@@ -11,6 +11,8 @@ const MODELS = require('../config/models');
 const { normalizePhone } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+const { parseETDateTime } = require('../utils/datetime-et');
+const { purposeForScheduledMessageType } = require('../services/scheduler');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -477,30 +479,70 @@ router.post('/ai-auto-reply', async (req, res) => {
   } catch (err) { res.json({ enabled: false, error: err.message }); }
 });
 
-// POST /api/admin/communications/schedule-sms — schedule SMS for later
+// Marketing/retention purposes require a real stored consent record per
+// server/services/messaging/policy.js. This conversational-compose endpoint
+// is not a marketing send path — reject any messageType whose scheduler
+// mapping resolves to marketing or retention. Reusing the scheduler's
+// mapper here (instead of a local regex) guarantees the route can't drift
+// from the cron's classification.
+const BLOCKED_SCHEDULED_PURPOSES = new Set(['marketing', 'retention']);
+
+// POST /api/admin/communications/schedule-sms — schedule SMS for later.
+// The /5min scheduled-sms cron in server/services/scheduler.js picks up rows
+// where status='scheduled' AND scheduled_for <= now() and dispatches them
+// through sendCustomerMessage (same path as the immediate /sms route).
 router.post('/schedule-sms', async (req, res, next) => {
   try {
-    const { to, from, body, scheduledFor } = req.body;
-    if (!to || !body || !scheduledFor) return res.status(400).json({ error: 'to, body, scheduledFor required' });
+    const { to, body, scheduledFor, customerId, fromNumber, from, messageType } = req.body || {};
+    const cleanBody = typeof body === 'string' ? body.trim() : '';
+    if (!to || !cleanBody || !scheduledFor) {
+      return res.status(400).json({ error: 'to, body, scheduledFor required' });
+    }
+    if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
+      return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
+    }
 
-    const sendAt = new Date(scheduledFor);
+    // ET wall-clock parse — datetime-local strings without offset are
+    // interpreted in ET, ISO strings pass through unchanged.
+    const sendAt = parseETDateTime(scheduledFor);
+    if (Number.isNaN(sendAt.getTime())) return res.status(400).json({ error: 'invalid scheduledFor' });
     if (sendAt <= new Date()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
 
-    // Find customer by phone
-    const customer = await db('customers').where({ phone: to }).first();
+    const chosenFrom = fromNumber || from || TWILIO_NUMBERS.getOutboundNumber();
+    if (!TWILIO_NUMBERS.findByNumber(chosenFrom)) {
+      return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
+    }
 
-    await db('sms_log').insert({
-      customer_id: customer?.id || null,
-      direction: 'outbound',
-      from_phone: from || '+19413187612',
-      to_phone: to,
-      message_body: body,
-      status: 'scheduled',
-      message_type: 'scheduled',
-      scheduled_for: sendAt,
-    });
+    let trustedCustomerId = null;
+    if (customerId) {
+      const customer = await db('customers').where({ id: customerId }).first('id', 'phone');
+      if (!customer) return res.status(404).json({ error: 'customerId not found' });
+      const normalizedTo = normalizePhone(to);
+      const normalizedCustomerPhone = normalizePhone(customer.phone);
+      if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
+        return res.status(400).json({ error: 'to must match the selected customer phone' });
+      }
+      trustedCustomerId = customer.id;
+    } else {
+      const fallback = await db('customers').where({ phone: to }).first('id');
+      if (fallback) trustedCustomerId = fallback.id;
+    }
 
-    res.json({ success: true, scheduledFor: sendAt.toISOString() });
+    const [row] = await db('sms_log')
+      .insert({
+        customer_id: trustedCustomerId,
+        direction: 'outbound',
+        from_phone: chosenFrom,
+        to_phone: to,
+        message_body: cleanBody,
+        status: 'scheduled',
+        message_type: messageType || 'manual',
+        admin_user_id: req.technicianId || null,
+        scheduled_for: sendAt,
+      })
+      .returning(['id', 'scheduled_for']);
+
+    res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });
   } catch (err) { next(err); }
 });
 

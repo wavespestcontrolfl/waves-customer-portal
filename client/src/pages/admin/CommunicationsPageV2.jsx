@@ -546,6 +546,11 @@ function SmsTab() {
   // MMS attachments: [{ url, key, fileName, size, mimeType, previewUrl }, ...]
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
+  // Delayed send: 'now' | 'tomorrow_8' | 'custom'. Mirrors invoice builder pattern.
+  // Scheduled rows land in sms_log with status='scheduled' and are picked up by
+  // the /5min cron in server/services/scheduler.js.
+  const [sendTiming, setSendTiming] = useState("now");
+  const [sendCustomAt, setSendCustomAt] = useState("");
   // Voice-to-text (Web Speech API) — populated below on first use.
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
@@ -679,29 +684,108 @@ function SmsTab() {
     setTogglingAi(false);
   };
 
+  // Compute the scheduled-for value as an ET-naive wall-clock string
+  // (YYYY-MM-DDTHH:MM) or null if "now". The server parses ET-naive strings
+  // via parseETDateTime() — emitting ISO/UTC here would lose the ET intent
+  // when the admin browser isn't on America/New_York. Mirrors the invoice
+  // builder's invoiceScheduledFor() pattern.
+  const etDateOnly = (date) => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const get = (t) => parts.find((p) => p.type === t)?.value;
+    return `${get("year")}-${get("month")}-${get("day")}`;
+  };
+  const resolveScheduledFor = () => {
+    if (sendTiming === "now") return { value: null, error: null };
+    if (sendTiming === "tomorrow_8") {
+      const [y, m, d] = etDateOnly(new Date()).split("-").map(Number);
+      // Build "tomorrow in ET" by adding 1 day at UTC noon (collision-free
+      // around DST boundaries), then re-format in ET.
+      const tomorrow = new Date(Date.UTC(y, m - 1, d + 1, 12, 0, 0));
+      return { value: `${etDateOnly(tomorrow)}T08:00`, error: null };
+    }
+    if (!sendCustomAt) return { value: null, error: "Pick a date and time" };
+    return { value: sendCustomAt, error: null };
+  };
+  // Format the ET-naive string for the confirmation toast without
+  // routing through `new Date(etNaive)`, which would interpret the
+  // wall-clock parts in the admin browser's timezone. Stuffing the ET
+  // parts into a UTC instant and formatting in UTC reproduces the
+  // intended ET wall-clock 1:1.
+  const formatScheduledForToast = (etNaive) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(etNaive);
+    if (!m) return etNaive;
+    const utc = new Date(
+      Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])),
+    );
+    return utc.toLocaleString("en-US", {
+      timeZone: "UTC",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  };
+
   const handleSend = async () => {
     if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
       return;
+    const { value: scheduledFor, error: scheduleErr } = resolveScheduledFor();
+    if (scheduleErr) {
+      setSendResult({ ok: false, text: scheduleErr });
+      return;
+    }
+    if (scheduledFor && attachments.length > 0) {
+      setSendResult({
+        ok: false,
+        text: "Attachments aren't supported on scheduled sends yet — send now, or remove attachments.",
+      });
+      return;
+    }
     setSending(true);
     setSendResult(null);
     try {
-      await adminFetch("/admin/communications/sms", {
-        method: "POST",
-        body: JSON.stringify({
-          to: toNumber.trim(),
-          body: msgBody.trim(),
-          customerId: selectedCustomerId || undefined,
-          messageType: "manual",
-          fromNumber,
-          mediaUrls:
-            attachments.length > 0 ? attachments.map((a) => a.url) : undefined,
-          mediaAttachments:
-            attachments.length > 0
-              ? attachments.map(({ previewUrl, ...a }) => a)
-              : undefined,
-        }),
-      });
-      setSendResult({ ok: true, text: "Message sent." });
+      if (scheduledFor) {
+        await adminFetch("/admin/communications/schedule-sms", {
+          method: "POST",
+          body: JSON.stringify({
+            to: toNumber.trim(),
+            body: msgBody.trim(),
+            customerId: selectedCustomerId || undefined,
+            messageType: "manual",
+            fromNumber,
+            scheduledFor,
+          }),
+        });
+        setSendResult({
+          ok: true,
+          text: `Scheduled for ${formatScheduledForToast(scheduledFor)}.`,
+        });
+      } else {
+        await adminFetch("/admin/communications/sms", {
+          method: "POST",
+          body: JSON.stringify({
+            to: toNumber.trim(),
+            body: msgBody.trim(),
+            customerId: selectedCustomerId || undefined,
+            messageType: "manual",
+            fromNumber,
+            mediaUrls:
+              attachments.length > 0
+                ? attachments.map((a) => a.url)
+                : undefined,
+            mediaAttachments:
+              attachments.length > 0
+                ? attachments.map(({ previewUrl, ...a }) => a)
+                : undefined,
+          }),
+        });
+        setSendResult({ ok: true, text: "Message sent." });
+      }
       setToNumber("");
       setToSearch("");
       setSelectedCustomerId(null);
@@ -711,6 +795,8 @@ function SmsTab() {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
       setAttachments([]);
+      setSendTiming("now");
+      setSendCustomAt("");
       loadData();
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
@@ -1322,6 +1408,34 @@ function SmsTab() {
             e.target.value = "";
           }}
         />{" "}
+        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
+          Send
+        </label>{" "}
+        <select
+          value={sendTiming}
+          onChange={(e) => setSendTiming(e.target.value)}
+          className={cn(
+            "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0",
+            "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
+            sendTiming === "custom" ? "mb-2" : "mb-3",
+          )}
+        >
+          {" "}
+          <option value="now">Immediately</option>{" "}
+          <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
+          <option value="custom">Custom time…</option>{" "}
+        </select>
+        {sendTiming === "custom" && (
+          <input
+            type="datetime-local"
+            value={sendCustomAt}
+            onChange={(e) => setSendCustomAt(e.target.value)}
+            className={cn(
+              "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0 mb-3",
+              "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
+            )}
+          />
+        )}
         <div className="flex gap-2 items-center">
           {/* Plus — attachment menu */}
           <div className="relative">
@@ -1390,7 +1504,15 @@ function SmsTab() {
               (!msgBody.trim() && attachments.length === 0)
             }
           >
-            {sending ? "Sending…" : uploading ? "Uploading…" : "Send"}
+            {sending
+              ? sendTiming === "now"
+                ? "Sending…"
+                : "Scheduling…"
+              : uploading
+                ? "Uploading…"
+                : sendTiming === "now"
+                  ? "Send"
+                  : "Schedule"}
           </Button>{" "}
           <Button
             variant="secondary"
