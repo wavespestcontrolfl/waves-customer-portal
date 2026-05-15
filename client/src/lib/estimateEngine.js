@@ -769,7 +769,10 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Top Dressing ────────────────────────────────────────── */
-  const lawnEst = turfArea.turfSf || (R.lawn ? Math.round(lotSqFt * 0.55 * (R.lawn[2] ? 0.65 : 0.55)) : Math.round(lotSqFt * 0.35));
+  const hasTurfEstimate = turfArea.turfSf !== undefined && turfArea.turfSf !== null && turfArea.turfSf !== '';
+  const lawnEst = hasTurfEstimate
+    ? turfArea.turfSf
+    : (R.lawn ? Math.round(lotSqFt * 0.55 * (R.lawn[2] ? 0.65 : 0.55)) : Math.round(lotSqFt * 0.35));
   if (svcTopdress && lawnEst > 0) {
     hasOT = true;
     const lk = lawnEst / 1000;

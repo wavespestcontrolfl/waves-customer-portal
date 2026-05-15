@@ -223,7 +223,8 @@ function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options
   const features = property.features || {};
   const complexity = String(features.complexity || property.landscapeComplexity || '').toLowerCase();
   const shrubs = String(features.shrubs || property.shrubDensity || '').toLowerCase();
-  const pressure = String(property.overallPestPressure || '').toUpperCase();
+  const maintenance = String(property.maintenanceCondition || '').toUpperCase().replace(/[\s-]+/g, '_');
+  const pressure = String(property.overallPestPressure || '').toUpperCase().replace(/[\s-]+/g, '_');
   const complexityMinutes =
     (complexity === 'moderate' ? 5 : 0) +
     (complexity === 'complex' ? 10 : 0) +
@@ -231,8 +232,8 @@ function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options
     ((property.fenceType || features.gate || features.accessDifficulty || '').toString().toLowerCase().includes('privacy') || features.largeDriveway ? 5 : 0);
   const callbackReservePerVisit =
     2 +
-    (String(property.maintenanceCondition || '').toUpperCase() === 'POOR' ? 5 : 0) +
-    (['HIGH', 'SEVERE'].includes(pressure) ? 5 : 0);
+    (['POOR', 'DEFERRED'].includes(maintenance) ? 5 : 0) +
+    (['HIGH', 'SEVERE', 'VERY_HIGH'].includes(pressure) ? 5 : 0);
 
   const materialCostPerVisit = turfK * materialCostPerK;
   const laborMinutesPerVisit = laborMinutesBase + turfK * laborMinutesPerK + complexityMinutes;
@@ -258,7 +259,13 @@ function priceLawnCare(property, options = {}) {
   const tierConfig = LAWN_TIERS[selectedTier];
   if (!tierConfig) throw new Error(`Unknown lawn tier: ${selectedTier}`);
 
-  const lawnSqFt = property.turfSf || property.lawnSqFt || 4500;
+  const hasTurfSf = property.turfSf !== undefined && property.turfSf !== null && property.turfSf !== '';
+  const hasLawnSqFt = property.lawnSqFt !== undefined && property.lawnSqFt !== null && property.lawnSqFt !== '';
+  const turfSqFt = Number(property.turfSf);
+  const legacyLawnSqFt = Number(property.lawnSqFt);
+  const lawnSqFt = hasTurfSf && Number.isFinite(turfSqFt) && turfSqFt >= 0
+    ? turfSqFt
+    : (hasLawnSqFt && Number.isFinite(legacyLawnSqFt) && legacyLawnSqFt >= 0 ? legacyLawnSqFt : 4500);
 
   // Lookup annual cost from v4 protocol data (approximate model)
   // These are based on actual visit-by-visit product costing from v4 protocols

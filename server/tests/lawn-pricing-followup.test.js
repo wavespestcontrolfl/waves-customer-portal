@@ -147,6 +147,35 @@ describe('lawn pricing production follow-up', () => {
     expect(fungicide.price).toBeGreaterThan(fert.price);
   });
 
+  test('explicit zero turf stays zero instead of falling back to default lawn size', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 0,
+      measuredTurfSf: 0,
+      estimatedTurfSf: 0,
+      imperviousSurfacePercent: 100,
+      estimatedBedAreaSf: 0,
+    }));
+    const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+
+    expect(property.turfSf).toBe(0);
+    expect(lawn.turfSf).toBe(0);
+    expect(lawn.lawnSqFt).toBe(0);
+  });
+
+  test('cost floor callback reserve recognizes property lookup risk enums', () => {
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4000 }));
+    const safe = priceLawnCare(
+      { ...property, maintenanceCondition: 'AVERAGE', overallPestPressure: 'MODERATE' },
+      { track: 'st_augustine', lawnFreq: 9, useLawnCostFloor: true }
+    );
+    const risky = priceLawnCare(
+      { ...property, maintenanceCondition: 'DEFERRED', overallPestPressure: 'VERY_HIGH' },
+      { track: 'st_augustine', lawnFreq: 9, useLawnCostFloor: true }
+    );
+
+    expect(risky.selected.costFloorAnnual).toBeGreaterThan(safe.selected.costFloorAnnual);
+  });
+
   test('large lawn custom quote warning is visible at top level', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 25000,
