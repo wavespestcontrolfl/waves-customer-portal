@@ -3912,35 +3912,6 @@ function CPChip({ selected, onClick, children, dot }) {
   );
 }
 
-function CPChipGroup({ label, dot, chips, onPick }) {
-  return (
-    <div style={{ marginBottom: 12 }}>
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          marginBottom: 8,
-        }}
-      >
-        {" "}
-        <span
-          style={{ width: 8, height: 8, borderRadius: "50%", background: dot }}
-        />{" "}
-        <span style={CP_EYEBROW}>{label}</span>{" "}
-      </div>{" "}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {chips.map((c) => (
-          <CPChip key={c} onClick={() => onPick(c)}>
-            {c}
-          </CPChip>
-        ))}
-      </div>{" "}
-    </div>
-  );
-}
-
 const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
   { key: "weed_suppression", label: "Weeds" },
@@ -5425,16 +5396,40 @@ export function CompletionPanel({
       : calibrationRequired
         ? "WaveGuard lawn visits require current calibrated spray equipment before completion."
         : "");
-  const chipGroupStyle = { marginBottom: 8 };
-  const chipLabelStyle = {
-    fontSize: 10,
-    fontWeight: 700,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
-    marginBottom: 4,
-    display: "block",
-  };
-
+  function isProtocolActionSelected(action) {
+    const noteText = action?.note || action?.label || action?.raw || "";
+    return (
+      (!!noteText && notes.includes(noteText)) ||
+      (action?.product?.id &&
+        selectedProducts.some((p) => p.productId === action.product.id))
+    );
+  }
+  const protocolActionSelectOptions = protocolActions.map((action, index) => ({
+    value: action.id ? String(action.id) : `action-${index}`,
+    label: action.label || action.note || action.raw || "Protocol action",
+    selected: isProtocolActionSelected(action),
+    action,
+  }));
+  const selectedProtocolActionCount = protocolActionSelectOptions.filter(
+    (opt) => opt.selected,
+  ).length;
+  function handleProtocolActionSelect(value) {
+    if (!value) return;
+    if (!protocolActions.length) {
+      addChipNote("Action", value);
+      return;
+    }
+    const option = protocolActionSelectOptions.find(
+      (opt) => opt.value === value,
+    );
+    if (option?.action) applyProtocolAction(option.action);
+  }
+  function handleObservationSelect(value) {
+    if (value) addChipNote("Found", value);
+  }
+  function handleRecommendationSelect(value) {
+    if (value) addChipNote("Next", value);
+  }
   // ────────────────────────────────────────────────────────────────────
   // Mobile admin render — follows reference_waves_admin_ui_system.md
   // Light mode only. Roboto body. No D.palette.
@@ -5489,6 +5484,12 @@ export function CompletionPanel({
       outline: "none",
       WebkitAppearance: "none",
     };
+    const mSelect = {
+      ...mInput,
+      paddingRight: 40,
+      WebkitAppearance: "menulist",
+      appearance: "auto",
+    };
     const mTextarea = {
       ...mInput,
       height: "auto",
@@ -5526,12 +5527,10 @@ export function CompletionPanel({
       height: 44,
     };
 
-    // Field / Chip / ChipGroup are hoisted above CompletionPanel (CPField,
-    // CPChip, CPChipGroup) so they survive re-renders without unmounting
-    // the inputs inside them.
+    // Field / Chip are hoisted above CompletionPanel so they survive
+    // re-renders without unmounting the inputs inside them.
     const Field = CPField;
     const Chip = CPChip;
-    const ChipGroup = CPChipGroup;
 
     return createPortal(
       <>
@@ -6141,18 +6140,17 @@ export function CompletionPanel({
             {/* Technician notes */}
             <Field label="Visit outcome">
               {" "}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <select
+                value={visitOutcome}
+                onChange={(e) => setVisitOutcome(e.target.value)}
+                style={mSelect}
+              >
                 {VISIT_OUTCOME_OPTIONS.map((opt) => (
-                  <Chip
-                    key={opt.value}
-                    selected={visitOutcome === opt.value}
-                    onClick={() => setVisitOutcome(opt.value)}
-                  >
-                    {visitOutcome === opt.value ? "" : ""}
+                  <option key={opt.value} value={opt.value}>
                     {opt.label}
-                  </Chip>
+                  </option>
                 ))}
-              </div>{" "}
+              </select>{" "}
             </Field>{" "}
             <Field label="Technician notes">
               {" "}
@@ -6164,110 +6162,108 @@ export function CompletionPanel({
                 style={{ ...mTextarea, minHeight: quickComplete ? 90 : 140 }}
               />{" "}
             </Field>
-            {/* Chip groups */}
-            <div style={{ marginBottom: 8 }}>
-              {" "}
-              <div style={{ marginBottom: 12 }}>
-                {" "}
+            <Field label="Protocol actions">
+              {protocolActionMeta?.programName && (
                 <div
                   style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
+                    fontFamily: font,
+                    fontSize: 12,
+                    color: M.ink4,
                     marginBottom: 8,
                   }}
                 >
-                  {" "}
-                  <span
-                    style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: "50%",
-                      background: M.info,
-                    }}
-                  />{" "}
-                  <span style={eyebrowStyle}>Protocol actions</span>{" "}
+                  {protocolActionMeta.programName}
+                  {protocolActionMeta.visit?.month
+                    ? ` - ${protocolActionMeta.visit.month}`
+                    : ""}
                 </div>
-                {protocolActionMeta?.programName && (
-                  <div
-                    style={{
-                      fontFamily: font,
-                      fontSize: 12,
-                      color: M.ink4,
-                      marginBottom: 8,
-                    }}
+              )}
+              {protocolActionsLoading ? (
+                <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
+                  Loading protocol actions...
+                </div>
+              ) : (
+                <>
+                  {protocolActionError && !protocolActions.length && (
+                    <div
+                      style={{
+                        fontFamily: font,
+                        fontSize: 12,
+                        color: M.ink4,
+                        marginBottom: 8,
+                      }}
+                    >
+                      Protocol actions unavailable.
+                    </div>
+                  )}
+                  <select
+                    aria-label="Add protocol action"
+                    value=""
+                    onChange={(e) => handleProtocolActionSelect(e.target.value)}
+                    style={mSelect}
                   >
-                    {protocolActionMeta.programName}
-                    {protocolActionMeta.visit?.month
-                      ? ` - ${protocolActionMeta.visit.month}`
-                      : ""}
-                  </div>
-                )}
-                {protocolActionsLoading ? (
-                  <div
-                    style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}
-                  >
-                    Loading protocol actions...
-                  </div>
-                ) : protocolActions.length > 0 ? (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {protocolActions.map((action) => {
-                      const selected =
-                        notes.includes(
-                          action.note || action.label || action.raw || "",
-                        ) ||
-                        (action.product?.id &&
-                          selectedProducts.some(
-                            (p) => p.productId === action.product.id,
-                          ));
-                      return (
-                        <Chip
-                          key={action.id}
-                          selected={selected}
-                          onClick={() => applyProtocolAction(action)}
-                        >
-                          {selected ? "" : ""}
-                          {action.label}
-                        </Chip>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <>
-                    {protocolActionError && (
-                      <div
-                        style={{
-                          fontFamily: font,
-                          fontSize: 12,
-                          color: M.ink4,
-                          marginBottom: 8,
-                        }}
-                      >
-                        Protocol actions unavailable.
-                      </div>
-                    )}
-                    <ChipGroup
-                      label="Actions"
-                      dot={M.info}
-                      chips={CHIP_ACTIONS}
-                      onPick={(c) => addChipNote("Action", c)}
-                    />{" "}
-                  </>
-                )}
-              </div>{" "}
-              <ChipGroup
-                label="Observations"
-                dot={M.warn}
-                chips={CHIP_OBSERVATIONS}
-                onPick={(c) => addChipNote("Found", c)}
-              />{" "}
-              <ChipGroup
-                label="Recommendations"
-                dot={M.success}
-                chips={CHIP_RECOMMENDATIONS}
-                onPick={(c) => addChipNote("Next", c)}
-              />{" "}
-            </div>
+                    <option value="">Add protocol action...</option>
+                    {protocolActions.length > 0
+                      ? protocolActionSelectOptions.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.selected ? "(applied) " : ""}
+                            {opt.label}
+                          </option>
+                        ))
+                      : CHIP_ACTIONS.map((chip) => (
+                          <option key={chip} value={chip}>
+                            {chip}
+                          </option>
+                        ))}
+                  </select>
+                  {selectedProtocolActionCount > 0 && (
+                    <div
+                      style={{
+                        fontFamily: font,
+                        fontSize: 12,
+                        color: M.ink3,
+                        marginTop: 6,
+                      }}
+                    >
+                      {selectedProtocolActionCount} protocol action
+                      {selectedProtocolActionCount === 1 ? "" : "s"} applied
+                    </div>
+                  )}
+                </>
+              )}
+            </Field>
+            <Field label="Observations">
+              {" "}
+              <select
+                aria-label="Add observation"
+                value=""
+                onChange={(e) => handleObservationSelect(e.target.value)}
+                style={mSelect}
+              >
+                <option value="">Add observation...</option>
+                {CHIP_OBSERVATIONS.map((chip) => (
+                  <option key={chip} value={chip}>
+                    {chip}
+                  </option>
+                ))}
+              </select>{" "}
+            </Field>
+            <Field label="Recommendations">
+              {" "}
+              <select
+                aria-label="Add recommendation"
+                value=""
+                onChange={(e) => handleRecommendationSelect(e.target.value)}
+                style={mSelect}
+              >
+                <option value="">Add recommendation...</option>
+                {CHIP_RECOMMENDATIONS.map((chip) => (
+                  <option key={chip} value={chip}>
+                    {chip}
+                  </option>
+                ))}
+              </select>{" "}
+            </Field>
             {/* AI report */}
             {!quickComplete && (
               <button
@@ -7593,35 +7589,17 @@ export function CompletionPanel({
           )}
           {/* Visit Outcome */}
           <label style={labelStyle}>Visit Outcome</label>{" "}
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 6,
-              marginBottom: 16,
-            }}
+          <select
+            value={visitOutcome}
+            onChange={(e) => setVisitOutcome(e.target.value)}
+            style={inputStyle}
           >
             {VISIT_OUTCOME_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => setVisitOutcome(opt.value)}
-                style={{
-                  padding: "6px 12px",
-                  borderRadius: 8,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  background:
-                    visitOutcome === opt.value ? D.teal + "22" : D.card,
-                  color: visitOutcome === opt.value ? D.teal : D.text,
-                  border: `1px solid ${visitOutcome === opt.value ? D.teal : D.border}`,
-                }}
-              >
-                {visitOutcome === opt.value ? "\u2713 " : ""}
+              <option key={opt.value} value={opt.value}>
                 {opt.label}
-              </button>
+              </option>
             ))}
-          </div>
+          </select>
           {/* Technician Notes */}
           <label style={labelStyle}>Technician Notes</label>{" "}
           <textarea
@@ -7642,14 +7620,12 @@ export function CompletionPanel({
             }}
             placeholder="Notes about this service..."
           />
-          {/* Three-row chip system */}
+          {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
-            {/* Action chips (blue) */}
-            <div style={chipGroupStyle}>
-              {" "}
-              <span style={{ ...chipLabelStyle, color: D.blue }}>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ ...labelStyle, color: D.blue }}>
                 Protocol Actions
-              </span>
+              </label>
               {protocolActionMeta?.programName && (
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 6 }}>
                   {protocolActionMeta.programName}
@@ -7658,123 +7634,83 @@ export function CompletionPanel({
                     : ""}
                 </div>
               )}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                {protocolActionsLoading ? (
-                  <span style={{ fontSize: 12, color: D.muted }}>
-                    Loading protocol actions...
-                  </span>
-                ) : protocolActions.length > 0 ? (
-                  protocolActions.map((action) => {
-                    const selected =
-                      notes.includes(
-                        action.note || action.label || action.raw || "",
-                      ) ||
-                      (action.product?.id &&
-                        selectedProducts.some(
-                          (p) => p.productId === action.product.id,
-                        ));
-                    return (
-                      <button
-                        key={action.id}
-                        onClick={() => applyProtocolAction(action)}
-                        style={{
-                          padding: "5px 10px",
-                          borderRadius: 8,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          cursor: "pointer",
-                          background: selected ? D.blue + "2a" : D.blue + "18",
-                          color: D.blue,
-                          border: `1px solid ${selected ? D.blue : D.blue + "44"}`,
-                        }}
-                      >
-                        {selected ? "\u2713 " : ""}
-                        {action.label}
-                      </button>
-                    );
-                  })
-                ) : (
-                  <>
-                    {protocolActionError && (
-                      <span style={{ fontSize: 12, color: D.muted }}>
-                        Protocol actions unavailable.
-                      </span>
-                    )}
-                    {CHIP_ACTIONS.map((chip) => (
-                      <button
-                        key={chip}
-                        onClick={() => addChipNote("Action", chip)}
-                        style={{
-                          padding: "5px 10px",
-                          borderRadius: 8,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          cursor: "pointer",
-                          background: D.blue + "18",
-                          color: D.blue,
-                          border: `1px solid ${D.blue}44`,
-                        }}
-                      >
-                        {chip}
-                      </button>
-                    ))}
-                  </>
-                )}
-              </div>{" "}
+              {protocolActionsLoading ? (
+                <span style={{ fontSize: 12, color: D.muted }}>
+                  Loading protocol actions...
+                </span>
+              ) : (
+                <>
+                  {protocolActionError && !protocolActions.length && (
+                    <div
+                      style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}
+                    >
+                      Protocol actions unavailable.
+                    </div>
+                  )}
+                  <select
+                    aria-label="Add protocol action"
+                    value=""
+                    onChange={(e) => handleProtocolActionSelect(e.target.value)}
+                    style={inputStyle}
+                  >
+                    <option value="">Add protocol action...</option>
+                    {protocolActions.length > 0
+                      ? protocolActionSelectOptions.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.selected ? "(applied) " : ""}
+                            {opt.label}
+                          </option>
+                        ))
+                      : CHIP_ACTIONS.map((chip) => (
+                          <option key={chip} value={chip}>
+                            {chip}
+                          </option>
+                        ))}
+                  </select>
+                  {selectedProtocolActionCount > 0 && (
+                    <div style={{ fontSize: 11, color: D.muted }}>
+                      {selectedProtocolActionCount} protocol action
+                      {selectedProtocolActionCount === 1 ? "" : "s"} applied
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-            {/* Observation chips (amber) */}
-            <div style={chipGroupStyle}>
-              {" "}
-              <span style={{ ...chipLabelStyle, color: D.amber }}>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ ...labelStyle, color: D.amber }}>
                 Observations
-              </span>{" "}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              </label>{" "}
+              <select
+                aria-label="Add observation"
+                value=""
+                onChange={(e) => handleObservationSelect(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="">Add observation...</option>
                 {CHIP_OBSERVATIONS.map((chip) => (
-                  <button
-                    key={chip}
-                    onClick={() => addChipNote("Found", chip)}
-                    style={{
-                      padding: "5px 10px",
-                      borderRadius: 8,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      background: D.amber + "18",
-                      color: D.amber,
-                      border: `1px solid ${D.amber}44`,
-                    }}
-                  >
+                  <option key={chip} value={chip}>
                     {chip}
-                  </button>
+                  </option>
                 ))}
-              </div>{" "}
+              </select>{" "}
             </div>
-            {/* Recommendation chips (green) */}
-            <div style={chipGroupStyle}>
-              {" "}
-              <span style={{ ...chipLabelStyle, color: D.green }}>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ ...labelStyle, color: D.green }}>
                 Recommendations
-              </span>{" "}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              </label>{" "}
+              <select
+                aria-label="Add recommendation"
+                value=""
+                onChange={(e) => handleRecommendationSelect(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="">Add recommendation...</option>
                 {CHIP_RECOMMENDATIONS.map((chip) => (
-                  <button
-                    key={chip}
-                    onClick={() => addChipNote("Next", chip)}
-                    style={{
-                      padding: "5px 10px",
-                      borderRadius: 8,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      background: D.green + "18",
-                      color: D.green,
-                      border: `1px solid ${D.green}44`,
-                    }}
-                  >
+                  <option key={chip} value={chip}>
                     {chip}
-                  </button>
+                  </option>
                 ))}
-              </div>{" "}
+              </select>{" "}
             </div>{" "}
           </div>
           {/* AI Report Generator — hidden in quick complete */}
