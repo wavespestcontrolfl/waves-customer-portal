@@ -195,7 +195,7 @@ describe("PipelineAnalytics", () => {
     expect(onFilterChange).toHaveBeenNthCalledWith(2, "all");
   });
 
-  it("fires follow_up from the follow-up overdue card", () => {
+  it("fires the overdue filter from the follow-up overdue card", () => {
     const { onFilterChange } = renderAnalytics({
       estimates: [
         estimate({
@@ -209,7 +209,28 @@ describe("PipelineAnalytics", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Follow-up overdue/i }));
 
-    expect(onFilterChange).toHaveBeenCalledWith("follow_up");
+    expect(onFilterChange).toHaveBeenCalledWith("follow_up_overdue");
+  });
+
+  it("fires the archived filter from the Archived control", () => {
+    const { onFilterChange } = renderAnalytics({ estimates: kpiFixture() });
+
+    fireEvent.click(screen.getByRole("button", { name: /Archived/i }));
+
+    expect(onFilterChange).toHaveBeenCalledWith("archived");
+  });
+
+  it("discloses scheduled estimates in the Sent funnel subtitle", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "awaiting", status: "sent", sentAt: hoursAgo(12) }),
+        estimate({ id: "scheduled", status: "scheduled" }),
+      ],
+    });
+
+    expect(
+      screen.getByText("1 awaiting · 0 viewed · 1 scheduled"),
+    ).toBeInTheDocument();
   });
 
   it("uses alert classes only on the follow-up overdue card", () => {

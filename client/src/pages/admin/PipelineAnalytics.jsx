@@ -52,6 +52,22 @@ export function withinDateRange(iso, range, nowMs = Date.now()) {
   return true;
 }
 
+export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
+  if (
+    estimate?.status === "sent" &&
+    !estimate.viewedAt &&
+    estimate.sentAt
+  ) {
+    const sentAt = new Date(estimate.sentAt).getTime();
+    return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
+  }
+  if (estimate?.status === "viewed" && estimate.viewedAt) {
+    const viewedAt = new Date(estimate.viewedAt).getTime();
+    return !Number.isNaN(viewedAt) && nowMs - viewedAt > 48 * HOUR;
+  }
+  return false;
+}
+
 // Aggregate sent/won/avg-ticket per service line. Sent = any non-draft estimate
 // in the window. Won = status === 'accepted'.
 export function aggregateServiceLineRows(estimates) {
@@ -251,22 +267,9 @@ export default function PipelineAnalytics({
     const declinedCount = inRange.filter((e) => e.status === "declined").length;
     const expiredCount = inRange.filter((e) => e.status === "expired").length;
 
-    const followUpOverdue = inRange.filter((e) => {
-      if (
-        e.status === "sent" &&
-        !e.viewedAt &&
-        e.sentAt &&
-        nowMs - new Date(e.sentAt).getTime() > 72 * HOUR
-      )
-        return true;
-      if (
-        e.status === "viewed" &&
-        e.viewedAt &&
-        nowMs - new Date(e.viewedAt).getTime() > 48 * HOUR
-      )
-        return true;
-      return false;
-    });
+    const followUpOverdue = inRange.filter((e) =>
+      isFollowUpOverdueEstimate(e, nowMs),
+    );
     const atRiskMRR = followUpOverdue.reduce((sum, e) => sum + amount(e), 0);
     const pricingRisk = inRange.filter((e) => e.pricingRisk?.hasRisk);
     const missingCogs = inRange.filter(
@@ -304,6 +307,7 @@ export default function PipelineAnalytics({
         sent: awaiting + followUp + scheduled,
         awaiting,
         viewed: followUp,
+        scheduled,
         won: won.length,
         wonMrr,
         lost: lost.length,
@@ -354,6 +358,21 @@ export default function PipelineAnalytics({
             Clear filter
           </button>
         )}
+        <button
+          type="button"
+          onClick={() =>
+            onFilterChange(activeFilter === "archived" ? "all" : "archived")
+          }
+          aria-pressed={activeFilter === "archived"}
+          className={cn(
+            "h-8 px-3 rounded-full text-11 font-medium border-hairline u-focus-ring",
+            activeFilter === "archived"
+              ? "bg-zinc-900 text-white border-zinc-900"
+              : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
+          )}
+        >
+          Archived
+        </button>
       </div>
 
       <div className="flex gap-2 mb-5 flex-wrap">
@@ -393,7 +412,7 @@ export default function PipelineAnalytics({
           <FunnelTile
             label="Sent"
             value={metrics.funnel.sent}
-            sub={`${metrics.funnel.awaiting} awaiting · ${metrics.funnel.viewed} viewed`}
+            sub={`${metrics.funnel.awaiting} awaiting · ${metrics.funnel.viewed} viewed · ${metrics.funnel.scheduled} scheduled`}
             filterKey="sent_group"
             activeFilter={activeFilter}
             onFilterChange={onFilterChange}
@@ -475,7 +494,7 @@ export default function PipelineAnalytics({
           label="Follow-up overdue"
           value={metrics.attention.followUpOverdue}
           sub={`${money(metrics.attention.atRiskMRR)}/mo at risk`}
-          filterKey="follow_up"
+          filterKey="follow_up_overdue"
           alert={metrics.attention.followUpOverdue > 0}
           onFilterChange={onFilterChange}
         />
