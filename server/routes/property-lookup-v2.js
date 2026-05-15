@@ -579,6 +579,10 @@ Return a JSON object with exactly these fields:
 // ENRICHED PROFILE — merges all data sources
 // ─────────────────────────────────────────────
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
+  const imperviousSurfacePercent = firstNonNegativeNumber(
+    ai?.imperviousSurfacePercent,
+    ai?.imperviosSurfacePercent
+  );
   const profile = {
     // ── ADDRESS ──
     address: rc?.formattedAddress || '',
@@ -626,10 +630,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
-    imperviousSurfacePercent: ai?.imperviousSurfacePercent ?? ai?.imperviosSurfacePercent,
-    imperviosSurfacePercent:
-      ai?.imperviousSurfacePercent ??
-      ai?.imperviosSurfacePercent,
+    imperviousSurfacePercent,
+    imperviosSurfacePercent: imperviousSurfacePercent,
     estimatedTurfSf: ai?.estimatedTurfSf || 0,
     turfCondition: ai?.turfCondition || 'UNKNOWN',
     possibleGrassType: ai?.possibleGrassType || 'UNKNOWN',
@@ -718,8 +720,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
         ai?.waterDistance || 'NONE'
       ),
       // Lawn: impervious surface correction
-      turfCorrectionFactor: ai?.imperviousSurfacePercent !== undefined || ai?.imperviosSurfacePercent !== undefined
-        ? (100 - (ai.imperviousSurfacePercent ?? ai.imperviosSurfacePercent)) / 100
+      turfCorrectionFactor: imperviousSurfacePercent !== undefined
+        ? (100 - imperviousSurfacePercent) / 100
         : 0.80,
       // Overall pest pressure multiplier
       pestPressureMult: calcPestPressureMult(ai?.overallPestPressureEstimate),
@@ -745,6 +747,15 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
 // ─────────────────────────────────────────────
 // HELPER FUNCTIONS
 // ─────────────────────────────────────────────
+
+function firstNonNegativeNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return undefined;
+}
 
 function detectCategory(rc) {
   if (!rc) return 'RESIDENTIAL';

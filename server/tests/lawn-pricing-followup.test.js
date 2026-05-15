@@ -256,6 +256,39 @@ describe('lawn pricing production follow-up', () => {
     expect(profile.imperviosSurfacePercent).toBe(25);
   });
 
+  test('profile builder ignores blank corrected impervious when legacy typo is valid', () => {
+    const profile = buildEnrichedProfile(
+      {
+        formattedAddress: '123 Main St',
+        propertyType: 'Single Family',
+        squareFootage: 0,
+        lotSize: 10000,
+        stories: 1,
+      },
+      {
+        imperviousSurfacePercent: '',
+        imperviosSurfacePercent: 35,
+        estimatedTurfSf: 0,
+        estimatedBedAreaSf: 0,
+      },
+      null,
+      null
+    );
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: profile.homeSqFt,
+      lotSqFt: profile.lotSqFt,
+      estimatedTurfSf: profile.estimatedTurfSf,
+      estimatedBedAreaSf: profile.estimatedBedAreaSf,
+      imperviousSurfacePercent: profile.imperviousSurfacePercent,
+      imperviosSurfacePercent: profile.imperviosSurfacePercent,
+    }));
+
+    expect(profile.imperviousSurfacePercent).toBe(35);
+    expect(profile.imperviosSurfacePercent).toBe(35);
+    expect(property.turfOpenArea).toBe(6500);
+    expect(property.turfSf).toBe(6500);
+  });
+
   test('one-time lawn market baseline is consistent with and without recurring LAWN when cost floor is enabled', () => {
     const common = baseInput({
       measuredTurfSf: 6000,
