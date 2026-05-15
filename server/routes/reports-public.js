@@ -22,7 +22,7 @@ const reportLimiter = rateLimit({
 
 router.use(reportLimiter);
 
-const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 
 async function trackServiceReportView(service) {
   if (!service?.id || service.report_viewed_at) return;
