@@ -5,6 +5,10 @@ const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
+const SCHEDULED_SMS_CLAIM_LIMIT = 20;
+const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
+const SCHEDULED_SMS_MAX_ATTEMPTS = 3;
+
 function purposeForScheduledMessageType(messageType) {
   const type = String(messageType || '').toLowerCase();
   if (type.includes('billing') || type.includes('payment') || type.includes('invoice')) return 'billing';
@@ -14,6 +18,76 @@ function purposeForScheduledMessageType(messageType) {
   if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
   if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
   return 'conversational';
+}
+
+function scheduledSmsAttemptSql() {
+  return `
+    CASE
+      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+        THEN (metadata->>'scheduled_sms_attempts')::int
+      ELSE 0
+    END
+  `;
+}
+
+async function recoverStaleScheduledSmsClaims(now) {
+  const staleBefore = new Date(now.getTime() - SCHEDULED_SMS_STALE_CLAIM_MS);
+  const attemptsSql = scheduledSmsAttemptSql();
+  const result = await db.raw(`
+    UPDATE sms_log
+    SET status = CASE
+          WHEN ${attemptsSql} >= ? THEN 'failed'
+          ELSE 'scheduled'
+        END,
+        updated_at = ?,
+        metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+          'scheduled_sms_recovered_at', ?::timestamptz
+        )
+    WHERE status = 'sending'
+      AND scheduled_for IS NOT NULL
+      AND scheduled_for <= ?
+      AND updated_at <= ?
+    RETURNING status
+  `, [SCHEDULED_SMS_MAX_ATTEMPTS, now, now, now, staleBefore]);
+
+  const recovered = result.rows || [];
+  if (recovered.length > 0) {
+    const retryCount = recovered.filter(row => row.status === 'scheduled').length;
+    const failedCount = recovered.filter(row => row.status === 'failed').length;
+    logger.warn(`[scheduled-sms] Recovered ${recovered.length} stale claim(s): ${retryCount} retried, ${failedCount} failed`);
+  }
+}
+
+async function claimDueScheduledSms(now) {
+  const result = await db.raw(`
+    WITH due AS (
+      SELECT id
+      FROM sms_log
+      WHERE status = 'scheduled'
+        AND scheduled_for IS NOT NULL
+        AND scheduled_for <= ?
+      ORDER BY scheduled_for ASC, created_at ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT ?
+    )
+    UPDATE sms_log AS s
+    SET status = 'sending',
+        updated_at = ?,
+        metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
+          'scheduled_sms_claimed_at', ?::timestamptz,
+          'scheduled_sms_attempts',
+          CASE
+            WHEN COALESCE(s.metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+              THEN (s.metadata->>'scheduled_sms_attempts')::int + 1
+            ELSE 1
+          END
+        )
+    FROM due
+    WHERE s.id = due.id
+    RETURNING s.*
+  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now]);
+
+  return result.rows || [];
 }
 
 function initScheduledJobs() {
@@ -257,10 +331,8 @@ function initScheduledJobs() {
       const now = new Date();
       let scheduled = [];
       try {
-        scheduled = await db('sms_log')
-          .where({ status: 'scheduled' })
-          .where('scheduled_for', '<=', now.toISOString())
-          .limit(20);
+        await recoverStaleScheduledSmsClaims(now);
+        scheduled = await claimDueScheduledSms(now);
       } catch { return; /* scheduled_for column may not exist yet */ }
 
       for (const msg of scheduled) {
@@ -286,15 +358,16 @@ function initScheduledJobs() {
               adminUserId: msg.admin_user_id || undefined,
             },
           });
+          const completedAt = new Date();
           if (smsResult.sent) {
-            await db('sms_log').where({ id: msg.id }).update({ status: 'sent', created_at: new Date() });
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'sent', created_at: completedAt, updated_at: completedAt });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
           } else {
-            await db('sms_log').where({ id: msg.id }).update({ status: 'blocked' });
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           }
         } catch (err) {
-          await db('sms_log').where({ id: msg.id }).update({ status: 'failed' });
+          await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: new Date() });
           logger.error(`[scheduled-sms] Failed: ${err.message}`);
         }
       }
