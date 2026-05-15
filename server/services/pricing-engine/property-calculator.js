@@ -19,6 +19,14 @@ function toNonNegativeNumber(value, fallback = 0) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+function hasNonNegativeNumber(value) {
+  return value !== undefined &&
+    value !== null &&
+    value !== '' &&
+    Number.isFinite(Number(value)) &&
+    Number(value) >= 0;
+}
+
 function estimateHardscape(lotSqFt, propertyType, features = {}) {
   const type = propertyType || 'single_family';
   let fn = HARDSCAPE.single_family;
@@ -58,8 +66,8 @@ function estimateLawnSqFt(lotSqFt, footprint, hardscape, features = {}) {
 }
 
 function computeTurfArea(input, fallback = {}) {
-  const measured = toPositiveNumber(input.measuredTurfSf);
-  if (measured > 0) {
+  if (hasNonNegativeNumber(input.measuredTurfSf)) {
+    const measured = Number(input.measuredTurfSf);
     return {
       turfSf: measured,
       turfEstimated: false,
@@ -69,8 +77,8 @@ function computeTurfArea(input, fallback = {}) {
     };
   }
 
-  const lawnSqFt = toPositiveNumber(input.lawnSqFt);
-  if (lawnSqFt > 0) {
+  if (hasNonNegativeNumber(input.lawnSqFt)) {
+    const lawnSqFt = Number(input.lawnSqFt);
     return {
       turfSf: lawnSqFt,
       turfEstimated: false,
@@ -130,18 +138,8 @@ function computeTurfArea(input, fallback = {}) {
   const imperviousFraction = Math.min(1, Math.max(0, imperviousPct / 100));
   const turfOpenArea = Math.max(0, Math.round(lotSqFt * (1 - imperviousFraction)));
   const bedPercent = toNonNegativeNumber(input.estimatedBedAreaPercent, 0);
-  const hasEstimatedBedArea =
-    input.estimatedBedAreaSf !== undefined &&
-    input.estimatedBedAreaSf !== null &&
-    input.estimatedBedAreaSf !== '' &&
-    Number.isFinite(Number(input.estimatedBedAreaSf)) &&
-    Number(input.estimatedBedAreaSf) >= 0;
-  const hasBedArea =
-    input.bedArea !== undefined &&
-    input.bedArea !== null &&
-    input.bedArea !== '' &&
-    Number.isFinite(Number(input.bedArea)) &&
-    Number(input.bedArea) >= 0;
+  const hasEstimatedBedArea = hasNonNegativeNumber(input.estimatedBedAreaSf);
+  const hasBedArea = hasNonNegativeNumber(input.bedArea);
   const explicitBedArea = hasEstimatedBedArea
     ? Number(input.estimatedBedAreaSf)
     : (hasBedArea ? Number(input.bedArea) : null);
@@ -182,13 +180,19 @@ function getLotCategory(lotSqFt) {
 function calculatePropertyProfile(input) {
   const footprint = calculateFootprint(input.homeSqFt, input.stories || 1);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, input.features || {});
-  const explicitBedArea = input.bedArea || input.estimatedBedAreaSf || 0;
-  const bedRatio = explicitBedArea ? explicitBedArea / input.lotSqFt : 0;
+  const hasInputBedArea = hasNonNegativeNumber(input.bedArea);
+  const hasEstimatedBedArea = hasNonNegativeNumber(input.estimatedBedAreaSf);
+  const explicitBedArea = hasInputBedArea
+    ? Number(input.bedArea)
+    : (hasEstimatedBedArea ? Number(input.estimatedBedAreaSf) : null);
+  const bedRatio = explicitBedArea !== null && input.lotSqFt > 0 ? explicitBedArea / input.lotSqFt : 0;
   const features = { ...(input.features || {}), bedRatio };
   const legacyLawnEstimate = estimateLawnSqFt(input.lotSqFt, footprint, hardscape, features);
   const turfArea = computeTurfArea(input, { turfSf: legacyLawnEstimate });
   const lawnSqFt = turfArea.turfSf;
-  const bedArea = explicitBedArea || estimateBedArea(input.lotSqFt, (input.features || {}).shrubs, (input.features || {}).complexity);
+  const bedArea = explicitBedArea !== null
+    ? explicitBedArea
+    : estimateBedArea(input.lotSqFt, (input.features || {}).shrubs, (input.features || {}).complexity);
   const perimeter = calculatePerimeter(footprint, (input.features || {}).complexity);
   const lotCategory = getLotCategory(input.lotSqFt);
 

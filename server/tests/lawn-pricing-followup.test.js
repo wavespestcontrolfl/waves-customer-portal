@@ -37,7 +37,6 @@ describe('lawn pricing production follow-up', () => {
   test('imperviousSurfacePercent 0 remains 0 instead of falling back to 20', () => {
     const property = calculatePropertyProfile(baseInput({
       homeSqFt: 0,
-      measuredTurfSf: 0,
       estimatedTurfSf: 0,
       imperviousSurfacePercent: 0,
       estimatedBedAreaSf: 1000,
@@ -109,6 +108,19 @@ describe('lawn pricing production follow-up', () => {
 
     expect(property.turfOpenArea).toBe(10000);
     expect(property.turfSf).toBe(10000);
+    expect(property.bedArea).toBe(0);
+  });
+
+  test('explicit zero measured turf overrides estimated turf', () => {
+    const property = calculatePropertyProfile(baseInput({
+      measuredTurfSf: 0,
+      estimatedTurfSf: 5000,
+    }));
+
+    expect(property.turfSf).toBe(0);
+    expect(property.lawnSqFt).toBe(0);
+    expect(property.turfEstimated).toBe(false);
+    expect(property.turfBasis).toBe('measuredTurfSf');
   });
 
   test('profile builder does not convert missing bed estimate into verified zero', () => {
@@ -213,7 +225,6 @@ describe('lawn pricing production follow-up', () => {
   test('explicit zero turf stays zero instead of falling back to default lawn size', () => {
     const property = calculatePropertyProfile(baseInput({
       homeSqFt: 0,
-      measuredTurfSf: 0,
       estimatedTurfSf: 0,
       imperviousSurfacePercent: 100,
       estimatedBedAreaSf: 0,
@@ -286,12 +297,10 @@ describe('lawn pricing production follow-up', () => {
 
   test('turf field verification only surfaces when turf-priced services are selected', () => {
     const pestOnly = generateEstimate(baseInput({
-      measuredTurfSf: 0,
       estimatedTurfSf: 0,
       services: { pest: { frequency: 'quarterly' } },
     }));
     const lawn = generateEstimate(baseInput({
-      measuredTurfSf: 0,
       estimatedTurfSf: 0,
       services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
     }));
