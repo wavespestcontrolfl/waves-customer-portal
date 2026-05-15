@@ -21,7 +21,19 @@
 //   - Frequency discount tracking in the stack
 //   - ACH discount plumbing (retired to 0% in an earlier session)
 // ============================================================
-const { WAVEGUARD, PALM, RODENT, GLOBAL } = require('./constants');
+const { WAVEGUARD, PALM, RODENT, GLOBAL, TREE_SHRUB } = require('./constants');
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function ceilMoney(value) {
+  return Math.ceil((Number(value) || 0) * 100) / 100;
+}
+
+function roundRatio(value) {
+  return Math.round((Number(value) || 0) * 1000) / 1000;
+}
 
 // ── Determine WaveGuard tier from active services ─────────────
 function determineWaveGuardTier(activeServices = []) {
@@ -122,6 +134,60 @@ function applyDiscount(basePrice, discountResult, priceFloor = 0) {
   return Math.round(price * 100) / 100;
 }
 
+function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
+  if (!serviceQuote || serviceQuote.service !== 'tree_shrub') {
+    return {
+      finalAnnual: roundMoney(finalAnnual),
+      finalMargin: null,
+      marginGuardApplied: false,
+      discountCapped: false,
+    };
+  }
+
+  const annualDirectCost = Number(serviceQuote.costs?.directCost);
+  const adminCost = Number(serviceQuote.costs?.adminCost ?? GLOBAL.ADMIN_ANNUAL);
+  const marginFloor = Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR);
+  const candidateAnnual = roundMoney(finalAnnual);
+
+  if (!Number.isFinite(annualDirectCost) || annualDirectCost < 0 || candidateAnnual <= 0) {
+    return {
+      finalAnnual: candidateAnnual,
+      finalMargin: null,
+      marginGuardApplied: false,
+      discountCapped: false,
+    };
+  }
+
+  const finalMargin = (candidateAnnual - annualDirectCost - adminCost) / candidateAnnual;
+  if (finalMargin >= marginFloor) {
+    return {
+      finalAnnual: candidateAnnual,
+      finalMargin: roundRatio(finalMargin),
+      marginGuardApplied: false,
+      discountCapped: false,
+      requestedDiscountPct,
+      actualDiscountPct: serviceQuote.annual > 0
+        ? roundRatio(1 - candidateAnnual / serviceQuote.annual)
+        : 0,
+    };
+  }
+
+  const minAnnualForMargin = (annualDirectCost + adminCost) / (1 - marginFloor);
+  const guardedAnnual = ceilMoney(Math.max(candidateAnnual, minAnnualForMargin));
+  const guardedMargin = (guardedAnnual - annualDirectCost - adminCost) / guardedAnnual;
+  const actualDiscountPct = serviceQuote.annual > 0 ? 1 - guardedAnnual / serviceQuote.annual : 0;
+
+  return {
+    finalAnnual: guardedAnnual,
+    finalMargin: roundRatio(guardedMargin),
+    marginGuardApplied: true,
+    discountCapped: actualDiscountPct < requestedDiscountPct,
+    requestedDiscountPct,
+    actualDiscountPct: roundRatio(Math.max(0, actualDiscountPct)),
+    minAnnualForMargin: ceilMoney(minAnnualForMargin),
+  };
+}
+
 // ── Validate discount for a full estimate (margin floor check) ─
 // Kept for Session 10 (COGS-based margin validation). Fires when
 // item.costs.total is populated.
@@ -131,7 +197,10 @@ function validateEstimateDiscounts(lineItems, waveGuardTier) {
     if (item.discount && item.discount.effectiveDiscount > 0 && item.costs && item.costs.total) {
       const basePrice = item.price ?? item.annual;
       if (!Number.isFinite(basePrice) || basePrice <= 0) continue;
-      const discountedPrice = basePrice * (1 - item.discount.effectiveDiscount);
+      const discountedPrice = item.annualAfterDiscount
+        ?? item.priceAfterDiscount
+        ?? item.totalAfterDiscount
+        ?? (basePrice * (1 - item.discount.effectiveDiscount));
       const margin = (discountedPrice - item.costs.total) / discountedPrice;
       if (margin < GLOBAL.MARGIN_FLOOR) {
         warnings.push({
@@ -151,5 +220,6 @@ module.exports = {
   determineWaveGuardTier,
   getEffectiveDiscount,
   applyDiscount,
+  applyMarginGuard,
   validateEstimateDiscounts,
 };

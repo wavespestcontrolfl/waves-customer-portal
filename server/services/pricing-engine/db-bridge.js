@@ -33,8 +33,14 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.global_labor_rate?.value) constants.GLOBAL.LABOR_RATE = config.global_labor_rate.value;
     if (config.global_drive_time?.value) constants.GLOBAL.DRIVE_TIME = config.global_drive_time.value;
     if (config.global_admin_annual?.value) constants.GLOBAL.ADMIN_ANNUAL = config.global_admin_annual.value;
-    if (config.global_margin_floor?.value) constants.GLOBAL.MARGIN_FLOOR = config.global_margin_floor.value;
-    if (config.global_margin_target_ts?.value) constants.GLOBAL.MARGIN_TARGET_TS = config.global_margin_target_ts.value;
+    if (config.global_margin_floor?.value) {
+      constants.GLOBAL.MARGIN_FLOOR = config.global_margin_floor.value;
+      constants.TREE_SHRUB.marginFloor = config.global_margin_floor.value;
+    }
+    if (config.global_margin_target_ts?.value) {
+      constants.GLOBAL.DIRECT_COST_RATIO_TARGET_TS = config.global_margin_target_ts.value;
+      constants.TREE_SHRUB.directCostRatioTarget = config.global_margin_target_ts.value;
+    }
     if (config.global_conditional_ceiling?.value) constants.GLOBAL.CONDITIONAL_CEILING = config.global_conditional_ceiling.value;
 
     // ── Zones ────────────────────────────────────────────────
@@ -110,13 +116,16 @@ async function syncConstantsFromDB(dbInstance) {
     // ── Tree & Shrub ─────────────────────────────────────────
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
-      if (rates['6x_standard']) constants.TREE_SHRUB.materialRates.standard = rates['6x_standard'];
-      if (rates['9x_enhanced']) constants.TREE_SHRUB.materialRates.enhanced = rates['9x_enhanced'];
-      if (rates['12x_premium']) constants.TREE_SHRUB.materialRates.premium = rates['12x_premium'];
+      if (rates['6x_standard'] && constants.TREE_SHRUB.tiers.standard) {
+        constants.TREE_SHRUB.tiers.standard.materialRate = rates['6x_standard'];
+      }
+      if (rates['9x_enhanced'] && constants.TREE_SHRUB.tiers.enhanced) {
+        constants.TREE_SHRUB.tiers.enhanced.materialRate = rates['9x_enhanced'];
+      }
     }
     if (config.ts_monthly_floors) {
       for (const [tier, val] of Object.entries(config.ts_monthly_floors)) {
-        if (constants.TREE_SHRUB.tiers[tier]) constants.TREE_SHRUB.tiers[tier].floor = r(val);
+        if (constants.TREE_SHRUB.tiers[tier]) constants.TREE_SHRUB.tiers[tier].monthlyFloor = r(val);
       }
     }
 

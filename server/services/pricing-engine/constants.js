@@ -13,7 +13,7 @@ const GLOBAL = {
   DRIVE_TIME: 20,             // minutes per visit
   ADMIN_ANNUAL: 51,           // $/service/yr (billing, scheduling, CRM)
   MARGIN_FLOOR: 0.35,         // 35% minimum contribution margin. TODO(v4.4): document rationale for 35% threshold (vs 30%/40%) — the single most load-bearing policy value in the engine.
-  MARGIN_TARGET_TS: 0.43,     // Tree & Shrub conservative target
+  DIRECT_COST_RATIO_TARGET_TS: 0.43, // Tree & Shrub direct-cost ratio target, not margin.
   CONDITIONAL_CEILING: 60,    // $/property/yr max conditional material before reprice
 };
 
@@ -305,18 +305,15 @@ const SHADE_RULES = {
 const TREE_SHRUB = {
   // Material rates updated per vendor cost audit (April 2026)
   // Old: 0.063/0.104/0.118 — underestimated by ~2×
-  materialRates: {
-    standard:  0.110,   // 6x/yr $/sqft
-    enhanced:  0.190,   // 9x/yr $/sqft
-    premium:   0.220,   // 12x/yr $/sqft
-  },
   tiers: {
-    standard:  { freq: 6,  floor: r(50), label: 'Standard' },
-    enhanced:  { freq: 9,  floor: r(65), label: 'Enhanced (recommended)' },
-    premium:   { freq: 12, floor: r(80), label: 'Premium' },
+    standard:  { label: 'Standard', frequency: 6, materialRate: 0.110, monthlyFloor: r(50) },
+    enhanced:  { label: 'Enhanced', frequency: 9, materialRate: 0.190, monthlyFloor: r(65) },
   },
+  defaultTier: 'standard',
+  recommendedTier: 'enhanced',
   accessMinutes: { easy: 0, moderate: 8, difficult: 15 },
-  marginTarget: 0.43,  // TODO(v4.4): document why Tree & Shrub targets 43% vs the 35% global MARGIN_FLOOR.
+  directCostRatioTarget: 0.43,
+  marginFloor: 0.35,
 };
 
 // ============================================================

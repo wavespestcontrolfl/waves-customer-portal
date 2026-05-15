@@ -20,10 +20,6 @@ function determineCategory(configKey) {
   return 'rule';
 }
 
-function isKnownCosmetic(configKey) {
-  return typeof configKey === 'string' && configKey.startsWith('global_margin_target_ts');
-}
-
 function buildRationaleText(proposal, reviewNotes, technicianId) {
   const lines = [];
   lines.push(`Approved by technician_id=${technicianId} at ${new Date().toISOString()}.`);
@@ -48,9 +44,6 @@ function buildRationaleText(proposal, reviewNotes, technicianId) {
     }
   }
   if (reviewNotes) lines.push(`Admin review_notes: ${reviewNotes}`);
-  if (isKnownCosmetic(proposal.config_key)) {
-    lines.push('NOTE: global_margin_target_ts is cosmetic in pricing_config — db-bridge does not sync it into the engine (engine reads TREE_SHRUB.marginTarget from constants.js directly). This approval updates the DB row for consistency but will not change engine behavior.');
-  }
   return lines.join('\n');
 }
 
