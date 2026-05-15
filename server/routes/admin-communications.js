@@ -11,6 +11,7 @@ const MODELS = require('../config/models');
 const { normalizePhone } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -499,11 +500,13 @@ router.post('/schedule-sms', async (req, res, next) => {
       return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
     }
 
-    const sendAt = new Date(scheduledFor);
+    // ET wall-clock parse — datetime-local strings without offset are
+    // interpreted in ET, ISO strings pass through unchanged.
+    const sendAt = parseETDateTime(scheduledFor);
     if (Number.isNaN(sendAt.getTime())) return res.status(400).json({ error: 'invalid scheduledFor' });
     if (sendAt <= new Date()) return res.status(400).json({ error: 'scheduledFor must be in the future' });
 
-    const chosenFrom = fromNumber || from || '+19413187612';
+    const chosenFrom = fromNumber || from || TWILIO_NUMBERS.getOutboundNumber();
     if (!TWILIO_NUMBERS.findByNumber(chosenFrom)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
