@@ -61,7 +61,11 @@ export default function RatePage() {
   useEffect(() => {
     fetch(`${API_BASE}/rate/${token}`)
       .then(r => { if (!r.ok) throw new Error('Invalid link'); return r.json(); })
-      .then(d => { setData(d); setLoading(false); })
+      .then(d => {
+        setData(d);
+        if (d?.alreadySubmitted) setScreen('success');
+        setLoading(false);
+      })
       .catch(e => { setError(e.message); setLoading(false); });
   }, [token]);
 
