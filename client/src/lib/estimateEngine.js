@@ -319,9 +319,11 @@ export function calculateEstimate(inputs) {
     const imperviousPct = toNonNegativeNumber(rawImperviousPct, 20);
     const openArea = Math.max(0, Math.round(lotSqFt * (1 - Math.min(1, imperviousPct / 100))));
     const bedPercent = toNonNegativeNumber(_estimatedBedAreaPercent, 0);
+    const hasExplicitBedArea = _bedArea !== undefined && _bedArea !== null && _bedArea !== ''
+      && Number.isFinite(Number(_bedArea)) && Number(_bedArea) >= 0;
     const turfBedArea = bedPercent > 0
       ? Math.round(openArea * (bedPercent / 100))
-      : (bedArea || Math.round(openArea * 0.15));
+      : (hasExplicitBedArea ? Number(_bedArea) : Math.round(openArea * 0.15));
     return {
       turfSf: Math.max(0, Math.round(openArea - turfBedArea)),
       turfEstimated: true,

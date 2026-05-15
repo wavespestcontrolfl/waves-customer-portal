@@ -130,10 +130,24 @@ function computeTurfArea(input, fallback = {}) {
   const imperviousFraction = Math.min(1, Math.max(0, imperviousPct / 100));
   const turfOpenArea = Math.max(0, Math.round(lotSqFt * (1 - imperviousFraction)));
   const bedPercent = toNonNegativeNumber(input.estimatedBedAreaPercent, 0);
-  const explicitBedArea = toPositiveNumber(input.estimatedBedAreaSf) || toPositiveNumber(input.bedArea);
+  const hasEstimatedBedArea =
+    input.estimatedBedAreaSf !== undefined &&
+    input.estimatedBedAreaSf !== null &&
+    input.estimatedBedAreaSf !== '' &&
+    Number.isFinite(Number(input.estimatedBedAreaSf)) &&
+    Number(input.estimatedBedAreaSf) >= 0;
+  const hasBedArea =
+    input.bedArea !== undefined &&
+    input.bedArea !== null &&
+    input.bedArea !== '' &&
+    Number.isFinite(Number(input.bedArea)) &&
+    Number(input.bedArea) >= 0;
+  const explicitBedArea = hasEstimatedBedArea
+    ? Number(input.estimatedBedAreaSf)
+    : (hasBedArea ? Number(input.bedArea) : null);
   const bedArea = bedPercent > 0
     ? Math.max(0, Math.round(turfOpenArea * (bedPercent / 100)))
-    : (explicitBedArea || Math.round(turfOpenArea * 0.15));
+    : (explicitBedArea !== null ? explicitBedArea : Math.round(turfOpenArea * 0.15));
 
   return {
     turfSf: Math.max(0, Math.round(turfOpenArea - bedArea)),

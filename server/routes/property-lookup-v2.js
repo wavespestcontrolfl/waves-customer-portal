@@ -626,7 +626,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
-    imperviousSurfacePercent: ai?.imperviousSurfacePercent,
+    imperviousSurfacePercent: ai?.imperviousSurfacePercent ?? ai?.imperviosSurfacePercent,
     imperviosSurfacePercent:
       ai?.imperviousSurfacePercent ??
       ai?.imperviosSurfacePercent ??

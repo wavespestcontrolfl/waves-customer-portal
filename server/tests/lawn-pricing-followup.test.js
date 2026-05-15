@@ -100,6 +100,39 @@ describe('lawn pricing production follow-up', () => {
     expect(legacyOnly.turfSf).toBe(4500);
   });
 
+  test('lot fallback preserves explicit zero bed area', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 0,
+      imperviousSurfacePercent: 0,
+      estimatedBedAreaSf: 0,
+    }));
+
+    expect(property.turfOpenArea).toBe(10000);
+    expect(property.turfSf).toBe(10000);
+  });
+
+  test('profile builder copies legacy impervious value into corrected field', () => {
+    const profile = buildEnrichedProfile(
+      {
+        formattedAddress: '123 Main St',
+        propertyType: 'Single Family',
+        squareFootage: 0,
+        lotSize: 10000,
+        stories: 1,
+      },
+      {
+        imperviosSurfacePercent: 25,
+        estimatedTurfSf: 0,
+        estimatedBedAreaSf: 0,
+      },
+      null,
+      null
+    );
+
+    expect(profile.imperviousSurfacePercent).toBe(25);
+    expect(profile.imperviosSurfacePercent).toBe(25);
+  });
+
   test('one-time lawn market baseline is consistent with and without recurring LAWN when cost floor is enabled', () => {
     const common = baseInput({
       measuredTurfSf: 6000,
