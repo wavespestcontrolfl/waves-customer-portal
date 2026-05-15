@@ -508,7 +508,7 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
         '',
         '**Lawn Care Pricing**',
         'Track-based lookup tables (Lawn_Pricing_v4_TimeScaled)',
-        'Tracks: A (St. Aug Sun) | B (St. Aug Shade) | C1 (Bermuda) | C2 (Zoysia) | D (Bahia)',
+        'Tracks: A (St. Augustine) | B (legacy St. Augustine alias) | C1 (Bermuda) | C2 (Zoysia) | D (Bahia)',
         'Turf area: fixed hardscape (800sf base + 3% excess) + complexity scoring + smoothed turf factor',
       ].join('\n');
       await upsert('pricing-engine-current', 'Pest & Lawn Pricing Engine', pricingContent, 'pricing', ['pest', 'lawn', 'modifiers']);
