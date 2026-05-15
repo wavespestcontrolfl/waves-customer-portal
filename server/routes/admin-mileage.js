@@ -7,12 +7,12 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const { etDateString } = require('../utils/datetime-et');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // ─── Dashboard ───────────────────────────────────────────────────
 // GET /admin/mileage/dashboard

@@ -9,7 +9,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts } = require('../utils/datetime-et');
+const { firstPresent, num } = require('./bouncie-payload');
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -45,6 +46,70 @@ function tripDateForBouncieStart(startTime) {
   return startTime ? etDateString(new Date(startTime)) : etDateString();
 }
 
+function locationLat(location) {
+  return num(firstPresent(location?.lat, location?.latitude));
+}
+
+function locationLng(location) {
+  return num(firstPresent(location?.lon, location?.lng, location?.longitude));
+}
+
+function tripDistanceMiles(trip) {
+  const explicitMiles = num(firstPresent(
+    trip.distanceMiles,
+    trip.distance_miles,
+    trip.tripDistance,
+    trip.metrics?.tripDistance,
+    trip.miles
+  ));
+  if (explicitMiles != null) return parseFloat(explicitMiles.toFixed(2));
+
+  const meters = num(firstPresent(trip.distanceMeters, trip.distance_meters, trip.distance));
+  return meters != null ? parseFloat((meters / 1609.344).toFixed(2)) : 0;
+}
+
+function tripDurationSeconds(trip) {
+  const seconds = num(firstPresent(
+    trip.durationSeconds,
+    trip.duration_seconds,
+    trip.duration,
+    trip.tripTime,
+    trip.metrics?.tripTime
+  ));
+  if (seconds != null) return seconds;
+  const minutes = num(firstPresent(trip.durationMinutes, trip.duration_minutes));
+  return minutes != null ? minutes * 60 : 0;
+}
+
+function stableFallbackTripId(imei, trip, tripDate, distanceMiles, durationSeconds) {
+  const start = firstPresent(trip.startTime, trip.start_time, trip.startedAt, trip.started_at);
+  const end = firstPresent(trip.endTime, trip.end_time, trip.endedAt, trip.ended_at);
+  return [
+    imei || 'unknown-imei',
+    start || end || tripDate,
+    distanceMiles,
+    Math.round(durationSeconds || 0),
+  ].join('-');
+}
+
+function timeStringToMinutes(value) {
+  if (!value) return null;
+  const [hours, minutes] = String(value).split(':').map((part) => parseInt(part, 10));
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  return hours * 60 + minutes;
+}
+
+function windowDistanceMinutes(service, eventTime) {
+  if (!eventTime || !service.window_start || !service.window_end) return 0;
+  const parts = etParts(new Date(eventTime));
+  const eventMinutes = parts.hour * 60 + parts.minute;
+  const start = timeStringToMinutes(service.window_start);
+  const end = timeStringToMinutes(service.window_end);
+  if (start == null || end == null) return 0;
+  if (eventMinutes >= start && eventMinutes <= end) return 0;
+  return eventMinutes < start ? start - eventMinutes : eventMinutes - end;
+}
+
 // ─── Trip-to-Job Matching ────────────────────────────────────────
 
 /**
@@ -54,38 +119,58 @@ function tripDateForBouncieStart(startTime) {
  * @param {string} tripDate - YYYY-MM-DD
  * @returns {{ customer_id, job_id, customer_name, distance_m } | null}
  */
-async function matchTripToJob(endLat, endLng, tripDate) {
+async function matchTripToJob(endLat, endLng, tripDate, options = {}) {
   if (!endLat || !endLng) return null;
+  const { technicianId = null, eventTime = null } = options;
 
   try {
-    // Pull scheduled services for the date with customer addresses
-    const services = await db('scheduled_services as ss')
-      .join('customers as c', 'ss.customer_id', 'c.id')
-      .where('ss.scheduled_date', tripDate)
-      .whereNotNull('c.latitude')
-      .whereNotNull('c.longitude')
-      .select(
-        'ss.id as job_id',
-        'ss.customer_id',
-        'c.first_name',
-        'c.last_name',
-        'c.latitude',
-        'c.longitude'
-      );
+    const loadServices = async (scopeToTech) => {
+      let query = db('scheduled_services as ss')
+        .join('customers as c', 'ss.customer_id', 'c.id')
+        .where('ss.scheduled_date', tripDate)
+        .whereNotIn('ss.status', ['cancelled', 'skipped'])
+        .whereNotNull('c.latitude')
+        .whereNotNull('c.longitude')
+        .select(
+          'ss.id as job_id',
+          'ss.customer_id',
+          'ss.technician_id',
+          'ss.window_start',
+          'ss.window_end',
+          'ss.status',
+          'c.first_name',
+          'c.last_name',
+          'c.latitude',
+          'c.longitude'
+        );
+      if (scopeToTech && technicianId) query = query.where('ss.technician_id', technicianId);
+      return query;
+    };
+
+    let services = await loadServices(true);
+    if (!services.length && technicianId) {
+      services = await loadServices(false);
+    }
 
     let best = null;
     let bestDist = Infinity;
+    let bestScore = Infinity;
 
     for (const svc of services) {
       const dist = haversineMeters(
         endLat, endLng,
         parseFloat(svc.latitude), parseFloat(svc.longitude)
       );
-      if (dist < 200 && dist < bestDist) {
+      const timeDistance = windowDistanceMinutes(svc, eventTime);
+      if (timeDistance > 240) continue;
+      const score = dist + timeDistance * 2;
+      if (dist < 200 && score < bestScore) {
         bestDist = dist;
+        bestScore = score;
         best = {
           customer_id: svc.customer_id,
           job_id: svc.job_id,
+          technician_id: svc.technician_id,
           customer_name: `${svc.first_name || ''} ${svc.last_name || ''}`.trim(),
           distance_m: Math.round(dist),
         };
@@ -107,15 +192,15 @@ async function matchTripToJob(endLat, endLng, tripDate) {
  * Logic:
  * - If start OR end is within a 'personal' geo-fence → personal
  * - If start OR end is within a 'business' or 'supplier' fence → business
- * - Default: business (conservative for IRS — better to over-count than under)
+ * - Default: unclassified/non-business until a job or business fence matches
  *
  * @returns {{ is_business: boolean, method: string, notes: string }}
  */
 async function classifyTrip(startLat, startLng, endLat, endLng) {
-  const defaultResult = { is_business: true, method: 'auto', notes: 'Default: classified as business (no fence match)' };
+  const defaultResult = { is_business: false, method: 'needs_review', notes: 'Unclassified: no job or business/personal fence match' };
 
   if (!startLat || !startLng || !endLat || !endLng) {
-    return { is_business: true, method: 'auto', notes: 'Missing coordinates — defaulting to business' };
+    return { is_business: false, method: 'needs_review', notes: 'Unclassified: missing start/end coordinates' };
   }
 
   try {
@@ -179,19 +264,20 @@ async function processTripWebhook(event) {
     const trip = event.data || event;
     const imei = event.imei || trip.imei || trip.vehicleId || '';
 
-    const startLat = trip.startLocation?.lat || trip.startLat || null;
-    const startLng = trip.startLocation?.lon || trip.startLocation?.lng || trip.startLng || null;
-    const endLat = trip.endLocation?.lat || trip.endLat || null;
-    const endLng = trip.endLocation?.lon || trip.endLocation?.lng || trip.endLng || null;
+    const startLat = firstPresent(locationLat(trip.startLocation), trip.startLat);
+    const startLng = firstPresent(locationLng(trip.startLocation), trip.startLng);
+    const endLat = firstPresent(locationLat(trip.endLocation), trip.endLat);
+    const endLng = firstPresent(locationLng(trip.endLocation), trip.endLng);
 
-    const distanceMeters = trip.distance || 0;
-    const distanceMiles = parseFloat((distanceMeters * 0.000621371).toFixed(2));
-    const durationSeconds = trip.duration || 0;
+    const distanceMiles = tripDistanceMiles(trip);
+    const durationSeconds = tripDurationSeconds(trip);
     const durationMinutes = Math.round(durationSeconds / 60);
 
-    const tripDate = tripDateForBouncieStart(trip.startTime);
+    const startTime = firstPresent(trip.startTime, trip.start_time, trip.startedAt, trip.started_at);
+    const tripDate = tripDateForBouncieStart(startTime || trip.endTime || trip.end_time);
 
-    const tripId = trip.transactionId || trip.id || `${imei}-${trip.startTime || Date.now()}`;
+    const tripId = trip.transactionId || trip.transaction_id || trip.tripId || trip.trip_id || trip.id ||
+      stableFallbackTripId(imei, trip, tripDate, distanceMiles, durationSeconds);
 
     // Dedup check
     const existing = await db('mileage_log').where('bouncie_trip_id', tripId).first();
@@ -200,15 +286,33 @@ async function processTripWebhook(event) {
       return existing;
     }
 
+    const technician = imei
+      ? await db('technicians').where({ bouncie_imei: String(imei) }).first('id', 'name', 'vehicle_name')
+      : null;
+
+    const equipment = await db('equipment')
+      .where('vin', imei)
+      .orWhere('serial_number', imei)
+      .first();
+    const assignedVehicle = equipment || (technician
+      ? await db('equipment')
+        .where({ assigned_to: technician.id, category: 'vehicle' })
+        .whereNot('status', 'retired')
+        .first()
+      : null);
+
     // Classify trip
     const classification = await classifyTrip(startLat, startLng, endLat, endLng);
 
-    // Match to job/customer
-    const jobMatch = await matchTripToJob(endLat, endLng, tripDate);
+    // Match to job/customer with the mapped technician first.
+    const jobMatch = await matchTripToJob(endLat, endLng, tripDate, {
+      technicianId: technician?.id,
+      eventTime: firstPresent(trip.endTime, trip.end_time, trip.endedAt, trip.ended_at, startTime),
+    });
 
-    // If job matched, definitely business
     if (jobMatch) {
       classification.is_business = true;
+      classification.method = 'auto';
       classification.notes = `Job match: ${jobMatch.customer_name} (${jobMatch.distance_m}m away)`;
     }
 
@@ -217,12 +321,6 @@ async function processTripWebhook(event) {
     const deductionAmount = classification.is_business
       ? parseFloat((distanceMiles * irsRate).toFixed(2))
       : 0;
-
-    // Find equipment by IMEI/vehicle_id
-    const equipment = await db('equipment')
-      .where('vin', imei)
-      .orWhere('serial_number', imei)
-      .first();
 
     const startAddr = trip.startLocation?.address ||
       (startLat && startLng ? `${startLat}, ${startLng}` : 'Unknown');
@@ -240,33 +338,35 @@ async function processTripWebhook(event) {
     const [inserted] = await db('mileage_log')
       .insert({
         vehicle_id: imei,
-        vehicle_name: equipment ? equipment.name : (trip.nickName || imei),
+        vehicle_name: assignedVehicle ? assignedVehicle.name : (trip.nickName || technician?.vehicle_name || imei),
         trip_date: tripDate,
         start_address: startAddr,
         end_address: endAddr,
         distance_miles: distanceMiles,
         duration_minutes: durationMinutes,
-        purpose: classification.is_business ? 'business' : 'personal',
+        purpose: classification.is_business ? 'business' : 'unclassified',
         irs_rate: irsRate,
         deduction_amount: deductionAmount,
         bouncie_trip_id: tripId,
         source: 'bouncie',
-        equipment_id: equipment ? equipment.id : null,
+        equipment_id: assignedVehicle ? assignedVehicle.id : null,
         customer_id: jobMatch ? jobMatch.customer_id : null,
         job_id: jobMatch ? jobMatch.job_id : null,
+        technician_id: technician ? technician.id : jobMatch?.technician_id || null,
         start_lat: startLat,
         start_lng: startLng,
         end_lat: endLat,
         end_lng: endLng,
-        start_odometer: trip.startOdometer || null,
-        end_odometer: trip.endOdometer || null,
-        max_speed_mph: trip.maxSpeed ? Math.round(trip.maxSpeed * 0.621371) : null,
-        avg_speed_mph: (distanceMiles && durationMinutes)
-          ? Math.round(distanceMiles / (durationMinutes / 60))
-          : null,
-        hard_brakes: trip.hardBrakes || 0,
-        hard_accels: trip.hardAccelerations || trip.hardAccels || 0,
-        idle_minutes: trip.idleTime ? Math.round(trip.idleTime / 60) : 0,
+        start_odometer: firstPresent(trip.startOdometer, trip.start_odometer) || null,
+        end_odometer: firstPresent(trip.endOdometer, trip.end_odometer) || null,
+        max_speed_mph: firstPresent(trip.maxSpeed, trip.max_speed_mph) ? Math.round(firstPresent(trip.maxSpeed, trip.max_speed_mph)) : null,
+        avg_speed_mph: firstPresent(trip.averageSpeed, trip.averageDriveSpeed, trip.avgSpeed) ||
+          ((distanceMiles && durationMinutes) ? Math.round(distanceMiles / (durationMinutes / 60)) : null),
+        hard_brakes: firstPresent(trip.hardBrakes, trip.hardBrakingCounts, trip.hardBrakingCount) || 0,
+        hard_accels: firstPresent(trip.hardAccelerations, trip.hardAccelerationCounts, trip.hardAccelerationCount, trip.hardAccels) || 0,
+        idle_minutes: firstPresent(trip.idleTime, trip.totalIdlingTime, trip.totalIdleDuration)
+          ? Math.round(firstPresent(trip.idleTime, trip.totalIdlingTime, trip.totalIdleDuration) / 60)
+          : 0,
         fuel_consumed_gal: trip.fuelConsumed || null,
         fuel_economy_mpg: (trip.fuelConsumed && trip.fuelConsumed > 0)
           ? parseFloat((distanceMiles / trip.fuelConsumed).toFixed(1))
@@ -282,8 +382,8 @@ async function processTripWebhook(event) {
     logger.info(`[bouncie-mileage] Processed trip ${tripId}: ${distanceMiles}mi, ${classification.is_business ? 'business' : 'personal'}`);
 
     // Update daily summary
-    if (equipment) {
-      await computeDailySummary(equipment.id, tripDate);
+    if (assignedVehicle) {
+      await computeDailySummary(assignedVehicle.id, tripDate);
     }
 
     return inserted;

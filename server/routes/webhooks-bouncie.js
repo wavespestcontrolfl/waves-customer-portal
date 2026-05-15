@@ -7,12 +7,13 @@
  * tracking have different failure modes and shouldn't cascade.
  *
  * Verification is fail-closed by default. Configure
- * BOUNCIE_WEBHOOK_SECRET and send it via x-webhook-key or
- * x-bouncie-webhook-key. Temporary rollout escape hatch:
+ * BOUNCIE_WEBHOOK_SECRET and let Bouncie send it via Authorization or
+ * X-Bouncie-Authorization. Temporary rollout escape hatch:
  * BOUNCIE_WEBHOOK_VERIFICATION=log accepts mismatches while logging them.
  *
  * Event model:
- *   - trip-start / trip-data / trip-end / trip-metrics / connect / disconnect
+ *   - Bouncie docs event names are normalized to trip-start / trip-data /
+ *     trip-end / trip-metrics / connect / disconnect.
  *   - IMEI resolved to a technician row; unknown IMEI = log, mark processed, return 200.
  *   - Raw payload logged to bouncie_webhook_log BEFORE processing so a
  *     handler crash can't lose the event.
@@ -28,142 +29,18 @@ const {
   inspectBouncieWebhook,
   stringifyBounciePayload,
 } = require('../services/bouncie-webhook-security');
+const {
+  eventTypeFromPayload,
+  extractImei,
+  normalizeEventType,
+  normalizeTripMetricsPayload,
+  pointFromPayload,
+  webhookDedupeKey,
+} = require('../services/bouncie-payload');
 
 // ---------- normalization ----------
-
-function pickLatestSample(payload) {
-  // trip-data arrives as { data: [{ timestamp, lat, lon, ... }, ...] }.
-  // Pick the sample with the highest timestamp so a repeated batch can't
-  // rewind our last-known position.
-  const arr = Array.isArray(payload.data) ? payload.data : null;
-  if (!arr || arr.length === 0) return null;
-  let best = arr[0];
-  let bestMs = Date.parse(best.timestamp || best.ts || 0) || 0;
-  for (let i = 1; i < arr.length; i++) {
-    const s = arr[i];
-    const ms = Date.parse(s.timestamp || s.ts || 0) || 0;
-    if (ms > bestMs) {
-      best = s;
-      bestMs = ms;
-    }
-  }
-  return best;
-}
-
-function extractImei(payload) {
-  return (
-    payload.imei ||
-    payload.vehicleId ||
-    payload.vehicle_id ||
-    payload.deviceId ||
-    payload.device_id ||
-    (payload.vehicle && payload.vehicle.imei) ||
-    (payload.data && !Array.isArray(payload.data) && (
-      payload.data.imei ||
-      payload.data.vehicleId ||
-      payload.data.vehicle_id ||
-      payload.data.deviceId ||
-      payload.data.device_id
-    )) ||
-    ''
-  );
-}
-
-function num(v) {
-  if (v === null || v === undefined || v === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function firstPresent(...values) {
-  return values.find((value) => value !== null && value !== undefined && value !== '');
-}
-
-function metersFromPayload(source) {
-  const meters = num(firstPresent(
-    source.distance_meters,
-    source.distanceMeters,
-    source.distance
-  ));
-  if (meters != null) return meters;
-
-  const miles = num(firstPresent(
-    source.distance_miles,
-    source.distanceMiles,
-    source.miles
-  ));
-  return miles != null ? miles / 0.000621371 : null;
-}
-
-function secondsFromPayload(source) {
-  const seconds = num(firstPresent(
-    source.duration_seconds,
-    source.durationSeconds,
-    source.duration
-  ));
-  if (seconds != null) return seconds;
-
-  const minutes = num(firstPresent(
-    source.duration_minutes,
-    source.durationMinutes,
-    source.minutes
-  ));
-  return minutes != null ? minutes * 60 : null;
-}
-
-function pickPoint(source) {
-  // Bouncie uses `lat`/`lon` in trip data, sometimes `latitude`/`longitude`.
-  if (!source) return null;
-  const lat = num(source.lat != null ? source.lat : source.latitude);
-  const lng = num(source.lon != null ? source.lon : source.longitude);
-  if (lat == null || lng == null) return null;
-  return {
-    lat,
-    lng,
-    heading: num(source.heading != null ? source.heading : source.bearing),
-    speed_mph: num(source.speed != null ? source.speed : source.speed_mph),
-    ignition: typeof source.ignition === 'boolean' ? source.ignition : null,
-    reported_at: source.timestamp || source.ts || null,
-  };
-}
-
-function normalizeTripMetricsPayload(payload, imei) {
-  const source = payload.data && !Array.isArray(payload.data) ? payload.data : payload;
-  const distance = metersFromPayload(source);
-  const duration = secondsFromPayload(source);
-  const hasTripMetric = distance != null || duration != null;
-  if (!hasTripMetric) return null;
-  const transactionId = firstPresent(
-    source.transactionId,
-    source.transaction_id,
-    source.tripId,
-    source.trip_id,
-    source.id,
-    payload.transactionId,
-    payload.transaction_id,
-    payload.tripId,
-    payload.trip_id,
-    payload.id
-  );
-  if (!transactionId) return null;
-
-  return {
-    eventType: 'tripCompleted',
-    imei,
-    data: {
-      ...source,
-      imei,
-      vehicleId: firstPresent(source.vehicleId, source.vehicle_id, payload.vehicleId, payload.vehicle_id, imei),
-      transactionId,
-      startTime: firstPresent(source.startTime, source.start_time, payload.startTime, payload.start_time, source.startedAt, source.started_at),
-      endTime: firstPresent(source.endTime, source.end_time, payload.endTime, payload.end_time, source.endedAt, source.ended_at),
-      distance: distance ?? 0,
-      duration: duration ?? 0,
-      startLocation: firstPresent(source.startLocation, source.start_location, payload.startLocation, payload.start_location),
-      endLocation: firstPresent(source.endLocation, source.end_location, payload.endLocation, payload.end_location),
-    },
-  };
-}
+// Normalization helpers live in services/bouncie-payload.js so both Bouncie
+// receivers parse the same official event names and nested GPS shapes.
 
 // ---------- persistence ----------
 
@@ -210,10 +87,11 @@ async function resolveTechnician(imei) {
 
 async function processTrackingEvent({ logId, eventType, payload }) {
   try {
+    const normalizedEventType = normalizeEventType(eventType);
     const imei = extractImei(payload);
     const tech = await resolveTechnician(imei);
     if (!tech) {
-      logger.warn(`[webhooks-bouncie] unknown IMEI ${imei || '(missing)'} for event ${eventType}`);
+      logger.warn(`[webhooks-bouncie] unknown IMEI ${imei || '(missing)'} for event ${normalizedEventType}`);
       if (logId) {
         await db('bouncie_webhook_log')
           .where('id', logId)
@@ -224,17 +102,16 @@ async function processTrackingEvent({ logId, eventType, payload }) {
     }
 
     let point = null;
-    switch (eventType) {
+    switch (normalizedEventType) {
       case 'trip-start':
       case 'trip-end':
       case 'connect':
       case 'disconnect': {
-        point = pickPoint(payload) || pickPoint(payload.location) || pickPoint(payload.position);
+        point = pointFromPayload(payload, normalizedEventType);
         break;
       }
       case 'trip-data': {
-        const sample = pickLatestSample(payload) || pickLatestSample(payload.samples);
-        point = pickPoint(sample);
+        point = pointFromPayload(payload, normalizedEventType);
         break;
       }
       case 'trip-metrics': {
@@ -245,7 +122,7 @@ async function processTrackingEvent({ logId, eventType, payload }) {
         break;
       }
       default: {
-        point = pickPoint(payload);
+        point = pointFromPayload(payload, normalizedEventType);
       }
     }
 
@@ -293,7 +170,7 @@ async function processTrackingEvent({ logId, eventType, payload }) {
 
 // ---------- routes ----------
 
-// GET /api/webhooks/bouncie/ping  (header: x-webhook-key)
+// GET /api/webhooks/bouncie/ping  (header: Authorization or X-Bouncie-Authorization)
 // Header-only on purpose: query strings leak into Railway access logs and
 // any upstream proxy logs, so the secret can't ride in the URL.
 router.get('/ping', (req, res) => {
@@ -316,24 +193,25 @@ router.post('/', async (req, res) => {
   }
 
   const payload = req.body || {};
-  const eventType =
-    payload.eventType ||
-    payload.event_type ||
-    payload.event ||
-    payload.type ||
-    'unknown';
+  const eventType = eventTypeFromPayload(payload);
   const imei = extractImei(payload);
+  const dedupeKey = webhookDedupeKey(payload, eventType, 'bouncie-live-tracking');
 
   let logId = null;
+  let duplicate = false;
   try {
     const [row] = await db('bouncie_webhook_log')
       .insert({
         event_type: eventType,
         vehicle_imei: imei,
         payload: stringifyBounciePayload(payload),
+        dedupe_key: dedupeKey,
         processed: false,
       })
+      .onConflict('dedupe_key')
+      .ignore()
       .returning('id');
+    duplicate = !row;
     logId = row && (row.id || row);
   } catch (logErr) {
     logger.error(`[webhooks-bouncie] failed to log event: ${logErr.message}`);
@@ -345,6 +223,11 @@ router.post('/', async (req, res) => {
 
   // Answer fast; process in the background so Bouncie never sees a slow 2xx.
   res.status(200).json({ ok: true });
+
+  if (duplicate) {
+    logger.info(`[webhooks-bouncie] duplicate ${eventType} imei=${imei || '(missing)'} skipped`);
+    return;
+  }
 
   setImmediate(() => {
     processTrackingEvent({ logId, eventType, payload }).catch((err) => {

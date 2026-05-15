@@ -48,6 +48,8 @@ const ACTION_COLORS = {
   no_active_timer: D.muted,
   unknown_vehicle: D.red,
   timer_already_running: D.amber,
+  auto_flip_en_route: D.teal,
+  auto_flip_dry_run: D.amber,
   dismissed: D.muted,
 };
 
@@ -200,6 +202,63 @@ export default function GeofenceSettings() {
               : "Only the timer stops on exit. Tech still marks the job complete manually."
           }
           warn={settings.auto_complete_on_exit}
+        />{" "}
+      </Card>
+      {/* ── AUTO-FLIP ── */}
+      <Card>
+        {" "}
+        <SectionTitle>Departure Auto-Flip</SectionTitle>{" "}
+        <ToggleField
+          label="Auto-flip next job on departure"
+          checked={settings.auto_flip_on_departure}
+          onChange={(v) => saveSettings({ auto_flip_on_departure: v })}
+          help={
+            settings.auto_flip_on_departure
+              ? "EXIT events can advance the tech's next scheduled job to en route."
+              : "EXIT events will not advance the next scheduled job."
+          }
+          warn={settings.auto_flip_on_departure && !settings.auto_flip_dry_run}
+        />{" "}
+        <ToggleField
+          label="Dry run"
+          checked={settings.auto_flip_dry_run}
+          onChange={(v) => saveSettings({ auto_flip_dry_run: v })}
+          help={
+            settings.auto_flip_dry_run
+              ? "Auto-flip decisions are logged without sending en route SMS."
+              : "Auto-flip can send en route SMS when all guardrails pass."
+          }
+          warn={!settings.auto_flip_dry_run && settings.auto_flip_on_departure}
+        />{" "}
+        <NumberField
+          label="Minimum dwell"
+          suffix="minutes"
+          value={settings.auto_flip_dwell_minutes}
+          min={1}
+          max={60}
+          step={1}
+          onChange={(v) => saveSettings({ auto_flip_dwell_minutes: v })}
+          help="Require this much active job time before departure can trigger the next en route update."
+        />{" "}
+        <NumberField
+          label="Next-job horizon"
+          suffix="hours"
+          value={settings.auto_flip_horizon_hours}
+          min={1}
+          max={12}
+          step={1}
+          onChange={(v) => saveSettings({ auto_flip_horizon_hours: v })}
+          help="Only auto-flip jobs inside this many hours after departure."
+        />{" "}
+        <NumberField
+          label="Auto-flip cooldown"
+          suffix="minutes"
+          value={settings.auto_flip_cooldown_minutes}
+          min={5}
+          max={120}
+          step={5}
+          onChange={(v) => saveSettings({ auto_flip_cooldown_minutes: v })}
+          help="Suppress repeated live auto-flips for the same customer in this window."
         />{" "}
       </Card>
       {/* ── VEHICLE MAPPING ── */}

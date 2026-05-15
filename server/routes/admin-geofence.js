@@ -17,6 +17,11 @@ const KEYS = [
   'geofence.radius_meters',
   'geofence.cooldown_minutes',
   'geofence.auto_complete_on_exit',
+  'geofence.auto_flip_on_departure',
+  'geofence.auto_flip_dry_run',
+  'geofence.auto_flip_dwell_minutes',
+  'geofence.auto_flip_horizon_hours',
+  'geofence.auto_flip_cooldown_minutes',
 ];
 
 // GET /api/admin/geofence/settings
@@ -30,6 +35,11 @@ router.get('/settings', async (req, res, next) => {
       radius_meters: parseInt(settings['geofence.radius_meters'] || '200', 10),
       cooldown_minutes: parseInt(settings['geofence.cooldown_minutes'] || '15', 10),
       auto_complete_on_exit: String(settings['geofence.auto_complete_on_exit']) === 'true',
+      auto_flip_on_departure: String(settings['geofence.auto_flip_on_departure']) === 'true',
+      auto_flip_dry_run: String(settings['geofence.auto_flip_dry_run'] ?? 'true') === 'true',
+      auto_flip_dwell_minutes: parseInt(settings['geofence.auto_flip_dwell_minutes'] || '10', 10),
+      auto_flip_horizon_hours: parseInt(settings['geofence.auto_flip_horizon_hours'] || '4', 10),
+      auto_flip_cooldown_minutes: parseInt(settings['geofence.auto_flip_cooldown_minutes'] || '30', 10),
     });
   } catch (err) { next(err); }
 });
@@ -37,12 +47,27 @@ router.get('/settings', async (req, res, next) => {
 // PUT /api/admin/geofence/settings
 router.put('/settings', async (req, res, next) => {
   try {
-    const { mode, radius_meters, cooldown_minutes, auto_complete_on_exit } = req.body;
+    const {
+      mode,
+      radius_meters,
+      cooldown_minutes,
+      auto_complete_on_exit,
+      auto_flip_on_departure,
+      auto_flip_dry_run,
+      auto_flip_dwell_minutes,
+      auto_flip_horizon_hours,
+      auto_flip_cooldown_minutes,
+    } = req.body;
     const updates = [];
     if (mode !== undefined) updates.push({ key: 'geofence.mode', value: String(mode) });
     if (radius_meters !== undefined) updates.push({ key: 'geofence.radius_meters', value: String(parseInt(radius_meters, 10)) });
     if (cooldown_minutes !== undefined) updates.push({ key: 'geofence.cooldown_minutes', value: String(parseInt(cooldown_minutes, 10)) });
     if (auto_complete_on_exit !== undefined) updates.push({ key: 'geofence.auto_complete_on_exit', value: String(!!auto_complete_on_exit) });
+    if (auto_flip_on_departure !== undefined) updates.push({ key: 'geofence.auto_flip_on_departure', value: String(!!auto_flip_on_departure) });
+    if (auto_flip_dry_run !== undefined) updates.push({ key: 'geofence.auto_flip_dry_run', value: String(!!auto_flip_dry_run) });
+    if (auto_flip_dwell_minutes !== undefined) updates.push({ key: 'geofence.auto_flip_dwell_minutes', value: String(parseInt(auto_flip_dwell_minutes, 10)) });
+    if (auto_flip_horizon_hours !== undefined) updates.push({ key: 'geofence.auto_flip_horizon_hours', value: String(parseInt(auto_flip_horizon_hours, 10)) });
+    if (auto_flip_cooldown_minutes !== undefined) updates.push({ key: 'geofence.auto_flip_cooldown_minutes', value: String(parseInt(auto_flip_cooldown_minutes, 10)) });
 
     for (const u of updates) {
       await db('system_settings')

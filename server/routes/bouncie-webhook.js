@@ -2,9 +2,9 @@
  * Bouncie Webhook Route
  *
  * Public Bouncie receiver for trip/vehicle events. Requests must include
- * BOUNCIE_WEBHOOK_SECRET via x-webhook-key or x-bouncie-webhook-key unless
+ * BOUNCIE_WEBHOOK_SECRET via Authorization or X-Bouncie-Authorization unless
  * BOUNCIE_WEBHOOK_VERIFICATION=log/disabled is explicitly configured.
- * All events are logged; tripCompleted events are processed.
+ * All events are logged; tripMetrics/tripCompleted and userGeozone events are processed.
  */
 const express = require('express');
 const router = express.Router();
@@ -16,41 +16,30 @@ const {
   inspectBouncieWebhook,
   stringifyBounciePayload,
 } = require('../services/bouncie-webhook-security');
-
-function extractImei(payload) {
-  return (
-    payload.imei ||
-    payload.vehicleId ||
-    payload.vehicle_id ||
-    payload.deviceId ||
-    payload.device_id ||
-    (payload.vehicle && payload.vehicle.imei) ||
-    (payload.data && !Array.isArray(payload.data) && (
-      payload.data.imei ||
-      payload.data.vehicleId ||
-      payload.data.vehicle_id ||
-      payload.data.deviceId ||
-      payload.data.device_id
-    )) ||
-    ''
-  );
-}
+const {
+  eventTypeFromPayload,
+  extractImei,
+  normalizeEventType,
+  normalizeTripCompletedPayload,
+  webhookDedupeKey,
+} = require('../services/bouncie-payload');
 
 function isTripCompletedEvent(eventType) {
-  return eventType === 'tripCompleted' || eventType === 'trip.completed' || eventType === 'trip';
+  return normalizeEventType(eventType) === 'trip-metrics';
 }
 
 function isGeozoneEvent(eventType) {
-  return eventType === 'userGeozone' || eventType === 'geozone' || eventType === 'user.geozone';
+  return ['userGeozone', 'applicationGeozone'].includes(normalizeEventType(eventType));
 }
 
 // POST /api/bouncie/webhook
 async function handleBouncieWebhook(req, res) {
-  // Always return 200 to Bouncie — never let errors cause retries
+  // Return 2xx after a valid secret so Bouncie does not retry handler errors.
   try {
     const payload = req.body || {};
-    const eventType = payload.eventType || payload.event_type || payload.type || 'unknown';
+    const eventType = eventTypeFromPayload(payload);
     const imei = extractImei(payload);
+    const dedupeKey = webhookDedupeKey(payload, eventType, 'bouncie-mileage-geofence');
 
     const verify = inspectBouncieWebhook(req);
     if (!verify.accepted) {
@@ -63,24 +52,37 @@ async function handleBouncieWebhook(req, res) {
 
     // Log the webhook event
     let logId = null;
+    let duplicate = false;
     try {
       const [log] = await db('bouncie_webhook_log')
         .insert({
           event_type: eventType,
           vehicle_imei: imei,
           payload: stringifyBounciePayload(payload),
+          dedupe_key: dedupeKey,
           processed: false,
         })
+        .onConflict('dedupe_key')
+        .ignore()
         .returning('id');
-      logId = log.id || log;
+      duplicate = !log;
+      logId = log && (log.id || log);
     } catch (logErr) {
       logger.error(`[bouncie-webhook] Failed to log event: ${logErr.message}`);
     }
 
-    // Process tripCompleted events
+    if (duplicate) {
+      logger.info(`[bouncie-webhook] Duplicate ${eventType} for ${imei} skipped`);
+      return res.status(200).json({ received: true, duplicate: true });
+    }
+
+    // Process trip metrics/completed events
     if (isTripCompletedEvent(eventType)) {
       try {
-        await mileageService.processTripWebhook(payload);
+        const tripPayload = normalizeTripCompletedPayload(payload);
+        if (tripPayload) {
+          await mileageService.processTripWebhook(tripPayload);
+        }
 
         // Mark webhook as processed
         if (logId) {
@@ -126,7 +128,7 @@ async function handleBouncieWebhook(req, res) {
     logger.error(`[bouncie-webhook] Unhandled error: ${err.message}`);
   }
 
-  // Always 200
+  // Handler errors are logged above; valid webhook attempts still get 200.
   res.status(200).json({ received: true });
 }
 

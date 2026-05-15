@@ -1,9 +1,16 @@
 const crypto = require('crypto');
 
 const SECRET_KEYS = new Set([
+  'Authorization',
+  'authorization',
+  'X-Bouncie-Authorization',
+  'x-bouncie-authorization',
+  'x_bouncie_authorization',
   'webhookKey',
   'webhook_key',
   'x-webhook-key',
+  'x_webhook_key',
+  'x-bouncie-webhook-key',
   'x_bouncie_webhook_key',
   'bouncieWebhookKey',
 ]);
@@ -38,6 +45,8 @@ function inspectBouncieWebhook(req, env = process.env) {
   }
 
   const candidates = [
+    ['header:authorization', req.get?.('authorization')],
+    ['header:x-bouncie-authorization', req.get?.('x-bouncie-authorization')],
     ['header:x-webhook-key', req.get?.('x-webhook-key')],
     ['header:x-bouncie-webhook-key', req.get?.('x-bouncie-webhook-key')],
     ['body:webhookKey', req.body?.webhookKey],

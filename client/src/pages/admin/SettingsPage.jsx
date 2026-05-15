@@ -735,7 +735,12 @@ const INTEGRATION_GROUPS = [
       {
         name: "Bouncie",
         platform: "bouncie",
-        keys: ["BOUNCIE_ACCESS_TOKEN"],
+        keys: [
+          "BOUNCIE_CLIENT_ID",
+          "BOUNCIE_CLIENT_SECRET",
+          "BOUNCIE_REFRESH_TOKEN",
+          "BOUNCIE_WEBHOOK_SECRET",
+        ],
         desc: "GPS + mileage tracking for tech vehicles",
       },
     ],
