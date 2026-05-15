@@ -108,9 +108,16 @@ function computeTurfArea(input, fallback = {}) {
     input.estimatedBedAreaSf !== undefined ||
     input.estimatedBedAreaPercent !== undefined;
 
-  if (!hasLotBasedTurfFields && toPositiveNumber(fallback.turfSf) > 0) {
+  const hasFallbackTurf =
+    fallback.turfSf !== undefined &&
+    fallback.turfSf !== null &&
+    fallback.turfSf !== '' &&
+    Number.isFinite(Number(fallback.turfSf)) &&
+    Number(fallback.turfSf) >= 0;
+
+  if (!hasLotBasedTurfFields && hasFallbackTurf) {
     return {
-      turfSf: fallback.turfSf,
+      turfSf: Number(fallback.turfSf),
       turfEstimated: true,
       turfConfidence: 'LOW',
       turfBasis: 'legacyHardscapeEstimate',

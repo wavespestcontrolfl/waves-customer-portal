@@ -162,6 +162,18 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.lawnSqFt).toBe(0);
   });
 
+  test('zero legacy hardscape turf estimate is preserved instead of replaced by lot fallback', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 9000,
+      lotSqFt: 9500,
+    }));
+    const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfSf).toBe(0);
+    expect(lawn.turfSf).toBe(0);
+  });
+
   test('cost floor callback reserve recognizes property lookup risk enums', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4000 }));
     const safe = priceLawnCare(
