@@ -4,9 +4,17 @@
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
-  TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, URGENCY,
+  TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, URGENCY,
   WAVEGUARD,
 } = require('./constants');
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function roundRatio(value) {
+  return Math.round((Number(value) || 0) * 1000) / 1000;
+}
 
 // ── Utility: Linear interpolation between brackets ────────────
 function interpolate(value, brackets, valueKey = 0, resultKey = 1) {
@@ -545,43 +553,274 @@ function priceLawnCare(property, options = {}) {
 // ============================================================
 // TREE & SHRUB
 // ============================================================
+function hasNonNegativePricingNumber(value) {
+  return value !== undefined &&
+    value !== null &&
+    value !== '' &&
+    Number.isFinite(Number(value)) &&
+    Number(value) >= 0;
+}
+
+function hasPositivePricingNumber(value) {
+  return value !== undefined &&
+    value !== null &&
+    value !== '' &&
+    Number.isFinite(Number(value)) &&
+    Number(value) > 0;
+}
+
+function normalizeTreeShrubEnum(value, fallback = '') {
+  return String(value || fallback || '').trim().toLowerCase();
+}
+
+function getTreeShrubShrubDensity(property = {}) {
+  return normalizeTreeShrubEnum(
+    property.shrubDensity || property.features?.shrubs,
+    'moderate'
+  );
+}
+
+function getTreeShrubComplexity(property = {}) {
+  return normalizeTreeShrubEnum(
+    property.complexity || property.landscapeComplexity || property.features?.complexity,
+    'standard'
+  );
+}
+
+function normalizeTreeShrubPressure(value) {
+  return normalizeTreeShrubEnum(value).replace(/[\s-]+/g, '_');
+}
+
+function hasKnownTreeShrubPressure(property = {}) {
+  const directSignals = [
+    property.pestPressure,
+    property.diseasePressure,
+    property.features?.pestPressure,
+    property.features?.diseasePressure,
+  ];
+  for (const signal of directSignals) {
+    if (signal === true) return true;
+    const normalized = normalizeTreeShrubPressure(signal);
+    if (normalized && !['false', 'no', 'none', 'low', 'unknown'].includes(normalized)) {
+      return true;
+    }
+  }
+
+  const overallPressure = normalizeTreeShrubPressure(
+    property.overallPestPressure || property.features?.overallPestPressure
+  );
+  return ['high', 'very_high', 'severe'].includes(overallPressure);
+}
+
+function estimateTreeShrubBedAreaFromLot(property = {}) {
+  const lotSqFt = Number(property.lotSqFt) || 0;
+  if (lotSqFt <= 0) return null;
+
+  const shrubDensity = getTreeShrubShrubDensity(property);
+  const complexity = getTreeShrubComplexity(property);
+  const density = BED_DENSITY[shrubDensity] || BED_DENSITY.moderate;
+  let pct = density.basePct;
+  if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
+
+  const rawBedArea = Math.max(0, Math.round(lotSqFt * pct));
+  return {
+    bedArea: Math.min(rawBedArea, BED_AREA_CAP),
+    capped: rawBedArea >= BED_AREA_CAP,
+  };
+}
+
+function resolveTreeShrubBedArea(property = {}, warnings = []) {
+  const sourceHint = normalizeTreeShrubEnum(property.bedAreaSource);
+  if (sourceHint === 'fallback') {
+    warnings.push('Tree & Shrub bed area was not provided; fallback 2,000 sqft was used.');
+    return {
+      bedArea: 2000,
+      bedAreaSource: 'fallback',
+      pricingConfidence: 'low',
+      requiresManualReview: true,
+    };
+  }
+
+  if (hasPositivePricingNumber(property.bedArea)) {
+    const bedAreaSource = sourceHint === 'estimated' ? 'estimated' : 'explicit';
+    return {
+      bedArea: Number(property.bedArea),
+      bedAreaSource,
+      pricingConfidence: bedAreaSource === 'estimated' ? 'medium' : 'high',
+      requiresManualReview: false,
+    };
+  }
+
+  const estimatedBedAreaValue = hasPositivePricingNumber(property.estimatedBedArea)
+    ? property.estimatedBedArea
+    : property.estimatedBedAreaSf;
+  if (hasPositivePricingNumber(estimatedBedAreaValue)) {
+    const rawBedArea = Number(estimatedBedAreaValue);
+    return {
+      bedArea: Math.min(rawBedArea, BED_AREA_CAP),
+      bedAreaSource: 'estimated',
+      pricingConfidence: 'medium',
+      requiresManualReview: false,
+      capped: rawBedArea >= BED_AREA_CAP,
+    };
+  }
+
+  const lotEstimate = estimateTreeShrubBedAreaFromLot(property);
+  if (lotEstimate) {
+    return {
+      bedArea: lotEstimate.bedArea,
+      bedAreaSource: 'estimated',
+      pricingConfidence: 'medium',
+      requiresManualReview: false,
+      capped: lotEstimate.capped,
+    };
+  }
+
+  warnings.push('Tree & Shrub bed area was not provided; fallback 2,000 sqft was used.');
+  return {
+    bedArea: 2000,
+    bedAreaSource: 'fallback',
+    pricingConfidence: 'low',
+    requiresManualReview: true,
+  };
+}
+
+function recommendTreeShrubTier(property = {}) {
+  let bedArea = 0;
+  if (hasPositivePricingNumber(property.bedArea)) {
+    bedArea = Number(property.bedArea);
+  } else if (hasPositivePricingNumber(property.estimatedBedArea)) {
+    bedArea = Number(property.estimatedBedArea);
+  } else if (hasPositivePricingNumber(property.estimatedBedAreaSf)) {
+    bedArea = Number(property.estimatedBedAreaSf);
+  } else {
+    bedArea = estimateTreeShrubBedAreaFromLot(property)?.bedArea || 0;
+  }
+  const heavyDensity = getTreeShrubShrubDensity(property) === 'heavy';
+  const complex = ['moderate', 'complex'].includes(getTreeShrubComplexity(property));
+  const highTreeCount = Number(property.treeCount || property.features?.treeCount || 0) >= 8;
+  const difficultAccess = normalizeTreeShrubEnum(property.access || property.features?.access) === 'difficult';
+  const knownPressure = hasKnownTreeShrubPressure(property);
+
+  if (
+    bedArea >= 2000 ||
+    heavyDensity ||
+    complex ||
+    highTreeCount ||
+    difficultAccess ||
+    knownPressure
+  ) {
+    return 'enhanced';
+  }
+
+  return TREE_SHRUB.defaultTier || 'standard';
+}
+
+function normalizeTreeShrubTier(requestedTier, warnings = []) {
+  const normalized = normalizeTreeShrubEnum(requestedTier, TREE_SHRUB.defaultTier || 'standard');
+  if (normalized === 'premium') {
+    warnings.push('Premium Tree & Shrub has been deprecated; Enhanced 9-visit plan was used.');
+    return { tier: 'enhanced', legacyTierRequested: 'premium' };
+  }
+  if (!TREE_SHRUB.tiers[normalized]) throw new Error(`Unknown T&S tier: ${requestedTier}`);
+  return { tier: normalized, legacyTierRequested: null };
+}
+
 function priceTreeShrub(property, options = {}) {
-  const {
-    tier = 'enhanced',
-    access = 'easy',
-    treeCount = 0,
-  } = options;
-
+  property = property || {};
+  const warnings = [];
+  const access = normalizeTreeShrubEnum(options.access || property.access || property.features?.access, 'easy');
+  const treeCount = Math.max(0, Number(
+    options.treeCount ?? property.treeCount ?? property.features?.treeCount ?? 0
+  ) || 0);
+  const recommendationInput = {
+    ...property,
+    access,
+    treeCount,
+    features: {
+      ...(property.features || {}),
+      access,
+      treeCount,
+    },
+  };
+  const recommendedTier = recommendTreeShrubTier(recommendationInput);
+  const requestedTier = options.tier || recommendedTier;
+  const { tier, legacyTierRequested } = normalizeTreeShrubTier(requestedTier, warnings);
   const tierConfig = TREE_SHRUB.tiers[tier];
-  if (!tierConfig) throw new Error(`Unknown T&S tier: ${tier}`);
 
-  const bedArea = property.bedArea || 2000;
+  const bedAreaInfo = resolveTreeShrubBedArea(property, warnings);
+  const bedArea = bedAreaInfo.bedArea;
+
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
   const onSiteMin = Math.max(25, 20 + Math.round(bedArea / 500) + Math.round(treeCount * 1.5) + accessMin);
 
-  const materialRate = TREE_SHRUB.materialRates[tier] || TREE_SHRUB.materialRates.enhanced;
-  const materialCost = Math.max(tierConfig.freq * 10, bedArea * materialRate);
+  const frequency = tierConfig.frequency;
+  const materialRate = tierConfig.materialRate;
+  const materialCost = Math.max(frequency * 10, bedArea * materialRate);
 
   const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + 10) / 60);
-  const laborCostAnnual = laborPerVisit * tierConfig.freq;
+  const laborAnnual = laborPerVisit * frequency;
 
-  const annualCost = materialCost + laborCostAnnual;
-  const annualPrice = annualCost / TREE_SHRUB.marginTarget;
-  const monthlyCalc = annualPrice / 12;
-  const monthly = Math.max(tierConfig.floor, Math.round(monthlyCalc * 100) / 100);
-  const annual = monthly * 12;
-  const perApp = Math.round(annual / tierConfig.freq * 100) / 100;
-  const margin = annual > 0 ? (annual - annualCost - GLOBAL.ADMIN_ANNUAL) / annual : 0;
+  const annualDirectCost = materialCost + laborAnnual;
+  const directCostRatioTarget = TREE_SHRUB.directCostRatioTarget || GLOBAL.DIRECT_COST_RATIO_TARGET_TS || 0.43;
+  const baseAnnualPrice = annualDirectCost / directCostRatioTarget;
+  const monthlyCalc = baseAnnualPrice / 12;
+  const monthly = Math.max(tierConfig.monthlyFloor, roundMoney(monthlyCalc));
+  const annual = roundMoney(monthly * 12);
+  const internalPerVisitRevenue = roundMoney(annual / frequency);
+  const baseMarginRaw = annual > 0 ? (annual - annualDirectCost - GLOBAL.ADMIN_ANNUAL) / annual : 0;
+  const baseMargin = roundRatio(baseMarginRaw);
+
+  let requiresManualReview = !!bedAreaInfo.requiresManualReview;
+  if (bedAreaInfo.bedAreaSource === 'fallback') {
+    requiresManualReview = true;
+  }
+  if (bedArea >= BED_AREA_CAP || bedAreaInfo.capped) {
+    requiresManualReview = true;
+    warnings.push('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
+  }
+  if (treeCount >= 15) {
+    requiresManualReview = true;
+    warnings.push('High tree count; manual review recommended.');
+  }
+  if (access === 'difficult' && bedArea >= 4000) {
+    requiresManualReview = true;
+    warnings.push('Difficult access with large bed area; manual review recommended.');
+  }
 
   return {
     service: 'tree_shrub',
-    tier, bedArea, treeCount, access,
-    onSiteMin, materialRate,
-    frequency: tierConfig.freq,
-    monthly, annual, perApp,
-    costs: { materialCost: Math.round(materialCost), laborCost: Math.round(laborCostAnnual), adminCost: GLOBAL.ADMIN_ANNUAL, total: Math.round(annualCost + GLOBAL.ADMIN_ANNUAL) },
-    margin: Math.round(margin * 1000) / 1000,
-    marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
+    tier,
+    ...(legacyTierRequested ? { legacyTierRequested } : {}),
+    recommendedTier,
+    recommended: tier === recommendedTier,
+    availableTiers: Object.keys(TREE_SHRUB.tiers),
+    frequency,
+    bedArea,
+    bedAreaSource: bedAreaInfo.bedAreaSource,
+    pricingConfidence: bedAreaInfo.pricingConfidence,
+    treeCount,
+    access,
+    onSiteMin,
+    materialRate,
+    monthly,
+    annual,
+    internalPerVisitRevenue,
+    perApp: internalPerVisitRevenue,
+    costs: {
+      materialCost: roundMoney(materialCost),
+      laborCost: roundMoney(laborAnnual),
+      adminCost: GLOBAL.ADMIN_ANNUAL,
+      directCost: roundMoney(annualDirectCost),
+      totalWithAdmin: roundMoney(annualDirectCost + GLOBAL.ADMIN_ANNUAL),
+      total: roundMoney(annualDirectCost + GLOBAL.ADMIN_ANNUAL),
+    },
+    directCostRatioTarget,
+    baseMargin,
+    margin: baseMargin,
+    marginFloorOk: baseMarginRaw >= (TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR),
+    requiresManualReview,
+    warnings: [...new Set(warnings)],
   };
 }
 
@@ -1988,4 +2227,5 @@ module.exports = {
   getOneTimeUrgencyMultiplier, applyOneTimeRecurringCustomerDiscount,
   applyOneTimeFloor, getOneTimeMosquitoAreaBucket, getOneTimeMosquitoBase,
   normalizeGrassType, calcLawnAnnualCostFloor,
+  recommendTreeShrubTier,
 };

@@ -20,7 +20,7 @@ const {
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
 } = require('./service-pricing');
 const {
-  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, validateEstimateDiscounts,
+  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
 } = require('./discount-engine');
 
 // ── Startup assertion — zone alignment ────────────────────────
@@ -71,8 +71,10 @@ function generateEstimate(input) {
     imperviousSurfacePercent: input.imperviousSurfacePercent,
     imperviosSurfacePercent: input.imperviosSurfacePercent,
     estimatedBedAreaSf: input.estimatedBedAreaSf,
+    estimatedBedArea: input.estimatedBedArea,
     estimatedBedAreaPercent: input.estimatedBedAreaPercent,
     bedArea: input.bedArea,
+    bedAreaSource: input.bedAreaSource,
     propertyType: input.propertyType,
     features: input.features || {},
     // v2 enriched fields (optional — null-safe)
@@ -173,12 +175,14 @@ function generateEstimate(input) {
   // Tree & Shrub
   if (services.treeShrub) {
     const result = priceTreeShrub(property, {
-      tier: services.treeShrub.tier || 'enhanced',
+      tier: services.treeShrub.tier,
       access: services.treeShrub.access || 'easy',
-      treeCount: services.treeShrub.treeCount || property.features?.treeCount || 0,
+      treeCount: services.treeShrub.treeCount ?? property.features?.treeCount ?? 0,
     });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
+    result.internalPerVisitRevenue = Math.round(result.annual / result.frequency * 100) / 100;
+    result.perApp = result.internalPerVisitRevenue;
     lineItems.push(result);
     activeServiceKeys.push('tree_shrub');
   }
@@ -607,7 +611,28 @@ function generateEstimate(input) {
 
     if (item.annual) {
       item.annualBeforeDiscount = item.annual;
-      item.annualAfterDiscount = applyDiscount(item.annual, discount);
+      const discountedAnnual = applyDiscount(item.annual, discount);
+      if (item.service === 'tree_shrub') {
+        const guarded = applyMarginGuard(item, discountedAnnual, discount.effectiveDiscount || 0);
+        item.preDiscountAnnual = item.annualBeforeDiscount;
+        item.requestedDiscountPct = discount.effectiveDiscount || 0;
+        item.actualDiscountPct = guarded.actualDiscountPct ?? (
+          item.annualBeforeDiscount > 0
+            ? Math.round((1 - guarded.finalAnnual / item.annualBeforeDiscount) * 1000) / 1000
+            : 0
+        );
+        item.finalAnnual = guarded.finalAnnual;
+        item.finalMonthly = Math.round(guarded.finalAnnual / 12 * 100) / 100;
+        item.finalMargin = guarded.finalMargin;
+        item.marginGuardApplied = guarded.marginGuardApplied;
+        item.discountCapped = guarded.discountCapped;
+        if (guarded.minAnnualForMargin !== undefined) {
+          item.minAnnualForMargin = guarded.minAnnualForMargin;
+        }
+        item.annualAfterDiscount = guarded.finalAnnual;
+      } else {
+        item.annualAfterDiscount = discountedAnnual;
+      }
       item.monthlyAfterDiscount = Math.round(item.annualAfterDiscount / 12 * 100) / 100;
     } else if (item.price) {
       item.priceBeforeDiscount = item.price;

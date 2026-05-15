@@ -151,12 +151,12 @@ async function ensureTable() {
       { config_key: 'global_drive_time', name: 'Average Drive Time', category: 'global', sort_order: 2, data: JSON.stringify({ value: 20, unit: 'min', description: 'Average drive time per visit (Zone A)' }) },
       { config_key: 'global_admin_annual', name: 'Admin Cost Allocation', category: 'global', sort_order: 3, data: JSON.stringify({ value: 51, unit: '$/service/yr', description: 'Annual admin overhead per service line' }) },
       { config_key: 'global_margin_floor', name: 'Margin Floor', category: 'global', sort_order: 4, data: JSON.stringify({ value: 0.35, unit: 'ratio', description: 'Minimum acceptable contribution margin' }) },
-      { config_key: 'global_margin_target_ts', name: 'T&S Margin Target', category: 'global', sort_order: 5, data: JSON.stringify({ value: 0.43, unit: 'ratio', description: 'Tree & Shrub margin target' }) },
+      { config_key: 'global_margin_target_ts', name: 'T&S Direct Cost Ratio Target', category: 'global', sort_order: 5, data: JSON.stringify({ value: 0.43, unit: 'ratio', description: 'Tree & Shrub direct-cost ratio target' }) },
       { config_key: 'global_conditional_ceiling', name: 'Conditional Material Ceiling', category: 'global', sort_order: 6, data: JSON.stringify({ value: 60, unit: '$/property/yr', description: 'Max conditional material spend before reprice flag' }) },
 
       // Tree & Shrub
-      { config_key: 'ts_material_rates', name: 'T&S Material Rates per SqFt', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ '6x_standard': 0.110, '9x_enhanced': 0.190, '12x_premium': 0.220, note: 'Updated Apr 2026 vendor cost audit — old rates underestimated by ~2x' }) },
-      { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ standard: 50, enhanced: 65, premium: 80 }) },
+      { config_key: 'ts_material_rates', name: 'T&S Material Rates per SqFt', category: 'tree_shrub', sort_order: 1, data: JSON.stringify({ '6x_standard': 0.110, '9x_enhanced': 0.190, note: 'Updated Apr 2026 vendor cost audit. Premium 12x deprecated.' }) },
+      { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ standard: 50, enhanced: 65 }) },
 
       // Palm
       { config_key: 'palm_pricing', name: 'Palm Injection Tiered Pricing', category: 'palm', sort_order: 1, data: JSON.stringify({ nutrition: 35, preventive_insecticide: 45, combo: 55, fungal: 40, lethal_bronzing_floor: 125, tree_age_floor: 65, min_per_visit: 75, apps_per_year: 2, tier_qualifier: false, flat_credit_per_palm: 10, flat_credit_min_tier: 'gold' }) },
