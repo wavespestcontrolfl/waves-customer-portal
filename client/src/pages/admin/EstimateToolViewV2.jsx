@@ -671,9 +671,16 @@ export default function EstimateToolViewV2({
     if (!Object.values(incoming).some(Boolean)) return;
     setForm((f) => {
       const next = { ...f };
+      let prefillIdentityChanged = false;
       for (const [key, value] of Object.entries(incoming)) {
-        if (value) next[key] = value;
+        if (value) {
+          if (f[key] !== value && key !== "leadServiceInterest") {
+            prefillIdentityChanged = true;
+          }
+          next[key] = value;
+        }
       }
+      if (prefillIdentityChanged) next.measuredTurfSf = "";
       return next;
     });
   }, [
@@ -938,6 +945,35 @@ export default function EstimateToolViewV2({
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
+
+  useEffect(() => {
+    const incoming = {
+      leadId: initialLeadId,
+      customerId: initialCustomerId,
+      address: initialAddress,
+      customerName: initialCustomerName,
+      customerPhone: initialCustomerPhone,
+      customerEmail: initialCustomerEmail,
+      leadServiceInterest: initialServiceInterest,
+    };
+    if (!Object.values(incoming).some(Boolean)) return;
+    setEstimate(null);
+    setSavedId(null);
+    setShowSendForm(false);
+    setLookupStatus({ type: "", msg: "" });
+    setEnrichedProfile(null);
+    setExistingCustomerMatch(null);
+    setSatelliteStatus({ type: "", msg: "" });
+    setSatelliteData(null);
+  }, [
+    initialAddress,
+    initialCustomerEmail,
+    initialCustomerId,
+    initialCustomerName,
+    initialCustomerPhone,
+    initialLeadId,
+    initialServiceInterest,
+  ]);
 
   const [discountPresets, setDiscountPresets] = useState([]);
   useEffect(() => {
