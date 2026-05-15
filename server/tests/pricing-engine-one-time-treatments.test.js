@@ -6,6 +6,7 @@ const {
   priceOneTimeMosquito,
   priceOneTimePest,
   pricePestControl,
+  priceFoamDrill,
 } = require('../services/pricing-engine');
 
 function property(overrides = {}) {
@@ -224,5 +225,24 @@ describe('pricing engine one-time treatment rules', () => {
         zoneD.lineItems.find(i => i.service === service).price
       );
     }
+  });
+
+  test('foam drill selects tiers by point range and never falls back to Spot for higher counts', () => {
+    const spot = priceFoamDrill(5);
+    const moderate = priceFoamDrill(6);
+
+    expect(spot.tier).toContain('Spot');
+    expect(moderate.tier).toContain('Moderate');
+    expect(moderate.cans).toBe(2);
+    expect(moderate.price).toBeGreaterThanOrEqual(spot.price);
+  });
+
+  test('foam drill rejects invalid point counts instead of defaulting to Spot', () => {
+    expect(() => priceFoamDrill(0)).toThrow(/positive whole number/);
+    expect(() => priceFoamDrill(21)).toThrow(/exceeds the configured 20-point maximum/);
+    expect(() => priceFoamDrill('abc')).toThrow(/positive whole number/);
+    expect(() => generateEstimate(estimateInput({
+      services: { foam: { points: 0 } },
+    }))).toThrow(/positive whole number/);
   });
 });

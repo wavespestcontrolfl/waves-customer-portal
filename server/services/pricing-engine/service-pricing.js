@@ -1459,12 +1459,23 @@ function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
 // ============================================================
 // FOAM & DRILL (termite perimeter injection)
 // ============================================================
-// v2 parity: exact-match tier lookup (5/10/15/20 only; falls back to Spot).
+function resolveFoamDrillTier(points, tiers = SPECIALTY.foamDrill.tiers) {
+  const pointCount = Number(points);
+  if (!Number.isInteger(pointCount) || pointCount < 1) {
+    throw new Error('Foam drill point count must be a positive whole number.');
+  }
+  const tier = tiers.find(t => pointCount <= t.maxPoints);
+  if (!tier) {
+    const max = tiers[tiers.length - 1]?.maxPoints || 0;
+    throw new Error(`Foam drill point count ${pointCount} exceeds the configured ${max}-point maximum.`);
+  }
+  return { pointCount, tier };
+}
+
 function priceFoamDrill(points = 5, options = {}) {
   const { urgency = 'ROUTINE', afterHours = false } = options;
   const cfg = SPECIALTY.foamDrill;
-  const tierMap = { 5: cfg.tiers[0], 10: cfg.tiers[1], 15: cfg.tiers[2], 20: cfg.tiers[3] };
-  const tier = tierMap[points] || cfg.tiers[0];
+  const { pointCount, tier } = resolveFoamDrillTier(points, cfg.tiers);
   const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
   let price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
   price = applyUrgency(price, urgency, afterHours);
@@ -1474,7 +1485,7 @@ function priceFoamDrill(points = 5, options = {}) {
     name: 'Drill-and-Foam Termite',
     price,
     detail: `${label} | ${tier.cans} can${tier.cans > 1 ? 's' : ''}`,
-    points, tier: label, cans: tier.cans,
+    points: pointCount, tier: label, cans: tier.cans,
   };
 }
 

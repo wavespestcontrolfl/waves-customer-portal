@@ -2018,7 +2018,7 @@ export default function EstimateToolViewV2({
         preslabSqft: parseInt(form.preslabSqft, 10) || 0,
         preslabWarranty: form.preslabWarranty || "BASIC",
         preslabVolume: form.preslabVolume || "NONE",
-        foamPoints: parseInt(form.foamPoints, 10) || 5,
+        foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
         bedbugRooms: parseInt(form.bedbugRooms, 10) || 1,
         bedbugMethod: form.bedbugMethod || "BOTH",
         exclSimple: parseInt(form.exclSimple, 10) || 0,
