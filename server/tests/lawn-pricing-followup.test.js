@@ -99,6 +99,18 @@ describe('lawn pricing production follow-up', () => {
     expect(legacyOnly.turfSf).toBe(4500);
   });
 
+  test('blank corrected impervious value does not override valid legacy typo', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 0,
+      imperviousSurfacePercent: '',
+      imperviosSurfacePercent: 50,
+      estimatedBedAreaSf: 0,
+    }));
+
+    expect(property.turfOpenArea).toBe(5000);
+    expect(property.turfSf).toBe(5000);
+  });
+
   test('lot fallback preserves explicit zero bed area', () => {
     const property = calculatePropertyProfile(baseInput({
       homeSqFt: 0,
@@ -192,6 +204,34 @@ describe('lawn pricing production follow-up', () => {
     expect(profile.estimatedBedAreaSf).toBeUndefined();
     expect(property.turfOpenArea).toBe(8000);
     expect(property.turfSf).toBe(6800);
+  });
+
+  test('profile builder leaves missing impervious fields undefined', () => {
+    const profile = buildEnrichedProfile(
+      {
+        formattedAddress: '123 Main St',
+        propertyType: 'Single Family',
+        squareFootage: 2000,
+        lotSize: 10000,
+        stories: 1,
+      },
+      {
+        estimatedTurfSf: 0,
+      },
+      null,
+      null
+    );
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: profile.homeSqFt,
+      lotSqFt: profile.lotSqFt,
+      estimatedTurfSf: profile.estimatedTurfSf,
+      imperviousSurfacePercent: profile.imperviousSurfacePercent,
+      imperviosSurfacePercent: profile.imperviosSurfacePercent,
+    }));
+
+    expect(profile.imperviousSurfacePercent).toBeUndefined();
+    expect(profile.imperviosSurfacePercent).toBeUndefined();
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
   });
 
   test('profile builder copies legacy impervious value into corrected field', () => {

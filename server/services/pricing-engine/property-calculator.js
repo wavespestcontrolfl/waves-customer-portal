@@ -133,7 +133,9 @@ function computeTurfArea(input, fallback = {}) {
     };
   }
 
-  const rawImperviousPct = input.imperviousSurfacePercent ?? input.imperviosSurfacePercent ?? 20;
+  const rawImperviousPct = hasNonNegativeNumber(input.imperviousSurfacePercent)
+    ? input.imperviousSurfacePercent
+    : (hasNonNegativeNumber(input.imperviosSurfacePercent) ? input.imperviosSurfacePercent : 20);
   const imperviousPct = toNonNegativeNumber(rawImperviousPct, 20);
   const imperviousFraction = Math.min(1, Math.max(0, imperviousPct / 100));
   const turfOpenArea = Math.max(0, Math.round(lotSqFt * (1 - imperviousFraction)));

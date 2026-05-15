@@ -326,7 +326,9 @@ export function calculateEstimate(inputs) {
         turfFlags: ['FIELD_VERIFY_TURF_SQFT'],
       };
     }
-    const rawImperviousPct = _imperviousSurfacePercent ?? _imperviosSurfacePercent ?? 20;
+    const rawImperviousPct = hasNonNegativeNumber(_imperviousSurfacePercent)
+      ? _imperviousSurfacePercent
+      : (hasNonNegativeNumber(_imperviosSurfacePercent) ? _imperviosSurfacePercent : 20);
     const imperviousPct = toNonNegativeNumber(rawImperviousPct, 20);
     const openArea = Math.max(0, Math.round(lotSqFt * (1 - Math.min(1, imperviousPct / 100))));
     const hasBedPercent = hasNonNegativeNumber(_estimatedBedAreaPercent);

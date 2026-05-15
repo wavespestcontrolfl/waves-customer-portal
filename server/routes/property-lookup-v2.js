@@ -629,8 +629,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     imperviousSurfacePercent: ai?.imperviousSurfacePercent ?? ai?.imperviosSurfacePercent,
     imperviosSurfacePercent:
       ai?.imperviousSurfacePercent ??
-      ai?.imperviosSurfacePercent ??
-      20,
+      ai?.imperviosSurfacePercent,
     estimatedTurfSf: ai?.estimatedTurfSf || 0,
     turfCondition: ai?.turfCondition || 'UNKNOWN',
     possibleGrassType: ai?.possibleGrassType || 'UNKNOWN',
