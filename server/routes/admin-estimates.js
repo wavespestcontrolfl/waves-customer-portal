@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const crypto = require('crypto');
 const db = require('../models/db');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
@@ -17,10 +16,13 @@ const {
   saveEstimatePricingAuditSnapshot,
 } = require('../services/estimate-pricing-audit');
 const {
-  attachLeadToEstimate,
   markLinkedLeadEstimateSent,
 } = require('../services/lead-estimate-link');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+const {
+  createOrReuseAdminEstimate,
+  estimateViewUrl,
+} = require('../services/admin-estimate-persistence');
 
 const ESTIMATE_LIST_LIMIT = 500;
 
@@ -39,51 +41,16 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
-    const { customerId, leadId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl, showOneTimeOption, billByInvoice } = req.body;
-    const linkedLeadId = typeof leadId === 'string' ? leadId.trim() : leadId;
-    const deliveryError = validateEstimateDeliveryOptions({
-      showOneTimeOption: !!showOneTimeOption,
-      billByInvoice: !!billByInvoice,
-      onetimeTotal,
-      monthlyTotal,
-      annualTotal,
+    const { estimate, reused } = await createOrReuseAdminEstimate({
+      body: req.body,
+      technicianId: req.technicianId,
+      technician: req.technician,
     });
-    if (deliveryError) return res.status(400).json({ error: deliveryError });
-
-    // 16 bytes = 128 bits of entropy. Old format (`name-slug-${4 bytes}`)
-    // was guessable: customer name is public-ish and 32 bits is brute-forceable
-    // in days at modest QPS. Existing rows keep their old tokens (DB lookup
-    // is a string match), so this is forward-only.
-    const token = crypto.randomBytes(16).toString('hex');
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
-
-    const estimate = await db.transaction(async (trx) => {
-      const [created] = await trx('estimates').insert({
-        customer_id: customerId || null,
-        created_by_technician_id: req.technicianId,
-        estimate_data: estimateData ? JSON.stringify(estimateData) : null,
-        address, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail,
-        monthly_total: monthlyTotal, annual_total: annualTotal, onetime_total: onetimeTotal,
-        waveguard_tier: waveguardTier, token, expires_at: expiresAt, notes, satellite_url: satelliteUrl,
-        show_one_time_option: !!showOneTimeOption,
-        bill_by_invoice: !!billByInvoice,
-      }).returning('*');
-
-      if (linkedLeadId) {
-        await attachLeadToEstimate({
-          database: trx,
-          leadId: linkedLeadId,
-          estimateId: created.id,
-          estimate: created,
-          technician: req.technician,
-        });
-      }
-
-      return created;
+    res.status(reused ? 200 : 201).json({
+      id: estimate.id,
+      token: estimate.token,
+      viewUrl: estimateViewUrl(estimate.token),
     });
-
-    res.status(201).json({ id: estimate.id, token, viewUrl: `https://portal.wavespestcontrol.com/estimate/${token}` });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);

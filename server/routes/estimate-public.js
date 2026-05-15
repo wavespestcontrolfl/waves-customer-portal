@@ -21,6 +21,12 @@ const {
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateViewed,
 } = require('../services/lead-estimate-link');
+const {
+  cleanupEstimatePricingCache,
+  clearEstimatePricingCache,
+  getEstimatePricingCache,
+  setEstimatePricingCache,
+} = require('../services/estimate-pricing-cache');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -71,6 +77,10 @@ function shouldCountView(req) {
   if (isBotUserAgent(req.get('user-agent'))) return false;
   if (hasAdminMarker(req)) return false;
   return true;
+}
+
+function shouldApplyFirstViewSideEffects(req, ip) {
+  return !hasAdminMarker(req) && !isAdminIp(ip);
 }
 
 // Map a one-time service name to the booking page's service id (matches PublicBookingPage SERVICES)
@@ -1531,10 +1541,9 @@ async function handleEstimateView(req, res, next) {
     }
 
     // First-view actions: set viewed_at/status, notify admin + SMS office.
-    // Match the React data endpoint's admin-IP guard so admin previews of
-    // one-time-toggle estimates do not look like real customer opens now
-    // that show_one_time_option is handled by this rich SSR view.
-    if (!estimate.viewed_at && !isAdminIp(requestIp) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // Admin preview links should render the exact customer page without
+    // making the estimate look customer-opened.
+    if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, requestIp) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
@@ -2271,7 +2280,7 @@ router.put('/:token/preferences', async (req, res, next) => {
       onetime_total: onetimeTotal,
       updated_at: db.fn.now(),
     });
-    pricingCache.delete(estimate.id);
+    clearEstimatePricingCache(estimate.id);
 
     // Per-row metadata for client re-render (off-desc + savings label)
     const prefMeta = {};
@@ -2409,7 +2418,7 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
           });
 
           // Bust the per-estimate pricing cache so the next GET re-reads from DB.
-          pricingCache.delete(estimate.id);
+          clearEstimatePricingCache(estimate.id);
 
           bundled = {
             addedService: suggestedService,
@@ -2510,19 +2519,6 @@ const FREQUENCY_LADDER = [
   { key: 'bi_monthly', label: 'Bi-monthly',  engineFrequency: 'bimonthly' },
   { key: 'monthly',    label: 'Monthly',     engineFrequency: 'monthly' },
 ];
-
-// In-memory cache keyed on estimateId, 10-min TTL. One JSON endpoint hit
-// produces one cache entry; subsequent hits within 10 min skip the
-// engine recompute entirely.
-const pricingCache = new Map();
-const PRICING_TTL_MS = 10 * 60 * 1000;
-
-function pricingCacheCleanup() {
-  const now = Date.now();
-  for (const [k, v] of pricingCache.entries()) {
-    if (v.expiresAt < now) pricingCache.delete(k);
-  }
-}
 
 function extractRequestIp(req) {
   const raw = (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
@@ -3141,10 +3137,10 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
 }
 
 async function buildPricingBundle(estimate) {
-  pricingCacheCleanup();
-  const cached = pricingCache.get(estimate.id);
-  if (cached && cached.expiresAt > Date.now()) {
-    return { ...cached.payload, cacheHit: true };
+  cleanupEstimatePricingCache();
+  const cached = getEstimatePricingCache(estimate);
+  if (cached) {
+    return { ...cached, cacheHit: true };
   }
 
   const estData = typeof estimate.estimate_data === 'string'
@@ -3204,7 +3200,7 @@ async function buildPricingBundle(estimate) {
       oneTimeBreakdown: storedOneTimeBreakdown,
       source: 'v1_engine_shape',
     };
-    pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
+    setEstimatePricingCache(estimate, payload);
     return payload;
   }
 
@@ -3233,7 +3229,7 @@ async function buildPricingBundle(estimate) {
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
     };
-    pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
+    setEstimatePricingCache(estimate, payload);
     return payload;
   }
 
@@ -3286,7 +3282,7 @@ async function buildPricingBundle(estimate) {
     oneTimeBreakdown,
     source: 'engine_invocation',
   };
-  pricingCache.set(estimate.id, { payload, expiresAt: Date.now() + PRICING_TTL_MS });
+  setEstimatePricingCache(estimate, payload);
   return payload;
 }
 
@@ -3327,10 +3323,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       } catch (e) { logger.warn(`[estimate-data] estimate_views insert skipped: ${e.message}`); }
     }
 
-    // First-view transition — gate on viewed_at IS NULL AND !adminIP.
-    // Admin allowlist keeps Virginia's preview clicks from firing the
+    // First-view transition — keep admin preview clicks from firing the
     // "customer just opened their estimate" office SMS.
-    if (!estimate.viewed_at && !isAdminIp(ip) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
         status: 'viewed',
@@ -3413,3 +3408,4 @@ module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
+module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;

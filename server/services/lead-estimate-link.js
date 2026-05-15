@@ -29,6 +29,29 @@ function leadMatchesEstimateContact(lead, estimate) {
   return !!(leadEmail && estimateEmail && leadEmail === estimateEmail);
 }
 
+function assertLeadCanAttachEstimate({ lead, estimate, estimateId }) {
+  if (!lead) {
+    const err = new Error('Lead not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  if (CLOSED_LEAD_STATUSES.has(lead.status)) {
+    const err = new Error('Lead is closed and cannot be linked to a new estimate');
+    err.statusCode = 409;
+    throw err;
+  }
+  if (lead.estimate_id && String(lead.estimate_id) !== String(estimateId)) {
+    const err = new Error('Lead is already linked to another estimate');
+    err.statusCode = 409;
+    throw err;
+  }
+  if (!leadMatchesEstimateContact(lead, estimate)) {
+    const err = new Error('Lead contact does not match estimate contact');
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
 function performedByFromTechnician(technician) {
   const name = [technician?.first_name, technician?.last_name].filter(Boolean).join(' ').trim();
   return name || 'system';
@@ -56,28 +79,9 @@ async function attachLeadToEstimate({ database = db, leadId, estimateId, estimat
   if (!leadId) return null;
 
   const lead = await database('leads').where({ id: leadId }).first();
-  if (!lead) {
-    const err = new Error('Lead not found');
-    err.statusCode = 404;
-    throw err;
-  }
-  if (CLOSED_LEAD_STATUSES.has(lead.status)) {
-    const err = new Error('Lead is closed and cannot be linked to a new estimate');
-    err.statusCode = 409;
-    throw err;
-  }
-  if (lead.estimate_id && String(lead.estimate_id) !== String(estimateId)) {
-    const err = new Error('Lead is already linked to another estimate');
-    err.statusCode = 409;
-    throw err;
-  }
 
   const estimateForValidation = estimate || await database('estimates').where({ id: estimateId }).first();
-  if (!leadMatchesEstimateContact(lead, estimateForValidation)) {
-    const err = new Error('Lead contact does not match estimate contact');
-    err.statusCode = 409;
-    throw err;
-  }
+  assertLeadCanAttachEstimate({ lead, estimate: estimateForValidation, estimateId });
 
   const performedBy = performedByFromTechnician(technician);
   const updates = {
@@ -161,6 +165,8 @@ async function markLinkedLeadEstimateAccepted({
 
 module.exports = {
   attachLeadToEstimate,
+  assertLeadCanAttachEstimate,
+  leadMatchesEstimateContact,
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
