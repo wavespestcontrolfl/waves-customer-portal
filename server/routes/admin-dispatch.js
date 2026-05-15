@@ -468,6 +468,32 @@ function parseJsonObject(value) {
   return {};
 }
 
+async function attachLawnAssessmentOutcomePhotoRefs(outcome, assessmentId) {
+  if (!outcome || !assessmentId) return;
+  try {
+    const bestPhoto = await db('lawn_assessment_photos')
+      .where({ assessment_id: assessmentId, is_best_photo: true })
+      .first();
+    if (bestPhoto) {
+      await db('treatment_outcomes')
+        .where({ id: outcome.id })
+        .update({ post_best_photo_key: bestPhoto.s3_key });
+    }
+    if (outcome.pre_assessment_id) {
+      const preBestPhoto = await db('lawn_assessment_photos')
+        .where({ assessment_id: outcome.pre_assessment_id, is_best_photo: true })
+        .first();
+      if (preBestPhoto) {
+        await db('treatment_outcomes')
+          .where({ id: outcome.id })
+          .update({ pre_best_photo_key: preBestPhoto.s3_key });
+      }
+    }
+  } catch (err) {
+    logger.error(`[dispatch] Lawn assessment outcome photo refs failed: ${err.message}`);
+  }
+}
+
 function serializeJsonb(value) {
   return JSON.stringify(value ?? null);
 }
@@ -1031,6 +1057,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       formResponses,
       formStartedAt,
       invoiceAlreadySent = false,
+      lawnAssessmentId = null,
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -1070,6 +1097,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const canLinkLawnAssessmentRecord = !isIncompleteVisit
+      && await db.schema.hasColumn('lawn_assessments', 'service_record_id').catch(() => false);
 
     const rawIdempotencyKey = req.get('Idempotency-Key') || bodyIdempotencyKey
       || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
@@ -1229,6 +1259,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
     let record;
+    let linkedLawnAssessmentId = null;
     if (resumingCommittedCompletion) {
       record = await db('service_records').where({ id: claim.serviceRecordId }).first();
       if (!record) {
@@ -1237,6 +1268,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           code: 'completion_resume_missing_record',
         });
       }
+      linkedLawnAssessmentId = parseJsonObject(record.structured_notes).lawnAssessmentId || null;
       durableCompletionCommitted = true;
     } else {
       try {
@@ -1277,6 +1309,58 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           soil_temp: soilTemp || null, thatch_measurement: thatchMeasurement || null,
           soil_ph: soilPh || null, soil_moisture: soilMoisture || null,
         }).returning('*');
+
+        if (canLinkLawnAssessmentRecord) {
+          const linkPayload = {
+            service_id: svc.id,
+            service_record_id: record.id,
+            updated_at: trx.fn.now(),
+          };
+          if (lawnAssessmentId) {
+            const [linked] = await trx('lawn_assessments')
+              .where({
+                id: lawnAssessmentId,
+                customer_id: svc.customer_id,
+                service_id: svc.id,
+                confirmed_by_tech: true,
+              })
+              .update(linkPayload)
+              .returning('id');
+            linkedLawnAssessmentId = linked?.id || linked || null;
+            if (!linkedLawnAssessmentId) {
+              const err = new Error('lawnAssessmentId was not confirmed for this service');
+              err.isOperational = true;
+              err.statusCode = 400;
+              throw err;
+            }
+          }
+          if (!linkedLawnAssessmentId) {
+            const existing = await trx('lawn_assessments')
+              .where({
+                service_id: svc.id,
+                customer_id: svc.customer_id,
+                confirmed_by_tech: true,
+              })
+              .orderByRaw('confirmed_at DESC NULLS LAST')
+              .orderBy('created_at', 'desc')
+              .first('id');
+            if (existing?.id) {
+              await trx('lawn_assessments')
+                .where({ id: existing.id })
+                .update(linkPayload);
+              linkedLawnAssessmentId = existing.id;
+            }
+          }
+          if (linkedLawnAssessmentId) {
+            record.structured_notes = {
+              ...structuredNotes,
+              lawnAssessmentId: linkedLawnAssessmentId,
+            };
+            await trx('service_records')
+              .where({ id: record.id })
+              .update({ structured_notes: serializeJsonb(record.structured_notes) });
+          }
+        }
 
         const turfProfile = await trx('customer_turf_profiles')
           .where({ customer_id: svc.customer_id, active: true })
@@ -1450,6 +1534,38 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // execution we can now run best-effort follow-up alerts and tracking;
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
+
+    const completedLawnAssessmentId =
+      linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
+    if (!isIncompleteVisit && completedLawnAssessmentId) {
+      try {
+        const completedAssessment = await db('lawn_assessments')
+          .where({
+            id: completedLawnAssessmentId,
+            customer_id: svc.customer_id,
+            service_id: svc.id,
+            confirmed_by_tech: true,
+          })
+          .first('id');
+        if (!completedAssessment) {
+          throw new Error('Linked lawn assessment is not confirmed for this service');
+        }
+        if (canLinkLawnAssessmentRecord) {
+          await db('lawn_assessments')
+            .where({ id: completedAssessment.id })
+            .update({
+              service_id: svc.id,
+              service_record_id: record.id,
+              updated_at: new Date(),
+            });
+        }
+        const wiki = require('../services/agronomic-wiki');
+        const outcome = await wiki.linkTreatmentOutcome(record.id);
+        await attachLawnAssessmentOutcomePhotoRefs(outcome, completedLawnAssessmentId);
+      } catch (err) {
+        logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
+      }
+    }
 
     // MOA-rotation violation detector (third dispatch alert generator).
     // checkLimits looks at property_application_history for past

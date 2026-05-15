@@ -34,7 +34,6 @@ import {
   Truck,
   Package,
   ShieldCheck,
-  Leaf,
   BookMarked,
   Brain,
   FileText,
@@ -118,7 +117,6 @@ const NAV_SECTIONS = [
       { path: "/admin/fleet", icon: Truck, label: "Fleet" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
       { path: "/admin/compliance", icon: ShieldCheck, label: "Compliance" },
-      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
     ],
   },
   {

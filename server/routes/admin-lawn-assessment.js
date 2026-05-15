@@ -20,6 +20,129 @@ try { PhotoService = require('../services/photos'); } catch { PhotoService = nul
 const config = require('../config');
 const { etDateString } = require('../utils/datetime-et');
 
+function applyLawnServiceFilter(query, alias = 'ss') {
+  return query.where(function () {
+    this.whereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%lawn%'])
+      .orWhereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%waveguard%'])
+      .orWhereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%fertiliz%'])
+      .orWhereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%fungicide%'])
+      .orWhereRaw(`LOWER(${alias}.service_type) LIKE ?`, ['%turf%']);
+  });
+}
+
+function calculateOverallScore(scores = {}) {
+  return Math.round(
+    (Number(scores.turf_density) || 0) * 0.30 +
+    (Number(scores.weed_suppression) || 0) * 0.25 +
+    (Number(scores.color_health) || 0) * 0.20 +
+    (Number(scores.fungus_control) || 0) * 0.15 +
+    (Number(scores.thatch_level) || 0) * 0.10
+  );
+}
+
+function parseJsonObject(value, fallback = {}) {
+  if (value == null) return fallback;
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function parseJsonArray(value, fallback = []) {
+  if (value == null) return fallback;
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function normalizeAssessmentRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    photos: parseJsonArray(row.photos),
+    composite_scores: parseJsonObject(row.composite_scores),
+    adjusted_scores: parseJsonObject(row.adjusted_scores),
+    divergence_flags: parseJsonArray(row.divergence_flags),
+    stress_flags: parseJsonObject(row.stress_flags, null),
+  };
+}
+
+function scoreValue(value, fallback = 0) {
+  const n = Number(value);
+  if (Number.isFinite(n)) return Math.max(0, Math.min(100, Math.round(n)));
+  const f = Number(fallback);
+  return Number.isFinite(f) ? Math.max(0, Math.min(100, Math.round(f))) : 0;
+}
+
+let hasServiceRecordColumnPromise = null;
+function hasAssessmentServiceRecordColumn() {
+  if (!hasServiceRecordColumnPromise) {
+    hasServiceRecordColumnPromise = db.schema
+      .hasColumn('lawn_assessments', 'service_record_id')
+      .catch(() => false);
+  }
+  return hasServiceRecordColumnPromise;
+}
+
+async function resolveAssessmentServiceRecordId(assessment) {
+  if (!assessment) return null;
+  if (assessment.service_record_id) return assessment.service_record_id;
+  if (!assessment.service_id) return null;
+
+  const serviceRecord = await db('service_records')
+    .where({ scheduled_service_id: assessment.service_id })
+    .orderBy('created_at', 'desc')
+    .first();
+  if (!serviceRecord?.id) return null;
+
+  if (await hasAssessmentServiceRecordColumn()) {
+    await db('lawn_assessments')
+      .where({ id: assessment.id })
+      .update({ service_record_id: serviceRecord.id, updated_at: new Date() })
+      .catch((err) => logger.error(`[lawn-assessment] service_record_id back-link failed: ${err.message}`));
+  }
+  return serviceRecord.id;
+}
+
+async function attachOutcomePhotoRefs(outcome, assessmentId) {
+  if (!outcome) return;
+  try {
+    const bestPhoto = await db('lawn_assessment_photos')
+      .where({ assessment_id: assessmentId, is_best_photo: true })
+      .first();
+    if (bestPhoto) {
+      await db('treatment_outcomes')
+        .where({ id: outcome.id })
+        .update({ post_best_photo_key: bestPhoto.s3_key });
+    }
+    if (outcome.pre_assessment_id) {
+      const preBestPhoto = await db('lawn_assessment_photos')
+        .where({ assessment_id: outcome.pre_assessment_id, is_best_photo: true })
+        .first();
+      if (preBestPhoto) {
+        await db('treatment_outcomes')
+          .where({ id: outcome.id })
+          .update({ pre_best_photo_key: preBestPhoto.s3_key });
+      }
+    }
+  } catch (photoRefErr) {
+    logger.error(`[lawn-assessment] Photo ref update on treatment_outcome failed: ${photoRefErr.message}`);
+  }
+}
+
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
 
@@ -31,35 +154,42 @@ router.get('/customers', async (req, res, next) => {
     const { q } = req.query;
     const today = etDateString();
 
-    // Try today's scheduled services first, fall back to all customers if none found
     let query;
-    const hasScheduled = await db('scheduled_services')
-      .where('scheduled_date', today)
-      .whereNotIn('status', ['cancelled', 'completed'])
-      .first();
+    const hasScheduled = await applyLawnServiceFilter(
+      db('scheduled_services as ss')
+        .where('ss.scheduled_date', today)
+        .whereNotIn('ss.status', ['cancelled', 'completed']),
+      'ss'
+    ).first();
 
     if (hasScheduled) {
-      // Show today's scheduled services (any type, not just lawn).
-      // ss.id is exposed as serviceId so the panel can pass it back
-      // through /assess and anchor the assessment to the exact visit.
-      query = db('scheduled_services as ss')
-        .join('customers as c', 'ss.customer_id', 'c.id')
-        .where('ss.scheduled_date', today)
-        .whereNotIn('ss.status', ['cancelled', 'completed'])
-        .select(
-          'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
-          'c.email', 'c.phone', 'c.address_line1 as address',
-          'ss.id as serviceId',
-          'ss.service_type as serviceType', 'ss.window_start as windowStart'
-        )
-        .orderBy('ss.window_start', 'asc');
+      query = applyLawnServiceFilter(
+        db('scheduled_services as ss')
+          .join('customers as c', 'ss.customer_id', 'c.id')
+          .where('ss.scheduled_date', today)
+          .whereNotIn('ss.status', ['cancelled', 'completed'])
+          .select(
+            'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
+            'c.email', 'c.phone', 'c.address_line1 as address',
+            'ss.id as serviceId',
+            'ss.service_type as serviceType', 'ss.window_start as windowStart'
+          ),
+        'ss'
+      ).orderBy('ss.window_start', 'asc');
     } else {
-      // No services today — show all customers for manual assessment
       query = db('customers as c')
+        .leftJoin('customer_turf_profiles as ctp', function () {
+          this.on('ctp.customer_id', '=', 'c.id').andOn(db.raw('ctp.active = true'));
+        })
         .select(
           'c.id', 'c.first_name as firstName', 'c.last_name as lastName',
           'c.email', 'c.phone', 'c.address_line1 as address'
         )
+        .where(function () {
+          this.whereNotNull('ctp.id')
+            .orWhereNotNull('c.waveguard_tier')
+            .orWhereNotNull('c.lawn_type');
+        })
         .orderBy('c.last_name', 'asc');
     }
 
@@ -227,14 +357,7 @@ router.post('/assess', async (req, res, next) => {
     // Collect divergence flags from all photo analyses
     const allDivergences = validResults.flatMap(r => r.divergenceFlags || []);
 
-    // Compute overall weighted score (turf density 30%, weed 25%, color 20%, fungus 15%, thatch 10%)
-    const overallScore = Math.round(
-      (adjustedScores.turf_density || 0) * 0.30 +
-      (adjustedScores.weed_suppression || 0) * 0.25 +
-      (adjustedScores.color_health || 0) * 0.20 +
-      (adjustedScores.fungus_control || 0) * 0.15 +
-      (adjustedScores.thatch_level || 0) * 0.10
-    );
+    const overallScore = calculateOverallScore(adjustedScores);
 
     // Build photo metadata (always stored even without S3 for backward compat)
     const photoMeta = photos.map((p, i) => ({
@@ -449,21 +572,30 @@ router.post('/confirm', async (req, res, next) => {
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
 
+    const finalScores = {
+      turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
+      weed_suppression: scoreValue(adjustedScores?.weed_suppression, assessment.weed_suppression),
+      color_health: scoreValue(adjustedScores?.color_health, assessment.color_health),
+      fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
+      thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
+    };
+
     const updateData = {
       confirmed_by_tech: true,
       confirmed_at: new Date(),
       updated_at: new Date(),
+      ...finalScores,
+      overall_score: calculateOverallScore(finalScores),
     };
 
     // If tech provided adjusted scores, apply them
     if (adjustedScores) {
-      if (adjustedScores.turf_density != null) updateData.turf_density = adjustedScores.turf_density;
-      if (adjustedScores.weed_suppression != null) updateData.weed_suppression = adjustedScores.weed_suppression;
-      if (adjustedScores.color_health != null) updateData.color_health = adjustedScores.color_health;
-      if (adjustedScores.fungus_control != null) updateData.fungus_control = adjustedScores.fungus_control;
-      if (adjustedScores.thatch_level != null) updateData.thatch_level = adjustedScores.thatch_level;
       if (adjustedScores.observations != null) updateData.observations = adjustedScores.observations;
-      updateData.adjusted_scores = JSON.stringify(adjustedScores);
+      updateData.adjusted_scores = JSON.stringify({
+        ...parseJsonObject(assessment.adjusted_scores),
+        ...finalScores,
+        ...(adjustedScores.observations != null ? { observations: adjustedScores.observations } : {}),
+      });
     }
 
     // Persist stress_flags only if any allowed key was sent. An empty
@@ -478,38 +610,16 @@ router.post('/confirm', async (req, res, next) => {
       .update(updateData)
       .returning('*');
 
-    // Agronomic Wiki: link treatment outcome after assessment confirmed
+    // Agronomic Wiki: link only when a durable service_record exists.
+    // Assessments captured inside Complete Service are back-linked after
+    // completion creates that record.
     try {
       const wiki = require('../services/agronomic-wiki');
-      const outcome = await wiki.linkTreatmentOutcome(updated.service_record_id || updated.id);
-
-      // Attach best photo keys to treatment outcome for before/after display
-      if (outcome) {
-        try {
-          const bestPhoto = await db('lawn_assessment_photos')
-            .where({ assessment_id: assessmentId, is_best_photo: true })
-            .first();
-
-          if (bestPhoto) {
-            await db('treatment_outcomes')
-              .where({ id: outcome.id })
-              .update({ post_best_photo_key: bestPhoto.s3_key });
-          }
-
-          // Find pre-assessment best photo too
-          if (outcome.pre_assessment_id) {
-            const preBestPhoto = await db('lawn_assessment_photos')
-              .where({ assessment_id: outcome.pre_assessment_id, is_best_photo: true })
-              .first();
-            if (preBestPhoto) {
-              await db('treatment_outcomes')
-                .where({ id: outcome.id })
-                .update({ pre_best_photo_key: preBestPhoto.s3_key });
-            }
-          }
-        } catch (photoRefErr) {
-          logger.error(`[lawn-assessment] Photo ref update on treatment_outcome failed: ${photoRefErr.message}`);
-        }
+      const serviceRecordId = await resolveAssessmentServiceRecordId(updated);
+      if (serviceRecordId) {
+        updated.service_record_id = serviceRecordId;
+        const outcome = await wiki.linkTreatmentOutcome(serviceRecordId);
+        await attachOutcomePhotoRefs(outcome, assessmentId);
       }
     } catch (wikiErr) {
       logger.error(`[lawn-assessment] Wiki linkTreatmentOutcome failed (non-blocking): ${wikiErr.message}`);
@@ -526,8 +636,9 @@ router.post('/confirm', async (req, res, next) => {
 
         // 3. Tech calibration — record AI vs tech score differences
         if (adjustedScores) {
-          const aiScores = assessment.composite_scores
-            ? (typeof assessment.composite_scores === 'string' ? JSON.parse(assessment.composite_scores) : assessment.composite_scores)
+          const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
+          const aiScores = calibrationBaseline
+            ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
             : {};
           await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
         }
@@ -550,6 +661,35 @@ router.post('/confirm', async (req, res, next) => {
     });
 
     res.json({ success: true, assessment: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// GET /service/:serviceId — latest assessment captured for a scheduled visit
+// =========================================================================
+router.get('/service/:serviceId', async (req, res, next) => {
+  try {
+    const assessment = await db('lawn_assessments')
+      .where({ service_id: req.params.serviceId })
+      .orderByRaw('confirmed_at DESC NULLS LAST')
+      .orderBy('created_at', 'desc')
+      .first();
+
+    if (!assessment) return res.json({ assessment: null });
+
+    const photos = await db('lawn_assessment_photos')
+      .where({ assessment_id: assessment.id })
+      .orderBy('photo_order', 'asc')
+      .catch(() => []);
+
+    res.json({
+      assessment: {
+        ...normalizeAssessmentRow(assessment),
+        photo_records: photos,
+      },
+    });
   } catch (err) {
     next(err);
   }
