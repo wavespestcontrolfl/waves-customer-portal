@@ -775,11 +775,12 @@ export function calculateEstimate(inputs) {
   const lawnEst = hasTurfEstimate
     ? turfArea.turfSf
     : (R.lawn ? Math.round(lotSqFt * 0.55 * (R.lawn[2] ? 0.65 : 0.55)) : Math.round(lotSqFt * 0.35));
-  if (svcTopdress && lawnEst > 0) {
+  const topDressingLawnEst = svcLawn ? lawnEst : Math.round(lawnEst * 0.65);
+  if (svcTopdress && topDressingLawnEst > 0) {
     hasOT = true;
-    const lk = lawnEst / 1000;
-    const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (lawnEst / 130 + 30) / 60) / 0.40)));
-    const e4 = otP(Math.max(350, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (lawnEst / 130 * 1.5 + 45) / 60) / 0.40)));
+    const lk = topDressingLawnEst / 1000;
+    const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (topDressingLawnEst / 130 + 30) / 60) / 0.40)));
+    const e4 = otP(Math.max(350, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (topDressingLawnEst / 130 * 1.5 + 45) / 60) / 0.40)));
     R.td = e8;
     otItems.push({ name: 'Top Dressing', price: e8, detail: 'St. Augustine standard', depth: '1/8"' });
     R.tdTiers = [

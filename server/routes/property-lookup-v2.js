@@ -622,7 +622,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     landscapeComplexity: ai?.landscapeComplexity || 'MODERATE',
     estimatedPalmCount: ai?.estimatedPalmCount || 0,
     estimatedTreeCount: ai?.estimatedTreeCount || 0,
-    estimatedBedAreaSf: ai?.estimatedBedAreaSf || 0,
+    estimatedBedAreaSf: ai?.estimatedBedAreaSf,
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
