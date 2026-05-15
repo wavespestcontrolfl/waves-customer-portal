@@ -43,14 +43,17 @@ for (const zone of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
 }
 
 function normalizeMosquitoProgram(value) {
-  const raw = String(value || 'monthly').toLowerCase();
-  if (raw === 'seasonal' || raw === 'monthly' || raw === 'residual_seasonal' || raw === 'residual_monthly') return raw;
-  if (raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'residual_monthly';
-  if (raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'residual_seasonal';
+  if (value == null || value === '') return null;
+  const raw = String(value).toLowerCase();
+  if (raw === 'seasonal9' || raw === 'monthly12') return raw;
+  if (raw === 'seasonal') return 'seasonal9';
+  if (raw === 'monthly') return 'monthly12';
+  if (raw === 'residual_seasonal' || raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'seasonal9';
+  if (raw === 'residual_monthly' || raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'monthly12';
   // Migration shim only: older saved estimate inputs may still contain the
   // retired mosquito tier names. Do not expose these as product options.
-  if (raw === 'bronze') return 'seasonal';
-  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly';
+  if (raw === 'bronze') return 'seasonal9';
+  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly12';
   return raw;
 }
 
@@ -270,6 +273,7 @@ function generateEstimate(input) {
     const result = priceOneTimeMosquito(property, {
       stationCount: services.oneTimeMosquito.stationCount,
       dunkCount: services.oneTimeMosquito.dunkCount,
+      isRecurringCustomer,
     });
     lineItems.push(result);
   }
@@ -571,6 +575,25 @@ function generateEstimate(input) {
   for (const item of lineItems) {
     const serviceKey = resolveDiscountKey(item);
     const isOneTime = !item.annual; // One-time services have .price, not .annual
+
+    if (item.discountHandledByPricingFunction) {
+      const rate = Number(item.recurringCustomerDiscountRate || 0);
+      item.discount = {
+        serviceKey,
+        waveGuardTier: waveGuardTier.tier,
+        appliedDiscounts: rate > 0 ? [{
+          type: 'recurring_customer_one_time_perk',
+          amount: rate,
+        }] : [],
+        effectiveDiscount: rate,
+        totalDiscount: rate,
+      };
+      if (item.price) {
+        item.priceBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.price;
+        item.priceAfterDiscount = item.price;
+      }
+      continue;
+    }
 
     const discount = getEffectiveDiscount(serviceKey, waveGuardTier, {
       isRecurringCustomer,

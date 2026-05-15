@@ -161,7 +161,7 @@ function keyFromName(name) {
 
 function mosquitoCogs(program, addOns = {}) {
   const raw = String(program || '').toLowerCase();
-  const serviceTypes = raw === 'residual_seasonal' || raw === 'residual_monthly' || raw.includes('precision') || raw.includes('scion')
+  const serviceTypes = raw.includes('precision') || raw.includes('scion') || raw.includes('residual')
     ? ['Mosquito Treatment - Precision Barrier', 'Mosquito Treatment - IGR']
     : ['Mosquito Treatment - Essential Barrier', 'Mosquito Treatment - IGR'];
   const serviceTypeFixedMultipliers = {};

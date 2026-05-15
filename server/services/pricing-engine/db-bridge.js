@@ -280,27 +280,19 @@ async function syncConstantsFromDB(dbInstance) {
         if (tierMap && typeof tierMap === 'object' && constants.MOSQUITO.basePrices[lot]) {
           const legacyProgramPrice = tierMap.silver ?? tierMap.monthly ?? tierMap.bronze;
           next[lot] = [
-            r(Number(tierMap.seasonal ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][0])),
-            r(Number(tierMap.monthly ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][1])),
-            r(Number(tierMap.residual_seasonal ?? tierMap.scion_seasonal ?? tierMap.upgraded_seasonal ?? constants.MOSQUITO.basePrices[lot][2])),
-            r(Number(tierMap.residual_monthly ?? tierMap.scion_monthly ?? tierMap.scionMonthly ?? tierMap.upgraded_monthly ?? constants.MOSQUITO.basePrices[lot][3])),
+            r(Number(tierMap.seasonal9 ?? tierMap.seasonal ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][0])),
+            r(Number(tierMap.monthly12 ?? tierMap.monthly ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][1])),
           ];
         }
       }
       constants.MOSQUITO.basePrices = next;
     }
     if (config.mosquito_visits) {
-      if (config.mosquito_visits.seasonal != null) {
-        constants.MOSQUITO.tierVisits.seasonal = Number(config.mosquito_visits.seasonal);
+      if (config.mosquito_visits.seasonal9 != null || config.mosquito_visits.seasonal != null) {
+        constants.MOSQUITO.tierVisits.seasonal9 = Number(config.mosquito_visits.seasonal9 ?? config.mosquito_visits.seasonal);
       }
-      if (config.mosquito_visits.monthly != null) {
-        constants.MOSQUITO.tierVisits.monthly = Number(config.mosquito_visits.monthly);
-      }
-      if (config.mosquito_visits.residual_seasonal != null) {
-        constants.MOSQUITO.tierVisits.residual_seasonal = Number(config.mosquito_visits.residual_seasonal);
-      }
-      if (config.mosquito_visits.residual_monthly != null || config.mosquito_visits.scion_monthly != null) {
-        constants.MOSQUITO.tierVisits.residual_monthly = Number(config.mosquito_visits.residual_monthly ?? config.mosquito_visits.scion_monthly);
+      if (config.mosquito_visits.monthly12 != null || config.mosquito_visits.monthly != null) {
+        constants.MOSQUITO.tierVisits.monthly12 = Number(config.mosquito_visits.monthly12 ?? config.mosquito_visits.monthly);
       }
     }
     if (config.mosquito_lot_sizes) {
@@ -332,8 +324,28 @@ async function syncConstantsFromDB(dbInstance) {
     }
     if (config.onetime_mosquito) {
       const next = { ...constants.ONE_TIME.mosquito };
-      for (const lot of ['SMALL', 'QUARTER', 'THIRD', 'HALF', 'ACRE']) {
-        if (config.onetime_mosquito[lot] != null) next[lot] = r(Number(config.onetime_mosquito[lot]));
+      const legacyMap = {
+        QUARTER: 'STANDARD',
+        THIRD: 'LARGE',
+        HALF: 'XL',
+        ACRE: 'ACRE_CLASS',
+      };
+      for (const bucket of ['SMALL', 'STANDARD', 'LARGE', 'XL', 'ESTATE', 'ACRE_CLASS', 'OVER_ACRE']) {
+        const legacyKey = Object.entries(legacyMap).find(([, mapped]) => mapped === bucket)?.[0];
+        const raw = config.onetime_mosquito[bucket] ?? (legacyKey ? config.onetime_mosquito[legacyKey] : undefined);
+        if (raw != null) next[bucket] = r(Number(raw));
+      }
+      if (config.onetime_mosquito.overAcreIncrementSqFt != null) {
+        next.overAcreIncrementSqFt = Number(config.onetime_mosquito.overAcreIncrementSqFt);
+      }
+      if (config.onetime_mosquito.overAcreIncrementPrice != null) {
+        next.overAcreIncrementPrice = r(Number(config.onetime_mosquito.overAcreIncrementPrice));
+      }
+      if (config.onetime_mosquito.stationAddOn != null) {
+        next.stationAddOn = r(Number(config.onetime_mosquito.stationAddOn));
+      }
+      if (config.onetime_mosquito.dunkAddOn != null) {
+        next.dunkAddOn = r(Number(config.onetime_mosquito.dunkAddOn));
       }
       constants.ONE_TIME.mosquito = next;
     }
@@ -345,8 +357,37 @@ async function syncConstantsFromDB(dbInstance) {
       if (config.onetime_urgency.urgent) constants.URGENCY.URGENT.standard = config.onetime_urgency.urgent;
       if (config.onetime_urgency.urgent_after_hours) constants.URGENCY.URGENT.afterHours = config.onetime_urgency.urgent_after_hours;
     }
-    if (config.onetime_recurring_discount?.multiplier) {
-      constants.WAVEGUARD.recurringCustomerOneTimePerk = 1 - config.onetime_recurring_discount.multiplier;
+    if (config.onetime_recurring_discount) {
+      if (config.onetime_recurring_discount.discount != null) {
+        constants.WAVEGUARD.recurringCustomerOneTimePerk = Number(config.onetime_recurring_discount.discount);
+      } else if (config.onetime_recurring_discount.multiplier != null) {
+        constants.WAVEGUARD.recurringCustomerOneTimePerk = 1 - Number(config.onetime_recurring_discount.multiplier);
+      }
+    }
+    if (config.onetime_pest) {
+      const ot = config.onetime_pest;
+      if (ot.floor != null) constants.ONE_TIME.pest.floor = r(Number(ot.floor));
+      if (ot.multiplier != null || ot.markup_multiplier != null) {
+        constants.ONE_TIME.pest.multiplier = Number(ot.multiplier ?? ot.markup_multiplier);
+      }
+    }
+    if (config.onetime_lawn) {
+      const ot = config.onetime_lawn;
+      if (ot.floor != null) constants.ONE_TIME.lawn.floor = r(Number(ot.floor));
+      if (ot.fungicide_floor != null) constants.ONE_TIME.lawn.fungicideFloor = r(Number(ot.fungicide_floor));
+      if (ot.recurringPerAppMultiplier != null || ot.markup_multiplier != null) {
+        constants.ONE_TIME.lawn.oneTimeMultiplier = Number(ot.recurringPerAppMultiplier ?? ot.markup_multiplier);
+      }
+      if (ot.treatment_multipliers && typeof ot.treatment_multipliers === 'object') {
+        constants.ONE_TIME.lawn.treatmentMultipliers = {
+          ...constants.ONE_TIME.lawn.treatmentMultipliers,
+          ...ot.treatment_multipliers,
+        };
+      }
+      if (ot.fert_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.fert = Number(ot.fert_mult);
+      if (ot.weed_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.weed = Number(ot.weed_mult);
+      if (ot.pest_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.pest = Number(ot.pest_mult);
+      if (ot.fungicide_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.fungicide = Number(ot.fungicide_mult);
     }
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;

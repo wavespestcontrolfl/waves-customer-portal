@@ -341,7 +341,7 @@ const PALM = {
 };
 
 // ============================================================
-// MOSQUITO (Seasonal / Monthly / Upgraded Monthly Programs)
+// MOSQUITO (Seasonal / Monthly Programs)
 // ============================================================
 const MOSQUITO = {
   lotCategories: [
@@ -352,22 +352,20 @@ const MOSQUITO = {
     { key: 'ACRE',    maxSqFt: Infinity, label: '35k+ treatable sf' },
   ],
   grossLotGuardrailMaxDrop: 1,
-  programs: ['seasonal', 'monthly', 'residual_seasonal', 'residual_monthly'],
+  programs: ['seasonal9', 'monthly12'],
   programLabels: {
-    seasonal: 'Seasonal Essential Barrier',
-    monthly: 'Monthly Essential Barrier',
-    residual_seasonal: 'Seasonal Precision Barrier',
-    residual_monthly: 'Monthly Precision Barrier',
+    seasonal9: 'Seasonal Mosquito Program (9 visits)',
+    monthly12: 'Monthly Mosquito Program (12 visits)',
   },
   basePrices: {
-    //           Essential seasonal/monthly, Precision seasonal/monthly
-    SMALL:   [r(105), r(90),  r(135), r(120)],
-    QUARTER: [r(115), r(100), r(150), r(135)],
-    THIRD:   [r(130), r(115), r(175), r(155)],
-    HALF:    [r(155), r(135), r(210), r(185)],
-    ACRE:    [r(195), r(175), r(265), r(235)],
+    //           seasonal9, monthly12
+    SMALL:   [r(105), r(90)],
+    QUARTER: [r(115), r(100)],
+    THIRD:   [r(130), r(115)],
+    HALF:    [r(155), r(135)],
+    ACRE:    [r(195), r(175)],
   },
-  tierVisits: { seasonal: 9, monthly: 12, residual_seasonal: 9, residual_monthly: 12 },
+  tierVisits: { seasonal9: 9, monthly12: 12 },
   productCosts: {
     bifenthrinOz: 41.08 / 128,      // Bifen I/T 1 gal @ $41.08; Talak equivalent @ $41.57.
     tekkoProOz: 52.97 / 16,         // Tekko Pro IGR 16 oz @ $52.97.
@@ -600,10 +598,16 @@ const ONE_TIME = {
   },
   mosquito: {
     SMALL:   r(225),
-    QUARTER: r(275),
-    THIRD:   r(325),
-    HALF:    r(385),
-    ACRE:    r(475),
+    STANDARD: r(275),
+    LARGE:   r(325),
+    XL:      r(385),
+    ESTATE:  r(425),
+    ACRE_CLASS: r(475),
+    OVER_ACRE: r(475),
+    overAcreIncrementSqFt: 10000,
+    overAcreIncrementPrice: r(75),
+    stationAddOn: r(75),
+    dunkAddOn: r(15),
   },
 };
 

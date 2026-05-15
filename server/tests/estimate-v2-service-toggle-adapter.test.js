@@ -91,7 +91,7 @@ describe('estimate v2 service toggle adapter', () => {
       },
       ['MOSQUITO', 'OT_MOSQUITO'],
       {
-        mosquitoProgram: 'residual_monthly',
+        mosquitoProgram: 'monthly12',
         mosquitoStationCount: 2,
         mosquitoDunkCount: 4,
       }
@@ -101,8 +101,8 @@ describe('estimate v2 service toggle adapter', () => {
     expect(mapped.recurring.services).toContainEqual(expect.objectContaining({
       service: 'mosquito',
       name: 'Mosquito',
-      displayName: 'Monthly Precision Barrier',
-      program: 'residual_monthly',
+      displayName: 'Monthly Mosquito Program (12 visits)',
+      program: 'monthly12',
       detail: expect.stringContaining('2 mosquito stations'),
     }));
     expect(mapped.recurring.services.find((svc) => svc.service === 'mosquito').detail)
@@ -129,7 +129,7 @@ describe('estimate v2 service toggle adapter', () => {
       },
       ['MOSQUITO'],
       {
-        mosquitoProgram: 'residual_monthly',
+        mosquitoProgram: 'monthly12',
         mosquitoStationCount: 2,
         mosquitoDunkCount: 4,
       }

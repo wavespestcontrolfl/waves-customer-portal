@@ -5,6 +5,7 @@ const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
   TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, URGENCY,
+  WAVEGUARD,
 } = require('./constants');
 
 // ── Utility: Linear interpolation between brackets ────────────
@@ -118,6 +119,39 @@ function applyUrgency(price, urgency = 'ROUTINE', afterHours = false) {
   if (urgency === 'SOON') mult = afterHours ? 1.50 : 1.25;
   else if (urgency === 'URGENT') mult = afterHours ? 2.0 : 1.50;
   return Math.round(price * mult);
+}
+
+function getOneTimeUrgencyMultiplier({ urgency = 'NONE', afterHours = false } = {}) {
+  const key = String(urgency || 'NONE').toUpperCase();
+  const cfg = URGENCY[key] || URGENCY.NONE;
+  return afterHours ? (cfg.afterHours || cfg.standard || 1) : (cfg.standard || 1);
+}
+
+function applyOneTimeRecurringCustomerDiscount(price, { isRecurringCustomer = false } = {}) {
+  const rate = isRecurringCustomer ? WAVEGUARD.recurringCustomerOneTimePerk : 0;
+  const discounted = Math.round(price * (1 - rate));
+  return {
+    price: discounted,
+    rate,
+    amount: Math.max(0, Math.round(price) - discounted),
+  };
+}
+
+function applyOneTimeFloor(price, floor) {
+  return Math.max(floor, price);
+}
+
+function normalizeMosquitoProgramKey(value) {
+  if (value == null || value === '') return null;
+  const raw = String(value).toLowerCase();
+  if (raw === 'seasonal9' || raw === 'monthly12') return raw;
+  if (raw === 'seasonal') return 'seasonal9';
+  if (raw === 'monthly') return 'monthly12';
+  if (raw === 'residual_seasonal' || raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'seasonal9';
+  if (raw === 'residual_monthly' || raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'monthly12';
+  if (raw === 'bronze') return 'seasonal9';
+  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly12';
+  return raw;
 }
 
 // ============================================================
@@ -599,20 +633,15 @@ function pricePalmInjection(property, options = {}) {
 // ============================================================
 function priceMosquito(property, options = {}) {
   const {
-    tier = 'monthly',
+    tier = null,
     modifiers = {},
     stationCount = 0,
     dunkCount = 0,
   } = options;
 
-  const selectedProgram = tier;
   const lotCategory = property.mosquitoLotCategory || property.lotCategory;
-  const tierIndex = MOSQUITO.programs.indexOf(selectedProgram);
-  if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
-
   const basePrices = MOSQUITO.basePrices[lotCategory];
   if (!basePrices) throw new Error(`Unknown lot category: ${lotCategory}`);
-  const basePrice = basePrices[tierIndex];
 
   // Pressure multiplier
   let pressure = 1.00;
@@ -627,10 +656,21 @@ function priceMosquito(property, options = {}) {
   if (lotCategory === 'ACRE') pressure += MOSQUITO.pressureFactors.lot_acre;
   else if (lotCategory === 'HALF') pressure += MOSQUITO.pressureFactors.lot_half;
   // v2 graduated water proximity replaces binary nearWater when provided
-  if (modifiers.mosquitoWaterMult && modifiers.mosquitoWaterMult !== 1.0) {
-    pressure *= modifiers.mosquitoWaterMult;
+  const waterMultiplier = Number(modifiers.mosquitoWaterMult || 1);
+  if (waterMultiplier && waterMultiplier !== 1.0) {
+    pressure *= waterMultiplier;
   }
   pressure = Math.min(pressure, MOSQUITO.pressureCap);
+
+  const recommendedProgram = (
+    pressure >= 1.30 ||
+    waterMultiplier >= 1.20 ||
+    f.trees === 'heavy'
+  ) ? 'monthly12' : 'seasonal9';
+  const selectedProgram = normalizeMosquitoProgramKey(tier) || recommendedProgram;
+  const tierIndex = MOSQUITO.programs.indexOf(selectedProgram);
+  if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
+  const basePrice = basePrices[tierIndex];
 
   const perVisit = Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
@@ -646,7 +686,7 @@ function priceMosquito(property, options = {}) {
   const treatableThousands = Math.max(1, (property.mosquitoTreatableSqFt || 0) / 1000);
   const usage = MOSQUITO.productUsage;
   const costs = MOSQUITO.productCosts;
-  const usesPrecisionAdulticide = selectedProgram === 'residual_seasonal' || selectedProgram === 'residual_monthly';
+  const usesPrecisionAdulticide = false;
   const adulticideCost = usesPrecisionAdulticide
     ? (usage.scionBaseOz + usage.scionOzPer1000 * treatableThousands) * costs.scionOz
     : Math.max(usage.bifenthrinBaseOz, usage.bifenthrinOzPer1000 * treatableThousands) * costs.bifenthrinOz;
@@ -657,9 +697,7 @@ function priceMosquito(property, options = {}) {
   const annualCost = (materialPerVisit + laborPerVisitCost) * visits + addOnCost + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
-  const TIER_NAMES = MOSQUITO.programs;
-  const recommendedTier = selectedProgram;
-  const tiers = TIER_NAMES.map((name, idx) => {
+  const tiers = MOSQUITO.programs.map((name, idx) => {
     const bp = basePrices[idx];
     const pv = Math.round(bp * pressure);
     const v = MOSQUITO.tierVisits[name];
@@ -671,7 +709,9 @@ function priceMosquito(property, options = {}) {
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
       name: MOSQUITO.programLabels[name] || name.charAt(0).toUpperCase() + name.slice(1),
-      recommended: name === recommendedTier,
+      recommended: name === selectedProgram,
+      selected: name === selectedProgram,
+      pressureRecommended: name === recommendedProgram,
     };
   });
 
@@ -701,7 +741,9 @@ function priceMosquito(property, options = {}) {
     },
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
-    recommendedTier,
+    recommendedTier: selectedProgram,
+    recommendedProgram,
+    waterMultiplier,
   };
 }
 
@@ -1051,24 +1093,29 @@ function priceOneTimePest(property, options = {}) {
     base = pestResult.basePrice;
   }
 
-  let price = Math.max(ONE_TIME.pest.floor, Math.round(base * ONE_TIME.pest.multiplier));
+  const preUrgencyPrice = applyOneTimeFloor(
+    Math.round(base * ONE_TIME.pest.multiplier),
+    ONE_TIME.pest.floor
+  );
+  const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
+  const discountBase = preUrgencyPrice * urgencyMultiplier;
+  const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
+  const price = applyOneTimeFloor(discounted.price, ONE_TIME.pest.floor);
 
-  // Combine urgency × rc into a single Math.round to match v2's applyOT helper
-  // exactly (pricing-engine-v2.js:183). Prior stepwise rounding + mid-calc floor
-  // clamp produced $1 drift on SOON/URGENT × recurringCustomer combos.
-  const urgencyMult = afterHours
-    ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
-    : (URGENCY[urgency] || URGENCY.NONE).standard;
-  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
-  price = Math.round(price * urgencyMult * rcDisc);
-  price = Math.max(ONE_TIME.pest.floor, price);
-
-  return { service: 'one_time_pest', price, urgency, afterHours, isRecurringCustomer };
-}
-
-function WAVEGUARD_RECURRING_DISC() {
-  const { WAVEGUARD } = require('./constants');
-  return WAVEGUARD.recurringCustomerOneTimePerk;
+  return {
+    service: 'one_time_pest',
+    price,
+    urgency,
+    afterHours,
+    isRecurringCustomer,
+    basePrice: Math.round(base * 100) / 100,
+    preUrgencyPrice,
+    urgencyMultiplier,
+    subtotalBeforeRecurringCustomerDiscount: Math.round(discountBase),
+    recurringCustomerDiscountRate: discounted.rate,
+    recurringCustomerDiscountAmount: Math.max(0, Math.round(discountBase) - price),
+    discountHandledByPricingFunction: true,
+  };
 }
 
 // ============================================================
@@ -1095,16 +1142,11 @@ function priceOneTimeLawn(property, options = {}) {
   const base = Math.max(ONE_TIME.lawn.floor, Math.round(lawnResult.perApp * ONE_TIME.lawn.oneTimeMultiplier));
 
   const treatMult = ONE_TIME.lawn.treatmentMultipliers[normalizedTreatment] || 1.0;
-  let price = Math.max(ONE_TIME.lawn.floor, Math.round(base * treatMult));
-
-  // Combine urgency × rc into a single Math.round to match v2's applyOT helper
-  // exactly (pricing-engine-v2.js:183). See priceOneTimePest for rationale.
-  const urgencyMult = afterHours
-    ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
-    : (URGENCY[urgency] || URGENCY.NONE).standard;
-  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
-  price = Math.round(price * urgencyMult * rcDisc);
-  price = Math.max(ONE_TIME.lawn.floor, price);
+  const preUrgencyPrice = applyOneTimeFloor(Math.round(base * treatMult), ONE_TIME.lawn.floor);
+  const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
+  const discountBase = preUrgencyPrice * urgencyMultiplier;
+  const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
+  const price = applyOneTimeFloor(discounted.price, ONE_TIME.lawn.floor);
 
   return {
     service: 'one_time_lawn',
@@ -1113,6 +1155,14 @@ function priceOneTimeLawn(property, options = {}) {
     urgency,
     afterHours,
     isRecurringCustomer,
+    basePrice: base,
+    treatmentMultiplier: treatMult,
+    preUrgencyPrice,
+    urgencyMultiplier,
+    subtotalBeforeRecurringCustomerDiscount: Math.round(discountBase),
+    recurringCustomerDiscountRate: discounted.rate,
+    recurringCustomerDiscountAmount: Math.max(0, Math.round(discountBase) - price),
+    discountHandledByPricingFunction: true,
     baselinePerApp: lawnResult.perApp,
     baselinePricingBasis: lawnResult.pricingBasis,
     baselinePricingSource: lawnResult.pricingSource,
@@ -1124,24 +1174,87 @@ function priceOneTimeLawn(property, options = {}) {
 // ============================================================
 // ONE-TIME MOSQUITO
 // ============================================================
+function getOneTimeMosquitoAreaBucket(mosquitoTreatableSqFt) {
+  const sqft = Math.max(0, Math.round(Number(mosquitoTreatableSqFt) || 0));
+  if (sqft <= 7500) return 'SMALL';
+  if (sqft <= 11000) return 'STANDARD';
+  if (sqft <= 16000) return 'LARGE';
+  if (sqft <= 24000) return 'XL';
+  if (sqft <= 32000) return 'ESTATE';
+  if (sqft <= 43560) return 'ACRE_CLASS';
+  return 'OVER_ACRE';
+}
+
+function getOneTimeMosquitoBase(mosquitoTreatableSqFt) {
+  const sqft = Math.max(0, Math.round(Number(mosquitoTreatableSqFt) || 0));
+  const areaBucket = getOneTimeMosquitoAreaBucket(sqft);
+  const base = ONE_TIME.mosquito[areaBucket] || ONE_TIME.mosquito.SMALL;
+  if (areaBucket !== 'OVER_ACRE') {
+    return { areaBucket, basePrice: base, requiresManualReview: false };
+  }
+  const overageSqFt = Math.max(0, sqft - 43560);
+  const incrementCount = Math.ceil(overageSqFt / ONE_TIME.mosquito.overAcreIncrementSqFt);
+  return {
+    areaBucket,
+    basePrice: base + incrementCount * ONE_TIME.mosquito.overAcreIncrementPrice,
+    requiresManualReview: true,
+    overageSqFt,
+    incrementCount,
+  };
+}
+
 function priceOneTimeMosquito(property, options = {}) {
-  const lotCategory = property.mosquitoLotCategory || property.lotCategory;
-  const basePrice = ONE_TIME.mosquito[lotCategory] || ONE_TIME.mosquito.SMALL;
+  const fallbackTreatableSqFt = Math.max(
+    0,
+    (Number(property.lotSqFt) || 0) - (Number(property.footprint) || 0) - (Number(property.hardscape) || 0)
+  );
+  const mosquitoTreatableSqFt = Math.max(
+    0,
+    Math.round(Number(property.mosquitoTreatableSqFt ?? fallbackTreatableSqFt) || 0)
+  );
+  const base = getOneTimeMosquitoBase(mosquitoTreatableSqFt);
   const stationCount = Math.max(0, Math.round(Number(options.stationCount) || 0));
   const dunkCount = Math.max(0, Math.round(Number(options.dunkCount) || 0));
-  const stationAddOn = stationCount * MOSQUITO.addOns.in2CareStation.price;
-  const dunkAddOn = dunkCount * MOSQUITO.addOns.dunkTablet.price;
-  const price = basePrice + stationAddOn + dunkAddOn;
+  const stationAddOnTotal = stationCount * ONE_TIME.mosquito.stationAddOn;
+  const dunkAddOnTotal = dunkCount * ONE_TIME.mosquito.dunkAddOn;
+  const subtotalBeforeRecurringCustomerDiscount = base.basePrice + stationAddOnTotal + dunkAddOnTotal;
+  const discounted = applyOneTimeRecurringCustomerDiscount(subtotalBeforeRecurringCustomerDiscount, {
+    isRecurringCustomer: !!options.isRecurringCustomer,
+  });
+  const price = discounted.price;
   const detailParts = [];
-  if (stationCount > 0) detailParts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOn)})`);
-  if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOn)})`);
+  if (stationCount > 0) detailParts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOnTotal)})`);
+  if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOnTotal)})`);
   return {
     service: 'one_time_mosquito',
+    key: 'oneTimeMosquito',
+    name: 'One-Time Mosquito Treatment',
+    recurring: false,
     price,
-    lotCategory,
-    basePrice,
+    mosquitoTreatableSqFt,
+    areaBucket: base.areaBucket,
+    lotCategory: base.areaBucket,
+    basePrice: base.basePrice,
+    stationCount,
+    stationAddOnTotal,
+    dunkCount,
+    dunkAddOnTotal,
+    subtotalBeforeRecurringCustomerDiscount,
+    recurringCustomerDiscountRate: discounted.rate,
+    recurringCustomerDiscountAmount: discounted.amount,
+    requiresManualReview: base.requiresManualReview,
+    overageSqFt: base.overageSqFt || 0,
+    incrementCount: base.incrementCount || 0,
     detail: detailParts.join(' + '),
-    addOns: { stationCount, dunkCount, stationAddOn, dunkAddOn },
+    addOns: {
+      stationCount,
+      dunkCount,
+      stationAddOn: stationAddOnTotal,
+      dunkAddOn: dunkAddOnTotal,
+      stationAddOnTotal,
+      dunkAddOnTotal,
+    },
+    discountHandledByPricingFunction: true,
   };
 }
 
@@ -1221,7 +1334,7 @@ function priceGermanRoachInitial(options = {}) {
   const urgencyMult = afterHours
     ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
     : (URGENCY[urgency] || URGENCY.NONE).standard;
-  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
+  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD.recurringCustomerOneTimePerk) : 1;
   const price = Math.round(BASE * urgencyMult * rcDisc);
   return {
     service: 'german_roach_initial',
@@ -1861,5 +1974,7 @@ module.exports = {
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   interpolate, laborCost,
+  getOneTimeUrgencyMultiplier, applyOneTimeRecurringCustomerDiscount,
+  applyOneTimeFloor, getOneTimeMosquitoAreaBucket, getOneTimeMosquitoBase,
   normalizeGrassType, calcLawnAnnualCostFloor,
 };

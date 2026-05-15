@@ -138,15 +138,15 @@ Single source of truth for what this engine prices, how, and with what constants
 
 **Base prices by treatable area × program:**
 
-| Treatable bucket | Seasonal | Monthly |
+| Treatable bucket | seasonal9 | monthly12 |
 |---|---|---|
-| SMALL (<8k sf) | $90 | $90 |
-| QUARTER (8k-12k sf) | $100 | $100 |
-| THIRD (12k-18k sf) | $110 | $110 |
-| HALF (18k-35k sf) | $125 | $125 |
-| ACRE (35k+ sf) | $155 | $155 |
+| SMALL (<8k sf) | $105 | $90 |
+| QUARTER (8k-12k sf) | $115 | $100 |
+| THIRD (12k-18k sf) | $130 | $115 |
+| HALF (18k-35k sf) | $155 | $135 |
+| ACRE (35k+ sf) | $195 | $175 |
 
-**Visits/yr:** seasonal 9 · monthly 12
+**Visits/yr:** seasonal9 = 9 · monthly12 = 12
 
 **Pressure factors (add % to base):** trees heavy +15%, trees moderate +5%, complexity complex +10%, complexity moderate +5%, pool +5%, nearWater +10%, irrigation +8%, lot acre +15%, lot half +5%.
 
@@ -185,20 +185,20 @@ Single source of truth for what this engine prices, how, and with what constants
 
 Standalone prices (customer not on WaveGuard). Applied via `pricePestControlOneTime` / `priceLawnOneTime` / `priceMosquitoOneTime` in `service-pricing.js`.
 
-**Pest one-time:** `max($150, recurringPrice × 1.30)` — recurring price computed at quarterly cadence as anchor.
+**Pest one-time:** `max($199, recurringPrice × 1.75)` — recurring price computed at quarterly cadence as anchor. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $199 floor re-applied.
 
 **Lawn one-time (per treatment):**
 
 | Treatment | Multiplier | Floor |
 |---|---|---|
-| Fertilization | 1.00 | $85 |
-| Weed | 1.15 | $85 |
-| Pest | 1.30 | $85 |
-| Fungicide | 1.45 | $95 |
+| Fertilization | 1.00 | $115 |
+| Weed | 1.12 | $115 |
+| Pest | 1.30 | $115 |
+| Fungicide | 1.38 | $115 |
 
-Then × 1.30 standalone multiplier on top of recurring rate.
+Then × 1.50 standalone multiplier on top of recurring per-app rate. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $115 floor re-applied.
 
-**Mosquito one-time (flat by lot):** SMALL $200 · QUARTER $250 · THIRD $275 · HALF $300 · ACRE $350
+**Mosquito one-time:** based on mosquito treatable area, not gross lot. SMALL 0-7,500 = $225 · STANDARD 7,501-11,000 = $275 · LARGE 11,001-16,000 = $325 · XL 16,001-24,000 = $385 · ESTATE 24,001-32,000 = $425 · ACRE_CLASS 32,001-43,560 = $475 · OVER_ACRE = $475 + $75 per additional 10,000 sq ft and manual review. Add-ons: stations × $75 and Bti dunks × $15. Urgency and WaveGuard tier discounts do not apply.
 
 > **Note:** Public quote wizard (`public-quote.js`) is recurring-only. One-time and "not sure" frequencies divert to `/api/leads` (lead-webhook) for human triage — engine doesn't price them from the homepage form.
 

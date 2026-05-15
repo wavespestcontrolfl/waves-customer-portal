@@ -164,19 +164,21 @@ function mapV1ToLegacyShape(v1Result) {
 
   // Mosquito → R.mq, R.mqMeta
   if (mqLI) {
-    let ri = 1;
+    const selectedIndex = (mqLI.tiers || []).findIndex(t => t.tier === mqLI.tier);
+    let ri = selectedIndex >= 0 ? selectedIndex : 0;
     R.mq = (mqLI.tiers || []).map((t, i) => {
-      if (t.recommended) ri = i;
       return {
         pv: t.perVisit, v: t.visits, ann: t.annual, mo: t.monthly,
         n: t.name,
         recommended: !!t.recommended, dimmed: !t.recommended,
+        pressureRecommended: !!t.pressureRecommended,
       };
     });
     R.mqMeta = {
       pr: mqLI.pressureMultiplier || 1,
       sz: mqLI.lotCategory || 'SMALL',
       program: mqLI.tier || 'monthly',
+      recommendedProgram: mqLI.recommendedProgram || null,
       addOns: mqLI.addOns || null,
       ri,
     };

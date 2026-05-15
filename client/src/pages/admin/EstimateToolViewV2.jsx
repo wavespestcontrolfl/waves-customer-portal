@@ -156,8 +156,7 @@ const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
 const MOSQUITO_PROTOCOL_STEPS = [
   "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
   "Use a gas-powered backpack sprayer for a directed barrier application to mosquito resting zones. Keep applications off blooms and avoid pollinator activity windows.",
-  "Essential Barrier uses bifenthrin adulticide with pyriproxyfen + novaluron IGR support where breeding pressure exists.",
-  "Precision Barrier uses gamma-cyhalothrin adulticide with the same IGR support for heavier foliage, water adjacency, pool cages, and higher residual expectations.",
+  "Recurring mosquito uses a seasonal 9-visit program or a monthly 12-visit program with pressure-adjusted recurring pricing.",
   "Recommend stations or Bti dunk tablets when breeding sources cannot be fully dumped, drained, or eliminated during the visit.",
   "Document inaccessible water, wind/rain constraints, customer source-reduction notes, and any reinspection trigger on the service record.",
 ];
@@ -177,7 +176,7 @@ function buildMosquitoRecommendations(form) {
 
   if (
     form.svcMosquito &&
-    form.mosquitoProgram !== "residual_monthly" &&
+    form.mosquitoProgram !== "monthly12" &&
     (heavyVegetation || waterPressure || poolPressure || lotPressure)
   ) {
     const reasons = [
@@ -187,10 +186,10 @@ function buildMosquitoRecommendations(form) {
       lotPressure ? "larger treatable area" : null,
     ].filter(Boolean);
     recommendations.push({
-      key: "precision",
-      label: "Use Monthly Precision Barrier",
+      key: "monthly12",
+      label: "Use monthly mosquito program",
       detail: `Recommended for ${reasons.join(", ")}.`,
-      apply: { mosquitoProgram: "residual_monthly" },
+      apply: { mosquitoProgram: "monthly12" },
     });
   }
 
@@ -610,7 +609,7 @@ export default function EstimateToolViewV2({
     manualDiscountValue: "",
     manualDiscountLabel: "",
     grassType: "st_augustine",
-    mosquitoProgram: "monthly",
+    mosquitoProgram: "monthly12",
     mosquitoStationCount: "0",
     mosquitoDunkCount: "0",
     otLawnType: "FERT",
@@ -739,13 +738,7 @@ export default function EstimateToolViewV2({
       );
     if (form.svcMosquito) {
       const programBase =
-        form.mosquitoProgram === "residual_monthly"
-          ? 120
-          : form.mosquitoProgram === "residual_seasonal"
-            ? 95
-            : form.mosquitoProgram === "seasonal"
-              ? 79
-              : 90;
+        form.mosquitoProgram === "seasonal9" ? 105 : 90;
       approx.mosquito = Math.max(
         programBase,
         Math.round(lotSqft * 0.005 + programBase),
@@ -1293,7 +1286,7 @@ export default function EstimateToolViewV2({
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
         roachModifier: form.roachModifier || "NONE",
-        mosquitoProgram: form.mosquitoProgram || "monthly",
+        mosquitoProgram: form.mosquitoProgram || "monthly12",
         mosquitoStationCount: parseInt(form.mosquitoStationCount, 10) || 0,
         mosquitoDunkCount: parseInt(form.mosquitoDunkCount, 10) || 0,
         urgency: form.urgency || "ROUTINE",
@@ -2441,20 +2434,12 @@ export default function EstimateToolViewV2({
                           k="mosquitoProgram"
                           options={[
                             {
-                              value: "monthly",
-                              label: "Monthly Essential Barrier",
+                              value: "monthly12",
+                              label: "Monthly Program (12 visits)",
                             },
                             {
-                              value: "seasonal",
-                              label: "Seasonal Essential Barrier",
-                            },
-                            {
-                              value: "residual_monthly",
-                              label: "Monthly Precision Barrier",
-                            },
-                            {
-                              value: "residual_seasonal",
-                              label: "Seasonal Precision Barrier",
+                              value: "seasonal9",
+                              label: "Seasonal Program (9 visits)",
                             },
                           ]}
                         />{" "}
@@ -2485,22 +2470,18 @@ export default function EstimateToolViewV2({
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         {" "}
                         <div className="text-12 font-semibold text-zinc-900 mb-1">
-                          Essential Barrier
+                          Seasonal Program
                         </div>
-                        Bifenthrin adulticide with pyriproxyfen + novaluron IGR
-                        support. Best fit for normal mosquito pressure, routine
-                        foliage resting sites, and budget-sensitive recurring
-                        service.
+                        9 applications during mosquito season, roughly every 21
+                        days while pressure is active.
                       </div>{" "}
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         {" "}
                         <div className="text-12 font-semibold text-zinc-900 mb-1">
-                          Precision Barrier
+                          Monthly Program
                         </div>
-                        Gamma-cyhalothrin adulticide with the same IGR support.
-                        Better fit for heavy vegetation, pool cages, water
-                        adjacency, and customers who need a stronger residual
-                        barrier.
+                        12 applications year-round. Recommended for heavy tree
+                        cover, water adjacency, and higher mosquito pressure.
                       </div>{" "}
                     </div>
                   )}
