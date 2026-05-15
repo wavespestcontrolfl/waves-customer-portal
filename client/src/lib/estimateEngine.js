@@ -104,6 +104,22 @@ function normalizeGrassType(grassType) {
   return 'st_augustine';
 }
 
+function resolveFoamDrillTier(points) {
+  const pointCount = Number(points === undefined ? 5 : points);
+  if (!Number.isInteger(pointCount) || pointCount < 1) {
+    throw new Error('Foam drill point count must be a positive whole number.');
+  }
+  const tiers = [
+    { max: 5, c: 1, l: 1, n: 'Spot (1–5)' },
+    { max: 10, c: 2, l: 1.5, n: 'Moderate (6–10)' },
+    { max: 15, c: 3, l: 2, n: 'Extensive (11–15)' },
+    { max: 20, c: 4, l: 3, n: 'Full Perimeter' },
+  ];
+  const tier = tiers.find(t => pointCount <= t.max);
+  if (!tier) throw new Error(`Foam drill point count ${pointCount} exceeds the configured 20-point maximum.`);
+  return { pointCount, tier };
+}
+
 function resolveLawnFreq(freq) {
   const parsed = Number(freq);
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
@@ -225,7 +241,6 @@ export function calculateEstimate(inputs) {
   const plugArea = Math.max(0, Number(_plugArea) || 0);
   const plugSpacing = Number(_plugSpacing) || 12;
   const bedbugRooms = Number(_bedbugRooms) || 1;
-  const fmPts = Number(_foamPoints) || 5;
   const grassType = normalizeGrassType(_grassType);
   const lawnFreq = resolveLawnFreq(_lawnFreq);
   const mosquitoStationCount = Math.max(0, Math.round(Number(_mosquitoStationCount) || 0));
@@ -900,13 +915,7 @@ export function calculateEstimate(inputs) {
   if (svcFoam) {
     hasOT = true;
     const FM_CAN = 39.08, FM_BITS = 8;
-    const ft = {
-      '5':  { c: 1, l: 1, n: 'Spot (1–5)' },
-      '10': { c: 2, l: 1.5, n: 'Moderate (6–10)' },
-      '15': { c: 3, l: 2, n: 'Extensive (11–15)' },
-      '20': { c: 4, l: 3, n: 'Full Perimeter' },
-    };
-    const t = ft[String(fmPts)] || ft['5'];
+    const { pointCount: fmPts, tier: t } = resolveFoamDrillTier(_foamPoints);
     const cost = t.c * FM_CAN + t.l * LABOR + FM_BITS;
     const fp = otP(Math.max(250, Math.round(cost / 0.45)));
     otItems.push({ name: 'Foam Drill', price: fp, detail: t.c + ' cans | ~$' + Math.round(fp / fmPts) + '/point', tierName: t.n });

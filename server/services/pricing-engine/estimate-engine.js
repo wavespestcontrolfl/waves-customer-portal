@@ -383,9 +383,12 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.foam) {
-    const result = priceFoamDrill(services.foam.points || 5, {
-      urgency: services.foam.urgency || 'ROUTINE',
-      afterHours: services.foam.afterHours || false,
+    const foamOptions = typeof services.foam === 'object' && services.foam !== null
+      ? services.foam
+      : {};
+    const result = priceFoamDrill(Object.prototype.hasOwnProperty.call(foamOptions, 'points') ? foamOptions.points : undefined, {
+      urgency: foamOptions.urgency || 'ROUTINE',
+      afterHours: foamOptions.afterHours || false,
     });
     lineItems.push(result);
   }

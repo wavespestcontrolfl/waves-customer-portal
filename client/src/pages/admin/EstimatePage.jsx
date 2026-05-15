@@ -1212,7 +1212,7 @@ function EstimateToolView() {
           preslabSqft: parseInt(form.preslabSqft) || 0,
           preslabWarranty: form.preslabWarranty || "BASIC",
           preslabVolume: form.preslabVolume || "NONE",
-          foamPoints: parseInt(form.foamPoints) || 5,
+          foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
           bedbugRooms: parseInt(form.bedbugRooms) || 1,
           bedbugMethod: form.bedbugMethod || "BOTH",
           exclSimple: parseInt(form.exclSimple) || 0,

@@ -1394,7 +1394,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       warranty: o.preslabWarranty || 'BASIC',
     };
   }
-  if (sel.has('FOAM')) services.foam = { points: o.foamPoints || 5, urgency, afterHours };
+  if (sel.has('FOAM')) {
+    services.foam = { urgency, afterHours };
+    if (Object.prototype.hasOwnProperty.call(o, 'foamPoints')) {
+      services.foam.points = o.foamPoints;
+    }
+  }
   if (sel.has('RODENT_TRAP')) services.rodentTrapping = {};
   if (sel.has('WDO')) services.wdo = {};
   if (sel.has('FLEA')) services.flea = {};
