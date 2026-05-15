@@ -107,8 +107,16 @@ const EstimateConverter = {
     }
     estimateData = estimateData || {};
 
-    // Count recurring services
-    const recurringServices = estimateData.recurring?.services || estimateData.services?.filter(s => s.recurring || s.frequency) || [];
+    // Count recurring services.
+    // V2 pricing-engine estimates store services at estimate_data.result.recurring.services,
+    // while older shapes use estimate_data.recurring.services or a flat estimate_data.services.
+    // Without the result.* fallback, V2 estimates resolved to 0 services → tier='none' →
+    // CHECK constraint violation on customers.waveguard_tier and the whole accept rolled back.
+    const recurringServices =
+      estimateData.recurring?.services
+      || estimateData.result?.recurring?.services
+      || estimateData.services?.filter(s => s.recurring || s.frequency)
+      || [];
     const serviceCount = recurringServices.length;
 
     // Determine tier
