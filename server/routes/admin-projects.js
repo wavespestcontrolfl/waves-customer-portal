@@ -31,6 +31,7 @@ const { projectReportPathForProject } = require('../services/project-report-link
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const ALLOWED_UPLOAD_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -740,12 +741,36 @@ router.get('/:id', async (req, res, next) => {
       .where({ project_id: project.id })
       .orderBy(['visit', 'sort_order', 'created_at']);
 
+    let upcomingAppointment = null;
+    if (project.scheduled_service_id) {
+      upcomingAppointment = await db('scheduled_services as s')
+        .where({ 's.id': project.scheduled_service_id, 's.customer_id': project.customer_id })
+        .where('s.scheduled_date', '>=', etDateString())
+        .whereIn('s.status', ACTIVE_APPOINTMENT_STATUSES)
+        .leftJoin('technicians as st', 's.technician_id', 'st.id')
+        .select(
+          's.service_type',
+          's.scheduled_date',
+          's.window_start',
+          's.window_end',
+          'st.name as technician_name',
+        )
+        .first();
+    }
+
     res.json({
       project: {
         ...project,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
       },
+      upcomingAppointment: upcomingAppointment ? {
+        serviceType: upcomingAppointment.service_type,
+        scheduledDate: upcomingAppointment.scheduled_date,
+        windowStart: upcomingAppointment.window_start,
+        windowEnd: upcomingAppointment.window_end,
+        technicianName: upcomingAppointment.technician_name,
+      } : null,
       photos,
     });
   } catch (err) { next(err); }
