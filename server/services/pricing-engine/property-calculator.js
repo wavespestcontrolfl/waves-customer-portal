@@ -113,7 +113,6 @@ function computeTurfArea(input, fallback = {}) {
   const hasLotBasedTurfFields =
     hasNonNegativeNumber(input.imperviousSurfacePercent) ||
     hasNonNegativeNumber(input.imperviosSurfacePercent) ||
-    hasNonNegativeNumber(input.bedArea) ||
     hasNonNegativeNumber(input.estimatedBedAreaSf) ||
     hasNonNegativeNumber(input.estimatedBedAreaPercent);
 

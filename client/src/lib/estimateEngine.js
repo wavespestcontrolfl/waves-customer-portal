@@ -312,9 +312,9 @@ export function calculateEstimate(inputs) {
       return { turfSf: estimated, turfEstimated: true, turfConfidence: 'MEDIUM', turfBasis: 'estimatedTurfSf', turfFlags: [] };
     }
     const hasLotBasedTurfFields =
-      _imperviousSurfacePercent !== undefined ||
-      _imperviosSurfacePercent !== undefined ||
-      _estimatedBedAreaPercent !== undefined;
+      hasNonNegativeNumber(_imperviousSurfacePercent) ||
+      hasNonNegativeNumber(_imperviosSurfacePercent) ||
+      hasNonNegativeNumber(_estimatedBedAreaPercent);
     if (!hasLotBasedTurfFields) {
       const legacy = estimateLegacyTurfArea();
       return {
@@ -329,11 +329,11 @@ export function calculateEstimate(inputs) {
     const rawImperviousPct = _imperviousSurfacePercent ?? _imperviosSurfacePercent ?? 20;
     const imperviousPct = toNonNegativeNumber(rawImperviousPct, 20);
     const openArea = Math.max(0, Math.round(lotSqFt * (1 - Math.min(1, imperviousPct / 100))));
-    const bedPercent = toNonNegativeNumber(_estimatedBedAreaPercent, 0);
+    const hasBedPercent = hasNonNegativeNumber(_estimatedBedAreaPercent);
     const hasExplicitBedArea = _bedArea !== undefined && _bedArea !== null && _bedArea !== ''
       && Number.isFinite(Number(_bedArea)) && Number(_bedArea) >= 0;
-    const turfBedArea = bedPercent > 0
-      ? Math.round(openArea * (bedPercent / 100))
+    const turfBedArea = hasBedPercent
+      ? Math.round(openArea * (Number(_estimatedBedAreaPercent) / 100))
       : (hasExplicitBedArea ? Number(_bedArea) : Math.round(openArea * 0.15));
     return {
       turfSf: Math.max(0, Math.round(openArea - turfBedArea)),

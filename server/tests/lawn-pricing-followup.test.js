@@ -140,6 +140,18 @@ describe('lawn pricing production follow-up', () => {
     expect(property.turfSf).toBe(7000);
   });
 
+  test('legacy bedArea alone still uses legacy hardscape turf estimate', () => {
+    const property = calculatePropertyProfile(baseInput({
+      homeSqFt: 2000,
+      lotSqFt: 10000,
+      bedArea: 1000,
+    }));
+
+    expect(property.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(property.turfOpenArea).toBeUndefined();
+    expect(property.turfSf).toBeLessThan(6000);
+  });
+
   test('explicit zero measured turf overrides estimated turf', () => {
     const property = calculatePropertyProfile(baseInput({
       measuredTurfSf: 0,
