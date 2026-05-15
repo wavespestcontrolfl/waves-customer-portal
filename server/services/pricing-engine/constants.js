@@ -216,6 +216,21 @@ const LAWN_TIERS = {
   premium:  { freq: 12, index: 3 },
 };
 
+const LAWN_FREQS = [4, 6, 9, 12];
+const LAWN_TABLE_MAX_SQFT = 20000;
+const LAWN_TRACK_DISPLAY = {
+  st_augustine: { code: 'A', label: 'St. Augustine' },
+  bermuda: { code: 'C1', label: 'Bermuda' },
+  zoysia: { code: 'C2', label: 'Zoysia' },
+  bahia: { code: 'D', label: 'Bahia' },
+};
+const GRASS_TYPE_ALIASES = {
+  st_augustine: ['A', 'B', 'ST_AUGUSTINE', 'ST_AUG', 'ST AUGUSTINE', 'ST. AUGUSTINE', 'ST_AUGUST', 'ST_AUGUSTINE_SHADE', 'st_augustine'],
+  bermuda: ['C1', 'BERMUDA', 'bermuda'],
+  zoysia: ['C2', 'ZOYSIA', 'zoysia'],
+  bahia: ['D', 'BAHIA', 'bahia'],
+};
+
 // Bracket tables: [sqft, basic, standard, enhanced, premium]
 // Base prices — 3.99% card surcharge is applied at checkout, not baked in here.
 const LAWN_BRACKETS = {
@@ -573,14 +588,15 @@ const ONE_TIME = {
   },
   lawn: {
     treatmentMultipliers: {
+      fert: 1.00,
       fertilization: 1.00,
-      weed: 1.15,       // Was 1.12. Slight increase for Celsius cost.
+      weed: 1.12,
       pest: 1.30,
-      fungicide: 1.45,  // Was 1.38. Fungicide products warrant higher premium on standalone.
+      fungicide: 1.38,
     },
-    floor: r(85),
-    fungicideFloor: r(95),
-    oneTimeMultiplier: 1.30,
+    floor: r(115),
+    fungicideFloor: r(115),
+    oneTimeMultiplier: 1.50,
   },
   mosquito: {
     SMALL:   r(225),
@@ -801,7 +817,8 @@ const ACH_DISCOUNT = {
 module.exports = {
   GLOBAL, ZONES, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
-  PEST, LAWN_TIERS, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
+  PEST, LAWN_TIERS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, WAVEGUARD, ACH_DISCOUNT,
   PROCESSING_ADJUSTMENT,
