@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -71,6 +71,55 @@ async function renderRequiredTemplate(templateKey, vars) {
     throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
   }
   throw new Error(`SMS template ${templateKey} is missing or inactive`);
+}
+
+const MAX_REVIEW_DELAY_MINUTES = 60 * 24 * 30;
+
+function completionReviewTimingError(message) {
+  const err = new Error(message);
+  err.statusCode = 400;
+  err.isOperational = true;
+  return err;
+}
+
+function clampReviewDelayMinutes(minutes) {
+  const rounded = Math.max(0, Math.round(minutes));
+  return Math.min(rounded, MAX_REVIEW_DELAY_MINUTES);
+}
+
+function parseCompletionReviewDelayMinutes(body = {}) {
+  if (!body.requestReview) return null;
+  const hasExplicitTiming =
+    Object.prototype.hasOwnProperty.call(body, 'reviewTiming') ||
+    Object.prototype.hasOwnProperty.call(body, 'reviewDelayMinutes') ||
+    Object.prototype.hasOwnProperty.call(body, 'reviewScheduledFor');
+  if (!hasExplicitTiming) return undefined;
+
+  if (body.reviewTiming === 'now') return 0;
+  if (body.reviewTiming === 'tomorrow_8') {
+    const targetDay = etDateString(addETDays(new Date(), 1));
+    const target = parseETDateTime(`${targetDay}T08:00`);
+    return clampReviewDelayMinutes(Math.ceil((target.getTime() - Date.now()) / 60000));
+  }
+  if (body.reviewTiming === 'custom') {
+    if (!body.reviewScheduledFor) {
+      throw completionReviewTimingError('reviewScheduledFor required');
+    }
+    const target = parseETDateTime(body.reviewScheduledFor);
+    if (Number.isNaN(target.getTime())) {
+      throw completionReviewTimingError('invalid reviewScheduledFor');
+    }
+    if (target.getTime() <= Date.now()) {
+      throw completionReviewTimingError('reviewScheduledFor must be in the future');
+    }
+    return clampReviewDelayMinutes(Math.ceil((target.getTime() - Date.now()) / 60000));
+  }
+
+  const raw = body.reviewDelayMinutes ?? body.reviewTiming;
+  if (raw === undefined || raw === null || raw === '') return 120;
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes)) return 120;
+  return clampReviewDelayMinutes(minutes);
 }
 
 // Templates say "Your {service_type} service report is ready", but
@@ -1085,6 +1134,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       soilMoisture,
       sendCompletionSms,
       requestReview,
+      reviewTiming,
+      reviewScheduledFor,
       oneTimeRecapOnly = false,
       areasTreated,
       areasServiced,
@@ -1108,6 +1159,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
     const isIncompleteVisit = visitOutcome === 'incomplete';
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
+    const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedOfficeApproval = normalizeOfficeApproval(officeApproval);
@@ -1340,6 +1392,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             requestReview: isIncompleteVisit ? false : requestReview !== false,
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
+            reviewTiming: reviewTiming || null,
+            reviewDelayMinutes: completionReviewDelayMinutes == null ? null : completionReviewDelayMinutes,
+            reviewScheduledFor: reviewScheduledFor || null,
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: customerRecap || null,
@@ -2028,16 +2083,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       else invoiceCreated = true;
     }
 
-    // When the tech completes with both "send report" and "ask for review" on,
-    // mint the review row now and bundle its short URL into the one completion
-    // SMS instead of firing a second message 90-180 min later. Single message
-    // lands higher read-rates than two.
+    // Immediate/legacy review requests can be bundled into the completion SMS.
+    // Explicit delayed timing skips the bundle and schedules a separate review
+    // request below.
     const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview;
+    const shouldBundleReview =
+      sendCompletionSms &&
+      effectiveRequestReview &&
+      svc.cust_phone &&
+      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0);
 
     let bundledReviewUrl = null;
-    if (sendCompletionSms && effectiveRequestReview && svc.cust_phone) {
+    if (shouldBundleReview) {
       try {
         const ReviewService = require('../services/review-request');
         bundledReviewUrl = await ReviewService.createInline({
@@ -2176,7 +2235,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           triggeredBy: 'auto',
-          delayMinutes: 120,
+          delayMinutes: completionReviewDelayMinutes === undefined
+            ? 120
+            : completionReviewDelayMinutes,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
