@@ -9,6 +9,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
+const { buildReportV1Data } = require('../services/service-report/report-data');
 
 // Rate-limit public report access to deter token brute-forcing.
 const reportLimiter = rateLimit({
@@ -22,6 +23,16 @@ const reportLimiter = rateLimit({
 router.use(reportLimiter);
 
 const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+
+async function trackServiceReportView(service) {
+  if (!service?.id || service.report_viewed_at) return;
+  await db('service_records').where({ id: service.id }).update({ report_viewed_at: db.fn.now() });
+  await db('activity_log').insert({
+    customer_id: service.customer_id,
+    action: 'report_viewed',
+    description: `${service.first_name} ${service.last_name} viewed service report for ${service.service_type}`,
+  }).catch(() => {});
+}
 
 async function findProjectByReportSegment(segment) {
   const lookup = extractProjectReportTokenLookup(segment);
@@ -163,14 +174,7 @@ router.get('/:token', async (req, res, next) => {
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
     // Track first view
-    if (!service.report_viewed_at) {
-      await db('service_records').where({ id: service.id }).update({ report_viewed_at: db.fn.now() });
-      await db('activity_log').insert({
-        customer_id: service.customer_id,
-        action: 'report_viewed',
-        description: `${service.first_name} ${service.last_name} viewed service report for ${service.service_type}`,
-      }).catch(() => {});
-    }
+    await trackServiceReportView(service);
 
     // Check if pre-generated PDF exists
     if (service.report_pdf_path) {
@@ -212,7 +216,13 @@ router.get('/:token/data', async (req, res, next) => {
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
+    await trackServiceReportView(service);
+
     const products = await db('service_products').where({ service_record_id: service.id });
+
+    if (service.report_template_version === 'service_report_v1') {
+      return res.json(await buildReportV1Data(service, req.params.token));
+    }
 
     res.json({
       serviceType: service.service_type,
