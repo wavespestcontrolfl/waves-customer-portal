@@ -38,6 +38,7 @@ import React, {
 import { fmt, fmtInt } from "../../lib/estimateEngine";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
+import { ExternalLink } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -87,6 +88,13 @@ async function summarizeEstimateResponseFailure(response, fallbackLabel) {
     }
   }
   return `${fallbackLabel}: ${response.status}`;
+}
+
+function estimatePreviewUrlFromSave(data) {
+  if (data?.token) {
+    return `${window.location.origin}/estimate/${encodeURIComponent(data.token)}`;
+  }
+  return data?.viewUrl || null;
 }
 
 // ── Error Boundary ──────────────────────────────────────────────
@@ -1514,6 +1522,7 @@ export default function EstimateToolViewV2({
 
   const [estimate, setEstimate] = useState(null);
   const [savedId, setSavedId] = useState(null);
+  const [savedViewUrl, setSavedViewUrl] = useState(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
@@ -1540,16 +1549,19 @@ export default function EstimateToolViewV2({
     if (SEND_FIELDS.has(key)) return;
     if (CONTACT_FIELDS.has(key) || DELIVERY_OPTION_FIELDS.has(key)) {
       setSavedId(null);
+      setSavedViewUrl(null);
       return;
     }
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
   const toggle = useCallback((key) => {
     setForm((f) => ({ ...f, [key]: !f[key] }));
     if (key.startsWith("svc")) {
       setEstimate(null);
       setSavedId(null);
+      setSavedViewUrl(null);
     }
   }, []);
   const applyMosquitoCustomerChoice = useCallback((choice) => {
@@ -1565,6 +1577,7 @@ export default function EstimateToolViewV2({
     });
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
   const setCustomerChoiceOption = useCallback((enabled) => {
     setForm((f) => {
@@ -1577,6 +1590,7 @@ export default function EstimateToolViewV2({
       return next;
     });
     setSavedId(null);
+    setSavedViewUrl(null);
     setEstimate(null);
   }, []);
 
@@ -1588,6 +1602,7 @@ export default function EstimateToolViewV2({
     setForm((f) => ({ ...f, ...(recommendation?.apply || {}) }));
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
 
   const searchSendCustomers = useCallback(async (q) => {
@@ -1672,6 +1687,7 @@ export default function EstimateToolViewV2({
     if (!Object.values(incoming).some(Boolean)) return;
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
     setShowSendForm(false);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
@@ -1710,6 +1726,7 @@ export default function EstimateToolViewV2({
   function applyDiscountPreset(key) {
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
     if (key === "__custom__" || !key) {
       setForm((f) => ({ ...f, manualDiscountPreset: key || "" }));
       return;
@@ -2223,6 +2240,7 @@ export default function EstimateToolViewV2({
 
       setEstimate(result);
       setSavedId(null);
+      setSavedViewUrl(null);
       setLookupStatus((s) => ({ ...s, type: "ok" }));
       return result;
     } catch (e) {
@@ -2270,8 +2288,10 @@ export default function EstimateToolViewV2({
         );
       const d = await r.json();
       const id = d.id || d.estimateId;
+      const viewUrl = estimatePreviewUrlFromSave(d);
       setSavedId(id);
-      return id;
+      setSavedViewUrl(viewUrl);
+      return { id, viewUrl };
     } catch (e) {
       alert(e.message);
       return null;
@@ -2389,6 +2409,7 @@ export default function EstimateToolViewV2({
     }));
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
     setShowSendForm(false);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
@@ -2416,8 +2437,45 @@ export default function EstimateToolViewV2({
         return;
       }
     }
-    const id = savedId || (await doSave());
-    if (id) await doSend(id, method);
+    const saved = savedId
+      ? { id: savedId, viewUrl: savedViewUrl }
+      : await doSave();
+    if (saved?.id) await doSend(saved.id, method);
+  }
+
+  async function previewCustomerEstimate() {
+    if (generating || saving || sending) return;
+    if (!estimate) {
+      alert('Click "Generate Estimate" first.');
+      return;
+    }
+
+    const pendingPreviewWindow = savedViewUrl
+      ? null
+      : window.open("about:blank", "_blank");
+    if (pendingPreviewWindow) pendingPreviewWindow.opener = null;
+    if (!savedViewUrl && !pendingPreviewWindow) {
+      alert("Your browser blocked the preview tab. Allow pop-ups and try again.");
+      return;
+    }
+
+    const saved = savedViewUrl
+      ? { id: savedId, viewUrl: savedViewUrl }
+      : await doSave();
+    if (!saved?.id) {
+      if (pendingPreviewWindow) pendingPreviewWindow.close();
+      return;
+    }
+    if (!saved.viewUrl) {
+      if (pendingPreviewWindow) pendingPreviewWindow.close();
+      alert("Preview link unavailable. Save the estimate and try again.");
+      return;
+    }
+    if (pendingPreviewWindow) {
+      pendingPreviewWindow.location.replace(saved.viewUrl);
+    } else {
+      window.open(saved.viewUrl, "_blank", "noopener,noreferrer");
+    }
   }
 
   const E = estimate;
@@ -3654,21 +3712,43 @@ export default function EstimateToolViewV2({
               </div>{" "}
             </div>
             {/* Action buttons */}
-            <div className="grid grid-cols-2 gap-3">
+            <div
+              className={cn(
+                "grid gap-3",
+                estimate ? "grid-cols-3" : "grid-cols-2",
+              )}
+            >
               {" "}
               <Button
                 onClick={() => doGenerate()}
                 disabled={generateBusy}
                 variant="primary"
                 size="md"
-                className="h-12 text-14"
+                className={cn("h-12", estimate ? "text-12" : "text-14")}
               >
-                {generating ? "Generating…" : "Generate Estimate"}
+                {generating
+                  ? "Generating…"
+                  : estimate
+                    ? "Regenerate"
+                    : "Generate Estimate"}
               </Button>{" "}
+              {estimate && (
+                <Button
+                  variant="secondary"
+                  size="md"
+                  className="h-12 text-12 gap-2"
+                  disabled={generateBusy}
+                  onClick={previewCustomerEstimate}
+                  title="Open the customer-facing estimate in a new tab"
+                >
+                  <ExternalLink size={14} strokeWidth={1.8} aria-hidden />
+                  Preview
+                </Button>
+              )}
               <Button
                 variant="secondary"
                 size="md"
-                className="h-12 text-14"
+                className={cn("h-12", estimate ? "text-12" : "text-14")}
                 disabled={generateBusy}
                 onClick={async () => {
                   if (estimate || (await doGenerate())) {
@@ -3676,7 +3756,11 @@ export default function EstimateToolViewV2({
                   }
                 }}
               >
-                {generating ? "Generating…" : "Send Estimate"}
+                {generating
+                  ? "Generating…"
+                  : estimate
+                    ? "Send"
+                    : "Send Estimate"}
               </Button>{" "}
             </div>
             {/* Send form */}
@@ -3964,8 +4048,19 @@ export default function EstimateToolViewV2({
                 {" "}
                 <Card className="p-5">
                   {" "}
-                  <div className="flex justify-end gap-2 mb-2">
+                  <div className="flex flex-wrap justify-end gap-2 mb-2">
                     {" "}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={previewCustomerEstimate}
+                      disabled={sendBusy}
+                      title="Open the customer-facing estimate in a new tab"
+                    >
+                      <ExternalLink size={13} strokeWidth={1.8} aria-hidden />
+                      Customer View
+                    </Button>{" "}
                     <Button
                       variant="secondary"
                       size="sm"
@@ -3979,6 +4074,7 @@ export default function EstimateToolViewV2({
                       onClick={() => {
                         setEstimate(null);
                         setSavedId(null);
+                        setSavedViewUrl(null);
                         setShowSendForm(false);
                       }}
                     >

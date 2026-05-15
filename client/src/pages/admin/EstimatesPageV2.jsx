@@ -1098,6 +1098,11 @@ function fmtDate(d) {
   });
 }
 
+function estimatePreviewHref(estimate) {
+  if (!estimate?.token) return null;
+  return `/estimate/${encodeURIComponent(estimate.token)}`;
+}
+
 // Formats an appointment row from /admin/estimates as a short label like
 // "Tue 5/12 · 9:00 AM". scheduledDate is YYYY-MM-DD in ET, so we render it
 // in ET to keep day-of-week consistent regardless of viewer locale.
@@ -1514,6 +1519,7 @@ function EstimatePipelineViewV2() {
                 const urgency = getUrgencyIndicator(e);
                 const competitor = detectCompetitor(e.notes || e.description);
                 const source = SOURCE_ICON[e.source];
+                const previewHref = estimatePreviewHref(e);
 
                 return (
                   <Card
@@ -1871,6 +1877,28 @@ function EstimatePipelineViewV2() {
                         >
                           Audit
                         </Button>
+                        {previewHref && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="w-full sm:w-auto rounded-full whitespace-nowrap gap-1.5"
+                            onClick={() =>
+                              window.open(
+                                previewHref,
+                                "_blank",
+                                "noopener,noreferrer",
+                              )
+                            }
+                            title="Open the customer-facing estimate in a new tab"
+                          >
+                            <ExternalLink
+                              size={13}
+                              strokeWidth={1.75}
+                              aria-hidden
+                            />
+                            Preview
+                          </Button>
+                        )}
                         {e.status === "draft" && e.monthlyTotal > 0 && (
                           <Button
                             size="sm"
