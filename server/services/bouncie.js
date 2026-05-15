@@ -12,6 +12,9 @@
 const config = require('../config');
 const db = require('../models/db');
 const logger = require('./logger');
+const mileageWriter = require('./bouncie-mileage');
+const tokenStore = require('./bouncie-token-store');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 const API_BASE = config.bouncie.apiBase || 'https://api.bouncie.dev/v1';
 const AUTH_BASE = config.bouncie.authBase || 'https://auth.bouncie.com';
@@ -26,12 +29,27 @@ const IRS_MILEAGE_RATES = {
 // In-memory token (shared with routes/bouncie.js pattern)
 let currentToken = config.bouncie.accessToken;
 let currentRefresh = config.bouncie.refreshToken;
+let hydratedTokens = false;
+
+async function hydrateTokens(force = false) {
+  if (hydratedTokens && !force) return;
+  const stored = await tokenStore.loadTokens();
+  if (stored?.accessToken) currentToken = stored.accessToken;
+  if (stored?.refreshToken) currentRefresh = stored.refreshToken;
+  hydratedTokens = true;
+}
 
 /**
  * Refresh the Bouncie OAuth access token
  */
 async function refreshAccessToken() {
   try {
+    await hydrateTokens();
+    if (!currentRefresh) {
+      logger.error('[bouncie] Token refresh failed: no refresh token configured');
+      return false;
+    }
+
     const res = await fetch(`${AUTH_BASE}/oauth/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -52,6 +70,11 @@ async function refreshAccessToken() {
     const data = await res.json();
     currentToken = data.access_token;
     if (data.refresh_token) currentRefresh = data.refresh_token;
+    await tokenStore.saveTokens({
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresIn: data.expires_in,
+    });
     logger.info('[bouncie] Access token refreshed');
     return true;
   } catch (err) {
@@ -64,6 +87,12 @@ async function refreshAccessToken() {
  * Make an authenticated GET request to the Bouncie API with auto-retry on 401
  */
 async function bouncieRequest(path) {
+  await hydrateTokens();
+  if (!currentToken) {
+    const refreshed = await refreshAccessToken();
+    if (!refreshed) throw new Error('Bouncie access token is not configured');
+  }
+
   const doFetch = () => fetch(`${API_BASE}${path}`, {
     headers: {
       'Authorization': currentToken,
@@ -107,6 +136,7 @@ class BouncieService {
       logger.info(`[bouncie] Found ${vehicles.length} vehicle(s)`);
       return vehicles.map(v => ({
         id: v.imei,
+        imei: v.imei,
         vin: v.vin,
         make: v.model?.make || 'Unknown',
         model: v.model?.name || 'Unknown',
@@ -115,7 +145,9 @@ class BouncieService {
         isRunning: v.stats?.isRunning || false,
         fuelLevel: v.stats?.fuelLevel || null,
         odometer: v.stats?.odometer || null,
+        speed: v.stats?.speed ?? null,
         lastLocation: v.stats?.location || null,
+        lastUpdated: v.stats?.lastUpdated || v.stats?.location?.timestamp || null,
       }));
     } catch (err) {
       logger.error(`[bouncie] getVehicles failed: ${err.message}`);
@@ -135,29 +167,22 @@ class BouncieService {
       const imei = vehicleId || config.bouncie.vehicleImei;
       if (!imei) throw new Error('No vehicle IMEI provided');
 
-      // Bouncie uses ISO format for date params
-      const params = new URLSearchParams({
-        imei,
-        starts_after: `${startDate}T00:00:00Z`,
-        ends_before: `${endDate}T23:59:59Z`,
-      });
+      const allTrips = [];
+      for (const [chunkStart, chunkEnd] of dateChunks(startDate, endDate)) {
+        const window = etDateChunkWindow(chunkStart, chunkEnd);
+        const params = new URLSearchParams({
+          imei,
+          'gps-format': 'geojson',
+          'starts-after': window.startsAfter,
+          'ends-before': window.endsBefore,
+        });
 
-      const trips = await bouncieRequest(`/trips?${params.toString()}`);
-      logger.info(`[bouncie] Found ${trips.length} trip(s) for vehicle ${imei} from ${startDate} to ${endDate}`);
+        const trips = await bouncieRequest(`/trips?${params.toString()}`);
+        allTrips.push(...trips);
+      }
+      logger.info(`[bouncie] Found ${allTrips.length} trip(s) for vehicle ${imei} from ${startDate} to ${endDate}`);
 
-      return trips.map(trip => ({
-        tripId: trip.transactionId || trip.id || `${imei}-${trip.startTime}`,
-        vehicleId: imei,
-        startTime: trip.startTime,
-        endTime: trip.endTime,
-        startLocation: trip.startLocation || {},
-        endLocation: trip.endLocation || {},
-        distanceMiles: trip.distance ? parseFloat((trip.distance * 0.000621371).toFixed(2)) : 0, // meters to miles
-        durationMinutes: trip.duration ? Math.round(trip.duration / 60) : 0, // seconds to minutes
-        maxSpeed: trip.maxSpeed || null,
-        hardBrakes: trip.hardBrakes || 0,
-        hardAccels: trip.hardAccelerations || 0,
-      }));
+      return allTrips.map((trip) => normalizeRestTrip(trip, imei));
     } catch (err) {
       logger.error(`[bouncie] getTrips failed: ${err.message}`);
       throw err;
@@ -202,37 +227,22 @@ class BouncieService {
             continue;
           }
 
-          const tripDate = new Date(trip.startTime);
-          const year = tripDate.getFullYear();
-          const irsRate = getIrsRate(year);
-          const deductionAmount = parseFloat((trip.distanceMiles * irsRate).toFixed(2));
-
-          // Build start/end address strings from location objects
-          const startAddr = trip.startLocation?.address ||
-            [trip.startLocation?.lat, trip.startLocation?.lon].filter(Boolean).join(', ') ||
-            'Unknown';
-          const endAddr = trip.endLocation?.address ||
-            [trip.endLocation?.lat, trip.endLocation?.lon].filter(Boolean).join(', ') ||
-            'Unknown';
-
-          await db('mileage_log').insert({
-            vehicle_id: vehicle.id,
-            vehicle_name: vehicle.nickname || `${vehicle.make} ${vehicle.model}`,
-            trip_date: tripDate.toISOString().split('T')[0],
-            start_address: startAddr,
-            end_address: endAddr,
-            distance_miles: trip.distanceMiles,
-            duration_minutes: trip.durationMinutes,
-            purpose: 'business', // default all trips as business
-            irs_rate: irsRate,
-            deduction_amount: deductionAmount,
-            bouncie_trip_id: trip.tripId,
-            source: 'bouncie',
+          const inserted = await mileageWriter.processTripWebhook({
+            eventType: 'tripCompleted',
+            imei: vehicle.id,
+            data: {
+              ...trip,
+              transactionId: trip.tripId,
+              vehicleId: vehicle.id,
+              nickName: vehicle.nickname || `${vehicle.make} ${vehicle.model}`,
+              distanceMiles: trip.distanceMiles,
+              durationSeconds: trip.durationSeconds,
+            },
           });
 
           tripsImported++;
           totalMiles += trip.distanceMiles;
-          totalDeduction += deductionAmount;
+          totalDeduction += parseFloat(inserted?.deduction_amount || 0);
         }
       }
 
@@ -404,11 +414,119 @@ class BouncieService {
   /**
    * Update in-memory tokens (called from OAuth callback route)
    */
-  updateTokens(accessToken, refreshToken) {
+  async updateTokens(accessToken, refreshToken, options = {}) {
     if (accessToken) currentToken = accessToken;
     if (refreshToken) currentRefresh = refreshToken;
+    hydratedTokens = true;
+    if (options.persist !== false) {
+      await tokenStore.saveTokens({
+        accessToken,
+        refreshToken,
+        expiresIn: options.expiresIn,
+      });
+    }
     logger.info('[bouncie] In-memory tokens updated from OAuth callback');
   }
 }
 
 module.exports = new BouncieService();
+
+function dateChunks(startDate, endDate) {
+  const start = parseDateOnly(startDate);
+  const end = parseDateOnly(endDate);
+  if (end < start) throw new Error('endDate must be on or after startDate');
+
+  const chunks = [];
+  for (let cursor = start; cursor <= end;) {
+    const chunkEnd = new Date(cursor);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + 6);
+    if (chunkEnd > end) chunkEnd.setTime(end.getTime());
+    chunks.push([formatDateOnly(cursor), formatDateOnly(chunkEnd)]);
+    cursor = new Date(chunkEnd);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return chunks;
+}
+
+function parseDateOnly(value) {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) throw new Error(`Invalid date: ${value}`);
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+}
+
+function formatDateOnly(date) {
+  return date.toISOString().split('T')[0];
+}
+
+function etDateChunkWindow(chunkStart, chunkEnd) {
+  return {
+    startsAfter: parseETDateTime(`${chunkStart}T00:00:00`).toISOString(),
+    endsBefore: parseETDateTime(`${chunkEnd}T23:59:59`).toISOString(),
+  };
+}
+
+function normalizeRestTrip(trip, imei) {
+  const route = routeEndpointsFromGps(trip.gps);
+  const durationSeconds = trip.duration || trip.tripTime ||
+    (trip.startTime && trip.endTime ? Math.max(0, Math.round((new Date(trip.endTime) - new Date(trip.startTime)) / 1000)) : 0);
+  const distanceMeters = Number.isFinite(Number(trip.distance)) ? Number(trip.distance) : 0;
+  const distanceMiles = parseFloat((distanceMeters / 1609.344).toFixed(2));
+  return {
+    tripId: trip.transactionId || trip.id || `${imei}-${trip.startTime || trip.endTime}`,
+    vehicleId: imei,
+    imei,
+    startTime: trip.startTime,
+    endTime: trip.endTime,
+    startLocation: trip.startLocation || route.start || {},
+    endLocation: trip.endLocation || route.end || {},
+    distance: distanceMeters,
+    distanceMeters,
+    distanceMiles,
+    durationMinutes: durationSeconds ? Math.round(durationSeconds / 60) : 0,
+    durationSeconds,
+    maxSpeed: trip.maxSpeed || null,
+    averageSpeed: trip.averageSpeed || null,
+    hardBrakes: trip.hardBrakingCount || trip.hardBrakes || 0,
+    hardAccels: trip.hardAccelerationCount || trip.hardAccelerations || 0,
+    idleTime: trip.totalIdleDuration || 0,
+    fuelConsumed: trip.fuelConsumed || null,
+    startOdometer: trip.startOdometer || null,
+    endOdometer: trip.endOdometer || null,
+  };
+}
+
+function routeEndpointsFromGps(gps) {
+  if (!gps) return {};
+  let parsed = gps;
+  if (typeof gps === 'string') {
+    try {
+      parsed = JSON.parse(gps);
+    } catch {
+      return {};
+    }
+  }
+
+  const coordinates =
+    parsed?.type === 'Feature' ? parsed.geometry?.coordinates :
+      parsed?.type === 'LineString' ? parsed.coordinates :
+        parsed?.geometry?.coordinates;
+  if (!Array.isArray(coordinates) || coordinates.length === 0) return {};
+
+  const first = coordinates[0];
+  const last = coordinates[coordinates.length - 1];
+  const toLocation = (coord) => {
+    if (!Array.isArray(coord) || coord.length < 2) return null;
+    return { lon: coord[0], lng: coord[0], lat: coord[1] };
+  };
+  return {
+    start: toLocation(first),
+    end: toLocation(last),
+  };
+}
+
+module.exports._test = {
+  dateChunks,
+  etDateChunkWindow,
+  normalizeRestTrip,
+  routeEndpointsFromGps,
+};

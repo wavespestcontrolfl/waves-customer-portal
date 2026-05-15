@@ -191,18 +191,25 @@ async function checkGBP(locationKey) {
 
 async function checkBouncie() {
   const platform = 'bouncie';
-  const envVarName = 'BOUNCIE_ACCESS_TOKEN';
-  const token = process.env.BOUNCIE_ACCESS_TOKEN;
+  const envVarName = 'BOUNCIE_REFRESH_TOKEN';
+  let token = process.env.BOUNCIE_ACCESS_TOKEN;
+  try {
+    const tokenStore = require('./bouncie-token-store');
+    const stored = await tokenStore.loadTokens();
+    token = stored?.accessToken || token;
+  } catch (_) {
+    // fall back to env bootstrap token
+  }
 
   if (!token) {
-    const result = { platform, status: 'not_configured', lastError: 'BOUNCIE_ACCESS_TOKEN not set', expiresAt: null };
+    const result = { platform, status: 'not_configured', lastError: 'No Bouncie access token in DB or env', expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   }
 
   try {
     const res = await fetch('https://api.bouncie.dev/v1/user', {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: token },
     });
 
     if (res.ok) {

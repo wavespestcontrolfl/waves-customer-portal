@@ -71,6 +71,50 @@ describe('Bouncie tracking webhook trip-metrics processing', () => {
     expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
   });
 
+  test('persists official tripMetrics payloads from Bouncie docs', async () => {
+    const technicianLookup = tableMock({
+      first: { id: 'tech-1', name: 'Tech One', bouncie_imei: 'imei-1', active: true },
+    });
+    const logUpdate = tableMock();
+    db
+      .mockReturnValueOnce(technicianLookup)
+      .mockReturnValueOnce(logUpdate);
+
+    await router._test.processTrackingEvent({
+      logId: 47,
+      eventType: 'tripMetrics',
+      payload: {
+        eventType: 'tripMetrics',
+        imei: 'imei-1',
+        transactionId: 'txn-docs-1',
+        metrics: {
+          timestamp: '2026-05-05T13:00:00.000Z',
+          tripTime: 1800,
+          tripDistance: 12.5,
+          totalIdlingTime: 300,
+          maxSpeed: 65,
+          averageDriveSpeed: 35.5,
+          hardBrakingCounts: 2,
+          hardAccelerationCounts: 1,
+        },
+      },
+    });
+
+    expect(mileageService.processTripWebhook).toHaveBeenCalledWith({
+      eventType: 'tripCompleted',
+      imei: 'imei-1',
+      data: expect.objectContaining({
+        transactionId: 'txn-docs-1',
+        distanceMiles: 12.5,
+        distance: expect.closeTo(20116.8, 1),
+        duration: 1800,
+        hardBrakes: 2,
+        hardAccelerations: 1,
+      }),
+    });
+    expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
+  });
+
   test('marks metrics-only webhook processed when no distance or duration is present', async () => {
     const technicianLookup = tableMock({
       first: { id: 'tech-1', name: 'Tech One', bouncie_imei: 'imei-1', active: true },
@@ -146,7 +190,7 @@ describe('Bouncie tracking webhook trip-metrics processing', () => {
         imei: 'imei-1',
         vehicleId: 'vehicle-1',
         transactionId: 'txn-1',
-        distance: 1609.34,
+        distance: expect.closeTo(1609.34, 1),
         duration: 600,
       }),
     });
@@ -190,10 +234,58 @@ describe('Bouncie tracking webhook trip-metrics processing', () => {
         imei: 'vehicle-1',
         vehicleId: 'vehicle-1',
         transactionId: 'txn-1',
-        distance: 1609.34,
+        distance: expect.closeTo(1609.34, 1),
         duration: 600,
       }),
     });
+    expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
+  });
+
+  test('updates live location from official tripData nested gps samples', async () => {
+    const technicianLookup = tableMock({
+      first: { id: 'tech-1', name: 'Tech One', bouncie_imei: 'imei-1', active: true },
+    });
+    const logUpdate = tableMock();
+    db
+      .mockReturnValueOnce(technicianLookup)
+      .mockReturnValueOnce(logUpdate);
+
+    await router._test.processTrackingEvent({
+      logId: 48,
+      eventType: 'tripData',
+      payload: {
+        eventType: 'tripData',
+        imei: 'imei-1',
+        transactionId: 'txn-live-1',
+        data: [
+          {
+            timestamp: '2026-05-05T12:00:00.000Z',
+            speed: 12,
+            gps: { lat: 27.1, lon: -82.1, heading: 90 },
+          },
+          {
+            timestamp: '2026-05-05T12:02:00.000Z',
+            speed: 18,
+            gps: { lat: 27.2, lon: -82.2, heading: 100 },
+          },
+        ],
+      },
+    });
+
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO vehicle_locations'), expect.arrayContaining([
+      'imei-1',
+      27.2,
+      -82.2,
+      100,
+      18,
+      null,
+    ]));
+    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({
+      tech_id: 'tech-1',
+      lat: 27.2,
+      lng: -82.2,
+      speed_mph: 18,
+    }));
     expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
   });
 });

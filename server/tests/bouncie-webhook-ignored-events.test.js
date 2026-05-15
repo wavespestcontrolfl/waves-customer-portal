@@ -29,6 +29,8 @@ const router = require('../routes/bouncie-webhook');
 function insertMock(row = { id: 99 }) {
   return {
     insert: jest.fn().mockReturnThis(),
+    onConflict: jest.fn().mockReturnThis(),
+    ignore: jest.fn().mockReturnThis(),
     returning: jest.fn().mockResolvedValue([row]),
   };
 }
@@ -84,6 +86,41 @@ describe('legacy Bouncie webhook ignored events', () => {
     expect(geofenceHandler.handleGeozoneEvent).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({ received: true });
+  });
+
+  test('processes official tripMetrics events as mileage input', async () => {
+    const insert = insertMock({ id: 43 });
+    const update = updateMock();
+    db
+      .mockReturnValueOnce(insert)
+      .mockReturnValueOnce(update);
+
+    const res = resMock();
+    await router._test.handleBouncieWebhook({
+      body: {
+        eventType: 'tripMetrics',
+        imei: 'imei-1',
+        transactionId: 'txn-1',
+        metrics: {
+          tripDistance: 2,
+          tripTime: 300,
+          timestamp: '2026-05-05T12:05:00.000Z',
+        },
+      },
+    }, res);
+
+    expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      event_type: 'trip-metrics',
+      vehicle_imei: 'imei-1',
+      dedupe_key: expect.any(String),
+    }));
+    expect(mileageService.processTripWebhook).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'tripCompleted',
+      imei: 'imei-1',
+    }));
+    expect(geofenceHandler.handleGeozoneEvent).not.toHaveBeenCalled();
+    expect(update.update).toHaveBeenCalledWith({ processed: true });
+    expect(res.status).toHaveBeenCalledWith(200);
   });
 
   test('extracts nested vehicle ids consistently', () => {

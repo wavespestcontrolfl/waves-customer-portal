@@ -33,7 +33,29 @@ describe('bouncie webhook security helpers', () => {
     });
   });
 
-  test('accepts matching header secrets', () => {
+  test('accepts Bouncie official authorization headers', () => {
+    const result = inspectBouncieWebhook(
+      reqWith({ headers: { authorization: 'secret' } }),
+      { BOUNCIE_WEBHOOK_SECRET: 'secret' }
+    );
+    expect(result).toMatchObject({
+      accepted: true,
+      matched: true,
+      from: 'header:authorization',
+    });
+
+    const fallback = inspectBouncieWebhook(
+      reqWith({ headers: { 'x-bouncie-authorization': 'secret' } }),
+      { BOUNCIE_WEBHOOK_SECRET: 'secret' }
+    );
+    expect(fallback).toMatchObject({
+      accepted: true,
+      matched: true,
+      from: 'header:x-bouncie-authorization',
+    });
+  });
+
+  test('keeps legacy rollout header support', () => {
     const result = inspectBouncieWebhook(
       reqWith({ headers: { 'x-webhook-key': 'secret' } }),
       { BOUNCIE_WEBHOOK_SECRET: 'secret' }
@@ -67,8 +89,10 @@ describe('bouncie webhook security helpers', () => {
   test('redacts webhook secrets before persistence', () => {
     const payload = {
       eventType: 'trip-data',
+      Authorization: 'official-secret',
       webhookKey: 'body-secret',
       nested: {
+        'X-Bouncie-Authorization': 'official-nested-secret',
         webhook_key: 'nested-secret',
         keep: 'value',
       },
@@ -76,14 +100,18 @@ describe('bouncie webhook security helpers', () => {
     };
     expect(redactBouncieWebhookPayload(payload)).toEqual({
       eventType: 'trip-data',
+      Authorization: '[redacted]',
       webhookKey: '[redacted]',
       nested: {
+        'X-Bouncie-Authorization': '[redacted]',
         webhook_key: '[redacted]',
         keep: 'value',
       },
       data: [{ x_bouncie_webhook_key: '[redacted]', lat: 27.1 }],
     });
     expect(stringifyBounciePayload(payload)).not.toContain('body-secret');
+    expect(stringifyBounciePayload(payload)).not.toContain('official-secret');
+    expect(stringifyBounciePayload(payload)).not.toContain('official-nested-secret');
     expect(stringifyBounciePayload(payload)).not.toContain('nested-secret');
     expect(stringifyBounciePayload(payload)).not.toContain('array-secret');
   });

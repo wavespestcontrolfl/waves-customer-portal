@@ -1,8 +1,11 @@
 const express = require('express');
 const router = express.Router();
+const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { authenticate } = require('../middleware/auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const tokenStore = require('../services/bouncie-token-store');
 
 const BOUNCIE_API = config.bouncie.apiBase;
 const AUTH_BASE = config.bouncie.authBase;
@@ -10,10 +13,25 @@ const AUTH_BASE = config.bouncie.authBase;
 // In-memory token (refreshes automatically)
 let currentToken = config.bouncie.accessToken;
 let currentRefresh = config.bouncie.refreshToken;
+let hydratedTokens = false;
+
+async function hydrateTokens(force = false) {
+  if (hydratedTokens && !force) return;
+  const stored = await tokenStore.loadTokens();
+  if (stored?.accessToken) currentToken = stored.accessToken;
+  if (stored?.refreshToken) currentRefresh = stored.refreshToken;
+  hydratedTokens = true;
+}
 
 // Refresh the access token using the refresh token
 async function refreshAccessToken() {
   try {
+    await hydrateTokens();
+    if (!currentRefresh) {
+      logger.error('Bouncie token refresh failed: no refresh token configured');
+      return false;
+    }
+
     const res = await fetch(`${AUTH_BASE}/oauth/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -34,6 +52,11 @@ async function refreshAccessToken() {
     const data = await res.json();
     currentToken = data.access_token;
     if (data.refresh_token) currentRefresh = data.refresh_token;
+    await tokenStore.saveTokens({
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresIn: data.expires_in,
+    });
     logger.info('Bouncie access token refreshed');
     return true;
   } catch (err) {
@@ -44,6 +67,12 @@ async function refreshAccessToken() {
 
 // Call Bouncie REST API with auto-retry on 401
 async function bouncieRequest(path) {
+  await hydrateTokens();
+  if (!currentToken) {
+    const refreshed = await refreshAccessToken();
+    if (!refreshed) throw new Error('Bouncie access token is not configured');
+  }
+
   const doFetch = () => fetch(`${BOUNCIE_API}${path}`, {
     headers: { 'Authorization': currentToken, 'Content-Type': 'application/json' },
   });
@@ -115,18 +144,55 @@ router.get('/location', authenticate, async (req, res, next) => {
 });
 
 // =========================================================================
+// GET /api/bouncie/auth — Admin-only OAuth start with signed state
+// =========================================================================
+router.get('/auth', adminAuthenticate, requireAdmin, (req, res) => {
+  const redirectUri = config.bouncie.redirectUri || 'https://portal.wavespestcontrol.com/api/bouncie/callback';
+  const state = jwt.sign(
+    {
+      type: 'bouncie_oauth',
+      technicianId: req.technicianId,
+    },
+    config.jwt.secret,
+    { expiresIn: '15m' }
+  );
+  const params = new URLSearchParams({
+    client_id: config.bouncie.clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    state,
+  });
+  res.redirect(`${AUTH_BASE}/dialog/authorize?${params.toString()}`);
+});
+
+// =========================================================================
 // GET /api/bouncie/callback — OAuth callback for token exchange
 // =========================================================================
 router.get('/callback', async (req, res, next) => {
   try {
-    const { code } = req.query;
+    const { code, state } = req.query;
     if (!code) return res.status(400).send('<h2>Error: No authorization code received</h2>');
+    if (!state) {
+      return res.status(400).send('<h2>Error: Missing OAuth state</h2><p>Start the connection from /api/bouncie/auth.</p>');
+    }
+
+    const staticState = process.env.BOUNCIE_OAUTH_STATE;
+    try {
+      if (staticState && String(state) === String(staticState)) {
+        logger.warn('[bouncie] OAuth callback accepted static BOUNCIE_OAUTH_STATE');
+      } else {
+        const decoded = jwt.verify(state, config.jwt.secret);
+        if (decoded?.type !== 'bouncie_oauth') throw new Error('invalid state type');
+      }
+    } catch {
+      return res.status(400).send('<h2>Error: Invalid or expired OAuth state</h2><p>Start the connection again from /api/bouncie/auth.</p>');
+    }
 
     const clientId = config.bouncie.clientId;
     const clientSecret = config.bouncie.clientSecret;
     const redirectUri = config.bouncie.redirectUri || 'https://portal.wavespestcontrol.com/api/bouncie/callback';
 
-    logger.info(`[bouncie] Token exchange: client_id=${clientId}, redirect_uri=${redirectUri}, code=${code?.substring(0, 8)}...`);
+    logger.info(`[bouncie] Token exchange started for redirect_uri=${redirectUri}`);
 
     // Exchange code for tokens (JSON body per Bouncie docs)
     let tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
@@ -161,27 +227,23 @@ router.get('/callback', async (req, res, next) => {
     const tokenData = await tokenRes.json();
     currentToken = tokenData.access_token;
     if (tokenData.refresh_token) currentRefresh = tokenData.refresh_token;
+    hydratedTokens = true;
+    await tokenStore.saveTokens({
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token,
+      expiresIn: tokenData.expires_in,
+    });
 
     // Update the bouncie.js service's in-memory tokens too
     try {
       const bouncieService = require('../services/bouncie');
-      if (bouncieService.updateTokens) bouncieService.updateTokens(tokenData.access_token, tokenData.refresh_token);
-    } catch (e) { /* service may not expose this yet */ }
-
-    // Persist tokens to DB so they survive restarts
-    try {
-      const db = require('../models/db');
-      const now = new Date();
-      for (const [envVar, value] of [['BOUNCIE_ACCESS_TOKEN', tokenData.access_token], ['BOUNCIE_REFRESH_TOKEN', tokenData.refresh_token]]) {
-        if (!value) continue;
-        const existing = await db('token_credentials').where({ platform: `bouncie_${envVar.toLowerCase()}` }).first();
-        const row = { platform: `bouncie_${envVar.toLowerCase()}`, token_type: 'oauth', status: 'healthy', last_verified_at: now, env_var_name: envVar, updated_at: now, last_error: null };
-        if (existing) await db('token_credentials').where({ id: existing.id }).update(row);
-        else await db('token_credentials').insert(row);
+      if (bouncieService.updateTokens) {
+        await bouncieService.updateTokens(tokenData.access_token, tokenData.refresh_token, {
+          persist: false,
+          expiresIn: tokenData.expires_in,
+        });
       }
-      // Update the main bouncie entry too
-      await db('token_credentials').where({ platform: 'bouncie' }).update({ status: 'healthy', last_verified_at: now, last_error: null, updated_at: now }).catch(() => {});
-    } catch (e) { logger.error(`[bouncie] Token persistence failed: ${e.message}`); }
+    } catch (e) { /* service may not expose this yet */ }
 
     logger.info('[bouncie] OAuth token exchanged and persisted');
 
@@ -195,14 +257,12 @@ h2{color:#10b981;margin:0 0 16px}.ok{color:#10b981;font-size:24px;margin-right:8
 .label{color:#94a3b8;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
 .warn{color:#f59e0b;font-size:13px;margin-top:16px;padding:12px;background:#f59e0b11;border:1px solid #f59e0b33;border-radius:8px}
 a{color:#0ea5e9;text-decoration:none}</style></head><body><div class="card">
-<h2><span class="ok">&#10003;</span> Bouncie Connected</h2>
-<p>Tokens exchanged and loaded in-memory. Mileage tracking is active.</p>
-<div><div class="label">Access Token</div><div class="field">${masked(tokenData.access_token)}</div></div>
-<div><div class="label">Refresh Token</div><div class="field">${masked(tokenData.refresh_token)}</div></div>
-<div class="warn"><strong>Update Railway env vars</strong> to survive deploys:<br>
-<code>BOUNCIE_ACCESS_TOKEN</code> = ${masked(tokenData.access_token)}<br>
-<code>BOUNCIE_REFRESH_TOKEN</code> = ${masked(tokenData.refresh_token)}<br><br>
-The full tokens are in the server logs.</div>
+	<h2><span class="ok">&#10003;</span> Bouncie Connected</h2>
+	<p>Tokens exchanged, persisted, and loaded in-memory. Mileage tracking is active.</p>
+	<div><div class="label">Access Token</div><div class="field">${masked(tokenData.access_token)}</div></div>
+	<div><div class="label">Refresh Token</div><div class="field">${masked(tokenData.refresh_token)}</div></div>
+	<div class="warn"><strong>Stored in the application database.</strong><br>
+	The callback no longer logs full token values. Keep Railway env vars as a fallback only.</div>
 <p style="margin-top:20px"><a href="/admin/mileage">&#8592; Back to Mileage Dashboard</a></p>
 </div></body></html>`);
   } catch (err) {

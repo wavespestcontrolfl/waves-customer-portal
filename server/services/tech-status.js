@@ -214,7 +214,8 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph }) {
     throw new Error('pingTechLocation: tech_id, lat, lng are required');
   }
 
-  const moving = ignition === true && Number(speed_mph || 0) > 5;
+  const speedMoving = Number(speed_mph || 0) > 5;
+  const moving = ignition === false ? false : speedMoving;
   const derivedStatus = moving ? 'driving' : 'idle';
 
   let row;

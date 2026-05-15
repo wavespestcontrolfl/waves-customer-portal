@@ -150,7 +150,7 @@ async function findNearbyCustomer(lat, lng, radiusMeters = 200) {
  * Falls back to any tech if the assigned-tech query misses (covers crew swaps).
  */
 async function findScheduledJob(techId, customerId, date = new Date()) {
-  const dateStr = date.toISOString().split('T')[0];
+  const dateStr = etDateString(new Date(date));
   try {
     const assigned = await db('scheduled_services')
       .where({ technician_id: techId, customer_id: customerId })
@@ -310,7 +310,7 @@ async function isRecentAutoFlipForCustomer(customerId, cooldownMinutes = 30) {
     const cutoff = new Date(Date.now() - cooldownMinutes * 60_000);
     const row = await db('geofence_events')
       .where({ matched_customer_id: customerId })
-      .whereIn('action_taken', ['auto_flip_en_route', 'auto_flip_dry_run'])
+      .where('action_taken', 'auto_flip_en_route')
       .where('event_timestamp', '>', cutoff)
       .first();
     return !!row;
