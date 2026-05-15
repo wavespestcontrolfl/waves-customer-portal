@@ -61,6 +61,80 @@ export function fmtInt(n) {
   return '$' + Math.round(Number(n)).toLocaleString();
 }
 
+const LAWN_TABLE_MAX_SQFT = 20000;
+const LAWN_FREQS = [4, 6, 9, 12];
+const LAWN_PRICES = {
+  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
+  bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
+  zoysia:       { name: 'Zoysia',        code: 'C2', pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
+  bahia:        { name: 'Bahia',         code: 'D', pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] },
+};
+
+function toPositiveNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function toNonNegativeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function hasNonNegativeNumber(value) {
+  return value !== undefined &&
+    value !== null &&
+    value !== '' &&
+    Number.isFinite(Number(value)) &&
+    Number(value) >= 0;
+}
+
+function normalizeGrassType(grassType) {
+  const raw = String(grassType || '').trim();
+  const compact = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const aliases = {
+    st_augustine: ['A', 'B', 'STAUGUSTINE', 'STAUG'],
+    bermuda: ['C1', 'BERMUDA'],
+    zoysia: ['C2', 'ZOYSIA'],
+    bahia: ['D', 'BAHIA'],
+  };
+  if (LAWN_PRICES[raw]) return raw;
+  for (const [track, values] of Object.entries(aliases)) {
+    if (values.includes(compact)) return track;
+  }
+  return 'st_augustine';
+}
+
+function resolveLawnFreq(freq) {
+  const parsed = Number(freq);
+  return LAWN_FREQS.includes(parsed) ? parsed : 9;
+}
+
+function lawnLookup(lp, sf, freqIdx) {
+  const pts = lp.pts;
+  if (sf <= pts[0][0]) return { monthly: pts[0][freqIdx + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
+  if (sf > LAWN_TABLE_MAX_SQFT) {
+    const lo = pts[pts.length - 2], hi = pts[pts.length - 1];
+    const slope = (hi[freqIdx + 1] - lo[freqIdx + 1]) / (hi[0] - lo[0]);
+    return {
+      monthly: Math.round(hi[freqIdx + 1] + (sf - hi[0]) * slope),
+      pricingBasis: 'EXTRAPOLATED_ABOVE_TABLE_MAX',
+      pricingSource: 'EXTRAPOLATED_TABLE',
+    };
+  }
+  for (let i = 1; i < pts.length; i++) {
+    if (sf <= pts[i][0]) {
+      const lo = pts[i - 1], hi = pts[i];
+      const ratio = (sf - lo[0]) / (hi[0] - lo[0]);
+      return {
+        monthly: Math.round(lo[freqIdx + 1] + ratio * (hi[freqIdx + 1] - lo[freqIdx + 1])),
+        pricingBasis: 'TABLE_INTERPOLATION',
+        pricingSource: 'MARKET_TABLE',
+      };
+    }
+  }
+  return { monthly: pts[pts.length - 1][freqIdx + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
+}
+
 /* ── main engine ────────────────────────────────────────────── */
 
 export function calculateEstimate(inputs) {
@@ -89,6 +163,12 @@ export function calculateEstimate(inputs) {
     plugArea: _plugArea,
     plugSpacing: _plugSpacing,
     grassType: _grassType,
+    lawnFreq: _lawnFreq,
+    measuredTurfSf: _measuredTurfSf,
+    estimatedTurfSf: _estimatedTurfSf,
+    imperviousSurfacePercent: _imperviousSurfacePercent,
+    imperviosSurfacePercent: _imperviosSurfacePercent,
+    estimatedBedAreaPercent: _estimatedBedAreaPercent,
     otLawnType,
     exclSimple: exS,
     exclModerate: exM,
@@ -144,9 +224,8 @@ export function calculateEstimate(inputs) {
   const plugSpacing = Number(_plugSpacing) || 12;
   const bedbugRooms = Number(_bedbugRooms) || 1;
   const fmPts = Number(_foamPoints) || 5;
-  // Backward compat: map old track letters to new keys
-  const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
-  const grassType = TRACK_MAP[_grassType] || _grassType || 'st_augustine';
+  const grassType = normalizeGrassType(_grassType);
+  const lawnFreq = resolveLawnFreq(_lawnFreq);
 
   const LABOR = 35, DRIVE = 20;
   const footprint = homeSqFt > 0 ? Math.round(homeSqFt / stories) : 0;
@@ -199,6 +278,105 @@ export function calculateEstimate(inputs) {
   const atticIsEstimated = inputs.boracareSqftAuto || false;
 
   let R = {}, wgServices = [];
+  let notes = [];
+  function addLawnCustomQuoteNote() {
+    if (notes.some(n => n.type === 'LAWN_CUSTOM_QUOTE')) return;
+    notes.push({
+      type: 'LAWN_CUSTOM_QUOTE',
+      text: 'Turf area exceeds 20,000 sq ft. Pricing was extrapolated and requires field verification/custom quote.',
+      priority: 'HIGH',
+    });
+  }
+
+  function estimateLegacyTurfArea() {
+    let hardscapeEstimate = 800;
+    const propertyTypeKey = String(propertyType || '').toLowerCase();
+    if (propertyTypeKey.includes('town') || propertyTypeKey.includes('duplex')) {
+      hardscapeEstimate = 400 + Math.max(0, Math.round((lotSqFt - 7500) * 0.02));
+    } else if (propertyTypeKey.includes('condo')) {
+      hardscapeEstimate = 200 + Math.max(0, Math.round((lotSqFt - 7500) * 0.05));
+    }
+    else if (propertyTypeKey.includes('commercial')) hardscapeEstimate = lotSqFt * 0.15;
+    else {
+      if (lotSqFt > 7500) hardscapeEstimate += (Math.min(lotSqFt, 15000) - 7500) * 0.03;
+      if (lotSqFt > 15000) hardscapeEstimate += (lotSqFt - 15000) * 0.05;
+    }
+    if (hasPoolCage) hardscapeEstimate += 600;
+    else if (hasPool) hardscapeEstimate += 450;
+    if (hasLargeDriveway) hardscapeEstimate += 300;
+
+    const openArea = Math.max(0, Math.round(lotSqFt - footprint - hardscapeEstimate));
+    let score = 0;
+    if (hasPool) score += 2;
+    if (hasPoolCage) score += 2;
+    if (hasLargeDriveway) score += 2;
+    if (shrubDensity === 'MODERATE') score += 1; else if (shrubDensity === 'HEAVY') score += 2;
+    if (treeDensity === 'MODERATE') score += 1; else if (treeDensity === 'HEAVY') score += 2;
+    if (landscapeComplexity === 'MODERATE') score += 1; else if (landscapeComplexity === 'COMPLEX') score += 2;
+    if (bedArea > 0 && lotSqFt > 0) {
+      const bedRatio = bedArea / lotSqFt;
+      if (bedRatio >= 0.20) score += 3;
+      else if (bedRatio >= 0.10) score += 1;
+    }
+    const turfFactors = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33];
+    return {
+      turfSf: Math.round(openArea * turfFactors[Math.min(score, 9)]),
+      openArea,
+    };
+  }
+
+  function computeTurfArea() {
+    if (hasNonNegativeNumber(_measuredTurfSf)) {
+      const measured = Number(_measuredTurfSf);
+      return { turfSf: measured, turfEstimated: false, turfConfidence: 'HIGH', turfBasis: 'measuredTurfSf', turfFlags: [] };
+    }
+    const estimated = toPositiveNumber(_estimatedTurfSf);
+    if (estimated > 0) {
+      return { turfSf: estimated, turfEstimated: true, turfConfidence: 'MEDIUM', turfBasis: 'estimatedTurfSf', turfFlags: [] };
+    }
+    const hasLotBasedTurfFields =
+      hasNonNegativeNumber(_imperviousSurfacePercent) ||
+      hasNonNegativeNumber(_imperviosSurfacePercent) ||
+      hasNonNegativeNumber(_estimatedBedAreaPercent);
+    if (!hasLotBasedTurfFields) {
+      const legacy = estimateLegacyTurfArea();
+      return {
+        turfSf: legacy.turfSf,
+        turfEstimated: true,
+        turfConfidence: 'LOW',
+        turfBasis: 'legacyHardscapeEstimate',
+        turfOpenArea: legacy.openArea,
+        turfFlags: ['FIELD_VERIFY_TURF_SQFT'],
+      };
+    }
+    const rawImperviousPct = hasNonNegativeNumber(_imperviousSurfacePercent)
+      ? _imperviousSurfacePercent
+      : (hasNonNegativeNumber(_imperviosSurfacePercent) ? _imperviosSurfacePercent : 20);
+    const imperviousPct = toNonNegativeNumber(rawImperviousPct, 20);
+    const openArea = Math.max(0, Math.round(lotSqFt * (1 - Math.min(1, imperviousPct / 100))));
+    const hasBedPercent = hasNonNegativeNumber(_estimatedBedAreaPercent);
+    const hasExplicitBedArea = _bedArea !== undefined && _bedArea !== null && _bedArea !== ''
+      && Number.isFinite(Number(_bedArea)) && Number(_bedArea) >= 0;
+    const turfBedArea = hasBedPercent
+      ? Math.round(openArea * (Number(_estimatedBedAreaPercent) / 100))
+      : (hasExplicitBedArea ? Number(_bedArea) : Math.round(openArea * 0.15));
+    return {
+      turfSf: Math.max(0, Math.round(openArea - turfBedArea)),
+      turfEstimated: true,
+      turfConfidence: 'LOW',
+      turfBasis: 'lotFallback',
+      turfOpenArea: openArea,
+      turfFlags: ['FIELD_VERIFY_TURF_SQFT'],
+    };
+  }
+
+  const turfArea = computeTurfArea();
+  const hasTurfPricedService = svcLawn || svcOnetimeLawn || svcTopdress || svcDethatch || svcPlugging;
+  if (hasTurfPricedService) {
+    turfArea.turfFlags.forEach(flag => {
+      if (!fieldVerify.includes(flag)) fieldVerify.push(flag);
+    });
+  }
 
   /* ── pricing modifiers tracking ─────────────────────────── */
   const modifiers = [];
@@ -367,25 +545,9 @@ export function calculateEstimate(inputs) {
     // ── Smoothed turf factor (~5% per point) ──
     const tfTable = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33];
     const tf = tfTable[Math.min(sc, 9)];
-    const lsf = Math.round(oa * tf);
-
-    // ── Track-based pricing lookup (from Lawn_Pricing_v4_TimeScaled) ──
-    const LAWN_PRICES = {
-      st_augustine: { name: 'St. Augustine', pts: [[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]] },
-      bermuda:      { name: 'Bermuda',       pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,60,86],[6000,40,50,67,97],[7000,40,51,74,108],[8000,42,56,82,120],[10000,48,65,96,142],[12000,55,74,111,165],[15000,65,88,132,199],[20000,81,111,169,256]] },
-      zoysia:       { name: 'Zoysia',        pts: [[0,40,50,60,75],[4000,40,50,60,75],[5000,40,50,61,87],[6000,40,50,68,98],[7000,40,52,75,110],[8000,42,56,83,121],[10000,49,66,97,144],[12000,56,75,112,167],[15000,66,89,134,202],[20000,83,112,171,259]] },
-      bahia:        { name: 'Bahia',         pts: [[0,30,40,50,60],[3000,30,40,50,60],[3500,30,40,50,63],[4000,30,40,50,68],[5000,30,40,55,78],[6000,32,42,61,87],[7000,35,46,67,97],[8000,37,50,73,107],[10000,43,58,86,126],[12000,48,66,98,145],[15000,57,77,117,174],[20000,71,97,148,223]] },
-    };
     const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
-
-    function lawnLookup(sf, freqIdx) {
-      const pts = lp.pts;
-      if (sf >= pts[pts.length - 1][0]) return pts[pts.length - 1][freqIdx + 1];
-      for (let i = 1; i < pts.length; i++) {
-        if (sf <= pts[i][0]) return pts[i - 1][freqIdx + 1];
-      }
-      return pts[pts.length - 1][freqIdx + 1];
-    }
+    const lsf = turfArea.turfSf;
+    const selectedFreq = resolveLawnFreq(lawnFreq);
 
     const freqs = [
       { name: '4x/yr', v: 4 },
@@ -395,14 +557,28 @@ export function calculateEstimate(inputs) {
     ];
     R.lawn = [];
     freqs.forEach((f, i) => {
-      const mo = lawnLookup(lsf, i);
+      const price = lawnLookup(lp, lsf, i);
+      const mo = price.monthly;
       const ann = mo * 12;
       const pa = Math.round(ann / f.v * 100) / 100;
-      const rec = i === 2, dim = i !== 2;
-      R.lawn.push({ pa, v: f.v, ann, mo, name: f.name, recommended: rec, dimmed: dim });
+      const rec = f.v === selectedFreq, dim = !rec;
+      R.lawn.push({ pa, v: f.v, ann, mo, name: f.name, recommended: rec, dimmed: dim, pricingBasis: price.pricingBasis, pricingSource: price.pricingSource });
     });
-    wgServices.push({ name: 'Lawn Care', mo: R.lawn[2].mo });
-    R.lawnMeta = { lsf, sc, tf, oa, grassType, grassName: lp.name, hardscape };
+    const selectedLawn = R.lawn.find(t => t.recommended) || R.lawn[2];
+    wgServices.push({ name: 'Lawn Care', mo: selectedLawn.mo });
+    const customQuoteFlag = lsf > LAWN_TABLE_MAX_SQFT;
+    if (customQuoteFlag) {
+      addLawnCustomQuoteNote();
+    }
+    R.lawnMeta = {
+      lsf, sc, tf, oa, grassType, grassCode: lp.code, grassName: lp.name, hardscape,
+      turfEstimated: turfArea.turfEstimated,
+      turfConfidence: turfArea.turfConfidence,
+      turfBasis: turfArea.turfBasis,
+      customQuoteFlag,
+      pricingBasis: selectedLawn.pricingBasis,
+      pricingSource: selectedLawn.pricingSource,
+    };
   }
 
   /* ── PEST — multi-frequency ──────────────────────────────── */
@@ -591,18 +767,19 @@ export function calculateEstimate(inputs) {
   /* ── One-Time Lawn ───────────────────────────────────────── */
   if (svcOnetimeLawn && lotSqFt > 0) {
     hasOT = true;
-    // v1.5: standalone fungicide fallback base raised — Headway G + liquid follow-up
-    // is $80+ materials on a 6k sf lawn, $73 base was underpricing mid-size properties
-    let enhPA = 55 * 12 / 9;
-    if (R.lawn && R.lawn[2]) enhPA = R.lawn[2].pa;
-    const isFungicide = otLawnType === 'FUNGICIDE';
-    const standaloneFungBase = Math.max(enhPA, 95); // higher floor for standalone fungicide
-    let bl = Math.max(85, Math.round((isFungicide && !R.lawn ? standaloneFungBase : enhPA) * 1.30));
+    const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
+    const selectedFreq = resolveLawnFreq(lawnFreq);
+    const selectedFreqIdx = LAWN_FREQS.indexOf(selectedFreq);
+    const baselinePrice = lawnLookup(lp, turfArea.turfSf, selectedFreqIdx >= 0 ? selectedFreqIdx : 2);
+    const baselineMonthly = baselinePrice.monthly;
+    if (baselinePrice.pricingBasis === 'EXTRAPOLATED_ABOVE_TABLE_MAX') addLawnCustomQuoteNote();
+    const baselinePerApp = Math.round((baselineMonthly * 12) / selectedFreq * 100) / 100;
+    let bl = Math.max(115, Math.round(baselinePerApp * 1.50));
     let tm = 1.0, tl = 'Fertilization';
-    if (otLawnType === 'WEED') { tm = 1.15; tl = 'Weed Control'; }
+    if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
-    else if (otLawnType === 'FUNGICIDE') { tm = 1.45; tl = 'Fungicide'; }
-    const fp = otP(Math.max(85, Math.round(bl * tm)));
+    else if (otLawnType === 'FUNGICIDE') { tm = 1.38; tl = 'Fungicide'; }
+    const fp = otP(Math.max(115, Math.round(bl * tm)));
     otItems.push({ name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl });
   }
 
@@ -633,12 +810,16 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Top Dressing ────────────────────────────────────────── */
-  const lawnEst = R.lawn ? Math.round(lotSqFt * 0.55 * (R.lawn[2] ? 0.65 : 0.55)) : Math.round(lotSqFt * 0.35);
-  if (svcTopdress && lawnEst > 0) {
+  const hasTurfEstimate = turfArea.turfSf !== undefined && turfArea.turfSf !== null && turfArea.turfSf !== '';
+  const lawnEst = hasTurfEstimate
+    ? turfArea.turfSf
+    : (R.lawn ? Math.round(lotSqFt * 0.55 * (R.lawn[2] ? 0.65 : 0.55)) : Math.round(lotSqFt * 0.35));
+  const topDressingLawnEst = svcLawn ? lawnEst : Math.round(lawnEst * 0.65);
+  if (svcTopdress && topDressingLawnEst > 0) {
     hasOT = true;
-    const lk = lawnEst / 1000;
-    const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (lawnEst / 130 + 30) / 60) / 0.40)));
-    const e4 = otP(Math.max(350, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (lawnEst / 130 * 1.5 + 45) / 60) / 0.40)));
+    const lk = topDressingLawnEst / 1000;
+    const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (topDressingLawnEst / 130 + 30) / 60) / 0.40)));
+    const e4 = otP(Math.max(350, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (topDressingLawnEst / 130 * 1.5 + 45) / 60) / 0.40)));
     R.td = e8;
     otItems.push({ name: 'Top Dressing', price: e8, detail: 'St. Augustine standard', depth: '1/8"' });
     R.tdTiers = [
@@ -867,7 +1048,8 @@ export function calculateEstimate(inputs) {
   let ac = 0, ra = 0;
   // Track per-line revenue for margin check
   const lineItems = [];
-  if (R.lawn) { ac++; ra += R.lawn[2].ann; lineItems.push({ name: 'Lawn Care', ann: R.lawn[2].ann }); }
+  const selectedRecurringLawn = R.lawn ? (R.lawn.find(t => t.recommended) || R.lawn[2]) : null;
+  if (selectedRecurringLawn) { ac++; ra += selectedRecurringLawn.ann; lineItems.push({ name: 'Lawn Care', ann: selectedRecurringLawn.ann }); }
   if (R.pest) { ac++; ra += R.pest.ann; lineItems.push({ name: 'Pest Control', ann: R.pest.ann }); }
   if (R.ts) { ac++; ra += R.ts[1].ann; lineItems.push({ name: 'Tree & Shrub', ann: R.ts[1].ann }); }
   // Palm Injection intentionally excluded from WaveGuard tier count + discounted total —
@@ -937,6 +1119,10 @@ export function calculateEstimate(inputs) {
       lotSqFt,
       stories,
       footprint,
+      turfSf: turfArea.turfSf,
+      turfEstimated: turfArea.turfEstimated,
+      turfConfidence: turfArea.turfConfidence,
+      turfBasis: turfArea.turfBasis,
       pool: hasPool,
       poolCage: hasPoolCage,
       driveway: hasLargeDriveway,
@@ -974,6 +1160,7 @@ export function calculateEstimate(inputs) {
     results: R,
     specItems, // full array including onProg items for display
     fieldVerify,
+    notes,
     urgency,
     urgLabel,
     urgMult,

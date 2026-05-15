@@ -559,10 +559,12 @@ Return a JSON object with exactly these fields:
 // ENRICHED PROFILE — merges all data sources
 // ─────────────────────────────────────────────
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
-  const imperviousSurfacePercent = ai?.imperviousSurfacePercent ?? ai?.imperviosSurfacePercent ?? 20;
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
   const waterDistance = ai?.waterDistance || 'NONE';
-
+  const imperviousSurfacePercent = firstNonNegativeNumber(
+    ai?.imperviousSurfacePercent,
+    ai?.imperviosSurfacePercent
+  );
   const profile = {
     // ── ADDRESS ──
     address: rc?.formattedAddress || '',
@@ -612,7 +614,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     landscapeComplexity: ai?.landscapeComplexity || 'MODERATE',
     estimatedPalmCount: ai?.estimatedPalmCount || 0,
     estimatedTreeCount: ai?.estimatedTreeCount || 0,
-    estimatedBedAreaSf: ai?.estimatedBedAreaSf || 0,
+    estimatedBedAreaSf: ai?.estimatedBedAreaSf,
     shadeCoveragePercent: ai?.shadeCoveragePercent || 0,
 
     // ── TURF ──
@@ -707,7 +709,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
         waterDistance
       ),
       // Lawn: impervious surface correction
-      turfCorrectionFactor: imperviousSurfacePercent
+      turfCorrectionFactor: imperviousSurfacePercent !== undefined
         ? (100 - imperviousSurfacePercent) / 100
         : 0.80,
       // Overall pest pressure multiplier
@@ -782,6 +784,15 @@ function buildFallbackPropertyDataQuality(rc) {
 // ─────────────────────────────────────────────
 // HELPER FUNCTIONS
 // ─────────────────────────────────────────────
+
+function firstNonNegativeNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return undefined;
+}
 
 function detectCategory(rc) {
   if (!rc) return 'RESIDENTIAL';
@@ -1213,7 +1224,21 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Grass track — v2 accepts old A/B/C1/C2/D letters AND new keys.
   const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
   const rawGrass = o.grassType || 'st_augustine';
-  const track = TRACK_MAP[rawGrass] || rawGrass;
+  const rawGrassKey = String(rawGrass).trim().toUpperCase();
+  const rawGrassCompact = rawGrassKey.replace(/[^A-Z0-9]/g, '');
+  const ALIAS_TRACK = {
+    A: 'st_augustine',
+    B: 'st_augustine',
+    STAUGUSTINE: 'st_augustine',
+    STAUG: 'st_augustine',
+    C1: 'bermuda',
+    BERMUDA: 'bermuda',
+    C2: 'zoysia',
+    ZOYSIA: 'zoysia',
+    D: 'bahia',
+    BAHIA: 'bahia',
+  };
+  const track = TRACK_MAP[rawGrass] || ALIAS_TRACK[rawGrassCompact] || rawGrass;
 
   // Frequency integer → v1 key
   const PEST_FREQ = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
@@ -1241,7 +1266,19 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
 
   // Recurring
   if (sel.has('PEST')) services.pest = { frequency: pestFreq, roachType };
-  if (sel.has('LAWN')) services.lawn = { track, tier: lawnTier };
+  if (sel.has('LAWN')) {
+    services.lawn = {
+      track,
+      tier: lawnTier,
+      lawnFreq: Number(o.lawnFreq) || 9,
+      useLawnCostFloor: !!o.useLawnCostFloor,
+      targetLawnGrossMargin: o.targetLawnGrossMargin,
+      routeDriveMinutes: o.routeDriveMinutes,
+      lawnMaterialCostPerK: o.lawnMaterialCostPerK,
+      lawnLaborMinutesBase: o.lawnLaborMinutesBase,
+      lawnLaborMinutesPerK: o.lawnLaborMinutesPerK,
+    };
+  }
   if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
   if (sel.has('PALM_INJECTION')) {
     const totalPalmCount = Math.max(1, Number(p.estimatedPalmCount || p.palmCount) || 3);
@@ -1267,16 +1304,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // applied inside priceOneTimePest/priceOneTimeLawn via top-level override.
   if (sel.has('OT_PEST')) services.oneTimePest = { urgency, afterHours };
   if (sel.has('OT_LAWN')) {
-    const LAWN_TREATMENT_MAP = {
-      FERT: 'fertilization',
-      WEED: 'weed',
-      PEST: 'pest',
-      FUNGICIDE: 'fungicide',
-    };
-    const treatmentType = LAWN_TREATMENT_MAP[String(o.onetimeLawnType || 'FERT').toUpperCase()] || 'fertilization';
+    const otLawnType = String(o.onetimeLawnType || 'WEED').toUpperCase();
+    const OT_LAWN_TYPE = { FERT: 'fert', WEED: 'weed', PEST: 'pest', FUNGICIDE: 'fungicide' };
     services.oneTimeLawn = {
-      treatmentType,
+      treatmentType: OT_LAWN_TYPE[otLawnType] || 'weed',
       urgency, afterHours,
+      track,
+      tier: lawnTier,
+      lawnFreq: Number(o.lawnFreq) || 9,
     };
   }
   if (sel.has('OT_MOSQUITO')) {
@@ -1387,8 +1422,13 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     lotSqFt,
     propertyType: normalizePropertyType(p.propertyType),
     serviceZone: p.serviceZone,
-    lawnSqFt: Number(p.estimatedTurfSf) || 0,
-    bedArea: Number(p.estimatedBedAreaSf) || 0,
+    measuredTurfSf: p.measuredTurfSf,
+    estimatedTurfSf: p.estimatedTurfSf,
+    imperviousSurfacePercent: p.imperviousSurfacePercent,
+    imperviosSurfacePercent: p.imperviosSurfacePercent,
+    estimatedBedAreaSf: p.estimatedBedAreaSf,
+    estimatedBedAreaPercent: p.estimatedBedAreaPercent,
+    bedArea: p.estimatedBedAreaSf,
     features,
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,
@@ -1403,6 +1443,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     fenceType: p.fenceType,
     outbuildingCount: p.outbuildingCount,
     attachedGarage: p.attachedGarage,
+    maintenanceCondition: p.maintenanceCondition,
+    overallPestPressure: p.overallPestPressure,
     recurringCustomer,
     // Step 2b-4: pass-through. v1 engine applies it to recurring annual
     // after WaveGuard, capped at base — exact mirror of v2 calcTotals.
@@ -1657,4 +1699,5 @@ function extractOpenAIText(data) {
 
 module.exports = router;
 module.exports.performPropertyLookup = performPropertyLookup;
+module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;

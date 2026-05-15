@@ -118,8 +118,25 @@ function mapV1ToLegacyShape(v1Result) {
       name: `${t.visits}x`,
       recommended: !!t.recommended, dimmed: !t.recommended,
       hasLandscape: t.visits >= 12,
+      pricingSource: t.pricingSource,
+      pricingBasis: t.pricingBasis,
+      costFloorApplied: !!t.costFloorApplied,
     }));
-    R.lawnMeta = { lsf: lawnLI.lawnSqFt || 0, sc: 0, tf: 0, oa: 0 };
+    R.lawnMeta = {
+      lsf: lawnLI.lawnSqFt || 0,
+      sc: 0,
+      tf: 0,
+      oa: 0,
+      grassType: lawnLI.track,
+      grassCode: lawnLI.grassCode,
+      grassName: lawnLI.grassType,
+      turfEstimated: lawnLI.turfEstimated,
+      turfConfidence: lawnLI.turfConfidence,
+      turfBasis: lawnLI.turfBasis,
+      customQuoteFlag: !!lawnLI.customQuoteFlag,
+      pricingBasis: lawnLI.pricingBasis,
+      pricingSource: lawnLI.pricingSource,
+    };
   }
 
   // Tree & Shrub → R.ts, R.tsMeta
@@ -313,7 +330,7 @@ function mapV1ToLegacyShape(v1Result) {
   return {
     property: legacyProperty,
     productionDiagnostics: pestLI?.productionDiagnostics || null,
-    fieldVerify: [],
+    fieldVerify: v1Result.fieldVerify || [],
     notes: v1Result.notes || [],
     urgency: { mult: 1, label: '' },
     recurringCustomer: false,
