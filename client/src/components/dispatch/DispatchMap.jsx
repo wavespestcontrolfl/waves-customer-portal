@@ -5,10 +5,10 @@
  * marker rendering).
  *
  * Markers:
- *   - <Marker> per tech with valid lat/lng → "truck" pin colored by
+ *   - <Marker> per tech with valid lat/lng → Waves van pin colored by
  *     tech.id (deterministic hash → palette). Click → setSelectedTechId.
  *   - <Marker> per job with valid lat/lng → "job" pin colored by the
- *     assigned technician_id (matches the tech truck color so unassigned
+ *     assigned technician_id (matches the tech van color so unassigned
  *     jobs render in a neutral gray). Click → onSelectJob(job.id) opens
  *     the JobDrawer; drag onto a tech roster card → reassign.
  *
@@ -82,15 +82,33 @@ function colorForTech(techId) {
 }
 
 function svgPin(color, isSelected = false, isTruck = false) {
-  // Inline SVG so we don't ship marker images. Truck pins are diamond,
-  // job pins are circles — gives an at-a-glance read of "tech is here"
-  // vs "job is there" without legend.
+  // Inline SVG so we don't ship marker images. Tech pins are Waves
+  // van icons; job pins stay circles for an at-a-glance "tech is here"
+  // vs "job is there" read without a legend.
   const stroke = isSelected ? '#18181B' : '#FFFFFF';
   const strokeWidth = isSelected ? 3 : 1.5;
+  if (isTruck) {
+    const size = isSelected ? 38 : 34;
+    const haloStroke = isSelected ? '#18181B' : color;
+    const stripe = color === '#F0A500' ? '#0A7EC2' : '#F0A500';
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 40 40">
+        <circle cx="20" cy="20" r="${isSelected ? 17 : 15}" fill="#FFFFFF" stroke="${haloStroke}" stroke-width="${isSelected ? 3 : 2}"/>
+        <g transform="translate(4 10)">
+          <path d="M3 8.5C3 6.6 4.6 5 6.5 5h13.6c1.7 0 3.2.9 4.1 2.3l2.7 4.2H31c1.1 0 2 .9 2 2V18H3V8.5Z" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linejoin="round"/>
+          <path d="M7 8h6.6v4.1H7V8Zm9 0h4.2c.8 0 1.5.4 1.9 1.1l1.8 3H16V8Z" fill="#DFF2FF"/>
+          <path d="M5.3 14.6h25.8" stroke="${stripe}" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="10" cy="18" r="3.1" fill="#18181B"/>
+          <circle cx="26" cy="18" r="3.1" fill="#18181B"/>
+          <circle cx="10" cy="18" r="1.2" fill="#FFFFFF"/>
+          <circle cx="26" cy="18" r="1.2" fill="#FFFFFF"/>
+          <circle cx="30" cy="7" r="3" fill="#FFFFFF" stroke="${color}" stroke-width="1.5"/>
+        </g>
+      </svg>`;
+    return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+  }
   const size = isSelected ? 28 : 22;
-  const shape = isTruck
-    ? `<polygon points="14,2 26,14 14,26 2,14" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`
-    : `<circle cx="14" cy="14" r="9" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`;
+  const shape = `<circle cx="14" cy="14" r="9" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 28 28">${shape}</svg>`;
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
