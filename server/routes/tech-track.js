@@ -33,7 +33,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
 const config = require('../config');
@@ -42,10 +42,9 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const trackTransitions = require('../services/track-transitions');
 const { transitionJobStatus } = require('../services/job-status');
 const {
-  hashBuffer,
-  hashPhotoChainPayload,
-  latestPhotoHash,
-} = require('../services/service-report/photo-chain');
+  uploadServicePhotoBuffer,
+  VALID_PHOTO_TYPES,
+} = require('../services/service-photos');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -58,40 +57,6 @@ const s3 = new S3Client({
     ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
     : undefined,
 });
-const SERVICE_PHOTO_PREFIX = 'service-photos/';
-
-// service_photos.photo_type is a Postgres enum: before / after /
-// issue / progress (see initial migration 20260401000001). Reject
-// anything else with 400 — the DB CHECK would otherwise convert to
-// a 500.
-const VALID_PHOTO_TYPES = new Set(['before', 'after', 'issue', 'progress']);
-
-function nullIfEmpty(value) {
-  if (value == null) return null;
-  const text = String(value).trim();
-  return text ? text : null;
-}
-
-function numberOrNull(value) {
-  if (value == null || value === '') return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function parseJsonOrNull(value) {
-  if (value == null || value === '') return null;
-  if (typeof value === 'object') return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-function dateOrNow(value) {
-  const date = value ? new Date(value) : new Date();
-  return Number.isNaN(date.getTime()) ? new Date() : date;
-}
 
 // POST /api/tech/services/:id/en-route
 router.post('/:id/en-route', async (req, res, next) => {
@@ -250,70 +215,25 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       });
     }
 
-    const safeName = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const key = `${SERVICE_PHOTO_PREFIX}${serviceRecord.id}/${Date.now()}-${safeName}`;
-    await s3.send(new PutObjectCommand({
-      Bucket: config.s3.bucket,
-      Key: key,
-      Body: req.file.buffer,
-      ContentType: req.file.mimetype,
-    }));
-
-    const servicePhotoCols = await db('service_photos').columnInfo().catch(() => ({}));
-    const capturedAt = dateOrNow(req.body.capturedAt);
-    const imageHash = servicePhotoCols.image_sha256 ? hashBuffer(req.file.buffer) : null;
-    const sortOrder = parseInt(req.body.sortOrder, 10) || 0;
-    let row;
-    await db.transaction(async (trx) => {
-      const insert = {
-        service_record_id: serviceRecord.id,
-        photo_type: photoType,
-        s3_key: key,
-        caption: nullIfEmpty(req.body.caption),
-        sort_order: sortOrder,
-      };
-      if (servicePhotoCols.storage_key) insert.storage_key = key;
-      if (servicePhotoCols.thumbnail_key) insert.thumbnail_key = nullIfEmpty(req.body.thumbnailKey);
-      if (servicePhotoCols.state_badge) insert.state_badge = nullIfEmpty(req.body.stateBadge);
-      if (servicePhotoCols.zone_id) insert.zone_id = nullIfEmpty(req.body.zoneId);
-      if (servicePhotoCols.finding_id) insert.finding_id = nullIfEmpty(req.body.findingId);
-      if (servicePhotoCols.gps_lat) insert.gps_lat = numberOrNull(req.body.gpsLat);
-      if (servicePhotoCols.gps_lng) insert.gps_lng = numberOrNull(req.body.gpsLng);
-      if (servicePhotoCols.captured_at) insert.captured_at = capturedAt;
-      if (servicePhotoCols.device) insert.device = nullIfEmpty(req.body.device);
-      if (servicePhotoCols.app_version) insert.app_version = nullIfEmpty(req.body.appVersion);
-      if (servicePhotoCols.ai_tags) insert.ai_tags = parseJsonOrNull(req.body.aiTags);
-      if (servicePhotoCols.annotation) insert.annotation = parseJsonOrNull(req.body.annotation);
-      if (servicePhotoCols.image_sha256) insert.image_sha256 = imageHash;
-
-      const canHashChain = servicePhotoCols.hash_sha256
-        && servicePhotoCols.prev_hash_sha256
-        && servicePhotoCols.captured_at;
-      const prevHash = canHashChain ? await latestPhotoHash(trx, serviceRecord.id) : null;
-      if (canHashChain) insert.prev_hash_sha256 = prevHash;
-
-      const returning = [
-        'id',
-        'service_record_id',
-        'photo_type',
-        's3_key',
-        'storage_key',
-        'caption',
-        'sort_order',
-        'state_badge',
-        'zone_id',
-        'captured_at',
-        'image_sha256',
-        'hash_sha256',
-        'prev_hash_sha256',
-        'created_at',
-      ].filter((column) => column === 'id' || servicePhotoCols[column]);
-      [row] = await trx('service_photos').insert(insert).returning(returning);
-      if (canHashChain) {
-        const hash = hashPhotoChainPayload(row, prevHash);
-        await trx('service_photos').where({ id: row.id }).update({ hash_sha256: hash });
-        row.hash_sha256 = hash;
-      }
+    const row = await uploadServicePhotoBuffer({
+      serviceRecordId: serviceRecord.id,
+      buffer: req.file.buffer,
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      photoType,
+      sortOrder: req.body.sortOrder,
+      caption: req.body.caption,
+      thumbnailKey: req.body.thumbnailKey,
+      stateBadge: req.body.stateBadge,
+      zoneId: req.body.zoneId,
+      findingId: req.body.findingId,
+      gpsLat: req.body.gpsLat,
+      gpsLng: req.body.gpsLng,
+      capturedAt: req.body.capturedAt,
+      device: req.body.device,
+      appVersion: req.body.appVersion,
+      aiTags: req.body.aiTags,
+      annotation: req.body.annotation,
     });
 
     logger.info(
