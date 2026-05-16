@@ -4,7 +4,6 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
-import BrandFooter from '../components/BrandFooter';
 
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
@@ -132,7 +131,6 @@ function Page({ children }) {
       <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto' }}>
         {children}
       </div>
-      <BrandFooter />
     </div>
   );
 }
@@ -266,39 +264,6 @@ function TrackerMap({ tech, property }) {
   );
 }
 
-function PrepChecklist() {
-  const [open, setOpen] = useState(false);
-  const items = ['Gates unlocked', 'Pets inside or secured', 'Sprinklers off until tonight'];
-  return (
-    <div style={{
-      marginTop: 16, padding: '14px 18px', background: COLORS.white,
-      borderRadius: 12, border: `1px solid ${COLORS.slate200}`,
-    }}>
-      <button
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        style={{
-          width: '100%', display: 'flex', justifyContent: 'space-between',
-          alignItems: 'center', background: 'none', border: 'none',
-          cursor: 'pointer', fontFamily: FONT_BODY, fontSize: 16,
-          fontWeight: 600, color: COLORS.blueDeeper, padding: 0,
-        }}
-      >
-        <span>Quick prep</span>
-        <span style={{ fontSize: 14, color: COLORS.textCaption }}>{open ? '▴' : '▾'}</span>
-      </button>
-      {open ? (
-        <ul style={{
-          margin: '12px 0 0', paddingLeft: 22, fontSize: 15,
-          color: COLORS.textBody, lineHeight: 1.7,
-        }}>
-          {items.map((t) => <li key={t}>{t}</li>)}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
 function Card({ children, accent }) {
   return (
     <div style={{
@@ -364,16 +329,10 @@ function TechBlock({ tech, size = 'md' }) {
 function ServiceMeta({ data }) {
   const window = formatWindow(data.window?.start, data.window?.end);
   const addr = data.property?.addressLine1;
-  const summary = data.service?.summary;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${COLORS.offWhite}` }}>
       <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 4 }}>Today's visit</div>
       <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.navy }}>{data.service?.type}</div>
-      {summary ? (
-        <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 6, lineHeight: 1.5 }}>
-          {summary}
-        </div>
-      ) : null}
       {window ? (
         <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10 }}>{window}</div>
       ) : null}
@@ -461,11 +420,9 @@ function EnRouteCard({ data }) {
           href={`sms:${WAVES_PHONE_TEL}`}
           style={{ ...GOLD_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >
-          TEXT WAVES
+          TEXT {techFirst.toUpperCase()}
         </a>
       </Card>
-
-      <PrepChecklist />
     </>
   );
 }
