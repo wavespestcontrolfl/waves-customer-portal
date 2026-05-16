@@ -17,17 +17,15 @@ const GLOBAL = {
   CONDITIONAL_CEILING: 60,    // $/property/yr max conditional material before reprice
 };
 
-// ── Zone Multipliers ──────────────────────────────────────────
-// Must match modifiers.zoneMultiplier(). Startup assertion in
-// estimate-engine.js verifies alignment at module load.
-// Session 3 aligned v1, v2, and DB to these values (changelog id=3).
-// Prior v1 had Zone C at 1.10 (vs 1.12 in v2/DB) and was missing Zone D entirely.
+// ── Service Zones ─────────────────────────────────────────────
+// Zones are retained as routing/metadata labels only. They do not affect
+// estimator pricing; all multipliers are intentionally neutral.
 const ZONES = {
   A: { name: 'Manatee/Sarasota core', multiplier: 1.00 },
-  B: { name: 'Extended service area', multiplier: 1.05 },
-  C: { name: 'Charlotte outskirts',   multiplier: 1.12 },
-  D: { name: 'Far reach',              multiplier: 1.20 },
-  UNKNOWN: { name: 'Default',          multiplier: 1.00 },  // Codifies live behavior — modifiers.zoneMultiplier() default returns 1.0.
+  B: { name: 'Extended service area', multiplier: 1.00 },
+  C: { name: 'Charlotte outskirts',   multiplier: 1.00 },
+  D: { name: 'Far reach',              multiplier: 1.00 },
+  UNKNOWN: { name: 'Default',          multiplier: 1.00 },
 };
 
 // ── Urgency Multipliers ──────────────────────────────────────

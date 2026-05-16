@@ -23,14 +23,14 @@ Single source of truth for what this engine prices, how, and with what constants
 | `CONDITIONAL_CEILING` | $60 | Max conditional material/yr before reprice |
 | `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; 3.99% added at checkout) |
 
-**Zone multipliers** (applied after all service pricing):
+**Service zones** (routing/metadata only; no pricing effect):
 
-| Zone | Area | Multiplier |
+| Zone | Area | Pricing multiplier |
 |---|---|---|
 | A | Manatee/Sarasota core | 1.00 |
-| B | Extended service area | 1.05 |
-| C | Charlotte outskirts | 1.12 |
-| D | Far reach | 1.20 |
+| B | Extended service area | 1.00 |
+| C | Charlotte outskirts | 1.00 |
+| D | Far reach | 1.00 |
 | UNKNOWN | default | 1.00 |
 
 **Urgency multipliers** (Routine is no-op):
@@ -75,7 +75,7 @@ Single source of truth for what this engine prices, how, and with what constants
 
 **Lot size:** recurring pest price currently has no lot-size dollar adder. Lot size feeds `productionDiagnostics.breakdown.lot` only, so it is visible for calibration/manual review but does not change `basePrice`, `perApp`, annual, or monthly price until the production-minute model is explicitly cut over.
 
-**Annual prepay:** acceptance/conversion invoices annual prepay as `estimate.monthly_total × 12`, rounded to cents. This intentionally preserves the selected frequency, zone multiplier, WaveGuard bundle discount, and any recurring price adjustments already reflected in the accepted quote; it is not `basePrice × 4`.
+**Annual prepay:** acceptance/conversion invoices annual prepay as `estimate.monthly_total × 12`, rounded to cents. This intentionally preserves the selected frequency, WaveGuard bundle discount, and any recurring price adjustments already reflected in the accepted quote; it is not `basePrice × 4`.
 
 **Production diagnostics:** pest results include `productionDiagnostics` with estimated minutes, minute breakdown, `pricingConfidence` (`high`/`medium`/`low`), and `reviewReasons`. This is shadow-only and does not drive price until calibrated against Bouncie/on-site actuals.
 

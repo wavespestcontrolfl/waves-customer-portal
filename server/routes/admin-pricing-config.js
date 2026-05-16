@@ -8,6 +8,14 @@ const { BED_BUG } = require('../services/pricing-engine/constants');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+const SERVICE_ZONE_NAMES = {
+  A: 'Manatee/Sarasota core',
+  B: 'Extended service area',
+  C: 'Charlotte outskirts',
+  D: 'Far reach',
+  UNKNOWN: 'Default',
+};
+
 const ESTIMATE_COST_FALLBACKS = {
   pest_control: {
     serviceTypes: ['Quarterly Pest Control', 'Pest Control'],
@@ -123,6 +131,42 @@ async function getInventoryCostEstimate(serviceKey, dimensions) {
   return result;
 }
 
+function parseConfigData(data) {
+  if (typeof data !== 'string') return data;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return data;
+  }
+}
+
+function neutralizeZoneConfig(data = {}) {
+  return Object.fromEntries(
+    Object.entries(SERVICE_ZONE_NAMES).map(([key, defaultName]) => [
+      key,
+      {
+        name: data?.[key]?.name || defaultName,
+        multiplier: 1.00,
+      },
+    ])
+  );
+}
+
+function normalizePricingConfigRow(row) {
+  const data = parseConfigData(row.data);
+  if (row.config_key !== 'zone_multipliers') return { ...row, data };
+  return {
+    ...row,
+    name: row.name === 'Service Zone Multipliers' ? 'Service Zones' : row.name,
+    data: neutralizeZoneConfig(data),
+  };
+}
+
+function normalizeIncomingConfigData(configKey, data) {
+  if (configKey !== 'zone_multipliers') return data;
+  return neutralizeZoneConfig(data);
+}
+
 async function ensureTable() {
   if (!(await db.schema.hasTable('pricing_config'))) {
     await db.schema.createTable('pricing_config', t => {
@@ -144,8 +188,8 @@ async function ensureTable() {
       { config_key: 'waveguard_tiers', name: 'WaveGuard Bundle Discounts', category: 'waveguard', sort_order: 10, data: JSON.stringify({ bronze:{min_services:1,discount:0},silver:{min_services:2,discount:0.10},gold:{min_services:3,discount:0.15},platinum:{min_services:4,discount:0.20} }) },
       { config_key: 'waveguard_membership', name: 'WaveGuard Membership Fee', category: 'waveguard', sort_order: 11, data: JSON.stringify({ fee:99, waived_with_prepay:true }) },
       { config_key: 'lawn_st_augustine', name: 'St. Augustine', category: 'lawn', sort_order: 20, data: JSON.stringify([[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]]) },
-      // Zone multipliers — must match constants.ZONES / modifiers.zoneMultiplier
-      { config_key: 'zone_multipliers', name: 'Service Zone Multipliers', category: 'zone', sort_order: 1, data: JSON.stringify({ A: { name: 'Manatee/Sarasota core', multiplier: 1.00 }, B: { name: 'Extended service area', multiplier: 1.05 }, C: { name: 'Charlotte outskirts', multiplier: 1.12 }, D: { name: 'Far reach', multiplier: 1.20 }, UNKNOWN: { name: 'Default', multiplier: 1.05 } }) },
+      // Service zones — metadata only; no pricing multiplier.
+      { config_key: 'zone_multipliers', name: 'Service Zones', category: 'zone', sort_order: 1, data: JSON.stringify({ A: { name: 'Manatee/Sarasota core', multiplier: 1.00 }, B: { name: 'Extended service area', multiplier: 1.00 }, C: { name: 'Charlotte outskirts', multiplier: 1.00 }, D: { name: 'Far reach', multiplier: 1.00 }, UNKNOWN: { name: 'Default', multiplier: 1.00 } }) },
 
       // Global constants
       { config_key: 'global_labor_rate', name: 'Loaded Labor Rate', category: 'global', sort_order: 1, data: JSON.stringify({ value: 35, unit: '$/hr', description: 'Wages + benefits + WC + vehicle + insurance' }) },
@@ -214,7 +258,7 @@ router.get('/', async (req, res, next) => {
     let query = db('pricing_config').orderBy('category').orderBy('sort_order');
     if (category) query = query.where({ category });
     const configs = await query;
-    res.json({ configs: configs.map(c => ({ ...c, data: typeof c.data === 'string' ? JSON.parse(c.data) : c.data })) });
+    res.json({ configs: configs.map(normalizePricingConfigRow) });
   } catch (err) { next(err); }
 });
 
@@ -440,8 +484,7 @@ router.get('/:key', async (req, res, next) => {
   try {
     const config = await db('pricing_config').where({ config_key: req.params.key }).first();
     if (!config) return res.status(404).json({ error: 'Config not found' });
-    config.data = typeof config.data === 'string' ? JSON.parse(config.data) : config.data;
-    res.json(config);
+    res.json(normalizePricingConfigRow(config));
   } catch (err) { next(err); }
 });
 
@@ -455,7 +498,8 @@ router.put('/:key', async (req, res, next) => {
     if (!oldConfig) return res.status(404).json({ error: 'Config not found' });
 
     const updates = { updated_at: new Date() };
-    if (data !== undefined) updates.data = JSON.stringify(data);
+    const normalizedData = data !== undefined ? normalizeIncomingConfigData(req.params.key, data) : undefined;
+    if (normalizedData !== undefined) updates.data = JSON.stringify(normalizedData);
     if (name !== undefined) updates.name = name;
     if (description !== undefined) updates.description = description;
 
@@ -473,12 +517,12 @@ router.put('/:key', async (req, res, next) => {
     } catch { /* non-fatal */ }
 
     // Audit log
-    if (data !== undefined) {
+    if (normalizedData !== undefined) {
       try {
         await db('pricing_config_audit').insert({
           config_key: req.params.key,
           old_value: JSON.stringify(oldConfig.data),
-          new_value: JSON.stringify(data),
+          new_value: JSON.stringify(normalizedData),
           changed_by: req.admin?.name || 'admin',
           reason: reason || null
         });

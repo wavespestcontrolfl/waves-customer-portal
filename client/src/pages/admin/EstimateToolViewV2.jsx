@@ -342,7 +342,7 @@ function CheckboxV2({ k, label }) {
   const { form, toggle } = useContext(FormCtx);
   const checked = !!form[k];
   return (
-    <label className="flex items-center gap-2.5 mb-2.5 cursor-pointer text-14 text-zinc-900 select-none">
+    <label className="relative flex items-center gap-2.5 mb-2.5 cursor-pointer text-14 text-zinc-900 select-none">
       {" "}
       <span
         className={cn(

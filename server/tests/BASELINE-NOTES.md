@@ -8,6 +8,21 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-05-16 service zone pricing removal
+
+Service Zone A/B/C/D is now routing/metadata only in the modular estimator. It no longer applies a recurring-service price multiplier.
+
+Updated local v1 regression baselines:
+- `zone_b_monthly_pest_bermuda_premium`
+- `zone_c_bimonthly_pest_zoysia_standard_treeshrub`
+- `zone_d_quarterly_pest_bahia_basic`
+- `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub`
+- `v1adapter_zone_d_quarterly_pest_bahia`
+
+See pricing_changelog entry `codex-2026-05-16` for rationale.
+
+---
+
 ## Baseline context that differed from the original v4.3 build brief
 
 ### Anomaly 1 — Platinum WaveGuard already at 20%, not 18%
@@ -135,7 +150,7 @@ Extraction was behavior-preserving by construction. The 170-line inline remap (p
 
 **Structural parity:** proven. LOCAL and HTTP produce envelopes with identical keys, types, and array shapes.
 
-**Numeric parity:** data-state dependent. LOCAL mode reads `pricing_config` from the local DB, which lags prod. Cases touching DB-driven values (zone multipliers, lawn brackets, pest base rates, discount tiers) will diverge numerically in LOCAL runs until a prod-mirror seed script lands. See `project_prod_mirror_local_db.md` memory — tracked as a Session 9 dependency. Until then, treat LOCAL-mode numeric diffs as data-state drift, not engine regressions; use HTTP mode against prod for numeric baseline verification.
+**Numeric parity:** data-state dependent. LOCAL mode reads `pricing_config` from the local DB, which lags prod. Cases touching DB-driven values (lawn brackets, pest base rates, discount tiers) will diverge numerically in LOCAL runs until a prod-mirror seed script lands. See `project_prod_mirror_local_db.md` memory — tracked as a Session 9 dependency. Until then, treat LOCAL-mode numeric diffs as data-state drift, not engine regressions; use HTTP mode against prod for numeric baseline verification.
 
 ### Gate 3 — deliberate-break verification
 
