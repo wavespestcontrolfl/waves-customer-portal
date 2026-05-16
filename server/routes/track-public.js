@@ -41,10 +41,12 @@ const {
   finiteNumber,
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
+const { ensureCustomerGeocoded } = require('../services/geocoder');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
 const STALE_VEHICLE_MS = 5 * 60 * 1000;
+const TRACK_PUBLIC_GEOCODE_TIMEOUT_MS = 1500;
 
 // Polling cadence for the customer track page while tech is en-route.
 // Socket broadcasts handle state transitions; this poll only refreshes
@@ -109,6 +111,14 @@ function isFreshVehicleTimestamp(updatedAt) {
   return Number.isFinite(updatedMs) && (Date.now() - updatedMs) <= STALE_VEHICLE_MS;
 }
 
+async function withTimeout(promise, timeoutMs, fallbackValue = null) {
+  let timeoutId;
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(fallbackValue), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
 async function buildVehicle(service) {
   // Phase 2: live tech location + ETA from tech_status. Returns null
   // if either the tech's last GPS ping is missing or the property
@@ -143,6 +153,31 @@ async function buildVehicle(service) {
     etaMinutes: eta?.minutes ?? null,
     etaSource: eta?.source ?? null,
   };
+}
+
+async function ensureEnRouteDestinationGeocoded(service) {
+  if (!service || service.track_state !== 'en_route') return service;
+  if (finiteNumber(service.latitude) != null && finiteNumber(service.longitude) != null) return service;
+  if (!service.customer_id) return service;
+
+  try {
+    const geocoded = await withTimeout(
+      ensureCustomerGeocoded(service.customer_id),
+      TRACK_PUBLIC_GEOCODE_TIMEOUT_MS,
+      null
+    );
+    const lat = finiteNumber(geocoded?.lat);
+    const lng = finiteNumber(geocoded?.lng);
+    if (lat == null || lng == null) return service;
+    return {
+      ...service,
+      latitude: lat,
+      longitude: lng,
+    };
+  } catch (err) {
+    logger.warn(`[track-public] customer geocode fallback failed for ${service.customer_id}: ${err.message}`);
+    return service;
+  }
 }
 
 async function buildSummary(service) {
@@ -223,7 +258,7 @@ router.get('/:token', async (req, res, next) => {
   }
 
   try {
-    const row = await db('scheduled_services as s')
+    let row = await db('scheduled_services as s')
       .leftJoin('customers as c', 's.customer_id', 'c.id')
       .leftJoin('technicians as t', 's.technician_id', 't.id')
       .leftJoin('services as sv', 's.service_id', 'sv.id')
@@ -267,6 +302,7 @@ router.get('/:token', async (req, res, next) => {
     if (!isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
+    row = await ensureEnRouteDestinationGeocoded(row);
 
     // Presign the tech's photo (if S3-managed) inside this trusted
     // track-token boundary. Falls back to row.tech_photo_url for
@@ -333,6 +369,7 @@ router.get('/:token', async (req, res, next) => {
 router._test = {
   isTrackTokenLive,
   isFreshVehicleTimestamp,
+  ensureEnRouteDestinationGeocoded,
 };
 
 module.exports = router;
