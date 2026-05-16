@@ -424,6 +424,7 @@ function RowActionsMenu({ items, label = "More actions" }) {
             className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
             role="dialog"
             aria-modal="true"
+            style={{ fontFamily: ROBOTO }}
             onClick={() => setOpen(false)}
           >
             {" "}
@@ -549,6 +550,7 @@ function FilterSheetV2({ value, onChange, options, counts }) {
             role="dialog"
             aria-modal="true"
             aria-label="Filter estimates"
+            style={{ fontFamily: ROBOTO }}
           >
             {" "}
             <div
@@ -931,6 +933,7 @@ function EstimatePricingAuditModal({
       role="dialog"
       aria-modal="true"
       aria-label="Estimate pricing audit"
+      style={{ fontFamily: ROBOTO }}
       onClick={onClose}
     >
       {" "}
@@ -2259,6 +2262,7 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
             role="dialog"
             aria-modal="true"
             aria-label={title}
+            style={{ fontFamily: ROBOTO }}
           >
             {" "}
             <div

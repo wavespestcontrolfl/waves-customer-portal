@@ -18,6 +18,11 @@ import {
 } from "../ui";
 import { DECLINE_REASONS } from "../../pages/admin/EstimatePage";
 
+// Match the EstimatesPageV2 surface — the estimates page is locked to Roboto
+// per Adam's design call, and these modals only render from that page, so
+// the panel font follows the same body.
+const ROBOTO_STYLE = { fontFamily: "'Roboto', Arial, sans-serif" };
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function adminFetch(path, options = {}) {
@@ -56,7 +61,7 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
   };
 
   return (
-    <Dialog open onClose={onClose} size="md">
+    <Dialog open onClose={onClose} size="md" style={ROBOTO_STYLE}>
       {" "}
       <DialogHeader>
         {" "}
@@ -117,7 +122,7 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
   };
 
   return (
-    <Dialog open onClose={onClose} size="sm">
+    <Dialog open onClose={onClose} size="sm" style={ROBOTO_STYLE}>
       {" "}
       <DialogHeader>
         {" "}
