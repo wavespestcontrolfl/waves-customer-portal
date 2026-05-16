@@ -60,9 +60,29 @@ router.get('/:token', async (req, res, next) => {
     const contact = getServiceContact(customer);
     const loc = resolveReviewLocation(request, customer);
 
+    // Tech avatar: presign photo_s3_key (canonical) inside this trusted
+    // token-scoped boundary; fall back to photo_url for techs whose
+    // photo lives at an external URL (e.g., GBP). Same pattern as
+    // track-public.js.
+    let techPhotoUrl = null;
+    if (request.technician_id) {
+      try {
+        const tech = await db('technicians')
+          .where({ id: request.technician_id })
+          .first('photo_s3_key', 'photo_url');
+        if (tech) {
+          const { resolveTechPhotoUrl } = require('../services/tech-photo');
+          techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
+        }
+      } catch (err) {
+        logger.warn(`[review-gate] tech photo resolve failed: ${err.message}`);
+      }
+    }
+
     res.json({
       firstName: contact.name || customer?.first_name || 'there',
       techName: request.tech_name || 'your technician',
+      techPhotoUrl,
       serviceType: request.service_type || 'pest control service',
       hasServiceType: Boolean(request.service_type),
       serviceDate: request.service_date,

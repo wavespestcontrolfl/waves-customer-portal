@@ -55,6 +55,18 @@ function formatCompleteDate(iso) {
   }
 }
 
+// Build the property-address lines from the public-track payload. Returns
+// the visible lines in order: [line1, line2?, "City, ST Zip"]. Empty
+// strings filtered out so a missing line2 just collapses cleanly.
+function fullAddressLines(property) {
+  if (!property) return [];
+  const cityStateZip = [
+    property.city,
+    [property.state, property.zip].filter(Boolean).join(' '),
+  ].filter(Boolean).join(', ');
+  return [property.addressLine1, property.addressLine2, cityStateZip].filter(Boolean);
+}
+
 function useElapsed(fromIso) {
   const [text, setText] = useState('');
   useEffect(() => {
@@ -328,7 +340,7 @@ function TechBlock({ tech, size = 'md' }) {
 
 function ServiceMeta({ data }) {
   const window = formatWindow(data.window?.start, data.window?.end);
-  const addr = data.property?.addressLine1;
+  const addrLines = fullAddressLines(data.property);
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${COLORS.offWhite}` }}>
       <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 4 }}>Today's visit</div>
@@ -336,8 +348,10 @@ function ServiceMeta({ data }) {
       {window ? (
         <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10 }}>{window}</div>
       ) : null}
-      {addr ? (
-        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>{addr}</div>
+      {addrLines.length > 0 ? (
+        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, lineHeight: 1.5 }}>
+          {addrLines.map((line, i) => <div key={i}>{line}</div>)}
+        </div>
       ) : null}
     </div>
   );
@@ -359,11 +373,15 @@ function ScheduledCard({ data }) {
       <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
-      {data.property?.addressLine1 ? (
-        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 16 }}>
-          {data.property.addressLine1}
-        </div>
-      ) : null}
+      {(() => {
+        const lines = fullAddressLines(data.property);
+        if (lines.length === 0) return null;
+        return (
+          <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 16, lineHeight: 1.5 }}>
+            {lines.map((line, i) => <div key={i}>{line}</div>)}
+          </div>
+        );
+      })()}
     </Card>
   );
 }
