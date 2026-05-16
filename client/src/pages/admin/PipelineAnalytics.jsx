@@ -69,6 +69,14 @@ export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
   return false;
 }
 
+export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
+  if (estimate?.status !== "viewed" || !estimate.viewedAt) return false;
+  const viewedAt = new Date(estimate.viewedAt).getTime();
+  if (Number.isNaN(viewedAt)) return false;
+  const age = nowMs - viewedAt;
+  return age > 48 * HOUR && age < 168 * HOUR;
+}
+
 // Aggregate sent/won/avg-ticket per service line. Sent = any non-draft estimate
 // in the window. Won = status === 'accepted'.
 export function aggregateServiceLineRows(estimates) {
@@ -279,11 +287,9 @@ export default function PipelineAnalytics({
     const lowMargin = inRange.filter(
       (e) => (e.pricingRisk?.lowMarginCount || 0) > 0,
     ).length;
-    const goingCold = inRange.filter((e) => {
-      if (e.status !== "viewed" || !e.viewedAt) return false;
-      const age = nowMs - new Date(e.viewedAt).getTime();
-      return age > 48 * HOUR && age < 168 * HOUR;
-    }).length;
+    const goingCold = inRange.filter((e) =>
+      isGoingColdEstimate(e, nowMs),
+    ).length;
 
     return {
       inRange,
@@ -510,7 +516,7 @@ export default function PipelineAnalytics({
           label="Going cold"
           value={metrics.attention.goingCold}
           sub="Viewed over 48h"
-          filterKey="follow_up"
+          filterKey="going_cold"
           onFilterChange={onFilterChange}
         />
       </div>

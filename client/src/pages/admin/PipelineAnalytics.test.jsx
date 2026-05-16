@@ -220,6 +220,22 @@ describe("PipelineAnalytics", () => {
     expect(onFilterChange).toHaveBeenCalledWith("archived");
   });
 
+  it("fires the going_cold filter from the Going cold card", () => {
+    const { onFilterChange } = renderAnalytics({
+      estimates: [
+        estimate({
+          id: "cold",
+          status: "viewed",
+          viewedAt: hoursAgo(60),
+        }),
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Going cold/i }));
+
+    expect(onFilterChange).toHaveBeenCalledWith("going_cold");
+  });
+
   it("discloses scheduled estimates in the Sent funnel subtitle", () => {
     renderAnalytics({
       estimates: [

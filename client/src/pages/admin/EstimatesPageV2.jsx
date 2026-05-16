@@ -29,6 +29,7 @@ import EstimateToolViewV2 from "./EstimateToolViewV2";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
 import PipelineAnalytics, {
   isFollowUpOverdueEstimate,
+  isGoingColdEstimate,
   withinDateRange,
 } from "./PipelineAnalytics";
 import {
@@ -275,6 +276,7 @@ function estimateMatchesFilter(e, filter) {
       e._class === "scheduled"
     );
   if (filter === "follow_up_overdue") return isFollowUpOverdueEstimate(e);
+  if (filter === "going_cold") return isGoingColdEstimate(e);
   if (filter === "pricing_risk") return !!e.pricingRisk?.hasRisk;
   if (filter === "missing_cogs")
     return (e.pricingRisk?.missingCogsCount || 0) > 0;
@@ -286,6 +288,7 @@ function estimateFilterLabel(filter) {
   if (filter === "drafts") return "Drafts";
   if (filter === "sent_group") return "Sent";
   if (filter === "follow_up_overdue") return "Follow-up overdue";
+  if (filter === "going_cold") return "Going cold";
   return PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label;
 }
 
