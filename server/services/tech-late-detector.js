@@ -1,8 +1,9 @@
 /**
  * tech-late-detector — first dispatch alert generator. Runs every
  * 5 minutes via initScheduledJobs (gated by GATE_CRON_JOBS). Finds
- * jobs whose arrival window due time (window_end, or window_start +
- * estimated duration fallback) has passed by ≥ 15 min while the job
+ * jobs whose promised arrival due time (at least 2 hours after
+ * window_start, or later when window_end is later) has passed by
+ * ≥ 30 min while the job
  * hasn't moved to on_site / completed /
  * cancelled / skipped, and creates a `tech_late` dispatch_alert via
  * createAlert(). The Action Queue surfaces the row in real time
@@ -10,13 +11,13 @@
  * post-commit.
  *
  * Severity bands (frozen at insert time):
- *   15–29 min after due time  → warn
- *   ≥ 30 min after due time   → critical
+ *   30–59 min after due time  → warn
+ *   ≥ 60 min after due time   → critical
  *
  * Noise controls:
- *   - Do not fire at window_start. Most Waves jobs have an arrival
- *     window; warning 15 minutes after the start created noisy cards
- *     for normal in-window arrivals.
+ *   - Do not fire at window_start. Waves typically promises a 2-hour
+ *     arrival window, even when stored window_end represents service
+ *     duration. Alerting waits until the promised window has closed.
  *   - Do not create tech_late for stale pending jobs more than 3
  *     hours past due. Those are data hygiene / completion cleanup,
  *     not live dispatch signals.
@@ -62,9 +63,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { createAlert } = require('./dispatch-alerts');
 
-const TECH_LATE_GRACE_MINUTES = 15;
-const TECH_LATE_CRITICAL_MINUTES = 30;
+const TECH_LATE_GRACE_MINUTES = 30;
+const TECH_LATE_CRITICAL_MINUTES = 60;
 const TECH_LATE_MAX_DELAY_MINUTES = 180;
+const TECH_LATE_CUSTOMER_WINDOW_MINUTES = 120;
 const TECH_LATE_FALLBACK_DURATION_MINUTES = 60;
 
 function normalizeDateOnly(value) {
@@ -106,7 +108,7 @@ async function runInner() {
           s.window_start,
           s.window_end,
           s.scheduled_date,
-          (
+          GREATEST(
             CASE
               WHEN s.window_end IS NOT NULL
                 THEN s.scheduled_date + s.window_end
@@ -114,7 +116,10 @@ async function runInner() {
                 s.scheduled_date
                   + s.window_start
                   + make_interval(mins => COALESCE(NULLIF(s.estimated_duration_minutes, 0), ${TECH_LATE_FALLBACK_DURATION_MINUTES}))
-            END
+            END,
+            s.scheduled_date
+              + s.window_start
+              + make_interval(mins => ${TECH_LATE_CUSTOMER_WINDOW_MINUTES})
           ) AT TIME ZONE 'America/New_York' AS due_at
         FROM scheduled_services s
         WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
@@ -201,6 +206,7 @@ module.exports = {
   TECH_LATE_GRACE_MINUTES,
   TECH_LATE_CRITICAL_MINUTES,
   TECH_LATE_MAX_DELAY_MINUTES,
+  TECH_LATE_CUSTOMER_WINDOW_MINUTES,
   TECH_LATE_FALLBACK_DURATION_MINUTES,
   _test: {
     normalizeDateOnly,
