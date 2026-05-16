@@ -234,6 +234,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [serviceResults, setServiceResults] = useState([]);
   const [serviceLoading, setServiceLoading] = useState(false);
   const [addingService, setAddingService] = useState(false);
+  const [scheduleEstimates, setScheduleEstimates] = useState([]);
+  const [scheduleEstimatesLoading, setScheduleEstimatesLoading] = useState(false);
+  const [scheduleEstimateError, setScheduleEstimateError] = useState('');
+  const [linkedEstimate, setLinkedEstimate] = useState(null);
   const selectedService = services[0] || null;
 
   // Lock body scroll while the modal is open. The modal is portaled to
@@ -286,6 +290,33 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }, 200);
     return () => clearTimeout(handle);
   }, [serviceSearch]);
+
+  useEffect(() => {
+    const customerId = selectedCustomer?.id;
+    setLinkedEstimate(null);
+    setScheduleEstimates([]);
+    setScheduleEstimateError('');
+    if (!customerId) {
+      setScheduleEstimatesLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setScheduleEstimatesLoading(true);
+    adminFetch(`/admin/customers/${customerId}/schedule-estimates`)
+      .then((r) => {
+        if (cancelled) return;
+        setScheduleEstimates(Array.isArray(r.estimates) ? r.estimates : []);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setScheduleEstimateError(e.message || 'Could not load won estimates');
+        setScheduleEstimates([]);
+      })
+      .finally(() => {
+        if (!cancelled) setScheduleEstimatesLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedCustomer?.id]);
 
   // Find-a-Time state
   const [findingTimes, setFindingTimes] = useState(false);
@@ -385,6 +416,65 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setServiceSearch('');
     setServiceResults([]);
     setAddingService(false);
+  };
+  const formatScheduleEstimateLabel = (estimate) => {
+    if (!estimate) return '';
+    const accepted = estimate.acceptedAt || estimate.createdAt;
+    const date = accepted
+      ? new Date(accepted).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      : 'Won estimate';
+    const servicesLabel = estimate.serviceInterest || (estimate.lines || []).map((l) => l.estimateLabel || l.name).filter(Boolean).slice(0, 2).join(' + ') || 'Accepted estimate';
+    const amount = Number(estimate.onetimeTotal || 0) > 0
+      ? `$${Number(estimate.onetimeTotal).toFixed(0)} one-time`
+      : Number(estimate.monthlyTotal || 0) > 0
+        ? `$${Number(estimate.monthlyTotal).toFixed(0)}/mo`
+        : '';
+    return [servicesLabel, amount, date].filter(Boolean).join(' - ');
+  };
+  const applyScheduleEstimate = (estimateId) => {
+    if (!estimateId) {
+      setLinkedEstimate(null);
+      return;
+    }
+    const estimate = scheduleEstimates.find((e) => e.id === estimateId);
+    if (!estimate) return;
+    const nextLines = (estimate.lines || []).map((line) => {
+      const inferred = inferServiceCadence({
+        name: line.name,
+        frequency: line.frequency,
+        billing_type: line.billingType,
+        visits_per_year: line.visitsPerYear,
+      });
+      return {
+        id: line.serviceId || null,
+        serviceKey: line.serviceKey || null,
+        name: line.name || line.estimateLabel || 'Estimate service',
+        category: line.category || undefined,
+        billing_type: line.billingType || undefined,
+        frequency: line.frequency || undefined,
+        visits_per_year: line.visitsPerYear || undefined,
+        duration: line.duration || 30,
+        default_duration_minutes: line.duration || 30,
+        priceMin: line.price,
+        priceMax: line.price,
+        base_price: line.price,
+        lineId: `estimate_${estimate.id}_${line.serviceId || line.name}_${Math.random().toString(36).slice(2, 8)}`,
+        price: line.price != null ? String(line.price) : '',
+        cadence: line.cadence || inferred.cadence,
+        intervalDays: inferred.intervalDays,
+        nth: 3,
+        weekday: 3,
+        boosterMonths: [],
+        sourceEstimateId: estimate.id,
+      };
+    });
+    if (nextLines.length > 0) {
+      setServices(nextLines);
+      setAddingService(false);
+      setServiceSearch('');
+      setServiceResults([]);
+    }
+    setLinkedEstimate(estimate);
   };
   const formatDiscountLabel = (d) => {
     if (!d) return '';
@@ -765,6 +855,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // (windowStart..windowEnd) instead of just the primary line's
           // catalog default — capacity / dispatch math depends on this.
           estimatedDuration: groupDuration > 0 ? groupDuration : undefined,
+          sourceEstimateId: linkedEstimate?.id || undefined,
           urgency: 'routine',
           notes: customerNotes || undefined,
           internalNotes: internalNotes || undefined,
@@ -1102,6 +1193,51 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </div>
             )}
           </div>
+
+          {selectedCustomer && (
+            <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${D.border}` }}>
+              <label style={labelStyle}>Won estimate</label>
+              {scheduleEstimatesLoading ? (
+                <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>Loading won estimates...</div>
+              ) : scheduleEstimateError ? (
+                <div style={{ fontSize: 12, color: D.red }}>{scheduleEstimateError}</div>
+              ) : scheduleEstimates.length > 0 ? (
+                <>
+                  <select
+                    value={linkedEstimate?.id || ''}
+                    onChange={(e) => applyScheduleEstimate(e.target.value)}
+                    style={inputStyle}
+                  >
+                    <option value="">Manual service entry</option>
+                    {scheduleEstimates.map((estimate) => (
+                      <option key={estimate.id} value={estimate.id}>
+                        {formatScheduleEstimateLabel(estimate)}
+                        {estimate.linkedAppointment ? ' (already linked)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {linkedEstimate && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginTop: 8, fontSize: 12, color: D.muted }}>
+                      <span style={{ minWidth: 0 }}>
+                        Linked to estimate #{String(linkedEstimate.id).slice(0, 8)}. Service lines and prices can still be edited before saving.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setLinkedEstimate(null)}
+                        style={{ border: 'none', background: 'transparent', color: D.text, cursor: 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', padding: '4px 0' }}
+                      >
+                        Unlink
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>
+                  No accepted estimates found for this customer.
+                </div>
+              )}
+            </div>
+          )}
 
           {services.length > 0 && !isMobile && (
             <div style={{
