@@ -1348,9 +1348,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     const injectablePalmCount = Number(p.injectablePalms) > 0
       ? Number(p.injectablePalms)
       : Math.max(1, Math.round(totalPalmCount * 0.30));
+    const requestedPalmSize = String(o.palmSize || p.palmSize || 'medium').toLowerCase();
+    const palmSize = ['small', 'medium', 'large'].includes(requestedPalmSize)
+      ? requestedPalmSize
+      : 'medium';
     services.palm = {
       palmCount: injectablePalmCount,
       treatmentType: 'combo',
+      palmSize,
     };
   }
   if (sel.has('MOSQUITO')) {

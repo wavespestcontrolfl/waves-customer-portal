@@ -27,6 +27,7 @@ const ONE_TIME_SERVICES = new Set([
 ]);
 
 const CAP = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+const roundMoney = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
 const SERVICE_LABEL = {
   one_time_pest: 'One-Time Pest',
@@ -154,11 +155,36 @@ function mapV1ToLegacyShape(v1Result) {
   }
 
   // Palm Injection → R.injection
+  let palmAnnualBeforeCredits = 0;
+  let palmAnnualAfterCredits = 0;
+  let palmMonthlyAfterCredits = 0;
+  let palmFlatCreditAnnual = 0;
   if (palmLI) {
+    palmAnnualBeforeCredits = roundMoney(palmLI.annualBeforeCredits ?? palmLI.annualBeforeDiscount ?? palmLI.annual);
+    palmAnnualAfterCredits = roundMoney(palmLI.annualAfterCredits ?? palmLI.annualAfterDiscount ?? palmLI.annual);
+    palmMonthlyAfterCredits = roundMoney(palmLI.monthlyAfterCredits ?? palmLI.monthlyAfterDiscount ?? (palmAnnualAfterCredits / 12));
+    palmFlatCreditAnnual = roundMoney(palmLI.flatCreditAnnual ?? palmLI.discount?.flatCreditAnnual);
+    const parts = [
+      palmLI.treatmentLabel || 'Palm Injection',
+      palmLI.palmSize ? `${palmLI.palmSize} palms` : null,
+      `$${palmLI.pricePerPalm}/palm`,
+      `${palmLI.appsPerYear}/yr`,
+      palmLI.minimumApplied ? `$${palmLI.perVisit} visit minimum applied` : null,
+    ].filter(Boolean);
     R.injection = {
       palms: palmLI.palmCount,
-      ann: palmLI.annual,
-      mo: palmLI.monthly,
+      ann: palmAnnualAfterCredits,
+      mo: palmMonthlyAfterCredits,
+      pricePerPalm: palmLI.pricePerPalm,
+      appsPerYear: palmLI.appsPerYear,
+      palmSize: palmLI.palmSize,
+      perVisit: palmLI.perVisit,
+      annualBeforeCredits: palmAnnualBeforeCredits,
+      flatCreditAnnual: palmFlatCreditAnnual,
+      annualAfterCredits: palmAnnualAfterCredits,
+      monthlyAfterCredits: palmMonthlyAfterCredits,
+      treatmentLabel: palmLI.treatmentLabel,
+      detail: parts.join(' · '),
     };
   }
 
@@ -298,9 +324,9 @@ function mapV1ToLegacyShape(v1Result) {
   const waveGuardTier = CAP(wg.tier || 'bronze');
   const rodentBaitMonthly = rbLI ? (rbLI.monthly || 0) : 0;
   const rodentBaitAnnual = rodentBaitMonthly * 12;
-  const palmInjectionMonthly = palmLI ? (palmLI.monthly || 0) : 0;
-  const palmInjectionAnnual = palmLI ? (palmLI.annual || 0) : 0;
-  const recurringAnnualBefore = Math.max(0, Math.round(((summary.recurringAnnualBeforeDiscount || 0) - rodentBaitAnnual - palmInjectionAnnual) * 100) / 100);
+  const palmInjectionMonthly = palmLI ? palmMonthlyAfterCredits : 0;
+  const palmInjectionAnnual = palmLI ? palmAnnualAfterCredits : 0;
+  const recurringAnnualBefore = Math.max(0, Math.round(((summary.recurringAnnualBeforeDiscount || 0) - rodentBaitAnnual - palmAnnualBeforeCredits) * 100) / 100);
   const recurringAnnual = Math.max(0, Math.round(((summary.recurringAnnualAfterDiscount || 0) - rodentBaitAnnual - palmInjectionAnnual) * 100) / 100);
   const recurringMonthly = Math.round((recurringAnnual / 12) * 100) / 100;
 
@@ -348,7 +374,7 @@ function mapV1ToLegacyShape(v1Result) {
       grandTotal: year2Monthly,
       monthlyTotal: recurringMonthly,
       annualAfterDiscount: recurringAnnual,
-      savings: Math.round((summary.waveGuardSavings || 0) * 100) / 100,
+      savings: roundMoney((summary.waveGuardSavings || 0) - palmFlatCreditAnnual),
       rodentBaitMo: rodentBaitMonthly,
       palmInjectionMo: palmInjectionMonthly,
       palmInjectionAnn: palmInjectionAnnual,

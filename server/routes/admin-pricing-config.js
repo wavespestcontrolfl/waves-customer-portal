@@ -159,7 +159,7 @@ async function ensureTable() {
       { config_key: 'ts_monthly_floors', name: 'T&S Monthly Floor Prices', category: 'tree_shrub', sort_order: 2, data: JSON.stringify({ standard: 50, enhanced: 65 }) },
 
       // Palm
-      { config_key: 'palm_pricing', name: 'Palm Injection Tiered Pricing', category: 'palm', sort_order: 1, data: JSON.stringify({ nutrition: 35, preventive_insecticide: 45, combo: 55, fungal: 40, lethal_bronzing_floor: 125, tree_age_floor: 65, min_per_visit: 75, apps_per_year: 2, tier_qualifier: false, flat_credit_per_palm: 10, flat_credit_min_tier: 'gold' }) },
+      { config_key: 'palm_pricing', name: 'Palm Injection Protocol Pricing', category: 'palm', sort_order: 1, data: JSON.stringify({ nutrition: 35, insecticide_small: 45, insecticide_medium: 55, insecticide_large: 75, combo_small: 65, combo_medium: 75, combo_large: 95, fungal_floor: 50, lethal_bronzing_floor: 125, tree_age_floor: 65, min_per_visit: 75, nutrition_default_apps_per_year: 1, nutrition_allowed_apps_per_year: [1, 2], flat_credit_per_palm: 10, flat_credit_min_tier: 'gold', tier_qualifier: false, exclude_from_pct_discount: true }) },
 
       // Mosquito
       { config_key: 'mosquito_lot_sizes', name: 'Mosquito Treatable Area Categories', category: 'mosquito', sort_order: 1, data: JSON.stringify({ SMALL: { max_sqft: 7999 }, QUARTER: { max_sqft: 11999 }, THIRD: { max_sqft: 17999 }, HALF: { max_sqft: 34999 }, ACRE: { max_sqft: 999999 } }) },

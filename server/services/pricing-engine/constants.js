@@ -317,24 +317,135 @@ const TREE_SHRUB = {
 };
 
 // ============================================================
-// PALM INJECTION — Tiered pricing (updated per vendor cost audit)
+// PALM INJECTION - protocol-based pricing
 // ============================================================
-const PALM = {
-  // TODO(v4.4): document per-palm pricing methodology (cost-plus margin,
-  // competitor benchmark, or historical anchor). v4.3 operator baseline.
-  treatmentTypes: {
-    nutrition:   { pricePerPalm: r(35),  label: 'Nutrition Only', appsPerYear: 2 },
-    insecticide: { pricePerPalm: r(45),  label: 'Preventive Insecticide', appsPerYear: 2 },
-    combo:       { pricePerPalm: r(55),  label: 'Combo (Nutrition + Insecticide)', appsPerYear: 2 },
-    fungal:      { pricePerPalm: r(40),  label: 'Fungal Treatment', appsPerYear: 2 },
-    lethalBronzing: { pricePerPalm: null, floorPerPalm: r(125), label: 'Lethal Bronzing', appsPerYear: 2, quoteBased: true },
-    treeAge:     { pricePerPalm: null, floorPerPalm: r(65), label: 'Tree-Age Specialty', appsPerYear: 1, quoteBased: true },
+const PALM_TREATMENTS = {
+  nutrition: {
+    label: 'Palm Nutrition Injection',
+    pricingType: 'fixed',
+    pricePerPalm: r(35),
+    defaultAppsPerYear: 1,
+    allowedAppsPerYear: [1, 2],
+    product: 'Palm-Jet Mg',
+    requiresDeficiencyOrCorrectiveUse: true,
+    notes: [
+      'Corrective injection; not a replacement for a full granular palm fertilization program.',
+    ],
   },
+
+  insecticide: {
+    label: 'Preventive Palm Insecticide',
+    pricingType: 'tiered',
+    defaultAppsPerYear: 2,
+    product: 'Ima-Jet',
+    requiresPalmSize: true,
+    tiers: [
+      { size: 'small', pricePerPalm: r(45) },
+      { size: 'medium', pricePerPalm: r(55) },
+      { size: 'large', pricePerPalm: r(75) },
+    ],
+    quoteBasedWhen: ['highDose', 'largeDiameter', 'nonstandardProduct'],
+  },
+
+  combo: {
+    label: 'Nutrition + Insecticide',
+    pricingType: 'tiered',
+    defaultAppsPerYear: 2,
+    products: ['Palm-Jet Mg', 'Ima-Jet'],
+    requiresPalmSize: true,
+    tiers: [
+      { size: 'small', pricePerPalm: r(65) },
+      { size: 'medium', pricePerPalm: r(75) },
+      { size: 'large', pricePerPalm: r(95) },
+    ],
+    quoteBasedWhen: ['highDose', 'largeDiameter', 'nonstandardProduct'],
+    notes: [
+      'Do not model this as a tank mix. Palm-Jet should be treated as a separate compatible application step.',
+    ],
+  },
+
+  fungal: {
+    label: 'Palm Fungal Treatment',
+    pricingType: 'quote',
+    quoteBased: true,
+    floorPerPalm: r(50),
+    requiresDiagnosis: true,
+    requiresProductSelection: true,
+    requiresAppsOrInterval: true,
+    products: ['PHOSPHO-Jet', 'Propizol'],
+    notes: [
+      'Diagnosis/product-driven treatment. Do not default to generic 2x/year fungal service.',
+    ],
+  },
+
+  lethalBronzing: {
+    label: 'Lethal Bronzing Preventive OTC Program',
+    pricingType: 'quote',
+    quoteBased: true,
+    floorPerPalm: r(125),
+    intervalMonths: 3,
+    appsPerYear: 4,
+    minimumProgramMonths: 24,
+    product: 'Arbor OTC',
+    requiresPalmStatus: true,
+    eligibleStatuses: [
+      'healthy_preventive',
+      'near_infected',
+      'tested_negative_preventive',
+    ],
+    ineligibleStatuses: [
+      'symptomatic',
+      'tested_positive',
+      'infected',
+    ],
+    notes: [
+      'Preventive program only. Do not sell as a cure for symptomatic or positive palms.',
+    ],
+  },
+
+  treeAge: {
+    label: 'Tree-Age G-4 Specialty Injection',
+    pricingType: 'tiered_quote',
+    quoteBased: true,
+    floorPerPalm: r(65),
+    intervalMonths: 24,
+    appsPerYear: 0.5,
+    product: 'Tree-Age G-4',
+    requiresDiameter: true,
+    tiers: [
+      { dbhMax: 10, pricePerPalm: r(65) },
+      { dbhMax: 15, pricePerPalm: r(85) },
+      { dbhMax: 20, pricePerPalm: r(110) },
+      { dbhMax: null, quoteBased: true },
+    ],
+    notes: [
+      'Annual is annualized from a 24-month treatment interval. Use event price/perVisit for customer-facing one-time charge.',
+    ],
+  },
+};
+
+const PALM = {
+  treatments: PALM_TREATMENTS,
+  treatmentTypes: PALM_TREATMENTS,
   minPerVisit: r(75),
   // WaveGuard rules: NOT a tier qualifier, flat credit only
   tierQualifier: false,
+  excludeFromPctDiscount: true,
   flatCreditPerPalm: 10, // $/palm/year for Gold+ members
   flatCreditMinTier: 'gold',
+  internalCostBasis: {
+    palmJetMg1L: { unitPrice: 125.63, volumeMl: 1000 },
+    imaJet1L: { unitPrice: 295.00, volumeMl: 1000 },
+    imaJet10_1L: { unitPrice: 427.75, volumeMl: 1000, defaultUse: false },
+    phosphoJet1L: { unitPrice: 99.00, volumeMl: 1000 },
+    propizol1L: { unitPrice: 79.99, volumeMl: 1000 },
+    arborOtc1oz: { unitPrice: 140.00, estimatedPalms: 10 },
+    arborOtc5oz: { unitPrice: 625.00, estimatedPalms: 50 },
+    treeAgeG4Qt: { unitPrice: 476.00, estimatedTenInchDbhTrees: 27 },
+    treeAgeR10Pt: { unitPrice: 562.00, restrictedUse: true, defaultUse: false },
+    lescoPalmGranular_8_0_10_50lb: { unitPrice: 23.77, weightLb: 50 },
+    lescoPalmGranular_8_2_12_50lb: { unitPrice: 46.36, weightLb: 50 },
+  },
 };
 
 // ============================================================
