@@ -2723,6 +2723,17 @@ function SiteAuditTab() {
     return "healthy";
   };
 
+  const parseAuditIssues = (value) => {
+    if (Array.isArray(value)) return value;
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
   const filteredPages = pages.filter((p) => {
     if (filter === "all") return true;
     return getPageStatus(p) === filter;
@@ -2957,13 +2968,7 @@ function SiteAuditTab() {
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {filteredPages.slice(0, 50).map((p, i) => {
             const status = getPageStatus(p);
-            const pageIssues = (() => {
-              try {
-                return JSON.parse(p.issues || "[]");
-              } catch {
-                return [];
-              }
-            })();
+            const pageIssues = parseAuditIssues(p.issues);
             const isExpanded = expandedPage === i;
             return (
               <div key={i}>

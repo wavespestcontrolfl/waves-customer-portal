@@ -9,7 +9,7 @@ const logger = require('../logger');
 const crypto = require('crypto');
 const { etDateString } = require('../../utils/datetime-et');
 
-const SITE_URL = process.env.WAVES_SITE_URL || 'https://wavespestcontrol.com';
+const SITE_URL = process.env.WAVES_SITE_URL || 'https://www.wavespestcontrol.com';
 const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];
 const CTA_PATTERNS = /free estimate|call|schedule|get a quote|contact|book|text us/i;
 const FL_PESTS = /palmetto bug|fire ant|chinch bug|ghost ant|german roach|subterranean termite|whitefly|mole cricket|no-see-um|love bug/i;
@@ -114,6 +114,38 @@ class SiteAuditor {
       }
     }
     return null;
+  }
+
+  parseIssues(value) {
+    if (Array.isArray(value)) return value;
+    if (!value) return [];
+    try {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  isSoft404(html, metaTitle, statusCode) {
+    if (!html || statusCode < 200 || statusCode >= 400) return false;
+    const title = String(metaTitle || '').trim();
+    if (/(^|[\s|\u2014-])(404|page not found)([\s|\u2014-]|$)/i.test(title)) return true;
+
+    const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    const h1Text = h1Match?.[1]?.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() || '';
+    if (/^(404|page not found|not found)$/i.test(h1Text)) return true;
+
+    const visibleText = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+
+    return visibleText.includes('page not found') &&
+      visibleText.includes('waves pest control') &&
+      /(requested page|does not exist|could not find|couldn't find|go back|return home)/i.test(visibleText);
   }
 
   /**
@@ -225,7 +257,7 @@ class SiteAuditor {
       // Store issue trends
       const issuesByCategory = {};
       for (const r of auditResults) {
-        for (const issue of (r.issues || [])) {
+        for (const issue of this.parseIssues(r.issues)) {
           const key = `${issue.category}:${issue.type}`;
           if (!issuesByCategory[key]) issuesByCategory[key] = { category: issue.category, type: issue.type, severity: issue.severity, urls: [], recommendation: issue.recommendation };
           issuesByCategory[key].urls.push(r.url);
@@ -267,9 +299,11 @@ class SiteAuditor {
     const metaTitle = titleMatch?.[1]?.trim() || '';
     const metaDesc = this.getMetaContent(html, 'name', 'description')?.trim() || '';
     const ogImage = this.getMetaContent(html, 'property', 'og:image') || null;
+    const soft404 = this.isSoft404(html, metaTitle, statusCode);
 
     if (statusCode === 0 || statusCode >= 500) issues.push({ category: 'crawl', type: 'fetch_failed', severity: 'critical', recommendation: 'Page could not be fetched for audit' });
     else if (statusCode >= 400) issues.push({ category: 'crawl', type: 'http_error', severity: 'critical', recommendation: `Page returned HTTP ${statusCode}` });
+    else if (soft404) issues.push({ category: 'crawl', type: 'soft_404', severity: 'critical', recommendation: 'Return HTTP 404/410 for missing pages or 301 redirect stale URLs to the closest relevant live page' });
     if (!metaTitle) issues.push({ category: 'meta', type: 'missing_title', severity: 'critical', recommendation: 'Add a title tag' });
     else if (metaTitle.length > 60) issues.push({ category: 'meta', type: 'title_too_long', severity: 'warning', recommendation: `Title is ${metaTitle.length} chars, keep under 60` });
     if (!metaDesc) issues.push({ category: 'meta', type: 'missing_description', severity: 'warning', recommendation: 'Add a meta description' });

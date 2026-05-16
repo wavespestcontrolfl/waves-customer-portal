@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const SearchConsole = require('../services/seo/search-console-v2');
 const SEOAdvisor = require('../services/seo/seo-advisor');
 const logger = require('../services/logger');
@@ -228,18 +228,24 @@ router.get('/sync-health', async (req, res, next) => {
 
     const gbpLocations = await Promise.all(WAVES_LOCATIONS.map(async (loc) => {
       const envVar = loc.googleRefreshTokenEnv;
-      const configured = !!(envVar && process.env[envVar]);
+      const envSuffix = envVar?.replace(/^GBP_REFRESH_TOKEN_/, '');
+      const configured = !!(
+        envSuffix &&
+        process.env[`GBP_CLIENT_ID_${envSuffix}`] &&
+        process.env[`GBP_CLIENT_SECRET_${envSuffix}`] &&
+        process.env[envVar]
+      );
       let lastDate = null;
       let rowCount = 0;
       if (gbpDaily.ok) {
         try {
           const row = await db('gbp_performance_daily')
-            .where({ location_id: loc.googleLocationId })
+            .where({ location_id: loc.id })
             .max('date as max')
             .first();
           lastDate = row?.max || null;
           const [{ count }] = await db('gbp_performance_daily')
-            .where({ location_id: loc.googleLocationId })
+            .where({ location_id: loc.id })
             .count('* as count');
           rowCount = parseInt(count || 0, 10);
         } catch { /* keep default health values */ }
@@ -304,7 +310,7 @@ router.get('/advisor/history', async (req, res, next) => {
 });
 
 // POST /api/admin/seo/advisor/generate — manually trigger
-router.post('/advisor/generate', async (req, res, next) => {
+router.post('/advisor/generate', requireAdmin, async (req, res, next) => {
   try {
     const report = await SEOAdvisor.generateWeeklyReport();
     res.json({ report });
@@ -316,7 +322,7 @@ router.post('/advisor/generate', async (req, res, next) => {
 // =========================================================================
 
 // POST /api/admin/seo/sync — manually trigger GSC data sync
-router.post('/sync', async (req, res, next) => {
+router.post('/sync', requireAdmin, async (req, res, next) => {
   try {
     const domain = req.body.domain || null;
     const result = await SearchConsole.syncDailyData(req.body.daysBack || 7, domain);
@@ -325,7 +331,7 @@ router.post('/sync', async (req, res, next) => {
 });
 
 // POST /api/admin/seo/sync-gbp — manually trigger GBP performance sync
-router.post('/sync-gbp', async (req, res, next) => {
+router.post('/sync-gbp', requireAdmin, async (req, res, next) => {
   try {
     const GoogleBusiness = require('../services/google-business');
     const result = await GoogleBusiness.syncPerformanceDaily(req.body.daysBack || 30);
@@ -459,7 +465,7 @@ router.get('/rankings', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/rankings/track', async (req, res, next) => {
+router.post('/rankings/track', requireAdmin, async (req, res, next) => {
   try {
     const result = await RankTracker.trackRanks(req.body.priority || null);
     res.json(result);
@@ -474,7 +480,7 @@ router.get('/serp/:keywordId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/serp/analyze', async (req, res, next) => {
+router.post('/serp/analyze', requireAdmin, async (req, res, next) => {
   try {
     const result = await SERPAnalyzer.analyzeKeyword(req.body.keywordId);
     res.json(result);
@@ -489,7 +495,7 @@ router.get('/backlinks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/backlinks/scan', async (req, res, next) => {
+router.post('/backlinks/scan', requireAdmin, async (req, res, next) => {
   try {
     const result = await BacklinkMonitor.scan();
     await BacklinkMonitor.takeSnapshot();
@@ -497,14 +503,14 @@ router.post('/backlinks/scan', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/backlinks/disavow', async (req, res, next) => {
+router.post('/backlinks/disavow', requireAdmin, async (req, res, next) => {
   try {
     const result = await BacklinkMonitor.generateDisavow();
     res.json(result);
   } catch (err) { next(err); }
 });
 
-router.post('/backlinks/competitor-gaps', async (req, res, next) => {
+router.post('/backlinks/competitor-gaps', requireAdmin, async (req, res, next) => {
   try {
     const { domain } = req.body;
     if (!domain) return res.status(400).json({ error: 'Competitor domain required' });
@@ -513,7 +519,7 @@ router.post('/backlinks/competitor-gaps', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/backlinks/llm-mentions', async (req, res, next) => {
+router.post('/backlinks/llm-mentions', requireAdmin, async (req, res, next) => {
   try {
     await BacklinkMonitor.checkLLMMentions();
     const mentions = await db('seo_llm_mentions').orderBy('check_date', 'desc').limit(20);
@@ -531,7 +537,7 @@ router.get('/ai-overview', async (req, res, next) => {
 });
 
 // POST /api/admin/seo/ai-overview/scan — manually trigger AI Overview scan
-router.post('/ai-overview/scan', async (req, res, next) => {
+router.post('/ai-overview/scan', requireAdmin, async (req, res, next) => {
   try {
     await ensureSeoKeywords();
     const result = await AIOverviewTracker.trackDaily();
@@ -547,14 +553,14 @@ router.get('/qa', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/qa/:blogPostId/score', async (req, res, next) => {
+router.post('/qa/:blogPostId/score', requireAdmin, async (req, res, next) => {
   try {
     const result = await ContentQA.scoreContent(req.params.blogPostId);
     res.json(result);
   } catch (err) { next(err); }
 });
 
-router.post('/qa/batch', async (req, res, next) => {
+router.post('/qa/batch', requireAdmin, async (req, res, next) => {
   try {
     const results = await ContentQA.batchScore(parseInt(req.body.limit || 50));
     res.json({ results });
@@ -585,7 +591,7 @@ router.get('/citations', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put('/citations/:id', async (req, res, next) => {
+router.put('/citations/:id', requireAdmin, async (req, res, next) => {
   try {
     await CitationAuditor.updateCitation(req.params.id, req.body);
     res.json({ success: true });
@@ -654,7 +660,7 @@ router.get('/audit/page-detail', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/audit/run', async (req, res, next) => {
+router.post('/audit/run', requireAdmin, async (req, res, next) => {
   try {
     const result = await SiteAuditor.runSiteAudit();
     res.json(result);
@@ -962,7 +968,7 @@ router.get('/keywords/manage', async (req, res, next) => {
 });
 
 // POST /api/admin/seo/keywords/manage — add new keyword
-router.post('/keywords/manage', async (req, res, next) => {
+router.post('/keywords/manage', requireAdmin, async (req, res, next) => {
   try {
     const { keyword, city, service, priority = 2, search_volume, difficulty, notes } = req.body;
     if (!keyword) return res.status(400).json({ error: 'keyword is required' });
@@ -985,7 +991,7 @@ router.post('/keywords/manage', async (req, res, next) => {
 });
 
 // PUT /api/admin/seo/keywords/manage/:id — update keyword
-router.put('/keywords/manage/:id', async (req, res, next) => {
+router.put('/keywords/manage/:id', requireAdmin, async (req, res, next) => {
   try {
     const { keyword, city, service, priority, search_volume, difficulty, status, notes, content_url, has_content, current_position, best_position, target_url } = req.body;
 
@@ -1013,7 +1019,7 @@ router.put('/keywords/manage/:id', async (req, res, next) => {
 });
 
 // DELETE /api/admin/seo/keywords/manage/:id — delete keyword
-router.delete('/keywords/manage/:id', async (req, res, next) => {
+router.delete('/keywords/manage/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await db('seo_target_keywords').where('id', req.params.id).del();
     if (!deleted) return res.status(404).json({ error: 'Keyword not found' });

@@ -56,7 +56,9 @@ class GoogleBusinessService {
   constructor() {
     // Check if any location has credentials
     this.configured = Object.values(LOCATION_ENV_KEYS).some(key =>
-      process.env[`GBP_CLIENT_ID_${key}`] && process.env[`GBP_REFRESH_TOKEN_${key}`]
+      process.env[`GBP_CLIENT_ID_${key}`] &&
+      process.env[`GBP_CLIENT_SECRET_${key}`] &&
+      process.env[`GBP_REFRESH_TOKEN_${key}`]
     );
 
     const domain = process.env.SERVER_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || 'portal.wavespestcontrol.com';
@@ -108,7 +110,10 @@ class GoogleBusinessService {
   getConfiguredLocations() {
     return WAVES_LOCATIONS.filter(loc => {
       const envKey = LOCATION_ENV_KEYS[loc.id];
-      return envKey && process.env[`GBP_CLIENT_ID_${envKey}`] && process.env[`GBP_REFRESH_TOKEN_${envKey}`];
+      return envKey &&
+        process.env[`GBP_CLIENT_ID_${envKey}`] &&
+        process.env[`GBP_CLIENT_SECRET_${envKey}`] &&
+        process.env[`GBP_REFRESH_TOKEN_${envKey}`];
     });
   }
 
@@ -444,9 +449,10 @@ class GoogleBusinessService {
    * Data has a ~2-day reporting lag. Upserts by (location_id, date).
    */
   async syncPerformanceDaily(daysBack = 7) {
-    if (!this.configured) {
+    const configuredLocations = this.getConfiguredLocations();
+    if (configuredLocations.length === 0) {
       logger.warn('[gbp] No GBP credentials — skipping performance sync');
-      return { synced: false, reason: 'not_configured' };
+      return { synced: false, partial: false, rows: 0, errors: [], reason: 'not_configured' };
     }
 
     const METRICS = [
@@ -476,7 +482,7 @@ class GoogleBusinessService {
     let totalRows = 0;
     const errors = [];
 
-    for (const loc of this.getConfiguredLocations()) {
+    for (const loc of configuredLocations) {
       try {
         const headers = await this._getHeaders(loc.id);
         const url = `https://businessprofileperformance.googleapis.com/v1/locations/${loc.googleLocationId}:fetchMultiDailyMetricsTimeSeries?${metricsQS}&${dateRangeQS}`;
@@ -534,7 +540,13 @@ class GoogleBusinessService {
       }
     }
 
-    return { synced: true, rows: totalRows, errors };
+    const synced = errors.length === 0;
+    return {
+      synced,
+      partial: totalRows > 0 && errors.length > 0,
+      rows: totalRows,
+      errors,
+    };
   }
 
   // =========================================================================

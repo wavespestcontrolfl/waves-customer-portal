@@ -5,7 +5,7 @@
  * Authenticates with the shared Google Service Account.
  *
  * ENV:
- *   GA4_PROPERTY_ID — numeric GA4 property ID (default 353979644)
+ *   GA4_PROPERTY_ID — numeric GA4 property ID (Waves production: 487785917)
  *   GOOGLE_SERVICE_ACCOUNT_JSON — JSON string of service account credentials
  */
 
@@ -18,7 +18,7 @@ function getGoogle() {
 const db = require('../../models/db');
 const logger = require('../logger');
 
-const propertyId = process.env.GA4_PROPERTY_ID || '353979644';
+const propertyId = process.env.GA4_PROPERTY_ID || null;
 
 let analyticsClient = null;
 let initAttempted = false;
@@ -33,6 +33,11 @@ async function initialize() {
   initAttempted = true;
 
   try {
+    if (!propertyId) {
+      logger.warn('[GA4] GA4_PROPERTY_ID not set — GA4 disabled');
+      return null;
+    }
+
     const saEnv = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
     if (!saEnv) {
       logger.warn('[GA4] GOOGLE_SERVICE_ACCOUNT_JSON not set — GA4 disabled');

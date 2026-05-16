@@ -22,7 +22,7 @@ function getGoogle() {
   return google;
 }
 
-const DEFAULT_SITE_URL = process.env.GSC_SITE_URL || 'https://wavespestcontrol.com';
+const DEFAULT_SITE_URL = process.env.GSC_SITE_URL || 'https://www.wavespestcontrol.com/';
 
 // All 15 Waves network domains — GSC properties to query
 const NETWORK_DOMAINS = [
@@ -45,7 +45,9 @@ function normalizeDomain(value) {
 
 function siteUrlForDomain(domain) {
   if (!domain) return DEFAULT_SITE_URL;
-  return `https://${normalizeDomain(domain)}`;
+  const normalized = normalizeDomain(domain);
+  if (normalized === normalizeDomain(DEFAULT_SITE_URL)) return DEFAULT_SITE_URL;
+  return `https://${normalized}/`;
 }
 
 function applyDomainFilter(query, domain) {
@@ -302,7 +304,21 @@ class SearchConsoleService {
 
   async syncSitewideTotals(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
     const domain = normalizeDomain(siteUrl);
-    // Get sitewide totals with branded breakdown
+    const response = await this.webmasters.searchanalytics.query({
+      siteUrl,
+      requestBody: {
+        startDate,
+        endDate,
+        dimensions: ['date'],
+        type: 'web',
+      },
+    });
+
+    const totalRows = response.data.rows || [];
+
+    // Query rows are incomplete because GSC anonymizes some query data. Keep the
+    // branded/non-brand split as a labeled-query breakdown, but use the true
+    // date-level GSC totals for sitewide clicks/impressions/CTR/position.
     const queries = await db('gsc_queries')
       .where('date', '>=', startDate)
       .where('date', '<=', endDate)
@@ -322,18 +338,33 @@ class SearchConsoleService {
       }
     }
 
-    for (const [date, data] of Object.entries(byDate)) {
-      const totalClicks = data.branded_clicks + data.nonbrand_clicks;
-      const totalImpressions = data.branded_impressions + data.nonbrand_impressions;
+    for (const row of totalRows) {
+      const date = row.keys[0];
+      const data = byDate[date] || {
+        branded_clicks: 0,
+        branded_impressions: 0,
+        nonbrand_clicks: 0,
+        nonbrand_impressions: 0,
+      };
+      const labeledClicks = data.branded_clicks + data.nonbrand_clicks;
+      const labeledImpressions = data.branded_impressions + data.nonbrand_impressions;
 
       const record = {
-        clicks: totalClicks,
-        impressions: totalImpressions,
-        ctr: totalImpressions > 0 ? totalClicks / totalImpressions : 0,
+        clicks: row.clicks || 0,
+        impressions: row.impressions || 0,
+        ctr: row.ctr || 0,
+        avg_position: row.position || null,
         branded_clicks: data.branded_clicks,
         branded_impressions: data.branded_impressions,
         nonbrand_clicks: data.nonbrand_clicks,
         nonbrand_impressions: data.nonbrand_impressions,
+        metadata: {
+          source: 'searchanalytics_date_total',
+          labeledClicks,
+          labeledImpressions,
+          hiddenClicks: Math.max(0, (row.clicks || 0) - labeledClicks),
+          hiddenImpressions: Math.max(0, (row.impressions || 0) - labeledImpressions),
+        },
       };
 
       await db('gsc_performance_daily')
