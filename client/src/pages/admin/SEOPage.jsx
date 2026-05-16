@@ -2280,9 +2280,9 @@ function AnalyticsTab() {
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      adminFetch(`/admin/analytics/overview?days=${days}`),
-      adminFetch(`/admin/analytics/traffic?days=${days}`),
-      adminFetch(`/admin/analytics/pages?days=${days}`),
+      adminFetch(`/admin/analytics/overview?period=${days}`),
+      adminFetch(`/admin/analytics/sources?period=${days}`),
+      adminFetch(`/admin/analytics/landing-pages?period=${days}`),
     ])
       .then(([o, t, p]) => {
         setOverview(o);
@@ -2322,7 +2322,36 @@ function AnalyticsTab() {
       </Card>
     );
 
-  const data = overview?.data || {};
+  if (overview?.error)
+    return (
+      <Card style={{ textAlign: "center", padding: 60 }}>
+        <div
+          style={{
+            fontSize: 18,
+            fontWeight: 600,
+            color: D.heading,
+            marginBottom: 8,
+          }}
+        >
+          Google Analytics Needs Access
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.6 }}>
+          {overview.error}
+        </div>
+      </Card>
+    );
+
+  const totals = overview?.totals || overview?.data || {};
+  const data = {
+    sessions: totals.sessions,
+    users: totals.users,
+    newUsers: totals.newUsers,
+    bounceRate: totals.bounceRate,
+    avgSessionDuration: totals.avgSessionDuration,
+    pageviewsPerSession:
+      totals.pageviewsPerSession ||
+      (totals.sessions ? totals.pageviews / totals.sessions : null),
+  };
   const sources = traffic?.data || [];
   const topPages = pages?.data || [];
   const fmt = (v) => (v != null ? Number(v).toLocaleString() : "—");
@@ -2560,7 +2589,7 @@ function AnalyticsTab() {
                     wordBreak: "break-all",
                   }}
                 >
-                  {p.page || p.pagePath}
+                  {p.landingPage || p.page || p.pagePath}
                 </div>{" "}
                 <div
                   style={{
@@ -2573,7 +2602,7 @@ function AnalyticsTab() {
                     flexShrink: 0,
                   }}
                 >
-                  {fmt(p.sessions)}
+                  {fmt(p.sessions || p.pageviews)}
                 </div>{" "}
                 <div
                   style={{
