@@ -18,7 +18,7 @@ describe('tech-late detector tuning', () => {
     jest.clearAllMocks();
   });
 
-  test('query waits until due time plus grace and suppresses stale or already-acknowledged windows', async () => {
+  test('query waits until promised arrival due time plus grace and suppresses stale or already-acknowledged windows', async () => {
     db.raw.mockResolvedValue({ rows: [] });
 
     await detector.runTechLateCheck();
@@ -27,6 +27,8 @@ describe('tech-late detector tuning', () => {
     expect(sql).toContain('s.window_end IS NOT NULL');
     expect(sql).toContain('s.scheduled_date + s.window_end');
     expect(sql).toContain(`make_interval(mins => COALESCE(NULLIF(s.estimated_duration_minutes, 0), ${detector.TECH_LATE_FALLBACK_DURATION_MINUTES}))`);
+    expect(sql).toContain('GREATEST(');
+    expect(sql).toContain(`make_interval(mins => ${detector.TECH_LATE_CUSTOMER_WINDOW_MINUTES})`);
     expect(sql).toContain(`c.due_at < NOW() - INTERVAL '${detector.TECH_LATE_GRACE_MINUTES} minutes'`);
     expect(sql).toContain(`c.due_at >= NOW() - INTERVAL '${detector.TECH_LATE_MAX_DELAY_MINUTES} minutes'`);
     expect(sql).toContain("LEFT(a.payload->>'scheduled_date', 10) = c.scheduled_date::text");
@@ -53,7 +55,7 @@ describe('tech-late detector tuning', () => {
           window_start: '11:00:00',
           window_end: '12:00:00',
           scheduled_date: '2026-05-05',
-          delay_minutes: '31.2',
+          delay_minutes: '61.2',
         },
       ],
     });
@@ -80,7 +82,7 @@ describe('tech-late detector tuning', () => {
       techId: 'tech-2',
       jobId: 'job-critical',
       payload: {
-        delay_minutes: 31,
+        delay_minutes: 61,
         window_start: '11:00:00',
         window_end: '12:00:00',
         scheduled_date: '2026-05-05',

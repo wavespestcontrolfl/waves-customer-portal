@@ -1,16 +1,17 @@
 /**
  * unassigned-overdue-detector — second dispatch alert generator.
  * Runs every 5 minutes via initScheduledJobs (gated by GATE_CRON_JOBS).
- * Finds jobs whose window_start (in America/New_York) has passed by
- * ≥ 15 min while technician_id IS NULL and the job hasn't moved to
+ * Finds jobs whose promised arrival due time (at least 2 hours after
+ * window_start, or later when window_end is later) has passed by
+ * ≥ 30 min while technician_id IS NULL and the job hasn't moved to
  * on_site / completed / cancelled / skipped, and creates an
  * `unassigned_overdue` dispatch_alert via createAlert(). The Action
  * Queue surfaces the row in real time because createAlert emits
  * `dispatch:alert` to dispatch:admins post-commit.
  *
  * Severity bands (frozen at insert time, same as tech_late):
- *   15–29 min  → warn
- *   ≥ 30 min   → critical
+ *   30–59 min after due time  → warn
+ *   ≥ 60 min after due time   → critical
  *
  * Scope distinction vs tech-late-detector:
  *   - tech_late:           technician_id IS NOT NULL (the tech
@@ -44,6 +45,11 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { createAlert } = require('./dispatch-alerts');
 
+const UNASSIGNED_OVERDUE_GRACE_MINUTES = 30;
+const UNASSIGNED_OVERDUE_CRITICAL_MINUTES = 60;
+const UNASSIGNED_OVERDUE_CUSTOMER_WINDOW_MINUTES = 120;
+const UNASSIGNED_OVERDUE_FALLBACK_DURATION_MINUTES = 60;
+
 // In-process mutex matches dashboard-alerts-cron.js + tech-late-detector.js.
 let isRunning = false;
 
@@ -64,25 +70,46 @@ async function runInner() {
   let rows;
   try {
     const result = await db.raw(`
+      WITH candidates AS (
+        SELECT
+          s.id AS job_id,
+          s.window_start,
+          s.window_end,
+          s.scheduled_date,
+          GREATEST(
+            CASE
+              WHEN s.window_end IS NOT NULL
+                THEN s.scheduled_date + s.window_end
+              ELSE
+                s.scheduled_date
+                  + s.window_start
+                  + make_interval(mins => COALESCE(NULLIF(s.estimated_duration_minutes, 0), ${UNASSIGNED_OVERDUE_FALLBACK_DURATION_MINUTES}))
+            END,
+            s.scheduled_date
+              + s.window_start
+              + make_interval(mins => ${UNASSIGNED_OVERDUE_CUSTOMER_WINDOW_MINUTES})
+          ) AT TIME ZONE 'America/New_York' AS due_at
+        FROM scheduled_services s
+        WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
+          AND s.scheduled_date <= ((NOW() AT TIME ZONE 'America/New_York')::date)
+          AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped')
+          AND s.technician_id IS NULL
+          AND s.window_start IS NOT NULL
+      )
       SELECT
-        s.id AS job_id,
-        s.window_start,
-        s.scheduled_date,
+        c.job_id,
+        c.window_start,
+        c.window_end,
+        c.scheduled_date,
         EXTRACT(EPOCH FROM (
-          NOW() - ((s.scheduled_date + s.window_start) AT TIME ZONE 'America/New_York')
+          NOW() - c.due_at
         )) / 60 AS delay_minutes
-      FROM scheduled_services s
-      WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
-        AND s.scheduled_date <= ((NOW() AT TIME ZONE 'America/New_York')::date)
-        AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped')
-        AND s.technician_id IS NULL
-        AND s.window_start IS NOT NULL
-        AND ((s.scheduled_date + s.window_start) AT TIME ZONE 'America/New_York')
-              < NOW() - INTERVAL '15 minutes'
+      FROM candidates c
+      WHERE c.due_at < NOW() - INTERVAL '${UNASSIGNED_OVERDUE_GRACE_MINUTES} minutes'
         AND NOT EXISTS (
           SELECT 1 FROM dispatch_alerts a
           WHERE a.type = 'unassigned_overdue'
-            AND a.job_id = s.id
+            AND a.job_id = c.job_id
             AND a.resolved_at IS NULL
         )
     `);
@@ -96,7 +123,7 @@ async function runInner() {
   let suppressed = 0;
   for (const row of rows) {
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
-    const severity = delayMin >= 30 ? 'critical' : 'warn';
+    const severity = delayMin >= UNASSIGNED_OVERDUE_CRITICAL_MINUTES ? 'critical' : 'warn';
     try {
       await createAlert({
         type: 'unassigned_overdue',
@@ -106,6 +133,7 @@ async function runInner() {
         payload: {
           delay_minutes: delayMin,
           window_start: row.window_start,
+          window_end: row.window_end,
           scheduled_date: row.scheduled_date,
         },
       });
@@ -128,4 +156,10 @@ async function runInner() {
   return { created, suppressed, scanned: rows.length };
 }
 
-module.exports = { runUnassignedOverdueCheck };
+module.exports = {
+  runUnassignedOverdueCheck,
+  UNASSIGNED_OVERDUE_GRACE_MINUTES,
+  UNASSIGNED_OVERDUE_CRITICAL_MINUTES,
+  UNASSIGNED_OVERDUE_CUSTOMER_WINDOW_MINUTES,
+  UNASSIGNED_OVERDUE_FALLBACK_DURATION_MINUTES,
+};

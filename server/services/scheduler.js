@@ -1412,9 +1412,11 @@ function initScheduledJobs() {
 
   // EVERY 5 MIN — Tech-late detector (first dispatch alert generator)
   //
-  // Reads scheduled_services for jobs whose ET window_start has passed
-  // by ≥ 15 min while the tech hasn't moved to on_site / completed /
-  // cancelled / skipped, and inserts a tech_late dispatch_alert via
+  // Reads scheduled_services for jobs whose ET promised arrival due
+  // time (at least window_start + 2 hours, or later window_end) has
+  // passed by ≥ 30 min while the tech hasn't moved to on_site /
+  // completed / cancelled / skipped, and inserts a tech_late
+  // dispatch_alert via
   // createAlert (which fans out the dispatch:alert socket broadcast
   // post-commit so the Action Queue right pane updates in real time).
   //
@@ -1435,10 +1437,11 @@ function initScheduledJobs() {
   //
   // Same shape as tech-late-detector but scopes to jobs with
   // technician_id IS NULL. Fires unassigned_overdue alerts when an
-  // unassigned job's window_start (in ET) has passed by ≥ 15 min
-  // and the job is still pre-terminal. Severity bands: 15–29 → warn,
-  // ≥ 30 → critical. Partial unique index closes the cross-process
-  // race (migration 20260427000003).
+  // unassigned job's promised arrival due time (at least window_start
+  // + 2 hours, or later window_end) has passed by ≥ 30 min and the
+  // job is still pre-terminal. Severity bands: 30–59 → warn, ≥ 60 →
+  // critical. Partial unique index closes the cross-process race
+  // (migration 20260427000003).
   cron.schedule('*/5 * * * *', async () => {
     try {
       const { runUnassignedOverdueCheck } = require('./unassigned-overdue-detector');
