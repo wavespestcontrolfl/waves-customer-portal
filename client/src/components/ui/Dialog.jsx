@@ -4,7 +4,7 @@ import { cn } from './cn';
 
 // Hand-rolled modal. If focus-trap edge cases accumulate, swap the root
 // for @radix-ui/react-dialog (see DECISIONS.md 2026-04-18 entry on primitives).
-export function Dialog({ open, onClose, children, size = 'md', className }) {
+export function Dialog({ open, onClose, children, size = 'md', className, style }) {
   const panelRef = useRef(null);
 
   useEffect(() => {
@@ -34,6 +34,7 @@ export function Dialog({ open, onClose, children, size = 'md', className }) {
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
+      style={style}
     >
       <div
         className="absolute inset-0 bg-zinc-900/30"
