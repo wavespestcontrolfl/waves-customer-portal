@@ -81,6 +81,11 @@ function tripDurationSeconds(trip) {
   return minutes != null ? minutes * 60 : 0;
 }
 
+function speedMph(value) {
+  const parsed = num(value);
+  return parsed != null ? parseFloat(parsed.toFixed(1)) : null;
+}
+
 function stableFallbackTripId(imei, trip, tripDate, distanceMiles, durationSeconds) {
   const start = firstPresent(trip.startTime, trip.start_time, trip.startedAt, trip.started_at);
   const end = firstPresent(trip.endTime, trip.end_time, trip.endedAt, trip.ended_at);
@@ -334,6 +339,10 @@ async function processTripWebhook(event) {
       .count('id as cnt')
       .first();
     const sequence = (parseInt(tripCount.cnt) || 0) + 1;
+    const reportedAvgSpeed = speedMph(firstPresent(trip.averageSpeed, trip.averageDriveSpeed, trip.avgSpeed));
+    const calculatedAvgSpeed = (distanceMiles && durationMinutes)
+      ? speedMph(distanceMiles / (durationMinutes / 60))
+      : null;
 
     const [inserted] = await db('mileage_log')
       .insert({
@@ -360,8 +369,7 @@ async function processTripWebhook(event) {
         start_odometer: firstPresent(trip.startOdometer, trip.start_odometer) || null,
         end_odometer: firstPresent(trip.endOdometer, trip.end_odometer) || null,
         max_speed_mph: firstPresent(trip.maxSpeed, trip.max_speed_mph) ? Math.round(firstPresent(trip.maxSpeed, trip.max_speed_mph)) : null,
-        avg_speed_mph: firstPresent(trip.averageSpeed, trip.averageDriveSpeed, trip.avgSpeed) ||
-          ((distanceMiles && durationMinutes) ? Math.round(distanceMiles / (durationMinutes / 60)) : null),
+        avg_speed_mph: reportedAvgSpeed ?? calculatedAvgSpeed,
         hard_brakes: firstPresent(trip.hardBrakes, trip.hardBrakingCounts, trip.hardBrakingCount) || 0,
         hard_accels: firstPresent(trip.hardAccelerations, trip.hardAccelerationCounts, trip.hardAccelerationCount, trip.hardAccels) || 0,
         idle_minutes: firstPresent(trip.idleTime, trip.totalIdlingTime, trip.totalIdleDuration)
@@ -805,4 +813,7 @@ module.exports = {
   getDashboard,
   getIrsReport,
   exportIrsCsv,
+  _test: {
+    speedMph,
+  },
 };

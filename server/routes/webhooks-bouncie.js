@@ -145,6 +145,7 @@ async function processTrackingEvent({ logId, eventType, payload }) {
           lng: point.lng,
           ignition: point.ignition,
           speed_mph: point.speed_mph,
+          reported_at: point.reported_at,
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] pingTechLocation failed: ${err.message}`);

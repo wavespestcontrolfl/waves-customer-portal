@@ -5,7 +5,7 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
-const { classifyTrip, tripDateForBouncieStart } = require('../services/bouncie-mileage');
+const { classifyTrip, tripDateForBouncieStart, _test } = require('../services/bouncie-mileage');
 
 describe('Bouncie mileage trip date', () => {
   test('uses America/New_York business date for UTC evening-boundary starts', () => {
@@ -21,5 +21,11 @@ describe('Bouncie mileage trip date', () => {
       is_business: false,
       method: 'needs_review',
     });
+  });
+
+  test('keeps Bouncie decimal average speeds insert-safe', () => {
+    expect(_test.speedMph('37.24')).toBe(37.2);
+    expect(_test.speedMph(37.25)).toBe(37.3);
+    expect(_test.speedMph(null)).toBeNull();
   });
 });

@@ -40,6 +40,7 @@ const {
   calculateBoundedTrackingEta,
   finiteNumber,
 } = require('../services/customer-tracking-eta');
+const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -117,36 +118,28 @@ async function buildVehicle(service) {
   if (!service.technician_id) return null;
   if (finiteNumber(service.latitude) == null || finiteNumber(service.longitude) == null) return null;
 
-  let ts;
-  try {
-    ts = await db('tech_status')
-      .where({ tech_id: service.technician_id })
-      .first('lat', 'lng', 'location_updated_at', 'updated_at');
-  } catch (err) {
-    logger.warn(`[track-public] tech_status lookup failed: ${err.message}`);
-    return null;
-  }
-  if (!ts || finiteNumber(ts.lat) == null || finiteNumber(ts.lng) == null) return null;
-
-  const lat = finiteNumber(ts.lat);
-  const lng = finiteNumber(ts.lng);
-  const lastReportedAt = ts.location_updated_at;
-  if (!isFreshVehicleTimestamp(lastReportedAt)) return null;
+  const position = await resolveFreshTechPosition({
+    techId: service.technician_id,
+    bouncieImei: service.tech_bouncie_imei,
+    logPrefix: 'track-public',
+  });
+  if (!position) return null;
 
   const eta = await calculateBoundedTrackingEta({
-    techLat: lat,
-    techLng: lng,
+    techLat: position.lat,
+    techLng: position.lng,
     customerLat: service.latitude,
     customerLng: service.longitude,
-    techUpdatedAt: lastReportedAt,
+    techUpdatedAt: position.lastReportedAt,
     logPrefix: 'track-public',
   });
 
   return {
-    lat,
-    lng,
-    lastReportedAt,
+    lat: position.lat,
+    lng: position.lng,
+    lastReportedAt: position.lastReportedAt,
     stale: false,
+    source: position.source || null,
     etaMinutes: eta?.minutes ?? null,
     etaSource: eta?.source ?? null,
   };
@@ -259,6 +252,7 @@ router.get('/:token', async (req, res, next) => {
         'c.latitude',
         'c.longitude',
         't.name as tech_name',
+        't.bouncie_imei as tech_bouncie_imei',
         't.photo_url as tech_photo_url',
         't.photo_s3_key as tech_photo_s3_key',
         // Customer-friendly description from the service library. Used
