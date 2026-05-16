@@ -675,10 +675,22 @@ export function calculateEstimate(inputs) {
       palmEstimated = true;
       fieldVerify.push('injectable palm count');
     }
-    // v1.7: palm injection default is combo ($55/palm) for estimates, 2 apps/year
-    const palmPerApp = 55;
-    const inja = ip * palmPerApp * 2, injMo = Math.round(inja / 12 * 100) / 100;
-    R.injection = { palms: ip, ann: inja, mo: injMo, estimated: palmEstimated, pricePerPalm: palmPerApp };
+    // Client fallback mirrors the server adapter's explicit combo/medium protocol.
+    const palmPerApp = 75;
+    const appsPerYear = 2;
+    const perVisit = Math.max(ip * palmPerApp, 75);
+    const inja = perVisit * appsPerYear, injMo = Math.round(inja / 12 * 100) / 100;
+    R.injection = {
+      palms: ip,
+      ann: inja,
+      mo: injMo,
+      estimated: palmEstimated,
+      pricePerPalm: palmPerApp,
+      appsPerYear,
+      palmSize: 'medium',
+      perVisit,
+      detail: `Nutrition + Insecticide · medium palms · $${palmPerApp}/palm · ${appsPerYear}/yr${perVisit > ip * palmPerApp ? ` · $${perVisit} visit minimum applied` : ''}`,
+    };
     // Palm injection is excluded from WaveGuard percent discounts and does not
     // count toward tier qualification — billed separately like rodent bait.
   }
@@ -1090,6 +1102,23 @@ export function calculateEstimate(inputs) {
   else if (ac === 3) { wt = 'Gold'; wd = 0.15; }
   else if (ac === 2) { wt = 'Silver'; wd = 0.10; }
   else if (ac === 1) { wt = 'Bronze'; wd = 0; }
+  if (R.injection) {
+    const annualBeforeCredits = R.injection.ann;
+    const flatCreditAnnual = wt === 'Gold' || wt === 'Platinum'
+      ? Math.min(annualBeforeCredits, R.injection.palms * 10)
+      : 0;
+    const annualAfterCredits = Math.round((annualBeforeCredits - flatCreditAnnual) * 100) / 100;
+    const monthlyAfterCredits = Math.round(annualAfterCredits / 12 * 100) / 100;
+    R.injection = {
+      ...R.injection,
+      ann: annualAfterCredits,
+      mo: monthlyAfterCredits,
+      annualBeforeCredits,
+      flatCreditAnnual,
+      annualAfterCredits,
+      monthlyAfterCredits,
+    };
+  }
   const da = Math.round(ra * wd * 100) / 100;
   const ad = Math.round((ra - da) * 100) / 100;
   const mm = Math.round(ad / 12 * 100) / 100;

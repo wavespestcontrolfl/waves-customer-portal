@@ -17,7 +17,7 @@
  *       pest:       { frequency, roachType, version },
  *       lawn:       { track, tier, shadeClassification },
  *       treeShrub:  { tier, access, treeCount },
- *       palm:       { palmCount, treatmentType },
+ *       palm:       { palmCount, treatmentType, palmSize },
  *       mosquito:   { tier: 'seasonal' | 'monthly' },
  *       termite:    { system, monitoringTier },
  *       rodentBait: true,

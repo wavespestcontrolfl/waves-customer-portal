@@ -114,6 +114,87 @@ describe('estimate v2 service toggle adapter', () => {
     }));
   });
 
+  test('maps palm injection selection with explicit medium palm size for strict tiered pricing', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        estimatedPalmCount: 8,
+      },
+      ['PALM_INJECTION'],
+      {}
+    );
+
+    expect(input.services.palm).toEqual({
+      palmCount: 2,
+      treatmentType: 'combo',
+      palmSize: 'medium',
+    });
+
+    const estimate = generateEstimate(input);
+    const palm = estimate.lineItems.find((line) => line.service === 'palm_injection');
+    expect(palm).toEqual(expect.objectContaining({
+      treatmentType: 'combo',
+      palmSize: 'medium',
+      pricePerPalm: 75,
+    }));
+
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.results.injection).toEqual(expect.objectContaining({
+      pricePerPalm: 75,
+      appsPerYear: 2,
+      palmSize: 'medium',
+      detail: expect.stringContaining('$75/palm'),
+    }));
+  });
+
+  test('maps Gold palm credits onto the legacy palm line item and totals', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        estimatedPalmCount: 10,
+      },
+      ['PEST', 'LAWN', 'MOSQUITO', 'PALM_INJECTION'],
+      {
+        manualDiscount: { type: 'FIXED', value: 100, label: 'Manual promo' },
+      }
+    );
+
+    const estimate = generateEstimate(input);
+    const palm = estimate.lineItems.find((line) => line.service === 'palm_injection');
+    expect(estimate.waveGuard.tier).toBe('gold');
+    expect(palm).toEqual(expect.objectContaining({
+      annualBeforeCredits: 450,
+      flatCreditAnnual: 30,
+      annualAfterCredits: 420,
+      monthlyAfterCredits: 35,
+    }));
+
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.results.injection).toEqual(expect.objectContaining({
+      ann: 420,
+      mo: 35,
+      annualBeforeCredits: 450,
+      flatCreditAnnual: 30,
+      annualAfterCredits: 420,
+      monthlyAfterCredits: 35,
+    }));
+    expect(mapped.recurring.palmInjectionAnn).toBe(420);
+    expect(mapped.recurring.palmInjectionMo).toBe(35);
+    expect(mapped.recurring.annualBeforeDiscount).toBeCloseTo(
+      estimate.summary.recurringAnnualBeforeDiscount - palm.annualBeforeCredits
+    );
+    expect(mapped.recurring.annualAfterDiscount).toBeCloseTo(
+      estimate.summary.recurringAnnualAfterDiscount - palm.annualAfterCredits
+    );
+    expect(mapped.recurring.savings).toBeCloseTo(
+      estimate.summary.waveGuardSavings - palm.flatCreditAnnual
+    );
+    expect(mapped.manualDiscount).toEqual(expect.objectContaining({ amount: 100 }));
+    expect(mapped.recurring.annualBeforeDiscount - mapped.recurring.annualAfterDiscount)
+      .toBeCloseTo(mapped.recurring.savings + mapped.manualDiscount.amount);
+    expect(mapped.totals.year2).toBeCloseTo(estimate.summary.recurringAnnualAfterDiscount);
+  });
+
   test('uses zoned recurring mosquito add-on amounts in detail copy', () => {
     const input = translateV2CallToV1Input(
       {

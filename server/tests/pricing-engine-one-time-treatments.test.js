@@ -179,7 +179,7 @@ describe('pricing engine one-time treatment rules', () => {
   test('palm injection and rodent bait do not trigger the one-time recurring-customer perk', () => {
     const estimate = generateEstimate(estimateInput({
       services: {
-        palm: { palmCount: 3, treatmentType: 'combo' },
+        palm: { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' },
         rodentBait: {},
         oneTimeMosquito: { stationCount: 0, dunkCount: 0 },
       },

@@ -132,13 +132,48 @@ async function syncConstantsFromDB(dbInstance) {
     // ── Palm Injection ───────────────────────────────────────
     if (config.palm_pricing) {
       const p = config.palm_pricing;
-      const tt = constants.PALM.treatmentTypes;
-      if (p.nutrition) tt.nutrition.pricePerPalm = r(p.nutrition);
-      if (p.preventive_insecticide) tt.insecticide.pricePerPalm = r(p.preventive_insecticide);
-      if (p.combo) tt.combo.pricePerPalm = r(p.combo);
-      if (p.fungal) tt.fungal.pricePerPalm = r(p.fungal);
+      const tt = constants.PALM.treatments || constants.PALM.treatmentTypes;
+      const setTier = (treatment, size, value) => {
+        const tier = treatment?.tiers?.find(t => t.size === size);
+        if (tier && value != null) tier.pricePerPalm = r(value);
+      };
+      if (p.nutrition != null) tt.nutrition.pricePerPalm = r(p.nutrition);
+      if (p.nutrition_default_apps_per_year != null) {
+        const apps = Number(p.nutrition_default_apps_per_year);
+        if (Number.isFinite(apps) && apps > 0) tt.nutrition.defaultAppsPerYear = apps;
+      }
+      if (Array.isArray(p.nutrition_allowed_apps_per_year)) {
+        const allowed = p.nutrition_allowed_apps_per_year
+          .map(Number)
+          .filter(v => Number.isFinite(v) && v > 0);
+        if (allowed.length) tt.nutrition.allowedAppsPerYear = allowed;
+      }
+      setTier(tt.insecticide, 'small', p.insecticide_small ?? p.preventive_insecticide_small);
+      setTier(tt.insecticide, 'medium', p.insecticide_medium ?? p.preventive_insecticide_medium);
+      setTier(tt.insecticide, 'large', p.insecticide_large ?? p.preventive_insecticide_large);
+      setTier(tt.combo, 'small', p.combo_small);
+      setTier(tt.combo, 'medium', p.combo_medium);
+      setTier(tt.combo, 'large', p.combo_large);
+      if (p.fungal_floor != null) tt.fungal.floorPerPalm = r(p.fungal_floor);
       if (p.lethal_bronzing_floor) tt.lethalBronzing.floorPerPalm = r(p.lethal_bronzing_floor);
-      if (p.tree_age_floor) tt.treeAge.floorPerPalm = r(p.tree_age_floor);
+      if (p.tree_age_floor) {
+        tt.treeAge.floorPerPalm = r(p.tree_age_floor);
+        const firstTier = tt.treeAge.tiers?.find(t => t.dbhMax === 10);
+        if (firstTier) firstTier.pricePerPalm = r(p.tree_age_floor);
+      }
+      if (p.min_per_visit != null) {
+        const min = Number(p.min_per_visit);
+        if (Number.isFinite(min) && min > 0) constants.PALM.minPerVisit = r(min);
+      }
+      if (p.flat_credit_per_palm != null) {
+        const credit = Number(p.flat_credit_per_palm);
+        if (Number.isFinite(credit) && credit >= 0) constants.PALM.flatCreditPerPalm = credit;
+      }
+      if (p.flat_credit_min_tier && constants.WAVEGUARD.tiers[p.flat_credit_min_tier]) {
+        constants.PALM.flatCreditMinTier = p.flat_credit_min_tier;
+      }
+      if (typeof p.tier_qualifier === 'boolean') constants.PALM.tierQualifier = p.tier_qualifier;
+      if (typeof p.exclude_from_pct_discount === 'boolean') constants.PALM.excludeFromPctDiscount = p.exclude_from_pct_discount;
     }
 
     // ── Termite ──────────────────────────────────────────────

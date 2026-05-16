@@ -189,13 +189,11 @@ function generateEstimate(input) {
 
   // Palm Injection
   if (services.palm) {
-    const result = pricePalmInjection(property, {
-      palmCount: services.palm.palmCount || 1,
-      treatmentType: services.palm.treatmentType || 'combo',
-      customPricePerPalm: services.palm.customPricePerPalm,
-    });
+    const result = pricePalmInjection(property, { ...services.palm });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
+    result.annualBeforeCredits = result.annual;
+    result.monthlyBeforeCredits = result.monthly;
     lineItems.push(result);
     // Palm does NOT add to activeServiceKeys for tier determination
   }
@@ -605,6 +603,8 @@ function generateEstimate(input) {
     const discount = getEffectiveDiscount(serviceKey, waveGuardTier, {
       isRecurringCustomer,
       isOneTimeService: isOneTime,
+      palmCount: item.palmCount,
+      annualBeforeCredits: item.annualBeforeCredits ?? item.annual,
     });
 
     item.discount = discount;
@@ -634,6 +634,12 @@ function generateEstimate(input) {
         item.annualAfterDiscount = discountedAnnual;
       }
       item.monthlyAfterDiscount = Math.round(item.annualAfterDiscount / 12 * 100) / 100;
+      if (serviceKey === 'palm_injection') {
+        item.annualBeforeCredits = item.annualBeforeCredits ?? item.annualBeforeDiscount;
+        item.flatCreditAnnual = discount.flatCreditAnnual || 0;
+        item.annualAfterCredits = item.annualAfterDiscount;
+        item.monthlyAfterCredits = Math.round(item.annualAfterCredits / 12 * 100) / 100;
+      }
     } else if (item.price) {
       item.priceBeforeDiscount = item.price;
       item.priceAfterDiscount = applyDiscount(item.price, discount);

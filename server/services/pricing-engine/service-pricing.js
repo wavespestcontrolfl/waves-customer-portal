@@ -827,44 +827,270 @@ function priceTreeShrub(property, options = {}) {
 // ============================================================
 // PALM INJECTION
 // ============================================================
-function pricePalmInjection(property, options = {}) {
-  const {
-    palmCount = 1,
-    treatmentType = 'combo',
-    customPricePerPalm = null, // For quote-based treatments (LB, Tree-Age)
-  } = options;
+const PALM_WARNING_TEXT = {
+  nutrition: 'Corrective injection; not a replacement for full granular palm fertilization.',
+  combo: 'Do not model as tank mix; separate compatible application steps.',
+  fungal: 'Diagnosis/product-driven treatment.',
+  lethalBronzing: 'Preventive program only; not a cure for symptomatic or positive palms.',
+  treeAge: 'Annual value is annualized from a 24-month interval; perVisit is the event price.',
+};
 
-  const treatment = PALM.treatmentTypes[treatmentType];
-  if (!treatment) throw new Error(`Unknown palm treatment: ${treatmentType}`);
+function roundCurrency(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
 
-  let pricePerPalm;
-  if (treatment.quoteBased) {
-    pricePerPalm = customPricePerPalm || treatment.floorPerPalm;
-    if (pricePerPalm < treatment.floorPerPalm) pricePerPalm = treatment.floorPerPalm;
-  } else {
-    pricePerPalm = treatment.pricePerPalm;
+function isMissingPrice(value) {
+  return value === null || value === undefined || value === '';
+}
+
+function assertPositiveInteger(value, name) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function assertPositiveNumber(value, name) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number`);
+  }
+  return value;
+}
+
+function assertCustomPriceIfPresent(customPricePerPalm) {
+  if (isMissingPrice(customPricePerPalm)) return;
+  if (typeof customPricePerPalm !== 'number' || !Number.isFinite(customPricePerPalm)) {
+    throw new Error('customPricePerPalm must be a finite number');
+  }
+  if (customPricePerPalm < 0) {
+    throw new Error('customPricePerPalm must be non-negative');
+  }
+}
+
+function resolveQuotePrice(customPricePerPalm, floorPerPalm) {
+  assertCustomPriceIfPresent(customPricePerPalm);
+  if (isMissingPrice(customPricePerPalm)) {
+    return {
+      pricePerPalm: floorPerPalm,
+      quoteFloorApplied: false,
+      customPriceProvided: false,
+    };
   }
 
-  const appsPerYear = treatment.appsPerYear;
-  const annualCostPerPalm = pricePerPalm * appsPerYear;
-  const annual = annualCostPerPalm * palmCount;
-  const monthly = Math.round(annual / 12 * 100) / 100;
-
-  // Per-visit minimum check
-  const perVisitTotal = pricePerPalm * palmCount;
-  const perVisitEffective = Math.max(perVisitTotal, PALM.minPerVisit);
-
   return {
-    service: 'palm_injection',
-    treatmentType, palmCount, pricePerPalm, appsPerYear,
-    perVisit: perVisitEffective,
-    annual, monthly,
-    tierQualifier: PALM.tierQualifier,
-    excludeFromPctDiscount: true,
-    flatCredit: PALM.flatCreditPerPalm,
-    flatCreditMinTier: PALM.flatCreditMinTier,
-    quoteBased: treatment.quoteBased || false,
+    pricePerPalm: Math.max(customPricePerPalm, floorPerPalm),
+    quoteFloorApplied: customPricePerPalm < floorPerPalm,
+    customPriceProvided: true,
   };
+}
+
+function resolveAppsPerYear(treatment, options = {}) {
+  if (!isMissingPrice(options.appsPerYear)) {
+    return assertPositiveNumber(options.appsPerYear, 'appsPerYear');
+  }
+  if (!isMissingPrice(options.intervalMonths)) {
+    return roundCurrency(12 / assertPositiveNumber(options.intervalMonths, 'intervalMonths'));
+  }
+  if (treatment.intervalMonths) {
+    const intervalAppsPerYear = 12 / treatment.intervalMonths;
+    if (typeof treatment.appsPerYear === 'number') return treatment.appsPerYear;
+    return roundCurrency(intervalAppsPerYear);
+  }
+  if (typeof treatment.defaultAppsPerYear === 'number') return treatment.defaultAppsPerYear;
+  if (typeof treatment.appsPerYear === 'number') return treatment.appsPerYear;
+  throw new Error('appsPerYear could not be resolved for palm treatment');
+}
+
+function getTierByPalmSize(treatment, palmSize) {
+  if (!palmSize) throw new Error('palmSize is required for this palm treatment');
+  const tier = (treatment.tiers || []).find(t => t.size === palmSize);
+  if (!tier) throw new Error('palmSize must be one of: small, medium, large');
+  return tier;
+}
+
+function getTreeAgeTier(treatment, dbhInches) {
+  return (treatment.tiers || []).find(t => t.dbhMax === null || dbhInches <= t.dbhMax);
+}
+
+function formatInterval(intervalMonths) {
+  if (!intervalMonths) return undefined;
+  const unit = intervalMonths === 1 ? 'month' : 'months';
+  return `every ${intervalMonths} ${unit}`;
+}
+
+function shouldIncludePalmInternalCostBasis(options) {
+  return options.includeInternalCostBasis === true
+    && (options.internal === true || options.isInternal === true || options.admin === true || options.isAdmin === true);
+}
+
+function pricePalmInjection(property, options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error('Palm injection options are required');
+  }
+
+  const { treatmentType, customPricePerPalm } = options;
+  if (!treatmentType) throw new Error('Palm treatmentType is required');
+
+  const treatment = PALM.treatments[treatmentType];
+  if (!treatment) throw new Error(`Unknown palm treatment: ${treatmentType}`);
+
+  const palmCount = assertPositiveInteger(options.palmCount, 'palmCount');
+  assertCustomPriceIfPresent(customPricePerPalm);
+
+  let palmSize;
+  let dbhInches;
+  let intervalMonths;
+  let appsPerYear;
+  let pricePerPalm;
+  let quoteBased = treatment.quoteBased === true;
+  let quoteFloorApplied = false;
+  let customPriceProvided = false;
+  const warnings = [];
+  if (PALM_WARNING_TEXT[treatmentType]) warnings.push(PALM_WARNING_TEXT[treatmentType]);
+
+  if (treatment.pricingType === 'fixed') {
+    if (!isMissingPrice(options.appsPerYear)) {
+      appsPerYear = assertPositiveNumber(options.appsPerYear, 'appsPerYear');
+      if (!treatment.allowedAppsPerYear.includes(appsPerYear)) {
+        throw new Error(`appsPerYear for ${treatmentType} must be one of: ${treatment.allowedAppsPerYear.join(', ')}`);
+      }
+    } else {
+      appsPerYear = treatment.defaultAppsPerYear;
+    }
+    pricePerPalm = treatment.pricePerPalm;
+  } else if (treatment.pricingType === 'tiered') {
+    palmSize = options.palmSize;
+    const tier = getTierByPalmSize(treatment, palmSize);
+    appsPerYear = treatment.defaultAppsPerYear;
+
+    const quoteFlags = treatment.quoteBasedWhen || [];
+    const requiresQuotePrice = quoteFlags.some(flag => options[flag] === true);
+    if (requiresQuotePrice) {
+      if (isMissingPrice(customPricePerPalm)) {
+        throw new Error(`customPricePerPalm is required for quote-based ${treatmentType} palm pricing`);
+      }
+      const quotePrice = resolveQuotePrice(customPricePerPalm, tier.pricePerPalm);
+      pricePerPalm = quotePrice.pricePerPalm;
+      quoteFloorApplied = quotePrice.quoteFloorApplied;
+      customPriceProvided = quotePrice.customPriceProvided;
+      quoteBased = true;
+    } else {
+      pricePerPalm = tier.pricePerPalm;
+    }
+  } else if (treatmentType === 'fungal') {
+    if (options.diagnosisConfirmed !== true) {
+      throw new Error('diagnosisConfirmed must be true for fungal palm treatment pricing');
+    }
+    if (!options.selectedProduct) {
+      throw new Error('selectedProduct is required for fungal palm treatment pricing');
+    }
+    if (!treatment.products.includes(options.selectedProduct)) {
+      throw new Error(`selectedProduct must be one of: ${treatment.products.join(', ')}`);
+    }
+    if (isMissingPrice(options.appsPerYear) && isMissingPrice(options.intervalMonths)) {
+      throw new Error('fungal palm treatment pricing requires appsPerYear or intervalMonths');
+    }
+    intervalMonths = !isMissingPrice(options.intervalMonths)
+      ? assertPositiveNumber(options.intervalMonths, 'intervalMonths')
+      : undefined;
+    appsPerYear = resolveAppsPerYear(treatment, options);
+    const quotePrice = resolveQuotePrice(customPricePerPalm, treatment.floorPerPalm);
+    pricePerPalm = quotePrice.pricePerPalm;
+    quoteFloorApplied = quotePrice.quoteFloorApplied;
+    customPriceProvided = quotePrice.customPriceProvided;
+  } else if (treatmentType === 'lethalBronzing') {
+    const palmStatus = options.palmStatus;
+    if (!palmStatus) throw new Error('palmStatus is required for lethal bronzing palm pricing');
+    if (treatment.ineligibleStatuses.includes(palmStatus)) {
+      throw new Error('Palm is not eligible for lethal bronzing injection pricing and should be handled outside this service');
+    }
+    if (!treatment.eligibleStatuses.includes(palmStatus)) {
+      throw new Error(`Unknown or invalid lethal bronzing palmStatus: ${palmStatus}`);
+    }
+    intervalMonths = treatment.intervalMonths;
+    appsPerYear = resolveAppsPerYear(treatment);
+    const quotePrice = resolveQuotePrice(customPricePerPalm, treatment.floorPerPalm);
+    pricePerPalm = quotePrice.pricePerPalm;
+    quoteFloorApplied = quotePrice.quoteFloorApplied;
+    customPriceProvided = quotePrice.customPriceProvided;
+  } else if (treatmentType === 'treeAge') {
+    dbhInches = assertPositiveNumber(options.dbhInches, 'dbhInches');
+    const tier = getTreeAgeTier(treatment, dbhInches);
+    const tierFloor = tier.pricePerPalm || 110;
+    if (tier.quoteBased && isMissingPrice(customPricePerPalm)) {
+      throw new Error('customPricePerPalm is required for Tree-Age pricing above 20 DBH inches');
+    }
+    if ((options.product === 'Tree-Age R10' || options.restrictedUseProduct === true) && options.licensedApplicator !== true) {
+      throw new Error('licensedApplicator is required for restricted-use Tree-Age product pricing');
+    }
+    intervalMonths = treatment.intervalMonths;
+    appsPerYear = resolveAppsPerYear(treatment);
+    const quotePrice = resolveQuotePrice(customPricePerPalm, tierFloor);
+    pricePerPalm = quotePrice.pricePerPalm;
+    quoteFloorApplied = quotePrice.quoteFloorApplied;
+    customPriceProvided = quotePrice.customPriceProvided;
+  } else {
+    throw new Error(`Unsupported palm treatment pricing type: ${treatment.pricingType}`);
+  }
+
+  const rawPerVisit = roundCurrency(pricePerPalm * palmCount);
+  const perVisit = roundCurrency(Math.max(rawPerVisit, PALM.minPerVisit));
+  const minimumApplied = perVisit > rawPerVisit;
+  const minimumShortfallPerVisit = minimumApplied ? roundCurrency(perVisit - rawPerVisit) : 0;
+  const rawAnnual = roundCurrency(rawPerVisit * appsPerYear);
+  const annualBeforeCredits = roundCurrency(perVisit * appsPerYear);
+  const monthlyBeforeCredits = roundCurrency(annualBeforeCredits / 12);
+
+  const result = {
+    service: 'palm_injection',
+
+    treatmentType,
+    treatmentLabel: treatment.label,
+    pricingType: treatment.pricingType,
+
+    palmCount,
+    palmSize,
+    dbhInches,
+
+    pricePerPalm: roundCurrency(pricePerPalm),
+    quoteBased,
+    quoteFloorApplied,
+    customPriceProvided,
+
+    appsPerYear,
+    intervalMonths,
+    minimumProgramMonths: treatment.minimumProgramMonths,
+
+    rawPerVisit,
+    perVisit,
+    minimumApplied,
+    minimumShortfallPerVisit,
+
+    rawAnnual,
+    annualBeforeCredits,
+    monthlyBeforeCredits,
+
+    annual: annualBeforeCredits,
+    monthly: monthlyBeforeCredits,
+
+    tierQualifier: PALM.tierQualifier,
+    excludeFromPctDiscount: PALM.excludeFromPctDiscount,
+
+    flatCredit: PALM.flatCreditPerPalm,
+    flatCreditPerPalm: PALM.flatCreditPerPalm,
+    flatCreditMinTier: PALM.flatCreditMinTier,
+
+    warnings,
+  };
+
+  if (intervalMonths) {
+    result.displayFrequency = formatInterval(intervalMonths);
+    result.annualized = intervalMonths > 12;
+  }
+  if (options.selectedProduct) result.selectedProduct = options.selectedProduct;
+  if (shouldIncludePalmInternalCostBasis(options)) result.internalCostBasis = PALM.internalCostBasis;
+
+  return result;
 }
 
 // ============================================================

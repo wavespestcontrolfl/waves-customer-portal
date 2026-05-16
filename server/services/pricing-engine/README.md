@@ -131,16 +131,20 @@ Estimated bed area is capped at 8,000 sqft. Manual review is required for fallba
 
 ## 6. Palm Injection
 
-| Treatment | $/palm | Apps/yr |
-|---|---|---|
-| Nutrition | $35 | 2 |
-| Preventive Insecticide | $45 | 2 |
-| Combo | $55 | 2 |
-| Fungal | $40 | 2 |
-| Lethal Bronzing | quote (floor $125) | 2 |
-| Tree-Age Specialty | quote (floor $65) | 1 |
+Palm injection pricing requires explicit `treatmentType` and positive integer `palmCount`; the service no longer silently defaults to combo or one palm.
 
-**Minimum per visit:** $75. Not a WaveGuard tier qualifier. Gold+ members get $10/palm/yr flat credit.
+**Minimum per visit:** $75. The visit minimum is billable and is reflected in annual/monthly pricing (`annual = max(rawPerVisit, 75) x appsPerYear`). Palm services are not WaveGuard tier qualifiers and are excluded from percentage discounts. Gold+ members get a capped $10/palm/year flat credit after gross annual pricing is calculated.
+
+| Treatment | Pricing |
+|---|---|
+| Palm Nutrition Injection | $35/palm, default 1x/year; optional 2x/year for corrective protocol |
+| Preventive Palm Insecticide | small $45, medium $55, large $75; default 2x/year; high-dose/large-diameter/nonstandard product is quote-based |
+| Nutrition + Insecticide | small $65, medium $75, large $95; default 2x/year; high-dose/large-diameter/nonstandard product is quote-based |
+| Palm Fungal Treatment | quote-based; requires confirmed diagnosis, selected product (`PHOSPHO-Jet` or `Propizol`), and apps/year or interval |
+| Lethal Bronzing Preventive OTC Program | quote-based; floor $125/palm/application; every 3 months, 4 apps/year; 24-month minimum preventive program |
+| Tree-Age G-4 Specialty Injection | quote-based/tiered; DBH <=10 $65, <=15 $85, <=20 $110, >20 custom quote; 24-month interval with annualized annual/monthly values |
+
+**Methodology:** Palm rates combine operator baseline, supplied material-cost review, visit minimum economics, and product/protocol constraints. Internal material prices are stored for audit only and are not customer-facing.
 
 ---
 
@@ -234,7 +238,7 @@ Qualifies off count of **qualifying recurring services** bundled together:
 
 **Excluded from % discount (flat credits instead):**
 - `rodent_bait` — $50 setup credit
-- `palm_injection` — $10/palm/yr credit (Gold+ only)
+- `palm_injection` — $10/palm/year credit (Gold+ only), applied after billable annual pricing and capped at net $0
 - `bed_bug_chemical`, `bed_bug_heat` — $50 flat member credit
 - `bora_care`, `pre_slab_termidor` — fully excluded, no discount
 - `german_roach_initial` — excluded to avoid double-dip with baked urgency/rc
@@ -280,7 +284,6 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 - MARGIN_FLOOR 35% threshold justification
 - URGENCY multiplier values (why 1.25/1.50/2.00)
 - PEST base/floor anchor (market analysis vs historical)
-- PALM per-palm pricing methodology
 - TERMITE monitoring subscription pricing
 - RODENT bait subscription pricing
 - ONE_TIME 1.30x multiplier + floor rationale

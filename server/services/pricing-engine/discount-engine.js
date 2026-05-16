@@ -35,6 +35,10 @@ function roundRatio(value) {
   return Math.round((Number(value) || 0) * 1000) / 1000;
 }
 
+function roundCurrency(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
 // ── Determine WaveGuard tier from active services ─────────────
 function determineWaveGuardTier(activeServices = []) {
   const qualifying = activeServices.filter(svc =>
@@ -71,10 +75,32 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
     if (serviceKey === 'palm_injection') {
       const tierRank = { bronze: 0, silver: 1, gold: 2, platinum: 3 };
       if (tierRank[waveGuardTier.tier] >= tierRank[PALM.flatCreditMinTier]) {
-        result.flatCredit = PALM.flatCreditPerPalm;
+        const palmCount = Number.isInteger(options.palmCount) && options.palmCount > 0
+          ? options.palmCount
+          : 1;
+        const annualCredit = roundCurrency(palmCount * PALM.flatCreditPerPalm);
+        const annualBeforeCredits = Number.isFinite(options.annualBeforeCredits)
+          ? options.annualBeforeCredits
+          : null;
+        const cappedAnnualCredit = annualBeforeCredits === null
+          ? annualCredit
+          : Math.min(annualCredit, annualBeforeCredits);
+
+        result.palmCount = palmCount;
+        result.flatCreditPerPalm = PALM.flatCreditPerPalm;
+        result.flatCredit = cappedAnnualCredit;
+        result.flatCreditAnnual = cappedAnnualCredit;
+        result.flatCreditAnnualUncapped = annualCredit;
+        if (annualBeforeCredits !== null) {
+          result.annualBeforeCredits = annualBeforeCredits;
+          result.annualAfterCredits = roundCurrency(Math.max(0, annualBeforeCredits - cappedAnnualCredit));
+          result.monthlyAfterCredits = roundCurrency(result.annualAfterCredits / 12);
+        }
         result.appliedDiscounts.push({
           type: 'flat_credit',
-          amount: PALM.flatCreditPerPalm,
+          amount: cappedAnnualCredit,
+          perPalm: PALM.flatCreditPerPalm,
+          palmCount,
           reason: `$${PALM.flatCreditPerPalm}/palm/yr Gold+ loyalty credit`,
         });
       }
@@ -129,9 +155,10 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
 // ── Apply discount to a price ─────────────────────────────────
 function applyDiscount(basePrice, discountResult, priceFloor = 0) {
   let price = basePrice * (1 - discountResult.effectiveDiscount);
-  if (discountResult.flatCredit) price -= discountResult.flatCredit;
+  const flatCredit = discountResult.flatCreditAnnual ?? discountResult.flatCredit;
+  if (flatCredit) price -= flatCredit;
   price = Math.max(priceFloor, price);
-  return Math.round(price * 100) / 100;
+  return roundCurrency(price);
 }
 
 function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {

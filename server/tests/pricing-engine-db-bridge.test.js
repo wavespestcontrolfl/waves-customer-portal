@@ -22,6 +22,14 @@ describe('pricing engine DB bridge', () => {
   const originalRecurringCustomerPerk = constants.WAVEGUARD.recurringCustomerOneTimePerk;
   const originalMosquitoBasePrices = JSON.parse(JSON.stringify(constants.MOSQUITO.basePrices));
   const originalMosquitoTierVisits = { ...constants.MOSQUITO.tierVisits };
+  const originalPalmTreatments = JSON.parse(JSON.stringify(constants.PALM.treatments));
+  const originalPalm = {
+    minPerVisit: constants.PALM.minPerVisit,
+    flatCreditPerPalm: constants.PALM.flatCreditPerPalm,
+    flatCreditMinTier: constants.PALM.flatCreditMinTier,
+    tierQualifier: constants.PALM.tierQualifier,
+    excludeFromPctDiscount: constants.PALM.excludeFromPctDiscount,
+  };
 
   afterEach(() => {
     constants.PEST.pestInitialRoach = originalInitialRoach;
@@ -34,6 +42,9 @@ describe('pricing engine DB bridge', () => {
     constants.WAVEGUARD.recurringCustomerOneTimePerk = originalRecurringCustomerPerk;
     constants.MOSQUITO.basePrices = JSON.parse(JSON.stringify(originalMosquitoBasePrices));
     constants.MOSQUITO.tierVisits = { ...originalMosquitoTierVisits };
+    constants.PALM.treatments = JSON.parse(JSON.stringify(originalPalmTreatments));
+    constants.PALM.treatmentTypes = constants.PALM.treatments;
+    Object.assign(constants.PALM, originalPalm);
   });
 
   test('preserves cents on DB-synced initial roach pricing brackets', async () => {
@@ -117,5 +128,39 @@ describe('pricing engine DB bridge', () => {
     }));
     expect(constants.MOSQUITO.basePrices.SMALL).toEqual([105, 90]);
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
+  });
+
+  test('ignores legacy scalar palm pricing keys and syncs explicit protocol keys', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'palm_pricing',
+      data: {
+        preventive_insecticide: 41,
+        combo: 42,
+        fungal: 43,
+        nutrition_default_apps_per_year: 2,
+        nutrition_allowed_apps_per_year: [1, 2],
+        combo_medium: 76,
+        fungal_floor: 52,
+        min_per_visit: 90,
+        flat_credit_per_palm: 12,
+        flat_credit_min_tier: 'silver',
+        tier_qualifier: false,
+        exclude_from_pct_discount: true,
+      },
+    }]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    const insecticideMedium = constants.PALM.treatments.insecticide.tiers.find(t => t.size === 'medium');
+    const comboMedium = constants.PALM.treatments.combo.tiers.find(t => t.size === 'medium');
+
+    expect(insecticideMedium.pricePerPalm).toBe(55);
+    expect(comboMedium.pricePerPalm).toBe(76);
+    expect(constants.PALM.treatments.fungal.floorPerPalm).toBe(52);
+    expect(constants.PALM.treatments.nutrition.defaultAppsPerYear).toBe(2);
+    expect(constants.PALM.treatments.nutrition.allowedAppsPerYear).toEqual([1, 2]);
+    expect(constants.PALM.minPerVisit).toBe(90);
+    expect(constants.PALM.flatCreditPerPalm).toBe(12);
+    expect(constants.PALM.flatCreditMinTier).toBe('silver');
   });
 });

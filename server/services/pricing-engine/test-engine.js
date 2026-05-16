@@ -72,8 +72,16 @@ for (const tier of ['standard', 'enhanced', 'premium']) {
 console.log('\n' + '─'.repeat(70));
 console.log('PALM INJECTION (3 palms)');
 console.log('─'.repeat(70));
-for (const tt of ['nutrition', 'insecticide', 'combo', 'fungal', 'lethalBronzing']) {
-  const r = pricePalmInjection(refProperty, { palmCount: 3, treatmentType: tt });
+const palmExamples = [
+  { palmCount: 3, treatmentType: 'nutrition' },
+  { palmCount: 3, treatmentType: 'insecticide', palmSize: 'medium' },
+  { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' },
+  { palmCount: 3, treatmentType: 'fungal', diagnosisConfirmed: true, selectedProduct: 'PHOSPHO-Jet', appsPerYear: 2 },
+  { palmCount: 3, treatmentType: 'lethalBronzing', palmStatus: 'healthy_preventive' },
+  { palmCount: 3, treatmentType: 'treeAge', dbhInches: 12 },
+];
+for (const opts of palmExamples) {
+  const r = pricePalmInjection(refProperty, opts);
   console.log(`  ${r.treatmentType.padEnd(16)} | Per palm: ${fmt(r.pricePerPalm).padStart(6)} | Annual: ${fmt(r.annual).padStart(7)} | Mo: ${fmt(r.monthly).padStart(7)}`);
 }
 
