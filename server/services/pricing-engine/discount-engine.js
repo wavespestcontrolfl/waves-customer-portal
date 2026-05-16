@@ -39,6 +39,19 @@ function roundCurrency(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
+// Tier discount applies only to lawn, pest, tree & shrub, mosquito, and
+// termite bait station. lawn_care_enhanced / lawn_care_premium are tier
+// variants of lawn_care that resolveDiscountKey emits.
+const TIER_DISCOUNT_ELIGIBLE = new Set([
+  ...WAVEGUARD.qualifyingServices,
+  'lawn_care_enhanced',
+  'lawn_care_premium',
+]);
+
+function isTierDiscountEligible(serviceKey) {
+  return TIER_DISCOUNT_ELIGIBLE.has(serviceKey);
+}
+
 // ── Determine WaveGuard tier from active services ─────────────
 function determineWaveGuardTier(activeServices = []) {
   const qualifying = activeServices.filter(svc =>
@@ -136,8 +149,10 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
         amount: WAVEGUARD.recurringCustomerOneTimePerk,
       });
     }
-  } else {
-    // Recurring services get WaveGuard tier discount. No caps, no stacking.
+  } else if (isTierDiscountEligible(serviceKey)) {
+    // Tier discount applies only to the qualifying recurring services
+    // (lawn_care, pest_control, tree_shrub, mosquito, termite_bait).
+    // lawn_care_enhanced/lawn_care_premium are tier variants of lawn_care.
     if (waveGuardTier.discount > 0) {
       result.effectiveDiscount = waveGuardTier.discount;
       result.appliedDiscounts.push({

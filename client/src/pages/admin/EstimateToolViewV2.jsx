@@ -769,12 +769,11 @@ function oneTimeRowsForCustomerPreview(E, {
     if (!hasTermiteInstallRow) addRow(termiteInstallRow);
   }
 
-  const setupFee = Number(E?.oneTime?.membershipFee ?? setupFeeAmount ?? 0);
+  const setupFee = includeSetupFees ? Number(setupFeeAmount || 0) : 0;
   const targetTotal = Number(oneTimeTotal);
   const rowsTotal = displayRows.reduce((sum, row) => sum + row.price, 0);
   const hasSetupRow = displayRows.some((row) => row.service === "waveguard_setup");
   const targetIncludesSetupFee =
-    includeSetupFees &&
     setupFee > 0 &&
     !hasSetupRow &&
     Number.isFinite(targetTotal) &&
@@ -794,7 +793,10 @@ function oneTimeRowsForCustomerPreview(E, {
 
 function firstVisitFeesForCustomerPreview(E, pestTier) {
   const rows = [];
-  const setupFee = Number(E?.oneTime?.membershipFee || pestTier?.init || 0);
+  const hasRecurringPest = !!pestTier;
+  const setupFee = hasRecurringPest
+    ? Number(E?.oneTime?.membershipFee || pestTier?.init || 0)
+    : 0;
   if (setupFee > 0) {
     rows.push({
       service: "waveguard_setup",
@@ -1186,9 +1188,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
 
         <div className="bg-[#1B2C5B] text-white text-center rounded-[14px] border border-[#1B2C5B] p-6 mt-4">
           <div className="customer-preview-serif text-26 leading-tight">
-            {monthlyTotal > 0
-              ? `Ready to lock in ${fmt(intervalTotal)}${cadence.period}?`
-              : `Ready to lock in ${fmt(oneTimeStandaloneTotal)}?`}
+            Go Waves!
           </div>
           <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>
           <div className="inline-flex mt-4 px-5 py-3 rounded-[10px] bg-white text-[#1B2C5B] text-15 font-semibold">
@@ -1557,7 +1557,20 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }, []);
   const toggle = useCallback((key) => {
-    setForm((f) => ({ ...f, [key]: !f[key] }));
+    setForm((f) => {
+      const next = { ...f, [key]: !f[key] };
+      // Auto-enable "Offer one-time option" whenever recurring + one-time of
+      // the same service are both selected (pest, lawn, mosquito). Customer
+      // estimate then renders the Recurring / One-time toggle automatically
+      // without the admin needing to also tick the customer-options box.
+      const pestBoth = next.svcPest && next.svcOnetimePest;
+      const lawnBoth = next.svcLawn && next.svcOnetimeLawn;
+      const mosquitoBoth = next.svcMosquito && next.svcOnetimeMosquito;
+      if (pestBoth || lawnBoth || mosquitoBoth) {
+        next.showOneTimeOption = true;
+      }
+      return next;
+    });
     if (key.startsWith("svc")) {
       setEstimate(null);
       setSavedId(null);
@@ -2080,6 +2093,12 @@ export default function EstimateToolViewV2({
           form.palmCount,
           Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0,
         ),
+        // When admin types a palm count in the form, treat it as the
+        // injectable count and skip the 30% satellite-estimate gating in
+        // property-lookup-v2. Admin already knows which palms need treatment.
+        ...(String(form.palmCount ?? "").trim() !== ""
+          ? { injectablePalms: Number(form.palmCount) }
+          : {}),
         estimatedTreeCount: treeCount,
         treeCount,
       };
@@ -2921,25 +2940,29 @@ export default function EstimateToolViewV2({
               <FieldV2 label="Lot Sq Ft">
                 <InputV2 k="lotSqFt" type="number" placeholder="8000" />
               </FieldV2>
-              {form.svcTs && (
+              {(form.svcTs || form.svcInjection) && (
                 <>
                   {" "}
                   <div className="grid grid-cols-2 gap-3">
                     {" "}
-                    <FieldV2 label="Bed Area (sq ft)">
-                      <InputV2
-                        k="bedArea"
-                        type="number"
-                        placeholder="Auto-estimate"
-                      />
-                    </FieldV2>{" "}
+                    {form.svcTs && (
+                      <FieldV2 label="Bed Area (sq ft)">
+                        <InputV2
+                          k="bedArea"
+                          type="number"
+                          placeholder="Auto-estimate"
+                        />
+                      </FieldV2>
+                    )}{" "}
                     <FieldV2 label="Palm Count">
                       <InputV2 k="palmCount" type="number" placeholder="Auto" />
                     </FieldV2>{" "}
                   </div>{" "}
-                  <FieldV2 label="Tree Count">
-                    <InputV2 k="treeCount" type="number" placeholder="Auto" />
-                  </FieldV2>{" "}
+                  {form.svcTs && (
+                    <FieldV2 label="Tree Count">
+                      <InputV2 k="treeCount" type="number" placeholder="Auto" />
+                    </FieldV2>
+                  )}{" "}
                 </>
               )}
             </div>

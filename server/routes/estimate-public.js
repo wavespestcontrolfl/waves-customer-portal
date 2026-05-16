@@ -565,14 +565,15 @@ function renderPage(token, estimate, estData) {
   const recurringDisplayBase = intervalPriceFromMonthly(baseMonthly, selectedRecurringFrequencyKey);
   const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedRecurringFrequencyKey);
 
-  // WaveGuard Membership — recurring pest plans carry a $99 setup fee
-  // unless the customer prepays 12 months. Older v1 estimates may not have
-  // oneTime.membershipFee cached, so fall back to the pricing constant when
-  // a recurring pest line is present.
+  // WaveGuard Membership — strictly recurring-pest-only. Lawn-only, T&S-only,
+  // mosquito-only, or termite-bait-only estimates never show the $99 setup
+  // line, even if a stale `oneTime.membershipFee` exists in cached data.
+  // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
+  // to the pricing constant when a recurring pest line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  const membershipFee = explicitMembershipFee > 0
-    ? explicitMembershipFee
-    : (pestRecurring ? Number(PEST.initialFee || 99) : 0);
+  const membershipFee = pestRecurring
+    ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
+    : 0;
   const showMembershipFee = membershipFee > 0 && !locked;
   const membershipFeeHtml = showMembershipFee ? `
   <div class="setup-fee" data-mode-only="recurring">
@@ -581,6 +582,8 @@ function renderPage(token, estimate, estData) {
       <div class="setup-fee-sub">Waived when you pay the year in full up front.</div>
     </div>
   </div>` : '';
+
+  const perTreatmentHtml = '';
 
   const realOneTimeRows = oneTimeItems.map((it) => {
     const label = String(it.name || it.label || '').toLowerCase();
@@ -716,6 +719,16 @@ function renderPage(token, estimate, estData) {
   .setup-fee{margin-top:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;max-width:520px;padding:12px 14px;border:1px solid #D4CBB8;border-radius:10px;background:#fff}
   .setup-fee-title{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
   .setup-fee-sub{font-size:12px;color:#6B7280;margin-top:2px;line-height:1.45}
+  .per-treatment{margin-top:14px;max-width:520px;padding:14px 16px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
+  .per-treatment-title{font-size:12px;font-weight:700;color:#1B2C5B;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
+  .per-treatment-rows{display:grid;gap:8px}
+  .pt-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:baseline}
+  .pt-label{font-size:14px;color:#1B2C5B;line-height:1.35}
+  .pt-cadence{font-size:12px;color:#6B7280;margin-left:2px}
+  .pt-price{font-size:14px;font-weight:700;color:#1B2C5B;white-space:nowrap}
+  .pt-suffix{font-weight:500;color:#6B7280}
+  .pt-total{border-top:1px solid #E7E2D7;padding-top:8px;margin-top:2px}
+  .pt-total .pt-label{font-weight:700}
   .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
   .mini-guarantee[data-mode-only="one_time"]{margin-top:4px;font-size:14px;line-height:1.55;color:#3F4A65}
   .mode-toggle{display:inline-flex;gap:4px;margin-top:18px;padding:4px;background:#F1F5F9;border-radius:999px;border:1px solid #E2E8F0}
@@ -873,6 +886,7 @@ ${shellTopBar()}
       <span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span>${recurringPricePeriodLabel} with WaveGuard <span id="savings-tier">${escapeHtml(tier)}</span></span>
     </div>
     <div class="day-price" data-mode-only="recurring">That\u2019s just <span id="day-price">${fmtMoney(dayPrice)}</span>/day for complete home protection.</div>
+    ${perTreatmentHtml}
     ${membershipFeeHtml}
     ${canChooseOneTime ? `
     <div class="big-price" data-mode-only="one_time" hidden>
@@ -958,8 +972,8 @@ ${shellTopBar()}
   </div>
 
   <div class="final">
-    <h2 data-mode-only="recurring">Ready to lock in <span data-monthly-echo>${fmtMoney(recurringDisplayTotal)}</span>${recurringPricePeriodLabel}?</h2>
-    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Ready to lock in <span data-onetime-echo>${fmtMoney(oneTimeChoicePrice)}</span> one-time?</h2>` : ''}
+    <h2 data-mode-only="recurring">Go Waves!</h2>
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves!</h2>` : ''}
     <p>No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
@@ -2587,6 +2601,38 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   const annual = summary.recurringAnnualAfterDiscount ?? null;
   const onetime = summary.oneTimeTotal ?? null;
 
+  // Per-treatment breakdown — pull perApp/visitsPerYear off each recurring
+  // line item the engine emitted. Labels match the displayed service name;
+  // visitsPerYear may sit under several aliases depending on the line item
+  // (mosquito uses `visits`, T&S uses `frequency`).
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']);
+  const labelForRecurring = (svc) => {
+    switch (svc) {
+      case 'pest_control': return 'Pest Control';
+      case 'lawn_care': return 'Lawn Care';
+      case 'tree_shrub': return 'Tree & Shrub';
+      case 'mosquito': return 'Mosquito';
+      case 'termite_bait': return 'Termite Bait';
+      default: return svc;
+    }
+  };
+  const perServiceTreatments = lineItems
+    .filter((li) => li && RECURRING_LINE_SERVICES.has(li.service))
+    .map((li) => {
+      const pa = Number(li.perApp ?? li.perVisit);
+      const visits = Number(li.visitsPerYear ?? li.visits ?? li.frequency);
+      return {
+        service: li.service,
+        label: li.displayName || labelForRecurring(li.service),
+        perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
+        visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
+      };
+    });
+  const sameDayTreatmentTotal = perServiceTreatments.reduce(
+    (sum, row) => sum + (Number.isFinite(row.perTreatment) ? row.perTreatment : 0),
+    0,
+  );
+
   return {
     key: ladder.key,
     label: ladder.label,
@@ -2596,6 +2642,8 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
     oneTimeTotal: onetime != null ? Number(onetime) : null,
     included,
     addOns,
+    perServiceTreatments,
+    sameDayTreatmentTotal: Math.round(sameDayTreatmentTotal * 100) / 100,
   };
 }
 
@@ -2695,7 +2743,14 @@ function normalizeOneTimeBreakdown(estData) {
   addRows(oneTime?.items);
   if (nestedOneTime && nestedOneTime !== oneTime) addRows(nestedOneTime.items);
   const membershipFee = Number(oneTime?.membershipFee ?? nestedOneTime?.membershipFee);
-  if (Number.isFinite(membershipFee) && membershipFee > 0) {
+  // WaveGuard setup fee only applies when recurring pest is part of the
+  // estimate. Lawn-only / T&S-only / mosquito-only estimates never carry it,
+  // even if a stale membershipFee was cached in oneTime.
+  const recurringServicesForFee = Array.isArray(result?.recurring?.services)
+    ? result.recurring.services
+    : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
+  const hasRecurringPest = recurringServicesForFee.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
+  if (Number.isFinite(membershipFee) && membershipFee > 0 && hasRecurringPest) {
     addRows([{
       service: 'waveguard_setup',
       name: 'WaveGuard setup',
@@ -3092,8 +3147,8 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const pestOnly = options.pestOnly === true && !!pestTier;
   const pestMoBefore = pestTier ? Number(pestTier.mo || 0) : 0;
   const pestAnnBefore = pestTier ? Number(pestTier.ann || 0) : 0;
-  const nonPestMoBefore = v1.services.reduce((sum, svc) => {
-    if (isPestServiceName(svc?.name)) return sum;
+  const nonPestServices = v1.services.filter((svc) => !isPestServiceName(svc?.name));
+  const nonPestMoBefore = nonPestServices.reduce((sum, svc) => {
     return sum + (Number(svc?.mo || svc?.monthly || 0));
   }, 0);
 
@@ -3124,6 +3179,39 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
 
   const addOns = shapePreferenceAddOns(prefs, pestTier);
 
+  // Per-treatment breakdown — one row per recurring service with its
+  // pre-discount per-application price + visits/yr. Customers can see what
+  // each visit costs and the combined per-treatment total when bundling.
+  // Pest's row uses the currently-selected frequency's tier (pa varies by
+  // cadence); non-pest rows pull perTreatment/visitsPerYear forwarded from
+  // the line items at estimate-generation time.
+  const perServiceTreatments = [];
+  if (pestTier) {
+    const pestPa = Number(pestTier.pa);
+    perServiceTreatments.push({
+      service: 'pest_control',
+      label: `Pest Control (${pestTier.label || 'Quarterly'})`,
+      perTreatment: Number.isFinite(pestPa) && pestPa > 0 ? pestPa : null,
+      visitsPerYear: Number(pestTier.apps || pestTier.v) || null,
+    });
+  }
+  if (!pestOnly) {
+    nonPestServices.forEach((svc) => {
+      const pa = Number(svc?.perTreatment ?? svc?.perApp ?? svc?.perVisit);
+      const visits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.frequency);
+      perServiceTreatments.push({
+        service: svc?.service || (svc?.name || '').toLowerCase().replace(/\s+/g, '_'),
+        label: svc?.displayName || svc?.name || 'Service',
+        perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
+        visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
+      });
+    });
+  }
+  const sameDayTreatmentTotal = perServiceTreatments.reduce(
+    (sum, row) => sum + (Number.isFinite(row.perTreatment) ? row.perTreatment : 0),
+    0,
+  );
+
   return {
     key: ladder.key,
     label: ladder.label,
@@ -3133,6 +3221,8 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     oneTimeTotal: v1.oneTimeTotal || null,
     included,
     addOns,
+    perServiceTreatments,
+    sameDayTreatmentTotal: Math.round(sameDayTreatmentTotal * 100) / 100,
   };
 }
 
