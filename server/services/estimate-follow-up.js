@@ -22,8 +22,9 @@ const { sendCustomerMessage } = require("./messaging/send-customer-message");
 
 const TERMINAL_STATUSES = new Set(["declined", "accepted", "expired", "void"]);
 
-// 9a–7p America/New_York. Cron runs every 2h; sends blocked outside the
-// window will be re-evaluated at the next cron tick and fire then.
+// 9a–5p America/New_York. Per Adam: never text a customer outside normal
+// business hours. Cron runs every 2h; sends blocked outside the window
+// will be re-evaluated at the next cron tick and fire then.
 function isQuietHours(now = new Date()) {
   const hour = parseInt(
     new Intl.DateTimeFormat("en-US", {
@@ -34,7 +35,7 @@ function isQuietHours(now = new Date()) {
     10,
   );
   if (Number.isNaN(hour)) return false; // fail open — better to send than stall
-  return hour < 9 || hour >= 19;
+  return hour < 9 || hour >= 17;
 }
 
 // Engagement signal: if the customer opened the estimate within the last N
