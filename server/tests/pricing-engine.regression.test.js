@@ -234,8 +234,8 @@ const REGRESSION_CASES = [
     // `ReferenceError: zone is not defined` slipped past the prior 12 cases
     // because none exercised the missing-zone fallback. Session 6 rewrites
     // the discount engine's control flow — same exposure class.
-    // zone intentionally omitted: currently produces zone.key='UNKNOWN' in
-    // output but runtime pricing uses modifiers.zoneMultiplier(undefined) → 1.0x.
+    // zone intentionally omitted: produces zone.key='UNKNOWN' in output while
+    // runtime pricing treats service zones as neutral metadata.
     name: 'baseline_unknown_zone_minimal',
     input: {
       homeSqFt: 2000, stories: 1, lotSqFt: 10000,

@@ -200,7 +200,7 @@ moves materially:
 operator's actual SWFL routes (Manatee + Sarasota + Charlotte). Used to
 compute the labor cost contribution from drive in
 `service-pricing.js`. This is a fleet average, not a per-property value
-— Zone multipliers (`ZONES.A/B/C/D`) handle the geographic spread.
+— service zones remain routing/metadata labels and do not change price.
 
 **`ADMIN_ANNUAL`**: $51 per service per year for billing, scheduling,
 CRM, and dispatch overhead. Allocated annually because the underlying

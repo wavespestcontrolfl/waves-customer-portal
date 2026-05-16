@@ -5,7 +5,7 @@
 // ============================================================
 const { GLOBAL, WAVEGUARD, ZONES, URGENCY, SPECIALTY } = require('./constants');
 const { calculatePropertyProfile } = require('./property-calculator');
-const { deriveModifiers, deriveNotes, zoneMultiplier } = require('./modifiers');
+const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
@@ -22,25 +22,6 @@ const {
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
 } = require('./discount-engine');
-
-// ── Startup assertion — zone alignment ────────────────────────
-// Fail-fast at module load if constants.ZONES drifts from
-// modifiers.zoneMultiplier(). Without this, future edits to one
-// source and not the other would silently misprice quotes until
-// a regression test happened to notice.
-for (const zone of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
-  const cz = ZONES[zone];
-  if (!cz) {
-    throw new Error(`[pricing-engine startup] Zone ${zone} missing from constants.ZONES`);
-  }
-  const mz = zoneMultiplier(zone);
-  if (Math.abs(cz.multiplier - mz) > 0.0001) {
-    throw new Error(
-      `[pricing-engine startup] Zone ${zone} multiplier mismatch: ` +
-      `constants.ZONES=${cz.multiplier}, modifiers.zoneMultiplier=${mz}`
-    );
-  }
-}
 
 function normalizeMosquitoProgram(value) {
   if (value == null || value === '') return null;
@@ -137,15 +118,6 @@ function generateEstimate(input) {
   const modifiers = deriveModifiers(property);
   const structuralNotes = deriveNotes(property);
 
-  // ── 3. Zone multiplier ────────────────────────────────────
-  // Strict use of modifiers.zoneMult (deriveModifiers always returns a value —
-  // defaults to 1.0 for unknown zones). constants.ZONES is no longer consulted
-  // here; it's now only a reference table verified against modifiers at startup.
-  const zoneMult = modifiers.zoneMult;
-  if (typeof zoneMult !== 'number') {
-    throw new Error(`No zone multiplier derived for zone ${input.zone}`);
-  }
-
   // ── 3. Price each requested service ────────────────────────
   const services = input.services || {};
   const lineItems = [];
@@ -159,18 +131,17 @@ function generateEstimate(input) {
       roachType: services.pest.roachType || 'none',
       modifiers,
     });
-    // 2-decimal rounding matches v2 (pricing-engine-v2.js:758-760).
-    result.annual = Math.round(result.annual * zoneMult * 100) / 100;
+    result.annual = Math.round(result.annual * 100) / 100;
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.perApp = Math.round(result.annual / result.visitsPerYear * 100) / 100;
     if (Array.isArray(result.tiers)) {
       result.tiers = result.tiers.map(t => {
-        const zAnn = Math.round(t.annual * zoneMult * 100) / 100;
+        const annual = Math.round(t.annual * 100) / 100;
         return {
           ...t,
-          perApp: Math.round(t.perApp * zoneMult * 100) / 100,
-          annual: zAnn,
-          monthly: Math.round(zAnn / 12 * 100) / 100,
+          perApp: Math.round(t.perApp * 100) / 100,
+          annual,
+          monthly: Math.round(annual / 12 * 100) / 100,
         };
       });
     }
@@ -216,7 +187,7 @@ function generateEstimate(input) {
       access: services.treeShrub.access || 'easy',
       treeCount: services.treeShrub.treeCount ?? property.features?.treeCount ?? 0,
     });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.internalPerVisitRevenue = Math.round(result.annual / result.frequency * 100) / 100;
     result.perApp = result.internalPerVisitRevenue;
@@ -227,7 +198,7 @@ function generateEstimate(input) {
   // Palm Injection
   if (services.palm) {
     const result = pricePalmInjection(property, { ...services.palm });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.annualBeforeCredits = result.annual;
     result.monthlyBeforeCredits = result.monthly;
@@ -243,7 +214,7 @@ function generateEstimate(input) {
       stationCount: services.mosquito.stationCount,
       dunkCount: services.mosquito.dunkCount,
     });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     lineItems.push(result);
     activeServiceKeys.push('mosquito');
@@ -256,7 +227,7 @@ function generateEstimate(input) {
       monitoringTier: services.termite.monitoringTier || 'basic',
       modifiers,
     });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     lineItems.push(result);
     activeServiceKeys.push('termite_bait');
@@ -265,7 +236,7 @@ function generateEstimate(input) {
   // Rodent Bait
   if (services.rodentBait) {
     const result = priceRodentBait(property, { modifiers });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     lineItems.push(result);
     // Rodent does NOT add to activeServiceKeys for tier determination
@@ -281,9 +252,7 @@ function generateEstimate(input) {
       ? !!input.isRecurringCustomer
       : activeServiceKeys.length > 0;
 
-  // One-time and specialty services are ZONE-AGNOSTIC (v2 parity — see
-  // Session 11a Step 2b-2). Zone multiplier is applied only to recurring
-  // services above; one-times use the floor/formula price straight through.
+  // One-time and specialty services are zone-agnostic.
   if (services.oneTimePest) {
     const result = priceOneTimePest(property, {
       urgency: services.oneTimePest.urgency || 'NONE',
@@ -782,7 +751,7 @@ function generateEstimate(input) {
     zone: (() => {
       const zoneKey = (input.serviceZone || input.zone || 'UNKNOWN').toUpperCase();
       const info = ZONES[zoneKey] || ZONES.UNKNOWN;
-      return { key: zoneKey, name: info.name, multiplier: zoneMult };
+      return { key: zoneKey, name: info.name, multiplier: 1 };
     })(),
 
     // WaveGuard

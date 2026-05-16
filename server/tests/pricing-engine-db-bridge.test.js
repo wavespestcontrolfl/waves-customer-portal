@@ -27,6 +27,7 @@ describe('pricing engine DB bridge', () => {
   const originalBedBug = JSON.parse(JSON.stringify(constants.BED_BUG));
   const originalFlea = JSON.parse(JSON.stringify(constants.SPECIALTY.flea));
   const originalUrgency = JSON.parse(JSON.stringify(constants.URGENCY));
+  const originalZones = JSON.parse(JSON.stringify(constants.ZONES));
   const originalPalm = {
     minPerVisit: constants.PALM.minPerVisit,
     flatCreditPerPalm: constants.PALM.flatCreditPerPalm,
@@ -54,6 +55,8 @@ describe('pricing engine DB bridge', () => {
     Object.assign(constants.SPECIALTY.flea, JSON.parse(JSON.stringify(originalFlea)));
     for (const key of Object.keys(constants.URGENCY)) delete constants.URGENCY[key];
     Object.assign(constants.URGENCY, JSON.parse(JSON.stringify(originalUrgency)));
+    for (const key of Object.keys(constants.ZONES)) delete constants.ZONES[key];
+    Object.assign(constants.ZONES, JSON.parse(JSON.stringify(originalZones)));
     Object.assign(constants.PALM, originalPalm);
   });
 
@@ -80,6 +83,26 @@ describe('pricing engine DB bridge', () => {
       { sqft: 2501, price: 239 },
       { sqft: Infinity, price: 289 },
     ]);
+  });
+
+  test('keeps service zone multipliers neutral when DB has legacy bumps', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'zone_multipliers',
+      data: {
+        A: { name: 'Core', multiplier: 1.00 },
+        B: { name: 'Extended', multiplier: 1.05 },
+        C: { name: 'Outer', multiplier: 1.12 },
+        D: { name: 'Far', multiplier: 1.20 },
+        UNKNOWN: { name: 'Default', multiplier: 1.05 },
+      },
+    }]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    expect(constants.ZONES.B.name).toBe('Extended');
+    for (const zone of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
+      expect(constants.ZONES[zone].multiplier).toBe(1.00);
+    }
   });
 
   test('syncs canonical one-time treatment pricing and mosquito programs from pricing_config', async () => {

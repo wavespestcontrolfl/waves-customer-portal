@@ -236,7 +236,7 @@ describe('estimate v2 service toggle adapter', () => {
     expect(mapped.totals.year2).toBeCloseTo(estimate.summary.recurringAnnualAfterDiscount);
   });
 
-  test('uses zoned recurring mosquito add-on amounts in detail copy', () => {
+  test('uses recurring mosquito add-on amounts in detail copy', () => {
     const input = translateV2CallToV1Input(
       {
         ...baseProfile(),
@@ -259,8 +259,8 @@ describe('estimate v2 service toggle adapter', () => {
 
     const mapped = mapV1ToLegacyShape(generateEstimate(input));
     const mosquito = mapped.recurring.services.find((svc) => svc.service === 'mosquito');
-    expect(mosquito.detail).toContain('2 mosquito stations (+$94/yr)');
-    expect(mosquito.detail).toContain('4 Bti dunk tablets (+$19/yr)');
+    expect(mosquito.detail).toContain('2 mosquito stations (+$78/yr)');
+    expect(mosquito.detail).toContain('4 Bti dunk tablets (+$16/yr)');
   });
 
   test('does not double-bill recurring German roach initial when standalone German roach is also selected', () => {
