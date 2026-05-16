@@ -11,8 +11,8 @@
 //      WaveGuard tier (one-time services never see tier discount; recurring
 //      services never see the perk).
 //
-// Excluded services: rodent_bait, palm_injection, bed_bug_*, bora_care,
-//   pre_slab_termidor. No % discount. Flat credits where applicable.
+// Excluded services: rodent_bait, palm_injection, bed_bug*, bora_care,
+//   pre_slab_termidor. No % discount. Flat credits where explicitly configured.
 //
 // Removed in v4.3 Session 6:
 //   - Composite discount cap (was 0.25)
@@ -113,14 +113,6 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
         reason: `One-time $${RODENT.setupCredit} WaveGuard member credit`,
       });
     }
-    if (serviceKey === 'bed_bug_chemical' || serviceKey === 'bed_bug_heat') {
-      const tierRank = { bronze: 0, silver: 1, gold: 2, platinum: 3 };
-      if (tierRank[waveGuardTier.tier] >= tierRank.silver) {
-        result.flatCredit = 50;
-        result.appliedDiscounts.push({ type: 'flat_credit', amount: 50, reason: '$50 WaveGuard member credit' });
-      }
-    }
-
     // totalDiscount stays 0 — no % discount applies
     return result;
   }

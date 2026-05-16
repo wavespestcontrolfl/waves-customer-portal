@@ -283,7 +283,8 @@ function mapV1ToLegacyShape(v1Result) {
     // drop the species distinction). Fall back to the SERVICE_LABEL map for
     // legacy services that don't set a label themselves.
     const name = li.label || labelFor(li.service);
-    const price = li.price || 0;
+    const quoteRequired = !!li.quoteRequired;
+    const price = quoteRequired ? null : (li.price || 0);
     const detail = li.detail || '';
     if (ONE_TIME_SERVICES.has(li.service)) {
       // Preserve `service` on the mapped item so consumers can match by
@@ -300,6 +301,8 @@ function mapV1ToLegacyShape(v1Result) {
       v1SpecItems.push({
         service: li.service, name, price, det: detail,
         onProg: !!li.includedOnProgram,
+        quoteRequired,
+        reason: li.reason,
       });
     }
   });
@@ -387,8 +390,15 @@ function mapV1ToLegacyShape(v1Result) {
     oneTime: {
       items: v1OtItems,
       specItems: v1SpecItems
-        .filter(s => !s.onProg && s.price > 0)
-        .map(s => ({ name: s.name, price: s.price })),
+        .filter(s => !s.onProg && (s.quoteRequired || s.price > 0))
+        .map(s => ({
+          service: s.service,
+          name: s.name,
+          price: s.quoteRequired ? null : s.price,
+          detail: s.det,
+          quoteRequired: !!s.quoteRequired,
+          reason: s.reason,
+        })),
       total: oneTimeTotal,
       tmInstall,
       // Kept out of items[] by legacy v2 convention, but surfaced

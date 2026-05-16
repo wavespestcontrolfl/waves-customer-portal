@@ -11,8 +11,10 @@ const {
   isStructuralOneTimeOnlyEstimate,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
+  renderPage,
   resolveAcceptOneTimeTotal,
   resolveEstimateDeclineGuard,
+  resolveEstimateQuoteRequirement,
   shouldApplyFirstViewSideEffects,
 } = require('../routes/estimate-public');
 
@@ -418,6 +420,64 @@ describe('public estimate one-time breakdown', () => {
       { onetime_total: 199 },
       { anchorOneTimePrice: null, oneTimeBreakdown: { total: 0 } },
     )).toBe(199);
+  });
+
+  test('quote-required one-time rows block public acceptance', async () => {
+    const estimateData = {
+      result: {
+        oneTime: {
+          total: 0,
+          specItems: [{
+            service: 'bed_bug',
+            name: 'Bed Bug Chemical/IPM Program - Quote Required',
+            price: null,
+            quoteRequired: true,
+            reason: 'SEVERE_INFESTATION',
+          }],
+        },
+      },
+    };
+
+    const breakdown = normalizeOneTimeBreakdown(estimateData);
+    expect(breakdown.total).toBe(0);
+    expect(breakdown.quoteRequired).toBe(true);
+
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-quote-required-test',
+      estimate_data: estimateData,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(resolveEstimateQuoteRequirement(payload)).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      reason: 'SEVERE_INFESTATION',
+    }));
+  });
+
+  test('server-rendered quote-required page suppresses normal lock-in copy', () => {
+    const html = renderPage('quote-token', {
+      status: 'quote_required',
+      quoteRequired: true,
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('Inspection required to finish this quote');
+    expect(html).not.toContain('Ready to lock in');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+    expect(html).not.toContain('id="booking-card"');
   });
 
   test('accept success payload marks invoice payment as the next step', () => {

@@ -460,7 +460,8 @@ function renderPage(token, estimate, estData) {
     ? Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100)
     : Math.max(0, Number(est.annualTotal || monthlyTotal * 12) - prefMonthlyOff * 12);
   const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
-  const locked = est.status === 'accepted';
+  const quoteRequired = est.quoteRequired === true || est.status === 'quote_required';
+  const locked = est.status === 'accepted' || quoteRequired;
 
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
   const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
@@ -922,6 +923,7 @@ function renderPage(token, estimate, estData) {
   .final h2{color:#fff;margin:0 0 8px}
   .final p{color:rgba(255,255,255,.8);font-size:14px}
   .accepted-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:${BRAND.green};text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
+  .quote-required-banner{background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
   .site-footer{text-align:center;padding:40px 20px 32px;color:#6B7280;font-size:12px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
   .site-footer-socials{display:flex;justify-content:center;gap:12px;margin-bottom:16px}
   .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
@@ -949,7 +951,8 @@ ${shellTopBar()}
 
 <div class="wrap">
 
-  ${locked ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
+  ${est.status === 'accepted' ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
+  ${quoteRequired ? `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.</div>` : ''}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
@@ -962,16 +965,24 @@ ${shellTopBar()}
       <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">One-Time Pest Control</button>
     </div>` : ''}
     <div class="big-price" data-mode-only="recurring">
+      ${quoteRequired ? `
+      <span class="num" id="monthly-display" style="font-size:42px">Quote Required</span>
+      ` : `
       ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)}${recurringPricePeriodLabel}</span>` : ''}
       <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
       <span class="per">${recurringPricePeriodLabel}</span>
       <span class="tier-lbl" id="tier-display">WaveGuard ${escapeHtml(tier)}</span>
+      `}
     </div>
-    <div class="save-row" data-mode-only="recurring"${savingsPerMo > 0 ? '' : ' style="display:none"'}>
+    <div class="save-row" data-mode-only="recurring"${!quoteRequired && savingsPerMo > 0 ? '' : ' style="display:none"'}>
       <span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span>${recurringPricePeriodLabel} with WaveGuard <span id="savings-tier">${escapeHtml(tier)}</span></span>
     </div>
+    ${quoteRequired ? `
+    <div class="day-price" data-mode-only="recurring">Inspection required before final pricing.</div>
+    ` : `
     <div class="day-price" data-mode-only="recurring">That\u2019s just <span id="day-price">${fmtMoney(dayPrice)}</span>/day for complete home protection.</div>
     ${perTreatmentHtml}
+    `}
     ${membershipFeeHtml}
     ${canChooseOneTime ? `
     <div class="big-price" data-mode-only="one_time" hidden>
@@ -981,7 +992,7 @@ ${shellTopBar()}
     <div class="onetime-note" data-mode-only="one_time" hidden>
       One visit, pay on service day. No recurring schedule, no tier discount.
     </div>` : ''}
-    <div class="mini-guarantee" data-mode-only="recurring">Try us risk-free \u2014 90-day money-back guarantee.</div>
+    ${quoteRequired ? '' : `<div class="mini-guarantee" data-mode-only="recurring">Try us risk-free \u2014 90-day money-back guarantee.</div>`}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
   </div>
 
@@ -1031,10 +1042,10 @@ ${shellTopBar()}
     ${hasRealOneTime ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
   </div>` : ''}
 
-  <div class="card" data-mode-only="recurring">
+  ${quoteRequired ? '' : `<div class="card" data-mode-only="recurring">
     <h2>What WaveGuard members get</h2>
     <ul class="perks-list">${perksHtml}</ul>
-  </div>
+  </div>`}
 
   <div class="card">
     <h2>What your neighbors are saying</h2>
@@ -1056,15 +1067,24 @@ ${shellTopBar()}
     <div class="locs">${locationsHtml}</div>
   </div>
 
+  ${quoteRequired ? `
+  <div class="final">
+    <h2>Inspection required to finish this quote</h2>
+    <p>This treatment needs a field review before we can finalize pricing or book it online.</p>
+    <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
+    <div style="margin-top:20px;font-size:14px">
+      Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
+    </div>
+  </div>` : `
   <div class="final">
     <h2 data-mode-only="recurring">Ready to lock in <span data-monthly-echo>${fmtMoney(recurringDisplayTotal)}</span>${recurringPricePeriodLabel}?</h2>
     ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Ready to lock in <span data-onetime-echo>${fmtMoney(oneTimeChoicePrice)}</span> one-time?</h2>` : ''}
     <p>No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
-      Questions? Call <a href="tel:+19412975749" style="color:#fff;font-weight:700">(941) 297-5749</a>
+      Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
     </div>
-  </div>
+  </div>`}
 
   <footer class="site-footer">
     <div class="site-footer-socials">${socialsHtml}</div>
@@ -1663,6 +1683,7 @@ async function handleEstimateView(req, res, next) {
     }
 
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    const quoteRequirement = resolveEstimateQuoteRequirement(null, estData);
 
     // One-time alternative price for the inline toggle. Mirrors the
     // resolveAcceptOneTimeTotal logic on accept so the customer sees the
@@ -1679,7 +1700,11 @@ async function handleEstimateView(req, res, next) {
 
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
-      status: estimate.status,
+      status: estimate.status === 'accepted'
+        ? estimate.status
+        : (quoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
+      quoteRequired: quoteRequirement.quoteRequired,
+      quoteRequiredReason: quoteRequirement.reason || null,
       customerName: estimate.customer_name,
       address: estimate.address,
       monthlyTotal: parseFloat(estimate.monthly_total || 0),
@@ -1780,14 +1805,21 @@ router.put('/:token/accept', async (req, res, next) => {
 
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    const pricingBundle = await buildPricingBundle(estimate);
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
+    if (quoteRequirement.quoteRequired) {
+      return res.status(409).json({
+        error: 'This estimate requires an inspection before it can be accepted online',
+        quoteRequired: true,
+        reason: quoteRequirement.reason || 'QUOTE_REQUIRED',
+      });
+    }
+
     let { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
     if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
     }
     const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
-    const pricingBundle = (requestedOneTime || selectedFrequencyKey || billByInvoice || isOneTimeOnly)
-      ? await buildPricingBundle(estimate)
-      : null;
     const oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, pricingBundle);
     const canChooseOneTime = !!estimate.show_one_time_option && oneTimeChoicePrice > 0;
     if (requestedOneTime && !isOneTimeOnly && !canChooseOneTime) {
@@ -2784,7 +2816,7 @@ function normalizeOneTimeBreakdown(estData) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
-  if (!result) return { items: [], total: 0 };
+  if (!result) return { items: [], total: 0, quoteRequired: false, quoteRequiredItems: [] };
 
   const rows = [];
   const seen = new Set();
@@ -2798,12 +2830,13 @@ function normalizeOneTimeBreakdown(estData) {
       if (!item || typeof item !== 'object') continue;
       if (item.onProg === true || item.includedOnProgram === true) continue;
 
+      const quoteRequired = item.quoteRequired === true;
       const rawPrice = Number(item.price ?? item.amount ?? item.total);
       const discounted = Number(item.priceAfterDiscount ?? item.totalAfterDiscount);
       const amount = Number.isFinite(rawPrice) && rawPrice < 0
         ? (Number.isFinite(discounted) && discounted !== 0 ? discounted : rawPrice)
         : (Number.isFinite(discounted) ? discounted : rawPrice);
-      if (!Number.isFinite(amount) || amount === 0) continue;
+      if (!quoteRequired && (!Number.isFinite(amount) || amount === 0)) continue;
 
       const label = String(item.label || item.displayName || item.name || item.service || 'One-time service').trim();
       const service = item.service || (ROACH_NAME_RX.test(label) ? 'pest_initial_roach' : null);
@@ -2818,9 +2851,11 @@ function normalizeOneTimeBreakdown(estData) {
       rows.push({
         service,
         label,
-        amount: Math.round(amount * 100) / 100,
+        amount: quoteRequired ? null : Math.round(amount * 100) / 100,
         detail,
-        kind: amount < 0 ? 'discount' : 'charge',
+        kind: quoteRequired ? 'quote_required' : (amount < 0 ? 'discount' : 'charge'),
+        quoteRequired,
+        reason: item.reason || null,
       });
     }
   };
@@ -2908,9 +2943,39 @@ function normalizeOneTimeBreakdown(estData) {
     });
   }
   const total = Number.isFinite(explicitTotal) ? explicitTotal : rowTotal + difference;
+  const quoteRequiredItems = rows.filter((row) => row.quoteRequired === true);
   return {
     items: rows,
     total: Math.round(total * 100) / 100,
+    quoteRequired: quoteRequiredItems.length > 0,
+    quoteRequiredItems,
+  };
+}
+
+function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
+  const breakdown = pricingBundle?.oneTimeBreakdown
+    || (estData ? normalizeOneTimeBreakdown(estData) : null);
+  const quoteRequiredItems = Array.isArray(breakdown?.quoteRequiredItems)
+    ? breakdown.quoteRequiredItems
+    : (Array.isArray(breakdown?.items) ? breakdown.items.filter((item) => item.quoteRequired === true) : []);
+  const quoteRequired = pricingBundle?.quoteRequired === true
+    || breakdown?.quoteRequired === true
+    || quoteRequiredItems.length > 0;
+
+  return {
+    quoteRequired,
+    reason: quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason || null,
+    items: quoteRequiredItems,
+  };
+}
+
+function attachQuoteRequirement(payload) {
+  const quoteState = resolveEstimateQuoteRequirement(payload);
+  return {
+    ...payload,
+    quoteRequired: quoteState.quoteRequired,
+    quoteRequiredReason: quoteState.reason,
+    quoteRequiredItems: quoteState.items,
   };
 }
 
@@ -3386,7 +3451,7 @@ async function buildPricingBundle(estimate) {
       ? Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100)
       : rawV1OneTimeTotal;
 
-    const payload = {
+    const payload = attachQuoteRequirement({
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice,
@@ -3396,7 +3461,7 @@ async function buildPricingBundle(estimate) {
       firstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       source: 'v1_engine_shape',
-    };
+    });
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
@@ -3410,7 +3475,7 @@ async function buildPricingBundle(estimate) {
   // stored totals. Not ideal but safer than fabricating a multi-frequency
   // ladder from nothing. React renders a simplified PriceCard.
   if (!engineInputs) {
-    const payload = {
+    const payload = attachQuoteRequirement({
       frequencies: [{
         key: 'quarterly',
         label: 'Quarterly',
@@ -3425,7 +3490,7 @@ async function buildPricingBundle(estimate) {
       anchorOneTimePrice: Number(estimate.onetime_total || 0) || null,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
-    };
+    });
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
@@ -3472,13 +3537,13 @@ async function buildPricingBundle(estimate) {
     ? generatedOneTimeBreakdown
     : storedOneTimeBreakdown;
 
-  const payload = {
+  const payload = attachQuoteRequirement({
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,
     oneTimeBreakdown,
     source: 'engine_invocation',
-  };
+  });
   setEstimatePricingCache(estimate, payload);
   return payload;
 }
@@ -3552,12 +3617,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     }
 
     const pricingBundle = await buildPricingBundle(estimate);
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
 
     const terminalState = (() => {
       if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
       if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) return 'expired';
       return null;
     })();
+    const ctaTerminalState = terminalState || (quoteRequirement.quoteRequired ? 'quote_required' : null);
 
     res.json({
       estimate: {
@@ -3581,8 +3648,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       },
       pricing: pricingBundle,
       cta: {
-        canAccept: terminalState === null,
-        terminalState,
+        canAccept: terminalState === null && !quoteRequirement.quoteRequired,
+        terminalState: ctaTerminalState,
+        quoteRequired: quoteRequirement.quoteRequired,
+        quoteRequiredReason: quoteRequirement.reason || null,
       },
       meta: {
         generatedAt: new Date().toISOString(),
@@ -3597,6 +3666,8 @@ module.exports = router;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
+module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
+module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;

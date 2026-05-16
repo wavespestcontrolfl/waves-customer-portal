@@ -297,7 +297,7 @@ Recurring customer impact in the reconciliation window (Apr 14 → Apr 17): **ze
 | `v2_boracare_attic_2000sf` | $1,946 | $1,946 | **0** | No pest path. |
 | `v2_preslab_2000sf_basic_warranty` | $852 | $852 | **0** | No pest path. |
 | `v2_stinging_wasp_ground_tier2` | $250 | $250 | **0** | No pest path. |
-| `v2_bedbug_3rooms_both_methods` | $3,351 | $3,351 | **0** | No pest path. |
+| `v1adapter_bedbug_3rooms_hybrid` | $2,950 | $2,950 | **0** | Explicit HYBRID bed bug path; no duplicate heat + chemical lines. |
 | `v2_exclusion_moderate_waive_inspection` | $450 | $450 | **0** | No pest path. |
 | `v2_onetime_pest_urgent_afterhours` | $300 | $318 | **+$18 (+6.0%)** | One-time pest with drifted features × urgency multiplier. |
 | `v2_onetime_pest_recurring_customer` | $128 | $135 | **+$7 (+5.5%)** | One-time pest + moderate features drift. |

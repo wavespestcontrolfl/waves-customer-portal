@@ -1430,9 +1430,24 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     }
   }
   if (sel.has('BEDBUG')) {
+    const bedbugRooms = Number(o.bedbugRooms);
+    const subcontractCost = Number(o.bedbugSubcontractCost);
+    const bedbugMethod = o.bedbugMethod;
+    const isChemicalBedBug = bedbugMethod === 'CHEMICAL';
+    const bedbugEquipment = isChemicalBedBug ? undefined : o.bedbugEquipment;
     services.bedBug = {
-      rooms: o.bedbugRooms || 1,
-      method: (o.bedbugMethod || 'BOTH').toLowerCase(),
+      rooms: Number.isFinite(bedbugRooms) ? bedbugRooms : o.bedbugRooms,
+      method: bedbugMethod,
+      severity: o.bedbugSeverity,
+      prepStatus: o.bedbugPrepStatus,
+      occupancyType: o.bedbugOccupancyType,
+      equipment: bedbugEquipment,
+      heatScope: isChemicalBedBug ? undefined : o.bedbugHeatScope,
+      subcontractCost: bedbugEquipment === 'SUBCONTRACT' && Number.isFinite(subcontractCost) && o.bedbugSubcontractCost !== ''
+        ? subcontractCost
+        : undefined,
+      urgency,
+      afterHours,
     };
   }
   if (sel.has('STING')) {
