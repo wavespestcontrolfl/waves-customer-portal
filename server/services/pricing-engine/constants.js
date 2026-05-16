@@ -969,6 +969,14 @@ const BED_BUG = {
       },
       roomMaterialAllowance: 50.42,
     },
+    protocol: {
+      programType: 'IPM',
+      residualApplication: true,
+      requiresPrepChecklist: true,
+      requiresFollowUpMonitoring: true,
+      requiresCustomerAcknowledgement: true,
+      productLabelVerificationRequired: true,
+    },
     warnings: [
       'Chemical treatment should be sold as an IPM program, not spray-only.',
       'Customer prep and follow-up monitoring are required.',
@@ -1015,6 +1023,14 @@ const BED_BUG = {
     includePostInspection: true,
     postInspectionDays: 14,
     residualAddOn: { base: 175, perRoom: 75 },
+    protocol: {
+      heatEvent: true,
+      residualApplication: true,
+      residualApplicationType: 'targeted',
+      requiresPrepChecklist: true,
+      requiresFollowUpMonitoring: true,
+      requiresCustomerAcknowledgement: true,
+    },
     warnings: [
       'Hybrid must be explicitly selected.',
       'Do not trigger hybrid from invalid method input.',

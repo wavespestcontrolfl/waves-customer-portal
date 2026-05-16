@@ -2087,6 +2087,36 @@ function bedBugMethodLabel(method) {
   return 'Bed Bug Treatment';
 }
 
+function buildBedBugChemicalProtocol(includedVisits) {
+  const chemical = BED_BUG.chemical;
+  return {
+    ...(chemical.protocol || {}),
+    includedVisits,
+    followUpDays: chemical.followUpDays,
+  };
+}
+
+function buildBedBugHeatProtocol() {
+  const heat = BED_BUG.heat;
+  return {
+    targetAmbientTempF: heat.protocol.targetAmbientTempF,
+    requiredMinimumTempF: heat.protocol.requiredMinimumTempF,
+    minimumHoldTimeMinutes: heat.protocol.minimumHoldTimeMinutes,
+    minSensors: heat.protocol.minSensors,
+    activeMonitoringRequired: heat.protocol.activeMonitoringRequired,
+    requiresPrepChecklist: heat.protocol.requiresPrepChecklist,
+    requiresHeatSensitiveItemPlan: heat.protocol.requiresHeatSensitiveItemPlan,
+  };
+}
+
+function buildBedBugHybridProtocol(heatProtocol) {
+  return {
+    ...heatProtocol,
+    ...(BED_BUG.hybrid.protocol || {}),
+    postInspectionDays: BED_BUG.hybrid.postInspectionDays,
+  };
+}
+
 function buildBedBugQuoteRequired(normalized, reason, warnings = []) {
   const label = `${bedBugMethodLabel(normalized.method)} — ${normalized.rooms} room(s) — Quote Required`;
   const detail = reason === 'PREP_REFUSED'
@@ -2208,6 +2238,7 @@ function resolveChemicalPrice(normalized) {
   const multipliers = getBedBugMultipliers(normalized, chemical.sizeModifiers);
   const price = roundPrice(applyBedBugMultipliers(baseChemicalPrice, multipliers));
   const warnings = uniqueWarnings(chemical.warnings);
+  const protocol = buildBedBugChemicalProtocol(includedVisits);
   const estimatedGrossMargin = price > 0 ? roundedRatio((price - directCost) / price) : 0;
 
   return bedBugCommonResult(normalized, {
@@ -2222,6 +2253,7 @@ function resolveChemicalPrice(normalized) {
       price,
       includedVisits,
       followUpDays: chemical.followUpDays,
+      protocol,
       directCostEstimate: roundCurrency(directCost),
       costRatio: chemical.targetCostRatio,
       actualCostRatio: price > 0 ? roundedRatio(directCost / price) : 0,
@@ -2237,6 +2269,7 @@ function resolveChemicalPrice(normalized) {
       estimatedGrossMargin,
       pricingModel: chemical.pricingModel,
       targetCostRatio: chemical.targetCostRatio,
+      protocol,
     },
   });
 }
@@ -2282,6 +2315,7 @@ function resolveHeatPrice(property, normalized, options = {}) {
     ? roundPrice(applyBedBugMultipliers(baseHeatPrice, multipliers))
     : roundCurrency(baseHeatPrice);
   const warnings = uniqueWarnings(heat.warnings);
+  const protocol = buildBedBugHeatProtocol();
   const line = {
     label: `${heat.label} — ${rooms} room(s) — ${normalized.equipment}`,
     method: normalized.method,
@@ -2291,13 +2325,7 @@ function resolveHeatPrice(property, normalized, options = {}) {
     postInspectionDays: heat.postInspectionDays,
     heatScope: normalized.heatScope,
     equipment: normalized.equipment,
-    protocol: {
-      targetAmbientTempF: heat.protocol.targetAmbientTempF,
-      requiredMinimumTempF: heat.protocol.requiredMinimumTempF,
-      minimumHoldTimeMinutes: heat.protocol.minimumHoldTimeMinutes,
-      minSensors: heat.protocol.minSensors,
-      activeMonitoringRequired: heat.protocol.activeMonitoringRequired,
-    },
+    protocol,
     warnings,
   };
 
@@ -2335,6 +2363,7 @@ function resolveHybridPrice(property, normalized) {
   const price = roundPrice(applyBedBugMultipliers(combinedBase, multipliers));
   const warnings = uniqueWarnings(BED_BUG.heat.warnings, BED_BUG.hybrid.warnings);
   const note = 'Hybrid is heat plus targeted residual protection, not a duplicate full chemical program.';
+  const protocol = buildBedBugHybridProtocol(heatBase.treatmentLines[0].protocol);
 
   return bedBugCommonResult(normalized, {
     label: `${BED_BUG.hybrid.label} — ${normalized.rooms} room(s)`,
@@ -2354,7 +2383,7 @@ function resolveHybridPrice(property, normalized) {
       postInspectionDays: BED_BUG.hybrid.postInspectionDays,
       heatScope: normalized.heatScope,
       equipment: normalized.equipment,
-      protocol: heatBase.treatmentLines[0].protocol,
+      protocol,
       warnings,
       note,
     }],
@@ -2366,7 +2395,7 @@ function resolveHybridPrice(property, normalized) {
       heatBasePrice: roundCurrency(heatBase.basePrice),
       includePostInspection: BED_BUG.hybrid.includePostInspection,
       postInspectionDays: BED_BUG.hybrid.postInspectionDays,
-      protocol: heatBase.treatmentLines[0].protocol,
+      protocol,
       note,
     },
   });

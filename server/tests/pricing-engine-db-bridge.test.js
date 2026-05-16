@@ -23,6 +23,7 @@ describe('pricing engine DB bridge', () => {
   const originalMosquitoBasePrices = JSON.parse(JSON.stringify(constants.MOSQUITO.basePrices));
   const originalMosquitoTierVisits = { ...constants.MOSQUITO.tierVisits };
   const originalPalmTreatments = JSON.parse(JSON.stringify(constants.PALM.treatments));
+  const originalBedBug = JSON.parse(JSON.stringify(constants.BED_BUG));
   const originalPalm = {
     minPerVisit: constants.PALM.minPerVisit,
     flatCreditPerPalm: constants.PALM.flatCreditPerPalm,
@@ -44,6 +45,8 @@ describe('pricing engine DB bridge', () => {
     constants.MOSQUITO.tierVisits = { ...originalMosquitoTierVisits };
     constants.PALM.treatments = JSON.parse(JSON.stringify(originalPalmTreatments));
     constants.PALM.treatmentTypes = constants.PALM.treatments;
+    for (const key of Object.keys(constants.BED_BUG)) delete constants.BED_BUG[key];
+    Object.assign(constants.BED_BUG, JSON.parse(JSON.stringify(originalBedBug)));
     Object.assign(constants.PALM, originalPalm);
   });
 
@@ -162,5 +165,55 @@ describe('pricing engine DB bridge', () => {
     expect(constants.PALM.minPerVisit).toBe(90);
     expect(constants.PALM.flatCreditPerPalm).toBe(12);
     expect(constants.PALM.flatCreditMinTier).toBe('silver');
+  });
+
+  test('syncs complete bed bug specialty pricing protocol from pricing_config', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'onetime_bed_bug',
+      data: {
+        urgencyMultipliers: { emergencyAfterHours: 2.25 },
+        chemical: {
+          followUpDays: 21,
+          minimumBase: 425,
+          minimumAdditionalRoom: 275,
+          protocol: {
+            requiresFollowUpMonitoring: true,
+            requiresCustomerAcknowledgement: true,
+          },
+        },
+        heat: {
+          roomRates: { oneRoom: 1100, twoRooms: 900, threePlusRooms: 800 },
+          protocol: {
+            targetAmbientTempF: 140,
+            minSensors: 7,
+            requiresPrepChecklist: true,
+            requiresHeatSensitiveItemPlan: true,
+          },
+        },
+        hybrid: {
+          residualAddOn: { base: 200, perRoom: 85 },
+          protocol: {
+            residualApplicationType: 'targeted',
+            requiresCustomerAcknowledgement: true,
+          },
+        },
+      },
+    }]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    expect(constants.BED_BUG.urgencyMultipliers.emergencyAfterHours).toBe(2.25);
+    expect(constants.BED_BUG.chemical.followUpDays).toBe(21);
+    expect(constants.BED_BUG.chemical.minimumBase).toBe(425);
+    expect(constants.BED_BUG.chemical.protocol.requiresCustomerAcknowledgement).toBe(true);
+    expect(constants.BED_BUG.heat.roomRates).toEqual({ oneRoom: 1100, twoRooms: 900, threePlusRooms: 800 });
+    expect(constants.BED_BUG.heat.protocol).toEqual(expect.objectContaining({
+      targetAmbientTempF: 140,
+      minSensors: 7,
+      requiresPrepChecklist: true,
+      requiresHeatSensitiveItemPlan: true,
+    }));
+    expect(constants.BED_BUG.hybrid.residualAddOn).toEqual({ base: 200, perRoom: 85 });
+    expect(constants.BED_BUG.hybrid.protocol.residualApplicationType).toBe('targeted');
   });
 });

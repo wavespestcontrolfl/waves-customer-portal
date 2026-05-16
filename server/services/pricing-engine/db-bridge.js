@@ -7,6 +7,168 @@ const constants = require('./constants');
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
+function readFiniteNumber(value) {
+  if (value === null || value === undefined || value === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function setNumber(target, key, value, transform = Number) {
+  const parsed = readFiniteNumber(value);
+  if (parsed !== undefined) target[key] = transform(parsed);
+}
+
+function setBoolean(target, key, value) {
+  if (typeof value === 'boolean') target[key] = value;
+}
+
+function setString(target, key, value) {
+  if (typeof value === 'string' && value.trim()) target[key] = value.trim();
+}
+
+function setStringArray(target, key, value) {
+  if (!Array.isArray(value)) return;
+  const strings = value.map(v => String(v).trim()).filter(Boolean);
+  if (strings.length) target[key] = strings;
+}
+
+function mergePlainObject(target, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  Object.assign(target, value);
+}
+
+function syncBedBugPricingConfig(bedBugConfig) {
+  if (!bedBugConfig || typeof bedBugConfig !== 'object' || Array.isArray(bedBugConfig)) return;
+
+  const target = constants.BED_BUG;
+  setBoolean(target, 'recurringDiscountEligible', bedBugConfig.recurringDiscountEligible);
+  setNumber(target, 'maxRecurringDiscountPct', bedBugConfig.maxRecurringDiscountPct);
+  setStringArray(target, 'allowedMethods', bedBugConfig.allowedMethods);
+
+  if (bedBugConfig.severity && typeof bedBugConfig.severity === 'object') {
+    for (const [key, cfg] of Object.entries(bedBugConfig.severity)) {
+      if (!target.severity[key] || !cfg || typeof cfg !== 'object') continue;
+      setString(target.severity[key], 'label', cfg.label);
+      setNumber(target.severity[key], 'visits', cfg.visits, Number);
+      setNumber(target.severity[key], 'multiplier', cfg.multiplier);
+      setBoolean(target.severity[key], 'quoteRequired', cfg.quoteRequired);
+    }
+  }
+
+  if (bedBugConfig.prepStatus && typeof bedBugConfig.prepStatus === 'object') {
+    for (const [key, cfg] of Object.entries(bedBugConfig.prepStatus)) {
+      if (!target.prepStatus[key] || !cfg || typeof cfg !== 'object') continue;
+      setString(target.prepStatus[key], 'label', cfg.label);
+      setNumber(target.prepStatus[key], 'multiplier', cfg.multiplier);
+      setBoolean(target.prepStatus[key], 'allowed', cfg.allowed);
+      setBoolean(target.prepStatus[key], 'quoteRequired', cfg.quoteRequired);
+      setStringArray(target.prepStatus[key], 'warnings', cfg.warnings);
+    }
+  }
+
+  if (bedBugConfig.occupancyType && typeof bedBugConfig.occupancyType === 'object') {
+    for (const [key, cfg] of Object.entries(bedBugConfig.occupancyType)) {
+      if (!target.occupancyType[key] || !cfg || typeof cfg !== 'object') continue;
+      setString(target.occupancyType[key], 'label', cfg.label);
+      setNumber(target.occupancyType[key], 'multiplier', cfg.multiplier);
+    }
+  }
+
+  if (bedBugConfig.stories && typeof bedBugConfig.stories === 'object') {
+    for (const [key, cfg] of Object.entries(bedBugConfig.stories)) {
+      if (!target.stories[key] || !cfg || typeof cfg !== 'object') continue;
+      setNumber(target.stories[key], 'maxStories', cfg.maxStories, Number);
+      setNumber(target.stories[key], 'multiplier', cfg.multiplier);
+    }
+  }
+
+  if (bedBugConfig.urgencyMultipliers && typeof bedBugConfig.urgencyMultipliers === 'object') {
+    for (const [key, value] of Object.entries(bedBugConfig.urgencyMultipliers)) {
+      setNumber(target.urgencyMultipliers, key, value);
+    }
+  }
+
+  const chemical = bedBugConfig.chemical || {};
+  if (chemical && typeof chemical === 'object') {
+    setString(target.chemical, 'label', chemical.label);
+    setNumber(target.chemical, 'includedVisits', chemical.includedVisits, Number);
+    setNumber(target.chemical, 'followUpDays', chemical.followUpDays, Number);
+    setNumber(target.chemical, 'materialPerRoomVisit1', chemical.materialPerRoomVisit1 ?? chemical.material_per_room);
+    setNumber(target.chemical, 'materialPerRoomVisit2Factor', chemical.materialPerRoomVisit2Factor);
+    setNumber(target.chemical, 'extraFollowUpMaterialFactor', chemical.extraFollowUpMaterialFactor);
+    setString(target.chemical, 'pricingModel', chemical.pricingModel);
+    setNumber(target.chemical, 'targetCostRatio', chemical.targetCostRatio);
+    setNumber(target.chemical, 'minimumBase', chemical.minimumBase ?? chemical.floor_base, money);
+    setNumber(target.chemical, 'minimumAdditionalRoom', chemical.minimumAdditionalRoom ?? chemical.floor_per_extra_room, money);
+    if (chemical.additionalFollowUpPrice) {
+      setNumber(target.chemical.additionalFollowUpPrice, 'base', chemical.additionalFollowUpPrice.base, money);
+      setNumber(target.chemical.additionalFollowUpPrice, 'perRoom', chemical.additionalFollowUpPrice.perRoom, money);
+    }
+    if (chemical.visitMinutes && typeof chemical.visitMinutes === 'object') {
+      for (const [visitKey, cfg] of Object.entries(chemical.visitMinutes)) {
+        if (!target.chemical.visitMinutes[visitKey] || !cfg || typeof cfg !== 'object') continue;
+        for (const [field, value] of Object.entries(cfg)) {
+          setNumber(target.chemical.visitMinutes[visitKey], field, value, Number);
+        }
+      }
+    }
+    if (Array.isArray(chemical.sizeModifiers)) target.chemical.sizeModifiers = chemical.sizeModifiers.map(rule => ({ ...rule }));
+    if (chemical.productBasis) mergePlainObject(target.chemical.productBasis, chemical.productBasis);
+    if (chemical.protocol) mergePlainObject(target.chemical.protocol, chemical.protocol);
+    setStringArray(target.chemical, 'warnings', chemical.warnings);
+  }
+
+  const heat = bedBugConfig.heat || {};
+  if (heat && typeof heat === 'object') {
+    setString(target.heat, 'label', heat.label);
+    setNumber(target.heat, 'includedTreatmentEvents', heat.includedTreatmentEvents, Number);
+    setBoolean(target.heat, 'includePostInspection', heat.includePostInspection);
+    setNumber(target.heat, 'postInspectionDays', heat.postInspectionDays, Number);
+    setStringArray(target.heat, 'allowedEquipment', heat.allowedEquipment);
+    if (heat.roomRates) {
+      setNumber(target.heat.roomRates, 'oneRoom', heat.roomRates.oneRoom ?? heat.per_room_1, money);
+      setNumber(target.heat.roomRates, 'twoRooms', heat.roomRates.twoRooms ?? heat.per_room_2, money);
+      setNumber(target.heat.roomRates, 'threePlusRooms', heat.roomRates.threePlusRooms ?? heat.per_room_3, money);
+    } else {
+      setNumber(target.heat.roomRates, 'oneRoom', heat.per_room_1, money);
+      setNumber(target.heat.roomRates, 'twoRooms', heat.per_room_2, money);
+      setNumber(target.heat.roomRates, 'threePlusRooms', heat.per_room_3, money);
+    }
+    if (heat.inHouseEquipmentFee) {
+      setNumber(target.heat.inHouseEquipmentFee, 'base', heat.inHouseEquipmentFee.base, money);
+      setNumber(target.heat.inHouseEquipmentFee, 'perExtraRoom', heat.inHouseEquipmentFee.perExtraRoom, money);
+    }
+    setNumber(target.heat, 'subcontractMarkup', heat.subcontractMarkup);
+    if (heat.minimums) {
+      setNumber(target.heat.minimums, 'inHouse', heat.minimums.inHouse, money);
+      setNumber(target.heat.minimums, 'subcontract', heat.minimums.subcontract, money);
+    }
+    if (heat.heatScope) setStringArray(target.heat.heatScope, 'allowed', heat.heatScope.allowed);
+    if (heat.sqftRates) {
+      setNumber(target.heat.sqftRates, 'inHouse', heat.sqftRates.inHouse);
+      setNumber(target.heat.sqftRates, 'subcontract', heat.sqftRates.subcontract);
+    }
+    if (Array.isArray(heat.sizeModifiers)) target.heat.sizeModifiers = heat.sizeModifiers.map(rule => ({ ...rule }));
+    if (heat.protocol) mergePlainObject(target.heat.protocol, heat.protocol);
+    setStringArray(target.heat, 'warnings', heat.warnings);
+  }
+
+  const hybrid = bedBugConfig.hybrid || {};
+  if (hybrid && typeof hybrid === 'object') {
+    setString(target.hybrid, 'label', hybrid.label);
+    setBoolean(target.hybrid, 'heatEvent', hybrid.heatEvent);
+    setBoolean(target.hybrid, 'residualApplication', hybrid.residualApplication);
+    setBoolean(target.hybrid, 'includePostInspection', hybrid.includePostInspection);
+    setNumber(target.hybrid, 'postInspectionDays', hybrid.postInspectionDays, Number);
+    if (hybrid.residualAddOn) {
+      setNumber(target.hybrid.residualAddOn, 'base', hybrid.residualAddOn.base, money);
+      setNumber(target.hybrid.residualAddOn, 'perRoom', hybrid.residualAddOn.perRoom, money);
+    }
+    if (hybrid.protocol) mergePlainObject(target.hybrid.protocol, hybrid.protocol);
+    setStringArray(target.hybrid, 'warnings', hybrid.warnings);
+  }
+}
+
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
 
@@ -486,6 +648,9 @@ async function syncConstantsFromDB(dbInstance) {
           }
         }
       }
+    }
+    if (config.onetime_bed_bug) {
+      syncBedBugPricingConfig(config.onetime_bed_bug);
     }
 
     // ── Lawn Care Brackets (all 4 grass tracks) ──────────────

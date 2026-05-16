@@ -274,6 +274,13 @@ describe('bed bug specialty pricing', () => {
     test('CHEMICAL 1 room light/ready/single-family uses 2 visits and cost-ratio base', () => {
       const result = priceBedBugTreatment({}, validChemical);
       expect(result.treatmentLines[0].includedVisits).toBe(2);
+      expect(result.protocol).toEqual(expect.objectContaining({
+        programType: 'IPM',
+        includedVisits: 2,
+        followUpDays: 14,
+        requiresPrepChecklist: true,
+        requiresFollowUpMonitoring: true,
+      }));
       expect(result.directCostEstimate).toBeCloseTo(157.30, 2);
       expect(result.basePrice).toBeCloseTo(449.42, 2);
       expect(result.price).toBe(449);
@@ -427,6 +434,8 @@ describe('bed bug specialty pricing', () => {
         minimumHoldTimeMinutes: 90,
         activeMonitoringRequired: true,
         minSensors: 5,
+        requiresPrepChecklist: true,
+        requiresHeatSensitiveItemPlan: true,
       }));
     });
 
@@ -474,6 +483,13 @@ describe('bed bug specialty pricing', () => {
       expect(result.warnings).toContain('Heat treatment has no residual effect.');
       expect(result.warnings).toContain('Hybrid must be explicitly selected.');
       expect(result.note).toMatch(/not a duplicate full chemical program/);
+      expect(result.protocol).toEqual(expect.objectContaining({
+        heatEvent: true,
+        residualApplication: true,
+        residualApplicationType: 'targeted',
+        requiresHeatSensitiveItemPlan: true,
+        requiresPrepChecklist: true,
+      }));
     });
 
     test('HYBRID has no recurring discount', () => {

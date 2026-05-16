@@ -45,6 +45,9 @@ describe('deprecated client estimator pricing drift guards', () => {
 
   test('legacy admin page blocks bed bug estimates from falling back to client pricing', () => {
     expect(legacyAdminSource).toContain('const canUseServerForBedBug =');
+    expect(legacyAdminSource).toContain('const hasLawnPricedService =');
+    expect(legacyAdminSource).toContain('form.svcBedbug && hasLawnPricedService && !enrichedProfile && !hasManualLawnDimensions');
+    expect(legacyAdminSource).toContain('Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.');
     expect(legacyAdminSource).toContain('form.svcBedbug && !canUseServerForBedBug');
     expect(legacyAdminSource).toContain('Enter home sq ft or run Property Lookup before generating a mixed bed bug estimate.');
   });

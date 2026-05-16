@@ -1183,11 +1183,26 @@ function EstimateToolView() {
     ];
     const bedBugOnlyManual =
       form.svcBedbug && serviceFlagValues.filter(Boolean).length === 1;
+    const hasLawnPricedService =
+      form.svcLawn ||
+      form.svcOnetimeLawn ||
+      form.svcTopdress ||
+      form.svcDethatch ||
+      form.svcPlugging;
+    const hasManualLawnDimensions =
+      (Number(form.lotSqFt) || 0) > 0 ||
+      (Number(form.measuredTurfSf) || 0) > 0 ||
+      (Number(form.estimatedTurfSf) || 0) > 0;
     const hasManualPropertyDimensions =
       (Number(form.homeSqFt) || 0) > 0 || (Number(form.lotSqFt) || 0) > 0;
     const canUseServerForBedBug =
       enrichedProfile ||
       (form.svcBedbug && (bedBugOnlyManual || hasManualPropertyDimensions));
+
+    if (form.svcBedbug && hasLawnPricedService && !enrichedProfile && !hasManualLawnDimensions) {
+      alert("Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.");
+      return;
+    }
 
     if (form.svcBedbug && !canUseServerForBedBug) {
       alert("Enter home sq ft or run Property Lookup before generating a mixed bed bug estimate.");
