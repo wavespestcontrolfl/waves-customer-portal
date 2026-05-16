@@ -198,11 +198,83 @@ const AREAS_BY_SERVICE = {
   ],
 };
 const CUSTOMER_INTERACTION_OPTIONS = [
-  { value: "spoke", label: "Customer home — spoke with them" },
-  { value: "not_home_full", label: "Customer not home — full access" },
-  { value: "not_home_partial", label: "Customer not home — partial access" },
-  { value: "concern", label: "Customer had specific concern" },
+  { value: "tech_home_spoke_with_them", label: "Customer home — spoke with them" },
+  { value: "not_home_full_access", label: "Customer not home — full access" },
+  { value: "not_home_partial_access", label: "Customer not home — partial access" },
+  { value: "customer_specific_concern", label: "Customer had specific concern" },
 ];
+const CUSTOMER_INTERACTION_ALIASES = {
+  spoke: "tech_home_spoke_with_them",
+  not_home_full: "not_home_full_access",
+  not_home_partial: "not_home_partial_access",
+  concern: "customer_specific_concern",
+};
+const COMPLETION_PHOTO_MAX_BYTES = 1.5 * 1024 * 1024;
+const COMPLETION_PHOTO_MAX_DIMENSION = 1600;
+const COMPLETION_PHOTO_QUALITY_STEPS = [0.82, 0.72, 0.62, 0.54];
+
+function normalizeCustomerInteractionValue(value) {
+  return CUSTOMER_INTERACTION_ALIASES[value] || value || "";
+}
+
+function isCustomerConcernInteraction(value) {
+  return normalizeCustomerInteractionValue(value) === "customer_specific_concern";
+}
+
+function dataUrlApproxBytes(dataUrl) {
+  const encoded = String(dataUrl || "").split(",")[1] || "";
+  return Math.ceil((encoded.length * 3) / 4);
+}
+
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not read photo"));
+    };
+    img.src = url;
+  });
+}
+
+async function prepareCompletionPhoto(file) {
+  if (!file?.type?.startsWith("image/")) {
+    throw new Error("Only image files can be attached.");
+  }
+  const image = await loadImageFromFile(file);
+  const largestSide = Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height);
+  let scale = largestSide > COMPLETION_PHOTO_MAX_DIMENSION
+    ? COMPLETION_PHOTO_MAX_DIMENSION / largestSide
+    : 1;
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0, width, height);
+
+    for (const quality of COMPLETION_PHOTO_QUALITY_STEPS) {
+      const data = canvas.toDataURL("image/jpeg", quality);
+      if (dataUrlApproxBytes(data) <= COMPLETION_PHOTO_MAX_BYTES) {
+        return {
+          data,
+          name: file.name?.replace(/\.[^.]+$/, ".jpg") || "service-photo.jpg",
+          capturedAt: new Date().toISOString(),
+        };
+      }
+    }
+    scale *= 0.75;
+  }
+  throw new Error("Photo is too large to attach to completion.");
+}
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 
@@ -277,50 +349,6 @@ async function generateAiReport(payload) {
     throw err;
   }
   return body || {};
-}
-
-function dataUrlToBlob(dataUrl) {
-  const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/);
-  if (!match) return null;
-  const mimeType = match[1] || "image/jpeg";
-  const isBase64 = !!match[2];
-  const raw = isBase64 ? atob(match[3]) : decodeURIComponent(match[3]);
-  const bytes = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
-  return new Blob([bytes], { type: mimeType });
-}
-
-async function uploadCompletionPhotos(serviceId, photos = []) {
-  if (!serviceId || !Array.isArray(photos) || photos.length === 0) {
-    return { uploaded: 0, failed: 0 };
-  }
-  const token =
-    localStorage.getItem("waves_admin_token") || localStorage.getItem("adminToken");
-  let uploaded = 0;
-  let failed = 0;
-  for (let index = 0; index < photos.length; index += 1) {
-    const photo = photos[index];
-    const blob = dataUrlToBlob(photo?.data);
-    if (!blob) {
-      failed += 1;
-      continue;
-    }
-    const filename = String(photo?.name || `service-photo-${index + 1}.jpg`)
-      .replace(/[^a-zA-Z0-9._-]/g, "_")
-      .slice(0, 120);
-    const fd = new FormData();
-    fd.append("photo", blob, filename || `service-photo-${index + 1}.jpg`);
-    fd.append("photoType", "after");
-    fd.append("sortOrder", String(index));
-    const res = await fetch(`${API_BASE}/tech/services/${serviceId}/photos`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body: fd,
-    });
-    if (res.ok) uploaded += 1;
-    else failed += 1;
-  }
-  return { uploaded, failed };
 }
 
 function googleMapsUrl(address) {
@@ -4594,7 +4622,8 @@ export function CompletionPanel({
     ? "incomplete"
     : visitOutcome === "customer_declined"
       ? "customer_declined"
-      : visitOutcome === "customer_concern" || customerInteraction === "concern"
+      : visitOutcome === "customer_concern" ||
+          isCustomerConcernInteraction(customerInteraction)
         ? "customer_concern"
         : willInvoice
           ? "invoice_created"
@@ -5115,7 +5144,9 @@ export function CompletionPanel({
     setAreasServiced(
       Array.isArray(savedDraft.areasServiced) ? savedDraft.areasServiced : [],
     );
-    setCustomerInteraction(savedDraft.customerInteraction || "");
+    setCustomerInteraction(
+      normalizeCustomerInteractionValue(savedDraft.customerInteraction),
+    );
     setCustomerConcern(savedDraft.customerConcern || "");
     setSelectedProtocolActionLabels(
       Array.isArray(savedDraft.selectedProtocolActionLabels)
@@ -5330,6 +5361,9 @@ export function CompletionPanel({
           null,
         totalAmount: "",
         amountUnit: defaultUnit,
+        applicationArea: "",
+        areaValue: "",
+        areaUnit: "sqft",
       },
     ]);
     setProductSearch("");
@@ -5358,22 +5392,30 @@ export function CompletionPanel({
     );
     setCalibrationId(selected?.id || "");
   }
-  function handlePhotoSelect(e) {
+  async function handlePhotoSelect(e) {
     const files = Array.from(e.target.files || []);
     if (servicePhotos.length + files.length > 5) {
       alert("Maximum 5 photos allowed.");
+      if (photoInputRef.current) photoInputRef.current.value = "";
       return;
     }
-    files.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
+    let failed = 0;
+    for (const file of files) {
+      try {
+        const photo = await prepareCompletionPhoto(file);
         setServicePhotos((prev) => {
           if (prev.length >= 5) return prev;
-          return [...prev, { data: reader.result, name: file.name }];
+          return [...prev, photo];
         });
-      };
-      reader.readAsDataURL(file);
-    });
+      } catch {
+        failed += 1;
+      }
+    }
+    if (failed > 0) {
+      alert(
+        `${failed} photo${failed === 1 ? "" : "s"} could not be prepared for completion.`,
+      );
+    }
     if (photoInputRef.current) photoInputRef.current.value = "";
   }
   function removePhoto(index) {
@@ -5381,6 +5423,7 @@ export function CompletionPanel({
   }
 
   async function handleSubmit() {
+    if (submitting) return;
     if (calibrationCompletionBlocked) {
       alert(
         calibrationHelpText ||
@@ -5489,6 +5532,11 @@ export function CompletionPanel({
           rateUnit: p.rateUnit,
           totalAmount: p.totalAmount,
           amountUnit: p.amountUnit,
+          applicationArea:
+            p.applicationArea ||
+            (areasServiced.length === 1 ? areasServiced[0] : null),
+          areaValue: p.areaValue,
+          areaUnit: p.areaUnit,
         })),
         oneTimeRecapOnly,
         sendCompletionSms: effectiveSendSms,
@@ -5501,13 +5549,20 @@ export function CompletionPanel({
         areasTreated: areasServiced,
         timeOnSite: elapsed,
         areasServiced,
-        customerInteraction,
+        customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,
         observations: reportObservations,
         recommendations: reportRecommendations,
         lawnAssessmentId,
+        completionPhotos: servicePhotos.map((photo, index) => ({
+          data: photo.data,
+          name: photo.name || `service-photo-${index + 1}.jpg`,
+          photoType: "after",
+          sortOrder: index,
+          capturedAt: photo.capturedAt || null,
+        })),
       };
-      if (customerInteraction === "concern" && customerConcern) {
+      if (isCustomerConcernInteraction(customerInteraction) && customerConcern) {
         body.customerConcernText = customerConcern;
       }
       if (nextVisitNote) {
@@ -5524,19 +5579,11 @@ export function CompletionPanel({
         body.invoiceAlreadySent = true;
       }
       const result = await onSubmit(service.id, body);
-      if (servicePhotos.length > 0) {
-        try {
-          const photoResult = await uploadCompletionPhotos(service.id, servicePhotos);
-          if (photoResult.failed > 0) {
-            alert(
-              `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
-            );
-          }
-        } catch (photoErr) {
-          alert(
-            `Service completed, but photos failed to upload: ${photoErr.message || "Upload failed"}`,
-          );
-        }
+      const photoResult = result?.completionPhotoUpload;
+      if (photoResult?.failed > 0) {
+        alert(
+          `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
+        );
       }
       localStorage.removeItem(completionDraftKey(service.id));
       setCompletionResult(result || null);
@@ -6768,6 +6815,36 @@ export function CompletionPanel({
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
                       </select>{" "}
+                      {areasServiced.length > 0 && (
+                        <select
+                          value={sp.applicationArea || ""}
+                          onChange={(e) =>
+                            updateProduct(
+                              sp.productId,
+                              "applicationArea",
+                              e.target.value,
+                            )
+                          }
+                          style={{
+                            ...mInput,
+                            minWidth: 150,
+                            flex: "1 1 150px",
+                            height: 40,
+                            padding: "0 12px",
+                          }}
+                        >
+                          <option value="">
+                            {areasServiced.length === 1
+                              ? `Area: ${areasServiced[0]}`
+                              : "Treatment area"}
+                          </option>
+                          {areasServiced.map((area) => (
+                            <option key={area} value={area}>
+                              {area}
+                            </option>
+                          ))}
+                        </select>
+                      )}
                       <button
                         type="button"
                         onClick={() => removeProduct(sp.productId)}
@@ -6940,7 +7017,7 @@ export function CompletionPanel({
                     );
                   })}
                 </div>
-                {customerInteraction === "concern" && (
+                {isCustomerConcernInteraction(customerInteraction) && (
                   <input
                     type="text"
                     value={customerConcern}
@@ -8242,6 +8319,35 @@ export function CompletionPanel({
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
                   </select>{" "}
+                  {areasServiced.length > 0 && (
+                    <select
+                      value={sp.applicationArea || ""}
+                      onChange={(e) =>
+                        updateProduct(
+                          sp.productId,
+                          "applicationArea",
+                          e.target.value,
+                        )
+                      }
+                      style={{
+                        ...inputStyle,
+                        minWidth: 150,
+                        flex: "1 1 150px",
+                        marginBottom: 0,
+                      }}
+                    >
+                      <option value="">
+                        {areasServiced.length === 1
+                          ? `Area: ${areasServiced[0]}`
+                          : "Treatment area"}
+                      </option>
+                      {areasServiced.map((area) => (
+                        <option key={area} value={area}>
+                          {area}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     onClick={() => removeProduct(sp.productId)}
                     style={{
@@ -8426,7 +8532,7 @@ export function CompletionPanel({
                   </button>
                 ))}
               </div>
-              {customerInteraction === "concern" && (
+              {isCustomerConcernInteraction(customerInteraction) && (
                 <input
                   type="text"
                   value={customerConcern}

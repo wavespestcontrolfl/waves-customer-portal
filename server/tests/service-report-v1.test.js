@@ -336,6 +336,49 @@ describe('service report v1', () => {
     ])).toEqual(['Perimeter', 'Garage']);
   });
 
+  test('product application area narrows fallback treatment zones', async () => {
+    const fixtures = {
+      service_products: [{
+        id: 'product-1',
+        product_name: 'Demand CS',
+        product_category: 'insecticide',
+        application_method: 'perimeter_spray',
+        application_area: 'Garage',
+      }],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-areas',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-15',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Perimeter', 'Garage']),
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-areas', knex);
+
+    expect(data.zones.map((zone) => zone.label)).toEqual(['Perimeter', 'Garage']);
+    expect(data.applications[0].zone_ids).toEqual(['default-zone-2']);
+  });
+
   test('v1 data exposes public report asset endpoints', async () => {
     const fixtures = {
       service_products: [],

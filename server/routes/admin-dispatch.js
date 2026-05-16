@@ -28,6 +28,7 @@ const {
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
+const { uploadServicePhotoDataUrls } = require('../services/service-photos');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
   recordTrackTransitionFailure,
@@ -155,6 +156,19 @@ const VALID_VISIT_OUTCOMES = new Set([
   'customer_concern',
   'incomplete',
 ]);
+
+const CUSTOMER_INTERACTION_ALIASES = {
+  spoke: 'tech_home_spoke_with_them',
+  not_home_full: 'not_home_full_access',
+  not_home_partial: 'not_home_partial_access',
+  concern: 'customer_specific_concern',
+};
+
+function normalizeCustomerInteractionValue(value) {
+  if (!value) return null;
+  const text = String(value).trim();
+  return CUSTOMER_INTERACTION_ALIASES[text] || text || null;
+}
 
 function isWaveGuardLawnCompletion(svc) {
   return !!svc?.cust_waveguard_tier && detectServiceLine(svc?.service_type) === 'lawn';
@@ -1167,17 +1181,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       formStartedAt,
       invoiceAlreadySent = false,
       lawnAssessmentId = null,
+      completionPhotos = [],
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
         error: `visitOutcome must be one of: ${Array.from(VALID_VISIT_OUTCOMES).join(', ')}`,
       });
     }
+    if (completionPhotos != null && !Array.isArray(completionPhotos)) {
+      return res.status(400).json({
+        error: 'completionPhotos must be an array',
+        code: 'completion_photos_invalid',
+      });
+    }
+    if (Array.isArray(completionPhotos) && completionPhotos.length > 5) {
+      return res.status(400).json({
+        error: 'Maximum 5 completion photos allowed',
+        code: 'completion_photos_too_many',
+      });
+    }
     const isIncompleteVisit = visitOutcome === 'incomplete';
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
+    let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
+    const normalizedCustomerInteraction = normalizeCustomerInteractionValue(customerInteraction);
     const normalizedOfficeApproval = normalizeOfficeApproval(officeApproval);
     const normalizedNLimitApproval = normalizeOfficeApproval(nLimitApproval);
     const normalizedManagerApproval = normalizeOfficeApproval(managerApproval);
@@ -1416,7 +1445,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             customerConcernText: concernText || null,
             customerRecap: customerRecap || null,
             timeOnSite: timeOnSite || null,
-            customerInteraction: customerInteraction || null,
+            customerInteraction: normalizedCustomerInteraction,
             invoiceAlreadySent: !!invoiceAlreadySent,
             areasTreated: completionAreas,
             waveguardEquipmentSystemId,
@@ -1459,7 +1488,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             technician_notes: technicianNotes || '',
             structured_notes: serializeJsonb(structuredNotes),
             areas_serviced: serializeJsonb(completionAreas),
-            customer_interaction: customerInteraction || null,
+            customer_interaction: normalizedCustomerInteraction,
             soil_temp: soilTemp || null,
             thatch_measurement: thatchMeasurement || null,
             soil_ph: soilPh || null,
@@ -1737,6 +1766,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // on resume we skip those already-committed/operational side paths and
     // continue the customer-visible billing/SMS/review side effects below.
 
+    if (Array.isArray(completionPhotos) && completionPhotos.length) {
+      completionPhotoUploadResult = await uploadServicePhotoDataUrls({
+        serviceRecordId: record.id,
+        photos: completionPhotos,
+        photoType: 'after',
+      });
+      if (completionPhotoUploadResult.failed > 0) {
+        logger.warn(
+          `[dispatch] ${completionPhotoUploadResult.failed} completion photo upload(s) failed for service_record ${record.id}`
+        );
+      }
+      const latestNotes = parseJsonObject(record.structured_notes);
+      const photoNotes = {
+        ...latestNotes,
+        completionPhotos: {
+          uploaded: completionPhotoUploadResult.uploaded,
+          failed: completionPhotoUploadResult.failed,
+          uploadedAt: new Date().toISOString(),
+        },
+      };
+      await db('service_records').where({ id: record.id }).update({
+        structured_notes: serializeJsonb(photoNotes),
+      }).catch((updateErr) => {
+        logger.warn(`[dispatch] completion photo status update failed: ${updateErr.message}`);
+      });
+      record.structured_notes = photoNotes;
+    }
+
     const completedLawnAssessmentId =
       linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
     if (!isIncompleteVisit && completedLawnAssessmentId) {
@@ -1883,6 +1940,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         serviceRecordId: record.id,
         invoiceId: null,
         invoiceTotal: null,
+        completionPhotoUpload: completionPhotoUploadResult,
       };
       await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice: null, response: responsePayload });
       markedSucceeded = true;
@@ -2517,6 +2575,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionSmsError: finalRecordNotes.completionSmsError || null,
       completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
+      completionPhotoUpload: completionPhotoUploadResult,
     };
     // Refresh the stored response with the final invoice info — this is an
     // UPDATE of an already-succeeded row (set above immediately after the
