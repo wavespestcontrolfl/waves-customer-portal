@@ -195,7 +195,7 @@ Palm injection pricing requires explicit `treatmentType` and positive integer `p
 
 **Trapping:** base $350, floor $350, footprint and lot adjustments per bracket (see `constants.js:RODENT.trapping`).
 
-**WaveGuard:** NOT a tier qualifier. Excluded from % discounts. $50 one-time setup credit for members.
+**WaveGuard:** NOT a tier qualifier. Excluded from % discounts, setup credits, coupons, and tier benefits.
 
 ---
 
@@ -261,7 +261,7 @@ Qualifies off count of **qualifying recurring services** bundled together:
 **Non-qualifiers (still priced but don't count):** palm_injection, rodent_bait
 
 **Excluded from % discount (flat credits instead):**
-- `rodent_bait` — $50 setup credit
+- `rodent_bait` — no WaveGuard credit, coupon, setup credit, discount, or tier benefit
 - `palm_injection` — $10/palm/year credit (Gold+ only), applied after billable annual pricing and capped at net $0
 - `bed_bug`, `bed_bug_chemical`, `bed_bug_heat` — excluded from all blanket recurring-customer bed bug discounts; no flat credit
 - `bora_care`, `pre_slab_termidor` — fully excluded, no discount

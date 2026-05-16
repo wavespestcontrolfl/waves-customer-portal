@@ -386,7 +386,13 @@ async function syncConstantsFromDB(dbInstance) {
       if (t.base != null) constants.RODENT.trapping.base = r(t.base);
       if (t.floor != null) constants.RODENT.trapping.floor = r(t.floor);
       if (t.ceiling_before_custom != null) constants.RODENT.trapping.ceilingBeforeCustom = r(t.ceiling_before_custom);
-      if (t.included_followups != null) constants.RODENT.trapping.includedFollowUps = Number(t.included_followups);
+      if (t.included_followups != null) {
+        constants.RODENT.trapping.includedFollowUps =
+          String(t.included_followups).toLowerCase() === 'unlimited'
+            ? 'unlimited'
+            : Number(t.included_followups);
+      }
+      if (t.active_window_days != null) constants.RODENT.trapping.activeWindowDays = Number(t.active_window_days);
       if (t.additional_followup_rate != null) constants.RODENT.trapping.additionalFollowUpRate = r(t.additional_followup_rate);
       if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);
       if (t.emergency_minimum_surcharge != null) constants.RODENT.trapping.emergencyMinimumSurcharge = r(t.emergency_minimum_surcharge);
@@ -465,6 +471,13 @@ async function syncConstantsFromDB(dbInstance) {
       if (Array.isArray(g.eligibility_requires)) {
         constants.RODENT.guarantee.eligibilityRequires = g.eligibility_requires.map(String);
       }
+    }
+
+    if (config.rodent_waveguard || config.rodent_rules) {
+      const rw = config.rodent_waveguard || config.rodent_rules;
+      if (typeof rw.tier_qualifier === 'boolean') constants.RODENT.tierQualifier = rw.tier_qualifier;
+      if (typeof rw.exclude_from_pct_discount === 'boolean') constants.RODENT.excludeFromPctDiscount = rw.exclude_from_pct_discount;
+      if (rw.setup_credit != null) constants.RODENT.setupCredit = r(rw.setup_credit);
     }
 
     // ── WaveGuard ────────────────────────────────────────────
@@ -651,6 +664,36 @@ async function syncConstantsFromDB(dbInstance) {
     }
     if (config.onetime_bed_bug) {
       syncBedBugPricingConfig(config.onetime_bed_bug);
+    }
+    if (config.onetime_flea) {
+      const flea = config.onetime_flea;
+      const target = constants.SPECIALTY.flea;
+      const initial = flea.initial || {};
+      const followUp = flea.followUp || flea.followup || {};
+      setNumber(target.initial, 'base', initial.base ?? flea.initial_base, money);
+      setNumber(target.initial, 'floor', initial.floor ?? flea.initial_floor, money);
+      setNumber(target.followUp, 'base', followUp.base ?? flea.followup_base ?? flea.followUp_base, money);
+      setNumber(target.followUp, 'floor', followUp.floor ?? flea.followup_floor ?? flea.followUp_floor, money);
+      if (flea.exterior && typeof flea.exterior === 'object') {
+        setBoolean(target.exterior, 'enabled', flea.exterior.enabled);
+        setNumber(target.exterior, 'maxSqFt', flea.exterior.maxSqFt ?? flea.exterior.max_sqft, Number);
+        if (Array.isArray(flea.exterior.tiers)) {
+          target.exterior.tiers = flea.exterior.tiers.map(t => ({
+            min: Number(t.min),
+            max: Number(t.max),
+            initial: money(t.initial),
+            followUp: money(t.followUp ?? t.followup),
+          })).filter(t => Number.isFinite(t.min) && Number.isFinite(t.max));
+        }
+      }
+      if (flea.footprint && typeof flea.footprint === 'object') {
+        if (Array.isArray(flea.footprint.initial)) target.footprintAdjustments.initial = flea.footprint.initial.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+        if (Array.isArray(flea.footprint.followUp)) target.footprintAdjustments.followUp = flea.footprint.followUp.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+      }
+      if (flea.lot && typeof flea.lot === 'object') {
+        if (Array.isArray(flea.lot.initial)) target.lotAdjustments.initial = flea.lot.initial.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+        if (Array.isArray(flea.lot.followUp)) target.lotAdjustments.followUp = flea.lot.followUp.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+      }
     }
 
     // ── Lawn Care Brackets (all 4 grass tracks) ──────────────

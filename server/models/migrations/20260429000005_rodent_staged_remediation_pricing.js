@@ -7,9 +7,9 @@
  * prior PR — they stay at $49/$59/$69 monthly with quarterly cadence.
  *
  * Major changes:
- *   - Trapping: $295 → $395 base, $350 floor, includes 2 follow-ups (was 1).
+ *   - Trapping: $295 → $395 base, $350 floor, active-window trap checks included.
  *     New home/lot/pressure adjustments and emergency surcharge.
- *   - Trap follow-up rate stays $95/visit; 3-pack SKU retired.
+ *   - Trap checks/callbacks are included during the active window; out-of-window checks require review.
  *   - Inspection: standalone SKU at $125, creditable, waivable above $995.
  *   - Exclusion: simple $50, moderate $95, advanced $195, specialty $275+.
  *     Home-size minimums ($395/$595/$895/$1,295) replace flat $195 floor.
@@ -43,7 +43,7 @@ exports.up = async function (knex) {
       price_range_min: 350.00,
       price_range_max: 795.00,
       default_duration_minutes: 60,
-      description: 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup and 2 follow-up trap checks. Additional follow-ups billed separately.',
+      description: 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup and unlimited trap checks/callbacks during the 14-day active trapping window.',
       updated_at: knex.fn.now(),
     });
 
@@ -53,7 +53,7 @@ exports.up = async function (knex) {
       base_price: 595.00,
       price_range_min: 395.00,
       price_range_max: 2500.00,
-      description: 'Sealing of all identified rodent entry points. Per-point: simple $50 / moderate $95 / advanced $195 / specialty $275+. Home-size minimum applies. Inspection fee waived when bundled with any other rodent service.',
+      description: 'Sealing of all identified rodent entry points. Per-point: simple $50 / moderate $95 / advanced $195 / specialty $275+. Home-size minimum applies. Inspection fee waived when bundled with trapping or sanitation, not bait stations.',
       updated_at: knex.fn.now(),
     });
 
@@ -73,7 +73,7 @@ exports.up = async function (knex) {
       base_price: 1495.00,
       price_range_min: 1195.00,
       price_range_max: 3995.00,
-      description: 'Complete rodent remediation: trapping (setup + 2 follow-ups), full exclusion sealing (per-point), and sanitation. 10% bundle discount. Eligible for $199–$299/yr guarantee renewal.',
+      description: 'Complete rodent remediation: trapping with active-window trap checks, full exclusion sealing (per-point), and sanitation. 10% bundle discount when it lowers the component total. Eligible for $199-$299/yr guarantee renewal.',
       updated_at: knex.fn.now(),
     });
 
@@ -231,8 +231,9 @@ exports.up = async function (knex) {
         base: 395,
         floor: 350,
         ceiling_before_custom: 795,
-        included_followups: 2,
-        additional_followup_rate: 95,
+        included_followups: 'unlimited',
+        active_window_days: 14,
+        additional_followup_rate: 0,
         emergency_multiplier: 1.20,
         emergency_minimum_surcharge: 75,
         home_size_adjustments: [

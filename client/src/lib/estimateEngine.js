@@ -780,7 +780,7 @@ export function calculateEstimate(inputs) {
     if (lotSqFt >= 20000) rodentScore += 2; else if (lotSqFt >= 12000) rodentScore += 1;
     if (nearWater) rodentScore += 1;
     if (treeDensity === 'HEAVY') rodentScore += 1;
-    const rmo = rodentScore >= 3 ? 109 : rodentScore <= 1 ? 75 : 89;
+    const rmo = rodentScore >= 3 ? 69 : rodentScore <= 1 ? 49 : 59;
     R.rodBaitMo = rmo;
     R.rodBaitSize = rodentScore >= 3 ? 'Large' : rodentScore <= 1 ? 'Small' : 'Medium';
     R.rodBaitScore = rodentScore;

@@ -443,10 +443,10 @@ function generateEstimate(input) {
   }
   if (services.exclusion) {
     // Auto-waive inspection fee when any rodent service is opted in
-    // alongside exclusion (trap, bait, sanitation). Standalone exclusion
-    // with no other rodent service still incurs the $125 inspection.
+    // alongside exclusion (trapping or sanitation). Bait stations are fully
+    // excluded from rodent remediation benefits and do not waive inspection.
     const hasRodentServiceOptIn = !!(
-      services.rodentTrapping || services.rodentBait || services.sanitation
+      services.rodentTrapping || services.sanitation
     );
     const result = priceExclusion({
       simple: services.exclusion.simple || 0,
@@ -482,12 +482,15 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
 
-  // Additional trap follow-up visits beyond the 2 included in base trapping
+  // Legacy explicit trap-check rows are included during the active window.
   if (services.rodentTrappingFollowups) {
+    const followupOptions = typeof services.rodentTrappingFollowups === 'object'
+      ? services.rodentTrappingFollowups
+      : {};
     const count = typeof services.rodentTrappingFollowups === 'number'
       ? services.rodentTrappingFollowups
-      : (services.rodentTrappingFollowups.count || 0);
-    const result = priceRodentTrappingFollowups(count);
+      : (followupOptions.count || 0);
+    const result = priceRodentTrappingFollowups(count, followupOptions);
     if (result) lineItems.push(result);
   }
 
@@ -528,17 +531,19 @@ function generateEstimate(input) {
     if (bundle) {
       const componentTotal = (trapItem?.price || 0) + (exclItem?.price || 0) + (sanItem?.price || 0);
       const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
-      lineItems.push({
-        service: 'rodent_bundle_discount',
-        name: `Rodent ${bundle.kind} bundle`,
-        price: -savings,
-        bundleKind: bundle.kind,
-        discount: bundle.discount,
-        floor: bundle.floor,
-        bundledTotal: discounted,
-        componentTotal,
-        detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
-      });
+      if (savings > 0) {
+        lineItems.push({
+          service: 'rodent_bundle_discount',
+          name: `Rodent ${bundle.kind} bundle`,
+          price: -savings,
+          bundleKind: bundle.kind,
+          discount: bundle.discount,
+          floor: bundle.floor,
+          bundledTotal: discounted,
+          componentTotal,
+          detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
+        });
+      }
     }
   }
 
@@ -692,19 +697,23 @@ function generateEstimate(input) {
 
   // Session 11a Step 2b-4: manual discount fan-out. Mirrors v2's calcTotals
   // (pricing-engine-v2.js:1417-1437) — applies to the WaveGuard-discounted
-  // recurring annual (including rodent bait), capped at the base. Does not
+  // recurring annual, excluding rodent bait because it receives no WaveGuard
+  // credit, discount, setup credit, coupon, or tier benefit. Does not
   // touch one-time/specialty totals.
   let manualDiscountAmount = 0;
   let manualDiscountInfo = null;
+  const manualDiscountableRecurringAnnual = recurringItems
+    .filter(i => resolveDiscountKey(i) !== 'rodent_bait')
+    .reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
   const md = input.manualDiscount;
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
     if (md.type === 'PERCENT') {
-      manualDiscountAmount = Math.round(recurringAnnualAfterWG * (v / 100) * 100) / 100;
+      manualDiscountAmount = Math.round(manualDiscountableRecurringAnnual * (v / 100) * 100) / 100;
     } else {
       manualDiscountAmount = Math.round(v * 100) / 100;
     }
-    manualDiscountAmount = Math.min(manualDiscountAmount, recurringAnnualAfterWG);
+    manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual);
     manualDiscountInfo = {
       type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
       value: v,

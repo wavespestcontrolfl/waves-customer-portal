@@ -533,7 +533,7 @@ const TERMITE = {
 // ============================================================
 // Staged-remediation pricing model (Apr 2026 v2):
 //   1. Inspection / diagnosis (creditable)
-//   2. Active trapping (setup + 2 follow-ups, with home/lot/pressure adj)
+//   2. Active trapping (setup + unlimited trap checks during active window)
 //   3. Exclusion (per-point with home-size minimums + access multipliers)
 //   4. Sanitation (light / standard / heavy with sqft + debris scaling)
 //   5. Bundle discount (7% / 5% / 10% with floors)
@@ -571,11 +571,12 @@ const RODENT = {
 
   // ── Trapping ──────────────────────────────────────────────
   trapping: {
-    base: r(395),                       // Includes 2 follow-up checks
+    base: r(395),                       // Includes active-window trap checks
     floor: r(350),
     ceilingBeforeCustom: r(795),
-    includedFollowUps: 2,
-    additionalFollowUpRate: r(95),
+    includedFollowUps: 'unlimited',
+    activeWindowDays: 14,
+    additionalFollowUpRate: 0,
     homeSizeAdjustments: [
       { maxSqFt: 1200,     adjustment: -r(25) },
       { maxSqFt: 2500,     adjustment: 0 },
@@ -672,10 +673,10 @@ const RODENT = {
     ],
   },
 
-  // WaveGuard rules: NOT a tier qualifier, excluded from % discounts
+  // WaveGuard rules: NOT a tier qualifier, excluded from all WaveGuard benefits
   tierQualifier: false,
   excludeFromPctDiscount: true,
-  setupCredit: 50, // Legacy WG credit, retained for migration compatibility
+  setupCredit: 0,
 };
 
 // ============================================================
@@ -1068,9 +1069,9 @@ const WAVEGUARD = {
     'lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait',
     // palm_injection and rodent_bait are NOT qualifiers
   ],
-  // Services excluded from percentage discounts (get flat credits instead, where applicable)
+  // Services excluded from percentage discounts (flat credits only where explicitly allowed)
   excludedFromPercentDiscount: {
-    rodent_bait: true,          // Flat $50 setup credit for WaveGuard members
+    rodent_bait: true,          // Fully excluded: no tier count, %, setup credit, coupon, or benefit
     palm_injection: true,       // $10/palm/yr Gold+ flat credit
     bed_bug: true,              // Bed bug services are not eligible for recurring-customer discounts
     bed_bug_chemical: true,     // Legacy key; excluded with no flat credit
