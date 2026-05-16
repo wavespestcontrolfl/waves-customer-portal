@@ -9,6 +9,7 @@ const { recordSuppression, clearSuppression } = require('../services/messaging/v
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
+const { hasSchedulingIntent, isSmsReaction } = require('../services/sms-intent');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
@@ -42,6 +43,8 @@ router.post('/sms', async (req, res) => {
     }
 
     const { From, To, Body, MessageSid } = req.body;
+    const smsReaction = isSmsReaction(Body);
+    const schedulingIntent = hasSchedulingIntent(Body);
 
     // ── Spam block (must run before any other routing) ──
     const { checkInboundBlock } = require('../middleware/spam-block');
@@ -256,7 +259,7 @@ router.post('/sms', async (req, res) => {
     });
 
     // In-app + push notification for inbound SMS from known customers
-    if (customer && (Body || inboundMedia.length) && numberConfig.type === 'location') {
+    if (customer && (Body || inboundMedia.length) && numberConfig.type === 'location' && !smsReaction) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         await triggerNotification('sms_reply', {
@@ -269,7 +272,7 @@ router.post('/sms', async (req, res) => {
     }
 
     // Notify Adam of every inbound SMS (skip only if it would create a loop — same from AND to)
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length
@@ -316,10 +319,7 @@ router.post('/sms', async (req, res) => {
     // booked, call us" while the customer actually had an appointment. Any
     // scheduling-intent inbound skips the auto-reply entirely and falls
     // through to Virginia's inbox (legacy ai-draft block below still runs).
-    const { hasSchedulingIntent } = require('../services/sms-intent');
-    const schedulingIntent = Body ? hasSchedulingIntent(Body) : false;
-
-    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent) {
+    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !smsReaction) {
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({
@@ -375,10 +375,12 @@ router.post('/sms', async (req, res) => {
     } else if (schedulingIntent && aiAutoReplyOn) {
       // Log the intentional skip so we can audit the gate and see volume.
       logger.info(`[sms-intent] scheduling-intent detected from ${From}; skipping auto-reply, routing to human inbox`);
+    } else if (smsReaction && aiAutoReplyOn) {
+      logger.info(`[sms-intent] SMS reaction detected from ${From}; skipping auto-reply`);
     }
 
     // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
-    if (customer && numberConfig.type === 'location' && Body) {
+    if (customer && numberConfig.type === 'location' && Body && !schedulingIntent && !smsReaction) {
       try {
         const ContextAggregator = require('../services/context-aggregator');
         const ResponseDrafter = require('../services/response-drafter');
@@ -457,6 +459,10 @@ router.post('/sms', async (req, res) => {
 
         logger.info(`AI draft created for ${customer.first_name}: ${intent.intent}`);
       } catch (e) { logger.error(`AI draft pipeline failed: ${e.message}`); }
+    } else if (customer && numberConfig.type === 'location' && Body && schedulingIntent) {
+      logger.info(`[sms-intent] scheduling-intent detected from ${From}; skipping legacy AI draft`);
+    } else if (customer && numberConfig.type === 'location' && Body && smsReaction) {
+      logger.info(`[sms-intent] SMS reaction detected from ${From}; skipping legacy AI draft`);
     }
 
     // Return empty TwiML — Adam approves drafts before sending
