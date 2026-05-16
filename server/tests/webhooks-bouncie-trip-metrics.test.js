@@ -280,6 +280,8 @@ describe('Bouncie tracking webhook trip-metrics processing', () => {
       18,
       null,
     ]));
+    expect(db.raw.mock.calls[0][0]).toContain('EXCLUDED.reported_at >= vehicle_locations.reported_at');
+    expect(db.raw.mock.calls[0][0]).toContain('ELSE vehicle_locations.lat');
     expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({
       tech_id: 'tech-1',
       lat: 27.2,
@@ -287,5 +289,15 @@ describe('Bouncie tracking webhook trip-metrics processing', () => {
       speed_mph: 18,
     }));
     expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
+  });
+
+  test('clamps live location timestamps that are too far in the future', () => {
+    const now = new Date('2026-05-05T12:00:00.000Z');
+    expect(router._test.normalizeLocationReportedAt('2026-05-05T12:01:59.000Z', now))
+      .toEqual(new Date('2026-05-05T12:01:59.000Z'));
+    expect(router._test.normalizeLocationReportedAt('2026-05-05T12:02:01.000Z', now))
+      .toBe(now);
+    expect(router._test.normalizeLocationReportedAt('not-a-date', now))
+      .toBe(now);
   });
 });

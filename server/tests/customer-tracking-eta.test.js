@@ -1,6 +1,7 @@
 const {
   calculateBoundedTrackingEta,
   finiteNumber,
+  isFreshTimestamp,
 } = require('../services/customer-tracking-eta');
 
 describe('customer tracking ETA helper', () => {
@@ -42,6 +43,11 @@ describe('customer tracking ETA helper', () => {
     })).resolves.toBeNull();
 
     expect(bouncie.calculateETAFromCoords).not.toHaveBeenCalled();
+  });
+
+  test('rejects provider timestamps that are too far in the future', () => {
+    expect(isFreshTimestamp('2026-05-05T12:01:59.000Z')).toBe(true);
+    expect(isFreshTimestamp('2026-05-05T12:02:01.000Z')).toBe(false);
   });
 
   test('maps fresh provider ETA without exposing coordinates', async () => {

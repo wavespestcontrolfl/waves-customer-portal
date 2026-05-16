@@ -126,6 +126,16 @@ describe('tech_status GPS freshness writes', () => {
     jest.useRealTimers();
   });
 
+  test('provider GPS timestamps are clamped when too far in the future', () => {
+    const now = new Date('2026-05-05T12:00:00.000Z');
+    expect(techStatus._test.normalizeProviderTimestamp('2026-05-05T12:01:59.000Z', now))
+      .toEqual(new Date('2026-05-05T12:01:59.000Z'));
+    expect(techStatus._test.normalizeProviderTimestamp('2026-05-05T12:02:01.000Z', now))
+      .toBe(now);
+    expect(techStatus._test.normalizeProviderTimestamp('not-a-date', now))
+      .toBe(now);
+  });
+
   test('GPS pings refresh location_updated_at with coordinates', async () => {
     const raw = jest.fn().mockResolvedValue({
       rows: [{

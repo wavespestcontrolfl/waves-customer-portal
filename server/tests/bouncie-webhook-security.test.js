@@ -55,6 +55,18 @@ describe('bouncie webhook security helpers', () => {
     });
   });
 
+  test('accepts bearer formatted authorization headers', () => {
+    const result = inspectBouncieWebhook(
+      reqWith({ headers: { authorization: 'Bearer secret' } }),
+      { BOUNCIE_WEBHOOK_SECRET: 'secret' }
+    );
+    expect(result).toMatchObject({
+      accepted: true,
+      matched: true,
+      from: 'header:authorization:bearer',
+    });
+  });
+
   test('keeps legacy rollout header support', () => {
     const result = inspectBouncieWebhook(
       reqWith({ headers: { 'x-webhook-key': 'secret' } }),

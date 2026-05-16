@@ -30,6 +30,7 @@
 const db = require('../models/db');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
+const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('./customer-tracking-eta');
 
 const ROOM = 'dispatch:admins';
 const EVENT = 'dispatch:tech_status';
@@ -48,6 +49,15 @@ function sanitizeTechStatusForDispatch(row) {
     lng: null,
     eta_minutes: null,
   };
+}
+
+function normalizeProviderTimestamp(value, now = new Date()) {
+  const parsed = value ? new Date(value) : now;
+  const parsedMs = parsed.getTime();
+  const nowMs = now.getTime();
+  if (!Number.isFinite(parsedMs)) return now;
+  if (parsedMs - nowMs > FUTURE_TIMESTAMP_TOLERANCE_MS) return now;
+  return parsed;
 }
 
 /**
@@ -218,8 +228,7 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
   const speedMoving = Number(speed_mph || 0) > 5;
   const moving = ignition === false ? false : speedMoving;
   const derivedStatus = moving ? 'driving' : 'idle';
-  const reportedAt = reported_at ? new Date(reported_at) : new Date();
-  const locationUpdatedAt = Number.isFinite(reportedAt.getTime()) ? reportedAt : new Date();
+  const locationUpdatedAt = normalizeProviderTimestamp(reported_at);
 
   let row;
   await db.transaction(async (trx) => {
@@ -333,5 +342,6 @@ module.exports = {
   _test: {
     sanitizeTechStatusForDispatch,
     isFreshDispatchLocation,
+    normalizeProviderTimestamp,
   },
 };
