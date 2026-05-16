@@ -691,6 +691,106 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/estimates/:id/extend — push expires_at forward by N days
+// and re-arm the expiring-nudge so the customer hears about the new
+// deadline. Used when Adam knows a customer is still considering and
+// doesn't want the estimate to lapse mid-decision.
+//
+// Body: { days: 7 | 14 | 30 | 90 | <any 1-180 int> }
+// Send SMS by default; pass { silent: true } to skip the customer text.
+router.post('/:id/extend', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+
+    const days = Number.parseInt(req.body?.days, 10);
+    if (!Number.isFinite(days) || days < 1 || days > 180) {
+      return res.status(400).json({ error: 'days must be an integer between 1 and 180.' });
+    }
+    if (!['sent', 'viewed', 'expired'].includes(estimate.status)) {
+      return res.status(400).json({
+        error: `Only sent / viewed / expired estimates can be extended. Current status: ${estimate.status}.`,
+      });
+    }
+    if (estimate.archived_at) {
+      return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
+    }
+
+    // Anchor the extension on the LATER of "now" and the current expiry —
+    // extending an already-expired estimate by 7d means 7d from today, not
+    // 7d after the expiry that already passed. Active estimates get their
+    // current expiry pushed out by the requested days.
+    const now = new Date();
+    const currentExpiry = estimate.expires_at ? new Date(estimate.expires_at) : now;
+    const anchor = currentExpiry > now ? currentExpiry : now;
+    const newExpiry = new Date(anchor.getTime() + days * 86400000);
+
+    // Re-arm the expiring nudge for the new deadline. Other stage flags
+    // (unviewed / viewed / final) stay as-is — those are tied to send /
+    // view timestamps that haven't moved.
+    const updates = {
+      expires_at: newExpiry,
+      followup_expiring_sent: false,
+      updated_at: db.fn.now(),
+    };
+    // Expired estimates flipping back to active need their status reset
+    // to whatever they were before expiry — viewed if the customer had
+    // viewed, otherwise sent.
+    if (estimate.status === 'expired') {
+      updates.status = estimate.viewed_at ? 'viewed' : 'sent';
+    }
+    await db('estimates').where({ id: estimate.id }).update(updates);
+
+    // Customer notification — Waves voice. Skipped if no phone, opted out,
+    // or the caller passed silent=true (e.g. internal cleanup operations).
+    let smsResult = { sent: false, reason: 'silent' };
+    if (!req.body?.silent && estimate.customer_phone) {
+      const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+      const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+      const viewUrl = await shortenOrPassthrough(longUrl, {
+        kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      });
+      const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
+        month: 'long', day: 'numeric', timeZone: 'America/New_York',
+      });
+      const fallback =
+        `Hey ${firstName}! Just a heads up — I kept your Waves Pest Control estimate live through ${newExpiryLabel} so you have more time to look it over. ` +
+        `No rush at all: ${viewUrl}\n\nReply here or call (941) 297-5749 if you have any questions. — Adam`;
+      const body = await renderTemplate(
+        'estimate_extended',
+        { first_name: firstName, estimate_url: viewUrl, new_expiry: newExpiryLabel, days_added: String(days) },
+        fallback,
+      );
+      smsResult = await sendCustomerMessage({
+        to: estimate.customer_phone,
+        body,
+        channel: 'sms',
+        audience: estimate.customer_id ? 'customer' : 'lead',
+        purpose: 'estimate_followup',
+        customerId: estimate.customer_id || undefined,
+        estimateId: estimate.id,
+        identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+        consentBasis: estimate.customer_id ? undefined : {
+          status: 'transactional_allowed',
+          source: 'admin_estimate_extend',
+          capturedAt: estimate.created_at || new Date().toISOString(),
+        },
+        entryPoint: 'admin_estimate_extend',
+        metadata: { original_message_type: 'estimate_extended_manual', days_added: days },
+      });
+    }
+
+    logger.info(`[estimates] Extended estimate ${estimate.id} by ${days}d to ${newExpiry.toISOString()} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'})`);
+    res.json({
+      success: true,
+      expires_at: newExpiry.toISOString(),
+      days_added: days,
+      status: updates.status || estimate.status,
+      sms: { sent: !!smsResult.sent, reason: smsResult.reason || null },
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/estimates/:id/mark-accepted — admin records a verbal yes.
 // This is intentionally separate from PATCH status edits so accepted_at is
 // stamped for funnel reporting and acceptance side effects run once.
