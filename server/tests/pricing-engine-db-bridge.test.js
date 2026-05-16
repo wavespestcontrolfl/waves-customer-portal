@@ -1,5 +1,6 @@
 const constants = require('../services/pricing-engine/constants');
 const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
+const { priceFlea } = require('../services/pricing-engine');
 
 function pricingConfigDb(rows) {
   const db = (table) => {
@@ -24,6 +25,8 @@ describe('pricing engine DB bridge', () => {
   const originalMosquitoTierVisits = { ...constants.MOSQUITO.tierVisits };
   const originalPalmTreatments = JSON.parse(JSON.stringify(constants.PALM.treatments));
   const originalBedBug = JSON.parse(JSON.stringify(constants.BED_BUG));
+  const originalFlea = JSON.parse(JSON.stringify(constants.SPECIALTY.flea));
+  const originalUrgency = JSON.parse(JSON.stringify(constants.URGENCY));
   const originalPalm = {
     minPerVisit: constants.PALM.minPerVisit,
     flatCreditPerPalm: constants.PALM.flatCreditPerPalm,
@@ -47,6 +50,10 @@ describe('pricing engine DB bridge', () => {
     constants.PALM.treatmentTypes = constants.PALM.treatments;
     for (const key of Object.keys(constants.BED_BUG)) delete constants.BED_BUG[key];
     Object.assign(constants.BED_BUG, JSON.parse(JSON.stringify(originalBedBug)));
+    for (const key of Object.keys(constants.SPECIALTY.flea)) delete constants.SPECIALTY.flea[key];
+    Object.assign(constants.SPECIALTY.flea, JSON.parse(JSON.stringify(originalFlea)));
+    for (const key of Object.keys(constants.URGENCY)) delete constants.URGENCY[key];
+    Object.assign(constants.URGENCY, JSON.parse(JSON.stringify(originalUrgency)));
     Object.assign(constants.PALM, originalPalm);
   });
 
@@ -131,6 +138,56 @@ describe('pricing engine DB bridge', () => {
     }));
     expect(constants.MOSQUITO.basePrices.SMALL).toEqual([105, 90]);
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
+  });
+
+  test('syncs flea package, exterior tiers, and one-time modifiers from pricing_config', async () => {
+    const db = pricingConfigDb([
+      {
+        config_key: 'onetime_flea',
+        data: {
+          initial: { base: 240, floor: 200 },
+          followUp: { base: 130, floor: 100 },
+          exterior: {
+            enabled: true,
+            maxSqFt: 12000,
+            tiers: [
+              { min: 1, max: 5000, initial: 80, followUp: 50 },
+              { min: 5001, max: 12000, initial: 130, followUp: 90 },
+            ],
+          },
+        },
+      },
+      { config_key: 'onetime_urgency', data: { soon: 1.30 } },
+      { config_key: 'onetime_recurring_discount', data: { discount: 0.20 } },
+    ]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    expect(constants.SPECIALTY.flea.initial).toEqual({ base: 240, floor: 200 });
+    expect(constants.SPECIALTY.flea.followUp).toEqual({ base: 130, floor: 100 });
+    expect(constants.SPECIALTY.flea.exterior.maxSqFt).toBe(12000);
+    expect(constants.SPECIALTY.flea.exterior.tiers).toEqual([
+      { min: 1, max: 5000, initial: 80, followUp: 50 },
+      { min: 5001, max: 12000, initial: 130, followUp: 90 },
+    ]);
+
+    const result = priceFlea({
+      services: { flea: true, fleaExterior: true },
+      footprintSqFt: 2000,
+      lotSqFt: 7500,
+      fleaExteriorAreaSqFt: 5000,
+      fleaExteriorAreaSource: 'CONFIRMED_SQ_FT',
+      urgency: 'SOON',
+      isRecurringCustomer: true,
+    });
+
+    expect(result.raw.total).toBe(500);
+    expect(result.modifiers).toEqual({
+      urgencyMultiplier: 1.30,
+      recurringCustomerMultiplier: 0.80,
+    });
+    expect(result.total).toBe(520);
+    expect(result.recurringCustomerDiscountRate).toBe(0.20);
   });
 
   test('ignores legacy scalar palm pricing keys and syncs explicit protocol keys', async () => {

@@ -390,8 +390,22 @@ function generateEstimate(input) {
     const result = priceWDO(property.footprint);
     lineItems.push(result);
   }
-  if (services.flea) {
-    const result = priceFlea(property);
+  if (services.flea || services.fleaExterior) {
+    const fleaOptions = typeof services.flea === 'object' && services.flea !== null ? services.flea : {};
+    const result = priceFlea({
+      ...property,
+      services: {
+        ...(property.services || {}),
+        flea: true,
+        fleaExterior: fleaOptions.fleaExterior ?? services.fleaExterior ?? input.fleaExterior,
+      },
+      fleaExteriorAreaSqFt: fleaOptions.fleaExteriorAreaSqFt ?? services.fleaExteriorAreaSqFt ?? input.fleaExteriorAreaSqFt,
+      fleaExteriorAreaSource: fleaOptions.fleaExteriorAreaSource ?? services.fleaExteriorAreaSource ?? input.fleaExteriorAreaSource,
+      fleaExteriorZones: fleaOptions.fleaExteriorZones ?? services.fleaExteriorZones ?? input.fleaExteriorZones,
+      urgency: fleaOptions.urgency ?? input.urgency ?? 'STANDARD',
+      afterHours: fleaOptions.afterHours ?? input.afterHours ?? false,
+      isRecurringCustomer,
+    });
     lineItems.push(result);
   }
   if (services.topDressing) {
@@ -634,6 +648,10 @@ function generateEstimate(input) {
       if (item.price) {
         item.priceBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.price;
         item.priceAfterDiscount = item.price;
+      }
+      if (item.total) {
+        item.totalBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.total;
+        item.totalAfterDiscount = item.total;
       }
       continue;
     }

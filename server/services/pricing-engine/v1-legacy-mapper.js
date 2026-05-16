@@ -44,6 +44,7 @@ const SERVICE_LABEL = {
   bed_bug: 'Bed Bug',
   wdo: 'WDO Inspection',
   flea: 'Flea Treatment',
+  flea_package: 'Flea Treatment Package',
   german_roach: 'German Roach',
   german_roach_initial: 'German Roach Initial (3-Visit)',
   pest_initial_roach: 'Initial Roach Knockdown',
@@ -282,10 +283,14 @@ function mapV1ToLegacyShape(v1Result) {
     // Knockdown' — SERVICE_LABEL flattens both to a generic name and would
     // drop the species distinction). Fall back to the SERVICE_LABEL map for
     // legacy services that don't set a label themselves.
-    const name = li.label || labelFor(li.service);
-    const quoteRequired = !!li.quoteRequired;
-    const price = quoteRequired ? null : (li.price || 0);
-    const detail = li.detail || '';
+    const name = li.display?.name || li.label || labelFor(li.service);
+    const quoteRequired = !!li.quoteRequired || !!li.requiresCustomQuote;
+    const price = quoteRequired ? null : (li.price ?? li.priceAfterDiscount ?? li.totalAfterDiscount ?? li.total ?? 0);
+    const detail = [
+      li.detail || li.det || '',
+      li.exteriorDetail || li.display?.exteriorDetail || '',
+      li.warning || '',
+    ].filter(Boolean).join(' · ');
     if (ONE_TIME_SERVICES.has(li.service)) {
       // Preserve `service` on the mapped item so consumers can match by
       // canonical key (e.g. estimate-public's findInitialRoachItem) without
@@ -303,6 +308,12 @@ function mapV1ToLegacyShape(v1Result) {
         onProg: !!li.includedOnProgram,
         quoteRequired,
         reason: li.reason,
+        exteriorDetail: li.exteriorDetail || li.display?.exteriorDetail || '',
+        warning: li.warning || null,
+        warnings: li.warnings || [],
+        requiresCustomQuote: !!li.requiresCustomQuote,
+        customQuoteReason: li.customQuoteReason || null,
+        fleaExteriorZones: li.fleaExteriorZones || [],
       });
     }
   });
@@ -371,7 +382,7 @@ function mapV1ToLegacyShape(v1Result) {
     recurringCustomer: false,
     isRecurringCustomer: false,
     hasRecurring: services.length > 0 || palmInjectionMonthly > 0 || rodentBaitMonthly > 0,
-    hasOneTime: v1OtItems.length > 0,
+    hasOneTime: v1OtItems.length > 0 || v1SpecItems.some(s => !s.onProg && (s.quoteRequired || s.price > 0)),
     recurring: {
       serviceCount: wg.qualifyingCount || 0,
       tier: waveGuardTier,
@@ -396,8 +407,14 @@ function mapV1ToLegacyShape(v1Result) {
           name: s.name,
           price: s.quoteRequired ? null : s.price,
           detail: s.det,
+          exteriorDetail: s.exteriorDetail,
+          warning: s.warning,
+          warnings: s.warnings,
           quoteRequired: !!s.quoteRequired,
           reason: s.reason,
+          requiresCustomQuote: !!s.requiresCustomQuote,
+          customQuoteReason: s.customQuoteReason,
+          fleaExteriorZones: s.fleaExteriorZones,
         })),
       total: oneTimeTotal,
       tmInstall,

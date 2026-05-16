@@ -114,6 +114,47 @@ describe('estimate v2 service toggle adapter', () => {
     }));
   });
 
+  test('maps exterior flea spray options into the authoritative server flea package', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        homeSqFt: 2000,
+        lotSqFt: 7500,
+        footprint: 2000,
+        treeDensity: 'LIGHT',
+        landscapeComplexity: 'SIMPLE',
+      },
+      ['FLEA'],
+      {
+        fleaExterior: true,
+        fleaExteriorAreaSqFt: 5000,
+        fleaExteriorAreaSource: 'CONFIRMED_SQ_FT',
+        fleaExteriorZones: ['PET_RESTING_AREA'],
+      }
+    );
+
+    expect(input.services.flea).toEqual(expect.objectContaining({
+      fleaExterior: true,
+      fleaExteriorAreaSqFt: 5000,
+      fleaExteriorAreaSource: 'CONFIRMED_SQ_FT',
+      fleaExteriorZones: ['PET_RESTING_AREA'],
+    }));
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'flea_package');
+    expect(item.total).toBe(470);
+
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.hasOneTime).toBe(true);
+    expect(mapped.oneTime.specItems).toContainEqual(expect.objectContaining({
+      service: 'flea_package',
+      name: 'Flea Treatment Package — 2 visits',
+      price: 470,
+      exteriorDetail: 'Exterior flea spray — 5,000 sf',
+      fleaExteriorZones: ['PET_RESTING_AREA'],
+    }));
+  });
+
   test('maps palm injection selection with explicit medium palm size for strict tiered pricing', () => {
     const input = translateV2CallToV1Input(
       {

@@ -825,6 +825,55 @@ const SPECIALTY = {
   flea: {
     initial: { base: r(225), floor: r(185) },
     followUp: { base: r(125), floor: r(95) },
+    footprintAdjustments: {
+      initial: [
+        { at: 800, adj: -r(25) }, { at: 1200, adj: -r(15) },
+        { at: 1500, adj: -r(5) }, { at: 2000, adj: 0 },
+        { at: 2500, adj: r(15) }, { at: 3000, adj: r(25) },
+        { at: 4000, adj: r(40) },
+      ],
+      followUp: [
+        { at: 800, adj: -r(15) }, { at: 1200, adj: -r(10) },
+        { at: 1500, adj: -r(3) }, { at: 2000, adj: 0 },
+        { at: 2500, adj: r(8) }, { at: 3000, adj: r(15) },
+        { at: 4000, adj: r(25) },
+      ],
+    },
+    lotAdjustments: {
+      initial: [
+        { at: 3000, adj: -r(15) }, { at: 5000, adj: -r(5) },
+        { at: 7500, adj: 0 }, { at: 10000, adj: r(10) },
+        { at: 15000, adj: r(20) }, { at: 25000, adj: r(35) },
+      ],
+      followUp: [
+        { at: 3000, adj: -r(8) }, { at: 5000, adj: -r(3) },
+        { at: 7500, adj: 0 }, { at: 10000, adj: r(5) },
+        { at: 15000, adj: r(12) }, { at: 25000, adj: r(20) },
+      ],
+    },
+    treeDensityAdjustments: {
+      heavy: { initial: r(20), followUp: r(10) },
+      moderate: { initial: r(10), followUp: r(5) },
+      light: { initial: 0, followUp: 0 },
+      none: { initial: 0, followUp: 0 },
+    },
+    landscapeComplexityAdjustments: {
+      complex: { initial: r(15), followUp: r(10) },
+      moderate: { initial: r(5), followUp: r(5) },
+      simple: { initial: 0, followUp: 0 },
+    },
+    exterior: {
+      enabled: true,
+      maxSqFt: 20000,
+      tiers: [
+        { min: 1, max: 2500, initial: r(55), followUp: r(35) },
+        { min: 2501, max: 5000, initial: r(75), followUp: r(45) },
+        { min: 5001, max: 7500, initial: r(95), followUp: r(60) },
+        { min: 7501, max: 10000, initial: r(115), followUp: r(75) },
+        { min: 10001, max: 15000, initial: r(155), followUp: r(100) },
+        { min: 15001, max: 20000, initial: r(195), followUp: r(125) },
+      ],
+    },
   },
   wasp: {
     tiers: [r(150), r(250), r(435), r(775)],
