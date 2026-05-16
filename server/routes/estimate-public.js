@@ -625,26 +625,32 @@ function renderPage(token, estimate, estData) {
     }
     return Number(visitsForService(name)) || 0;
   };
-  recurring.forEach((s) => {
-    const key = inferServiceKey(s);
-    if (!PER_TREATMENT_SERVICE_KEYS.has(key)) return;
-    const fwdPerTreatment = Number(s?.perTreatment ?? s?.perApp ?? s?.perVisit);
-    const fwdVisits = Number(s?.visitsPerYear ?? s?.visits ?? s?.frequency);
-    const visits = Number.isFinite(fwdVisits) && fwdVisits > 0
-      ? fwdVisits
-      : recommendedVisits(key, s?.name);
-    let perTreatment = Number.isFinite(fwdPerTreatment) && fwdPerTreatment > 0 ? fwdPerTreatment : null;
-    if (perTreatment == null && visits > 0) {
-      const mo = Number(s?.mo || s?.monthly || 0);
-      if (mo > 0) perTreatment = Math.round((mo * 12 / visits) * 100) / 100;
-    }
-    if (!perTreatment) return;
-    perTreatmentRows.push({
-      label: s?.displayName || s?.name || 'Service',
-      perTreatment,
-      visitsPerYear: visits || null,
+  // When the customer is choosing between recurring and one-time pest only
+  // (displayPestOnly), the rest of the bundle is hidden from the price card —
+  // showing lawn / T&S / mosquito per-treatment rows here would imply they're
+  // included in this selection.
+  if (!displayPestOnly) {
+    recurring.forEach((s) => {
+      const key = inferServiceKey(s);
+      if (!PER_TREATMENT_SERVICE_KEYS.has(key)) return;
+      const fwdPerTreatment = Number(s?.perTreatment ?? s?.perApp ?? s?.perVisit);
+      const fwdVisits = Number(s?.visitsPerYear ?? s?.visits ?? s?.frequency);
+      const visits = Number.isFinite(fwdVisits) && fwdVisits > 0
+        ? fwdVisits
+        : recommendedVisits(key, s?.name);
+      let perTreatment = Number.isFinite(fwdPerTreatment) && fwdPerTreatment > 0 ? fwdPerTreatment : null;
+      if (perTreatment == null && visits > 0) {
+        const mo = Number(s?.mo || s?.monthly || 0);
+        if (mo > 0) perTreatment = Math.round((mo * 12 / visits) * 100) / 100;
+      }
+      if (!perTreatment) return;
+      perTreatmentRows.push({
+        label: s?.displayName || s?.name || 'Service',
+        perTreatment,
+        visitsPerYear: visits || null,
+      });
     });
-  });
+  }
   const sameDayTreatmentTotal = perTreatmentRows.reduce((sum, r) => sum + r.perTreatment, 0);
   const showPerTreatmentBlock = perTreatmentRows.length > 0;
   const perTreatmentHtml = showPerTreatmentBlock ? `
@@ -2878,7 +2884,19 @@ function normalizeOneTimeBreakdown(estData) {
   }
 
   const rowTotal = rows.reduce((sum, row) => sum + row.amount, 0);
-  const explicitTotal = Number(oneTime?.total ?? nestedOneTime?.total);
+  const rawExplicitTotal = Number(oneTime?.total ?? nestedOneTime?.total);
+  // If we suppressed the WaveGuard setup row above (non-pest estimate with a
+  // stale membershipFee cached in oneTime.total), strip that fee from the
+  // explicit total so the difference logic doesn't resurface it as a generic
+  // "Other one-time services" charge.
+  const suppressedMembershipFee = Number.isFinite(membershipFee)
+    && membershipFee > 0
+    && !hasRecurringPest
+    ? membershipFee
+    : 0;
+  const explicitTotal = Number.isFinite(rawExplicitTotal)
+    ? Math.round((rawExplicitTotal - suppressedMembershipFee) * 100) / 100
+    : rawExplicitTotal;
   const difference = Math.round(((Number.isFinite(explicitTotal) ? explicitTotal : rowTotal) - rowTotal) * 100) / 100;
   if (difference !== 0) {
     rows.push({
@@ -3160,6 +3178,7 @@ function readV1Shape(estData) {
     discount: Number(recurring.discount) || 0,
     waveGuardTier: recurring.waveGuardTier || recurring.tier || null,
     oneTimeTotal: Number(result.oneTime?.total) || 0,
+    membershipFee: Number(result.oneTime?.membershipFee) || 0,
     recurringMonthlyTotal: Number(recurring.monthlyTotal) || 0,
     recurringAnnualAfter: Number(recurring.annualAfterDiscount) || 0,
   };
@@ -3358,10 +3377,19 @@ async function buildPricingBundle(estimate) {
       });
     }
 
+    // If the estimate has no recurring pest, the cached oneTime.total may
+    // still include a stale $99 WaveGuard membership fee. The display
+    // suppresses that fee for non-pest estimates; strip it from the anchor
+    // price too so resolveAcceptOneTimeTotal doesn't end up charging it.
+    const rawV1OneTimeTotal = v1.oneTimeTotal || Number(estimate.onetime_total || 0) || null;
+    const anchorOneTimePrice = (!hasPest && rawV1OneTimeTotal && v1.membershipFee > 0)
+      ? Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100)
+      : rawV1OneTimeTotal;
+
     const payload = {
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
-      anchorOneTimePrice: v1.oneTimeTotal || Number(estimate.onetime_total || 0) || null,
+      anchorOneTimePrice,
       // Back-compat: keep `setupFee` populated with the first waivable entry
       // for any older client build still reading the singular field.
       setupFee: firstVisitFees.find((f) => f.waivedWithPrepay) || null,
