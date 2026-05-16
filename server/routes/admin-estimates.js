@@ -481,17 +481,18 @@ router.get('/:id/pricing-audit', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /:id/archive — tuck a closed estimate out of the default list.
-// Allowed states: declined / expired / accepted. Active states (draft / sent /
-// viewed) must be declined first — preserves the operator's intent that
-// archive is a final shelving action, not a workflow shortcut.
+// POST /:id/archive — tuck an estimate out of the default list. Allowed
+// for sent / viewed / declined / expired / accepted. Drafts can't be
+// archived (they should be deleted instead — DELETE /:id). Archiving a
+// sent or viewed estimate hides it from the admin queue but preserves the
+// public token so the customer can still open the link they were sent.
 router.post('/:id/archive', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (!['declined', 'expired', 'accepted'].includes(estimate.status)) {
+    if (!['sent', 'viewed', 'declined', 'expired', 'accepted'].includes(estimate.status)) {
       return res.status(400).json({
-        error: `Only closed estimates (declined / expired / accepted) can be archived. Current status: ${estimate.status}.`,
+        error: `Drafts can't be archived — delete the draft instead. Current status: ${estimate.status}.`,
       });
     }
     if (estimate.archived_at) return res.json(estimate);  // idempotent
