@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PipelineAnalytics, {
   aggregateServiceLineRows,
   classifyEstimateServiceLine,
+  withinDateRange,
 } from "./PipelineAnalytics";
 
 const NOW = new Date("2026-05-15T12:00:00.000Z");
@@ -147,6 +148,20 @@ describe("aggregateServiceLineRows", () => {
       acceptancePct: 50,
       avgTicket: 60,
     });
+  });
+});
+
+describe("withinDateRange", () => {
+  it("uses the ET calendar year for YTD boundaries", () => {
+    const dec31EtNow = new Date("2026-01-01T04:30:00.000Z").getTime();
+    const jan1EtNow = new Date("2026-01-01T05:30:00.000Z").getTime();
+
+    expect(
+      withinDateRange("2026-01-01T03:30:00.000Z", "ytd", dec31EtNow),
+    ).toBe(true);
+    expect(
+      withinDateRange("2026-01-01T04:30:00.000Z", "ytd", jan1EtNow),
+    ).toBe(false);
   });
 });
 

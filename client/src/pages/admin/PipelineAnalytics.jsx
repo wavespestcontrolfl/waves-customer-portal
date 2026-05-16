@@ -3,6 +3,7 @@ import PropTypes from "prop-types";
 import { Bug, Leaf, PawPrint, ShieldCheck, Trees } from "lucide-react";
 import { classifyEstimate } from "./EstimatePage";
 import { Card, cn } from "../../components/ui";
+import { etParts } from "../../lib/timezone";
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
 const DAY = 86400000;
@@ -49,7 +50,8 @@ export function withinDateRange(iso, range, nowMs = Date.now()) {
   if (range === "7d") return ms <= 7 * DAY;
   if (range === "30d") return ms <= 30 * DAY;
   if (range === "90d") return ms <= 90 * DAY;
-  if (range === "ytd") return new Date(ts).getFullYear() === new Date(nowMs).getFullYear();
+  if (range === "ytd")
+    return etParts(new Date(ts)).year === etParts(new Date(nowMs)).year;
   return true;
 }
 
