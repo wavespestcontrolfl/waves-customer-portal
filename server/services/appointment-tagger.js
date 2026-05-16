@@ -3,6 +3,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
+const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
 
 class AppointmentTagger {
 
@@ -244,30 +245,20 @@ class AppointmentTagger {
 
   // Welcome sequence for new recurring customers
   async triggerWelcomeSequence(service) {
-    const sent = await db('sms_sequences').where({ customer_id: service.customer_id, sequence_type: 'new_customer_welcome' }).first();
-    if (sent) return;
-
-    const tier = service.waveguard_tier;
-    const perks = { Platinum: 'unlimited callbacks, priority scheduling, savings on add-ons, and termite guarantee coverage', Gold: 'unlimited callbacks, priority scheduling, and add-on savings', Silver: 'unlimited callbacks and add-on savings', Bronze: 'unlimited callbacks' }[tier] || 'regular scheduled service';
-
-    const welcomeResult = await sendCustomerMessage({
-      to: service.phone,
-      body: `Welcome to Waves, ${service.first_name}! Your first ${service.service_type || 'service'} is coming up. Your WaveGuard ${tier || ''} includes ${perks}. Your tech will text when en route. Portal: wavespestcontrol.com/portal Questions? Reply here. - Waves`,
-      channel: 'sms',
-      audience: 'customer',
-      purpose: 'appointment',
-      customerId: service.customer_id,
-      appointmentId: service.id,
-      identityTrustLevel: 'phone_matches_customer',
-      metadata: { original_message_type: 'welcome' },
+    const welcomeResult = await sendNewRecurringWelcome({
+      customer: {
+        id: service.customer_id,
+        first_name: service.first_name,
+        last_name: service.last_name,
+        phone: service.phone,
+      },
+      scheduledServiceId: service.id,
+      recurringPattern: service.recurring_pattern,
+      entryPoint: 'appointment_tagger_welcome',
     });
     if (!welcomeResult.sent) {
-      logger.warn(`[appointment-tagger] Welcome SMS blocked/failed for customer ${service.customer_id}: ${welcomeResult.code || welcomeResult.reason || 'unknown'}`);
       return;
     }
-
-    await db('sms_sequences').insert({ customer_id: service.customer_id, sequence_type: 'new_customer_welcome', status: 'completed' });
-    await db('customer_interactions').insert({ customer_id: service.customer_id, interaction_type: 'sms_outbound', subject: 'Welcome SMS sent' });
   }
 }
 
