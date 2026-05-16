@@ -1937,7 +1937,7 @@ function EstimatePipelineViewV2() {
                           </Button>
                         )}
 
-                        {e.status === "accepted" && (
+                        {e.status === "accepted" && !e.archivedAt && (
                           <Button
                             size="sm"
                             variant="primary"
@@ -2623,7 +2623,7 @@ function MobileEstimateRow({
           },
           (estimate.status === "sent" ||
             estimate.status === "viewed" ||
-            estimate.status === "accepted") && {
+            (estimate.status === "accepted" && !estimate.archivedAt)) && {
             key: "send-booking",
             label: "Send booking link",
             icon: <CalendarCheck size={16} strokeWidth={1.75} />,
