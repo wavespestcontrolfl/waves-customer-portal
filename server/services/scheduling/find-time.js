@@ -55,12 +55,12 @@ function toDateStr(d) {
   return d.toISOString().split('T')[0];
 }
 
-function enumerateDates(from, to) {
+function enumerateDates(from, to, { includeWeekends = false } = {}) {
   const dates = [];
   const start = new Date(from + 'T12:00:00');
   const end = new Date(to + 'T12:00:00');
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-    if (d.getDay() === 0) continue; // skip Sundays
+    if (!includeWeekends && d.getDay() === 0) continue; // legacy default: skip Sundays
     dates.push(toDateStr(d));
   }
   return dates;
@@ -79,6 +79,7 @@ function enumerateDates(from, to) {
  * @param {number} [opts.topN=10]            How many slots to return
  * @param {number} [opts.dayStartHour=8]
  * @param {number} [opts.dayEndHour=17]
+ * @param {boolean} [opts.includeWeekends=false] Include Sundays in addition to Saturdays
  * @returns {Promise<{slots: Array, evaluated: number}>}
  */
 async function findAvailableSlots(opts) {
@@ -90,6 +91,7 @@ async function findAvailableSlots(opts) {
     topN = 10,
     dayStartHour = DAY_START_HOUR,
     dayEndHour = DAY_END_HOUR,
+    includeWeekends = false,
   } = opts;
 
   if (lat == null || lng == null) {
@@ -136,7 +138,7 @@ async function findAvailableSlots(opts) {
       'customers.longitude as cust_lng',
     );
 
-  const dates = enumerateDates(dateFrom, dateTo);
+  const dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
   const candidates = [];
   let evaluated = 0;
 
@@ -223,4 +225,9 @@ async function findAvailableSlots(opts) {
   };
 }
 
-module.exports = { findAvailableSlots };
+module.exports = {
+  findAvailableSlots,
+  _internals: {
+    enumerateDates,
+  },
+};

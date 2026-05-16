@@ -106,7 +106,7 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
         {isOneTime ? 'Book your visit' : 'Reserve your spot'}
       </div>
 
-      <div style={{ display: 'grid', gap: 10 }}>
+      <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
         <button
           type="button"
           disabled={disabled}

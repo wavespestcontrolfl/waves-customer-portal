@@ -769,6 +769,12 @@ function renderPage(token, estimate, estData) {
   .booking-card .card-sub{font-size:14px;color:#6B7280;margin:0 0 20px;line-height:1.55}
   .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#6B7280;text-align:center}
   .slot-list{display:grid;gap:10px}
+  .slot-more{margin-top:10px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;overflow:hidden}
+  .slot-more summary{list-style:none;cursor:pointer;padding:12px 14px;color:#1B2C5B;font-size:14px;font-weight:700}
+  .slot-more summary::-webkit-details-marker{display:none}
+  .slot-more summary::after{content:'+';float:right;font-size:18px;line-height:1;color:#6B7280}
+  .slot-more[open] summary::after{content:'–'}
+  .slot-more-list{display:grid;gap:10px;padding:0 12px 12px}
   .slot-btn{width:100%;padding:14px 16px;border-radius:12px;cursor:pointer;background:#fff;color:#1B2C5B;border:1.5px solid #E2E8F0;text-align:left;transition:background-color .15s,border-color .15s,color .15s;font-family:Inter,system-ui,sans-serif}
   .slot-btn:hover:not([disabled]){border-color:${BRAND.blue}}
   .slot-btn.selected{border-color:${BRAND.blue};background:${BRAND.blue};color:#fff}
@@ -778,7 +784,8 @@ function renderPage(token, estimate, estData) {
   .slot-btn.selected .slot-day{color:rgba(255,255,255,.82)}
   .slot-btn.selected .slot-reason{color:rgba(255,255,255,.86)}
   .pay-pref-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
-  @media(max-width:560px){.pay-pref-grid{grid-template-columns:1fr}}
+  .pay-pref-grid.options{grid-template-columns:repeat(3,minmax(0,1fr))}
+  @media(max-width:560px){.pay-pref-grid,.pay-pref-grid.options{grid-template-columns:1fr}}
   .pay-pref-btn{background:#fff;border:2px solid #E7E2D7;border-radius:10px;padding:14px;text-align:left;cursor:pointer;font:inherit;color:inherit;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:4px}
   .pay-pref-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
   .pay-pref-btn[disabled]{opacity:.5;cursor:not-allowed}
@@ -932,7 +939,7 @@ ${shellTopBar()}
     <div id="pay-pref-area" style="display:none">
       <h3 id="pay-pref-heading" style="margin:20px 0 4px">How would you like to pay?</h3>
       <p class="card-sub" id="pay-pref-subhead" style="margin:0">Both options reserve your slot. You will not be charged today.</p>
-      <div class="pay-pref-grid">
+      <div class="pay-pref-grid options">
         <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">Save a card to lock my slot</span><span class="pay-pref-sub">Add a card on file now so your slot is reserved. We charge on the visit day, not today.</span></button>
         <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
         ${showMembershipFee ? `<button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">Pay the year up front</span><span class="pay-pref-sub">Prepay 12 months and we waive the ${fmtMoney(membershipFee)} setup fee.</span></button>` : ''}
@@ -1206,7 +1213,8 @@ ${shellQuestionsBar()}
       const body = await r.json();
       const primary = body.primary || [];
       const expander = body.expander || [];
-      const slots = primary.concat(expander).slice(0, 4);
+      const slots = primary.slice(0, 3);
+      const moreSlots = expander.slice(0, 3);
       if (!slots.length) {
         area.className = 'booking-state';
         area.innerHTML = 'No times available in the next 2 weeks. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll get you on the schedule.';
@@ -1217,6 +1225,11 @@ ${shellQuestionsBar()}
       html.push('<div class="slot-list">');
       slots.forEach((s) => html.push(renderSlot(s)));
       html.push('</div>');
+      if (moreSlots.length) {
+        html.push('<details class="slot-more"><summary>Show ' + moreSlots.length + ' more open slot' + (moreSlots.length === 1 ? '' : 's') + '</summary><div class="slot-more-list">');
+        moreSlots.forEach((s) => html.push(renderSlot(s)));
+        html.push('</div></details>');
+      }
       area.innerHTML = html.join('');
       area.querySelectorAll('.slot-btn').forEach((btn) => btn.addEventListener('click', () => selectSlot(btn)));
     } catch (e) {
