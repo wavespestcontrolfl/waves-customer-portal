@@ -9,6 +9,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
+ *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
@@ -27,6 +28,11 @@ const gates = {
 
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
+
+  // Legacy SMS AI Drafts — creates message_drafts rows and owner "Approve"
+  // alerts from inbound customer SMS. Off by default in prod until the
+  // approval workflow is ready.
+  legacyAiDrafts: isProd ? process.env.GATE_LEGACY_AI_DRAFTS === 'true' : true,
 
   // AI Blog Writer — generates content via Anthropic API
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
