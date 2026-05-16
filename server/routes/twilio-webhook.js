@@ -374,9 +374,9 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`AI Assistant failed: ${e.message}`); }
     } else if (schedulingIntent && aiAutoReplyOn) {
       // Log the intentional skip so we can audit the gate and see volume.
-      logger.info(`[sms-intent] scheduling-intent detected from ${From}; skipping auto-reply, routing to human inbox`);
+      logger.info(`[sms-intent] scheduling-intent detected from ${maskPhone(From)}; skipping auto-reply, routing to human inbox`);
     } else if (smsReaction && aiAutoReplyOn) {
-      logger.info(`[sms-intent] SMS reaction detected from ${From}; skipping auto-reply`);
+      logger.info(`[sms-intent] SMS reaction detected from ${maskPhone(From)}; skipping auto-reply`);
     }
 
     // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
@@ -460,9 +460,9 @@ router.post('/sms', async (req, res) => {
         logger.info(`AI draft created for ${customer.first_name}: ${intent.intent}`);
       } catch (e) { logger.error(`AI draft pipeline failed: ${e.message}`); }
     } else if (customer && numberConfig.type === 'location' && Body && schedulingIntent) {
-      logger.info(`[sms-intent] scheduling-intent detected from ${From}; skipping legacy AI draft`);
+      logger.info(`[sms-intent] scheduling-intent detected from ${maskPhone(From)}; skipping legacy AI draft`);
     } else if (customer && numberConfig.type === 'location' && Body && smsReaction) {
-      logger.info(`[sms-intent] SMS reaction detected from ${From}; skipping legacy AI draft`);
+      logger.info(`[sms-intent] SMS reaction detected from ${maskPhone(From)}; skipping legacy AI draft`);
     }
 
     // Return empty TwiML — Adam approves drafts before sending
