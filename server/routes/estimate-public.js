@@ -584,92 +584,7 @@ function renderPage(token, estimate, estData) {
     </div>
   </div>` : '';
 
-  // Per-treatment breakdown — one row per recurring service with its pre-discount
-  // per-application price. When multiple services are bundled, the customer sees
-  // a per-service breakdown plus the same-day visit total. Pest uses the currently
-  // selected frequency's tier; other services use perTreatment/visitsPerYear
-  // forwarded from the engine. Older estimates without those fields fall back to
-  // deriving per-treatment from monthly × 12 / visitsForService(name) when we can
-  // resolve a visit count.
-  const perTreatmentRows = [];
-  if (pestRecurring && selectedPestTier && Number(selectedPestTier.pa) > 0) {
-    perTreatmentRows.push({
-      label: `Pest Control (${selectedPestTier.label || 'Quarterly'})`,
-      perTreatment: Number(selectedPestTier.pa),
-      visitsPerYear: Number(selectedPestTier.apps) || null,
-    });
-  }
-  // Only services with a real per-application price participate. Termite
-  // bait, rodent bait, and palm injection are subscription / event-based —
-  // synthesizing perTreatment from monthly × 12 ÷ visits would show a number
-  // that doesn't match how those services are actually billed.
-  const PER_TREATMENT_SERVICE_KEYS = new Set(['lawn_care', 'tree_shrub', 'mosquito']);
-  const inferServiceKey = (svc) => {
-    if (svc?.service && typeof svc.service === 'string') return svc.service;
-    const n = String(svc?.name || '').toLowerCase();
-    if (n.includes('pest')) return 'pest_control';
-    if (n.includes('lawn')) return 'lawn_care';
-    if (n.includes('tree') || n.includes('shrub')) return 'tree_shrub';
-    if (n.includes('mosquito')) return 'mosquito';
-    if (n.includes('termite')) return 'termite_bait';
-    return null;
-  };
-  // For the fallback path (older estimates with no forwarded perTreatment /
-  // visitsPerYear), look up visits from the engine R block. Use the
-  // recommended tier — visitsForService returns R.ts[0] for Tree & Shrub
-  // (Standard, 6 visits), but the engine recommends Enhanced (R.ts[1], 9
-  // visits); dividing by 6 would overstate the customer's per-treatment.
-  const recommendedVisits = (key, name) => {
-    if (key === 'tree_shrub' && Array.isArray(R.ts)) {
-      const sel = R.ts.find((t) => t.recommended) || R.ts[1] || R.ts[0];
-      return Number(sel?.v) || 0;
-    }
-    return Number(visitsForService(name)) || 0;
-  };
-  // When the customer is choosing between recurring and one-time pest only
-  // (displayPestOnly), the rest of the bundle is hidden from the price card —
-  // showing lawn / T&S / mosquito per-treatment rows here would imply they're
-  // included in this selection.
-  if (!displayPestOnly) {
-    recurring.forEach((s) => {
-      const key = inferServiceKey(s);
-      if (!PER_TREATMENT_SERVICE_KEYS.has(key)) return;
-      const fwdPerTreatment = Number(s?.perTreatment ?? s?.perApp ?? s?.perVisit);
-      const fwdVisits = Number(s?.visitsPerYear ?? s?.visits ?? s?.frequency);
-      const visits = Number.isFinite(fwdVisits) && fwdVisits > 0
-        ? fwdVisits
-        : recommendedVisits(key, s?.name);
-      let perTreatment = Number.isFinite(fwdPerTreatment) && fwdPerTreatment > 0 ? fwdPerTreatment : null;
-      if (perTreatment == null && visits > 0) {
-        const mo = Number(s?.mo || s?.monthly || 0);
-        if (mo > 0) perTreatment = Math.round((mo * 12 / visits) * 100) / 100;
-      }
-      if (!perTreatment) return;
-      perTreatmentRows.push({
-        label: s?.displayName || s?.name || 'Service',
-        perTreatment,
-        visitsPerYear: visits || null,
-      });
-    });
-  }
-  const sameDayTreatmentTotal = perTreatmentRows.reduce((sum, r) => sum + r.perTreatment, 0);
-  const showPerTreatmentBlock = perTreatmentRows.length > 0;
-  const perTreatmentHtml = showPerTreatmentBlock ? `
-  <div class="per-treatment" data-mode-only="recurring">
-    <div class="per-treatment-title">Per treatment</div>
-    <div class="per-treatment-rows">
-      ${perTreatmentRows.map((r) => `
-        <div class="pt-row">
-          <div class="pt-label">${escapeHtml(r.label)}${r.visitsPerYear ? `<span class="pt-cadence"> · ${r.visitsPerYear}/yr</span>` : ''}</div>
-          <div class="pt-price">${fmtMoney(r.perTreatment)}<span class="pt-suffix">/treatment</span></div>
-        </div>`).join('')}
-      ${perTreatmentRows.length > 1 ? `
-        <div class="pt-row pt-total">
-          <div class="pt-label">Same-day visit total</div>
-          <div class="pt-price">${fmtMoney(sameDayTreatmentTotal)}<span class="pt-suffix">/treatment</span></div>
-        </div>` : ''}
-    </div>
-  </div>` : '';
+  const perTreatmentHtml = '';
 
   const realOneTimeRows = oneTimeItems.map((it) => {
     const label = String(it.name || it.label || '').toLowerCase();
@@ -1077,8 +992,8 @@ ${shellTopBar()}
     </div>
   </div>` : `
   <div class="final">
-    <h2 data-mode-only="recurring">Ready to lock in <span data-monthly-echo>${fmtMoney(recurringDisplayTotal)}</span>${recurringPricePeriodLabel}?</h2>
-    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Ready to lock in <span data-onetime-echo>${fmtMoney(oneTimeChoicePrice)}</span> one-time?</h2>` : ''}
+    <h2 data-mode-only="recurring">Go Waves!</h2>
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves!</h2>` : ''}
     <p>No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">

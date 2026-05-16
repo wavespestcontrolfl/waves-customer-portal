@@ -769,12 +769,11 @@ function oneTimeRowsForCustomerPreview(E, {
     if (!hasTermiteInstallRow) addRow(termiteInstallRow);
   }
 
-  const setupFee = Number(E?.oneTime?.membershipFee ?? setupFeeAmount ?? 0);
+  const setupFee = includeSetupFees ? Number(setupFeeAmount || 0) : 0;
   const targetTotal = Number(oneTimeTotal);
   const rowsTotal = displayRows.reduce((sum, row) => sum + row.price, 0);
   const hasSetupRow = displayRows.some((row) => row.service === "waveguard_setup");
   const targetIncludesSetupFee =
-    includeSetupFees &&
     setupFee > 0 &&
     !hasSetupRow &&
     Number.isFinite(targetTotal) &&
@@ -794,7 +793,10 @@ function oneTimeRowsForCustomerPreview(E, {
 
 function firstVisitFeesForCustomerPreview(E, pestTier) {
   const rows = [];
-  const setupFee = Number(E?.oneTime?.membershipFee || pestTier?.init || 0);
+  const hasRecurringPest = !!pestTier;
+  const setupFee = hasRecurringPest
+    ? Number(E?.oneTime?.membershipFee || pestTier?.init || 0)
+    : 0;
   if (setupFee > 0) {
     rows.push({
       service: "waveguard_setup",
@@ -1186,9 +1188,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
 
         <div className="bg-[#1B2C5B] text-white text-center rounded-[14px] border border-[#1B2C5B] p-6 mt-4">
           <div className="customer-preview-serif text-26 leading-tight">
-            {monthlyTotal > 0
-              ? `Ready to lock in ${fmt(intervalTotal)}${cadence.period}?`
-              : `Ready to lock in ${fmt(oneTimeStandaloneTotal)}?`}
+            Go Waves!
           </div>
           <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>
           <div className="inline-flex mt-4 px-5 py-3 rounded-[10px] bg-white text-[#1B2C5B] text-15 font-semibold">
@@ -1428,16 +1428,16 @@ export default function EstimateToolViewV2({
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
-    const recurringKeys = [
+    const qualifyingRecurringKeys = [
       "svcLawn",
       "svcPest",
       "svcTs",
-      "svcInjection",
       "svcMosquito",
       "svcTermiteBait",
-      "svcRodentBait",
     ];
-    const recurringCount = recurringKeys.filter((k) => form[k]).length;
+    const separateRecurringKeys = ["svcInjection", "svcRodentBait"];
+    const recurringCount = qualifyingRecurringKeys.filter((k) => form[k]).length;
+    const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     const tierMap = {
       0: { name: "No recurring bundle", discount: 0 },
@@ -1479,18 +1479,19 @@ export default function EstimateToolViewV2({
       );
     }
     if (form.svcTermiteBait) approx.termiteBait = 50;
-    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 55 : 45;
+    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 69 : 49;
 
-    const recurringMonthlyBefore = Object.values(approx).reduce(
-      (s, v) => s + v,
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0);
+    const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
+      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(
-      recurringMonthlyBefore * (1 - tier.discount),
+      discountableRecurringMonthlyBefore * (1 - tier.discount) + separateRecurringMonthly,
     );
     const annualRecurring = recurringMonthly * 12;
     const annualSavings = Math.round(
-      recurringMonthlyBefore * tier.discount * 12,
+      discountableRecurringMonthlyBefore * tier.discount * 12,
     );
 
     const onetimeKeys = [
@@ -1513,10 +1514,17 @@ export default function EstimateToolViewV2({
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,
+      // totalRecurringCount includes services like Palm Injection /
+      // Rodent Bait that don't count toward the WaveGuard tier but are
+      // still recurring selections — display surfaces use this to avoid
+      // claiming "0 recurring selected" when only a non-qualifying
+      // service is chosen. Tier-discount math still keys off
+      // recurringCount alone.
+      totalRecurringCount: recurringCount + separateRecurringCount,
       onetimeCount,
       tier,
       recurringMonthly,
@@ -1563,7 +1571,36 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }, []);
   const toggle = useCallback((key) => {
-    setForm((f) => ({ ...f, [key]: !f[key] }));
+    setForm((f) => {
+      const next = { ...f, [key]: !f[key] };
+      // Auto-enable "Offer one-time option" only when the bundle is pest-only
+      // (svcPest + svcOnetimePest with no other recurring service selected) —
+      // that's the single flow the public estimate + accept handler actually
+      // support without dropping other recurring services from the persisted
+      // total (server/routes/estimate-public.js treats show_one_time_option
+      // as a pest-only choice path). Lawn/mosquito recurring+one-time pairs
+      // still require admin to tick the customer-options box manually until
+      // the downstream choice logic becomes service-aware.
+      const OTHER_RECURRING_KEYS = [
+        "svcLawn", "svcTs", "svcInjection", "svcMosquito",
+        "svcTermiteBait", "svcRodentBait",
+      ];
+      const pestBoth = next.svcPest && next.svcOnetimePest;
+      const onlyPestRecurring = OTHER_RECURRING_KEYS.every((k) => !next[k]);
+      // _autoOneTimeOwned marks the flag as "owned by the auto-enable
+      // path" so we can safely flip it back when the bundle stops being
+      // pest-only — without clobbering a manual customer-options check
+      // (which clears _autoOneTimeOwned in setCustomerChoiceOption /
+      // applyMosquitoCustomerChoice).
+      if (pestBoth && onlyPestRecurring) {
+        next.showOneTimeOption = true;
+        next._autoOneTimeOwned = true;
+      } else if (f._autoOneTimeOwned) {
+        next.showOneTimeOption = false;
+        next._autoOneTimeOwned = false;
+      }
+      return next;
+    });
     if (key.startsWith("svc")) {
       setEstimate(null);
       setSavedId(null);
@@ -1572,7 +1609,9 @@ export default function EstimateToolViewV2({
   }, []);
   const applyMosquitoCustomerChoice = useCallback((choice) => {
     setForm((f) => {
-      const next = { ...f, showOneTimeOption: true };
+      // Mark the flag as manually owned so toggle()'s auto-clear path
+      // doesn't wipe it the next time the admin checks any service box.
+      const next = { ...f, showOneTimeOption: true, _autoOneTimeOwned: false };
       if (choice === "one_time") next.svcOnetimeMosquito = true;
       if (choice === "recurring") next.svcMosquito = true;
       if (choice === "both") {
@@ -1587,7 +1626,9 @@ export default function EstimateToolViewV2({
   }, []);
   const setCustomerChoiceOption = useCallback((enabled) => {
     setForm((f) => {
-      const next = { ...f, showOneTimeOption: enabled };
+      // Manual customer-options checkbox — own the flag, don't let
+      // toggle()'s auto-clear wipe it on the next service toggle.
+      const next = { ...f, showOneTimeOption: enabled, _autoOneTimeOwned: false };
       if (enabled) {
         if (f.svcMosquito && !f.svcOnetimeMosquito)
           next.svcOnetimeMosquito = true;
@@ -2088,10 +2129,23 @@ export default function EstimateToolViewV2({
           form.bedArea,
           Number(baseProfile.estimatedBedAreaSf) || 0,
         ),
-        estimatedPalmCount: manualNumber(
-          form.palmCount,
-          Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0,
-        ),
+        // When admin types a palm count in the form, treat it as the
+        // injectable count and skip the 30% satellite-estimate gating in
+        // property-lookup-v2. Admin already knows which palms need
+        // treatment. Palm pricing requires a positive integer — drop
+        // non-integer or <=0 inputs (e.g. "2.5", "0", "-1") for BOTH
+        // estimatedPalmCount and injectablePalms so we fall back to the
+        // AI/base count instead of silently truncating to 2 and quoting
+        // the wrong palm count.
+        ...(() => {
+          const raw = String(form.palmCount ?? "").trim();
+          const n = Number(raw);
+          const valid = raw !== "" && Number.isInteger(n) && n > 0;
+          const fallback = Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0;
+          return valid
+            ? { estimatedPalmCount: n, injectablePalms: n }
+            : { estimatedPalmCount: fallback };
+        })(),
         estimatedTreeCount: treeCount,
         treeCount,
       };
@@ -2935,25 +2989,29 @@ export default function EstimateToolViewV2({
               <FieldV2 label="Lot Sq Ft">
                 <InputV2 k="lotSqFt" type="number" placeholder="8000" />
               </FieldV2>
-              {form.svcTs && (
+              {(form.svcTs || form.svcInjection) && (
                 <>
                   {" "}
                   <div className="grid grid-cols-2 gap-3">
                     {" "}
-                    <FieldV2 label="Bed Area (sq ft)">
-                      <InputV2
-                        k="bedArea"
-                        type="number"
-                        placeholder="Auto-estimate"
-                      />
-                    </FieldV2>{" "}
+                    {form.svcTs && (
+                      <FieldV2 label="Bed Area (sq ft)">
+                        <InputV2
+                          k="bedArea"
+                          type="number"
+                          placeholder="Auto-estimate"
+                        />
+                      </FieldV2>
+                    )}{" "}
                     <FieldV2 label="Palm Count">
                       <InputV2 k="palmCount" type="number" placeholder="Auto" />
                     </FieldV2>{" "}
                   </div>{" "}
-                  <FieldV2 label="Tree Count">
-                    <InputV2 k="treeCount" type="number" placeholder="Auto" />
-                  </FieldV2>{" "}
+                  {form.svcTs && (
+                    <FieldV2 label="Tree Count">
+                      <InputV2 k="treeCount" type="number" placeholder="Auto" />
+                    </FieldV2>
+                  )}{" "}
                 </>
               )}
             </div>
@@ -4091,7 +4149,7 @@ export default function EstimateToolViewV2({
                 <div className="text-14 text-ink-secondary mb-4">
                   {!livePreview.anySelected
                     ? "Select at least one service to see pricing"
-                    : `${livePreview.recurringCount} recurring + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
+                    : `${livePreview.totalRecurringCount} recurring + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
                 </div>
                 {enrichedProfile && (
                   <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-13 text-ink-secondary leading-relaxed">
