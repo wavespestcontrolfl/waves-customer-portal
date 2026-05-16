@@ -2085,9 +2085,13 @@ function EstimatePipelineViewV2() {
                               onClick: () => setDeclineTarget(e),
                             },
                             !e.archivedAt &&
-                              ["declined", "expired", "accepted"].includes(
-                                e.status,
-                              ) && {
+                              [
+                                "sent",
+                                "viewed",
+                                "declined",
+                                "expired",
+                                "accepted",
+                              ].includes(e.status) && {
                                 key: "archive",
                                 label: "Archive",
                                 icon: <Archive size={16} strokeWidth={1.75} />,
@@ -2673,7 +2677,9 @@ function MobileEstimateRow({
             },
           },
           !estimate.archivedAt &&
-            ["declined", "expired", "accepted"].includes(estimate.status) && {
+            ["sent", "viewed", "declined", "expired", "accepted"].includes(
+              estimate.status,
+            ) && {
               key: "archive",
               label: "Archive",
               icon: <Archive size={16} strokeWidth={1.75} />,
