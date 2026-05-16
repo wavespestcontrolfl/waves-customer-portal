@@ -106,6 +106,8 @@ describe('estimate manual acceptance', () => {
     });
     expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, {
       database,
+      skipAutoSchedule: true,
+      skipSetupInvoice: true,
     });
     expect(inserts).toEqual([
       expect.objectContaining({
@@ -262,7 +264,7 @@ describe('estimate manual acceptance', () => {
       estimateConverter,
     })).rejects.toMatchObject({
       statusCode: 500,
-      message: 'Customer conversion/scheduling did not complete; estimate was not marked accepted.',
+      message: 'Customer conversion did not complete; estimate was not marked accepted.',
     });
 
     expect(updates).toHaveLength(1);
