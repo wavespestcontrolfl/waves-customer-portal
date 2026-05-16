@@ -340,7 +340,10 @@ export default function PipelineAnalytics({
 
   return (
     <div style={{ fontFamily: ROBOTO }}>
-      <div className="flex gap-2 mb-5 flex-wrap">
+      <div className="flex gap-2 mb-5 flex-wrap items-center">
+        <div className="text-11 uppercase tracking-label text-ink-tertiary">
+          KPI/ROI range
+        </div>
         {DATE_RANGES.map((option) => {
           const active = option.key === selectedRange;
           return (
@@ -410,7 +413,7 @@ export default function PipelineAnalytics({
       </div>
 
       <Card className="mb-5 overflow-hidden">
-        <SectionHeader title="Funnel" />
+        <SectionHeader title="Funnel" sub="All-time queue" />
         <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-2">
           <FunnelTile
             label="Drafts"
@@ -500,6 +503,12 @@ export default function PipelineAnalytics({
         )}
       </Card>
 
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+        <div className="text-11 uppercase tracking-label text-ink-tertiary">
+          Needs attention
+        </div>
+        <div className="text-11 text-ink-tertiary">All-time queue</div>
+      </div>
       <div className="grid grid-cols-3 gap-2 mb-5">
         <AttentionCard
           label="Follow-up overdue"
