@@ -196,6 +196,32 @@ const ReviewService = {
         serviceType = sr.service_type;
         serviceDate = sr.service_date;
         technicianId = sr.technician_id;
+
+        // Tech fallback: when service_records.technician_id wasn't set
+        // (legacy rows or services completed before a tech was tagged
+        // on the record), fall back to the assigned tech on the linked
+        // scheduled_services row. service_records.scheduled_service_id
+        // was added in migration 20260427000007. Without this fallback
+        // the rate page and post-service SMS body lose the tech name
+        // and avatar (Brooke b5nhw was a live example).
+        if (!technicianId && sr.scheduled_service_id) {
+          const ss = await db("scheduled_services")
+            .where({ "scheduled_services.id": sr.scheduled_service_id })
+            .leftJoin(
+              "technicians",
+              "scheduled_services.technician_id",
+              "technicians.id",
+            )
+            .select(
+              "scheduled_services.technician_id",
+              "technicians.name as tech_name",
+            )
+            .first();
+          if (ss?.technician_id) {
+            technicianId = ss.technician_id;
+            techName = techName || ss.tech_name || null;
+          }
+        }
       }
     }
 
@@ -472,6 +498,29 @@ const ReviewService = {
         serviceType = sr.service_type;
         serviceDate = sr.service_date;
         technicianId = sr.technician_id;
+
+        // Same scheduled_services fallback used in create() — keep both
+        // paths in lockstep so the auto_inline trigger doesn't end up
+        // with a null technician_id when create() would have resolved
+        // one.
+        if (!technicianId && sr.scheduled_service_id) {
+          const ss = await db("scheduled_services")
+            .where({ "scheduled_services.id": sr.scheduled_service_id })
+            .leftJoin(
+              "technicians",
+              "scheduled_services.technician_id",
+              "technicians.id",
+            )
+            .select(
+              "scheduled_services.technician_id",
+              "technicians.name as tech_name",
+            )
+            .first();
+          if (ss?.technician_id) {
+            technicianId = ss.technician_id;
+            techName = techName || ss.tech_name || null;
+          }
+        }
       }
     }
 
