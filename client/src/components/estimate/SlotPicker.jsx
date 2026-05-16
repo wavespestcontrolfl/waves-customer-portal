@@ -163,7 +163,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
               cursor: 'pointer', fontSize: 14, fontWeight: 600, width: '100%',
             }}
           >
-            {showMore ? 'Show fewer times' : `See ${more.length} more times`}
+            {showMore ? 'Hide extra slots' : `Show ${more.length} more open slot${more.length === 1 ? '' : 's'}`}
           </button>
           {showMore ? (
             <div style={{ marginTop: 14 }}>

@@ -256,7 +256,7 @@ async function releaseReservation({ scheduledServiceId, estimateId }) {
     .whereNull('customer_id')
     .whereNotNull('reservation_expires_at')
     .modify((q) => {
-      if (estimateId) q.where({ estimate_id: estimateId });
+      if (estimateId) q.where({ source_estimate_id: estimateId });
     })
     .del();
   return { released: count > 0 };

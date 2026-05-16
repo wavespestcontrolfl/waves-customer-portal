@@ -36,8 +36,9 @@ const DEFAULT_OPTS = {
   windowDays: 14,
   maxResults: 3,
   proximityDriveMinutes: 20,
-  expanderMaxResults: 2,
+  expanderMaxResults: 3,
   durationMinutes: 60,
+  includeWeekends: true,
 };
 
 // ---------- in-memory caches ----------
@@ -256,6 +257,16 @@ function spreadWindowsAcrossDay(slots) {
   });
 }
 
+function splitSlotResults(slots, maxResults, expanderMaxResults) {
+  const visibleCount = Math.max(0, Number(maxResults) || 0);
+  const moreCount = Math.max(0, Number(expanderMaxResults) || 0);
+  const safeSlots = Array.isArray(slots) ? slots : [];
+  return {
+    primary: safeSlots.slice(0, visibleCount),
+    expander: safeSlots.slice(visibleCount, visibleCount + moreCount),
+  };
+}
+
 // Drop any candidate whose rounded display window collides with a real
 // booking on the same tech/date. find-time evaluates the un-rounded
 // earliestStart; the hour-rounding done in classifySlot can shift the
@@ -400,6 +411,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     dateFrom,
     dateTo,
     topN: 50,
+    includeWeekends: opts.includeWeekends,
   });
 
   const classifiedRaw = (raw?.slots || []).map((s) => classifySlot(s, opts.proximityDriveMinutes));
@@ -453,8 +465,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
   // slots; that can land them on an existing booking, so re-filter once
   // more before returning.
-  const primary = await filterCollidingSlots(spread, { dateFrom, dateTo });
-  const expander = []; // kept for backward-compat with the client renderer
+  const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
+  const { primary, expander } = splitSlotResults(filtered, opts.maxResults, opts.expanderMaxResults);
 
   const result = {
     primary,
@@ -465,6 +477,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       coordsSource: coords.source,
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
+      includeWeekends: opts.includeWeekends,
       generatedAt: new Date().toISOString(),
       cacheHit: false,
       // TODO: PR B's accept-handler invalidates this cache on every new
@@ -513,6 +526,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     dateFrom,
     dateTo,
     topN: 200, // broad — debug surface wants everything
+    includeWeekends: opts.includeWeekends,
   });
 
   const classified = (raw?.slots || []).map((s) => ({
@@ -574,6 +588,7 @@ module.exports = {
     parseAnchorTime,
     pickNearbyAnchor,
     classifySlot,
+    splitSlotResults,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); },
   },
 };
