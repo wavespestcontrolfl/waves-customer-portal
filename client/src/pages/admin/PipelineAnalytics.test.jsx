@@ -251,6 +251,29 @@ describe("PipelineAnalytics", () => {
     expect(onFilterChange).toHaveBeenCalledWith("going_cold");
   });
 
+  it("fires dedicated pricing-risk subfilters", () => {
+    const { onFilterChange } = renderAnalytics({
+      estimates: [
+        estimate({
+          id: "missing",
+          pricingRisk: { hasRisk: true, missingCogsCount: 1, lowMarginCount: 0 },
+        }),
+        estimate({
+          id: "margin",
+          pricingRisk: { hasRisk: true, missingCogsCount: 0, lowMarginCount: 1 },
+        }),
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Pricing risk/i }));
+    fireEvent.click(screen.getByRole("button", { name: /1 missing COGS/i }));
+    fireEvent.click(screen.getByRole("button", { name: /1 low margin/i }));
+
+    expect(onFilterChange).toHaveBeenNthCalledWith(1, "pricing_risk");
+    expect(onFilterChange).toHaveBeenNthCalledWith(2, "missing_cogs");
+    expect(onFilterChange).toHaveBeenNthCalledWith(3, "low_margin");
+  });
+
   it("discloses scheduled estimates in the Sent funnel subtitle", () => {
     renderAnalytics({
       estimates: [

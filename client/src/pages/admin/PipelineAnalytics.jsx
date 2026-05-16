@@ -227,6 +227,46 @@ AttentionCard.propTypes = {
   onFilterChange: PropTypes.func.isRequired,
 };
 
+function PricingRiskCard({ value, missingCogs, lowMargin, onFilterChange }) {
+  return (
+    <Card>
+      <div className="w-full p-4 text-left rounded-sm bg-white text-zinc-900">
+        <button
+          type="button"
+          onClick={() => onFilterChange("pricing_risk")}
+          className="w-full text-left rounded-sm u-focus-ring hover:bg-zinc-50"
+        >
+          <div className="text-11 uppercase tracking-label">Pricing risk</div>
+          <div className="text-22 font-medium u-nums mt-1">{value}</div>
+        </button>
+        <div className="mt-2 flex gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => onFilterChange("missing_cogs")}
+            className="px-2 py-1 rounded-full text-11 border-hairline border-zinc-200 text-ink-tertiary u-focus-ring hover:bg-zinc-50"
+          >
+            <span className="u-nums">{missingCogs}</span> missing COGS
+          </button>
+          <button
+            type="button"
+            onClick={() => onFilterChange("low_margin")}
+            className="px-2 py-1 rounded-full text-11 border-hairline border-zinc-200 text-ink-tertiary u-focus-ring hover:bg-zinc-50"
+          >
+            <span className="u-nums">{lowMargin}</span> low margin
+          </button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+PricingRiskCard.propTypes = {
+  value: PropTypes.number.isRequired,
+  missingCogs: PropTypes.number.isRequired,
+  lowMargin: PropTypes.number.isRequired,
+  onFilterChange: PropTypes.func.isRequired,
+};
+
 export default function PipelineAnalytics({
   estimates,
   onFilterChange,
@@ -518,11 +558,10 @@ export default function PipelineAnalytics({
           alert={metrics.attention.followUpOverdue > 0}
           onFilterChange={onFilterChange}
         />
-        <AttentionCard
-          label="Pricing risk"
+        <PricingRiskCard
           value={metrics.attention.pricingRisk}
-          sub={`${metrics.attention.missingCogs} missing COGS · ${metrics.attention.lowMargin} low margin`}
-          filterKey="pricing_risk"
+          missingCogs={metrics.attention.missingCogs}
+          lowMargin={metrics.attention.lowMargin}
           onFilterChange={onFilterChange}
         />
         <AttentionCard
