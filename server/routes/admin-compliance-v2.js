@@ -114,6 +114,10 @@ router.put('/licenses/:techId', async (req, res, next) => {
       .returning('*');
     if (!tech) return res.status(404).json({ error: 'Technician not found' });
 
+    // password_hash lives on the technicians row and has no business
+    // being in any client response — strip before returning. Same
+    // guard the admin-timetracking endpoints apply.
+    delete tech.password_hash;
     res.json({ success: true, technician: tech });
   } catch (err) { next(err); }
 });
