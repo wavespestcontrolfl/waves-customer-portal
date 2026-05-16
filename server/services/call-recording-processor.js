@@ -34,6 +34,8 @@ const {
   withAutomatedEstimatePhoneLock,
 } = require('./estimate-automation-duplicates');
 
+const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam B.';
+
 function twilioClient() {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
   return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -156,22 +158,65 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   return query.first();
 }
 
-const UNSUPPORTED_CALL_RE = /\b(seo|organic traffic|google ranking|search engine optimization|lead generation|construction company|construction business|contractor leads?)\b/i;
+const UNSUPPORTED_CALL_RE = /\b(seo|organic traffic|google ranking|search engine optimization|lead generation|contractor leads?)\b/i;
+const UNSUPPORTED_CONSTRUCTION_BUSINESS_RE = /\bconstruction (?:company|business)\b/i;
+const UNSUPPORTED_CONSTRUCTION_ADVICE_RE = /\b(?:advice|consult(?:ing)?|guidance|strategy)\b/i;
 const UNSUPPORTED_MARKETING_CONTEXT_RE = /\b(?:marketing|advertising|social media)\s+(?:advice|consult(?:ing)?|strategy|campaign|management|services?)\b|\b(?:advice|consult(?:ing)?|strategy|campaign|management|services?)\s+(?:for|about|on|around)?\s*(?:marketing|advertising|social media)\b|\bads?\s+(?:campaign|consult(?:ing)?|management|strategy)\b|\b(?:campaign|consult(?:ing)?|management|strategy)\s+(?:for|about|on|around)?\s*ads?\b/i;
 const UNSUPPORTED_WEBSITE_CONTEXT_RE = /\b(?:website|web site|webpage|web page)\b.{0,80}\b(?:seo|ranking|traffic|design|development|redesign|optimi[sz]ation|build|builder|audit)\b|\b(?:seo|ranking|traffic|design|development|redesign|optimi[sz]ation|build|builder|audit)\b.{0,80}\b(?:website|web site|webpage|web page)\b/i;
+const ADMIN_FOLLOWUP_CONTEXT_RE = /\b(?:compliance report|service report|sticker|invoice|billing|receipt|payment|pay online|paid online|w-?9|certificate|paperwork)\b/i;
+const ADMIN_COMPLETED_WORK_RE = /\b(?:follow(?:ed)? up|completed service|completed inspection|already completed|inspection report|compliance report|service report|sticker|certificate|w-?9|paperwork)\b/i;
+const ADMIN_DOC_REQUEST_RE = /\b(?:needs?|wants?|looking for|asked for|request(?:ed|ing)?|send|sent|email(?:ed)?|text)\b.{0,35}\b(?:(?:wdo|termite|inspection|service|compliance)\s+)?(?:report|paperwork|sticker|certificate|invoice|receipt|payment link)\b|\b(?:wdo|termite|inspection|service|compliance)\s+report\b/i;
+const ADMIN_PAYMENT_REQUEST_RE = /\b(?:make|making|take|taking|process|processing|submit|submitted)\s+(?:a\s+)?payment\b|\bneeds?\s+(?:to\s+)?(?:make\s+)?(?:a\s+)?payment\b|\bwants?\s+to\s+(?:make\s+)?(?:a\s+)?payment\b|\b(?:pay|paid|paying)\b.{0,35}\b(?:invoice|bill|balance|service|inspection|report)\b|\bpayment\b.{0,35}\b(?:for|on)\b.{0,35}\b(?:service|inspection|treatment|report|rodent|pest|termite|wdo)\b/i;
+const ADMIN_NON_BILLING_DOC_RE = /\b(?:report|paperwork|sticker|certificate|w-?9|compliance)\b/i;
+const NEW_FIELD_VISIT_INTENT_RE = /\b(?:(?:schedule|scheduled|scheduling|calendar|book|booking|booked|set up)\b.{0,45}\b(?:appointment|visit|service call|inspection|treatment|tech|technician|come out|pest control|roach(?:es)?|rodent|rat|mice|mosquito|lawn|termite inspection|wdo inspection|bed\s*bug|tree|shrub)|(?:appointment|visit|service call|field service|tech|technician)\b.{0,45}\b(?:confirmed|scheduled|booked|set|for|on|at)|next available\b.{0,45}\b(?:appointment|visit|service|inspection|treatment|tech|technician)|come out|send (?:someone|a tech|a technician) out|send out (?:someone|a tech|a technician)|get (?:it|me|us) (?:going|on (?:the )?schedule)|pop (?:it|me|us) on (?:the )?(?:schedule|calendar)|put (?:it|me|us) on (?:the )?(?:schedule|calendar))\b/i;
+const CONFIRMED_FIELD_SERVICE_APPOINTMENT_RE = /\b(?:confirmed|scheduled|booked)\b.{0,100}\b(?:for|with)\b.{0,45}\b(?:service|appointment|visit|inspection|treatment|pest|bugs?|roach(?:es)?|cockroach(?:es)?|rodents?|rats?|mice|mouse|mosquito(?:es|s)?|lawn|grass|weeds?|termite(?:s)?|pre[-\s]?slab|preslab|soil treatment|soil poison|wdo|bed\s*bugs?|trees?|shrubs?)\b/i;
+const CONFIRMED_TIME_LOGISTICS_RE = /\b(?:confirmed|scheduled|booked|set(?: up)?)\b.{0,100}\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m|p\.m)|noon|midday)\b/i;
+const FIELD_SERVICE_REQUEST_RE = /\b(?:needs?|wants?|looking for|asked for|request(?:ed|ing)?|schedule|scheduled|scheduling|book|booking|booked|set(?: up)?|has|having|issue(?:s)?(?: with)?|problem(?:s)?(?: with)?|treat(?:ment)?|control|remove|removal|spray)\b.{0,90}\b(?:pest|bugs?|roach(?:es)?|cockroach(?:es)?|ants?|spiders?|wasps?|hornets?|fleas?|ticks?|rodents?|rats?|mice|mouse|mosquito(?:es|s)?|lawn|grass|weeds?|termite(?:s)?|pre[-\s]?slab|preslab|soil treatment|soil poison|wdo|bed\s*bugs?|trees?|shrubs?)\b/i;
+const HISTORY_REFERENCE_RE = /\b(?:same (?:thing|service|treatment)|same as (?:before|last time)|previous (?:service|treatment|estimate|quote)|last (?:service|treatment|estimate|quote)|from (?:my|the|that) (?:estimate|quote)|the (?:estimate|quote|service|treatment) we (?:talked about|discussed|sent)|as quoted|already quoted)\b/i;
+const HISTORY_ESTIMATE_REFERENCE_RE = /\b(?:estimate|quote|quoted)\b/i;
+const HISTORY_SERVICE_REFERENCE_RE = /\b(?:same (?:thing|service|treatment)|same as (?:before|last time)|previous (?:service|treatment)|last (?:service|treatment)|service we (?:talked about|discussed)|treatment we (?:talked about|discussed))\b/i;
+const HISTORY_DISMISSAL_RE = /\b(?:did not|didn't|do not|don't|dont|does not|doesn't|doesnt|not|no longer)\b.{0,60}\b(?:last|previous|estimate|quote|quoted|service|treatment)\b|\b(?:last|previous|estimate|quote|quoted|service|treatment)\b.{0,60}\b(?:did not|didn't|do not|don't|dont|does not|doesn't|doesnt|not|no longer|instead)\b/i;
+const HISTORY_TIMING_NEGATION_RE = /\b(?:last|previous|estimate|quote|quoted|service|treatment)\b.{0,60}\bnot\s+(?:until|before|after|yet)\b|\bnot\s+(?:until|before|after|yet)\b.{0,60}\b(?:last|previous|estimate|quote|quoted|service|treatment)\b/i;
+const PRE_SLAB_NEGATION_RE = /\b(?:without|don't need|doesn't need|dont need|doesnt need|no)\s+(?:pre[-\s]?slab|preslab|soil poison|soil treatment|termiticide|termidor)\b|\b(?:not|isn't|is not|wasn't|was not)\b(?:(?!\b(?:need|needs|needed|want|wants|wanted|request|requested|schedule|scheduled|book|booked)\b)[^.;,]){0,40}\b(?:pre[-\s]?slab|preslab|soil poison|soil treatment|termiticide|termidor)\b|\b(?:pre[-\s]?slab|preslab|soil poison|soil treatment|termiticide|termidor)\b[^.;,]{0,40}\b(?:not|isn't|is not|wasn't|was not|no)\b/i;
+const PRE_SLAB_TIMING_NEGATION_RE = /\b(?:pre[-\s]?slab|preslab|soil poison|soil treatment|termiticide|termidor|slab|concrete)\b.{0,60}\bnot\s+(?:until|before|after|yet)\b|\bnot\s+(?:until|before|after|yet)\b.{0,60}\b(?:pre[-\s]?slab|preslab|soil poison|soil treatment|termiticide|termidor|slab|concrete)\b/i;
+const PRE_SLAB_NOT_YET_RE = /\b(?:not|without)\b.{0,40}\b(?:pre[-\s]?slab|preslab|soil poison|soil treatment|termiticide|termidor)\b.{0,25}\byet\b/i;
+const GENERIC_TERMITE_NEGATION_RE = /\b(?:no|without)\s+(?:active\s+)?termites?\b|\b(?:not|isn't|is not|wasn't|was not)\b[^.;,]{0,30}\btermites?\b|\btermites?\b[^.;,]{0,25}\b(?:isn't|is not|wasn't|was not|not (?:active|present|found|seen|an? issue|a problem)|no (?:activity|signs?|evidence|issue|problem|concern))\b/i;
+const POSITIVE_TERMITE_REQUEST_RE = /\btermite\s+(?:inspection|treatment|service)\b|\b(?:inspect(?:ion)?|treat(?:ment)?)\s+(?:for\s+)?termites?\b|\b(?:needs?|wants?|looking for|asked for|request(?:ed|ing)?|schedule|scheduled|book|booking|booked)\b.{0,50}\btermites?\b/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function compactText(...parts) {
   return parts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 }
 
+function hasPreSlabTermiteContext(text) {
+  const value = String(text || '').toLowerCase();
+  if (
+    PRE_SLAB_NEGATION_RE.test(value)
+    && !PRE_SLAB_NOT_YET_RE.test(value)
+    && !PRE_SLAB_TIMING_NEGATION_RE.test(value)
+  ) return false;
+  const explicitPreSlab = /\b(pre[-\s]?slab|preslab)\b/.test(value);
+  const soilOrTermiticideTreatment = /\b(?:soil poison|soil treatment|slab pre[-\s]?treat|termiticide|termidor)\b/.test(value);
+  const termiteTreatment = /\btermites?\b.{0,40}\btreat(?:ment)?\b|\btreat(?:ment)?\b.{0,40}\btermites?\b/.test(value);
+  const concreteTiming = /\b(?:before (?:the )?(?:slab|concrete)|slab pour|pour(?:ing)? concrete)\b/.test(value);
+  const constructionCue = /\b(?:pre[-\s]?construction|new construction|slab|concrete)\b/.test(value);
+  const newConstructionTermite = /\b(?:pre[-\s]?construction|new construction)\b/.test(value)
+    && /\b(?:termite|termiticide|termidor|soil poison|soil treatment|pre[-\s]?slab|preslab|slab pour|before (?:the )?(?:slab|concrete))\b/.test(value);
+  return explicitPreSlab || ((soilOrTermiticideTreatment || termiteTreatment) && (constructionCue || concreteTiming)) || newConstructionTermite;
+}
+
 function canonicalWavesService(value) {
   const text = String(value || '').toLowerCase();
   if (!text) return null;
+  if (hasPreSlabTermiteContext(text)) return 'Pre-Slab Termidor';
+  if (/\bbora[-\s]?care\b|\bborate\b|\bwood treatment\b/.test(text)) return 'Termite Wood Treatment';
+  if (/\bfoam\b.{0,40}\bdrill\b|\bdrill\b.{0,40}\bfoam\b|\bvoid treatment\b|\bspot termite\b/.test(text)) return 'Termite Foam Drill';
+  if (/\btrench(?:ing)?\b|\brod(?:ding)?\b|\bliquid(?:\s+termite)?\s+perimeter\b|\btermidor\b/.test(text)) return 'Liquid Termite Perimeter';
   if (/\bwdo\b|wood destroying organism/.test(text)) return 'WDO Inspection';
   if (/\bbed\s*bugs?\b|\bbedbugs?\b/.test(text)) return 'Bed Bug Treatment';
   if (/\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|\bbait stations?\b/.test(text)) return 'Rodent Control';
   if (/\bmosquito(?:es|s)?\b/.test(text)) return 'Mosquito Control';
-  if (/\btermites?\b/.test(text)) return 'Termite Inspection';
+  if (/\btermites?\b/.test(text) && (!GENERIC_TERMITE_NEGATION_RE.test(text) || POSITIVE_TERMITE_REQUEST_RE.test(text))) return 'Termite Inspection';
   if (/\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b/.test(text)) return 'Tree & Shrub Care';
   if (/\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz](e|er|ation|ing)?\b|\bweeds?\b|\bchinch\b|\bsod\b|\bfungus\b|\bfungal\b/.test(text)) return 'Lawn Care';
   if (/\bpest(s| control)?\b|\bbugs?\b|\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bhornets?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto bugs?\b/.test(text)) return 'General Pest Control';
@@ -180,27 +225,327 @@ function canonicalWavesService(value) {
 
 function hasUnsupportedCallContext(value) {
   const text = String(value || '');
+  const constructionBusiness = UNSUPPORTED_CONSTRUCTION_BUSINESS_RE.test(text);
+  const constructionFieldService = hasFieldServiceRequestText({}, text) || NEW_FIELD_VISIT_INTENT_RE.test(text);
+  const unsupportedConstructionBusiness = constructionBusiness
+    && (UNSUPPORTED_CONSTRUCTION_ADVICE_RE.test(text) || !constructionFieldService);
   return UNSUPPORTED_CALL_RE.test(text)
+    || unsupportedConstructionBusiness
     || UNSUPPORTED_MARKETING_CONTEXT_RE.test(text)
     || UNSUPPORTED_WEBSITE_CONTEXT_RE.test(text);
 }
 
-function resolveSchedulableCallService(extracted = {}) {
-  const detailText = compactText(
+function hasFieldServiceRequestIntent(extracted = {}, value = '') {
+  const text = String(value || '');
+  const requestedText = compactText(extracted.requested_service);
+  const requestedService = canonicalWavesService(requestedText);
+  const matchedService = canonicalWavesService(extracted.matched_service);
+  if (hasConfirmedFieldServiceAppointment(extracted, text)) return true;
+  if (hasFieldServiceRequestText(extracted, text)) return true;
+  if (
+    extracted.appointment_confirmed
+    && extracted.preferred_date_time
+    && matchedService
+    && CONFIRMED_TIME_LOGISTICS_RE.test(text)
+    && !ADMIN_NON_BILLING_DOC_RE.test(text)
+    && !ADMIN_COMPLETED_WORK_RE.test(text)
+  ) return true;
+  if (
+    extracted.appointment_confirmed
+    && extracted.preferred_date_time
+    && requestedText
+    && requestedService
+    && !ADMIN_PAYMENT_REQUEST_RE.test(text)
+    && !ADMIN_COMPLETED_WORK_RE.test(text)
+    && !ADMIN_DOC_REQUEST_RE.test(requestedText)
+    && !ADMIN_PAYMENT_REQUEST_RE.test(requestedText)
+  ) return true;
+  if (requestedText && requestedService && !ADMIN_FOLLOWUP_CONTEXT_RE.test(requestedText) && !ADMIN_DOC_REQUEST_RE.test(text) && !ADMIN_PAYMENT_REQUEST_RE.test(text)) return true;
+
+  return false;
+}
+
+function hasConfirmedFieldServiceAppointment(extracted = {}, value = '') {
+  const text = String(value || '');
+  if (!extracted.appointment_confirmed || !extracted.preferred_date_time) return false;
+  if (!canonicalWavesService(compactText(extracted.matched_service, extracted.requested_service))) return false;
+  if (!CONFIRMED_FIELD_SERVICE_APPOINTMENT_RE.test(text)) return false;
+  if (!ADMIN_NON_BILLING_DOC_RE.test(text)) return true;
+
+  let stripped = text;
+  for (let i = 0; i < 3; i += 1) {
+    stripped = stripped.replace(ADMIN_DOC_REQUEST_RE, ' ');
+  }
+  return CONFIRMED_FIELD_SERVICE_APPOINTMENT_RE.test(stripped);
+}
+
+function hasFieldServiceRequestText(extracted = {}, value = '') {
+  const text = String(value || '');
+  const service = canonicalWavesService(compactText(extracted.requested_service, extracted.matched_service, text));
+  if (!service || !FIELD_SERVICE_REQUEST_RE.test(text)) return false;
+  if (!ADMIN_DOC_REQUEST_RE.test(text) && !ADMIN_PAYMENT_REQUEST_RE.test(text)) return true;
+  let stripped = text;
+  for (let i = 0; i < 3; i += 1) {
+    stripped = stripped
+      .replace(ADMIN_DOC_REQUEST_RE, ' ')
+      .replace(ADMIN_PAYMENT_REQUEST_RE, ' ');
+  }
+  return FIELD_SERVICE_REQUEST_RE.test(stripped);
+}
+
+function hasFieldVisitIntent(extracted = {}, value = '') {
+  if (hasFieldServiceRequestIntent(extracted, value)) return true;
+  return NEW_FIELD_VISIT_INTENT_RE.test(String(value || ''));
+}
+
+function hasAdministrativeOnlyContext(value, extracted = {}) {
+  const text = String(value || '');
+  const fieldServiceRequest = hasFieldServiceRequestIntent(extracted, text);
+  const adminRequest = ADMIN_DOC_REQUEST_RE.test(text) || ADMIN_PAYMENT_REQUEST_RE.test(text);
+  const newVisitInCompletedWorkCall = hasFieldServiceRequestText(extracted, text) || NEW_FIELD_VISIT_INTENT_RE.test(text);
+  if (adminRequest && !fieldServiceRequest) {
+    return true;
+  }
+  if (ADMIN_FOLLOWUP_CONTEXT_RE.test(text) && ADMIN_COMPLETED_WORK_RE.test(text) && !fieldServiceRequest && !newVisitInCompletedWorkCall) {
+    return true;
+  }
+  return ADMIN_FOLLOWUP_CONTEXT_RE.test(text) && !fieldServiceRequest && !NEW_FIELD_VISIT_INTENT_RE.test(text);
+}
+
+function extractHistoryServiceText(value, depth = 0) {
+  if (depth > 4 || value == null) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map((item) => extractHistoryServiceText(item, depth + 1)).join(' ');
+  if (typeof value !== 'object') return '';
+
+  return Object.entries(value)
+    .filter(([key]) => /service|treatment|program|name|label|description|interest|type|requested|matched/i.test(key))
+    .map(([, item]) => extractHistoryServiceText(item, depth + 1))
+    .join(' ');
+}
+
+function summarizeCustomerServiceContext(customerServiceContext = {}) {
+  const rows = [
+    ...(customerServiceContext.estimates || []),
+    ...(customerServiceContext.serviceRecords || []),
+    ...(customerServiceContext.scheduledServices || []),
+  ];
+  return rows.map((row) => compactText(
+    row.service_interest,
+    row.service_type,
+    row.notes,
+    row.technician_notes,
+    row.internal_notes,
+    extractHistoryServiceText(row.estimate_data),
+    extractHistoryServiceText(row.service_data),
+    extractHistoryServiceText(row.structured_notes)
+  )).join(' ');
+}
+
+function customerHistoryRowText(row = {}) {
+  return compactText(
+    row.service_interest,
+    row.service_type,
+    row.notes,
+    row.technician_notes,
+    row.internal_notes,
+    extractHistoryServiceText(row.estimate_data),
+    extractHistoryServiceText(row.service_data),
+    extractHistoryServiceText(row.structured_notes)
+  );
+}
+
+function customerHistoryRowTime(row = {}) {
+  const raw = row.service_date || row.scheduled_date || row.created_at || 0;
+  const time = new Date(raw).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function serviceFromHistoryRows(rows = []) {
+  return [...rows]
+    .sort((a, b) => customerHistoryRowTime(b) - customerHistoryRowTime(a))
+    .map((row) => (
+      canonicalWavesService(compactText(row.service_interest, row.service_type))
+      || canonicalWavesService(customerHistoryRowText(row))
+    ))
+    .find(Boolean) || null;
+}
+
+function completedServiceRows(rows = []) {
+  return rows.filter((row) => !row.status || row.status === 'completed');
+}
+
+function customerVisibleEstimateRows(rows = []) {
+  return rows.filter((row) => !row.status || row.status !== 'draft');
+}
+
+function hasHistoryDismissal(text) {
+  return HISTORY_DISMISSAL_RE.test(text) && !HISTORY_TIMING_NEGATION_RE.test(text);
+}
+
+function isTermiteService(service) {
+  return [
+    'Termite Inspection',
+    'Pre-Slab Termidor',
+    'Liquid Termite Perimeter',
+    'Termite Wood Treatment',
+    'Termite Foam Drill',
+  ].includes(service);
+}
+
+function resolveCustomerHistoryService(customerServiceContext = {}, referenceText = '') {
+  const text = String(referenceText || '');
+  if (!HISTORY_REFERENCE_RE.test(text)) return null;
+
+  const estimates = customerVisibleEstimateRows(customerServiceContext.estimates || []);
+  const serviceRows = completedServiceRows(customerServiceContext.serviceRecords || []);
+  const completedScheduledRows = completedServiceRows(customerServiceContext.scheduledServices || []);
+  const mentionsEstimate = HISTORY_ESTIMATE_REFERENCE_RE.test(text);
+  const mentionsService = HISTORY_SERVICE_REFERENCE_RE.test(text);
+
+  if (mentionsEstimate) {
+    const estimateService = serviceFromHistoryRows(estimates);
+    if (estimateService || !mentionsService) return estimateService;
+  }
+  if (mentionsService && !mentionsEstimate) return serviceFromHistoryRows([
+    ...serviceRows,
+    ...completedScheduledRows,
+  ]);
+
+  return serviceFromHistoryRows([
+    ...estimates,
+    ...serviceRows,
+    ...completedScheduledRows,
+  ]);
+}
+
+async function loadCustomerServiceContext(customerId, conn = db) {
+  if (!customerId) return null;
+
+  const [estimates, serviceRecords, scheduledServices] = await Promise.all([
+    conn('estimates')
+      .where({ customer_id: customerId })
+      .whereIn('status', ['sent', 'viewed', 'accepted', 'declined', 'expired'])
+      .select('service_interest', 'notes', 'estimate_data', 'status', 'created_at')
+      .orderBy('created_at', 'desc')
+      .limit(8)
+      .catch((err) => {
+        logger.warn(`[call-proc] Estimate history lookup failed for customer ${customerId}: ${err.message}`);
+        return [];
+      }),
+    conn('service_records')
+      .where({ customer_id: customerId })
+      .where({ status: 'completed' })
+      .select('service_type', 'technician_notes', 'service_data', 'structured_notes', 'status', 'service_date', 'created_at')
+      .orderBy('service_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .limit(8)
+      .catch((err) => {
+        logger.warn(`[call-proc] Service history lookup failed for customer ${customerId}: ${err.message}`);
+        return [];
+      }),
+    conn('scheduled_services')
+      .where({ customer_id: customerId })
+      .where({ status: 'completed' })
+      .select('service_type', 'notes', 'internal_notes', 'status', 'scheduled_date', 'created_at')
+      .orderBy('scheduled_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .limit(8)
+      .catch((err) => {
+        logger.warn(`[call-proc] Scheduled-service history lookup failed for customer ${customerId}: ${err.message}`);
+        return [];
+      }),
+  ]);
+
+  return { estimates, serviceRecords, scheduledServices };
+}
+
+function resolveSchedulableCallService(extracted = {}, opts = {}) {
+  const requestedText = compactText(extracted.requested_service);
+  const extractedDetailText = compactText(
     extracted.requested_service,
     extracted.call_summary,
     extracted.pain_points
   );
-  const detailService = canonicalWavesService(detailText);
-  if (hasUnsupportedCallContext(detailText)) {
+  const fullContextText = compactText(
+    extractedDetailText,
+    opts.transcription
+  );
+  const adminContextText = compactText(
+    ADMIN_FOLLOWUP_CONTEXT_RE.test(String(extracted.requested_service || '')) ? extracted.requested_service : null,
+    extracted.call_summary,
+    extracted.pain_points,
+    opts.transcription
+  );
+  const matchedService = canonicalWavesService(extracted.matched_service);
+  const requestedService = canonicalWavesService(extracted.requested_service);
+  const detailService = canonicalWavesService(extractedDetailText);
+  const requestedHistoryReference = HISTORY_REFERENCE_RE.test(requestedText);
+  const explicitRequestedTermiteInspection = requestedService === 'Termite Inspection'
+    && /\binspect(?:ion)?\b/i.test(requestedText)
+    && !requestedHistoryReference;
+
+  if (hasUnsupportedCallContext(extractedDetailText)) {
     return { ok: false, reason: 'unsupported_service', service: null };
   }
+  if (hasAdministrativeOnlyContext(adminContextText, extracted)) {
+    return { ok: false, reason: 'administrative_followup', service: null };
+  }
 
-  const service = canonicalWavesService(extracted.matched_service)
-    || canonicalWavesService(extracted.requested_service)
-    || detailService;
+  const hasHistoryReference = HISTORY_REFERENCE_RE.test(fullContextText);
+  const historyService = resolveCustomerHistoryService(
+    opts.customerServiceContext || opts.customerHistory || {},
+    fullContextText
+  );
+  const shouldUsePreSlabDetail = detailService === 'Pre-Slab Termidor'
+    && !explicitRequestedTermiteInspection
+    && (!matchedService || matchedService === 'Termite Inspection' || requestedService === 'Pre-Slab Termidor');
+  const shouldUseHistoryService = hasHistoryReference
+    && historyService
+    && !hasHistoryDismissal(fullContextText)
+    && !explicitRequestedTermiteInspection
+    && (!detailService || (detailService === 'Termite Inspection' && isTermiteService(historyService)));
+
+  const service = shouldUsePreSlabDetail
+    ? detailService
+    : (shouldUseHistoryService ? historyService : (matchedService || requestedService || detailService));
   if (!service) return { ok: false, reason: 'unsupported_service', service: null };
   return { ok: true, reason: null, service };
+}
+
+async function resolveDefaultCallBookingTechnician(conn = db) {
+  const configuredId = String(process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID || '').trim();
+  if (configuredId) {
+    if (!UUID_RE.test(configuredId)) {
+      logger.warn(`[call-proc] CALL_BOOKING_DEFAULT_TECHNICIAN_ID is not a valid UUID: ${configuredId}`);
+    } else {
+      const configuredTech = await conn('technicians')
+        .where({ id: configuredId })
+        .where(function () {
+          this.where({ active: true }).orWhereNull('active');
+        })
+        .first('id', 'name');
+      if (configuredTech?.id) return { id: configuredTech.id, name: configuredTech.name || null };
+      logger.warn(`[call-proc] CALL_BOOKING_DEFAULT_TECHNICIAN_ID did not match an active technician: ${configuredId}`);
+    }
+  }
+
+  const tech = await conn('technicians')
+    .whereRaw('LOWER(TRIM(name)) = LOWER(TRIM(?))', [DEFAULT_CALL_BOOKING_TECHNICIAN_NAME])
+    .where(function () {
+      this.where({ active: true }).orWhereNull('active');
+    })
+    .first('id', 'name');
+  if (!tech?.id) {
+    logger.warn(`[call-proc] Default call-booking technician not found: ${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}`);
+    return null;
+  }
+  return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
+}
+
+async function resolveDefaultCallBookingTechnicianId(conn = db) {
+  const tech = await resolveDefaultCallBookingTechnician(conn);
+  return tech?.id || null;
 }
 
 function hasUsablePhone(value) {
@@ -359,7 +704,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "pain_points": "brief summary of customer concerns or pest issues",
   "call_summary": "2-3 sentence summary of the call",
   "lead_quality": "hot/warm/cold/spam",
-  "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, Rodent Control, Bed Bug Treatment, WDO Inspection, Tree & Shrub Care, or null"
+  "matched_service": "best match from: General Pest Control, Lawn Care, Mosquito Control, Termite Inspection, WDO Inspection, Pre-Slab Termidor, Liquid Termite Perimeter, Termite Wood Treatment, Termite Foam Drill, Rodent Control, Bed Bug Treatment, Tree & Shrub Care, or null"
 }
 
 IMPORTANT — appointment_confirmed rules:
@@ -368,7 +713,10 @@ IMPORTANT — appointment_confirmed rules:
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 - Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
-- Do not set appointment_confirmed to true for unrelated business advice, SEO, marketing, construction, or other non-Waves services even if a time was discussed.
+  - Do not set appointment_confirmed to true for unrelated business advice, SEO, marketing, construction advice, or other non-Waves services even if a time was discussed.
+  - Do set appointment_confirmed to true when a builder or construction company explicitly books a Waves pre-slab/preconstruction termite, soil-treatment, or concrete-pour field-service appointment with a specific date and time.
+- Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.
+- If the caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, new-construction termite treatment, or treatment before a slab/concrete pour, matched_service must be "Pre-Slab Termidor" — not "Termite Inspection".
 
 IMPORTANT — wants_estimate rules:
 - Set wants_estimate to true only if the caller explicitly asks for a quote, estimate, bid, proposal, or asks Waves to send/give/prepare a price.
@@ -978,7 +1326,8 @@ const CallRecordingProcessor = {
     let appointmentResult = null;
     const timeStr = (extracted.preferred_date_time || '').toLowerCase();
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
-    const serviceResolution = resolveSchedulableCallService(extracted);
+    const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
+    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext });
     const isOutboundCall = String(call.direction || '').toLowerCase().startsWith('outbound');
     const canCreateAppointmentFromCall = !isOutboundCall && serviceResolution.ok;
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
@@ -1139,6 +1488,9 @@ const CallRecordingProcessor = {
               let reusedExistingSchedule = false;
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
+                const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
+                const defaultTechnicianId = defaultTechnician?.id || null;
+                const defaultTechnicianName = defaultTechnician?.name || null;
                 const existing = await findExistingCallAppointment({
                   customerId,
                   call,
@@ -1149,10 +1501,18 @@ const CallRecordingProcessor = {
                 });
                 if (existing) {
                   reusedExistingSchedule = true;
+                  if (!existing.technician_id && defaultTechnicianId) {
+                    const [updatedExisting] = await trx('scheduled_services')
+                      .where({ id: existing.id })
+                      .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
+                      .returning('*');
+                    return updatedExisting || existing;
+                  }
                   return existing;
                 }
-                const [created] = await trx('scheduled_services').insert({
+                const insertData = {
                   customer_id: customerId,
+                  technician_id: defaultTechnicianId,
                   scheduled_date: scheduledDate,
                   window_start: windowStart || '09:00',
                   window_end: windowEnd || '10:00',
@@ -1164,10 +1524,12 @@ const CallRecordingProcessor = {
                   notes: [
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
+                    defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
                     extracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
                   booking_source: 'phone_call',
-                }).returning('*');
+                };
+                const [created] = await trx('scheduled_services').insert(insertData).returning('*');
                 return created;
               });
               if (reusedExistingSchedule) {
@@ -1614,6 +1976,9 @@ const CallRecordingProcessor = {
 
 CallRecordingProcessor._test = {
   canonicalWavesService,
+  resolveDefaultCallBookingTechnician,
+  resolveDefaultCallBookingTechnicianId,
+  summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   validatePhoneCallAppointmentCustomer,
 };
