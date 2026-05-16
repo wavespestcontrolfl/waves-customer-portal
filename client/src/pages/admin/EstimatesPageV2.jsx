@@ -30,7 +30,6 @@ import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
 import PipelineAnalytics, {
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
-  withinDateRange,
 } from "./PipelineAnalytics";
 import {
   FollowUpModalV2,
@@ -1361,10 +1360,7 @@ function EstimatePipelineViewV2() {
   }
 
   // Classify + sort newest-first so the most recent estimates stay at the top.
-  const scopedEstimates = estimates.filter((e) =>
-    withinDateRange(e.createdAt, dateRange),
-  );
-  const classified = scopedEstimates.map((e) => ({
+  const classified = estimates.map((e) => ({
     ...e,
     _class: classifyEstimate(e),
   }));

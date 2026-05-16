@@ -240,7 +240,7 @@ export default function PipelineAnalytics({
     const inRange = estimates.filter((e) =>
       withinDateRange(e.createdAt, selectedRange, nowMs),
     );
-    const classified = inRange.map((e) => ({
+    const classified = estimates.map((e) => ({
       ...e,
       _class: e._class || classifyEstimate(e),
     }));
@@ -275,21 +275,23 @@ export default function PipelineAnalytics({
     const won = classified.filter((e) => e._class === "won");
     const lost = classified.filter((e) => e._class === "lost");
     const wonMrr = won.reduce((sum, e) => sum + amount(e), 0);
-    const declinedCount = inRange.filter((e) => e.status === "declined").length;
-    const expiredCount = inRange.filter((e) => e.status === "expired").length;
+    const declinedCount = estimates.filter(
+      (e) => e.status === "declined",
+    ).length;
+    const expiredCount = estimates.filter((e) => e.status === "expired").length;
 
-    const followUpOverdue = inRange.filter((e) =>
+    const followUpOverdue = estimates.filter((e) =>
       isFollowUpOverdueEstimate(e, nowMs),
     );
     const atRiskMRR = followUpOverdue.reduce((sum, e) => sum + amount(e), 0);
-    const pricingRisk = inRange.filter((e) => e.pricingRisk?.hasRisk);
-    const missingCogs = inRange.filter(
+    const pricingRisk = estimates.filter((e) => e.pricingRisk?.hasRisk);
+    const missingCogs = estimates.filter(
       (e) => (e.pricingRisk?.missingCogsCount || 0) > 0,
     ).length;
-    const lowMargin = inRange.filter(
+    const lowMargin = estimates.filter(
       (e) => (e.pricingRisk?.lowMarginCount || 0) > 0,
     ).length;
-    const goingCold = inRange.filter((e) =>
+    const goingCold = estimates.filter((e) =>
       isGoingColdEstimate(e, nowMs),
     ).length;
 
