@@ -1453,7 +1453,7 @@ function EstimatePipelineViewV2() {
     async (e) => {
       if (
         !window.confirm(
-          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and does not text the customer.`,
+          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup invoice is created — schedule the visit on the calendar and draft any invoice manually.`,
         )
       )
         return;
@@ -2740,7 +2740,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     async (e) => {
       if (
         !window.confirm(
-          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and does not text the customer.`,
+          `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup invoice is created — schedule the visit on the calendar and draft any invoice manually.`,
         )
       )
         return;
