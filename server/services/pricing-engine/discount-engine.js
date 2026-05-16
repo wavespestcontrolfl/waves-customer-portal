@@ -12,7 +12,8 @@
 //      services never see the perk).
 //
 // Excluded services: rodent_bait, palm_injection, bed_bug*, bora_care,
-//   pre_slab_termidor. No % discount. Flat credits where explicitly configured.
+//   pre_slab_termidor. No % discount. Flat credits only where explicitly
+//   allowed. Rodent bait receives no WaveGuard credit or tier benefit.
 //
 // Removed in v4.3 Session 6:
 //   - Composite discount cap (was 0.25)
@@ -21,7 +22,7 @@
 //   - Frequency discount tracking in the stack
 //   - ACH discount plumbing (retired to 0% in an earlier session)
 // ============================================================
-const { WAVEGUARD, PALM, RODENT, GLOBAL, TREE_SHRUB } = require('./constants');
+const { WAVEGUARD, PALM, GLOBAL, TREE_SHRUB } = require('./constants');
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -117,14 +118,6 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
           reason: `$${PALM.flatCreditPerPalm}/palm/yr Gold+ loyalty credit`,
         });
       }
-    }
-    if (serviceKey === 'rodent_bait') {
-      result.setupCredit = RODENT.setupCredit;
-      result.appliedDiscounts.push({
-        type: 'setup_credit',
-        amount: RODENT.setupCredit,
-        reason: `One-time $${RODENT.setupCredit} WaveGuard member credit`,
-      });
     }
     // totalDiscount stays 0 — no % discount applies
     return result;

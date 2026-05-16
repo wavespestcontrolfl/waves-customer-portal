@@ -666,16 +666,16 @@ function EstimateToolView() {
   /* ── live pricing preview (approximate from form state) ──── */
   const livePreview = useMemo(() => {
     // Count recurring services
-    const recurringKeys = [
+    const qualifyingRecurringKeys = [
       "svcLawn",
       "svcPest",
       "svcTs",
-      "svcInjection",
       "svcMosquito",
       "svcTermiteBait",
-      "svcRodentBait",
     ];
-    const recurringCount = recurringKeys.filter((k) => form[k]).length;
+    const separateRecurringKeys = ["svcInjection", "svcRodentBait"];
+    const recurringCount = qualifyingRecurringKeys.filter((k) => form[k]).length;
+    const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     // Tier logic
     const tierMap = {
@@ -713,18 +713,19 @@ function EstimateToolView() {
     if (form.svcMosquito)
       approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
     if (form.svcTermiteBait) approx.termiteBait = 50;
-    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 55 : 45;
+    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 69 : 49;
 
-    const recurringMonthlyBefore = Object.values(approx).reduce(
-      (s, v) => s + v,
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0);
+    const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
+      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(
-      recurringMonthlyBefore * (1 - tier.discount),
+      discountableRecurringMonthlyBefore * (1 - tier.discount) + separateRecurringMonthly,
     );
     const annualRecurring = recurringMonthly * 12;
     const annualSavings = Math.round(
-      recurringMonthlyBefore * tier.discount * 12,
+      discountableRecurringMonthlyBefore * tier.discount * 12,
     );
 
     // Count one-time services
@@ -747,7 +748,7 @@ function EstimateToolView() {
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,

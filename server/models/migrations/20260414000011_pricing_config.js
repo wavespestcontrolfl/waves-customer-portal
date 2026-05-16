@@ -189,7 +189,7 @@ exports.up = async function(knex) {
       { service_key: 'palm_injection', tier_qualifier: false, max_discount_pct: null, exclude_from_pct_discount: true, flat_credit: 10.00, flat_credit_min_tier: 'gold', notes: 'Flat $10/palm/yr credit for Gold+. Not a tier qualifier.' },
       { service_key: 'mosquito', tier_qualifier: true, max_discount_pct: null, exclude_from_pct_discount: false, flat_credit: null, flat_credit_min_tier: null, notes: 'Full discount applies' },
       { service_key: 'termite_bait', tier_qualifier: true, max_discount_pct: null, exclude_from_pct_discount: false, flat_credit: null, flat_credit_min_tier: null, notes: 'Full discount applies' },
-      { service_key: 'rodent_bait', tier_qualifier: false, max_discount_pct: null, exclude_from_pct_discount: true, flat_credit: null, flat_credit_min_tier: null, notes: 'Excluded from % discounts. $50 setup credit handled separately.' },
+      { service_key: 'rodent_bait', tier_qualifier: false, max_discount_pct: null, exclude_from_pct_discount: true, flat_credit: null, flat_credit_min_tier: null, notes: 'Fully excluded from WaveGuard credits, coupons, setup credits, discounts, and tier benefits.' },
     ]);
   }
 };

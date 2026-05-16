@@ -177,7 +177,7 @@ console.log(`  Lawn Enhanced @ Platinum: ${pct(disc.effectiveDiscount)} (should 
 
 // Rodent (excluded from %)
 disc = getEffectiveDiscount('rodent_bait', goldTier);
-console.log(`  Rodent Bait @ Gold: ${pct(disc.effectiveDiscount)} discount (should be 0%) + setup credit: $${disc.setupCredit || 0}`);
+console.log(`  Rodent Bait @ Gold: ${pct(disc.effectiveDiscount)} discount (should be 0%) + setup credit: $${disc.setupCredit || 0} (should be $0)`);
 
 // Palm (excluded, flat credit)
 disc = getEffectiveDiscount('palm_injection', goldTier);

@@ -1372,10 +1372,9 @@ function priceRodentBait(property, options = {}) {
 // ============================================================
 // RODENT TRAPPING (One-Time)
 // ============================================================
-// Base price = setup visit + 2 included follow-up trap checks. Final price
-// adjusts for home size, lot size, rodent pressure, and optional emergency
-// surcharge. Additional follow-ups beyond the 2 included billed via
-// priceRodentTrappingFollowups().
+// Base price = setup visit + unlimited callbacks / trap checks during the
+// active trapping window. Final price adjusts for home size, lot size, rodent
+// pressure, and optional emergency surcharge.
 //
 // Inputs:
 //   property: { footprint, lotSqFt, features }
@@ -1426,8 +1425,19 @@ function priceRodentTrapping(property, options = {}) {
   }
 
   const rounded = Math.round(raw / 5) * 5;
-  const customRecommended = !!(homeBracket.customRecommended || lotBracket.customRecommended);
+  const ceilingHit = rounded >= cfg.ceilingBeforeCustom;
+  const customRecommended = !!(homeBracket.customRecommended || lotBracket.customRecommended || ceilingHit);
   const price = Math.max(cfg.floor, Math.min(cfg.ceilingBeforeCustom, rounded));
+  const activeWindowDays = Number(cfg.activeWindowDays) || 14;
+  const unlimitedFollowUps = cfg.includedFollowUps === 'unlimited';
+  const includedDetail = unlimitedFollowUps
+    ? `Unlimited trap checks/callbacks for ${activeWindowDays} days`
+    : `Setup + ${cfg.includedFollowUps} follow-ups`;
+  const customQuoteReason = ceilingHit
+    ? `Rodent trapping reached the $${cfg.ceilingBeforeCustom} pricing ceiling`
+    : customRecommended
+      ? 'Large home or lot requires custom rodent trapping review'
+      : null;
 
   return {
     service: 'rodent_trapping',
@@ -1440,29 +1450,51 @@ function priceRodentTrapping(property, options = {}) {
     emergency,
     emergencySurcharge: Math.round(emergencySurcharge),
     includedFollowUps: cfg.includedFollowUps,
+    activeWindowDays,
+    unlimitedCallbacks: unlimitedFollowUps,
     customRecommended,
-    detail: `Setup + ${cfg.includedFollowUps} follow-ups | ${pressure} pressure${emergency ? ' | EMERGENCY' : ''}`,
+    requiresCustomQuote: ceilingHit,
+    quoteRequired: ceilingHit,
+    customQuoteReason,
+    reason: ceilingHit ? customQuoteReason : null,
+    detail: `${includedDetail} | ${pressure} pressure${emergency ? ' | EMERGENCY' : ''}`,
   };
 }
 
 // ============================================================
 // RODENT TRAPPING — ADDITIONAL FOLLOW-UP VISITS
 // ============================================================
-// Base trapping price includes setup + 2 follow-ups. Use this for additional
-// checks on active infestations beyond the included visits.
-function priceRodentTrappingFollowups(count = 1) {
+// Base trapping price includes unlimited checks during the active trapping
+// window. This legacy function now returns an included $0 line for callers
+// that still pass explicit follow-up counts.
+function priceRodentTrappingFollowups(count = 1, options = {}) {
   const n = Math.max(0, Math.floor(count));
   if (n === 0) return null;
 
-  const perVisit = RODENT.trapping.additionalFollowUpRate;
-  const price = n * perVisit;
+  const withinActiveWindow = options.withinActiveWindow !== false;
+  const activeWindowDays = Number(RODENT.trapping.activeWindowDays) || 14;
+  if (withinActiveWindow) {
+    return {
+      service: 'rodent_trapping_followup',
+      count: n,
+      perVisit: 0,
+      price: 0,
+      included: true,
+      activeWindowDays,
+      detail: `${n} trap check${n === 1 ? '' : 's'} included during ${activeWindowDays}-day active trapping window`,
+    };
+  }
 
   return {
     service: 'rodent_trapping_followup',
     count: n,
-    perVisit,
-    price,
-    detail: `${n} additional follow-up${n === 1 ? '' : 's'} @ $${perVisit}/ea`,
+    perVisit: 0,
+    price: 0,
+    requiresCustomQuote: true,
+    quoteRequired: true,
+    customQuoteReason: 'Trap checks outside the active trapping window require custom review',
+    reason: 'Trap checks outside the active trapping window require custom review',
+    detail: `${n} out-of-window trap check${n === 1 ? '' : 's'} require custom review`,
   };
 }
 
@@ -2962,17 +2994,15 @@ function calculateRodentGuaranteeCombo(config = {}) {
   const GUARANTEE_PREMIUM = { 12: 0.15, 24: 0.25 };
   const term = GUARANTEE_PREMIUM[guaranteeTerm] ? guaranteeTerm : 12;
   const guaranteePremiumRate = GUARANTEE_PREMIUM[term];
-  const BUNDLE_DISCOUNT = 0.10;
-
   const baitTotal = baitQuarterly * (term === 24 ? 8 : 4);
   const componentTotal = exclusion.price + baitTotal;
-  const discountedComponents = componentTotal * (1 - BUNDLE_DISCOUNT);
-  const guaranteeSurcharge = discountedComponents * guaranteePremiumRate;
-  const totalPackagePrice = discountedComponents + guaranteeSurcharge;
+  const bundleDiscount = 0;
+  const guaranteeSurcharge = componentTotal * guaranteePremiumRate;
+  const totalPackagePrice = componentTotal + guaranteeSurcharge;
 
   const MINIMUM_COMBO = { 12: 695, 24: 995 };
   const finalPrice = Math.max(MINIMUM_COMBO[term], _round5(totalPackagePrice));
-  const upfrontRevenue = exclusion.price * (1 - BUNDLE_DISCOUNT) + guaranteeSurcharge;
+  const upfrontRevenue = exclusion.price + guaranteeSurcharge;
 
   return {
     service: 'rodent_guarantee_combo',
@@ -2983,7 +3013,8 @@ function calculateRodentGuaranteeCombo(config = {}) {
       exclusionPrice: exclusion.price,
       baitStationQuarterly: baitQuarterly,
       baitStationTotal: baitTotal,
-      bundleDiscount: BUNDLE_DISCOUNT,
+      bundleDiscount,
+      baitExcludedFromBundleDiscount: true,
       guaranteePremium: guaranteePremiumRate,
       guaranteeSurcharge: _round5(guaranteeSurcharge),
     },
@@ -3025,9 +3056,10 @@ function applyRodentBundle(componentTotal, bundle) {
   if (!bundle) return { discounted: componentTotal, savings: 0 };
   const discounted = componentTotal * (1 - bundle.discount);
   const floored = Math.max(bundle.floor, Math.round(discounted / 10) * 10);
+  const finalTotal = Math.min(componentTotal, floored);
   return {
-    discounted: floored,
-    savings: Math.round(componentTotal - floored),
+    discounted: finalTotal,
+    savings: Math.max(0, Math.round(componentTotal - finalTotal)),
   };
 }
 

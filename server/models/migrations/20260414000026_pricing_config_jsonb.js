@@ -106,9 +106,9 @@ exports.up = async function(knex) {
 
     // ── Rodent ──
     { config_key: 'rodent_monthly', name: 'Rodent Bait Monthly Tiers', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: { monthly: 75, max_score: 1 }, medium: { monthly: 89, max_score: 2 }, large: { monthly: 109 } }) },
-    { config_key: 'rodent_trapping', name: 'Rodent Trapping Base', category: 'rodent', sort_order: 2, data: JSON.stringify({ base: 350, floor: 350 }) },
+    { config_key: 'rodent_trapping', name: 'Rodent Trapping Base', category: 'rodent', sort_order: 2, data: JSON.stringify({ base: 350, floor: 350, included_followups: 'unlimited', active_window_days: 14, additional_followup_rate: 0 }) },
     { config_key: 'rodent_score_factors', name: 'Rodent Score Factors', category: 'rodent', sort_order: 3, data: JSON.stringify({ footprint_2500plus: 2, footprint_1800plus: 1, lot_20000plus: 2, lot_12000plus: 1, near_water: 1, trees_heavy: 1 }) },
-    { config_key: 'rodent_rules', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 4, data: JSON.stringify({ tier_qualifier: false, exclude_from_pct_discount: true, setup_credit: 50 }) },
+    { config_key: 'rodent_rules', name: 'Rodent WaveGuard Rules', category: 'rodent', sort_order: 4, data: JSON.stringify({ tier_qualifier: false, exclude_from_pct_discount: true, setup_credit: 0 }) },
 
     // ── One-Time Services ──
     { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 1, data: JSON.stringify({ markup_multiplier: 1.30, floor: 150 }) },
