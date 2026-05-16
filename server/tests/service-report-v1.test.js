@@ -137,4 +137,83 @@ describe('service report v1', () => {
     expect(data.serviceData).toBeUndefined();
     expect(data.zones.map((zone) => zone.label)).toEqual(['Perimeter']);
   });
+
+  test('v1 data exposes completion panel fields used by the report', async () => {
+    const fixtures = {
+      service_products: [{
+        id: 'product-1',
+        product_name: 'Demand CS',
+        product_category: 'insecticide',
+        active_ingredient: 'Lambda-cyhalothrin',
+        application_rate: '0.800',
+        rate_unit: 'fl_oz',
+        total_amount: '2.000',
+        amount_unit: 'fl_oz',
+        created_at: '2026-05-15T14:00:00Z',
+      }],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [{
+        id: 'photo-1',
+        s3_url: 'https://example.com/photo.jpg',
+        caption: 'After service',
+        created_at: '2026-05-15T14:15:00Z',
+      }],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-1',
+      customer_id: 'customer-1',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-15',
+      first_name: 'Van',
+      last_name: 'Lee',
+      technician_name: 'Avery Tech',
+      customer_interaction: 'spoke',
+      soil_temp: 82,
+      thatch_measurement: 0.5,
+      soil_ph: 6.8,
+      soil_moisture: 33,
+      areas_serviced: JSON.stringify(['Perimeter', 'Garage']),
+      structured_notes: JSON.stringify({
+        customerRecap: 'Completed the exterior service and addressed activity around the garage.',
+        timeOnSite: '42:00',
+        protocolActionsCompleted: ['Applied perimeter band'],
+        observations: ['Pest activity noted'],
+        recommendations: ['Seal entry gaps near garage'],
+      }),
+      service_data: JSON.stringify({
+        protocol: {
+          actions: ['Cobweb sweep'],
+          observations: ['Standing water found'],
+          recommendations: ['Irrigation adjustment needed'],
+          visitOutcome: 'follow_up_needed',
+        },
+      }),
+    }, 'token-1', knex);
+
+    expect(data.summary).toMatch(/Completed the exterior service/);
+    expect(data.customerInteraction).toBe('spoke');
+    expect(data.visitOutcome).toBe('follow_up_needed');
+    expect(data.serviceAreas).toEqual(['Perimeter', 'Garage']);
+    expect(data.protocol.actions).toEqual(['Cobweb sweep', 'Applied perimeter band']);
+    expect(data.findings.map((finding) => finding.title)).toEqual(['Standing water found', 'Pest activity noted']);
+    expect(data.recommendations).toEqual(['Irrigation adjustment needed', 'Seal entry gaps near garage']);
+    expect(data.metrics.find((metric) => metric.key === 'on_site_min').value).toBe(42);
+    expect(data.measurements).toEqual({ soilTemp: 82, thatch: 0.5, soilPh: 6.8, moisture: 33 });
+    expect(data.applications[0].product.name).toBe('Demand CS');
+    expect(data.photos[0].url).toBe('https://example.com/photo.jpg');
+  });
 });

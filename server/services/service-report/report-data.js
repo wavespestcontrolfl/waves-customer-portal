@@ -87,6 +87,10 @@ function minutesFromElapsed(value) {
   return Number.isFinite(numeric) ? Math.round(numeric) : null;
 }
 
+function hasRecordedMeasurement(measurements) {
+  return Object.values(measurements || {}).some((value) => value != null && value !== '');
+}
+
 function methodFromProduct(product, serviceLine) {
   const raw = String(product.application_method || product.method || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
   if (raw && raw !== 'null') return raw;
@@ -282,6 +286,12 @@ async function buildReportV1Data(service, token, knex = db) {
     ...protocol.recommendations,
     ...findings.map((finding) => finding.recommendation).filter(Boolean),
   ]);
+  const measurements = {
+    soilTemp: service.soil_temp,
+    thatch: service.thatch_measurement,
+    soilPh: service.soil_ph,
+    moisture: service.soil_moisture,
+  };
   const photoPayload = await Promise.all(photos.map(async (photo) => ({
     id: photo.id,
     url: await photoUrl(photo),
@@ -309,6 +319,9 @@ async function buildReportV1Data(service, token, knex = db) {
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     visitOutcome: protocol.visitOutcome || 'completed',
+    summary: structured.customerRecap || '',
+    customerInteraction: service.customer_interaction || structured.customerInteraction || null,
+    serviceAreas: areaLabels,
     pressureIndex,
     metrics: [
       { key: 'on_site_min', label: 'On-site', value: onSiteMin, unit: 'min', format: 'integer' },
@@ -323,6 +336,7 @@ async function buildReportV1Data(service, token, knex = db) {
       ...parseJsonObject(service.conditions),
       ...parseJsonObject(service.weather_data),
     },
+    measurements: hasRecordedMeasurement(measurements) ? measurements : null,
     findings,
     recommendations,
     protocol,
@@ -332,10 +346,7 @@ async function buildReportV1Data(service, token, knex = db) {
     legacy: {
       notes: service.technician_notes || '',
       measurements: {
-        soilTemp: service.soil_temp,
-        thatch: service.thatch_measurement,
-        soilPh: service.soil_ph,
-        moisture: service.soil_moisture,
+        ...measurements,
       },
     },
   };
@@ -349,6 +360,7 @@ module.exports = {
   locationAreaLabels,
   taggedNoteLines,
   minutesFromElapsed,
+  hasRecordedMeasurement,
   methodFromProduct,
   defaultGeometry,
   defaultZones,

@@ -34,6 +34,12 @@ function valueOrDash(value, suffix = '') {
   return `${value}${suffix}`;
 }
 
+function humanize(value) {
+  return String(value || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function conditionRows(conditions = {}) {
   return [
     ['Air temp', valueOrDash(conditions.temp_f ?? conditions.temp, ' deg F')],
@@ -43,6 +49,15 @@ function conditionRows(conditions = {}) {
     ['Sky', valueOrDash(conditions.sky ?? conditions.cloudCover)],
     ['Source', valueOrDash(conditions.source)],
   ];
+}
+
+function measurementRows(measurements = {}) {
+  return [
+    ['Soil temp', valueOrDash(measurements.soilTemp, ' deg F')],
+    ['Thatch', valueOrDash(measurements.thatch, ' in')],
+    ['Soil pH', valueOrDash(measurements.soilPh)],
+    ['Moisture', valueOrDash(measurements.moisture, '%')],
+  ].filter(([, value]) => value !== '-');
 }
 
 function actionButtonStyle(kind = 'plain') {
@@ -116,7 +131,14 @@ function ServiceReportV1({ data, token }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? window.location.href : `/report/${token}`;
   const conditions = useMemo(() => conditionRows(data.conditions), [data.conditions]);
+  const measurements = useMemo(() => measurementRows(data.measurements), [data.measurements]);
   const serviceNotes = String(data.legacy?.notes || '').trim();
+  const summary = String(data.summary || '').trim();
+  const protocolActions = Array.isArray(data.protocol?.actions) ? data.protocol.actions : [];
+  const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas : [];
+  const customerInteraction = data.customerInteraction ? humanize(data.customerInteraction) : '';
+  const visitOutcome = data.visitOutcome && data.visitOutcome !== 'completed' ? humanize(data.visitOutcome) : '';
+  const showVisitSummary = summary || protocolActions.length || serviceAreas.length || customerInteraction || visitOutcome;
 
   const share = async () => {
     if (navigator.share) {
@@ -238,6 +260,7 @@ function ServiceReportV1({ data, token }) {
         .sr-cell { background: #fff; padding: 14px; min-height: 72px; }
         .sr-cell-label { font-size: 12px; color: var(--soft); }
         .sr-cell-value { margin-top: 6px; font-size: 15px; color: var(--text); }
+        .sr-summary { margin: 0 0 16px; color: #404040; line-height: 1.6; white-space: pre-wrap; }
         .sr-list { display: grid; gap: 10px; }
         .sr-row {
           border: .5px solid var(--line);
@@ -316,6 +339,45 @@ function ServiceReportV1({ data, token }) {
           ))}
         </section>
 
+        {showVisitSummary && (
+          <section className="sr-section">
+            <h2>Visit summary</h2>
+            {summary && <p className="sr-summary">{summary}</p>}
+            {(serviceAreas.length > 0 || customerInteraction || visitOutcome) && (
+              <div className="sr-grid-3" style={{ marginBottom: protocolActions.length ? 14 : 0 }}>
+                {serviceAreas.length > 0 && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Service areas</div>
+                    <div className="sr-cell-value">{serviceAreas.join(', ')}</div>
+                  </div>
+                )}
+                {customerInteraction && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Customer interaction</div>
+                    <div className="sr-cell-value">{customerInteraction}</div>
+                  </div>
+                )}
+                {visitOutcome && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Visit outcome</div>
+                    <div className="sr-cell-value">{visitOutcome}</div>
+                  </div>
+                )}
+              </div>
+            )}
+            {protocolActions.length > 0 && (
+              <div className="sr-list">
+                {protocolActions.map((action) => (
+                  <div className="sr-row" key={action}>
+                    <div className="sr-row-title">{action}</div>
+                    <div className="sr-pill">Completed</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
         {data.mapSvg && (
           <section className="sr-section">
             <h2>Treatment map</h2>
@@ -342,9 +404,9 @@ function ServiceReportV1({ data, token }) {
           </div>
 
           <div className="sr-section" style={{ marginTop: 18 }}>
-            <h2>Conditions</h2>
+            <h2>Conditions and measurements</h2>
             <div className="sr-grid-3">
-              {conditions.map(([label, value]) => (
+              {[...conditions, ...measurements].map(([label, value]) => (
                 <div className="sr-cell" key={label}>
                   <div className="sr-cell-label">{label}</div>
                   <div className="sr-cell-value">{value}</div>

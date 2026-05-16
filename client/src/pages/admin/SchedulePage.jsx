@@ -279,6 +279,50 @@ async function generateAiReport(payload) {
   return body || {};
 }
 
+function dataUrlToBlob(dataUrl) {
+  const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/);
+  if (!match) return null;
+  const mimeType = match[1] || "image/jpeg";
+  const isBase64 = !!match[2];
+  const raw = isBase64 ? atob(match[3]) : decodeURIComponent(match[3]);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+  return new Blob([bytes], { type: mimeType });
+}
+
+async function uploadCompletionPhotos(serviceId, photos = []) {
+  if (!serviceId || !Array.isArray(photos) || photos.length === 0) {
+    return { uploaded: 0, failed: 0 };
+  }
+  const token =
+    localStorage.getItem("waves_admin_token") || localStorage.getItem("adminToken");
+  let uploaded = 0;
+  let failed = 0;
+  for (let index = 0; index < photos.length; index += 1) {
+    const photo = photos[index];
+    const blob = dataUrlToBlob(photo?.data);
+    if (!blob) {
+      failed += 1;
+      continue;
+    }
+    const filename = String(photo?.name || `service-photo-${index + 1}.jpg`)
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .slice(0, 120);
+    const fd = new FormData();
+    fd.append("photo", blob, filename || `service-photo-${index + 1}.jpg`);
+    fd.append("photoType", "after");
+    fd.append("sortOrder", String(index));
+    const res = await fetch(`${API_BASE}/tech/services/${serviceId}/photos`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: fd,
+    });
+    if (res.ok) uploaded += 1;
+    else failed += 1;
+  }
+  return { uploaded, failed };
+}
+
 function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 }
@@ -5420,8 +5464,6 @@ export function CompletionPanel({
       if (customerInteraction === "concern" && customerConcern) {
         body.customerConcernText = customerConcern;
       }
-      // Photos captured but not sent in JSON body — server doesn't process them yet
-      // TODO: upload photos to S3 separately when backend photo support is added
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
       }
@@ -5436,6 +5478,20 @@ export function CompletionPanel({
         body.invoiceAlreadySent = true;
       }
       const result = await onSubmit(service.id, body);
+      if (servicePhotos.length > 0) {
+        try {
+          const photoResult = await uploadCompletionPhotos(service.id, servicePhotos);
+          if (photoResult.failed > 0) {
+            alert(
+              `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
+            );
+          }
+        } catch (photoErr) {
+          alert(
+            `Service completed, but photos failed to upload: ${photoErr.message || "Upload failed"}`,
+          );
+        }
+      }
       localStorage.removeItem(completionDraftKey(service.id));
       setCompletionResult(result || null);
       setSuccess(true);
