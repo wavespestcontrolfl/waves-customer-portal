@@ -377,6 +377,36 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN — Retry queued service report v1 email deliveries
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { processDueServiceReportDeliveries } = require('./service-report/delivery-queue');
+      const result = await processDueServiceReportDeliveries();
+      if (result.claimed || result.sent || result.skipped || result.failed || result.requeued || result.recovered) {
+        logger.info(`Service report deliveries: ${result.sent} sent, ${result.requeued} queued for retry, ${result.skipped} skipped, ${result.failed} failed, ${result.recovered} recovered`);
+      }
+    } catch (err) {
+      logger.error(`Service report delivery cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 2:45AM — Build anonymized service report neighborhood pressure rolls
+  // =========================================================================
+  cron.schedule('45 2 * * *', async () => {
+    try {
+      const { buildNeighborhoodPressureAggregates } = require('./service-report/neighborhood-pressure-aggregates');
+      const result = await buildNeighborhoodPressureAggregates();
+      if (result.inserted > 0) {
+        logger.info(`[service-report-pressure] Built ${result.inserted} neighborhood aggregate row(s) for ${result.periodStart} to ${result.periodEnd}`);
+      }
+    } catch (err) {
+      logger.error(`Service report neighborhood pressure aggregate failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MINUTES — Send scheduled estimates whose time has arrived
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {

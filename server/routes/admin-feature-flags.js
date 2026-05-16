@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { isValidFeatureFlagKey } = require('../services/feature-flags');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -52,8 +53,8 @@ router.post('/toggle', requireAdmin, async (req, res, next) => {
     if (!user_id || !flag_key || typeof enabled !== 'boolean') {
       return res.status(400).json({ error: 'user_id, flag_key, enabled required' });
     }
-    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(flag_key)) {
-      return res.status(400).json({ error: 'flag_key must be kebab-case, 1–64 chars' });
+    if (!isValidFeatureFlagKey(flag_key)) {
+      return res.status(400).json({ error: 'flag_key must use lowercase letters, numbers, hyphens, or underscores, 1-64 chars' });
     }
     const user = await db('technicians').where({ id: user_id }).first();
     if (!user) return res.status(404).json({ error: 'User not found' });
