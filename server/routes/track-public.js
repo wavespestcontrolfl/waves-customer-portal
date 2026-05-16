@@ -14,9 +14,11 @@
  *     other edge case (tech_id null, customer missing lat/lng, window
  *     missing, photos missing) returns a well-shaped response with
  *     nullable fields. TrackPage handles them.
- *   - Address is not stripped of unit/apt because unit/apt lives on
- *     customers.address_line2, which we never return. Only
- *     address_line1 (street) goes out.
+ *   - Address: full property address (line1 + line2 + city/state/zip)
+ *     is returned. The customer is viewing their own appointment, so
+ *     this is information they already own. Earlier versions returned
+ *     only address_line1; full address was re-added so the customer
+ *     can confirm we're heading to the right place at a glance.
  *   - Completion summary joins use the scheduled_service_id FK on
  *     service_records (migration 20260427000007). Same canonical path
  *     the tech-track upload route uses — guarantees we surface the
@@ -250,6 +252,10 @@ router.get('/:token', async (req, res, next) => {
         's.track_token_expires_at',
         'c.first_name as cust_first_name',
         'c.address_line1',
+        'c.address_line2',
+        'c.city',
+        'c.state',
+        'c.zip',
         'c.latitude',
         'c.longitude',
         't.name as tech_name',
@@ -294,6 +300,10 @@ router.get('/:token', async (req, res, next) => {
         lat: row.latitude != null ? parseFloat(row.latitude) : null,
         lng: row.longitude != null ? parseFloat(row.longitude) : null,
         addressLine1: row.address_line1 || null,
+        addressLine2: row.address_line2 || null,
+        city: row.city || null,
+        state: row.state || null,
+        zip: row.zip || null,
       },
       service: {
         type: row.service_type,
