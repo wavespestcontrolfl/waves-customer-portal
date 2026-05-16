@@ -10,6 +10,8 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
+const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 
 // Rate-limit public report access to deter token brute-forcing.
 const reportLimiter = rateLimit({
@@ -23,6 +25,37 @@ const reportLimiter = rateLimit({
 router.use(reportLimiter);
 
 const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
+const ALLOWED_REPORT_EVENTS = new Set([
+  'service_report_viewed',
+  'ai_summary_viewed',
+  'ai_summary_personality_viewed',
+  'ai_summary_personality_changed',
+  'unfiltered_summary_opened',
+  'pressure_trend_viewed',
+  'pressure_trend_expanded',
+  'lawn_assessment_viewed',
+  'property_defense_status_viewed',
+  'bug_file_viewed',
+  'why_activity_viewed',
+  'the_one_thing_viewed',
+  'weather_call_viewed',
+  'report_view_mode_changed',
+  'reentry_timer_viewed',
+  'reentry_timer_completed',
+  'report_question_asked',
+  'sms_sent',
+  'mms_sent',
+  'mms_fallback_to_sms',
+  'sms_preview_generated',
+  'sms_preview_failed',
+  'pdf_downloaded',
+  'share_link_copied',
+  'map_interacted',
+  'photo_opened',
+  'followup_requested',
+  'review_request_clicked',
+]);
+const ALLOWED_REPORT_EVENT_CHANNELS = new Set(['public_report', 'portal', 'email', 'sms', 'wallet']);
 
 async function trackServiceReportView(service) {
   if (!service?.id || service.report_viewed_at) return;
@@ -32,6 +65,156 @@ async function trackServiceReportView(service) {
     action: 'report_viewed',
     description: `${service.first_name} ${service.last_name} viewed service report for ${service.service_type}`,
   }).catch(() => {});
+}
+
+function hashPublicIp(value) {
+  const ip = String(value || '').trim();
+  if (!ip) return null;
+  const secret = process.env.SERVICE_REPORT_EVENT_SECRET
+    || process.env.SERVICE_REPORT_TOKEN_SECRET
+    || process.env.SESSION_SECRET
+    || 'waves-service-report-events';
+  return crypto.createHmac('sha256', secret).update(ip).digest('hex');
+}
+
+async function recordServiceReportEvent(service, eventName, channel, req, metadata = {}) {
+  if (!service?.id || !ALLOWED_REPORT_EVENTS.has(eventName) || !ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) return;
+  await db('service_report_events').insert({
+    service_record_id: service.id,
+    customer_id: service.customer_id || null,
+    event_name: eventName,
+    channel,
+    metadata: JSON.stringify(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+    user_agent: String(req.get('user-agent') || '').slice(0, 1000) || null,
+    ip_hash: hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress),
+  }).catch((err) => {
+    logger.warn(`[reports-public] service_report_event insert failed: ${err.message}`);
+  });
+}
+
+async function buildServiceReportV1ResponseData(service, token, { mode = 'live' } = {}) {
+  const data = await buildReportV1Data(service, token);
+  if (service?.report_template_version !== 'service_report_v1') return data;
+  const dynamicContext = await buildServiceReportDynamicContext({
+    recordId: service.id,
+    mode,
+  });
+  return { ...data, dynamicContext };
+}
+
+function serviceDateText(value) {
+  if (!value) return '';
+  const raw = String(value);
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  const date = dateOnly
+    ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12))
+    : new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toLocaleDateString('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function serviceTimeText(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return text;
+  const hour = Number(match[1]);
+  const minute = match[2];
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const displayHour = hour % 12 || 12;
+  return `${displayHour}:${minute} ${suffix}`;
+}
+
+function pickRecommendedFinding(findings = []) {
+  const rank = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+  return [...findings]
+    .sort((a, b) => (rank[String(b.severity || '').toLowerCase()] || 0) - (rank[String(a.severity || '').toLowerCase()] || 0))
+    .find((finding) => String(finding.recommendation || '').trim()) || null;
+}
+
+function reportEnumLabel(value) {
+  const key = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const labels = {
+    ghost_ant: 'ghost ants',
+    american_roach: 'American roaches',
+    spider: 'spiders',
+    perimeter_spray: 'Perimeter spray',
+    bait_placement: 'Bait placement',
+  };
+  return labels[key] || key.replace(/_/g, ' ');
+}
+
+function answerServiceReportQuestion({ question, data, nextAppointment } = {}) {
+  const q = String(question || '').toLowerCase();
+  const dynamic = data?.dynamicContext || {};
+  const lawnAssessment = data?.lawnAssessment || null;
+  const findings = Array.isArray(data?.findings) ? data.findings : [];
+  const applications = Array.isArray(data?.applications) ? data.applications : [];
+  const recommendation = dynamic.aiSummary?.recommendedNextStep?.text
+    || pickRecommendedFinding(findings)?.recommendation;
+
+  if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside|irrigation)\b/.test(q)) {
+    if (dynamic.reentry?.customerSummary) return dynamic.reentry.customerSummary;
+    const advisory = data?.advisory || {};
+    return `Re-entry guidance: ${advisory.exterior_reentry_min ?? 0} min outside, ${advisory.interior_reentry_min ?? 0} min inside.${advisory.pet_advisory ? ` ${advisory.pet_advisory}` : ''}`;
+  }
+
+  if (/\b(pressure|trend|better|worse|score|index|improving|lawn|turf|weed|fungus|thatch)\b/.test(q)) {
+    if (lawnAssessment?.scores) {
+      const scores = lawnAssessment.scores;
+      return [
+        lawnAssessment.customerSummary,
+        `Current lawn health is ${scores.overallScore}% overall.`,
+        `Turf density ${scores.turfDensity}%, weed suppression ${scores.weedSuppression}%, fungus control ${scores.fungusControl}%, thatch ${scores.thatchScore}%.`,
+      ].filter(Boolean).join(' ');
+    }
+    return dynamic.pressureTrend?.customerSummary
+      || `This visit's pressure index is ${Number(data?.pressureIndex || 0).toFixed(1)} on a 0-5 scale. Lower is better.`;
+  }
+
+  if (/\b(treat|treated|product|application|spray|bait|chemical|applied)\b/.test(q)) {
+    if (!applications.length) return 'No product applications were recorded on this report.';
+    return applications.slice(0, 3).map((app) => {
+      const product = app.product?.name || 'Treatment';
+      const purpose = app.methodLabel || String(app.method || 'application').replace(/_/g, ' ');
+      const targets = Array.isArray(app.targets) && app.targets.length ? ` for ${app.targets.map(reportEnumLabel).join(', ')}` : '';
+      return `${product}: ${purpose}${targets}.`;
+    }).join(' ');
+  }
+
+  if (/\b(do|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q)) {
+    return recommendation
+      ? `Recommended next step: ${recommendation}`
+      : 'No customer action was recommended on this report.';
+  }
+
+  if (/\b(next|upcoming|appointment|appt|schedule|scheduled|come back)\b/.test(q)) {
+    if (!nextAppointment) {
+      return 'I do not see another appointment scheduled yet. Reply to the text message or call Waves if you want us to set one up.';
+    }
+    const window = [nextAppointment.window_start, nextAppointment.window_end].filter(Boolean).map(serviceTimeText).join(' to ');
+    return `Your next appointment is ${serviceDateText(nextAppointment.scheduled_date)} for ${nextAppointment.service_type || 'service'}${window ? `, window ${window}` : ''}.`;
+  }
+
+  if (/\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q)) {
+    if (lawnAssessment?.observations) return lawnAssessment.observations;
+    if (!findings.length) return 'No issues were documented during this visit.';
+    return findings.slice(0, 3).map((finding) => {
+      const detail = finding.detail ? ` ${finding.detail}` : '';
+      return `${finding.title}.${detail}`;
+    }).join(' ');
+  }
+
+  const summary = dynamic.aiSummary;
+  if (summary?.headline || summary?.body) {
+    return [summary.headline, summary.body].filter(Boolean).join(' ');
+  }
+  return 'This service is complete. You can review the treatment map, applications, findings, and customer advisory on this report.';
 }
 
 async function findProjectByReportSegment(segment) {
@@ -154,6 +337,132 @@ router.get('/project/:token/data', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/reports/:token/events — token-scoped report interaction events.
+router.post('/:token/events', async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    const service = await db('service_records')
+      .where({ report_view_token: req.params.token })
+      .select('id', 'customer_id', 'report_template_version')
+      .first();
+    if (!service || service.report_template_version !== 'service_report_v1') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const eventName = String(req.body?.eventName || '').trim();
+    const channel = String(req.body?.channel || 'public_report').trim();
+    if (!ALLOWED_REPORT_EVENTS.has(eventName)) {
+      return res.status(400).json({ error: 'Unknown report event' });
+    }
+    if (!ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) {
+      return res.status(400).json({ error: 'Unknown report event channel' });
+    }
+    const metadata = req.body?.metadata && typeof req.body.metadata === 'object' && !Array.isArray(req.body.metadata)
+      ? req.body.metadata
+      : {};
+
+    await recordServiceReportEvent(service, eventName, channel, req, metadata);
+
+    return res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/reports/:token/ask — customer-facing, token-scoped report Q&A.
+router.post('/:token/ask', async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    const question = String(req.body?.question || '').trim();
+    if (!question) return res.status(400).json({ error: 'question_required' });
+    if (question.length > 500) return res.status(400).json({ error: 'question_too_long' });
+
+    const service = await db('service_records')
+      .where({ report_view_token: req.params.token })
+      .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+      .select('service_records.*', 'customers.first_name', 'customers.last_name',
+        'customers.address_line1', 'customers.address_line2',
+        'customers.city', 'customers.state', 'customers.zip',
+        'customers.has_left_google_review',
+        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        'technicians.name as technician_name',
+        'technicians.photo_url as technician_photo_url',
+        'technicians.avatar_url as technician_avatar_url',
+        'technicians.photo_s3_key as technician_photo_s3_key')
+      .first();
+
+    if (!service || service.report_template_version !== 'service_report_v1') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const [data, nextAppointment] = await Promise.all([
+      buildServiceReportV1ResponseData(service, req.params.token, { mode: 'live' }),
+      db('scheduled_services')
+        .where({ customer_id: service.customer_id })
+        .where('scheduled_date', '>=', etDateString())
+        .whereNotIn('status', ['cancelled', 'completed', 'complete'])
+        .orderBy('scheduled_date')
+        .orderBy('window_start')
+        .first('id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'status')
+        .catch(() => null),
+    ]);
+
+    const answer = answerServiceReportQuestion({ question, data, nextAppointment });
+    await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
+      question_length: question.length,
+    });
+    return res.json({ answer });
+  } catch (err) { next(err); }
+});
+
+// GET /api/reports/:token/preview.jpg — token-gated MMS preview image.
+router.get('/:token/preview.jpg', async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    const service = await db('service_records')
+      .where({ report_view_token: req.params.token })
+      .select('id', 'report_template_version')
+      .first();
+    if (!service || service.report_template_version !== 'service_report_v1') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const asset = await db('service_report_notification_assets')
+      .where({
+        service_record_id: service.id,
+        asset_type: 'sms_preview_image',
+      })
+      .orderBy('created_at', 'desc')
+      .first()
+      .catch(() => null);
+    if (!asset) return res.status(404).json({ error: 'preview_not_found' });
+
+    const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+    const config = require('../config');
+    if (!config.s3?.bucket) return res.status(404).json({ error: 'preview_not_found' });
+    const s3 = new S3Client({
+      region: config.s3?.region,
+      credentials: config.s3?.accessKeyId
+        ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
+        : undefined,
+    });
+    const object = await s3.send(new GetObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: asset.storage_key,
+    }));
+
+    res.setHeader('Content-Type', asset.content_type || 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=604800');
+    if (asset.byte_size) res.setHeader('Content-Length', String(asset.byte_size));
+    return object.Body.pipe(res);
+  } catch (err) { next(err); }
+});
+
 // GET /api/reports/:token — public PDF access (no auth)
 router.get('/:token', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -167,14 +476,29 @@ router.get('/:token', async (req, res, next) => {
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
-        'technicians.name as technician_name')
+        'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
+        'customers.has_left_google_review',
+        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        'technicians.name as technician_name',
+        'technicians.photo_url as technician_photo_url',
+        'technicians.avatar_url as technician_avatar_url',
+        'technicians.photo_s3_key as technician_photo_s3_key')
       .first();
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
     // Track first view
     await trackServiceReportView(service);
+    await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
+
+    if (service.report_template_version === 'service_report_v1') {
+      const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf' });
+      const pdf = await renderServiceReportV1Pdf(data, { token: req.params.token, req, logger });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(pdf);
+    }
 
     // Check if pre-generated PDF exists
     if (service.report_pdf_path) {
@@ -196,22 +520,59 @@ router.get('/:token', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/reports/:token/data — JSON report data (for the branded viewer page)
-router.get('/:token/data', async (req, res, next) => {
+// GET /api/reports/:token/map.svg — standalone v1 treatment map SVG
+router.get('/:token/map.svg', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
+  res.setHeader('Cache-Control', 'no-store');
   try {
-    // No address fields here — the viewer page does not need them, and leaking
-    // a home address on a public (tokenized) URL widens the blast radius if the
-    // token is shared or leaked.
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name',
-        'customers.city', 'customers.state',
-        'technicians.name as technician_name')
+        'customers.address_line1', 'customers.address_line2',
+        'customers.city', 'customers.state', 'customers.zip',
+        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        'technicians.name as technician_name',
+        'technicians.photo_url as technician_photo_url',
+        'technicians.avatar_url as technician_avatar_url',
+        'technicians.photo_s3_key as technician_photo_s3_key')
+      .first();
+
+    if (!service || service.report_template_version !== 'service_report_v1') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const data = await buildReportV1Data(service, req.params.token);
+    res.type('image/svg+xml');
+    return res.send(data.mapSvg || '');
+  } catch (err) { next(err); }
+});
+
+// GET /api/reports/:token/data — JSON report data (for the branded viewer page)
+router.get('/:token/data', async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    // This is the customer-facing document view. The token gates the report,
+    // and the document should mirror other customer documents by showing the
+    // service address.
+    const service = await db('service_records')
+      .where({ report_view_token: req.params.token })
+      .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+      .select('service_records.*', 'customers.first_name', 'customers.last_name',
+        'customers.address_line1', 'customers.address_line2',
+        'customers.city', 'customers.state', 'customers.zip',
+        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        'technicians.name as technician_name',
+        'technicians.photo_url as technician_photo_url',
+        'technicians.avatar_url as technician_avatar_url',
+        'technicians.photo_s3_key as technician_photo_s3_key')
       .first();
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
@@ -221,7 +582,7 @@ router.get('/:token/data', async (req, res, next) => {
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      return res.json(await buildReportV1Data(service, req.params.token));
+      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'live' }));
     }
 
     res.json({
