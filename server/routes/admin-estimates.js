@@ -582,9 +582,31 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
 
-    // Pull the same one-time service the auto-accept flow would have
-    // picked. Falls back to bookingServiceFor('') → Pest Control when the
-    // estimate carries no parseable one-time line.
+    // Status gate — only active offers can be booked. Drafts aren't real
+    // offers yet; declined/expired/archived are intentionally closed and
+    // shouldn't be quietly reopened by a self-schedule text.
+    if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) {
+      return res.status(400).json({
+        error: `Booking link can only be sent for sent/viewed/accepted estimates. Current status: ${estimate.status}.`,
+      });
+    }
+    if (estimate.archived_at) {
+      return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
+    }
+
+    // Invoice mode skips the booking flow by design — acceptance generates
+    // an invoice immediately and there's no slot to pick. Texting a /book
+    // URL would bypass the pay-link delivery the customer is expecting.
+    if (estimate.bill_by_invoice) {
+      return res.status(400).json({
+        error: 'Invoice mode is on for this estimate — booking link not applicable. Disable Invoice mode first.',
+      });
+    }
+
+    // Parse the same one-time line the auto-accept flow uses so we can
+    // pre-select the service in /book. A missing one-time line on a
+    // recurring estimate is a hard refusal: recurring customers belong in
+    // onboarding, not the self-booking flow.
     let oneTimeLabel = '';
     try {
       const estData = typeof estimate.estimate_data === 'string'
@@ -592,8 +614,33 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
         : estimate.estimate_data;
       const { oneTimeList } = acceptanceServiceLists(estData || {});
       oneTimeLabel = oneTimeList[0]?.name || '';
-    } catch (_) { /* fall through to default service */ }
+    } catch (_) { /* fall through to recurring-only refusal below */ }
+    if (!oneTimeLabel && Number(estimate.monthly_total || 0) > 0) {
+      return res.status(400).json({
+        error: 'No one-time service on this estimate — recurring offers route through onboarding, not /book.',
+      });
+    }
     const primarySvc = bookingServiceFor(oneTimeLabel);
+
+    // Reservation collision guard. If the estimate is already linked to a
+    // confirmed scheduled service, this customer has already picked a
+    // slot — texting a fresh /book URL would invite a second appointment.
+    try {
+      const estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : estimate.estimate_data;
+      const linkedSvcId = estData?.scheduled_service_id || null;
+      if (linkedSvcId) {
+        const linked = await db('scheduled_services')
+          .where({ id: linkedSvcId, status: 'confirmed' })
+          .first();
+        if (linked) {
+          return res.status(409).json({
+            error: `Customer already has a confirmed appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
+          });
+        }
+      }
+    } catch (_) { /* on parse failure fall through — no false positive */ }
 
     const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend`;
     const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
