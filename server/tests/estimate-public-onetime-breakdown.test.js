@@ -1,3 +1,7 @@
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+
+const jwt = require('jsonwebtoken');
+const config = require('../config');
 const {
   buildAcceptNotificationPayload,
   buildAcceptOfficeFallback,
@@ -9,6 +13,7 @@ const {
   normalizeOneTimeBreakdown,
   resolveAcceptOneTimeTotal,
   resolveEstimateDeclineGuard,
+  shouldApplyFirstViewSideEffects,
 } = require('../routes/estimate-public');
 
 function savedAdminEstimateData() {
@@ -637,5 +642,24 @@ describe('public estimate one-time breakdown', () => {
       adminBody: 'Rodent Service approved. Invoice was not sent automatically; office follow-up needed.',
       customerBody: 'Your Rodent Service estimate is approved. Our team will follow up with the invoice details.',
     }));
+  });
+
+  test('admin marker cookie suppresses first-view customer side effects', () => {
+    const token = jwt.sign(
+      { kind: 'admin_marker', sub: 'tech-1' },
+      config.jwt.secret,
+      { expiresIn: '1h' },
+    );
+    const req = {
+      headers: { cookie: `waves_admin=${encodeURIComponent(token)}` },
+    };
+
+    expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10')).toBe(false);
+  });
+
+  test('normal public requests still apply first-view customer side effects', () => {
+    const req = { headers: {} };
+
+    expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10')).toBe(true);
   });
 });

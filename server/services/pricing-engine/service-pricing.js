@@ -4,8 +4,17 @@
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
-  TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, URGENCY,
+  TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, URGENCY,
+  WAVEGUARD,
 } = require('./constants');
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function roundRatio(value) {
+  return Math.round((Number(value) || 0) * 1000) / 1000;
+}
 
 // ── Utility: Linear interpolation between brackets ────────────
 function interpolate(value, brackets, valueKey = 0, resultKey = 1) {
@@ -118,6 +127,39 @@ function applyUrgency(price, urgency = 'ROUTINE', afterHours = false) {
   if (urgency === 'SOON') mult = afterHours ? 1.50 : 1.25;
   else if (urgency === 'URGENT') mult = afterHours ? 2.0 : 1.50;
   return Math.round(price * mult);
+}
+
+function getOneTimeUrgencyMultiplier({ urgency = 'NONE', afterHours = false } = {}) {
+  const key = String(urgency || 'NONE').toUpperCase();
+  const cfg = URGENCY[key] || URGENCY.NONE;
+  return afterHours ? (cfg.afterHours || cfg.standard || 1) : (cfg.standard || 1);
+}
+
+function applyOneTimeRecurringCustomerDiscount(price, { isRecurringCustomer = false } = {}) {
+  const rate = isRecurringCustomer ? WAVEGUARD.recurringCustomerOneTimePerk : 0;
+  const discounted = Math.round(price * (1 - rate));
+  return {
+    price: discounted,
+    rate,
+    amount: Math.max(0, Math.round(price) - discounted),
+  };
+}
+
+function applyOneTimeFloor(price, floor) {
+  return Math.max(floor, price);
+}
+
+function normalizeMosquitoProgramKey(value) {
+  if (value == null || value === '') return null;
+  const raw = String(value).toLowerCase();
+  if (raw === 'seasonal9' || raw === 'monthly12') return raw;
+  if (raw === 'seasonal') return 'seasonal9';
+  if (raw === 'monthly') return 'monthly12';
+  if (raw === 'residual_seasonal' || raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'seasonal9';
+  if (raw === 'residual_monthly' || raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'monthly12';
+  if (raw === 'bronze') return 'seasonal9';
+  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly12';
+  return raw;
 }
 
 // ============================================================
@@ -511,87 +553,544 @@ function priceLawnCare(property, options = {}) {
 // ============================================================
 // TREE & SHRUB
 // ============================================================
+function hasNonNegativePricingNumber(value) {
+  return value !== undefined &&
+    value !== null &&
+    value !== '' &&
+    Number.isFinite(Number(value)) &&
+    Number(value) >= 0;
+}
+
+function hasPositivePricingNumber(value) {
+  return value !== undefined &&
+    value !== null &&
+    value !== '' &&
+    Number.isFinite(Number(value)) &&
+    Number(value) > 0;
+}
+
+function normalizeTreeShrubEnum(value, fallback = '') {
+  return String(value || fallback || '').trim().toLowerCase();
+}
+
+function getTreeShrubShrubDensity(property = {}) {
+  return normalizeTreeShrubEnum(
+    property.shrubDensity || property.features?.shrubs,
+    'moderate'
+  );
+}
+
+function getTreeShrubComplexity(property = {}) {
+  return normalizeTreeShrubEnum(
+    property.complexity || property.landscapeComplexity || property.features?.complexity,
+    'standard'
+  );
+}
+
+function normalizeTreeShrubPressure(value) {
+  return normalizeTreeShrubEnum(value).replace(/[\s-]+/g, '_');
+}
+
+function hasKnownTreeShrubPressure(property = {}) {
+  const directSignals = [
+    property.pestPressure,
+    property.diseasePressure,
+    property.features?.pestPressure,
+    property.features?.diseasePressure,
+  ];
+  for (const signal of directSignals) {
+    if (signal === true) return true;
+    const normalized = normalizeTreeShrubPressure(signal);
+    if (normalized && !['false', 'no', 'none', 'low', 'unknown'].includes(normalized)) {
+      return true;
+    }
+  }
+
+  const overallPressure = normalizeTreeShrubPressure(
+    property.overallPestPressure || property.features?.overallPestPressure
+  );
+  return ['high', 'very_high', 'severe'].includes(overallPressure);
+}
+
+function estimateTreeShrubBedAreaFromLot(property = {}) {
+  const lotSqFt = Number(property.lotSqFt) || 0;
+  if (lotSqFt <= 0) return null;
+
+  const shrubDensity = getTreeShrubShrubDensity(property);
+  const complexity = getTreeShrubComplexity(property);
+  const density = BED_DENSITY[shrubDensity] || BED_DENSITY.moderate;
+  let pct = density.basePct;
+  if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
+
+  const rawBedArea = Math.max(0, Math.round(lotSqFt * pct));
+  return {
+    bedArea: Math.min(rawBedArea, BED_AREA_CAP),
+    capped: rawBedArea >= BED_AREA_CAP,
+  };
+}
+
+function resolveTreeShrubBedArea(property = {}, warnings = []) {
+  const sourceHint = normalizeTreeShrubEnum(property.bedAreaSource);
+  if (sourceHint === 'fallback') {
+    warnings.push('Tree & Shrub bed area was not provided; fallback 2,000 sqft was used.');
+    return {
+      bedArea: 2000,
+      bedAreaSource: 'fallback',
+      pricingConfidence: 'low',
+      requiresManualReview: true,
+    };
+  }
+
+  if (hasPositivePricingNumber(property.bedArea)) {
+    const bedAreaSource = sourceHint === 'estimated' ? 'estimated' : 'explicit';
+    return {
+      bedArea: Number(property.bedArea),
+      bedAreaSource,
+      pricingConfidence: bedAreaSource === 'estimated' ? 'medium' : 'high',
+      requiresManualReview: false,
+    };
+  }
+
+  const estimatedBedAreaValue = hasPositivePricingNumber(property.estimatedBedArea)
+    ? property.estimatedBedArea
+    : property.estimatedBedAreaSf;
+  if (hasPositivePricingNumber(estimatedBedAreaValue)) {
+    const rawBedArea = Number(estimatedBedAreaValue);
+    return {
+      bedArea: Math.min(rawBedArea, BED_AREA_CAP),
+      bedAreaSource: 'estimated',
+      pricingConfidence: 'medium',
+      requiresManualReview: false,
+      capped: rawBedArea >= BED_AREA_CAP,
+    };
+  }
+
+  const lotEstimate = estimateTreeShrubBedAreaFromLot(property);
+  if (lotEstimate) {
+    return {
+      bedArea: lotEstimate.bedArea,
+      bedAreaSource: 'estimated',
+      pricingConfidence: 'medium',
+      requiresManualReview: false,
+      capped: lotEstimate.capped,
+    };
+  }
+
+  warnings.push('Tree & Shrub bed area was not provided; fallback 2,000 sqft was used.');
+  return {
+    bedArea: 2000,
+    bedAreaSource: 'fallback',
+    pricingConfidence: 'low',
+    requiresManualReview: true,
+  };
+}
+
+function recommendTreeShrubTier(property = {}) {
+  let bedArea = 0;
+  if (hasPositivePricingNumber(property.bedArea)) {
+    bedArea = Number(property.bedArea);
+  } else if (hasPositivePricingNumber(property.estimatedBedArea)) {
+    bedArea = Number(property.estimatedBedArea);
+  } else if (hasPositivePricingNumber(property.estimatedBedAreaSf)) {
+    bedArea = Number(property.estimatedBedAreaSf);
+  } else {
+    bedArea = estimateTreeShrubBedAreaFromLot(property)?.bedArea || 0;
+  }
+  const heavyDensity = getTreeShrubShrubDensity(property) === 'heavy';
+  const complex = ['moderate', 'complex'].includes(getTreeShrubComplexity(property));
+  const highTreeCount = Number(property.treeCount || property.features?.treeCount || 0) >= 8;
+  const difficultAccess = normalizeTreeShrubEnum(property.access || property.features?.access) === 'difficult';
+  const knownPressure = hasKnownTreeShrubPressure(property);
+
+  if (
+    bedArea >= 2000 ||
+    heavyDensity ||
+    complex ||
+    highTreeCount ||
+    difficultAccess ||
+    knownPressure
+  ) {
+    return 'enhanced';
+  }
+
+  return TREE_SHRUB.defaultTier || 'standard';
+}
+
+function normalizeTreeShrubTier(requestedTier, warnings = []) {
+  const normalized = normalizeTreeShrubEnum(requestedTier, TREE_SHRUB.defaultTier || 'standard');
+  if (normalized === 'premium') {
+    warnings.push('Premium Tree & Shrub has been deprecated; Enhanced 9-visit plan was used.');
+    return { tier: 'enhanced', legacyTierRequested: 'premium' };
+  }
+  if (!TREE_SHRUB.tiers[normalized]) throw new Error(`Unknown T&S tier: ${requestedTier}`);
+  return { tier: normalized, legacyTierRequested: null };
+}
+
 function priceTreeShrub(property, options = {}) {
-  const {
-    tier = 'enhanced',
-    access = 'easy',
-    treeCount = 0,
-  } = options;
-
+  property = property || {};
+  const warnings = [];
+  const access = normalizeTreeShrubEnum(options.access || property.access || property.features?.access, 'easy');
+  const treeCount = Math.max(0, Number(
+    options.treeCount ?? property.treeCount ?? property.features?.treeCount ?? 0
+  ) || 0);
+  const recommendationInput = {
+    ...property,
+    access,
+    treeCount,
+    features: {
+      ...(property.features || {}),
+      access,
+      treeCount,
+    },
+  };
+  const recommendedTier = recommendTreeShrubTier(recommendationInput);
+  const requestedTier = options.tier || recommendedTier;
+  const { tier, legacyTierRequested } = normalizeTreeShrubTier(requestedTier, warnings);
   const tierConfig = TREE_SHRUB.tiers[tier];
-  if (!tierConfig) throw new Error(`Unknown T&S tier: ${tier}`);
 
-  const bedArea = property.bedArea || 2000;
+  const bedAreaInfo = resolveTreeShrubBedArea(property, warnings);
+  const bedArea = bedAreaInfo.bedArea;
+
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
   const onSiteMin = Math.max(25, 20 + Math.round(bedArea / 500) + Math.round(treeCount * 1.5) + accessMin);
 
-  const materialRate = TREE_SHRUB.materialRates[tier] || TREE_SHRUB.materialRates.enhanced;
-  const materialCost = Math.max(tierConfig.freq * 10, bedArea * materialRate);
+  const frequency = tierConfig.frequency;
+  const materialRate = tierConfig.materialRate;
+  const materialCost = Math.max(frequency * 10, bedArea * materialRate);
 
   const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + 10) / 60);
-  const laborCostAnnual = laborPerVisit * tierConfig.freq;
+  const laborAnnual = laborPerVisit * frequency;
 
-  const annualCost = materialCost + laborCostAnnual;
-  const annualPrice = annualCost / TREE_SHRUB.marginTarget;
-  const monthlyCalc = annualPrice / 12;
-  const monthly = Math.max(tierConfig.floor, Math.round(monthlyCalc * 100) / 100);
-  const annual = monthly * 12;
-  const perApp = Math.round(annual / tierConfig.freq * 100) / 100;
-  const margin = annual > 0 ? (annual - annualCost - GLOBAL.ADMIN_ANNUAL) / annual : 0;
+  const annualDirectCost = materialCost + laborAnnual;
+  const directCostRatioTarget = TREE_SHRUB.directCostRatioTarget || GLOBAL.DIRECT_COST_RATIO_TARGET_TS || 0.43;
+  const baseAnnualPrice = annualDirectCost / directCostRatioTarget;
+  const monthlyCalc = baseAnnualPrice / 12;
+  const monthly = Math.max(tierConfig.monthlyFloor, roundMoney(monthlyCalc));
+  const annual = roundMoney(monthly * 12);
+  const internalPerVisitRevenue = roundMoney(annual / frequency);
+  const baseMarginRaw = annual > 0 ? (annual - annualDirectCost - GLOBAL.ADMIN_ANNUAL) / annual : 0;
+  const baseMargin = roundRatio(baseMarginRaw);
+
+  let requiresManualReview = !!bedAreaInfo.requiresManualReview;
+  if (bedAreaInfo.bedAreaSource === 'fallback') {
+    requiresManualReview = true;
+  }
+  if (bedArea >= BED_AREA_CAP || bedAreaInfo.capped) {
+    requiresManualReview = true;
+    warnings.push('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
+  }
+  if (treeCount >= 15) {
+    requiresManualReview = true;
+    warnings.push('High tree count; manual review recommended.');
+  }
+  if (access === 'difficult' && bedArea >= 4000) {
+    requiresManualReview = true;
+    warnings.push('Difficult access with large bed area; manual review recommended.');
+  }
 
   return {
     service: 'tree_shrub',
-    tier, bedArea, treeCount, access,
-    onSiteMin, materialRate,
-    frequency: tierConfig.freq,
-    monthly, annual, perApp,
-    costs: { materialCost: Math.round(materialCost), laborCost: Math.round(laborCostAnnual), adminCost: GLOBAL.ADMIN_ANNUAL, total: Math.round(annualCost + GLOBAL.ADMIN_ANNUAL) },
-    margin: Math.round(margin * 1000) / 1000,
-    marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
+    tier,
+    ...(legacyTierRequested ? { legacyTierRequested } : {}),
+    recommendedTier,
+    recommended: tier === recommendedTier,
+    availableTiers: Object.keys(TREE_SHRUB.tiers),
+    frequency,
+    bedArea,
+    bedAreaSource: bedAreaInfo.bedAreaSource,
+    pricingConfidence: bedAreaInfo.pricingConfidence,
+    treeCount,
+    access,
+    onSiteMin,
+    materialRate,
+    monthly,
+    annual,
+    internalPerVisitRevenue,
+    perApp: internalPerVisitRevenue,
+    costs: {
+      materialCost: roundMoney(materialCost),
+      laborCost: roundMoney(laborAnnual),
+      adminCost: GLOBAL.ADMIN_ANNUAL,
+      directCost: roundMoney(annualDirectCost),
+      totalWithAdmin: roundMoney(annualDirectCost + GLOBAL.ADMIN_ANNUAL),
+      total: roundMoney(annualDirectCost + GLOBAL.ADMIN_ANNUAL),
+    },
+    directCostRatioTarget,
+    baseMargin,
+    margin: baseMargin,
+    marginFloorOk: baseMarginRaw >= (TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR),
+    requiresManualReview,
+    warnings: [...new Set(warnings)],
   };
 }
 
 // ============================================================
 // PALM INJECTION
 // ============================================================
-function pricePalmInjection(property, options = {}) {
-  const {
-    palmCount = 1,
-    treatmentType = 'combo',
-    customPricePerPalm = null, // For quote-based treatments (LB, Tree-Age)
-  } = options;
+const PALM_WARNING_TEXT = {
+  nutrition: 'Corrective injection; not a replacement for full granular palm fertilization.',
+  combo: 'Do not model as tank mix; separate compatible application steps.',
+  fungal: 'Diagnosis/product-driven treatment.',
+  lethalBronzing: 'Preventive program only; not a cure for symptomatic or positive palms.',
+  treeAge: 'Annual value is annualized from a 24-month interval; perVisit is the event price.',
+};
 
-  const treatment = PALM.treatmentTypes[treatmentType];
-  if (!treatment) throw new Error(`Unknown palm treatment: ${treatmentType}`);
+function roundCurrency(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
 
-  let pricePerPalm;
-  if (treatment.quoteBased) {
-    pricePerPalm = customPricePerPalm || treatment.floorPerPalm;
-    if (pricePerPalm < treatment.floorPerPalm) pricePerPalm = treatment.floorPerPalm;
-  } else {
-    pricePerPalm = treatment.pricePerPalm;
+function isMissingPrice(value) {
+  return value === null || value === undefined || value === '';
+}
+
+function assertPositiveInteger(value, name) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function assertPositiveNumber(value, name) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number`);
+  }
+  return value;
+}
+
+function assertCustomPriceIfPresent(customPricePerPalm) {
+  if (isMissingPrice(customPricePerPalm)) return;
+  if (typeof customPricePerPalm !== 'number' || !Number.isFinite(customPricePerPalm)) {
+    throw new Error('customPricePerPalm must be a finite number');
+  }
+  if (customPricePerPalm < 0) {
+    throw new Error('customPricePerPalm must be non-negative');
+  }
+}
+
+function resolveQuotePrice(customPricePerPalm, floorPerPalm) {
+  assertCustomPriceIfPresent(customPricePerPalm);
+  if (isMissingPrice(customPricePerPalm)) {
+    return {
+      pricePerPalm: floorPerPalm,
+      quoteFloorApplied: false,
+      customPriceProvided: false,
+    };
   }
 
-  const appsPerYear = treatment.appsPerYear;
-  const annualCostPerPalm = pricePerPalm * appsPerYear;
-  const annual = annualCostPerPalm * palmCount;
-  const monthly = Math.round(annual / 12 * 100) / 100;
-
-  // Per-visit minimum check
-  const perVisitTotal = pricePerPalm * palmCount;
-  const perVisitEffective = Math.max(perVisitTotal, PALM.minPerVisit);
-
   return {
-    service: 'palm_injection',
-    treatmentType, palmCount, pricePerPalm, appsPerYear,
-    perVisit: perVisitEffective,
-    annual, monthly,
-    tierQualifier: PALM.tierQualifier,
-    excludeFromPctDiscount: true,
-    flatCredit: PALM.flatCreditPerPalm,
-    flatCreditMinTier: PALM.flatCreditMinTier,
-    quoteBased: treatment.quoteBased || false,
+    pricePerPalm: Math.max(customPricePerPalm, floorPerPalm),
+    quoteFloorApplied: customPricePerPalm < floorPerPalm,
+    customPriceProvided: true,
   };
+}
+
+function resolveAppsPerYear(treatment, options = {}) {
+  if (!isMissingPrice(options.appsPerYear)) {
+    return assertPositiveNumber(options.appsPerYear, 'appsPerYear');
+  }
+  if (!isMissingPrice(options.intervalMonths)) {
+    return roundCurrency(12 / assertPositiveNumber(options.intervalMonths, 'intervalMonths'));
+  }
+  if (treatment.intervalMonths) {
+    const intervalAppsPerYear = 12 / treatment.intervalMonths;
+    if (typeof treatment.appsPerYear === 'number') return treatment.appsPerYear;
+    return roundCurrency(intervalAppsPerYear);
+  }
+  if (typeof treatment.defaultAppsPerYear === 'number') return treatment.defaultAppsPerYear;
+  if (typeof treatment.appsPerYear === 'number') return treatment.appsPerYear;
+  throw new Error('appsPerYear could not be resolved for palm treatment');
+}
+
+function getTierByPalmSize(treatment, palmSize) {
+  if (!palmSize) throw new Error('palmSize is required for this palm treatment');
+  const tier = (treatment.tiers || []).find(t => t.size === palmSize);
+  if (!tier) throw new Error('palmSize must be one of: small, medium, large');
+  return tier;
+}
+
+function getTreeAgeTier(treatment, dbhInches) {
+  return (treatment.tiers || []).find(t => t.dbhMax === null || dbhInches <= t.dbhMax);
+}
+
+function formatInterval(intervalMonths) {
+  if (!intervalMonths) return undefined;
+  const unit = intervalMonths === 1 ? 'month' : 'months';
+  return `every ${intervalMonths} ${unit}`;
+}
+
+function shouldIncludePalmInternalCostBasis(options) {
+  return options.includeInternalCostBasis === true
+    && (options.internal === true || options.isInternal === true || options.admin === true || options.isAdmin === true);
+}
+
+function pricePalmInjection(property, options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error('Palm injection options are required');
+  }
+
+  const { treatmentType, customPricePerPalm } = options;
+  if (!treatmentType) throw new Error('Palm treatmentType is required');
+
+  const treatment = PALM.treatments[treatmentType];
+  if (!treatment) throw new Error(`Unknown palm treatment: ${treatmentType}`);
+
+  const palmCount = assertPositiveInteger(options.palmCount, 'palmCount');
+  assertCustomPriceIfPresent(customPricePerPalm);
+
+  let palmSize;
+  let dbhInches;
+  let intervalMonths;
+  let appsPerYear;
+  let pricePerPalm;
+  let quoteBased = treatment.quoteBased === true;
+  let quoteFloorApplied = false;
+  let customPriceProvided = false;
+  const warnings = [];
+  if (PALM_WARNING_TEXT[treatmentType]) warnings.push(PALM_WARNING_TEXT[treatmentType]);
+
+  if (treatment.pricingType === 'fixed') {
+    if (!isMissingPrice(options.appsPerYear)) {
+      appsPerYear = assertPositiveNumber(options.appsPerYear, 'appsPerYear');
+      if (!treatment.allowedAppsPerYear.includes(appsPerYear)) {
+        throw new Error(`appsPerYear for ${treatmentType} must be one of: ${treatment.allowedAppsPerYear.join(', ')}`);
+      }
+    } else {
+      appsPerYear = treatment.defaultAppsPerYear;
+    }
+    pricePerPalm = treatment.pricePerPalm;
+  } else if (treatment.pricingType === 'tiered') {
+    palmSize = options.palmSize;
+    const tier = getTierByPalmSize(treatment, palmSize);
+    appsPerYear = treatment.defaultAppsPerYear;
+
+    const quoteFlags = treatment.quoteBasedWhen || [];
+    const requiresQuotePrice = quoteFlags.some(flag => options[flag] === true);
+    if (requiresQuotePrice) {
+      if (isMissingPrice(customPricePerPalm)) {
+        throw new Error(`customPricePerPalm is required for quote-based ${treatmentType} palm pricing`);
+      }
+      const quotePrice = resolveQuotePrice(customPricePerPalm, tier.pricePerPalm);
+      pricePerPalm = quotePrice.pricePerPalm;
+      quoteFloorApplied = quotePrice.quoteFloorApplied;
+      customPriceProvided = quotePrice.customPriceProvided;
+      quoteBased = true;
+    } else {
+      pricePerPalm = tier.pricePerPalm;
+    }
+  } else if (treatmentType === 'fungal') {
+    if (options.diagnosisConfirmed !== true) {
+      throw new Error('diagnosisConfirmed must be true for fungal palm treatment pricing');
+    }
+    if (!options.selectedProduct) {
+      throw new Error('selectedProduct is required for fungal palm treatment pricing');
+    }
+    if (!treatment.products.includes(options.selectedProduct)) {
+      throw new Error(`selectedProduct must be one of: ${treatment.products.join(', ')}`);
+    }
+    if (isMissingPrice(options.appsPerYear) && isMissingPrice(options.intervalMonths)) {
+      throw new Error('fungal palm treatment pricing requires appsPerYear or intervalMonths');
+    }
+    intervalMonths = !isMissingPrice(options.intervalMonths)
+      ? assertPositiveNumber(options.intervalMonths, 'intervalMonths')
+      : undefined;
+    appsPerYear = resolveAppsPerYear(treatment, options);
+    const quotePrice = resolveQuotePrice(customPricePerPalm, treatment.floorPerPalm);
+    pricePerPalm = quotePrice.pricePerPalm;
+    quoteFloorApplied = quotePrice.quoteFloorApplied;
+    customPriceProvided = quotePrice.customPriceProvided;
+  } else if (treatmentType === 'lethalBronzing') {
+    const palmStatus = options.palmStatus;
+    if (!palmStatus) throw new Error('palmStatus is required for lethal bronzing palm pricing');
+    if (treatment.ineligibleStatuses.includes(palmStatus)) {
+      throw new Error('Palm is not eligible for lethal bronzing injection pricing and should be handled outside this service');
+    }
+    if (!treatment.eligibleStatuses.includes(palmStatus)) {
+      throw new Error(`Unknown or invalid lethal bronzing palmStatus: ${palmStatus}`);
+    }
+    intervalMonths = treatment.intervalMonths;
+    appsPerYear = resolveAppsPerYear(treatment);
+    const quotePrice = resolveQuotePrice(customPricePerPalm, treatment.floorPerPalm);
+    pricePerPalm = quotePrice.pricePerPalm;
+    quoteFloorApplied = quotePrice.quoteFloorApplied;
+    customPriceProvided = quotePrice.customPriceProvided;
+  } else if (treatmentType === 'treeAge') {
+    dbhInches = assertPositiveNumber(options.dbhInches, 'dbhInches');
+    const tier = getTreeAgeTier(treatment, dbhInches);
+    const tierFloor = tier.pricePerPalm || 110;
+    if (tier.quoteBased && isMissingPrice(customPricePerPalm)) {
+      throw new Error('customPricePerPalm is required for Tree-Age pricing above 20 DBH inches');
+    }
+    if ((options.product === 'Tree-Age R10' || options.restrictedUseProduct === true) && options.licensedApplicator !== true) {
+      throw new Error('licensedApplicator is required for restricted-use Tree-Age product pricing');
+    }
+    intervalMonths = treatment.intervalMonths;
+    appsPerYear = resolveAppsPerYear(treatment);
+    const quotePrice = resolveQuotePrice(customPricePerPalm, tierFloor);
+    pricePerPalm = quotePrice.pricePerPalm;
+    quoteFloorApplied = quotePrice.quoteFloorApplied;
+    customPriceProvided = quotePrice.customPriceProvided;
+  } else {
+    throw new Error(`Unsupported palm treatment pricing type: ${treatment.pricingType}`);
+  }
+
+  const rawPerVisit = roundCurrency(pricePerPalm * palmCount);
+  const perVisit = roundCurrency(Math.max(rawPerVisit, PALM.minPerVisit));
+  const minimumApplied = perVisit > rawPerVisit;
+  const minimumShortfallPerVisit = minimumApplied ? roundCurrency(perVisit - rawPerVisit) : 0;
+  const rawAnnual = roundCurrency(rawPerVisit * appsPerYear);
+  const annualBeforeCredits = roundCurrency(perVisit * appsPerYear);
+  const monthlyBeforeCredits = roundCurrency(annualBeforeCredits / 12);
+
+  const result = {
+    service: 'palm_injection',
+
+    treatmentType,
+    treatmentLabel: treatment.label,
+    pricingType: treatment.pricingType,
+
+    palmCount,
+    palmSize,
+    dbhInches,
+
+    pricePerPalm: roundCurrency(pricePerPalm),
+    quoteBased,
+    quoteFloorApplied,
+    customPriceProvided,
+
+    appsPerYear,
+    intervalMonths,
+    minimumProgramMonths: treatment.minimumProgramMonths,
+
+    rawPerVisit,
+    perVisit,
+    minimumApplied,
+    minimumShortfallPerVisit,
+
+    rawAnnual,
+    annualBeforeCredits,
+    monthlyBeforeCredits,
+
+    annual: annualBeforeCredits,
+    monthly: monthlyBeforeCredits,
+
+    tierQualifier: PALM.tierQualifier,
+    excludeFromPctDiscount: PALM.excludeFromPctDiscount,
+
+    flatCredit: PALM.flatCreditPerPalm,
+    flatCreditPerPalm: PALM.flatCreditPerPalm,
+    flatCreditMinTier: PALM.flatCreditMinTier,
+
+    warnings,
+  };
+
+  if (intervalMonths) {
+    result.displayFrequency = formatInterval(intervalMonths);
+    result.annualized = intervalMonths > 12;
+  }
+  if (options.selectedProduct) result.selectedProduct = options.selectedProduct;
+  if (shouldIncludePalmInternalCostBasis(options)) result.internalCostBasis = PALM.internalCostBasis;
+
+  return result;
 }
 
 // ============================================================
@@ -599,20 +1098,15 @@ function pricePalmInjection(property, options = {}) {
 // ============================================================
 function priceMosquito(property, options = {}) {
   const {
-    tier = 'monthly',
+    tier = null,
     modifiers = {},
     stationCount = 0,
     dunkCount = 0,
   } = options;
 
-  const selectedProgram = tier;
   const lotCategory = property.mosquitoLotCategory || property.lotCategory;
-  const tierIndex = MOSQUITO.programs.indexOf(selectedProgram);
-  if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
-
   const basePrices = MOSQUITO.basePrices[lotCategory];
   if (!basePrices) throw new Error(`Unknown lot category: ${lotCategory}`);
-  const basePrice = basePrices[tierIndex];
 
   // Pressure multiplier
   let pressure = 1.00;
@@ -627,10 +1121,21 @@ function priceMosquito(property, options = {}) {
   if (lotCategory === 'ACRE') pressure += MOSQUITO.pressureFactors.lot_acre;
   else if (lotCategory === 'HALF') pressure += MOSQUITO.pressureFactors.lot_half;
   // v2 graduated water proximity replaces binary nearWater when provided
-  if (modifiers.mosquitoWaterMult && modifiers.mosquitoWaterMult !== 1.0) {
-    pressure *= modifiers.mosquitoWaterMult;
+  const waterMultiplier = Number(modifiers.mosquitoWaterMult || 1);
+  if (waterMultiplier && waterMultiplier !== 1.0) {
+    pressure *= waterMultiplier;
   }
   pressure = Math.min(pressure, MOSQUITO.pressureCap);
+
+  const recommendedProgram = (
+    pressure >= 1.30 ||
+    waterMultiplier >= 1.20 ||
+    f.trees === 'heavy'
+  ) ? 'monthly12' : 'seasonal9';
+  const selectedProgram = normalizeMosquitoProgramKey(tier) || recommendedProgram;
+  const tierIndex = MOSQUITO.programs.indexOf(selectedProgram);
+  if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
+  const basePrice = basePrices[tierIndex];
 
   const perVisit = Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
@@ -646,7 +1151,7 @@ function priceMosquito(property, options = {}) {
   const treatableThousands = Math.max(1, (property.mosquitoTreatableSqFt || 0) / 1000);
   const usage = MOSQUITO.productUsage;
   const costs = MOSQUITO.productCosts;
-  const usesPrecisionAdulticide = selectedProgram === 'residual_seasonal' || selectedProgram === 'residual_monthly';
+  const usesPrecisionAdulticide = false;
   const adulticideCost = usesPrecisionAdulticide
     ? (usage.scionBaseOz + usage.scionOzPer1000 * treatableThousands) * costs.scionOz
     : Math.max(usage.bifenthrinBaseOz, usage.bifenthrinOzPer1000 * treatableThousands) * costs.bifenthrinOz;
@@ -657,9 +1162,7 @@ function priceMosquito(property, options = {}) {
   const annualCost = (materialPerVisit + laborPerVisitCost) * visits + addOnCost + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
 
-  const TIER_NAMES = MOSQUITO.programs;
-  const recommendedTier = selectedProgram;
-  const tiers = TIER_NAMES.map((name, idx) => {
+  const tiers = MOSQUITO.programs.map((name, idx) => {
     const bp = basePrices[idx];
     const pv = Math.round(bp * pressure);
     const v = MOSQUITO.tierVisits[name];
@@ -671,7 +1174,9 @@ function priceMosquito(property, options = {}) {
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
       name: MOSQUITO.programLabels[name] || name.charAt(0).toUpperCase() + name.slice(1),
-      recommended: name === recommendedTier,
+      recommended: name === selectedProgram,
+      selected: name === selectedProgram,
+      pressureRecommended: name === recommendedProgram,
     };
   });
 
@@ -701,7 +1206,9 @@ function priceMosquito(property, options = {}) {
     },
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
-    recommendedTier,
+    recommendedTier: selectedProgram,
+    recommendedProgram,
+    waterMultiplier,
   };
 }
 
@@ -1051,24 +1558,29 @@ function priceOneTimePest(property, options = {}) {
     base = pestResult.basePrice;
   }
 
-  let price = Math.max(ONE_TIME.pest.floor, Math.round(base * ONE_TIME.pest.multiplier));
+  const preUrgencyPrice = applyOneTimeFloor(
+    Math.round(base * ONE_TIME.pest.multiplier),
+    ONE_TIME.pest.floor
+  );
+  const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
+  const discountBase = preUrgencyPrice * urgencyMultiplier;
+  const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
+  const price = applyOneTimeFloor(discounted.price, ONE_TIME.pest.floor);
 
-  // Combine urgency × rc into a single Math.round to match v2's applyOT helper
-  // exactly (pricing-engine-v2.js:183). Prior stepwise rounding + mid-calc floor
-  // clamp produced $1 drift on SOON/URGENT × recurringCustomer combos.
-  const urgencyMult = afterHours
-    ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
-    : (URGENCY[urgency] || URGENCY.NONE).standard;
-  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
-  price = Math.round(price * urgencyMult * rcDisc);
-  price = Math.max(ONE_TIME.pest.floor, price);
-
-  return { service: 'one_time_pest', price, urgency, afterHours, isRecurringCustomer };
-}
-
-function WAVEGUARD_RECURRING_DISC() {
-  const { WAVEGUARD } = require('./constants');
-  return WAVEGUARD.recurringCustomerOneTimePerk;
+  return {
+    service: 'one_time_pest',
+    price,
+    urgency,
+    afterHours,
+    isRecurringCustomer,
+    basePrice: Math.round(base * 100) / 100,
+    preUrgencyPrice,
+    urgencyMultiplier,
+    subtotalBeforeRecurringCustomerDiscount: Math.round(discountBase),
+    recurringCustomerDiscountRate: discounted.rate,
+    recurringCustomerDiscountAmount: Math.max(0, Math.round(discountBase) - price),
+    discountHandledByPricingFunction: true,
+  };
 }
 
 // ============================================================
@@ -1095,16 +1607,11 @@ function priceOneTimeLawn(property, options = {}) {
   const base = Math.max(ONE_TIME.lawn.floor, Math.round(lawnResult.perApp * ONE_TIME.lawn.oneTimeMultiplier));
 
   const treatMult = ONE_TIME.lawn.treatmentMultipliers[normalizedTreatment] || 1.0;
-  let price = Math.max(ONE_TIME.lawn.floor, Math.round(base * treatMult));
-
-  // Combine urgency × rc into a single Math.round to match v2's applyOT helper
-  // exactly (pricing-engine-v2.js:183). See priceOneTimePest for rationale.
-  const urgencyMult = afterHours
-    ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
-    : (URGENCY[urgency] || URGENCY.NONE).standard;
-  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
-  price = Math.round(price * urgencyMult * rcDisc);
-  price = Math.max(ONE_TIME.lawn.floor, price);
+  const preUrgencyPrice = applyOneTimeFloor(Math.round(base * treatMult), ONE_TIME.lawn.floor);
+  const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
+  const discountBase = preUrgencyPrice * urgencyMultiplier;
+  const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
+  const price = applyOneTimeFloor(discounted.price, ONE_TIME.lawn.floor);
 
   return {
     service: 'one_time_lawn',
@@ -1113,6 +1620,14 @@ function priceOneTimeLawn(property, options = {}) {
     urgency,
     afterHours,
     isRecurringCustomer,
+    basePrice: base,
+    treatmentMultiplier: treatMult,
+    preUrgencyPrice,
+    urgencyMultiplier,
+    subtotalBeforeRecurringCustomerDiscount: Math.round(discountBase),
+    recurringCustomerDiscountRate: discounted.rate,
+    recurringCustomerDiscountAmount: Math.max(0, Math.round(discountBase) - price),
+    discountHandledByPricingFunction: true,
     baselinePerApp: lawnResult.perApp,
     baselinePricingBasis: lawnResult.pricingBasis,
     baselinePricingSource: lawnResult.pricingSource,
@@ -1124,24 +1639,87 @@ function priceOneTimeLawn(property, options = {}) {
 // ============================================================
 // ONE-TIME MOSQUITO
 // ============================================================
+function getOneTimeMosquitoAreaBucket(mosquitoTreatableSqFt) {
+  const sqft = Math.max(0, Math.round(Number(mosquitoTreatableSqFt) || 0));
+  if (sqft <= 7500) return 'SMALL';
+  if (sqft <= 11000) return 'STANDARD';
+  if (sqft <= 16000) return 'LARGE';
+  if (sqft <= 24000) return 'XL';
+  if (sqft <= 32000) return 'ESTATE';
+  if (sqft <= 43560) return 'ACRE_CLASS';
+  return 'OVER_ACRE';
+}
+
+function getOneTimeMosquitoBase(mosquitoTreatableSqFt) {
+  const sqft = Math.max(0, Math.round(Number(mosquitoTreatableSqFt) || 0));
+  const areaBucket = getOneTimeMosquitoAreaBucket(sqft);
+  const base = ONE_TIME.mosquito[areaBucket] || ONE_TIME.mosquito.SMALL;
+  if (areaBucket !== 'OVER_ACRE') {
+    return { areaBucket, basePrice: base, requiresManualReview: false };
+  }
+  const overageSqFt = Math.max(0, sqft - 43560);
+  const incrementCount = Math.ceil(overageSqFt / ONE_TIME.mosquito.overAcreIncrementSqFt);
+  return {
+    areaBucket,
+    basePrice: base + incrementCount * ONE_TIME.mosquito.overAcreIncrementPrice,
+    requiresManualReview: true,
+    overageSqFt,
+    incrementCount,
+  };
+}
+
 function priceOneTimeMosquito(property, options = {}) {
-  const lotCategory = property.mosquitoLotCategory || property.lotCategory;
-  const basePrice = ONE_TIME.mosquito[lotCategory] || ONE_TIME.mosquito.SMALL;
+  const fallbackTreatableSqFt = Math.max(
+    0,
+    (Number(property.lotSqFt) || 0) - (Number(property.footprint) || 0) - (Number(property.hardscape) || 0)
+  );
+  const mosquitoTreatableSqFt = Math.max(
+    0,
+    Math.round(Number(property.mosquitoTreatableSqFt ?? fallbackTreatableSqFt) || 0)
+  );
+  const base = getOneTimeMosquitoBase(mosquitoTreatableSqFt);
   const stationCount = Math.max(0, Math.round(Number(options.stationCount) || 0));
   const dunkCount = Math.max(0, Math.round(Number(options.dunkCount) || 0));
-  const stationAddOn = stationCount * MOSQUITO.addOns.in2CareStation.price;
-  const dunkAddOn = dunkCount * MOSQUITO.addOns.dunkTablet.price;
-  const price = basePrice + stationAddOn + dunkAddOn;
+  const stationAddOnTotal = stationCount * ONE_TIME.mosquito.stationAddOn;
+  const dunkAddOnTotal = dunkCount * ONE_TIME.mosquito.dunkAddOn;
+  const subtotalBeforeRecurringCustomerDiscount = base.basePrice + stationAddOnTotal + dunkAddOnTotal;
+  const discounted = applyOneTimeRecurringCustomerDiscount(subtotalBeforeRecurringCustomerDiscount, {
+    isRecurringCustomer: !!options.isRecurringCustomer,
+  });
+  const price = discounted.price;
   const detailParts = [];
-  if (stationCount > 0) detailParts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOn)})`);
-  if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOn)})`);
+  if (stationCount > 0) detailParts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOnTotal)})`);
+  if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOnTotal)})`);
   return {
     service: 'one_time_mosquito',
+    key: 'oneTimeMosquito',
+    name: 'One-Time Mosquito Treatment',
+    recurring: false,
     price,
-    lotCategory,
-    basePrice,
+    mosquitoTreatableSqFt,
+    areaBucket: base.areaBucket,
+    lotCategory: base.areaBucket,
+    basePrice: base.basePrice,
+    stationCount,
+    stationAddOnTotal,
+    dunkCount,
+    dunkAddOnTotal,
+    subtotalBeforeRecurringCustomerDiscount,
+    recurringCustomerDiscountRate: discounted.rate,
+    recurringCustomerDiscountAmount: discounted.amount,
+    requiresManualReview: base.requiresManualReview,
+    overageSqFt: base.overageSqFt || 0,
+    incrementCount: base.incrementCount || 0,
     detail: detailParts.join(' + '),
-    addOns: { stationCount, dunkCount, stationAddOn, dunkAddOn },
+    addOns: {
+      stationCount,
+      dunkCount,
+      stationAddOn: stationAddOnTotal,
+      dunkAddOn: dunkAddOnTotal,
+      stationAddOnTotal,
+      dunkAddOnTotal,
+    },
+    discountHandledByPricingFunction: true,
   };
 }
 
@@ -1221,7 +1799,7 @@ function priceGermanRoachInitial(options = {}) {
   const urgencyMult = afterHours
     ? (URGENCY[urgency] || URGENCY.NONE).afterHours || 1
     : (URGENCY[urgency] || URGENCY.NONE).standard;
-  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD_RECURRING_DISC()) : 1;
+  const rcDisc = isRecurringCustomer ? (1 - WAVEGUARD.recurringCustomerOneTimePerk) : 1;
   const price = Math.round(BASE * urgencyMult * rcDisc);
   return {
     service: 'german_roach_initial',
@@ -1346,12 +1924,23 @@ function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
 // ============================================================
 // FOAM & DRILL (termite perimeter injection)
 // ============================================================
-// v2 parity: exact-match tier lookup (5/10/15/20 only; falls back to Spot).
+function resolveFoamDrillTier(points, tiers = SPECIALTY.foamDrill.tiers) {
+  const pointCount = Number(points);
+  if (!Number.isInteger(pointCount) || pointCount < 1) {
+    throw new Error('Foam drill point count must be a positive whole number.');
+  }
+  const tier = tiers.find(t => pointCount <= t.maxPoints);
+  if (!tier) {
+    const max = tiers[tiers.length - 1]?.maxPoints || 0;
+    throw new Error(`Foam drill point count ${pointCount} exceeds the configured ${max}-point maximum.`);
+  }
+  return { pointCount, tier };
+}
+
 function priceFoamDrill(points = 5, options = {}) {
   const { urgency = 'ROUTINE', afterHours = false } = options;
   const cfg = SPECIALTY.foamDrill;
-  const tierMap = { 5: cfg.tiers[0], 10: cfg.tiers[1], 15: cfg.tiers[2], 20: cfg.tiers[3] };
-  const tier = tierMap[points] || cfg.tiers[0];
+  const { pointCount, tier } = resolveFoamDrillTier(points, cfg.tiers);
   const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
   let price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
   price = applyUrgency(price, urgency, afterHours);
@@ -1361,7 +1950,7 @@ function priceFoamDrill(points = 5, options = {}) {
     name: 'Drill-and-Foam Termite',
     price,
     detail: `${label} | ${tier.cans} can${tier.cans > 1 ? 's' : ''}`,
-    points, tier: label, cans: tier.cans,
+    points: pointCount, tier: label, cans: tier.cans,
   };
 }
 
@@ -1861,5 +2450,8 @@ module.exports = {
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   interpolate, laborCost,
+  getOneTimeUrgencyMultiplier, applyOneTimeRecurringCustomerDiscount,
+  applyOneTimeFloor, getOneTimeMosquitoAreaBucket, getOneTimeMosquitoBase,
   normalizeGrassType, calcLawnAnnualCostFloor,
+  recommendTreeShrubTier,
 };

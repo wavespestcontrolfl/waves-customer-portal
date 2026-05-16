@@ -8,6 +8,7 @@
  * messages bypass auto-reply and land in Virginia's inbox.
  *
  *   hasSchedulingIntent(body) -> boolean
+ *   isSmsReaction(body) -> boolean
  *
  * Returns true if the body looks like it's asking about timing, scheduling,
  * an existing appointment, or coordinating an arrival window.
@@ -41,6 +42,10 @@ const ORDINAL_DATE_RE = /\b(?:the\s+)?\d{1,2}(?:st|nd|rd|th)\b/i;
 // Bare time of day: "3pm", "at 3", "10:30am", "noon", "morning"
 const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)\b|\b(?:noon|midnight|morning|afternoon|evening)\b/i;
 
+const SMS_REACTION_TARGET_RE = '(?:[\\u201c"].+[\\u201d"]|an?\\s+(?:image|photo|video|audio message|attachment|message))';
+const SMS_REACTION_RE = new RegExp(`^(liked|loved|disliked|laughed at|emphasized|questioned)\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
+const REMOVED_SMS_REACTION_RE = new RegExp(`^removed\\s+(?:a|an)\\s+(?:like|heart|dislike|laugh|emphasis|question mark)\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
+
 function hasSchedulingIntent(body) {
   if (!body || typeof body !== 'string') return false;
   const lower = body.toLowerCase();
@@ -65,8 +70,14 @@ function hasSchedulingIntent(body) {
   return false;
 }
 
+function isSmsReaction(body) {
+  if (!body || typeof body !== 'string') return false;
+  const text = body.trim();
+  return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text);
+}
+
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-module.exports = { hasSchedulingIntent };
+module.exports = { hasSchedulingIntent, isSmsReaction };

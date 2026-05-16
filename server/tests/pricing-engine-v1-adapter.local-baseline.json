@@ -135,14 +135,6 @@
         {
           "mo": 125,
           "recommended": true
-        },
-        {
-          "mo": 141,
-          "recommended": false
-        },
-        {
-          "mo": 169,
-          "recommended": false
         }
       ],
       "tmBait": null
@@ -415,14 +407,6 @@
         {
           "mo": 331,
           "recommended": true
-        },
-        {
-          "mo": 375.75,
-          "recommended": false
-        },
-        {
-          "mo": 444,
-          "recommended": false
         }
       ],
       "tmBait": null

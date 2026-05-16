@@ -27,6 +27,6 @@ describe('deprecated client estimator pricing drift guards', () => {
   });
 
   test('keeps one-time pest floor as a final customer-facing floor', () => {
-    expect(source).toContain('const fp = Math.max(150, otP(Math.max(150, Math.round(bpp * 1.30))));');
+    expect(source).toContain('const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));');
   });
 });

@@ -151,6 +151,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
         className="fixed top-0 right-0 z-[110] h-full w-full sm:max-w-[480px] bg-white border-l border-hairline border-zinc-200 shadow-2xl flex flex-col"
         role="dialog"
         aria-label="Customer + estimate history"
+        style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
       >
         {" "}
         <div className="flex items-center gap-2 px-3 py-2.5 border-b border-hairline border-zinc-200">

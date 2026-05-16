@@ -29,16 +29,17 @@ describe('mosquito estimator adapter', () => {
     estimatedBedAreaSf: 900,
   };
 
-  test('returns recurring Essential and Precision programs with selected add-ons', () => {
+  test('returns recurring seasonal9 and monthly12 programs with selected add-ons', () => {
     const result = calculate(
       pressureProfile,
       ['MOSQUITO'],
-      { mosquitoProgram: 'residual_monthly', mosquitoStationCount: 2, mosquitoDunkCount: 4 },
+      { mosquitoProgram: 'monthly12', mosquitoStationCount: 2, mosquitoDunkCount: 4 },
     );
 
     expect(result.results.mqMeta).toEqual(expect.objectContaining({
-      program: 'residual_monthly',
-      ri: 3,
+      program: 'monthly12',
+      recommendedProgram: 'seasonal9',
+      ri: 1,
       addOns: expect.objectContaining({
         stationCount: 2,
         dunkCount: 4,
@@ -48,15 +49,31 @@ describe('mosquito estimator adapter', () => {
       }),
     }));
     expect(result.results.mq.map((tier) => tier.n)).toEqual([
-      'Seasonal Essential Barrier',
-      'Monthly Essential Barrier',
-      'Seasonal Precision Barrier',
-      'Monthly Precision Barrier',
+      'Seasonal Mosquito Program (9 visits)',
+      'Monthly Mosquito Program (12 visits)',
     ]);
-    expect(result.results.mq[3]).toEqual(expect.objectContaining({
+    expect(result.results.mq[1]).toEqual(expect.objectContaining({
       v: 12,
       recommended: true,
+      pressureRecommended: false,
     }));
+  });
+
+  test('keeps legacy direct mosquito program aliases compatible', () => {
+    const property = pricingEngine.calculatePropertyProfile({
+      homeSqFt: 2200,
+      stories: 1,
+      lotSqFt: 10000,
+      propertyType: 'single_family',
+      features: { trees: 'moderate', shrubs: 'moderate', complexity: 'moderate' },
+    });
+
+    expect(pricingEngine.priceMosquito(property, { tier: 'seasonal' })).toEqual(
+      expect.objectContaining({ tier: 'seasonal9', visits: 9 }),
+    );
+    expect(pricingEngine.priceMosquito(property, { tier: 'monthly' })).toEqual(
+      expect.objectContaining({ tier: 'monthly12', visits: 12 }),
+    );
   });
 
   test('returns one-time mosquito with station and Bti dunk add-ons', () => {
@@ -67,17 +84,17 @@ describe('mosquito estimator adapter', () => {
     );
 
     expect(result.hasOneTime).toBe(true);
-    expect(result.oneTime.total).toBe(319);
+    expect(result.oneTime.total).toBe(435);
     expect(result.oneTime.items).toEqual([
       expect.objectContaining({
         service: 'one_time_mosquito',
         name: 'One-Time Mosquito',
-        price: 319,
+        price: 435,
         addOns: expect.objectContaining({
           stationCount: 2,
           dunkCount: 4,
-          stationAddOn: 78,
-          dunkAddOn: 16,
+          stationAddOn: 150,
+          dunkAddOn: 60,
         }),
       }),
     ]);

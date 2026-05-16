@@ -6,7 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
-const { etDateString, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -22,6 +22,13 @@ const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
 const { computePressureIndex } = require('../services/service-report/pressure-index');
+const {
+  shouldSendServiceReportV1Delivery,
+} = require('../services/service-report/delivery');
+const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
+const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
+const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
   recordTrackTransitionFailure,
   recordTrackTransitionResultFailure,
@@ -61,6 +68,14 @@ async function renderTemplate(templateKey, vars, fallback) {
   return fallback;
 }
 
+async function runtimeServiceReportFlag(req, flagKey, envKey, defaultValue = false) {
+  const envValue = process.env[envKey];
+  if (envValue !== undefined) {
+    return ['1', 'true', 'yes', 'on'].includes(String(envValue).trim().toLowerCase());
+  }
+  return isUserFeatureEnabled(req.technicianId, flagKey, defaultValue).catch(() => !!defaultValue);
+}
+
 async function renderRequiredTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -71,6 +86,55 @@ async function renderRequiredTemplate(templateKey, vars) {
     throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
   }
   throw new Error(`SMS template ${templateKey} is missing or inactive`);
+}
+
+const MAX_REVIEW_DELAY_MINUTES = 60 * 24 * 30;
+
+function completionReviewTimingError(message) {
+  const err = new Error(message);
+  err.statusCode = 400;
+  err.isOperational = true;
+  return err;
+}
+
+function clampReviewDelayMinutes(minutes) {
+  const rounded = Math.max(0, Math.round(minutes));
+  return Math.min(rounded, MAX_REVIEW_DELAY_MINUTES);
+}
+
+function parseCompletionReviewDelayMinutes(body = {}) {
+  if (!body.requestReview) return null;
+  const hasExplicitTiming =
+    Object.prototype.hasOwnProperty.call(body, 'reviewTiming') ||
+    Object.prototype.hasOwnProperty.call(body, 'reviewDelayMinutes') ||
+    Object.prototype.hasOwnProperty.call(body, 'reviewScheduledFor');
+  if (!hasExplicitTiming) return undefined;
+
+  if (body.reviewTiming === 'now') return 0;
+  if (body.reviewTiming === 'tomorrow_8') {
+    const targetDay = etDateString(addETDays(new Date(), 1));
+    const target = parseETDateTime(`${targetDay}T08:00`);
+    return clampReviewDelayMinutes(Math.ceil((target.getTime() - Date.now()) / 60000));
+  }
+  if (body.reviewTiming === 'custom') {
+    if (!body.reviewScheduledFor) {
+      throw completionReviewTimingError('reviewScheduledFor required');
+    }
+    const target = parseETDateTime(body.reviewScheduledFor);
+    if (Number.isNaN(target.getTime())) {
+      throw completionReviewTimingError('invalid reviewScheduledFor');
+    }
+    if (target.getTime() <= Date.now()) {
+      throw completionReviewTimingError('reviewScheduledFor must be in the future');
+    }
+    return clampReviewDelayMinutes(Math.ceil((target.getTime() - Date.now()) / 60000));
+  }
+
+  const raw = body.reviewDelayMinutes ?? body.reviewTiming;
+  if (raw === undefined || raw === null || raw === '') return 120;
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes)) return 120;
+  return clampReviewDelayMinutes(minutes);
 }
 
 // Templates say "Your {service_type} service report is ready", but
@@ -1085,6 +1149,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       soilMoisture,
       sendCompletionSms,
       requestReview,
+      reviewTiming,
+      reviewScheduledFor,
       oneTimeRecapOnly = false,
       areasTreated,
       areasServiced,
@@ -1109,6 +1175,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     }
     const isIncompleteVisit = visitOutcome === 'incomplete';
     const recapReviewOnly = !!oneTimeRecapOnly && !isIncompleteVisit;
+    const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedOfficeApproval = normalizeOfficeApproval(officeApproval);
@@ -1127,7 +1194,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(
         'scheduled_services.*',
-        'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone',
+        'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
         'customers.city', 'customers.property_type',
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
@@ -1160,6 +1227,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       db('service_products').columnInfo().catch(() => ({})),
       db.schema.hasTable('service_findings').catch(() => false),
     ]);
+    const useServiceReportV1 = true;
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
       && await db.schema.hasColumn('lawn_assessments', 'service_record_id').catch(() => false);
@@ -1341,13 +1409,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             requestReview: isIncompleteVisit ? false : requestReview !== false,
             oneTimeRecapOnly: recapReviewOnly,
             reviewSuppression,
+            reviewTiming: reviewTiming || null,
+            reviewDelayMinutes: completionReviewDelayMinutes == null ? null : completionReviewDelayMinutes,
+            reviewScheduledFor: reviewScheduledFor || null,
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: customerRecap || null,
-            invoiceAlreadySent: !!invoiceAlreadySent,
-            areasTreated: completionAreas,
             timeOnSite: timeOnSite || null,
             customerInteraction: customerInteraction || null,
+            invoiceAlreadySent: !!invoiceAlreadySent,
+            areasTreated: completionAreas,
             waveguardEquipmentSystemId,
             waveguardCalibrationId,
             waveguardBlackoutApproval,
@@ -1394,14 +1465,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             soil_ph: soilPh || null,
             soil_moisture: soilMoisture || null,
           };
-          if (serviceRecordCols.report_template_version) recordInsert.report_template_version = 'service_report_v1';
+          if (serviceRecordCols.report_template_version && useServiceReportV1) recordInsert.report_template_version = 'service_report_v1';
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
           if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
           if (serviceRecordCols.started_at) recordInsert.started_at = svc.actual_start_time || svc.check_in_time || null;
           if (serviceRecordCols.ended_at) recordInsert.ended_at = trx.fn.now();
+          if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
-          if (serviceRecordCols.advisory) recordInsert.advisory = serializeJsonb(reportConfig.advisoryDefaults);
+          if (serviceRecordCols.advisory && useServiceReportV1) recordInsert.advisory = serializeJsonb(reportConfig.advisoryDefaults);
 
         // 1. service_record — the canonical "completion happened" audit.
         // scheduled_service_id is the FK back to the source row so
@@ -1411,7 +1483,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
 
-        if (serviceFindingsAvailable && reportObservations.length) {
+        if (useServiceReportV1 && serviceFindingsAvailable && reportObservations.length) {
           const findingRows = reportObservations.map((title) => ({
             service_record_id: record.id,
             category: title.toLowerCase().includes('concern') ? 'conducive_condition' : 'observation',
@@ -1422,7 +1494,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }));
           await trx('service_findings').insert(findingRows);
         }
-        if (serviceFindingsAvailable && serviceRecordCols.pressure_index) {
+        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index) {
           const pressureIndex = await computePressureIndex(record.id, trx);
           record.pressure_index = pressureIndex;
           await trx('service_records').where({ id: record.id }).update({ pressure_index: pressureIndex });
@@ -1917,12 +1989,51 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // prod for app-internal redirects). PORTAL_URL can override for dev.
     const portalUrl = process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com';
     let reportUrl = portalUrl;
+    let reportToken = null;
     try {
       const { ensureReportToken } = require('./reports-public');
-      const reportToken = await ensureReportToken(record.id);
+      reportToken = await ensureReportToken(record.id);
       if (reportToken) reportUrl = `${portalUrl}/report/${reportToken}`;
     } catch (err) {
       logger.error(`[dispatch] service report token mint failed: ${err.message}`);
+    }
+    const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
+    let reportSmsUrl = reportUrl;
+    if (serviceReportV1Delivery && reportUrl && reportUrl !== portalUrl) {
+      reportSmsUrl = await shortenOrPassthrough(reportUrl, {
+        kind: 'service_report',
+        entityType: 'service_records',
+        entityId: record.id,
+        customerId: svc.customer_id,
+        codePrefix: 'report',
+      });
+    }
+    let serviceReportDynamicContext = null;
+    let serviceReportPreviewAsset = null;
+    if (serviceReportV1Delivery && useServiceReportV1) {
+      serviceReportDynamicContext = await buildServiceReportDynamicContext({
+        recordId: record.id,
+        mode: 'static',
+      }).catch((err) => {
+        logger.warn(`[dispatch] service report dynamic context skipped: ${err.message}`);
+        return null;
+      });
+      const mmsPreviewEnabled = await runtimeServiceReportFlag(
+        req,
+        'service_report_mms_preview_v1',
+        'SERVICE_REPORT_MMS_PREVIEW_ENABLED',
+        false,
+      );
+      if (mmsPreviewEnabled && reportToken) {
+        serviceReportPreviewAsset = await buildAndStoreSmsPreviewImage({
+          recordId: record.id,
+          token: reportToken,
+          dynamicContext: serviceReportDynamicContext,
+        }).catch((err) => {
+          logger.warn(`[dispatch] service report MMS preview skipped: ${err.message}`);
+          return null;
+        });
+      }
     }
     const toCents = (value) => Math.max(0, Math.round((Number(value) || 0) * 100));
     const centsToDollars = (cents) => (cents / 100).toFixed(2);
@@ -2031,16 +2142,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       else invoiceCreated = true;
     }
 
-    // When the tech completes with both "send report" and "ask for review" on,
-    // mint the review row now and bundle its short URL into the one completion
-    // SMS instead of firing a second message 90-180 min later. Single message
-    // lands higher read-rates than two.
+    // Immediate/legacy review requests can be bundled into the completion SMS.
+    // Explicit delayed timing skips the bundle and schedules a separate review
+    // request below.
     const invoiceBlocksReview = !recapReviewOnly && !!invoice && invoice.status !== 'paid';
     const clientSuppressionBlocksReview = reviewSuppression && reviewSuppression !== 'invoice_created';
     const effectiveRequestReview = !!requestReview && !clientSuppressionBlocksReview && !invoiceBlocksReview;
+    const shouldBundleReview =
+      sendCompletionSms &&
+      effectiveRequestReview &&
+      svc.cust_phone &&
+      !serviceReportV1Delivery &&
+      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0);
 
     let bundledReviewUrl = null;
-    if (sendCompletionSms && effectiveRequestReview && svc.cust_phone) {
+    if (shouldBundleReview) {
       try {
         const ReviewService = require('../services/review-request');
         bundledReviewUrl = await ReviewService.createInline({
@@ -2081,28 +2197,48 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           && !prepaidCovered
           && !alreadyPaid
           && !autopayCoversVisit;
+        const usePaidCompletionTemplate = alreadyPaid
+          || prepaidCovered
+          || autopayCoversVisit
+          || String(invoice?.status || '').toLowerCase() === 'paid';
         if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
-          const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${reportUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          let body = await renderTemplate('service_complete_with_invoice', {
+          const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${reportSmsUrl || reportUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply here.`;
+          const body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
             service_type: displayServiceType,
-            portal_url: reportUrl,
+            portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
           }, fallback);
-          if (!body.includes(reportUrl)) body = fallback;
           sentSmsType = 'service_complete_with_invoice';
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
         } else {
-          const fallback = `Hello ${svc.first_name}! Your service report is ready. View it here: ${reportUrl}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!`;
-          let body = await renderTemplate('service_complete', {
-            first_name: svc.first_name || '',
-            portal_url: reportUrl,
-          }, fallback);
-          if (!body.includes(reportUrl)) body = fallback;
-          sentSmsType = 'service_complete';
-          const concise = `Hello ${svc.first_name}! Report: ${reportUrl}\nReply with questions.`;
-          ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
+          if (usePaidCompletionTemplate) {
+            const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${reportSmsUrl || reportUrl}\n\nQuestions or requests? Reply here.`;
+            const body = await renderTemplate('service_complete_prepaid', {
+              first_name: svc.first_name || '',
+              service_type: displayServiceType,
+              portal_url: reportSmsUrl || reportUrl,
+            }, fallback);
+            sentSmsType = 'service_complete_prepaid';
+            sentSmsBody = `${body}${reviewSuffix}`.trim();
+            completionSmsWasTruncated = false;
+          } else {
+            const fallback = `Hello ${svc.first_name}! Your service report is ready: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.`;
+            let body = await renderTemplate('service_complete', {
+              first_name: svc.first_name || '',
+              service_type: displayServiceType,
+              portal_url: reportSmsUrl || reportUrl,
+            }, fallback);
+            sentSmsType = 'service_complete';
+            if (serviceReportV1Delivery) {
+              sentSmsBody = `${body}${reviewSuffix}`.trim();
+              completionSmsWasTruncated = false;
+            } else {
+              const concise = `Hello ${svc.first_name}! Report: ${reportUrl}\nReply with questions.`;
+              ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
+            }
+          }
         }
         if (sentSmsBody) {
           const sendingNotes = {
@@ -2116,7 +2252,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           await db('service_records').where({ id: record.id }).update({
             structured_notes: serializeJsonb(sendingNotes),
           });
-          const smsResult = await sendCustomerMessage({
+          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id };
+          if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
+            smsMetadata.report_template_version = 'service_report_v1';
+            smsMetadata.report_url = reportUrl;
+            smsMetadata.report_sms_url = reportSmsUrl;
+            if (invoice?.id) smsMetadata.invoice_id = invoice.id;
+            if (
+              serviceReportPreviewAsset?.public_url
+              && serviceReportPreviewAsset.content_type === 'image/jpeg'
+              && Number(serviceReportPreviewAsset.byte_size || 0) <= 4_500_000
+            ) {
+              smsMetadata.mediaUrls = [serviceReportPreviewAsset.public_url];
+              smsMetadata.service_report_preview_asset_id = serviceReportPreviewAsset.id;
+            }
+          }
+          const attemptedMms = Array.isArray(smsMetadata.mediaUrls) && smsMetadata.mediaUrls.length > 0;
+          let sentSmsChannel = attemptedMms ? 'mms' : 'sms';
+          let mmsFallbackToSms = false;
+          const sendInput = {
             to: svc.cust_phone,
             body: sentSmsBody,
             channel: 'sms',
@@ -2125,8 +2279,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             customerId: svc.customer_id,
             appointmentId: svc.id,
             identityTrustLevel: 'phone_matches_customer',
-            metadata: { original_message_type: sentSmsType, service_record_id: record.id },
-          });
+            metadata: smsMetadata,
+          };
+          let smsResult = await sendCustomerMessage(sendInput);
+          if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
+            logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
+            const fallbackMetadata = { ...smsMetadata };
+            delete fallbackMetadata.mediaUrls;
+            fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
+            smsResult = await sendCustomerMessage({
+              ...sendInput,
+              metadata: fallbackMetadata,
+            });
+            sentSmsChannel = 'sms';
+            mmsFallbackToSms = true;
+            sendingNotes.completionSmsMmsFallbackAt = new Date().toISOString();
+            sendingNotes.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+          }
           if (!smsResult.sent) {
             const failedNotes = {
               ...sendingNotes,
@@ -2146,10 +2315,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               sentSmsBody,
               sentSmsAt: new Date().toISOString(),
               sentSmsType,
+              sentSmsChannel,
+              serviceReportPreviewAssetId: serviceReportPreviewAsset?.id || null,
             };
             await db('service_records').where({ id: record.id }).update({
               structured_notes: serializeJsonb(sentNotes),
             });
+            await db('service_report_events').insert({
+              service_record_id: record.id,
+              customer_id: svc.customer_id,
+              event_name: sentSmsChannel === 'mms' ? 'mms_sent' : 'sms_sent',
+              channel: 'sms',
+              metadata: serializeJsonb({
+                preview_asset_id: serviceReportPreviewAsset?.id || null,
+                fallback_to_sms: mmsFallbackToSms,
+              }),
+            }).catch((eventErr) => logger.warn(`[dispatch] service report SMS event insert failed: ${eventErr.message}`));
+            if (mmsFallbackToSms) {
+              await db('service_report_events').insert({
+                service_record_id: record.id,
+                customer_id: svc.customer_id,
+                event_name: 'mms_fallback_to_sms',
+                channel: 'sms',
+                metadata: serializeJsonb({
+                  preview_asset_id: serviceReportPreviewAsset?.id || null,
+                  reason: sendingNotes.completionSmsMmsFallbackReason || null,
+                }),
+              }).catch((eventErr) => logger.warn(`[dispatch] service report MMS fallback event insert failed: ${eventErr.message}`));
+            }
             record.structured_notes = sentNotes;
           }
         }
@@ -2170,6 +2363,72 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       logger.info(`[dispatch] Completion SMS already sent for service_record ${record.id}; skipping retry send`);
     }
 
+    const serviceReportEmailEnabled = serviceReportV1Delivery
+      ? await runtimeServiceReportFlag(
+          req,
+          'service_report_email_delivery_enabled',
+          'SERVICE_REPORT_EMAIL_DELIVERY_ENABLED',
+          false,
+        )
+      : false;
+    if (serviceReportV1Delivery && sendCompletionSms && !serviceReportEmailEnabled) {
+      const latestNotes = parseJsonObject(record.structured_notes);
+      if (!latestNotes.serviceReportV1EmailStatus) {
+        const disabledNotes = {
+          ...latestNotes,
+          serviceReportV1EmailStatus: 'disabled',
+          serviceReportV1EmailDisabledAt: new Date().toISOString(),
+        };
+        await db('service_records').where({ id: record.id }).update({
+          structured_notes: serializeJsonb(disabledNotes),
+        }).catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
+        record.structured_notes = disabledNotes;
+      }
+    }
+
+    if (serviceReportV1Delivery && sendCompletionSms && serviceReportEmailEnabled) {
+      const latestNotes = parseJsonObject(record.structured_notes);
+      const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
+      if (!emailAlreadyHandled) {
+        try {
+          const queued = await enqueueServiceReportV1EmailDelivery({
+            serviceRecordId: record.id,
+            customerId: svc.customer_id,
+            token: reportToken,
+            reportUrl,
+            pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
+            payload: {
+              scheduled_service_id: svc.id,
+              source: 'dispatch_complete',
+            },
+          });
+          const queuedNotes = {
+            ...latestNotes,
+            serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
+            serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
+            serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
+            serviceReportV1EmailError: queued.ok ? null : queued.error || null,
+          };
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: serializeJsonb(queuedNotes),
+          });
+          record.structured_notes = queuedNotes;
+        } catch (err) {
+          const failedNotes = {
+            ...latestNotes,
+            serviceReportV1EmailStatus: 'failed',
+            serviceReportV1EmailError: err.message || 'Email queue failed',
+            serviceReportV1EmailFailedAt: new Date().toISOString(),
+          };
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: serializeJsonb(failedNotes),
+          }).catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
+          record.structured_notes = failedNotes;
+          logger.error(`[dispatch] v1 report email queue failed: ${err.message}`);
+        }
+      }
+    }
+
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
     if (effectiveRequestReview && svc.cust_phone && !bundledReviewUrl) {
@@ -2179,7 +2438,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           customerId: svc.customer_id,
           serviceRecordId: record.id,
           triggeredBy: 'auto',
-          delayMinutes: 120,
+          delayMinutes: completionReviewDelayMinutes === undefined
+            ? 120
+            : completionReviewDelayMinutes,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }

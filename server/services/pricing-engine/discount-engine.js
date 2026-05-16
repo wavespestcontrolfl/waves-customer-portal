@@ -21,7 +21,23 @@
 //   - Frequency discount tracking in the stack
 //   - ACH discount plumbing (retired to 0% in an earlier session)
 // ============================================================
-const { WAVEGUARD, PALM, RODENT, GLOBAL } = require('./constants');
+const { WAVEGUARD, PALM, RODENT, GLOBAL, TREE_SHRUB } = require('./constants');
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function ceilMoney(value) {
+  return Math.ceil((Number(value) || 0) * 100) / 100;
+}
+
+function roundRatio(value) {
+  return Math.round((Number(value) || 0) * 1000) / 1000;
+}
+
+function roundCurrency(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
 
 // ── Determine WaveGuard tier from active services ─────────────
 function determineWaveGuardTier(activeServices = []) {
@@ -59,10 +75,32 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
     if (serviceKey === 'palm_injection') {
       const tierRank = { bronze: 0, silver: 1, gold: 2, platinum: 3 };
       if (tierRank[waveGuardTier.tier] >= tierRank[PALM.flatCreditMinTier]) {
-        result.flatCredit = PALM.flatCreditPerPalm;
+        const palmCount = Number.isInteger(options.palmCount) && options.palmCount > 0
+          ? options.palmCount
+          : 1;
+        const annualCredit = roundCurrency(palmCount * PALM.flatCreditPerPalm);
+        const annualBeforeCredits = Number.isFinite(options.annualBeforeCredits)
+          ? options.annualBeforeCredits
+          : null;
+        const cappedAnnualCredit = annualBeforeCredits === null
+          ? annualCredit
+          : Math.min(annualCredit, annualBeforeCredits);
+
+        result.palmCount = palmCount;
+        result.flatCreditPerPalm = PALM.flatCreditPerPalm;
+        result.flatCredit = cappedAnnualCredit;
+        result.flatCreditAnnual = cappedAnnualCredit;
+        result.flatCreditAnnualUncapped = annualCredit;
+        if (annualBeforeCredits !== null) {
+          result.annualBeforeCredits = annualBeforeCredits;
+          result.annualAfterCredits = roundCurrency(Math.max(0, annualBeforeCredits - cappedAnnualCredit));
+          result.monthlyAfterCredits = roundCurrency(result.annualAfterCredits / 12);
+        }
         result.appliedDiscounts.push({
           type: 'flat_credit',
-          amount: PALM.flatCreditPerPalm,
+          amount: cappedAnnualCredit,
+          perPalm: PALM.flatCreditPerPalm,
+          palmCount,
           reason: `$${PALM.flatCreditPerPalm}/palm/yr Gold+ loyalty credit`,
         });
       }
@@ -117,9 +155,64 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
 // ── Apply discount to a price ─────────────────────────────────
 function applyDiscount(basePrice, discountResult, priceFloor = 0) {
   let price = basePrice * (1 - discountResult.effectiveDiscount);
-  if (discountResult.flatCredit) price -= discountResult.flatCredit;
+  const flatCredit = discountResult.flatCreditAnnual ?? discountResult.flatCredit;
+  if (flatCredit) price -= flatCredit;
   price = Math.max(priceFloor, price);
-  return Math.round(price * 100) / 100;
+  return roundCurrency(price);
+}
+
+function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
+  if (!serviceQuote || serviceQuote.service !== 'tree_shrub') {
+    return {
+      finalAnnual: roundMoney(finalAnnual),
+      finalMargin: null,
+      marginGuardApplied: false,
+      discountCapped: false,
+    };
+  }
+
+  const annualDirectCost = Number(serviceQuote.costs?.directCost);
+  const adminCost = Number(serviceQuote.costs?.adminCost ?? GLOBAL.ADMIN_ANNUAL);
+  const marginFloor = Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR);
+  const candidateAnnual = roundMoney(finalAnnual);
+
+  if (!Number.isFinite(annualDirectCost) || annualDirectCost < 0 || candidateAnnual <= 0) {
+    return {
+      finalAnnual: candidateAnnual,
+      finalMargin: null,
+      marginGuardApplied: false,
+      discountCapped: false,
+    };
+  }
+
+  const finalMargin = (candidateAnnual - annualDirectCost - adminCost) / candidateAnnual;
+  if (finalMargin >= marginFloor) {
+    return {
+      finalAnnual: candidateAnnual,
+      finalMargin: roundRatio(finalMargin),
+      marginGuardApplied: false,
+      discountCapped: false,
+      requestedDiscountPct,
+      actualDiscountPct: serviceQuote.annual > 0
+        ? roundRatio(1 - candidateAnnual / serviceQuote.annual)
+        : 0,
+    };
+  }
+
+  const minAnnualForMargin = (annualDirectCost + adminCost) / (1 - marginFloor);
+  const guardedAnnual = ceilMoney(Math.max(candidateAnnual, minAnnualForMargin));
+  const guardedMargin = (guardedAnnual - annualDirectCost - adminCost) / guardedAnnual;
+  const actualDiscountPct = serviceQuote.annual > 0 ? 1 - guardedAnnual / serviceQuote.annual : 0;
+
+  return {
+    finalAnnual: guardedAnnual,
+    finalMargin: roundRatio(guardedMargin),
+    marginGuardApplied: true,
+    discountCapped: actualDiscountPct < requestedDiscountPct,
+    requestedDiscountPct,
+    actualDiscountPct: roundRatio(Math.max(0, actualDiscountPct)),
+    minAnnualForMargin: ceilMoney(minAnnualForMargin),
+  };
 }
 
 // ── Validate discount for a full estimate (margin floor check) ─
@@ -131,7 +224,10 @@ function validateEstimateDiscounts(lineItems, waveGuardTier) {
     if (item.discount && item.discount.effectiveDiscount > 0 && item.costs && item.costs.total) {
       const basePrice = item.price ?? item.annual;
       if (!Number.isFinite(basePrice) || basePrice <= 0) continue;
-      const discountedPrice = basePrice * (1 - item.discount.effectiveDiscount);
+      const discountedPrice = item.annualAfterDiscount
+        ?? item.priceAfterDiscount
+        ?? item.totalAfterDiscount
+        ?? (basePrice * (1 - item.discount.effectiveDiscount));
       const margin = (discountedPrice - item.costs.total) / discountedPrice;
       if (margin < GLOBAL.MARGIN_FLOOR) {
         warnings.push({
@@ -151,5 +247,6 @@ module.exports = {
   determineWaveGuardTier,
   getEffectiveDiscount,
   applyDiscount,
+  applyMarginGuard,
   validateEstimateDiscounts,
 };

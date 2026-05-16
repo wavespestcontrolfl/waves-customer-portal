@@ -253,6 +253,7 @@ export default function RatePage() {
 
   const firstName = data?.firstName || 'there';
   const techName = data?.techName || 'your technician';
+  const techPhotoUrl = data?.techPhotoUrl || null;
   const knownServiceSelection = getKnownServices();
   const hasKnownService = knownServiceSelection.length > 0;
 
@@ -280,9 +281,17 @@ export default function RatePage() {
       {screen === 'rating' && (
         <div>
           <div style={{ textAlign: 'center', marginBottom: 22 }}>
-            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'linear-gradient(135deg, #4DC9F6, #009CDE)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: COLORS.white, fontFamily: FONTS.display, boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}>
-              {(techName || 'W')[0].toUpperCase()}
-            </div>
+            {techPhotoUrl ? (
+              <img
+                src={techPhotoUrl}
+                alt={techName}
+                style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', margin: '0 auto 12px', display: 'block', boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}
+              />
+            ) : (
+              <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'linear-gradient(135deg, #4DC9F6, #009CDE)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: COLORS.white, fontFamily: FONTS.display, boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}>
+                {(techName || 'W')[0].toUpperCase()}
+              </div>
+            )}
             <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.blueDeeper }}>{techName}</div>
           </div>
 
@@ -609,16 +618,7 @@ function Page({ children }) {
         aria-hidden="true">
         <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
       </video>
-      <div style={{ position: 'relative', zIndex: 1, width: '100%', padding: '22px 20px 12px', textAlign: 'center' }}>
-        <h1 style={{
-          fontFamily: FONTS.display, fontWeight: 400,
-          fontSize: 36, color: COLORS.offWhite, letterSpacing: '0.03em', lineHeight: 1,
-          margin: 0, textShadow: '2px 2px 0 #1B2C5B',
-        }}>
-          Waves
-        </h1>
-      </div>
-      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 8 }}>
+      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 20, boxShadow: '0 12px 40px rgba(10,61,122,.25)', overflow: 'hidden', marginTop: 32 }}>
         <div style={{ height: 5, background: 'linear-gradient(90deg, #C8102E, #C8102E, #F59E0B, #FFD700)' }} />
         <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>{children}</div>
       </div>

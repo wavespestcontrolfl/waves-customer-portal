@@ -20,7 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
-const { calculateBoundedTrackingEta, finiteNumber } = require('./customer-tracking-eta');
+const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require('./customer-tracking-eta');
 
 function portalOrigin() {
   return process.env.CLIENT_URL
@@ -39,7 +39,10 @@ async function loadService(serviceId) {
 // customer address. Returns null on any missing-data or upstream
 // failure path so the SMS still fires (without the ETA line).
 async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
-  if (!technicianId || !customerId) return null;
+  if (!technicianId || !customerId) {
+    logger.info(`[track-transitions] en-route ETA skipped: missing ids (tech=${!!technicianId} cust=${!!customerId})`);
+    return null;
+  }
   try {
     const [ts, customer] = await Promise.all([
       db('tech_status')
@@ -53,8 +56,18 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
     const techLng = finiteNumber(ts?.lng);
     const custLat = finiteNumber(customer?.latitude);
     const custLng = finiteNumber(customer?.longitude);
-    if (techLat == null || techLng == null) return null;
-    if (custLat == null || custLng == null) return null;
+    if (techLat == null || techLng == null) {
+      logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no GPS in tech_status`);
+      return null;
+    }
+    if (custLat == null || custLng == null) {
+      logger.info(`[track-transitions] en-route ETA skipped: customer ${customerId} not geocoded`);
+      return null;
+    }
+    if (!isFreshTimestamp(ts.location_updated_at)) {
+      logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} GPS stale (updated ${ts.location_updated_at})`);
+      return null;
+    }
 
     const eta = await calculateBoundedTrackingEta({
       techLat,
@@ -64,7 +77,11 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
       techUpdatedAt: ts.location_updated_at,
       logPrefix: 'track-transitions',
     });
-    return eta?.minutes ?? null;
+    if (!eta?.minutes) {
+      logger.info(`[track-transitions] en-route ETA skipped: bouncie returned no minutes for tech ${technicianId}`);
+      return null;
+    }
+    return eta.minutes;
   } catch (err) {
     logger.warn(`[track-transitions] en-route ETA resolve failed: ${err.message}`);
     return null;

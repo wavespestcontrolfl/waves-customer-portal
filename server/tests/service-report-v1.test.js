@@ -1,5 +1,6 @@
 const { pressureFromFindings } = require('../services/service-report/pressure-index');
 const { renderTreatmentMap } = require('../services/service-report/treatment-map');
+const { buildSatelliteTreatmentMapContext } = require('../services/service-report/satellite-treatment-map');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const {
   buildReportV1Data,
@@ -7,6 +8,32 @@ const {
   methodFromProduct,
   minutesFromElapsed,
 } = require('../services/service-report/report-data');
+const {
+  hashPhotoChainPayload,
+  validatePhotoChainRows,
+} = require('../services/service-report/photo-chain');
+const {
+  renderFallbackPdf,
+  serviceReportViewerUrl,
+} = require('../services/service-report/pdf');
+const {
+  buildServiceReportV1DeliveryContext,
+  buildServiceReportV1Sms,
+  serviceReportV1SmsType,
+  shouldSendServiceReportV1Delivery,
+} = require('../services/service-report/delivery');
+const { buildServiceReportV1Email } = require('../services/service-report/email-delivery');
+const { buildPressureTrendContextFromRows } = require('../services/service-report/pressure-trend');
+const {
+  buildPremiumExperienceContextFromRows,
+  buildWeatherCallContext,
+  validateCustomerCopy,
+} = require('../services/service-report/premium-experience');
+const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
+const {
+  enqueueServiceReportV1EmailDelivery,
+  nextServiceReportDeliveryAttemptAt,
+} = require('../services/service-report/delivery-queue');
 
 describe('service report v1', () => {
   test('pressure index uses weighted current findings and prior smoothing', () => {
@@ -23,6 +50,181 @@ describe('service report v1', () => {
 
     expect(currentOnly).toBe(3.6);
     expect(smoothed).toBe(3.0);
+  });
+
+  test('pressure index treats callbacks as a negative pressure signal', () => {
+    const routine = pressureFromFindings([{ severity: 'low' }]);
+    const callback = pressureFromFindings([{ severity: 'low' }], null, { hasCallback: true });
+
+    expect(routine).toBe(0.6);
+    expect(callback).toBeGreaterThan(routine);
+    expect(callback).toBe(2.0);
+  });
+
+  test('dynamic pressure trend includes current override and customer ROI copy', () => {
+    const context = buildPressureTrendContextFromRows({
+      record: {
+        id: 'service-current',
+        service_date: '2026-05-16',
+        pressure_index: null,
+      },
+      currentPressureIndexOverride: 1.6,
+      priorRows: [
+        { id: 'service-1', service_date: '2026-01-12', pressure_index: 3.2 },
+        { id: 'service-2', service_date: '2026-03-04', pressure_index: 2.4 },
+      ],
+      findings: [
+        { service_record_id: 'service-current', severity: 'low', title: 'Light ant activity' },
+        { service_record_id: 'service-current', severity: 'high', title: 'Active trail at entry' },
+      ],
+    });
+
+    expect(context.points.map((point) => point.serviceRecordId)).toEqual(['service-1', 'service-2', 'service-current']);
+    expect(context.current.pressureIndex).toBe(1.6);
+    expect(context.direction).toBe('down');
+    expect(context.percentChange).toBe(50);
+    expect(context.current.mainDriver).toBe('Active trail at entry');
+    expect(context.customerSummary).toContain('down 50%');
+  });
+
+  test('dynamic pressure trend avoids odd percentages from low baseline and handles first visit', () => {
+    const lowBaseline = buildPressureTrendContextFromRows({
+      record: { id: 'service-current', service_date: '2026-05-16', pressure_index: 0.4 },
+      priorRows: [{ id: 'service-1', service_date: '2026-01-12', pressure_index: 0.8 }],
+      findings: [],
+    });
+    const firstVisit = buildPressureTrendContextFromRows({
+      record: { id: 'service-current', service_date: '2026-05-16', pressure_index: 1.4 },
+      priorRows: [],
+      findings: [],
+    });
+
+    expect(lowBaseline.percentChange).toBeUndefined();
+    expect(lowBaseline.customerSummary).toBe('Pest pressure remains low.');
+    expect(firstVisit.direction).toBe('first_visit');
+    expect(firstVisit.customerSummary).toContain('first pressure reading');
+  });
+
+  test('dynamic re-entry context uses latest application and absolute ready times', () => {
+    const context = buildReentryContextFromRecord({
+      id: 'service-1',
+      started_at: '2026-05-16T13:00:00.000Z',
+      ended_at: '2026-05-16T13:20:00.000Z',
+      applications: [
+        { appliedAt: '2026-05-16T13:10:00.000Z' },
+        { appliedAt: '2026-05-16T13:30:00.000Z' },
+      ],
+      advisory: {
+        exterior_reentry_min: 30,
+        interior_reentry_min: 120,
+        irrigation_hold_hr: 24,
+        pet_advisory: 'Keep pets off treated zones until dry.',
+      },
+    }, new Date('2026-05-16T13:35:00.000Z'));
+
+    expect(context.anchorAppliedAt).toBe('2026-05-16T13:30:00.000Z');
+    expect(context.targets).toHaveLength(2);
+    expect(context.targets[0]).toMatchObject({ key: 'exterior', statusAtGeneratedAt: 'pending' });
+    expect(context.targets[1]).toMatchObject({ key: 'interior', statusAtGeneratedAt: 'pending' });
+    expect(context.petAdvisory).toBe('Keep pets off treated zones until dry.');
+    expect(context.irrigationReadyAt).toBe('2026-05-17T13:30:00.000Z');
+    expect(context.customerSummary).toContain('Exterior ready at');
+  });
+
+  test('premium experience builds customer-facing modules from service facts', () => {
+    const context = buildPremiumExperienceContextFromRows({
+      record: {
+        id: 'service-current',
+        pressure_index: 1.6,
+        conditions: JSON.stringify({
+          temp_f: 82,
+          humidity_pct: 64,
+          wind_mph: 8,
+          rain_24h_in: 0.04,
+          source: 'FAWN 311 Myakka River',
+        }),
+      },
+      dynamicContext: {
+        pressureTrend: {
+          direction: 'down',
+          percentChange: 53,
+          customerSummary: 'Pest pressure is down 53% since your first WaveGuard service.',
+          current: { pressureIndex: 1.6 },
+          points: [
+            { serviceRecordId: 'service-1', pressureIndex: 3.4 },
+            { serviceRecordId: 'service-current', pressureIndex: 1.6 },
+          ],
+        },
+      },
+      findings: [
+        {
+          id: 'finding-1',
+          category: 'conducive_condition',
+          severity: 'medium',
+          title: 'Ghost ant trail at front entry threshold',
+          detail: 'Light activity from mulch bed to door sweep',
+          recommendation: 'Keep mulch pulled back two inches from the front-entry foundation.',
+          zone_id: 'zone-c',
+        },
+      ],
+      applications: [
+        {
+          id: 'app-1',
+          productName: 'Advion Ant Gel',
+          method: 'bait_placement',
+          targets: ['ghost_ant'],
+        },
+        {
+          id: 'app-2',
+          productName: 'Demand CS',
+          method: 'perimeter_spray',
+          targets: ['ghost_ant', 'american_roach'],
+        },
+      ],
+      zones: [
+        { id: 'zone-c', letter: 'C', label: 'Front entry', category: 'perimeter' },
+      ],
+      visitRows: [{ id: 'service-1' }, { id: 'service-current' }],
+    });
+
+    expect(context.aiSummaryPersonality.variants.straight.headline).toContain('down 53%');
+    expect(context.aiSummaryPersonality.variants.unfiltered.body).toContain('mulch');
+    expect(context.primaryMove.title).toContain('mulch pulled back');
+    expect(context.propertyDefenseStatus.items.find((item) => item.key === 'perimeter_shield')).toMatchObject({ status: 'active' });
+    expect(context.bugFiles[0]).toMatchObject({ suspectLabel: 'Ghost ant' });
+    expect(context.whyActivity.title).toBe('Why you might still see ants');
+    expect(context.weatherCall).toMatchObject({
+      headline: 'Good treatment window.',
+      factsLine: '82°F · 64% humidity · 8 mph wind · 0.04 in rain',
+    });
+    expect(context.pressureReceipt.stats.some((stat) => stat.label === 'Pressure down' && stat.value === '53%')).toBe(true);
+    expect(validateCustomerCopy(context.aiSummaryPersonality.variants.unfiltered.body)).toBe(true);
+  });
+
+  test('premium weather call formats raw weather without overclaiming', () => {
+    const good = buildWeatherCallContext({
+      record: {
+        conditions: JSON.stringify({
+          temp_f: 82,
+          humidity_pct: 64,
+          wind_mph: 8,
+          rain_24h_in: 0.04,
+        }),
+      },
+    });
+    const windy = buildWeatherCallContext({
+      record: {
+        conditions: JSON.stringify({
+          wind_mph: 16,
+          rain_24h_in: 0,
+        }),
+      },
+    });
+
+    expect(good.headline).toBe('Good treatment window.');
+    expect(good.factsLine).toContain('82°F');
+    expect(windy.headline).toBe('Wind was elevated.');
+    expect(`${good.headline} ${good.body} ${windy.headline} ${windy.body}`).not.toMatch(/perfect|guaranteed|safe/i);
   });
 
   test('treatment map is deterministic and exposes interactive layer data', () => {
@@ -68,6 +270,39 @@ describe('service report v1', () => {
     expect(first).toContain('Ant trail');
   });
 
+  test('satellite treatment map is opt-in and keeps Google imagery out of PDF and SMS export', async () => {
+    const previousEnabled = process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED;
+    const previousKey = process.env.GOOGLE_STATIC_MAPS_API_KEY;
+    try {
+      delete process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED;
+      delete process.env.GOOGLE_STATIC_MAPS_API_KEY;
+      const disabled = await buildSatelliteTreatmentMapContext({
+        service: { customer_latitude: 27.39, customer_longitude: -82.43 },
+      });
+      expect(disabled).toMatchObject({ available: false, fallbackReason: 'disabled' });
+
+      process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED = 'true';
+      process.env.GOOGLE_STATIC_MAPS_API_KEY = 'test-key';
+      const enabled = await buildSatelliteTreatmentMapContext({
+        service: { customer_latitude: 27.39, customer_longitude: -82.43 },
+        zones: [{ id: 'zone-a', letter: 'A', label: 'Front entry', category: 'perimeter', geometry: { x: 60, y: 40, w: 120, h: 40 } }],
+        applications: [{ id: 'app-1', method: 'perimeter_spray', product: { name: 'Demand CS' }, zone_ids: ['zone-a'] }],
+      });
+
+      expect(enabled.available).toBe(true);
+      expect(enabled.provider).toBe('google_maps');
+      expect(enabled.live.url).toContain('maps.googleapis.com/maps/api/staticmap');
+      expect(enabled.capabilities.canUseInPdf).toBe(false);
+      expect(enabled.capabilities.canUseInSmsPreview).toBe(false);
+      expect(enabled.overlay.zones[0].overlaySource).toBe('local_schematic');
+    } finally {
+      if (previousEnabled === undefined) delete process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED;
+      else process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED = previousEnabled;
+      if (previousKey === undefined) delete process.env.GOOGLE_STATIC_MAPS_API_KEY;
+      else process.env.GOOGLE_STATIC_MAPS_API_KEY = previousKey;
+    }
+  });
+
   test('service report classifiers keep customer-facing report labels accurate', () => {
     expect(detectServiceLine('Weed Control')).toBe('lawn');
     expect(detectServiceLine('Dethatching Service')).toBe('lawn');
@@ -101,7 +336,7 @@ describe('service report v1', () => {
     ])).toEqual(['Perimeter', 'Garage']);
   });
 
-  test('v1 data does not advertise the legacy report PDF', async () => {
+  test('v1 data exposes public report asset endpoints', async () => {
     const fixtures = {
       service_products: [],
       property_geometries: [],
@@ -133,33 +368,19 @@ describe('service report v1', () => {
       service_data: '{}',
     }, 'token-1', knex);
 
-    expect(data.pdfUrl).toBeNull();
+    expect(data.pdfUrl).toBe('/api/reports/token-1');
+    expect(data.mapSvgUrl).toBe('/api/reports/token-1/map.svg');
     expect(data.serviceData).toBeUndefined();
     expect(data.zones.map((zone) => zone.label)).toEqual(['Perimeter']);
   });
 
-  test('v1 data exposes completion panel fields used by the report', async () => {
+  test('v1 data carries completion panel fields into the public report payload', async () => {
     const fixtures = {
-      service_products: [{
-        id: 'product-1',
-        product_name: 'Demand CS',
-        product_category: 'insecticide',
-        active_ingredient: 'Lambda-cyhalothrin',
-        application_rate: '0.800',
-        rate_unit: 'fl_oz',
-        total_amount: '2.000',
-        amount_unit: 'fl_oz',
-        created_at: '2026-05-15T14:00:00Z',
-      }],
+      service_products: [],
       property_geometries: [],
       property_zones: [],
       service_findings: [],
-      service_photos: [{
-        id: 'photo-1',
-        s3_url: 'https://example.com/photo.jpg',
-        caption: 'After service',
-        created_at: '2026-05-15T14:15:00Z',
-      }],
+      service_photos: [],
     };
     const knex = (table) => {
       const rows = fixtures[table] || [];
@@ -174,46 +395,505 @@ describe('service report v1', () => {
     };
 
     const data = await buildReportV1Data({
-      id: 'service-1',
+      id: 'service-complete',
       customer_id: 'customer-1',
+      service_line: 'pest',
       service_type: 'Residential Pest Control',
       service_date: '2026-05-15',
       first_name: 'Van',
       last_name: 'Lee',
-      technician_name: 'Avery Tech',
-      customer_interaction: 'spoke',
-      soil_temp: 82,
+      areas_serviced: JSON.stringify(['Perimeter', 'Customer spoke with tech']),
+      customer_interaction: null,
+      soil_temp: 78,
       thatch_measurement: 0.5,
       soil_ph: 6.8,
-      soil_moisture: 33,
-      areas_serviced: JSON.stringify(['Perimeter', 'Garage']),
+      soil_moisture: 24,
       structured_notes: JSON.stringify({
-        customerRecap: 'Completed the exterior service and addressed activity around the garage.',
+        customerRecap: 'Treated the front entry and garage, then reviewed the concern with the customer.',
         timeOnSite: '42:00',
-        protocolActionsCompleted: ['Applied perimeter band'],
-        observations: ['Pest activity noted'],
-        recommendations: ['Seal entry gaps near garage'],
+        customerInteraction: 'spoke',
+        areasTreated: ['Perimeter', 'Garage'],
+        protocolActionsCompleted: ['Treated front entry trail'],
+        observations: ['Light ant activity at front entry'],
+        recommendations: ['Seal the small gap under the front door'],
       }),
-      service_data: JSON.stringify({
-        protocol: {
-          actions: ['Cobweb sweep'],
-          observations: ['Standing water found'],
-          recommendations: ['Irrigation adjustment needed'],
-          visitOutcome: 'follow_up_needed',
-        },
-      }),
-    }, 'token-1', knex);
+      service_data: '{}',
+    }, 'token-complete', knex);
 
-    expect(data.summary).toMatch(/Completed the exterior service/);
+    expect(data.summary).toBe('Treated the front entry and garage, then reviewed the concern with the customer.');
     expect(data.customerInteraction).toBe('spoke');
-    expect(data.visitOutcome).toBe('follow_up_needed');
     expect(data.serviceAreas).toEqual(['Perimeter', 'Garage']);
-    expect(data.protocol.actions).toEqual(['Cobweb sweep', 'Applied perimeter band']);
-    expect(data.findings.map((finding) => finding.title)).toEqual(['Standing water found', 'Pest activity noted']);
-    expect(data.recommendations).toEqual(['Irrigation adjustment needed', 'Seal entry gaps near garage']);
-    expect(data.metrics.find((metric) => metric.key === 'on_site_min').value).toBe(42);
-    expect(data.measurements).toEqual({ soilTemp: 82, thatch: 0.5, soilPh: 6.8, moisture: 33 });
-    expect(data.applications[0].product.name).toBe('Demand CS');
-    expect(data.photos[0].url).toBe('https://example.com/photo.jpg');
+    expect(data.measurements).toMatchObject({
+      soilTemp: 78,
+      thatch: 0.5,
+      soilPh: 6.8,
+      moisture: 24,
+    });
+    expect(data.protocol.actions).toEqual(['Treated front entry trail']);
+    expect(data.protocol.observations).toEqual(['Light ant activity at front entry']);
+    expect(data.recommendations).toContain('Seal the small gap under the front door');
+    expect(data.metrics.find((metric) => metric.key === 'on_site_min')).toMatchObject({ value: 42 });
+  });
+
+  test('v1 data filters saved property zones to the report service line', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [
+        {
+          id: 'zone-lawn',
+          customer_id: 'customer-1',
+          is_active: true,
+          letter: 'A',
+          label: 'Front lawn',
+          category: 'lawn',
+          geometry: { x: 60, y: 40, w: 160, h: 80 },
+          service_lines: ['lawn'],
+        },
+        {
+          id: 'zone-pest',
+          customer_id: 'customer-1',
+          is_active: true,
+          letter: 'B',
+          label: 'Kitchen baseboards',
+          category: 'interior',
+          geometry: { x: 260, y: 140, w: 90, h: 60 },
+          service_lines: ['pest'],
+        },
+      ],
+      service_findings: [],
+      service_photos: [],
+      lawn_assessments: [],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy(column, direction = 'asc') {
+          rows.sort((a, b) => {
+            const av = a[column] ?? '';
+            const bv = b[column] ?? '';
+            const result = String(av).localeCompare(String(bv));
+            return String(direction).toLowerCase() === 'desc' ? -result : result;
+          });
+          return query;
+        },
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-lawn-zones',
+      customer_id: 'customer-1',
+      service_line: 'lawn',
+      service_type: 'Weed Control',
+      service_date: '2026-05-16',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Front lawn']),
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-lawn-zones', knex);
+
+    expect(data.zones.map((zone) => zone.label)).toEqual(['Front lawn']);
+  });
+
+  test('v1 data includes linked lawn assessment and exposes lawn health metrics', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+      lawn_assessments: [
+        {
+          id: 'assessment-1',
+          customer_id: 'customer-1',
+          service_record_id: 'service-old',
+          service_id: 'scheduled-old',
+          confirmed_by_tech: true,
+          service_date: '2026-03-04',
+          turf_density: 60,
+          weed_suppression: 70,
+          color_health: 65,
+          fungus_control: 75,
+          thatch_level: 60,
+          overall_score: 66,
+          observations: 'Baseline turf assessment recorded.',
+        },
+        {
+          id: 'assessment-2',
+          customer_id: 'customer-1',
+          service_record_id: 'service-lawn',
+          service_id: 'scheduled-lawn',
+          confirmed_by_tech: true,
+          service_date: '2026-05-16',
+          turf_density: 80,
+          weed_suppression: 90,
+          color_health: 82,
+          fungus_control: 88,
+          thatch_level: 70,
+          overall_score: 83,
+          observations: 'Turf density improved and weed pressure was low.',
+          recommendations: JSON.stringify({ customerTip: 'Water deeply in the morning as needed.' }),
+        },
+      ],
+      lawn_assessment_photos: [
+        {
+          id: 'photo-1',
+          assessment_id: 'assessment-2',
+          customer_visible: true,
+          is_best_photo: true,
+          quality_score: 92,
+          photo_order: 0,
+          s3_key: 'pending/assessment-2/photo.jpg',
+          photo_type: 'front_yard',
+        },
+      ],
+      customer_turf_profiles: [
+        {
+          id: 'profile-1',
+          customer_id: 'customer-1',
+          active: true,
+          grass_type: 'st_augustine',
+          lawn_sqft: 6200,
+          irrigation_type: 'in_ground',
+        },
+      ],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy(column, direction = 'asc') {
+          rows.sort((a, b) => {
+            const av = a[column] ?? '';
+            const bv = b[column] ?? '';
+            const result = String(av).localeCompare(String(bv));
+            return String(direction).toLowerCase() === 'desc' ? -result : result;
+          });
+          return query;
+        },
+        limit(count) {
+          rows = rows.slice(0, count);
+          return query;
+        },
+        first() {
+          return Promise.resolve(rows[0] || null);
+        },
+        catch() {
+          return Promise.resolve(rows);
+        },
+        then(resolve) {
+          return Promise.resolve(rows).then(resolve);
+        },
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-lawn',
+      customer_id: 'customer-1',
+      scheduled_service_id: 'scheduled-lawn',
+      service_line: 'lawn',
+      service_type: 'Lawn Care',
+      service_date: '2026-05-16',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Front lawn']),
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-lawn', knex);
+
+    expect(data.serviceLine).toBe('lawn');
+    expect(data.lawnAssessment.scores.overallScore).toBe(83);
+    expect(data.lawnAssessment.initialScores.overallScore).toBe(66);
+    expect(data.lawnAssessment.customerSummary).toBe('Lawn health is up 17 points since your first assessment.');
+    expect(data.lawnAssessment.trend.map((point) => point.overallScore)).toEqual([66, 83]);
+    expect(data.lawnAssessment.turfProfile).toMatchObject({ grassType: 'st_augustine', lawnSqft: 6200 });
+    expect(data.metrics.find((metric) => metric.key === 'lawn_health')).toMatchObject({
+      label: 'Lawn health',
+      value: 83,
+      unit: '%',
+    });
+    expect(data.metrics.some((metric) => metric.label === 'Pressure index')).toBe(false);
+  });
+
+  test('photo hash chain validates deterministic metadata and detects tampering', () => {
+    const first = {
+      id: 'photo-1',
+      service_record_id: 'service-1',
+      photo_type: 'progress',
+      storage_key: 'service-photos/service-1/one.jpg',
+      caption: 'Front entry',
+      captured_at: '2026-05-16T12:00:00.000Z',
+      image_sha256: 'a'.repeat(64),
+      sort_order: 0,
+    };
+    const firstHash = hashPhotoChainPayload(first, null);
+    const second = {
+      id: 'photo-2',
+      service_record_id: 'service-1',
+      photo_type: 'progress',
+      storage_key: 'service-photos/service-1/two.jpg',
+      caption: 'Rear perimeter',
+      captured_at: '2026-05-16T12:01:00.000Z',
+      image_sha256: 'b'.repeat(64),
+      sort_order: 1,
+      prev_hash_sha256: firstHash,
+    };
+    const secondHash = hashPhotoChainPayload(second, firstHash);
+    const validRows = [
+      { ...first, prev_hash_sha256: null, hash_sha256: firstHash },
+      { ...second, hash_sha256: secondHash },
+    ];
+
+    expect(validatePhotoChainRows(validRows)).toEqual({
+      valid: true,
+      photo_count: 2,
+      broken_at: null,
+    });
+
+    const tampered = validRows.map((row) => (
+      row.id === 'photo-1' ? { ...row, caption: 'Changed caption' } : row
+    ));
+    expect(validatePhotoChainRows(tampered)).toMatchObject({
+      valid: false,
+      broken_at: 'photo-1',
+      reason: 'hash_mismatch',
+    });
+  });
+
+  test('v1 PDF fallback is a real PDF and viewer URL points to the report page', async () => {
+    expect(serviceReportViewerUrl('token-1')).toBe('http://localhost:5173/report/token-1?mode=pdf');
+
+    const pdf = await renderFallbackPdf({
+      serviceLineDisplay: 'WaveGuard pest control',
+      serviceType: 'Residential Pest Control',
+      serviceDate: '2026-05-15',
+      technicianName: 'Waves team',
+      cityState: 'Lakewood Ranch, FL',
+      metrics: [
+        { label: 'On-site', value: 12, unit: 'min' },
+        { label: 'Zones', value: '4/4' },
+        { label: 'Linear ft', value: 180 },
+        { label: 'Pressure index', value: 1.2 },
+      ],
+      advisory: {
+        exterior_reentry_min: 30,
+        interior_reentry_min: 120,
+        irrigation_hold_hr: 24,
+        pet_advisory: 'Keep pets off treated zones until dry.',
+      },
+      applications: [],
+      findings: [],
+    });
+
+    expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
+  });
+
+  test('v1 SMS delivery copy includes public report link and advisory re-entry', () => {
+    const body = buildServiceReportV1Sms({
+      customerFirstName: 'Van',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      advisory: {
+        exterior_reentry_min: 30,
+        interior_reentry_min: 120,
+      },
+    });
+
+    expect(body).toContain('Hi Van, your Waves service report is ready: https://portal.wavespestcontrol.com/report/token-1');
+    expect(body).toContain('Re-entry: 30 min outside, 120 min inside.');
+    expect(body).toContain('Reply STOP to opt out.');
+    expect(body).not.toContain('serviceData');
+  });
+
+  test('v1.1 SMS delivery keeps the existing body unchanged when dynamic context exists', () => {
+    const body = buildServiceReportV1Sms({
+      customerFirstName: 'Ava',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      advisory: {
+        exterior_reentry_min: 30,
+        interior_reentry_min: 120,
+      },
+      dynamicContext: {
+        pressureTrend: {
+          direction: 'down',
+          customerSummary: 'Pest pressure is down 38% since your first WaveGuard service.',
+        },
+        reentry: {
+          displayTimezone: 'America/New_York',
+          targets: [
+            { key: 'exterior', readyAt: '2026-05-16T14:12:00.000Z' },
+            { key: 'interior', readyAt: '2026-05-16T15:42:00.000Z' },
+          ],
+        },
+      },
+    });
+
+    expect(body).toBe(
+      'Hi Ava, your Waves service report is ready: https://portal.wavespestcontrol.com/report/token-1\n'
+      + 'Re-entry: 30 min outside, 120 min inside.\n'
+      + 'Reply STOP to opt out.'
+    );
+  });
+
+  test('v1 SMS delivery gates on template version and completed status', () => {
+    expect(shouldSendServiceReportV1Delivery({
+      report_template_version: 'service_report_v1',
+      status: 'completed',
+    })).toBe(true);
+    expect(shouldSendServiceReportV1Delivery({
+      report_template_version: 'service_report_v1',
+      status: 'complete',
+    })).toBe(true);
+    expect(shouldSendServiceReportV1Delivery({
+      report_template_version: null,
+      status: 'completed',
+    })).toBe(false);
+    expect(shouldSendServiceReportV1Delivery({
+      report_template_version: 'service_report_v1',
+      status: 'incomplete',
+    })).toBe(false);
+    expect(shouldSendServiceReportV1Delivery({
+      report_template_version: 'service_report_v1',
+      status: 'voided',
+    })).toBe(false);
+  });
+
+  test('v1 delivery context carries invoice link and report metadata', () => {
+    const context = buildServiceReportV1DeliveryContext({
+      record: {
+        id: 'service-1',
+        report_template_version: 'service_report_v1',
+        status: 'completed',
+        service_line: 'pest',
+        advisory: JSON.stringify({
+          exterior_reentry_min: 45,
+          interior_reentry_min: 90,
+        }),
+      },
+      service: {
+        first_name: 'Van',
+        service_type: 'Residential Pest Control',
+      },
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      smsReportUrl: 'https://portal.wavespestcontrol.com/l/report-abc12',
+      payUrl: 'https://portal.wavespestcontrol.com/l/invoice-xyz89',
+    });
+
+    expect(context.enabled).toBe(true);
+    expect(context.smsType).toBe(serviceReportV1SmsType({ hasInvoiceLink: true }));
+    expect(context.body).toContain('https://portal.wavespestcontrol.com/l/report-abc12');
+    expect(context.body).toContain('Re-entry: 45 min outside, 90 min inside.');
+    expect(context.body).toContain('Invoice: https://portal.wavespestcontrol.com/l/invoice-xyz89');
+    expect(context.metadata).toMatchObject({
+      original_message_type: 'service_report_v1_with_invoice',
+      service_record_id: 'service-1',
+      report_template_version: 'service_report_v1',
+      report_url: 'https://portal.wavespestcontrol.com/report/token-1',
+      report_sms_url: 'https://portal.wavespestcontrol.com/l/report-abc12',
+      service_line: 'pest',
+    });
+  });
+
+  test('v1 email delivery copy includes advisory and report CTA', () => {
+    const email = buildServiceReportV1Email({
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      pdfAttached: true,
+      data: {
+        serviceLineDisplay: 'WaveGuard pest control',
+        serviceType: 'Residential Pest Control',
+        serviceDate: '2026-05-15',
+        customerName: 'Van Lee',
+        technicianName: 'Jose Alvarado',
+        cityState: 'Lakewood Ranch, FL',
+        applications: [{ id: 'app-1' }],
+        findings: [{ title: 'Ghost ant trail at front entry threshold' }],
+        metrics: [{ label: 'Pressure index', value: 1.7 }],
+        advisory: {
+          exterior_reentry_min: 30,
+          interior_reentry_min: 120,
+        },
+      },
+    });
+
+    expect(email.subject).toContain('Your Waves service report - WaveGuard pest control');
+    expect(email.html).toContain('https://portal.wavespestcontrol.com/report/token-1');
+    expect(email.html).toContain('Exterior re-entry');
+    expect(email.html).toContain('30 min');
+    expect(email.html).toContain('Ghost ant trail at front entry threshold');
+    expect(email.text).toContain('The PDF service report is attached.');
+  });
+
+  test('v1 delivery queue enqueue is idempotent per service record and channel', async () => {
+    const rows = [];
+    const knex = (table) => {
+      expect(table).toBe('service_report_deliveries');
+      const query = {
+        criteria: null,
+        where(criteria) {
+          query.criteria = criteria;
+          return query;
+        },
+        first() {
+          return Promise.resolve(rows.find((row) => Object.entries(query.criteria || {})
+            .every(([key, value]) => row[key] === value)) || null);
+        },
+        insert(row) {
+          return {
+            returning: async () => {
+              const inserted = { id: `delivery-${rows.length + 1}`, ...row };
+              rows.push(inserted);
+              return [inserted];
+            },
+          };
+        },
+      };
+      return query;
+    };
+
+    const first = await enqueueServiceReportV1EmailDelivery({
+      serviceRecordId: 'service-1',
+      customerId: 'customer-1',
+      token: 'token-1',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      pdfUrl: 'https://portal.wavespestcontrol.com/api/reports/token-1',
+    }, knex);
+    const second = await enqueueServiceReportV1EmailDelivery({
+      serviceRecordId: 'service-1',
+      customerId: 'customer-1',
+      token: 'token-1',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      pdfUrl: 'https://portal.wavespestcontrol.com/api/reports/token-1',
+    }, knex);
+
+    expect(first.queued).toBe(true);
+    expect(second.queued).toBe(false);
+    expect(second.delivery.id).toBe(first.delivery.id);
+    expect(rows).toHaveLength(1);
+  });
+
+  test('v1 delivery queue retry schedule backs off deterministically', () => {
+    const now = new Date('2026-05-16T12:00:00.000Z');
+    expect(nextServiceReportDeliveryAttemptAt(now, 1).toISOString()).toBe('2026-05-16T12:05:00.000Z');
+    expect(nextServiceReportDeliveryAttemptAt(now, 2).toISOString()).toBe('2026-05-16T12:15:00.000Z');
+    expect(nextServiceReportDeliveryAttemptAt(now, 3).toISOString()).toBe('2026-05-16T13:00:00.000Z');
+    expect(nextServiceReportDeliveryAttemptAt(now, 99).toISOString()).toBe('2026-05-17T12:00:00.000Z');
   });
 });

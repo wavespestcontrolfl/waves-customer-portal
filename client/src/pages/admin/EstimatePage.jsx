@@ -702,7 +702,7 @@ function EstimateToolView() {
       );
     if (form.svcInjection)
       approx.injection = Math.round(
-        ((Number(form.palmCount) || 3) * 35 * 3) / 12,
+        (Math.max(Math.max(1, Math.round((Number(form.palmCount) || 3) * 0.30)) * 75, 75) * 2) / 12,
       );
     if (form.svcMosquito)
       approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
@@ -1212,7 +1212,7 @@ function EstimateToolView() {
           preslabSqft: parseInt(form.preslabSqft) || 0,
           preslabWarranty: form.preslabWarranty || "BASIC",
           preslabVolume: form.preslabVolume || "NONE",
-          foamPoints: parseInt(form.foamPoints) || 5,
+          foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
           bedbugRooms: parseInt(form.bedbugRooms) || 1,
           bedbugMethod: form.bedbugMethod || "BOTH",
           exclSimple: parseInt(form.exclSimple) || 0,
@@ -3532,7 +3532,10 @@ function EstimateToolView() {
                               {" "}
                               <TierRow
                                 name="Arborjet"
-                                detail={`${R.injection.palms} palms x $55 x 2/yr`}
+                                detail={
+                                  R.injection.detail ||
+                                  `${R.injection.palms} palms x $${R.injection.pricePerPalm || 75} x ${R.injection.appsPerYear || 2}/yr`
+                                }
                                 price={`${fmt(R.injection.mo)}/mo`}
                                 recommended
                               />{" "}

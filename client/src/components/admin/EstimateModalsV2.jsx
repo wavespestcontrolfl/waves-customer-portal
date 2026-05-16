@@ -18,6 +18,11 @@ import {
 } from "../ui";
 import { DECLINE_REASONS } from "../../pages/admin/EstimatePage";
 
+// Match the EstimatesPageV2 surface — the estimates page is locked to Roboto
+// per Adam's design call, and these modals only render from that page, so
+// the panel font follows the same body.
+const ROBOTO_STYLE = { fontFamily: "'Roboto', Arial, sans-serif" };
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function adminFetch(path, options = {}) {
@@ -56,7 +61,7 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
   };
 
   return (
-    <Dialog open onClose={onClose} size="md">
+    <Dialog open onClose={onClose} size="md" style={ROBOTO_STYLE}>
       {" "}
       <DialogHeader>
         {" "}
@@ -117,7 +122,7 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
   };
 
   return (
-    <Dialog open onClose={onClose} size="sm">
+    <Dialog open onClose={onClose} size="sm" style={ROBOTO_STYLE}>
       {" "}
       <DialogHeader>
         {" "}
@@ -180,6 +185,175 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
           disabled={saving || !reason}
         >
           {saving ? "Saving…" : "Mark as Lost"}
+        </Button>{" "}
+      </DialogFooter>{" "}
+    </Dialog>
+  );
+}
+
+// Extend modal — pushes expires_at forward by a preset window and sends the
+// customer a heads-up SMS in Waves voice. Default 7d; 14/30/90 are the other
+// presets; custom value is a free-text input (1-180 days).
+const EXTEND_PRESETS = [7, 14, 30, 90];
+
+function previewExpiry(currentExpiresAt, days) {
+  const now = new Date();
+  const cur = currentExpiresAt ? new Date(currentExpiresAt) : now;
+  const anchor = cur > now ? cur : now;
+  const next = new Date(anchor.getTime() + days * 86400000);
+  return next.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "America/New_York",
+  });
+}
+
+export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
+  const [days, setDays] = useState(7);
+  const [customDays, setCustomDays] = useState("");
+  const [silent, setSilent] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const effectiveDays = days === "custom"
+    ? Number.parseInt(customDays, 10) || 0
+    : days;
+  const valid = effectiveDays >= 1 && effectiveDays <= 180;
+  const hasPhone = !!estimate.customerPhone;
+
+  const handleExtend = async () => {
+    if (!valid) return;
+    setSending(true);
+    try {
+      const result = await adminFetch(
+        `/admin/estimates/${estimate.id}/extend`,
+        {
+          method: "POST",
+          body: JSON.stringify({ days: effectiveDays, silent }),
+        },
+      );
+      onExtended?.(result);
+    } catch (err) {
+      alert("Extend failed: " + err.message);
+    }
+    setSending(false);
+  };
+
+  return (
+    <Dialog open onClose={onClose} size="md" style={ROBOTO_STYLE}>
+      {" "}
+      <DialogHeader>
+        {" "}
+        <DialogTitle>Extend estimate</DialogTitle>{" "}
+        <div className="text-12 text-ink-secondary mt-0.5">
+          {estimate.customerName}
+          {estimate.address ? ` — ${estimate.address.split(",")[0]}` : ""}
+        </div>{" "}
+        {estimate.expiresAt && (
+          <div className="text-11 text-ink-tertiary mt-0.5">
+            Current expiry:{" "}
+            {new Date(estimate.expiresAt).toLocaleDateString("en-US", {
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              timeZone: "America/New_York",
+            })}
+          </div>
+        )}{" "}
+      </DialogHeader>{" "}
+      <DialogBody>
+        {" "}
+        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+          Add time
+        </div>{" "}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 mb-3">
+          {EXTEND_PRESETS.map((d) => {
+            const selected = days === d;
+            return (
+              <button
+                key={d}
+                type="button"
+                onClick={() => setDays(d)}
+                className={cn(
+                  "h-10 px-3 rounded-sm text-13 font-medium border-hairline u-focus-ring transition-colors",
+                  selected
+                    ? "bg-zinc-900 text-white border-zinc-900"
+                    : "bg-white text-zinc-900 border-zinc-300 hover:bg-zinc-50",
+                )}
+              >
+                +{d} days
+              </button>
+            );
+          })}{" "}
+          <button
+            type="button"
+            onClick={() => setDays("custom")}
+            className={cn(
+              "h-10 px-3 rounded-sm text-13 font-medium border-hairline u-focus-ring transition-colors",
+              days === "custom"
+                ? "bg-zinc-900 text-white border-zinc-900"
+                : "bg-white text-zinc-900 border-zinc-300 hover:bg-zinc-50",
+            )}
+          >
+            Custom
+          </button>{" "}
+        </div>
+        {days === "custom" && (
+          <div className="mb-3">
+            <input
+              type="number"
+              min={1}
+              max={180}
+              inputMode="numeric"
+              value={customDays}
+              onChange={(ev) => setCustomDays(ev.target.value)}
+              placeholder="Days (1–180)"
+              aria-label="Custom days to extend"
+              className="w-full h-10 px-3 text-14 rounded-sm bg-white border-hairline border-zinc-300 u-focus-ring"
+            />
+          </div>
+        )}
+        {valid && (
+          <div className="text-12 text-ink-secondary mb-3">
+            New expiry:{" "}
+            <span className="text-zinc-900 font-medium">
+              {previewExpiry(estimate.expiresAt, effectiveDays)}
+            </span>
+          </div>
+        )}{" "}
+        <label className="flex items-start gap-2 text-13 text-ink-secondary cursor-pointer">
+          {" "}
+          <input
+            type="checkbox"
+            checked={silent}
+            onChange={(ev) => setSilent(ev.target.checked)}
+            className="mt-1"
+          />{" "}
+          <span>
+            Skip the customer SMS (just extend silently — Waves voice text is
+            sent by default
+            {hasPhone ? "" : "; no phone on file so this would be skipped anyway"}
+            ).
+          </span>{" "}
+        </label>{" "}
+      </DialogBody>{" "}
+      <DialogFooter>
+        {" "}
+        <Button variant="secondary" onClick={onClose} disabled={sending}>
+          Cancel
+        </Button>{" "}
+        <Button
+          variant="primary"
+          onClick={handleExtend}
+          disabled={sending || !valid}
+        >
+          {sending
+            ? "Extending…"
+            : silent || !hasPhone
+              ? `Extend +${effectiveDays}d`
+              : `Extend +${effectiveDays}d & text`}
         </Button>{" "}
       </DialogFooter>{" "}
     </Dialog>

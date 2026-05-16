@@ -80,6 +80,22 @@ function sanitizeTechForNonAdmin(tech) {
   return out;
 }
 
+// Fields that should never leave the server in any response, even to
+// admin callers. password_hash exists on the technicians row for
+// portal-side auth — clients have no business case for receiving it
+// and a leaked hash makes offline brute-force possible against any
+// JWT-revoked rotation. Apply this stripper at every admin response
+// path that returns a raw `technicians.*` row (insert/update returning,
+// .first() lookups). Non-admin paths already exclude it via the
+// PUBLIC_TECH_FIELDS allowlist.
+const NEVER_RETURN_TECH_FIELDS = ['password_hash'];
+function stripPrivateTechFields(tech) {
+  if (!tech) return tech;
+  const out = { ...tech };
+  for (const f of NEVER_RETURN_TECH_FIELDS) delete out[f];
+  return out;
+}
+
 // Authoritative admin check — reads from req.technician.role (the
 // full DB row attached by adminAuthenticate), not the parallel
 // req.techRole convenience field, so renaming/drift on the convenience
@@ -741,7 +757,7 @@ router.get('/technicians', requireTechOrAdmin, async (req, res, next) => {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
       };
-      return callerIsAdmin ? row : sanitizeTechForNonAdmin(row);
+      return callerIsAdmin ? stripPrivateTechFields(row) : sanitizeTechForNonAdmin(row);
     }));
     res.json({ technicians: enriched });
   } catch (err) { next(err); }
@@ -798,7 +814,7 @@ router.post('/technicians', requireAdmin, async (req, res, next) => {
     // Log id + structural state only; the row now carries payroll/PII
     // so names stay out of logs per AGENTS.md.
     logger.info(`[team] Added technician id=${tech.id} (auto_flip_enabled=${tech.auto_flip_enabled})`);
-    res.json({ success: true, technician: tech });
+    res.json({ success: true, technician: stripPrivateTechFields(tech) });
   } catch (err) { next(err); }
 });
 
@@ -823,7 +839,7 @@ router.put('/technicians/:id', requireAdmin, async (req, res, next) => {
     await db('technicians').where({ id: req.params.id }).update(updates);
     const tech = await db('technicians').where({ id: req.params.id }).first();
     logger.info(`[team] Updated technician id=${tech.id} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
-    res.json({ success: true, technician: tech });
+    res.json({ success: true, technician: stripPrivateTechFields(tech) });
   } catch (err) { next(err); }
 });
 
@@ -1008,7 +1024,7 @@ router.post(
       const { resolveTechPhotoUrl } = require('../services/tech-photo');
       updated.avatar_url = await resolveTechPhotoUrl(updated.photo_s3_key, updated.avatar_url);
 
-      const responseRow = isAdminCaller(req) ? updated : sanitizeTechForNonAdmin(updated);
+      const responseRow = isAdminCaller(req) ? stripPrivateTechFields(updated) : sanitizeTechForNonAdmin(updated);
       res.json({ success: true, technician: responseRow });
     } catch (err) {
       logger.error(`[team] Tech photo upload failed: ${err.message}`);

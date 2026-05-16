@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const crypto = require('crypto');
 const db = require('../models/db');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
@@ -17,10 +16,17 @@ const {
   saveEstimatePricingAuditSnapshot,
 } = require('../services/estimate-pricing-audit');
 const {
-  attachLeadToEstimate,
   markLinkedLeadEstimateSent,
 } = require('../services/lead-estimate-link');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
+const {
+  createOrReuseAdminEstimate,
+  estimateViewUrl,
+} = require('../services/admin-estimate-persistence');
+const {
+  acceptanceServiceLists,
+  bookingServiceFor,
+} = require('./estimate-public');
 
 const ESTIMATE_LIST_LIMIT = 500;
 
@@ -39,51 +45,16 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // POST /api/admin/estimates — create estimate
 router.post('/', async (req, res, next) => {
   try {
-    const { customerId, leadId, estimateData, address, customerName, customerPhone, customerEmail, monthlyTotal, annualTotal, onetimeTotal, waveguardTier, notes, satelliteUrl, showOneTimeOption, billByInvoice } = req.body;
-    const linkedLeadId = typeof leadId === 'string' ? leadId.trim() : leadId;
-    const deliveryError = validateEstimateDeliveryOptions({
-      showOneTimeOption: !!showOneTimeOption,
-      billByInvoice: !!billByInvoice,
-      onetimeTotal,
-      monthlyTotal,
-      annualTotal,
+    const { estimate, reused } = await createOrReuseAdminEstimate({
+      body: req.body,
+      technicianId: req.technicianId,
+      technician: req.technician,
     });
-    if (deliveryError) return res.status(400).json({ error: deliveryError });
-
-    // 16 bytes = 128 bits of entropy. Old format (`name-slug-${4 bytes}`)
-    // was guessable: customer name is public-ish and 32 bits is brute-forceable
-    // in days at modest QPS. Existing rows keep their old tokens (DB lookup
-    // is a string match), so this is forward-only.
-    const token = crypto.randomBytes(16).toString('hex');
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
-
-    const estimate = await db.transaction(async (trx) => {
-      const [created] = await trx('estimates').insert({
-        customer_id: customerId || null,
-        created_by_technician_id: req.technicianId,
-        estimate_data: estimateData ? JSON.stringify(estimateData) : null,
-        address, customer_name: customerName, customer_phone: customerPhone, customer_email: customerEmail,
-        monthly_total: monthlyTotal, annual_total: annualTotal, onetime_total: onetimeTotal,
-        waveguard_tier: waveguardTier, token, expires_at: expiresAt, notes, satellite_url: satelliteUrl,
-        show_one_time_option: !!showOneTimeOption,
-        bill_by_invoice: !!billByInvoice,
-      }).returning('*');
-
-      if (linkedLeadId) {
-        await attachLeadToEstimate({
-          database: trx,
-          leadId: linkedLeadId,
-          estimateId: created.id,
-          estimate: created,
-          technician: req.technician,
-        });
-      }
-
-      return created;
+    res.status(reused ? 200 : 201).json({
+      id: estimate.id,
+      token: estimate.token,
+      viewUrl: estimateViewUrl(estimate.token),
     });
-
-    res.status(201).json({ id: estimate.id, token, viewUrl: `https://portal.wavespestcontrol.com/estimate/${token}` });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -510,17 +481,18 @@ router.get('/:id/pricing-audit', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /:id/archive — tuck a closed estimate out of the default list.
-// Allowed states: declined / expired / accepted. Active states (draft / sent /
-// viewed) must be declined first — preserves the operator's intent that
-// archive is a final shelving action, not a workflow shortcut.
+// POST /:id/archive — tuck an estimate out of the default list. Allowed
+// for sent / viewed / declined / expired / accepted. Drafts can't be
+// archived (they should be deleted instead — DELETE /:id). Archiving a
+// sent or viewed estimate hides it from the admin queue but preserves the
+// public token so the customer can still open the link they were sent.
 router.post('/:id/archive', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (!['declined', 'expired', 'accepted'].includes(estimate.status)) {
+    if (!['sent', 'viewed', 'declined', 'expired', 'accepted'].includes(estimate.status)) {
       return res.status(400).json({
-        error: `Only closed estimates (declined / expired / accepted) can be archived. Current status: ${estimate.status}.`,
+        error: `Drafts can't be archived — delete the draft instead. Current status: ${estimate.status}.`,
       });
     }
     if (estimate.archived_at) return res.json(estimate);  // idempotent
@@ -592,6 +564,230 @@ router.post('/:id/follow-up', async (req, res, next) => {
     });
 
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/estimates/:id/send-booking-link — manual override that
+// mirrors the post-accept one-time booking SMS. Re-fires the same flow the
+// system auto-runs when a customer accepts a one-time estimate: pre-select
+// the service in /book via bookingServiceFor(), use the
+// `estimate_accepted_onetime` template (same first_name + service_label +
+// booking_url vars). Useful when (a) the auto SMS missed (carrier block,
+// no phone at accept time, etc.), (b) admin marked accepted from verbal
+// yes and the customer never got the booking text, or (c) operator wants
+// to nudge a viewed estimate straight into scheduling without the accept
+// step.
+router.post('/:id/send-booking-link', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
+
+    // Status gate — only active offers can be booked. Drafts aren't real
+    // offers yet; declined/expired/archived are intentionally closed and
+    // shouldn't be quietly reopened by a self-schedule text.
+    if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) {
+      return res.status(400).json({
+        error: `Booking link can only be sent for sent/viewed/accepted estimates. Current status: ${estimate.status}.`,
+      });
+    }
+    if (estimate.archived_at) {
+      return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
+    }
+
+    // Invoice mode skips the booking flow by design — acceptance generates
+    // an invoice immediately and there's no slot to pick. Texting a /book
+    // URL would bypass the pay-link delivery the customer is expecting.
+    if (estimate.bill_by_invoice) {
+      return res.status(400).json({
+        error: 'Invoice mode is on for this estimate — booking link not applicable. Disable Invoice mode first.',
+      });
+    }
+
+    // Parse the same one-time line the auto-accept flow uses so we can
+    // pre-select the service in /book. A missing one-time line on a
+    // recurring estimate is a hard refusal: recurring customers belong in
+    // onboarding, not the self-booking flow.
+    let oneTimeLabel = '';
+    try {
+      const estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : estimate.estimate_data;
+      const { oneTimeList } = acceptanceServiceLists(estData || {});
+      oneTimeLabel = oneTimeList[0]?.name || '';
+    } catch (_) { /* fall through to recurring-only refusal below */ }
+    if (!oneTimeLabel && Number(estimate.monthly_total || 0) > 0) {
+      return res.status(400).json({
+        error: 'No one-time service on this estimate — recurring offers route through onboarding, not /book.',
+      });
+    }
+    const primarySvc = bookingServiceFor(oneTimeLabel);
+
+    // Reservation collision guard. If the estimate is already linked to a
+    // confirmed scheduled service, this customer has already picked a
+    // slot — texting a fresh /book URL would invite a second appointment.
+    try {
+      const estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : estimate.estimate_data;
+      const linkedSvcId = estData?.scheduled_service_id || null;
+      if (linkedSvcId) {
+        const linked = await db('scheduled_services')
+          .where({ id: linkedSvcId, status: 'confirmed' })
+          .first();
+        if (linked) {
+          return res.status(409).json({
+            error: `Customer already has a confirmed appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
+          });
+        }
+      }
+    } catch (_) { /* on parse failure fall through — no false positive */ }
+
+    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend`;
+    const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
+      kind: 'booking', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+    });
+    const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+
+    // Use the same template as the post-accept SMS so the customer sees a
+    // consistent voice. Admin can still override via req.body.message.
+    const fallback = `Hey ${firstName}! Pick your time for your ${primarySvc.label} with Waves here — we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`;
+    const msg = req.body?.message || (await renderTemplate(
+      'estimate_accepted_onetime',
+      { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
+      fallback,
+    ));
+
+    const smsResult = await sendCustomerMessage({
+      to: estimate.customer_phone,
+      body: msg,
+      channel: 'sms',
+      audience: estimate.customer_id ? 'customer' : 'lead',
+      purpose: 'estimate_followup',
+      customerId: estimate.customer_id || undefined,
+      estimateId: estimate.id,
+      identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+      consentBasis: estimate.customer_id ? undefined : {
+        status: 'transactional_allowed',
+        source: 'admin_estimate_send_booking_link',
+        capturedAt: estimate.created_at || new Date().toISOString(),
+      },
+      entryPoint: 'admin_estimate_send_booking_link',
+      metadata: {
+        original_message_type: 'estimate_accepted_onetime_manual_resend',
+        booking_service_id: primarySvc.id,
+        booking_service_label: primarySvc.label,
+      },
+    });
+    if (!smsResult.sent) {
+      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    }
+    await db('estimates').where({ id: estimate.id }).update({
+      follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
+      last_follow_up_at: db.fn.now(),
+    });
+    logger.info(`[estimates] Manual booking-link SMS sent for estimate ${estimate.id} → ${primarySvc.id}`);
+    res.json({ success: true, bookingServiceId: primarySvc.id, bookingServiceLabel: primarySvc.label });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/estimates/:id/extend — push expires_at forward by N days
+// and re-arm the expiring-nudge so the customer hears about the new
+// deadline. Used when Adam knows a customer is still considering and
+// doesn't want the estimate to lapse mid-decision.
+//
+// Body: { days: 7 | 14 | 30 | 90 | <any 1-180 int> }
+// Send SMS by default; pass { silent: true } to skip the customer text.
+router.post('/:id/extend', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+
+    const days = Number.parseInt(req.body?.days, 10);
+    if (!Number.isFinite(days) || days < 1 || days > 180) {
+      return res.status(400).json({ error: 'days must be an integer between 1 and 180.' });
+    }
+    if (!['sent', 'viewed', 'expired'].includes(estimate.status)) {
+      return res.status(400).json({
+        error: `Only sent / viewed / expired estimates can be extended. Current status: ${estimate.status}.`,
+      });
+    }
+    if (estimate.archived_at) {
+      return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
+    }
+
+    // Anchor the extension on the LATER of "now" and the current expiry —
+    // extending an already-expired estimate by 7d means 7d from today, not
+    // 7d after the expiry that already passed. Active estimates get their
+    // current expiry pushed out by the requested days.
+    const now = new Date();
+    const currentExpiry = estimate.expires_at ? new Date(estimate.expires_at) : now;
+    const anchor = currentExpiry > now ? currentExpiry : now;
+    const newExpiry = new Date(anchor.getTime() + days * 86400000);
+
+    // Re-arm the expiring nudge for the new deadline. Other stage flags
+    // (unviewed / viewed / final) stay as-is — those are tied to send /
+    // view timestamps that haven't moved.
+    const updates = {
+      expires_at: newExpiry,
+      followup_expiring_sent: false,
+      updated_at: db.fn.now(),
+    };
+    // Expired estimates flipping back to active need their status reset
+    // to whatever they were before expiry — viewed if the customer had
+    // viewed, otherwise sent.
+    if (estimate.status === 'expired') {
+      updates.status = estimate.viewed_at ? 'viewed' : 'sent';
+    }
+    await db('estimates').where({ id: estimate.id }).update(updates);
+
+    // Customer notification — Waves voice. Skipped if no phone, opted out,
+    // or the caller passed silent=true (e.g. internal cleanup operations).
+    let smsResult = { sent: false, reason: 'silent' };
+    if (!req.body?.silent && estimate.customer_phone) {
+      const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+      const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+      const viewUrl = await shortenOrPassthrough(longUrl, {
+        kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+      });
+      const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
+        month: 'long', day: 'numeric', timeZone: 'America/New_York',
+      });
+      const fallback =
+        `Hey ${firstName}! Just a heads up — I kept your Waves Pest Control estimate live through ${newExpiryLabel} so you have more time to look it over. ` +
+        `No rush at all: ${viewUrl}\n\nReply here or call (941) 297-5749 if you have any questions. — Adam`;
+      const body = await renderTemplate(
+        'estimate_extended',
+        { first_name: firstName, estimate_url: viewUrl, new_expiry: newExpiryLabel, days_added: String(days) },
+        fallback,
+      );
+      smsResult = await sendCustomerMessage({
+        to: estimate.customer_phone,
+        body,
+        channel: 'sms',
+        audience: estimate.customer_id ? 'customer' : 'lead',
+        purpose: 'estimate_followup',
+        customerId: estimate.customer_id || undefined,
+        estimateId: estimate.id,
+        identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+        consentBasis: estimate.customer_id ? undefined : {
+          status: 'transactional_allowed',
+          source: 'admin_estimate_extend',
+          capturedAt: estimate.created_at || new Date().toISOString(),
+        },
+        entryPoint: 'admin_estimate_extend',
+        metadata: { original_message_type: 'estimate_extended_manual', days_added: days },
+      });
+    }
+
+    logger.info(`[estimates] Extended estimate ${estimate.id} by ${days}d to ${newExpiry.toISOString()} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'})`);
+    res.json({
+      success: true,
+      expires_at: newExpiry.toISOString(),
+      days_added: days,
+      status: updates.status || estimate.status,
+      sms: { sent: !!smsResult.sent, reason: smsResult.reason || null },
+    });
   } catch (err) { next(err); }
 });
 

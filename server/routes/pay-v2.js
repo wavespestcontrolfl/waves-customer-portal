@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
+const InvoiceAttachments = require('../services/invoice-attachments');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
@@ -26,6 +27,10 @@ router.get('/:token', async (req, res, next) => {
     const lineItems = data.line_items || [];
     const productsApplied = data.products_applied || [];
     const photos = data.service_photos || [];
+    const attachments = await InvoiceAttachments.list(data.id).catch((err) => {
+      logger.warn(`[pay-v2] attachment list failed for invoice ${data.id}: ${err.message}`);
+      return [];
+    });
 
     res.json({
       invoice: {
@@ -46,6 +51,13 @@ router.get('/:token', async (req, res, next) => {
         cardLastFour: data.card_last_four,
         receiptUrl: data.receipt_url,
         notes: data.notes,
+        attachments: attachments.map((a) => ({
+          id: a.id,
+          fileName: a.file_name,
+          mimeType: a.mime_type,
+          fileSizeBytes: a.file_size_bytes,
+          createdAt: a.created_at,
+        })),
       },
       service: {
         type: data.service_type,
@@ -71,6 +83,22 @@ router.get('/:token', async (req, res, next) => {
         publishableKey: stripeConfig.publishableKey || null,
       },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// GET /api/pay/:token/attachments/:attachmentId — token-gated attachment view
+// =========================================================================
+router.get('/:token/attachments/:attachmentId', async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ token: req.params.token }).first('id');
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const attachment = await InvoiceAttachments.getForInvoice(invoice.id, req.params.attachmentId);
+    if (!attachment) return res.status(404).json({ error: 'Attachment not found' });
+    const url = await InvoiceAttachments.signedViewUrl(attachment);
+    res.redirect(url);
   } catch (err) {
     next(err);
   }

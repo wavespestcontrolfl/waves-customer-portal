@@ -119,6 +119,13 @@ function fmtCurrency(n) {
   return `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function fmtFileSize(bytes = 0) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
 function isDiscountLineItem(item) {
   const amount = Number(item?.amount ?? ((Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0)));
   return item?._kind === 'discount' || item?.discount_for || amount < 0;
@@ -823,6 +830,7 @@ export default function PayPageV2() {
 
   const { invoice, service, customer } = data;
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
+  const invoiceAttachments = invoice.attachments || [];
   const isOverdue = invoice.status !== 'paid'
     && isInvoiceDueDateOverdue(invoice.dueDate);
   const serviceLabel = invoice.title || service.type || 'Service';
@@ -958,6 +966,53 @@ export default function PayPageV2() {
                         {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
                       </div>
                     </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {invoiceAttachments.length > 0 && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ ...eyebrow, marginBottom: 8 }}>Attachments</div>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {invoiceAttachments.map((attachment) => (
+                    <a
+                      key={attachment.id}
+                      href={`${API_BASE}/pay/${token}/attachments/${attachment.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        minHeight: 44,
+                        display: 'grid',
+                        gridTemplateColumns: 'auto minmax(0, 1fr) auto',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '10px 12px',
+                        borderRadius: 8,
+                        border: '1px solid var(--border)',
+                        color: 'var(--text)',
+                        textDecoration: 'none',
+                        background: '#FFFFFF',
+                      }}
+                    >
+                      <Icon name="paperclip" size={16} strokeWidth={2} />
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{
+                          display: 'block',
+                          fontSize: 14,
+                          fontWeight: 750,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          {attachment.fileName}
+                        </span>
+                        <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                          {fmtFileSize(attachment.fileSizeBytes)}
+                        </span>
+                      </span>
+                      <Icon name="download" size={16} strokeWidth={2} style={{ color: 'var(--brand)' }} />
+                    </a>
                   ))}
                 </div>
               </div>

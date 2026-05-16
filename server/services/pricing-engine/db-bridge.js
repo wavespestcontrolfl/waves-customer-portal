@@ -33,8 +33,14 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.global_labor_rate?.value) constants.GLOBAL.LABOR_RATE = config.global_labor_rate.value;
     if (config.global_drive_time?.value) constants.GLOBAL.DRIVE_TIME = config.global_drive_time.value;
     if (config.global_admin_annual?.value) constants.GLOBAL.ADMIN_ANNUAL = config.global_admin_annual.value;
-    if (config.global_margin_floor?.value) constants.GLOBAL.MARGIN_FLOOR = config.global_margin_floor.value;
-    if (config.global_margin_target_ts?.value) constants.GLOBAL.MARGIN_TARGET_TS = config.global_margin_target_ts.value;
+    if (config.global_margin_floor?.value) {
+      constants.GLOBAL.MARGIN_FLOOR = config.global_margin_floor.value;
+      constants.TREE_SHRUB.marginFloor = config.global_margin_floor.value;
+    }
+    if (config.global_margin_target_ts?.value) {
+      constants.GLOBAL.DIRECT_COST_RATIO_TARGET_TS = config.global_margin_target_ts.value;
+      constants.TREE_SHRUB.directCostRatioTarget = config.global_margin_target_ts.value;
+    }
     if (config.global_conditional_ceiling?.value) constants.GLOBAL.CONDITIONAL_CEILING = config.global_conditional_ceiling.value;
 
     // ── Zones ────────────────────────────────────────────────
@@ -110,26 +116,64 @@ async function syncConstantsFromDB(dbInstance) {
     // ── Tree & Shrub ─────────────────────────────────────────
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
-      if (rates['6x_standard']) constants.TREE_SHRUB.materialRates.standard = rates['6x_standard'];
-      if (rates['9x_enhanced']) constants.TREE_SHRUB.materialRates.enhanced = rates['9x_enhanced'];
-      if (rates['12x_premium']) constants.TREE_SHRUB.materialRates.premium = rates['12x_premium'];
+      if (rates['6x_standard'] && constants.TREE_SHRUB.tiers.standard) {
+        constants.TREE_SHRUB.tiers.standard.materialRate = rates['6x_standard'];
+      }
+      if (rates['9x_enhanced'] && constants.TREE_SHRUB.tiers.enhanced) {
+        constants.TREE_SHRUB.tiers.enhanced.materialRate = rates['9x_enhanced'];
+      }
     }
     if (config.ts_monthly_floors) {
       for (const [tier, val] of Object.entries(config.ts_monthly_floors)) {
-        if (constants.TREE_SHRUB.tiers[tier]) constants.TREE_SHRUB.tiers[tier].floor = r(val);
+        if (constants.TREE_SHRUB.tiers[tier]) constants.TREE_SHRUB.tiers[tier].monthlyFloor = r(val);
       }
     }
 
     // ── Palm Injection ───────────────────────────────────────
     if (config.palm_pricing) {
       const p = config.palm_pricing;
-      const tt = constants.PALM.treatmentTypes;
-      if (p.nutrition) tt.nutrition.pricePerPalm = r(p.nutrition);
-      if (p.preventive_insecticide) tt.insecticide.pricePerPalm = r(p.preventive_insecticide);
-      if (p.combo) tt.combo.pricePerPalm = r(p.combo);
-      if (p.fungal) tt.fungal.pricePerPalm = r(p.fungal);
+      const tt = constants.PALM.treatments || constants.PALM.treatmentTypes;
+      const setTier = (treatment, size, value) => {
+        const tier = treatment?.tiers?.find(t => t.size === size);
+        if (tier && value != null) tier.pricePerPalm = r(value);
+      };
+      if (p.nutrition != null) tt.nutrition.pricePerPalm = r(p.nutrition);
+      if (p.nutrition_default_apps_per_year != null) {
+        const apps = Number(p.nutrition_default_apps_per_year);
+        if (Number.isFinite(apps) && apps > 0) tt.nutrition.defaultAppsPerYear = apps;
+      }
+      if (Array.isArray(p.nutrition_allowed_apps_per_year)) {
+        const allowed = p.nutrition_allowed_apps_per_year
+          .map(Number)
+          .filter(v => Number.isFinite(v) && v > 0);
+        if (allowed.length) tt.nutrition.allowedAppsPerYear = allowed;
+      }
+      setTier(tt.insecticide, 'small', p.insecticide_small ?? p.preventive_insecticide_small);
+      setTier(tt.insecticide, 'medium', p.insecticide_medium ?? p.preventive_insecticide_medium);
+      setTier(tt.insecticide, 'large', p.insecticide_large ?? p.preventive_insecticide_large);
+      setTier(tt.combo, 'small', p.combo_small);
+      setTier(tt.combo, 'medium', p.combo_medium);
+      setTier(tt.combo, 'large', p.combo_large);
+      if (p.fungal_floor != null) tt.fungal.floorPerPalm = r(p.fungal_floor);
       if (p.lethal_bronzing_floor) tt.lethalBronzing.floorPerPalm = r(p.lethal_bronzing_floor);
-      if (p.tree_age_floor) tt.treeAge.floorPerPalm = r(p.tree_age_floor);
+      if (p.tree_age_floor) {
+        tt.treeAge.floorPerPalm = r(p.tree_age_floor);
+        const firstTier = tt.treeAge.tiers?.find(t => t.dbhMax === 10);
+        if (firstTier) firstTier.pricePerPalm = r(p.tree_age_floor);
+      }
+      if (p.min_per_visit != null) {
+        const min = Number(p.min_per_visit);
+        if (Number.isFinite(min) && min > 0) constants.PALM.minPerVisit = r(min);
+      }
+      if (p.flat_credit_per_palm != null) {
+        const credit = Number(p.flat_credit_per_palm);
+        if (Number.isFinite(credit) && credit >= 0) constants.PALM.flatCreditPerPalm = credit;
+      }
+      if (p.flat_credit_min_tier && constants.WAVEGUARD.tiers[p.flat_credit_min_tier]) {
+        constants.PALM.flatCreditMinTier = p.flat_credit_min_tier;
+      }
+      if (typeof p.tier_qualifier === 'boolean') constants.PALM.tierQualifier = p.tier_qualifier;
+      if (typeof p.exclude_from_pct_discount === 'boolean') constants.PALM.excludeFromPctDiscount = p.exclude_from_pct_discount;
     }
 
     // ── Termite ──────────────────────────────────────────────
@@ -280,27 +324,19 @@ async function syncConstantsFromDB(dbInstance) {
         if (tierMap && typeof tierMap === 'object' && constants.MOSQUITO.basePrices[lot]) {
           const legacyProgramPrice = tierMap.silver ?? tierMap.monthly ?? tierMap.bronze;
           next[lot] = [
-            r(Number(tierMap.seasonal ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][0])),
-            r(Number(tierMap.monthly ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][1])),
-            r(Number(tierMap.residual_seasonal ?? tierMap.scion_seasonal ?? tierMap.upgraded_seasonal ?? constants.MOSQUITO.basePrices[lot][2])),
-            r(Number(tierMap.residual_monthly ?? tierMap.scion_monthly ?? tierMap.scionMonthly ?? tierMap.upgraded_monthly ?? constants.MOSQUITO.basePrices[lot][3])),
+            r(Number(tierMap.seasonal9 ?? tierMap.seasonal ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][0])),
+            r(Number(tierMap.monthly12 ?? tierMap.monthly ?? legacyProgramPrice ?? constants.MOSQUITO.basePrices[lot][1])),
           ];
         }
       }
       constants.MOSQUITO.basePrices = next;
     }
     if (config.mosquito_visits) {
-      if (config.mosquito_visits.seasonal != null) {
-        constants.MOSQUITO.tierVisits.seasonal = Number(config.mosquito_visits.seasonal);
+      if (config.mosquito_visits.seasonal9 != null || config.mosquito_visits.seasonal != null) {
+        constants.MOSQUITO.tierVisits.seasonal9 = Number(config.mosquito_visits.seasonal9 ?? config.mosquito_visits.seasonal);
       }
-      if (config.mosquito_visits.monthly != null) {
-        constants.MOSQUITO.tierVisits.monthly = Number(config.mosquito_visits.monthly);
-      }
-      if (config.mosquito_visits.residual_seasonal != null) {
-        constants.MOSQUITO.tierVisits.residual_seasonal = Number(config.mosquito_visits.residual_seasonal);
-      }
-      if (config.mosquito_visits.residual_monthly != null || config.mosquito_visits.scion_monthly != null) {
-        constants.MOSQUITO.tierVisits.residual_monthly = Number(config.mosquito_visits.residual_monthly ?? config.mosquito_visits.scion_monthly);
+      if (config.mosquito_visits.monthly12 != null || config.mosquito_visits.monthly != null) {
+        constants.MOSQUITO.tierVisits.monthly12 = Number(config.mosquito_visits.monthly12 ?? config.mosquito_visits.monthly);
       }
     }
     if (config.mosquito_lot_sizes) {
@@ -332,8 +368,28 @@ async function syncConstantsFromDB(dbInstance) {
     }
     if (config.onetime_mosquito) {
       const next = { ...constants.ONE_TIME.mosquito };
-      for (const lot of ['SMALL', 'QUARTER', 'THIRD', 'HALF', 'ACRE']) {
-        if (config.onetime_mosquito[lot] != null) next[lot] = r(Number(config.onetime_mosquito[lot]));
+      const legacyMap = {
+        QUARTER: 'STANDARD',
+        THIRD: 'LARGE',
+        HALF: 'XL',
+        ACRE: 'ACRE_CLASS',
+      };
+      for (const bucket of ['SMALL', 'STANDARD', 'LARGE', 'XL', 'ESTATE', 'ACRE_CLASS', 'OVER_ACRE']) {
+        const legacyKey = Object.entries(legacyMap).find(([, mapped]) => mapped === bucket)?.[0];
+        const raw = config.onetime_mosquito[bucket] ?? (legacyKey ? config.onetime_mosquito[legacyKey] : undefined);
+        if (raw != null) next[bucket] = r(Number(raw));
+      }
+      if (config.onetime_mosquito.overAcreIncrementSqFt != null) {
+        next.overAcreIncrementSqFt = Number(config.onetime_mosquito.overAcreIncrementSqFt);
+      }
+      if (config.onetime_mosquito.overAcreIncrementPrice != null) {
+        next.overAcreIncrementPrice = r(Number(config.onetime_mosquito.overAcreIncrementPrice));
+      }
+      if (config.onetime_mosquito.stationAddOn != null) {
+        next.stationAddOn = r(Number(config.onetime_mosquito.stationAddOn));
+      }
+      if (config.onetime_mosquito.dunkAddOn != null) {
+        next.dunkAddOn = r(Number(config.onetime_mosquito.dunkAddOn));
       }
       constants.ONE_TIME.mosquito = next;
     }
@@ -345,8 +401,37 @@ async function syncConstantsFromDB(dbInstance) {
       if (config.onetime_urgency.urgent) constants.URGENCY.URGENT.standard = config.onetime_urgency.urgent;
       if (config.onetime_urgency.urgent_after_hours) constants.URGENCY.URGENT.afterHours = config.onetime_urgency.urgent_after_hours;
     }
-    if (config.onetime_recurring_discount?.multiplier) {
-      constants.WAVEGUARD.recurringCustomerOneTimePerk = 1 - config.onetime_recurring_discount.multiplier;
+    if (config.onetime_recurring_discount) {
+      if (config.onetime_recurring_discount.discount != null) {
+        constants.WAVEGUARD.recurringCustomerOneTimePerk = Number(config.onetime_recurring_discount.discount);
+      } else if (config.onetime_recurring_discount.multiplier != null) {
+        constants.WAVEGUARD.recurringCustomerOneTimePerk = 1 - Number(config.onetime_recurring_discount.multiplier);
+      }
+    }
+    if (config.onetime_pest) {
+      const ot = config.onetime_pest;
+      if (ot.floor != null) constants.ONE_TIME.pest.floor = r(Number(ot.floor));
+      if (ot.multiplier != null || ot.markup_multiplier != null) {
+        constants.ONE_TIME.pest.multiplier = Number(ot.multiplier ?? ot.markup_multiplier);
+      }
+    }
+    if (config.onetime_lawn) {
+      const ot = config.onetime_lawn;
+      if (ot.floor != null) constants.ONE_TIME.lawn.floor = r(Number(ot.floor));
+      if (ot.fungicide_floor != null) constants.ONE_TIME.lawn.fungicideFloor = r(Number(ot.fungicide_floor));
+      if (ot.recurringPerAppMultiplier != null || ot.markup_multiplier != null) {
+        constants.ONE_TIME.lawn.oneTimeMultiplier = Number(ot.recurringPerAppMultiplier ?? ot.markup_multiplier);
+      }
+      if (ot.treatment_multipliers && typeof ot.treatment_multipliers === 'object') {
+        constants.ONE_TIME.lawn.treatmentMultipliers = {
+          ...constants.ONE_TIME.lawn.treatmentMultipliers,
+          ...ot.treatment_multipliers,
+        };
+      }
+      if (ot.fert_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.fert = Number(ot.fert_mult);
+      if (ot.weed_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.weed = Number(ot.weed_mult);
+      if (ot.pest_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.pest = Number(ot.pest_mult);
+      if (ot.fungicide_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.fungicide = Number(ot.fungicide_mult);
     }
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { ClipboardList, Plus } from "lucide-react";
+import { Calendar, ClipboardList, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
@@ -49,6 +49,19 @@ const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
 const GENERAL_PROJECT_TYPES = Object.keys(GENERAL_TYPE_LABELS);
+const BOOK_URL = "https://www.wavespestcontrol.com/book/";
+const REQUIRED_RECOMMENDATION_SECTION_HEADINGS = [
+  "WHAT WE INSPECTED",
+  "WHAT WE FOUND",
+  "WHAT WE RECOMMEND",
+];
+const RECOMMENDATION_SECTION_HEADINGS = [
+  "CUSTOMER CONCERN",
+  "WHAT WE INSPECTED",
+  "WHAT WE FOUND",
+  "WHAT WE DID",
+  "WHAT WE RECOMMEND",
+];
 const TECHNICAL_SNIPPETS = [
   {
     label: "Moisture risk",
@@ -102,6 +115,42 @@ function fmtDate(d) {
     year: "numeric",
     timeZone: "America/New_York",
   });
+}
+
+function formatProjectAppointmentDate(value) {
+  if (!value) return "";
+  const raw = String(value);
+  const dateOnly = dateOnlyValue(raw);
+  const date = dateOnly ? new Date(`${dateOnly}T12:00:00`) : new Date(raw);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "America/New_York",
+  });
+}
+
+function formatProjectAppointmentTime(value) {
+  if (!value) return "";
+  const raw = String(value).trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (!match) return raw;
+  const hour24 = Number(match[1]);
+  const minute = match[2];
+  const hour12 = hour24 % 12 || 12;
+  const suffix = hour24 >= 12 ? "PM" : "AM";
+  return `${hour12}:${minute} ${suffix}`;
+}
+
+function formatProjectAppointmentWindow(appt) {
+  if (!appt) return "";
+  const date = formatProjectAppointmentDate(appt.scheduledDate);
+  const start = formatProjectAppointmentTime(appt.windowStart);
+  const end = formatProjectAppointmentTime(appt.windowEnd);
+  const window = start && end ? `${start}-${end}` : start || end;
+  return [date, window].filter(Boolean).join(" ");
 }
 
 function dateInputValue(d) {
@@ -237,6 +286,509 @@ function evaluateProjectReadiness({
     missing: required.filter((item) => !item.ok),
     quality,
   };
+}
+
+function humanizeProjectKey(key) {
+  return String(key || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function projectFieldLabel(typeCfg, key) {
+  const field = typeCfg?.findingsFields?.find((f) => f.key === key);
+  return field?.label || humanizeProjectKey(key);
+}
+
+function formatProjectPreviewValue(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).join(", ");
+  if (value && typeof value === "object") {
+    return Object.entries(value)
+      .filter(([, v]) => hasMeaningfulValue(v))
+      .map(([k, v]) => `${humanizeProjectKey(k)}: ${String(v)}`)
+      .join("; ");
+  }
+  return String(value || "");
+}
+
+function customerAddressLine(project) {
+  return [project?.city, project?.state].filter(Boolean).join(", ");
+}
+
+function parseProjectRecommendationSections(text) {
+  const value = String(text || "");
+  const hasAll = REQUIRED_RECOMMENDATION_SECTION_HEADINGS.every((heading) =>
+    value.includes(heading),
+  );
+  if (!hasAll) return null;
+
+  const sections = [];
+  const headingPattern = new RegExp(
+    `^(${RECOMMENDATION_SECTION_HEADINGS.join("|")})\\s*$`,
+    "gm",
+  );
+  const indices = [];
+  let match;
+  while ((match = headingPattern.exec(value)) !== null) {
+    indices.push({
+      heading: match[1],
+      start: match.index,
+      contentStart: match.index + match[0].length,
+    });
+  }
+
+  for (let i = 0; i < indices.length; i += 1) {
+    const end = i + 1 < indices.length ? indices[i + 1].start : value.length;
+    const body = value.slice(indices[i].contentStart, end).trim();
+    if (body) sections.push({ heading: indices[i].heading, body });
+  }
+
+  const foundRequired = REQUIRED_RECOMMENDATION_SECTION_HEADINGS.every((heading) =>
+    sections.some((section) => section.heading === heading),
+  );
+  return foundRequired ? sections : null;
+}
+
+function titleCaseProjectSection(text) {
+  return String(text || "")
+    .split(" ")
+    .map((word) => word[0] + word.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function includesProjectTextAny(text, words) {
+  const value = String(text || "").toLowerCase();
+  return words.some((word) => value.includes(word));
+}
+
+function shouldShowProjectBookingCta(text) {
+  const value = String(text || "");
+  const negativeBeforeAction = /\b(no|not|none|without|unnecessary|isn'?t|not currently)\b.{0,55}\b(service|appointment|schedule|booking|treatment|treat|application|follow[-\s]?up|inspection|exclusion)\b/i.test(value);
+  const actionBeforeNegative = /\b(service|appointment|booking|treatment|application|follow[-\s]?up|inspection|exclusion)\b.{0,55}\b(no|not|unnecessary|isn'?t)\b/i.test(value);
+  if (negativeBeforeAction || actionBeforeNegative) return false;
+  return /\b(schedule|book|appointment|recommend(?:ed)? (?:service|treatment|follow[-\s]?up|inspection)|apply|application|treatment|treat|follow[-\s]?up|exclusion|bait|boracare|bora care|termite|rodent|bed bug)\b/i.test(value);
+}
+
+function ProjectPreviewBookingCta({ upcomingAppointment, text }) {
+  if (upcomingAppointment) {
+    return (
+      <div
+        style={{
+          marginTop: 12,
+          padding: "10px 12px",
+          borderRadius: 8,
+          background: "#fff",
+          border: "1px solid #D7E3EA",
+          textAlign: "center",
+        }}
+      >
+        <div
+          style={{
+            fontSize: 11,
+            fontWeight: 900,
+            color: "#1B2C5B",
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+          }}
+        >
+          Upcoming appointment
+        </div>
+        <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.55, marginTop: 4 }}>
+          {[upcomingAppointment.serviceType, formatProjectAppointmentWindow(upcomingAppointment)]
+            .filter(Boolean)
+            .join(" - ")}
+        </div>
+        {upcomingAppointment.technicianName && (
+          <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.45 }}>
+            Technician: {upcomingAppointment.technicianName}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const label = includesProjectTextAny(text, ["rodent", "exclusion", "trap"])
+    ? "Request Exclusion Estimate"
+    : "Book an appointment";
+  return (
+    <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
+      <a
+        href={BOOK_URL}
+        target="_blank"
+        rel="noreferrer"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          minHeight: 40,
+          padding: "11px 15px",
+          borderRadius: 8,
+          background: "#FFD700",
+          color: "#1B2C5B",
+          fontSize: 13,
+          fontWeight: 900,
+          textDecoration: "none",
+        }}
+      >
+        <Calendar size={14} strokeWidth={2.25} />
+        {label}
+      </a>
+    </div>
+  );
+}
+
+function ProjectPreviewRecommendationsBlock({ text, upcomingAppointment }) {
+  const sections = parseProjectRecommendationSections(text);
+  const wrapStyle = {
+    marginTop: 12,
+    padding: "11px 12px",
+    borderRadius: 9,
+    background: "#F0F7FC",
+    border: "1px solid #D7E3EA",
+  };
+
+  if (sections) {
+    return (
+      <div style={wrapStyle}>
+        {sections.map((section, index) => (
+          <div key={section.heading} style={{ marginTop: index === 0 ? 0 : 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 4 }}>
+              {titleCaseProjectSection(section.heading)}
+            </div>
+            <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+              {section.body}
+            </div>
+            {section.heading === "WHAT WE RECOMMEND" &&
+              shouldShowProjectBookingCta(section.body) && (
+                <ProjectPreviewBookingCta upcomingAppointment={upcomingAppointment} text={section.body} />
+              )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={wrapStyle}>
+      <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 4 }}>
+        Recommendations
+      </div>
+      <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+        {text}
+      </div>
+      {shouldShowProjectBookingCta(text) && (
+        <ProjectPreviewBookingCta upcomingAppointment={upcomingAppointment} text={text} />
+      )}
+    </div>
+  );
+}
+
+function ProjectPreviewPhotoTile({ photo, projectId }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setUrl(null);
+    adminFetch(`/admin/projects/${projectId}/photos/${photo.id}/url`)
+      .then((r) => readJsonResponse(r, "Could not load photo"))
+      .then((d) => {
+        if (!cancelled) setUrl(d.url || null);
+      })
+      .catch(() => {
+        if (!cancelled) setUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [photo.id, projectId]);
+
+  const label = photo.caption || (photo.category || "Service photo").replace(/_/g, " ");
+  return (
+    <div
+      style={{
+        borderRadius: 8,
+        overflow: "hidden",
+        border: "1px solid #D7E3EA",
+        background: "#fff",
+      }}
+    >
+      <div
+        style={{
+          aspectRatio: "1/1",
+          background: "#F0F7FC",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#64748B",
+          fontSize: 12,
+          fontWeight: 700,
+        }}
+      >
+        {url ? (
+          <img
+            src={url}
+            alt={label}
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />
+        ) : (
+          "Photo"
+        )}
+      </div>
+      <div
+        style={{
+          padding: "7px 8px",
+          fontSize: 12,
+          fontWeight: 800,
+          color: "#1B2C5B",
+          textTransform: "capitalize",
+        }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function CustomerProjectReportPreview({
+  project,
+  projectId,
+  typeCfg,
+  title,
+  projectDate,
+  findings,
+  recommendations,
+  upcomingAppointment,
+  photos,
+  sentLink,
+}) {
+  const typeLabel = typeCfg?.label || TYPE_LABELS[project.project_type] || "Inspection";
+  const reportTitle = String(title || "").trim() || typeLabel;
+  const findingsEntries = Object.entries(findings || {}).filter(([, v]) =>
+    hasMeaningfulValue(formatProjectPreviewValue(v)),
+  );
+  const visiblePhotos = (photos || []).slice(0, 4);
+  const address = customerAddressLine(project);
+  const metaRows = [
+    projectDate ? `Inspection date: ${fmtDate(projectDate)}` : null,
+    project.tech_name ? `Technician: ${project.tech_name}` : null,
+    address || null,
+  ].filter(Boolean);
+
+  return (
+    <div
+      style={{
+        border: "1px solid #D7E3EA",
+        borderRadius: 12,
+        overflow: "hidden",
+        background: "#F7FBFE",
+      }}
+    >
+      <div
+        style={{
+          background: "#065A8C",
+          padding: "12px 14px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: 10,
+              color: "#CDEBFA",
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              fontWeight: 800,
+            }}
+          >
+            Customer report preview
+          </div>
+          <div
+            style={{
+              fontSize: 18,
+              color: "#fff",
+              fontWeight: 800,
+              marginTop: 2,
+              lineHeight: 1.15,
+            }}
+          >
+            {reportTitle}
+          </div>
+          <div style={{ fontSize: 12, color: "#DFF4FC", marginTop: 3 }}>
+            {project.customer_name || "Customer"}
+          </div>
+        </div>
+        <img src="/waves-logo.png" alt="Waves" style={{ height: 26 }} />
+      </div>
+
+      <div style={{ padding: 14 }}>
+        {sentLink && (
+          <a
+            href={sentLink}
+            target="_blank"
+            rel="noreferrer"
+            style={{
+              display: "inline-flex",
+              marginBottom: 12,
+              color: "#065A8C",
+              fontSize: 12,
+              fontWeight: 800,
+              textDecoration: "none",
+            }}
+          >
+            Open live customer report
+          </a>
+        )}
+
+        <div
+          style={{
+            background: "#fff",
+            border: "1px solid #D7E3EA",
+            borderRadius: 10,
+            padding: 14,
+          }}
+        >
+          {metaRows.length > 0 && (
+            <div style={{ display: "grid", gap: 2, marginBottom: 12 }}>
+              {metaRows.map((row) => (
+                <div key={row} style={{ fontSize: 13, color: "#465569", lineHeight: 1.45 }}>
+                  {row}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: 9,
+              background: "#FFF9DB",
+              border: "1px solid #FFD700",
+              marginBottom: 12,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 900,
+                color: "#1B2C5B",
+                textTransform: "uppercase",
+                letterSpacing: 0.5,
+              }}
+            >
+              Next step
+            </div>
+            <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.55, marginTop: 4 }}>
+              {recommendations
+                ? "Review the findings and follow the recommendation below."
+                : "Add recommendations before sending so the customer sees a clear next step."}
+            </div>
+          </div>
+
+          {findingsEntries.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 900,
+                  color: "#1B2C5B",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}
+              >
+                Findings
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {findingsEntries.map(([key, value]) => (
+                  <div
+                    key={key}
+                    style={{
+                      padding: "9px 10px",
+                      borderRadius: 9,
+                      background: "#F0F7FC",
+                      border: "1px solid #D7E3EA",
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 2 }}>
+                      {projectFieldLabel(typeCfg, key)}
+                    </div>
+                    <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                      {formatProjectPreviewValue(value)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {recommendations ? (
+            <ProjectPreviewRecommendationsBlock
+              text={recommendations}
+              upcomingAppointment={upcomingAppointment}
+            />
+          ) : null}
+
+          {visiblePhotos.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 900,
+                  color: "#1B2C5B",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}
+              >
+                Photos
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(92px, 1fr))", gap: 8 }}>
+                {visiblePhotos.map((photo) => (
+                  <ProjectPreviewPhotoTile key={photo.id} photo={photo} projectId={projectId} />
+                ))}
+              </div>
+              {(photos || []).length > visiblePhotos.length && (
+                <div style={{ fontSize: 11, color: "#64748B", marginTop: 6 }}>
+                  +{(photos || []).length - visiblePhotos.length} more shown on the full report
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={{ textAlign: "center", marginTop: 12 }}>
+          <div style={{ fontSize: 13, color: "#465569" }}>Questions about this report?</div>
+          <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 8 }}>
+            <span
+              style={{
+                padding: "9px 14px",
+                background: "#FFD700",
+                color: "#1B2C5B",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 900,
+              }}
+            >
+              Text Us
+            </span>
+            <span
+              style={{
+                padding: "9px 14px",
+                background: "#E3F5FD",
+                color: "#065A8C",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 900,
+              }}
+            >
+              Call Us
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function ProjectsPage() {
@@ -1173,6 +1725,18 @@ function ProjectDetail({
             </div>{" "}
           </div>
         )}
+        <CustomerProjectReportPreview
+          project={project}
+          projectId={projectId}
+          typeCfg={typeCfg}
+          title={editTitle}
+          projectDate={editProjectDate}
+          findings={editFindings}
+          recommendations={editRecs}
+          upcomingAppointment={data.upcomingAppointment || null}
+          photos={data.photos || []}
+          sentLink={sentLink}
+        />
         {project.project_type === WDO_TYPE && (
           <div
             style={{

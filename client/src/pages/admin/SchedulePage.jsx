@@ -34,7 +34,7 @@
 import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
-import { etDateString } from "../../lib/timezone";
+import { addETDays, etDateString } from "../../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -341,6 +341,8 @@ function detectServiceCategory(serviceType) {
     s.includes("sod")
   )
     return "lawn";
+  if (s.includes("tree") || s.includes("shrub") || s.includes("palm"))
+    return "tree_shrub";
   if (s.includes("mosquito")) return "mosquito";
   if (s.includes("termite")) return "termite";
   if (
@@ -2066,16 +2068,7 @@ export function ProtocolPanel({ service, onClose }) {
 
   useEffect(() => {
     let cancelled = false;
-    const svcType = (service.serviceType || "").toLowerCase();
-    const line = svcType.includes("lawn")
-      ? "lawn"
-      : svcType.includes("tree") || svcType.includes("shrub")
-        ? "tree_shrub"
-        : svcType.includes("termite")
-          ? "termite"
-          : svcType.includes("mosquito")
-            ? "mosquito"
-            : "pest";
+    const line = serviceCategory;
     const protocolProgram =
       line === "tree_shrub" ||
       line === "termite" ||
@@ -2161,7 +2154,7 @@ export function ProtocolPanel({ service, onClose }) {
     return () => {
       cancelled = true;
     };
-  }, [service, isLawn]);
+  }, [service, isLawn, serviceCategory]);
 
   const SECTIONS = [
     ...(isLawn
@@ -4470,6 +4463,8 @@ export function CompletionPanel({
   const [soilMoisture, setSoilMoisture] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
+  const [reviewTiming, setReviewTiming] = useState("120");
+  const [reviewCustomAt, setReviewCustomAt] = useState("");
   const [oneTimeRecapOnly, setOneTimeRecapOnly] = useState(false);
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
@@ -4609,10 +4604,14 @@ export function CompletionPanel({
     !willInvoice &&
     !reviewSuppressionReason;
   const effectiveSendSms = !isIncompleteVisit && (oneTimeRecapOnly || sendSms);
+  const reviewSendsWithCompletionSms =
+    willReview &&
+    effectiveSendSms &&
+    (oneTimeRecapOnly || reviewTiming === "now");
   const smsPreview = [
     customerRecap.trim(),
     !isIncompleteVisit && willInvoice ? "[pay link inserted]" : "",
-    willReview ? "[review link inserted]" : "",
+    reviewSendsWithCompletionSms ? "[review link inserted]" : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -4623,6 +4622,23 @@ export function CompletionPanel({
       areasServiced.length > 0 ||
       visitOutcome !== "completed" ||
       customerInteraction);
+  const reviewScheduledFor = () => {
+    if (!willReview || oneTimeRecapOnly) return null;
+    if (reviewTiming === "tomorrow_8") {
+      return `${etDateString(addETDays(new Date(), 1))}T08:00`;
+    }
+    if (reviewTiming === "custom") return reviewCustomAt || null;
+    return null;
+  };
+  const reviewDelayMinutes = () => {
+    if (!willReview) return null;
+    if (oneTimeRecapOnly || reviewTiming === "now") return 0;
+    if (reviewTiming === "custom") {
+      const target = new Date(reviewCustomAt);
+      return reviewCustomAt && !Number.isNaN(target.getTime()) ? 0 : null;
+    }
+    return Number(reviewTiming) || 120;
+  };
   const recapStatusText = recapLoading
     ? "Drafting customer recap..."
     : recapError
@@ -4976,6 +4992,8 @@ export function CompletionPanel({
       selectedRecommendationLabels.length ||
       nextVisitNote.trim() ||
       oneTimeRecapOnly ||
+      reviewTiming !== "120" ||
+      reviewCustomAt.trim() ||
       tankLastProduct.trim() ||
       tankCleanoutCompleted ||
       tankCleanoutMethod.trim() ||
@@ -4995,6 +5013,8 @@ export function CompletionPanel({
         soilMoisture,
         sendSms,
         requestReview,
+        reviewTiming,
+        reviewCustomAt,
         oneTimeRecapOnly,
         visitOutcome,
         customerRecap,
@@ -5039,6 +5059,8 @@ export function CompletionPanel({
     soilMoisture,
     sendSms,
     requestReview,
+    reviewTiming,
+    reviewCustomAt,
     oneTimeRecapOnly,
     visitOutcome,
     customerRecap,
@@ -5080,6 +5102,8 @@ export function CompletionPanel({
     setSoilMoisture(savedDraft.soilMoisture || "");
     setSendSms(savedDraft.sendSms !== false);
     setRequestReview(savedDraft.requestReview !== false);
+    setReviewTiming(savedDraft.reviewTiming || "120");
+    setReviewCustomAt(savedDraft.reviewCustomAt || "");
     setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
     setVisitOutcome(savedDraft.visitOutcome || "completed");
     setCustomerRecap(savedDraft.customerRecap || "");
@@ -5156,7 +5180,7 @@ export function CompletionPanel({
             serviceType: service.serviceType,
             areasTreated: areasServiced,
             willInvoice,
-            willReview,
+            willReview: reviewSendsWithCompletionSms,
           }),
         });
         if (requestId !== recapRequestRef.current) return;
@@ -5188,7 +5212,7 @@ export function CompletionPanel({
     service.serviceType,
     customerInteraction,
     willInvoice,
-    willReview,
+    reviewSendsWithCompletionSms,
   ]);
 
   function handleCustomerRecapChange(value) {
@@ -5219,7 +5243,7 @@ export function CompletionPanel({
           serviceType: service.serviceType,
           areasTreated: areasServiced,
           willInvoice,
-          willReview,
+          willReview: reviewSendsWithCompletionSms,
           force: true,
         }),
       });
@@ -5390,6 +5414,23 @@ export function CompletionPanel({
       );
       return;
     }
+    const selectedReviewDelayMinutes = reviewDelayMinutes();
+    const selectedReviewScheduledFor = reviewScheduledFor();
+    if (!oneTimeRecapOnly && willReview && selectedReviewDelayMinutes === null) {
+      alert("Choose a review request time.");
+      return;
+    }
+    if (!oneTimeRecapOnly && willReview && reviewTiming === "custom") {
+      const target = new Date(reviewCustomAt);
+      if (
+        !reviewCustomAt ||
+        Number.isNaN(target.getTime()) ||
+        target.getTime() <= Date.now()
+      ) {
+        alert("Choose a future review request time.");
+        return;
+      }
+    }
     setSubmitting(true);
     try {
       if (!completionIdempotencyKeyRef.current) {
@@ -5452,6 +5493,11 @@ export function CompletionPanel({
         oneTimeRecapOnly,
         sendCompletionSms: effectiveSendSms,
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
+        reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
+        reviewDelayMinutes: selectedReviewDelayMinutes,
+        reviewScheduledFor: oneTimeRecapOnly
+          ? null
+          : selectedReviewScheduledFor,
         areasTreated: areasServiced,
         timeOnSite: elapsed,
         areasServiced,
@@ -7062,6 +7108,37 @@ export function CompletionPanel({
                       : "Send review request"}
                 </span>{" "}
               </label>{" "}
+              {willReview && !oneTimeRecapOnly && (
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                    gap: 8,
+                    margin: "0 0 8px 30px",
+                  }}
+                >
+                  <select
+                    value={reviewTiming}
+                    onChange={(e) => setReviewTiming(e.target.value)}
+                    style={mInput}
+                  >
+                    <option value="now">Now</option>
+                    <option value="120">In 2 hours</option>
+                    <option value="tomorrow_8">Tomorrow at 8 AM</option>
+                    <option value="custom">Custom time</option>
+                  </select>
+                  {reviewTiming === "custom" ? (
+                    <input
+                      type="datetime-local"
+                      value={reviewCustomAt}
+                      onChange={(e) => setReviewCustomAt(e.target.value)}
+                      style={mInput}
+                    />
+                  ) : (
+                    <div />
+                  )}
+                </div>
+              )}
             </Field>
             {/* Next visit */}
             {nextVisit && (
@@ -8473,6 +8550,37 @@ export function CompletionPanel({
                   : "Send review request"}
             </span>{" "}
           </label>
+          {willReview && !oneTimeRecapOnly && (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                gap: 8,
+                margin: "-4px 0 12px 30px",
+              }}
+            >
+              <select
+                value={reviewTiming}
+                onChange={(e) => setReviewTiming(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="now">Now</option>
+                <option value="120">In 2 hours</option>
+                <option value="tomorrow_8">Tomorrow at 8 AM</option>
+                <option value="custom">Custom time</option>
+              </select>
+              {reviewTiming === "custom" ? (
+                <input
+                  type="datetime-local"
+                  value={reviewCustomAt}
+                  onChange={(e) => setReviewCustomAt(e.target.value)}
+                  style={inputStyle}
+                />
+              ) : (
+                <div />
+              )}
+            </div>
+          )}
           {/* Next Visit Prompt */}
           {nextVisit && (
             <div

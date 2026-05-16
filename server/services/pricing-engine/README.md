@@ -19,7 +19,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | `DRIVE_TIME` | 20 min | Per-visit drive allowance baked into labor cost |
 | `ADMIN_ANNUAL` | $51 | Per-service/yr admin overhead (billing, scheduling, CRM) |
 | `MARGIN_FLOOR` | 35% | Minimum contribution margin for recurring lines |
-| `MARGIN_TARGET_TS` | 43% | Tree & Shrub conservative target |
+| `DIRECT_COST_RATIO_TARGET_TS` | 43% | Tree & Shrub direct-cost ratio target |
 | `CONDITIONAL_CEILING` | $60 | Max conditional material/yr before reprice |
 | `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; 3.99% added at checkout) |
 
@@ -50,7 +50,7 @@ Single source of truth for what this engine prices, how, and with what constants
 |---|---|---|---|
 | Pest Control | ✅ quarterly / bimonthly / monthly | ✅ | ✅ |
 | Lawn Care | ✅ basic/standard/enhanced/premium | ✅ per-treatment | ✅ |
-| Tree & Shrub | ✅ standard/enhanced/premium | — | ✅ |
+| Tree & Shrub | ✅ standard/enhanced | — | ✅ |
 | Palm Injection | ✅ (4 treatment types) | — | ❌ flat credit only |
 | Mosquito | ✅ Seasonal/Monthly | ✅ treatable area | ✅ |
 | Termite Bait | ✅ monthly subscription | install only | ✅ |
@@ -101,32 +101,50 @@ Single source of truth for what this engine prices, how, and with what constants
 
 ## 5. Tree & Shrub
 
-**Formula:** `max(floor, bedArea × materialRate) + labor + access`, targeting 43% margin.
+**Formula:** `annualDirectCost = materialCost + laborAnnual`, then `annualPrice = annualDirectCost / 0.43`.
+
+Tree & Shrub uses a 43% direct-cost ratio target, not a 43% margin target. This usually produces roughly 50%+ service-level margin after admin before final discounts.
 
 | Tier | Freq | Material rate | Floor |
 |---|---|---|---|
 | Standard | 6x | $0.110/sqft | $50 |
-| Enhanced (recommended) | 9x | $0.190/sqft | $65 |
-| Premium | 12x | $0.220/sqft | $80 |
+| Enhanced | 9x | $0.190/sqft | $65 |
+
+Premium 12-visit Tree & Shrub pricing is removed from active/customer-facing tiers. Legacy `tier: "premium"` requests are normalized to Enhanced with a warning.
+
+**Enhanced positioning:** six core seasonal applications plus three monitoring/targeted-treatment visits.
 
 **Access minutes:** easy 0, moderate 8, difficult 15.
 
-**Bed area estimate:** `lotSqFt × basePct + complexAdd` — heavy 25%, moderate 18%, light 10%. Capped at 8000 sqft.
+**Bed area confidence:**
+- `explicit` → high confidence, auto-price.
+- `estimated` → medium confidence, generated from estimate fields or `lotSqFt × basePct + complexAdd` (heavy 25%, moderate 18%, light 10%).
+- `fallback` → low confidence, uses 2,000 sqft and requires manual review.
+
+Estimated bed area is capped at 8,000 sqft. Manual review is required for fallback bed area, bed area at/above the cap, tree count 15+, or difficult access with bed area 4,000 sqft+.
+
+**Recommendation logic:** Standard is the core/default plan. Enhanced is recommended for bed area 2,000 sqft+, heavy shrub density, moderate/complex landscaping, tree count 8+, difficult access, or known pest/disease pressure.
+
+**Post-discount guard:** after zone modifiers and WaveGuard discounts, Tree & Shrub final annual revenue is guarded so true margin after direct cost and admin cannot fall below the recurring 35% floor. If needed, the effective discount is capped and audit fields are returned (`finalAnnual`, `finalMonthly`, `requestedDiscountPct`, `actualDiscountPct`, `finalMargin`, `marginGuardApplied`, `discountCapped`).
 
 ---
 
 ## 6. Palm Injection
 
-| Treatment | $/palm | Apps/yr |
-|---|---|---|
-| Nutrition | $35 | 2 |
-| Preventive Insecticide | $45 | 2 |
-| Combo | $55 | 2 |
-| Fungal | $40 | 2 |
-| Lethal Bronzing | quote (floor $125) | 2 |
-| Tree-Age Specialty | quote (floor $65) | 1 |
+Palm injection pricing requires explicit `treatmentType` and positive integer `palmCount`; the service no longer silently defaults to combo or one palm.
 
-**Minimum per visit:** $75. Not a WaveGuard tier qualifier. Gold+ members get $10/palm/yr flat credit.
+**Minimum per visit:** $75. The visit minimum is billable and is reflected in annual/monthly pricing (`annual = max(rawPerVisit, 75) x appsPerYear`). Palm services are not WaveGuard tier qualifiers and are excluded from percentage discounts. Gold+ members get a capped $10/palm/year flat credit after gross annual pricing is calculated.
+
+| Treatment | Pricing |
+|---|---|
+| Palm Nutrition Injection | $35/palm, default 1x/year; optional 2x/year for corrective protocol |
+| Preventive Palm Insecticide | small $45, medium $55, large $75; default 2x/year; high-dose/large-diameter/nonstandard product is quote-based |
+| Nutrition + Insecticide | small $65, medium $75, large $95; default 2x/year; high-dose/large-diameter/nonstandard product is quote-based |
+| Palm Fungal Treatment | quote-based; requires confirmed diagnosis, selected product (`PHOSPHO-Jet` or `Propizol`), and apps/year or interval |
+| Lethal Bronzing Preventive OTC Program | quote-based; floor $125/palm/application; every 3 months, 4 apps/year; 24-month minimum preventive program |
+| Tree-Age G-4 Specialty Injection | quote-based/tiered; DBH <=10 $65, <=15 $85, <=20 $110, >20 custom quote; 24-month interval with annualized annual/monthly values |
+
+**Methodology:** Palm rates combine operator baseline, supplied material-cost review, visit minimum economics, and product/protocol constraints. Internal material prices are stored for audit only and are not customer-facing.
 
 ---
 
@@ -138,15 +156,15 @@ Single source of truth for what this engine prices, how, and with what constants
 
 **Base prices by treatable area × program:**
 
-| Treatable bucket | Seasonal | Monthly |
+| Treatable bucket | seasonal9 | monthly12 |
 |---|---|---|
-| SMALL (<8k sf) | $90 | $90 |
-| QUARTER (8k-12k sf) | $100 | $100 |
-| THIRD (12k-18k sf) | $110 | $110 |
-| HALF (18k-35k sf) | $125 | $125 |
-| ACRE (35k+ sf) | $155 | $155 |
+| SMALL (<8k sf) | $105 | $90 |
+| QUARTER (8k-12k sf) | $115 | $100 |
+| THIRD (12k-18k sf) | $130 | $115 |
+| HALF (18k-35k sf) | $155 | $135 |
+| ACRE (35k+ sf) | $195 | $175 |
 
-**Visits/yr:** seasonal 9 · monthly 12
+**Visits/yr:** seasonal9 = 9 · monthly12 = 12
 
 **Pressure factors (add % to base):** trees heavy +15%, trees moderate +5%, complexity complex +10%, complexity moderate +5%, pool +5%, nearWater +10%, irrigation +8%, lot acre +15%, lot half +5%.
 
@@ -185,20 +203,20 @@ Single source of truth for what this engine prices, how, and with what constants
 
 Standalone prices (customer not on WaveGuard). Applied via `pricePestControlOneTime` / `priceLawnOneTime` / `priceMosquitoOneTime` in `service-pricing.js`.
 
-**Pest one-time:** `max($150, recurringPrice × 1.30)` — recurring price computed at quarterly cadence as anchor.
+**Pest one-time:** `max($199, recurringPrice × 1.75)` — recurring price computed at quarterly cadence as anchor. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $199 floor re-applied.
 
 **Lawn one-time (per treatment):**
 
 | Treatment | Multiplier | Floor |
 |---|---|---|
-| Fertilization | 1.00 | $85 |
-| Weed | 1.15 | $85 |
-| Pest | 1.30 | $85 |
-| Fungicide | 1.45 | $95 |
+| Fertilization | 1.00 | $115 |
+| Weed | 1.12 | $115 |
+| Pest | 1.30 | $115 |
+| Fungicide | 1.38 | $115 |
 
-Then × 1.30 standalone multiplier on top of recurring rate.
+Then × 1.50 standalone multiplier on top of recurring per-app rate. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $115 floor re-applied.
 
-**Mosquito one-time (flat by lot):** SMALL $200 · QUARTER $250 · THIRD $275 · HALF $300 · ACRE $350
+**Mosquito one-time:** based on mosquito treatable area, not gross lot. SMALL 0-7,500 = $225 · STANDARD 7,501-11,000 = $275 · LARGE 11,001-16,000 = $325 · XL 16,001-24,000 = $385 · ESTATE 24,001-32,000 = $425 · ACRE_CLASS 32,001-43,560 = $475 · OVER_ACRE = $475 + $75 per additional 10,000 sq ft and manual review. Add-ons: stations × $75 and Bti dunks × $15. Urgency and WaveGuard tier discounts do not apply.
 
 > **Note:** Public quote wizard (`public-quote.js`) is recurring-only. One-time and "not sure" frequencies divert to `/api/leads` (lead-webhook) for human triage — engine doesn't price them from the homepage form.
 
@@ -220,7 +238,7 @@ Qualifies off count of **qualifying recurring services** bundled together:
 
 **Excluded from % discount (flat credits instead):**
 - `rodent_bait` — $50 setup credit
-- `palm_injection` — $10/palm/yr credit (Gold+ only)
+- `palm_injection` — $10/palm/year credit (Gold+ only), applied after billable annual pricing and capped at net $0
 - `bed_bug_chemical`, `bed_bug_heat` — $50 flat member credit
 - `bora_care`, `pre_slab_termidor` — fully excluded, no discount
 - `german_roach_initial` — excluded to avoid double-dip with baked urgency/rc
@@ -266,7 +284,6 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 - MARGIN_FLOOR 35% threshold justification
 - URGENCY multiplier values (why 1.25/1.50/2.00)
 - PEST base/floor anchor (market analysis vs historical)
-- PALM per-palm pricing methodology
 - TERMITE monitoring subscription pricing
 - RODENT bait subscription pricing
 - ONE_TIME 1.30x multiplier + floor rationale

@@ -125,12 +125,20 @@ async function markEstimateManuallyAccepted({
     let conversion = null;
     if (asMoneyOrNull(updatedEstimate.monthly_total)) {
       try {
+        // Mark Won skips both side effects the converter would normally do
+        // on a customer-facing accept: no auto-scheduled visit and no
+        // draft setup-fee invoice. Adam wants to control scheduling on
+        // the calendar and invoice manually when the verbal yes converts
+        // to a real start. Customer flips to active_customer + tier +
+        // monthly_rate still land — those are pure data updates.
         conversion = await estimateConverter.convertEstimate(updatedEstimate.id, {
           database: trx,
+          skipAutoSchedule: true,
+          skipSetupInvoice: true,
         });
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] EstimateConverter failed for estimate ${updatedEstimate.id}: ${err.message}`);
-        throw httpError('Customer conversion/scheduling did not complete; estimate was not marked accepted.', 500);
+        throw httpError('Customer conversion did not complete; estimate was not marked accepted.', 500);
       }
     }
 

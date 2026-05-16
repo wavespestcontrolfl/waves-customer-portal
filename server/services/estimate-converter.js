@@ -90,6 +90,11 @@ const EstimateConverter = {
   async convertEstimate(estimateId, opts = {}) {
     const billingTerm = opts.billingTerm === 'prepay_annual' ? 'prepay_annual' : 'standard';
     const skipSetupInvoice = opts.skipSetupInvoice === true;
+    // Manual Mark Won path passes skipAutoSchedule=true — Adam wants to
+    // schedule the visit himself on the calendar rather than have the
+    // converter auto-pick the next feasible zone date. Self-accept paths
+    // still auto-schedule when there's no reservation row.
+    const skipAutoSchedule = opts.skipAutoSchedule === true;
     const database = opts.database || db;
     const estimate = await database('estimates').where({ id: estimateId }).first();
     if (!estimate) throw new Error(`Estimate ${estimateId} not found`);
@@ -168,6 +173,11 @@ const EstimateConverter = {
         .orderBy('scheduled_date', 'asc')
         .first('scheduled_date');
       termStartDate = reservedStart?.scheduled_date || null;
+    } else if (skipAutoSchedule) {
+      logger.info(
+        `[estimate-converter] Skipping auto-schedule for estimate ${estimateId} — ` +
+        `skipAutoSchedule=true (manual Mark Won)`,
+      );
     } else {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
       termStartDate = firstServiceDate;

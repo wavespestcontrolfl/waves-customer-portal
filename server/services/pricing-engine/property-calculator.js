@@ -197,18 +197,58 @@ function calculatePropertyProfile(input) {
   const footprint = calculateFootprint(input.homeSqFt, input.stories || 1);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, input.features || {});
   const hasInputBedArea = hasNonNegativeNumber(input.bedArea);
-  const hasEstimatedBedArea = hasNonNegativeNumber(input.estimatedBedAreaSf);
-  const explicitBedArea = hasInputBedArea
-    ? Number(input.bedArea)
-    : (hasEstimatedBedArea ? Number(input.estimatedBedAreaSf) : null);
+  const estimatedBedAreaInput = hasNonNegativeNumber(input.estimatedBedAreaSf)
+    ? input.estimatedBedAreaSf
+    : input.estimatedBedArea;
+  const hasEstimatedBedArea = hasNonNegativeNumber(estimatedBedAreaInput);
+  const inputBedArea = hasInputBedArea ? Number(input.bedArea) : null;
+  const providedEstimatedBedArea = hasEstimatedBedArea ? Number(estimatedBedAreaInput) : null;
+  const explicitBedArea = inputBedArea !== null
+    ? inputBedArea
+    : providedEstimatedBedArea;
+  const turfInput = hasEstimatedBedArea && !hasNonNegativeNumber(input.estimatedBedAreaSf)
+    ? { ...input, estimatedBedAreaSf: estimatedBedAreaInput }
+    : input;
   const bedRatio = explicitBedArea !== null && input.lotSqFt > 0 ? explicitBedArea / input.lotSqFt : 0;
   const features = { ...(input.features || {}), bedRatio };
   const legacyLawnEstimate = estimateLawnSqFt(input.lotSqFt, footprint, hardscape, features);
-  const turfArea = computeTurfArea(input, { turfSf: legacyLawnEstimate });
+  const turfArea = computeTurfArea(turfInput, { turfSf: legacyLawnEstimate });
   const lawnSqFt = turfArea.turfSf;
-  const bedArea = explicitBedArea !== null
-    ? explicitBedArea
-    : estimateBedArea(input.lotSqFt, (input.features || {}).shrubs, (input.features || {}).complexity);
+  const sourceHint = String(input.bedAreaSource || '').trim().toLowerCase();
+  const validSourceHint = ['explicit', 'estimated', 'fallback'].includes(sourceHint) ? sourceHint : null;
+  let bedArea;
+  let bedAreaSource;
+  let bedAreaPricingConfidence;
+  let bedAreaCapped = false;
+
+  if (validSourceHint === 'fallback') {
+    bedArea = 0;
+    bedAreaSource = 'fallback';
+    bedAreaPricingConfidence = 'low';
+  } else if (inputBedArea !== null) {
+    bedAreaSource = validSourceHint === 'estimated' ? 'estimated' : 'explicit';
+    bedAreaPricingConfidence = bedAreaSource === 'estimated' ? 'medium' : 'high';
+    if (bedAreaSource === 'estimated') {
+      bedArea = Math.min(inputBedArea, BED_AREA_CAP);
+      bedAreaCapped = inputBedArea >= BED_AREA_CAP;
+    } else {
+      bedArea = inputBedArea;
+    }
+  } else if (providedEstimatedBedArea !== null) {
+    bedArea = Math.min(providedEstimatedBedArea, BED_AREA_CAP);
+    bedAreaSource = 'estimated';
+    bedAreaPricingConfidence = 'medium';
+    bedAreaCapped = providedEstimatedBedArea >= BED_AREA_CAP;
+  } else if (toPositiveNumber(input.lotSqFt) > 0) {
+    bedArea = estimateBedArea(input.lotSqFt, (input.features || {}).shrubs, (input.features || {}).complexity);
+    bedAreaSource = 'estimated';
+    bedAreaPricingConfidence = 'medium';
+    bedAreaCapped = bedArea >= BED_AREA_CAP;
+  } else {
+    bedArea = 0;
+    bedAreaSource = 'fallback';
+    bedAreaPricingConfidence = 'low';
+  }
   const perimeter = calculatePerimeter(footprint, (input.features || {}).complexity);
   const lotCategory = getLotCategory(input.lotSqFt);
   const mosquitoTreatableSqFt = Math.max(0, input.lotSqFt - footprint - hardscape);
@@ -221,7 +261,12 @@ function calculatePropertyProfile(input) {
     turfBasis: turfArea.turfBasis,
     turfOpenArea: turfArea.turfOpenArea,
     turfFlags: turfArea.turfFlags,
-    bedArea, perimeter, lotCategory,
+    bedArea,
+    estimatedBedArea: bedAreaSource === 'estimated' ? bedArea : undefined,
+    bedAreaSource,
+    bedAreaPricingConfidence,
+    bedAreaCapped,
+    perimeter, lotCategory,
     mosquitoTreatableSqFt, mosquitoLotCategory,
     complexityScore: calculateComplexityScore(features),
     homeSqFt: input.homeSqFt,

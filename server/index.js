@@ -235,6 +235,7 @@ app.use(morgan('combined', {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/services', serviceRoutes);
+app.use('/api/service/records', require('./routes/service-records'));
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/notifications', notificationRoutes);

@@ -20,7 +20,7 @@ const {
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
 } = require('./service-pricing');
 const {
-  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, validateEstimateDiscounts,
+  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
 } = require('./discount-engine');
 
 // ── Startup assertion — zone alignment ────────────────────────
@@ -43,14 +43,17 @@ for (const zone of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
 }
 
 function normalizeMosquitoProgram(value) {
-  const raw = String(value || 'monthly').toLowerCase();
-  if (raw === 'seasonal' || raw === 'monthly' || raw === 'residual_seasonal' || raw === 'residual_monthly') return raw;
-  if (raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'residual_monthly';
-  if (raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'residual_seasonal';
+  if (value == null || value === '') return null;
+  const raw = String(value).toLowerCase();
+  if (raw === 'seasonal9' || raw === 'monthly12') return raw;
+  if (raw === 'seasonal') return 'seasonal9';
+  if (raw === 'monthly') return 'monthly12';
+  if (raw === 'residual_seasonal' || raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'seasonal9';
+  if (raw === 'residual_monthly' || raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'monthly12';
   // Migration shim only: older saved estimate inputs may still contain the
   // retired mosquito tier names. Do not expose these as product options.
-  if (raw === 'bronze') return 'seasonal';
-  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly';
+  if (raw === 'bronze') return 'seasonal9';
+  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly12';
   return raw;
 }
 
@@ -68,8 +71,10 @@ function generateEstimate(input) {
     imperviousSurfacePercent: input.imperviousSurfacePercent,
     imperviosSurfacePercent: input.imperviosSurfacePercent,
     estimatedBedAreaSf: input.estimatedBedAreaSf,
+    estimatedBedArea: input.estimatedBedArea,
     estimatedBedAreaPercent: input.estimatedBedAreaPercent,
     bedArea: input.bedArea,
+    bedAreaSource: input.bedAreaSource,
     propertyType: input.propertyType,
     features: input.features || {},
     // v2 enriched fields (optional — null-safe)
@@ -170,25 +175,25 @@ function generateEstimate(input) {
   // Tree & Shrub
   if (services.treeShrub) {
     const result = priceTreeShrub(property, {
-      tier: services.treeShrub.tier || 'enhanced',
+      tier: services.treeShrub.tier,
       access: services.treeShrub.access || 'easy',
-      treeCount: services.treeShrub.treeCount || property.features?.treeCount || 0,
+      treeCount: services.treeShrub.treeCount ?? property.features?.treeCount ?? 0,
     });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
+    result.internalPerVisitRevenue = Math.round(result.annual / result.frequency * 100) / 100;
+    result.perApp = result.internalPerVisitRevenue;
     lineItems.push(result);
     activeServiceKeys.push('tree_shrub');
   }
 
   // Palm Injection
   if (services.palm) {
-    const result = pricePalmInjection(property, {
-      palmCount: services.palm.palmCount || 1,
-      treatmentType: services.palm.treatmentType || 'combo',
-      customPricePerPalm: services.palm.customPricePerPalm,
-    });
+    const result = pricePalmInjection(property, { ...services.palm });
     result.annual = Math.round(result.annual * zoneMult);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
+    result.annualBeforeCredits = result.annual;
+    result.monthlyBeforeCredits = result.monthly;
     lineItems.push(result);
     // Palm does NOT add to activeServiceKeys for tier determination
   }
@@ -270,6 +275,7 @@ function generateEstimate(input) {
     const result = priceOneTimeMosquito(property, {
       stationCount: services.oneTimeMosquito.stationCount,
       dunkCount: services.oneTimeMosquito.dunkCount,
+      isRecurringCustomer,
     });
     lineItems.push(result);
   }
@@ -379,9 +385,12 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.foam) {
-    const result = priceFoamDrill(services.foam.points || 5, {
-      urgency: services.foam.urgency || 'ROUTINE',
-      afterHours: services.foam.afterHours || false,
+    const foamOptions = typeof services.foam === 'object' && services.foam !== null
+      ? services.foam
+      : {};
+    const result = priceFoamDrill(Object.prototype.hasOwnProperty.call(foamOptions, 'points') ? foamOptions.points : undefined, {
+      urgency: foamOptions.urgency || 'ROUTINE',
+      afterHours: foamOptions.afterHours || false,
     });
     lineItems.push(result);
   }
@@ -572,17 +581,65 @@ function generateEstimate(input) {
     const serviceKey = resolveDiscountKey(item);
     const isOneTime = !item.annual; // One-time services have .price, not .annual
 
+    if (item.discountHandledByPricingFunction) {
+      const rate = Number(item.recurringCustomerDiscountRate || 0);
+      item.discount = {
+        serviceKey,
+        waveGuardTier: waveGuardTier.tier,
+        appliedDiscounts: rate > 0 ? [{
+          type: 'recurring_customer_one_time_perk',
+          amount: rate,
+        }] : [],
+        effectiveDiscount: rate,
+        totalDiscount: rate,
+      };
+      if (item.price) {
+        item.priceBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.price;
+        item.priceAfterDiscount = item.price;
+      }
+      continue;
+    }
+
     const discount = getEffectiveDiscount(serviceKey, waveGuardTier, {
       isRecurringCustomer,
       isOneTimeService: isOneTime,
+      palmCount: item.palmCount,
+      annualBeforeCredits: item.annualBeforeCredits ?? item.annual,
     });
 
     item.discount = discount;
 
     if (item.annual) {
       item.annualBeforeDiscount = item.annual;
-      item.annualAfterDiscount = applyDiscount(item.annual, discount);
+      const discountedAnnual = applyDiscount(item.annual, discount);
+      if (item.service === 'tree_shrub') {
+        const guarded = applyMarginGuard(item, discountedAnnual, discount.effectiveDiscount || 0);
+        item.preDiscountAnnual = item.annualBeforeDiscount;
+        item.requestedDiscountPct = discount.effectiveDiscount || 0;
+        item.actualDiscountPct = guarded.actualDiscountPct ?? (
+          item.annualBeforeDiscount > 0
+            ? Math.round((1 - guarded.finalAnnual / item.annualBeforeDiscount) * 1000) / 1000
+            : 0
+        );
+        item.finalAnnual = guarded.finalAnnual;
+        item.finalMonthly = Math.round(guarded.finalAnnual / 12 * 100) / 100;
+        item.finalMargin = guarded.finalMargin;
+        item.marginGuardApplied = guarded.marginGuardApplied;
+        item.discountCapped = guarded.discountCapped;
+        if (guarded.minAnnualForMargin !== undefined) {
+          item.minAnnualForMargin = guarded.minAnnualForMargin;
+        }
+        item.annualAfterDiscount = guarded.finalAnnual;
+      } else {
+        item.annualAfterDiscount = discountedAnnual;
+      }
       item.monthlyAfterDiscount = Math.round(item.annualAfterDiscount / 12 * 100) / 100;
+      if (serviceKey === 'palm_injection') {
+        item.annualBeforeCredits = item.annualBeforeCredits ?? item.annualBeforeDiscount;
+        item.flatCreditAnnual = discount.flatCreditAnnual || 0;
+        item.annualAfterCredits = item.annualAfterDiscount;
+        item.monthlyAfterCredits = Math.round(item.annualAfterCredits / 12 * 100) / 100;
+      }
     } else if (item.price) {
       item.priceBeforeDiscount = item.price;
       item.priceAfterDiscount = applyDiscount(item.price, discount);

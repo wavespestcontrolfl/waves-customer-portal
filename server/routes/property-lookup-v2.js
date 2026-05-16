@@ -1348,14 +1348,19 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     const injectablePalmCount = Number(p.injectablePalms) > 0
       ? Number(p.injectablePalms)
       : Math.max(1, Math.round(totalPalmCount * 0.30));
+    const requestedPalmSize = String(o.palmSize || p.palmSize || 'medium').toLowerCase();
+    const palmSize = ['small', 'medium', 'large'].includes(requestedPalmSize)
+      ? requestedPalmSize
+      : 'medium';
     services.palm = {
       palmCount: injectablePalmCount,
       treatmentType: 'combo',
+      palmSize,
     };
   }
   if (sel.has('MOSQUITO')) {
     services.mosquito = {
-      tier: o.mosquitoProgram || 'monthly',
+      tier: o.mosquitoProgram || 'monthly12',
       stationCount: o.mosquitoStationCount,
       dunkCount: o.mosquitoDunkCount,
     };
@@ -1394,7 +1399,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       warranty: o.preslabWarranty || 'BASIC',
     };
   }
-  if (sel.has('FOAM')) services.foam = { points: o.foamPoints || 5, urgency, afterHours };
+  if (sel.has('FOAM')) {
+    services.foam = { urgency, afterHours };
+    if (Object.prototype.hasOwnProperty.call(o, 'foamPoints')) {
+      services.foam.points = o.foamPoints;
+    }
+  }
   if (sel.has('RODENT_TRAP')) services.rodentTrapping = {};
   if (sel.has('WDO')) services.wdo = {};
   if (sel.has('FLEA')) services.flea = {};
@@ -1492,6 +1502,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     estimatedBedAreaSf: p.estimatedBedAreaSf,
     estimatedBedAreaPercent: p.estimatedBedAreaPercent,
     bedArea: p.estimatedBedAreaSf,
+    bedAreaSource: p.estimatedBedAreaSf !== undefined && p.estimatedBedAreaSf !== null && p.estimatedBedAreaSf !== ''
+      ? 'estimated'
+      : undefined,
     features,
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,

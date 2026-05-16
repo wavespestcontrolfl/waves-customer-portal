@@ -104,6 +104,22 @@ function normalizeGrassType(grassType) {
   return 'st_augustine';
 }
 
+function resolveFoamDrillTier(points) {
+  const pointCount = Number(points === undefined ? 5 : points);
+  if (!Number.isInteger(pointCount) || pointCount < 1) {
+    throw new Error('Foam drill point count must be a positive whole number.');
+  }
+  const tiers = [
+    { max: 5, c: 1, l: 1, n: 'Spot (1–5)' },
+    { max: 10, c: 2, l: 1.5, n: 'Moderate (6–10)' },
+    { max: 15, c: 3, l: 2, n: 'Extensive (11–15)' },
+    { max: 20, c: 4, l: 3, n: 'Full Perimeter' },
+  ];
+  const tier = tiers.find(t => pointCount <= t.max);
+  if (!tier) throw new Error(`Foam drill point count ${pointCount} exceeds the configured 20-point maximum.`);
+  return { pointCount, tier };
+}
+
 function resolveLawnFreq(freq) {
   const parsed = Number(freq);
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
@@ -169,6 +185,8 @@ export function calculateEstimate(inputs) {
     imperviousSurfacePercent: _imperviousSurfacePercent,
     imperviosSurfacePercent: _imperviosSurfacePercent,
     estimatedBedAreaPercent: _estimatedBedAreaPercent,
+    mosquitoStationCount: _mosquitoStationCount,
+    mosquitoDunkCount: _mosquitoDunkCount,
     otLawnType,
     exclSimple: exS,
     exclModerate: exM,
@@ -223,9 +241,10 @@ export function calculateEstimate(inputs) {
   const plugArea = Math.max(0, Number(_plugArea) || 0);
   const plugSpacing = Number(_plugSpacing) || 12;
   const bedbugRooms = Number(_bedbugRooms) || 1;
-  const fmPts = Number(_foamPoints) || 5;
   const grassType = normalizeGrassType(_grassType);
   const lawnFreq = resolveLawnFreq(_lawnFreq);
+  const mosquitoStationCount = Math.max(0, Math.round(Number(_mosquitoStationCount) || 0));
+  const mosquitoDunkCount = Math.max(0, Math.round(Number(_mosquitoDunkCount) || 0));
 
   const LABOR = 35, DRIVE = 20;
   const footprint = homeSqFt > 0 ? Math.round(homeSqFt / stories) : 0;
@@ -565,7 +584,7 @@ export function calculateEstimate(inputs) {
       R.lawn.push({ pa, v: f.v, ann, mo, name: f.name, recommended: rec, dimmed: dim, pricingBasis: price.pricingBasis, pricingSource: price.pricingSource });
     });
     const selectedLawn = R.lawn.find(t => t.recommended) || R.lawn[2];
-    wgServices.push({ name: 'Lawn Care', mo: selectedLawn.mo });
+    wgServices.push({ name: 'Lawn Care', service: 'lawn_care', mo: selectedLawn.mo, perTreatment: selectedLawn.pa, visitsPerYear: selectedLawn.v });
     const customQuoteFlag = lsf > LAWN_TABLE_MAX_SQFT;
     if (customQuoteFlag) {
       addLawnCustomQuoteNote();
@@ -600,7 +619,7 @@ export function calculateEstimate(inputs) {
     });
     R.pestRoachMod = roachMod;
     R.pestInitialRoachPrice = initialRoachPrice(roachMod, fpEff, false);
-    wgServices.push({ name: 'Pest (' + R.pest.label + ')', mo: R.pest.mo });
+    wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps });
   }
 
   /* ── TREE & SHRUB ────────────────────────────────────────── */
@@ -638,7 +657,7 @@ export function calculateEstimate(inputs) {
       const rec = i === 1, dim = i !== 1;
       R.ts.push({ pa, v: t.v, ann, mo, name: t.n, recommended: rec, dimmed: dim });
     });
-    wgServices.push({ name: 'Tree & Shrub (Enhanced)', mo: R.ts[1].mo });
+    wgServices.push({ name: 'Tree & Shrub (Enhanced)', service: 'tree_shrub', mo: R.ts[1].mo, perTreatment: R.ts[1].pa, visitsPerYear: R.ts[1].v });
   }
 
   /* ── PALM INJECTION ──────────────────────────────────────── */
@@ -656,10 +675,22 @@ export function calculateEstimate(inputs) {
       palmEstimated = true;
       fieldVerify.push('injectable palm count');
     }
-    // v1.7: palm injection default is combo ($55/palm) for estimates, 2 apps/year
-    const palmPerApp = 55;
-    const inja = ip * palmPerApp * 2, injMo = Math.round(inja / 12 * 100) / 100;
-    R.injection = { palms: ip, ann: inja, mo: injMo, estimated: palmEstimated, pricePerPalm: palmPerApp };
+    // Client fallback mirrors the server adapter's explicit combo/medium protocol.
+    const palmPerApp = 75;
+    const appsPerYear = 2;
+    const perVisit = Math.max(ip * palmPerApp, 75);
+    const inja = perVisit * appsPerYear, injMo = Math.round(inja / 12 * 100) / 100;
+    R.injection = {
+      palms: ip,
+      ann: inja,
+      mo: injMo,
+      estimated: palmEstimated,
+      pricePerPalm: palmPerApp,
+      appsPerYear,
+      palmSize: 'medium',
+      perVisit,
+      detail: `Nutrition + Insecticide · medium palms · $${palmPerApp}/palm · ${appsPerYear}/yr${perVisit > ip * palmPerApp ? ` · $${perVisit} visit minimum applied` : ''}`,
+    };
     // Palm injection is excluded from WaveGuard percent discounts and does not
     // count toward tier qualification — billed separately like rodent bait.
   }
@@ -696,20 +727,18 @@ export function calculateEstimate(inputs) {
     else if (sz === 'HALF') pr += 0.05;
     pr = Math.min(2.0, Math.round(pr * 100) / 100);
     const bp = {
-      SMALL: [105, 90, 135, 120],
-      QUARTER: [115, 100, 150, 135],
-      THIRD: [130, 115, 175, 155],
-      HALF: [155, 135, 210, 185],
-      ACRE: [195, 175, 265, 235],
+      SMALL: [105, 90],
+      QUARTER: [115, 100],
+      THIRD: [130, 115],
+      HALF: [155, 135],
+      ACRE: [195, 175],
     };
     const b = bp[sz] || bp.SMALL;
+    const ri = (pr >= 1.30 || nearWater || treeDensity === 'HEAVY') ? 1 : 0;
     const mt = [
-      { n: 'Seasonal Essential Barrier', pv: Math.round(b[0] * pr), v: 9 },
-      { n: 'Monthly Essential Barrier', pv: Math.round(b[1] * pr), v: 12 },
-      { n: 'Seasonal Precision Barrier', pv: Math.round(b[2] * pr), v: 9 },
-      { n: 'Monthly Precision Barrier', pv: Math.round(b[3] * pr), v: 12 },
+      { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(b[0] * pr), v: 9, tier: 'seasonal9' },
+      { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(b[1] * pr), v: 12, tier: 'monthly12' },
     ];
-    const ri = 1;
     R.mq = [];
     R.mqMeta = { pr, sz, ri, treatableSqFt, grossLotCategory };
     mt.forEach((t, i) => {
@@ -718,7 +747,7 @@ export function calculateEstimate(inputs) {
       const rec = i === ri, dim = i !== ri;
       R.mq.push({ pv: t.pv, v: t.v, ann, mo, n: t.n, recommended: rec, dimmed: dim });
     });
-    wgServices.push({ name: 'Mosquito (' + R.mq[ri].n + ')', mo: R.mq[ri].mo });
+    wgServices.push({ name: 'Mosquito (' + R.mq[ri].n + ')', service: 'mosquito', mo: R.mq[ri].mo, perTreatment: R.mq[ri].pv, visitsPerYear: R.mq[ri].v });
   }
 
   /* ── TERMITE BAIT ────────────────────────────────────────── */
@@ -732,7 +761,7 @@ export function calculateEstimate(inputs) {
     const ai = Math.round((sta * 14 + sta * 5.25 + sta * 0.75) * 1.75);
     const ti = Math.round((sta * 24 + sta * 5.25 + sta * 0.75) * 1.75);
     R.tmBait = { hi, ai, ti, bmo: 35, pmo: 65, perim, sta };
-    wgServices.push({ name: 'Termite Bait (Basic)', mo: 35 });
+    wgServices.push({ name: 'Termite Bait (Basic)', service: 'termite_bait', mo: 35, perTreatment: null, visitsPerYear: null });
   }
 
   /* ── RODENT BAIT ─────────────────────────────────────────── */
@@ -760,7 +789,7 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
     const bpp = R.pest ? R.pest.pa : Math.max(89, 117 + pestBaseAdjustment(fpEff));
-    const fp = Math.max(150, otP(Math.max(150, Math.round(bpp * 1.30))));
+    const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));
     otItems.push({ name: 'OT Pest', price: fp, detail: indoor ? 'Interior + exterior' : 'Exterior (+ interior add-on)' });
   }
 
@@ -779,20 +808,27 @@ export function calculateEstimate(inputs) {
     if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
     else if (otLawnType === 'FUNGICIDE') { tm = 1.38; tl = 'Fungicide'; }
-    const fp = otP(Math.max(115, Math.round(bl * tm)));
+    const fp = Math.max(115, otP(Math.max(115, Math.round(bl * tm))));
     otItems.push({ name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl });
   }
 
   /* ── One-Time Mosquito ───────────────────────────────────── */
   if (svcOnetimeMosquito && lotSqFt > 0) {
     hasOT = true;
-    let p = 200;
-    if (lotSqFt >= 43560) p = 350;
-    else if (lotSqFt >= 21780) p = 300;
-    else if (lotSqFt >= 14520) p = 275;
-    else if (lotSqFt >= 10890) p = 250;
-    const fp = otP(p);
-    otItems.push({ name: 'OT Mosquito', price: fp, detail: 'Rain re-spray guarantee' });
+    const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
+    let p = 225;
+    if (treatableSqFt > 43560) p = 475 + Math.ceil((treatableSqFt - 43560) / 10000) * 75;
+    else if (treatableSqFt > 32000) p = 475;
+    else if (treatableSqFt > 24000) p = 425;
+    else if (treatableSqFt > 16000) p = 385;
+    else if (treatableSqFt > 11000) p = 325;
+    else if (treatableSqFt > 7500) p = 275;
+    const addOns = mosquitoStationCount * 75 + mosquitoDunkCount * 15;
+    const fp = Math.round((p + addOns) * rD);
+    const detailParts = [];
+    if (mosquitoStationCount > 0) detailParts.push(`${mosquitoStationCount} stations`);
+    if (mosquitoDunkCount > 0) detailParts.push(`${mosquitoDunkCount} Bti dunks`);
+    otItems.push({ name: 'OT Mosquito', price: fp, detail: detailParts.join(' + ') || 'Rain re-spray guarantee' });
   }
 
   /* ── Plugging ────────────────────────────────────────────── */
@@ -891,13 +927,7 @@ export function calculateEstimate(inputs) {
   if (svcFoam) {
     hasOT = true;
     const FM_CAN = 39.08, FM_BITS = 8;
-    const ft = {
-      '5':  { c: 1, l: 1, n: 'Spot (1–5)' },
-      '10': { c: 2, l: 1.5, n: 'Moderate (6–10)' },
-      '15': { c: 3, l: 2, n: 'Extensive (11–15)' },
-      '20': { c: 4, l: 3, n: 'Full Perimeter' },
-    };
-    const t = ft[String(fmPts)] || ft['5'];
+    const { pointCount: fmPts, tier: t } = resolveFoamDrillTier(_foamPoints);
     const cost = t.c * FM_CAN + t.l * LABOR + FM_BITS;
     const fp = otP(Math.max(250, Math.round(cost / 0.45)));
     otItems.push({ name: 'Foam Drill', price: fp, detail: t.c + ' cans | ~$' + Math.round(fp / fmPts) + '/point', tierName: t.n });
@@ -1072,6 +1102,23 @@ export function calculateEstimate(inputs) {
   else if (ac === 3) { wt = 'Gold'; wd = 0.15; }
   else if (ac === 2) { wt = 'Silver'; wd = 0.10; }
   else if (ac === 1) { wt = 'Bronze'; wd = 0; }
+  if (R.injection) {
+    const annualBeforeCredits = R.injection.ann;
+    const flatCreditAnnual = wt === 'Gold' || wt === 'Platinum'
+      ? Math.min(annualBeforeCredits, R.injection.palms * 10)
+      : 0;
+    const annualAfterCredits = Math.round((annualBeforeCredits - flatCreditAnnual) * 100) / 100;
+    const monthlyAfterCredits = Math.round(annualAfterCredits / 12 * 100) / 100;
+    R.injection = {
+      ...R.injection,
+      ann: annualAfterCredits,
+      mo: monthlyAfterCredits,
+      annualBeforeCredits,
+      flatCreditAnnual,
+      annualAfterCredits,
+      monthlyAfterCredits,
+    };
+  }
   const da = Math.round(ra * wd * 100) / 100;
   const ad = Math.round((ra - da) * 100) / 100;
   const mm = Math.round(ad / 12 * 100) / 100;

@@ -38,6 +38,7 @@ import React, {
 import { fmt, fmtInt } from "../../lib/estimateEngine";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
+import { ExternalLink } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -87,6 +88,13 @@ async function summarizeEstimateResponseFailure(response, fallbackLabel) {
     }
   }
   return `${fallbackLabel}: ${response.status}`;
+}
+
+function estimatePreviewUrlFromSave(data) {
+  if (data?.token) {
+    return `${window.location.origin}/estimate/${encodeURIComponent(data.token)}`;
+  }
+  return data?.viewUrl || null;
 }
 
 // ── Error Boundary ──────────────────────────────────────────────
@@ -156,8 +164,7 @@ const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
 const MOSQUITO_PROTOCOL_STEPS = [
   "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
   "Use a gas-powered backpack sprayer for a directed barrier application to mosquito resting zones. Keep applications off blooms and avoid pollinator activity windows.",
-  "Essential Barrier uses bifenthrin adulticide with pyriproxyfen + novaluron IGR support where breeding pressure exists.",
-  "Precision Barrier uses gamma-cyhalothrin adulticide with the same IGR support for heavier foliage, water adjacency, pool cages, and higher residual expectations.",
+  "Recurring mosquito uses a seasonal 9-visit program or a monthly 12-visit program with pressure-adjusted recurring pricing.",
   "Recommend stations or Bti dunk tablets when breeding sources cannot be fully dumped, drained, or eliminated during the visit.",
   "Document inaccessible water, wind/rain constraints, customer source-reduction notes, and any reinspection trigger on the service record.",
 ];
@@ -177,7 +184,7 @@ function buildMosquitoRecommendations(form) {
 
   if (
     form.svcMosquito &&
-    form.mosquitoProgram !== "residual_monthly" &&
+    form.mosquitoProgram !== "monthly12" &&
     (heavyVegetation || waterPressure || poolPressure || lotPressure)
   ) {
     const reasons = [
@@ -187,10 +194,10 @@ function buildMosquitoRecommendations(form) {
       lotPressure ? "larger treatable area" : null,
     ].filter(Boolean);
     recommendations.push({
-      key: "precision",
-      label: "Use Monthly Precision Barrier",
+      key: "monthly12",
+      label: "Use monthly mosquito program",
       detail: `Recommended for ${reasons.join(", ")}.`,
-      apply: { mosquitoProgram: "residual_monthly" },
+      apply: { mosquitoProgram: "monthly12" },
     });
   }
 
@@ -473,6 +480,726 @@ function SectionTitle({ children, className }) {
   );
 }
 
+const CUSTOMER_PREVIEW_PERKS = [
+  "Priority scheduling",
+  "Re-service between visits at no charge",
+  "Locked-in pricing for 12 months",
+  "Free annual termite inspection",
+  "15% off one-time treatments",
+  "Customer portal for service history",
+];
+
+function firstNameFromCustomerName(name) {
+  const first = String(name || "").trim().split(/\s+/)[0];
+  return first || "there";
+}
+
+function selectedPestTierForPreview(R, form) {
+  const tiers = Array.isArray(R?.pestTiers) ? R.pestTiers : [];
+  if (!tiers.length) return null;
+  return (
+    tiers.find((t) => String(t.apps) === String(form.pestFreq)) ||
+    tiers.find((t) => t.recommended) ||
+    tiers[0]
+  );
+}
+
+function cadenceFromPestTier(tier) {
+  const apps = Number(tier?.apps || 0);
+  if (apps >= 12) {
+    return { key: "monthly", label: "Monthly", intervalMonths: 1, period: "/mo" };
+  }
+  if (apps >= 6) {
+    return {
+      key: "bi_monthly",
+      label: "Bi-monthly",
+      intervalMonths: 2,
+      period: "/bi-monthly",
+    };
+  }
+  return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/quarter" };
+}
+
+function fallbackCadenceForPreview() {
+  return {
+    key: "quarterly",
+    label: "Quarterly",
+    intervalMonths: 3,
+    period: "/quarter",
+  };
+}
+
+function customerPreviewPricing(E, pestTier, form) {
+  const pestOnlyChoice =
+    !!form.showOneTimeOption &&
+    !!pestTier &&
+    Number(E?.oneTime?.total || 0) > 0;
+
+  if (pestOnlyChoice) {
+    const baseMonthly = Number(pestTier.mo || 0);
+    const discount = Number(E?.recurring?.discount || 0);
+    return {
+      monthlyTotal: Math.max(0, Math.round(baseMonthly * (1 - discount) * 100) / 100),
+      baseMonthly,
+    };
+  }
+
+  const grandTotal = Number(E?.recurring?.grandTotal);
+  const hasGrandTotal =
+    E?.recurring?.grandTotal !== undefined &&
+    E?.recurring?.grandTotal !== null &&
+    Number.isFinite(grandTotal);
+  const monthlyTotal = hasGrandTotal
+    ? grandTotal
+    : Number(E?.recurring?.monthlyTotal || 0) +
+      Number(E?.recurring?.rodentBaitMo || 0) +
+      Number(E?.recurring?.palmInjectionMo || 0);
+  const annualBeforeDiscount = Number(E?.recurring?.annualBeforeDiscount || 0);
+  return {
+    monthlyTotal,
+    baseMonthly: annualBeforeDiscount > 0 ? annualBeforeDiscount / 12 : monthlyTotal,
+  };
+}
+
+function previewVisitsLabel(visits) {
+  const n = Number(visits);
+  if (n === 12) return "Monthly";
+  if (n === 9) return "9-visit";
+  if (n === 8) return "8-visit";
+  if (n === 6) return "Bi-monthly";
+  if (n === 4) return "Quarterly";
+  if (n === 2) return "Semi-annual";
+  if (n === 1) return "Annual";
+  return n > 0 ? `${n}-visit` : "";
+}
+
+function previewRecurringServiceName(service) {
+  return service?.name || service?.label || service?.displayName || "";
+}
+
+function previewRecurringFrequencyLabel(name, R) {
+  const label = String(name || "").toLowerCase();
+  if (label.includes("lawn") && Array.isArray(R?.lawn)) {
+    const selected = R.lawn.find((tier) => tier.recommended) || R.lawn[0];
+    return previewVisitsLabel(selected?.v);
+  }
+  if (label.includes("mosquito") && Array.isArray(R?.mq)) {
+    const selected = R.mq.find((tier) => tier.recommended) || R.mq[R?.mqMeta?.ri] || R.mq[0];
+    return previewVisitsLabel(selected?.v);
+  }
+  if (label.includes("tree") && Array.isArray(R?.ts)) {
+    const selected = R.ts.find((tier) => tier.recommended) || R.ts[0];
+    return previewVisitsLabel(selected?.v);
+  }
+  if (label.includes("termite") && label.includes("bait")) return "Quarterly";
+  return "";
+}
+
+function previewRecurringDisplayName(service) {
+  return service?.displayName || previewRecurringServiceName(service);
+}
+
+function isFrequencyQualifiedPreviewLabel(label) {
+  return /\b(monthly|bi[-\s]?monthly|quarterly|seasonal|annual|semi[-\s]?annual|\d+\s*(?:x|visits?|visit)|x\/yr)\b/i.test(
+    String(label || ""),
+  );
+}
+
+function previewRecurringServiceLabel(service, R) {
+  const name = previewRecurringServiceName(service);
+  if (!name) return "";
+  const displayName = previewRecurringDisplayName(service);
+  if (
+    displayName &&
+    displayName !== name &&
+    isFrequencyQualifiedPreviewLabel(displayName)
+  ) {
+    return displayName;
+  }
+  const frequency = previewRecurringFrequencyLabel(name, R);
+  return frequency ? `${frequency} ${displayName || name}` : displayName || name;
+}
+
+function previewServiceLabel(E, R, form) {
+  const pestTier = selectedPestTierForPreview(R, form);
+  if (pestTier) {
+    const cadence = cadenceFromPestTier(pestTier);
+    if (form.showOneTimeOption && Number(E?.oneTime?.total || 0) > 0) {
+      return `${cadence.label} Pest Control or One-Time Pest Control`;
+    }
+    const bundledNames = (E?.recurring?.services || [])
+      .filter((service) => {
+        const name = previewRecurringServiceName(service).toLowerCase();
+        return name && !name.includes("pest");
+      })
+      .map((service) => previewRecurringServiceLabel(service, R))
+      .filter(Boolean);
+    return [`${cadence.label} Pest Control`, ...bundledNames].join(" + ");
+  }
+
+  const names = (E?.recurring?.services || [])
+    .map((s) => previewRecurringServiceLabel(s, R))
+    .filter(Boolean)
+    .slice(0, 3);
+  if (names.length) return names.join(" + ");
+
+  const oneTimeNames = [
+    ...(E?.oneTime?.items || []),
+    ...(E?.oneTime?.specItems || []),
+  ]
+    .map((s) => s.displayName || s.name)
+    .filter(Boolean)
+    .slice(0, 3);
+  return oneTimeNames.length ? oneTimeNames.join(" + ") : "Custom quote";
+}
+
+function propertyLineForPreview(E, R) {
+  const p = E?.property || {};
+  const rows = [];
+  const homeSqFt = Number(p.homeSqFt || 0);
+  const lotSqFt = Number(p.lotSqFt || 0);
+  const hasLawnService = (E?.recurring?.services || []).some((service) =>
+    previewRecurringServiceName(service).toLowerCase().includes("lawn"),
+  );
+  const lawnSqFt = hasLawnService ? Number(R?.lawnMeta?.lsf || p.turfSf || 0) : 0;
+  const termitePerimeter = Number(R?.tmBait?.perim || 0);
+  if (homeSqFt > 0) rows.push(`${Math.round(homeSqFt).toLocaleString()} sq ft home`);
+  if (lotSqFt > 0) rows.push(`${Math.round(lotSqFt).toLocaleString()} sq ft lot`);
+  if (lawnSqFt > 0) rows.push(`${Math.round(lawnSqFt).toLocaleString()} sq ft treatable lawn`);
+  if (termitePerimeter > 0) rows.push(`${Math.round(termitePerimeter).toLocaleString()} linear ft termite perimeter`);
+  return rows.join(" · ");
+}
+
+const INITIAL_ROACH_PREVIEW_RE = /initial.*(palmetto|german|roach).*knockdown/i;
+
+function previewServiceKey(item, fallbackLabel = "") {
+  const service = String(item?.service || "").toLowerCase();
+  if (service) return service;
+  const label = String(
+    fallbackLabel || item?.label || item?.displayName || item?.name || "",
+  ).toLowerCase();
+  if (INITIAL_ROACH_PREVIEW_RE.test(label)) return "pest_initial_roach";
+  if (label.includes("waveguard setup") || label.includes("membership")) {
+    return "waveguard_setup";
+  }
+  return "";
+}
+
+function previewLineAmount(price) {
+  return price < 0 ? `-${fmtInt(Math.abs(price))}` : fmtInt(price);
+}
+
+function termiteInstallPreviewRow(E) {
+  const price = Number(E?.oneTime?.tmInstall || 0);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const tmBait = E?.results?.tmBait || {};
+  const stations = Number(tmBait.sta || tmBait.stations || 0);
+  const perimeter = Number(tmBait.perim || tmBait.perimeter || 0);
+  const detail = [
+    stations > 0 ? `${Math.round(stations).toLocaleString()} stations` : null,
+    perimeter > 0 ? `${Math.round(perimeter).toLocaleString()} linear ft perimeter` : null,
+  ].filter(Boolean).join(" · ");
+  return {
+    service: "termite_bait_installation",
+    name: "Termite bait installation",
+    price,
+    detail,
+  };
+}
+
+function oneTimeRowsForCustomerPreview(E, {
+  includeSetupFees = false,
+  setupFeeAmount = 0,
+  oneTimeTotal = null,
+  excludeServices = [],
+} = {}) {
+  const specRows = Array.isArray(E?.specItems)
+    ? E.specItems
+    : (E?.oneTime?.specItems || []);
+  const rows = [
+    ...(E?.oneTime?.items || []),
+    ...specRows.filter((item) => {
+      const price = Number(item.price ?? item.amount ?? item.total ?? 0);
+      return !item.onProg && Number.isFinite(price) && price !== 0;
+    }),
+  ];
+
+  const excluded = new Set(
+    excludeServices.map((service) => String(service || "").toLowerCase()).filter(Boolean),
+  );
+  const seen = new Set();
+  const displayRows = [];
+
+  const addRow = (item) => {
+    const name = item.displayName || item.label || item.name || "One-time service";
+    const price = Number(item.price ?? item.amount ?? item.total ?? 0);
+    const detail = item.detail || item.det || item.note || "";
+    const service = previewServiceKey(item, name);
+    const label = String(name).toLowerCase();
+    const isSetupFee =
+      service === "waveguard_setup" ||
+      label.includes("waveguard setup") ||
+      label.includes("membership");
+    if (
+      !Number.isFinite(price) ||
+      price === 0 ||
+      excluded.has(service) ||
+      (!includeSetupFees && isSetupFee)
+    ) {
+      return;
+    }
+    const key = `${service}|${name}|${price}|${detail}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    displayRows.push({ service, name, price, detail });
+  };
+
+  rows.forEach(addRow);
+  const termiteInstallRow = termiteInstallPreviewRow(E);
+  if (termiteInstallRow) {
+    const hasTermiteInstallRow = displayRows.some((row) => {
+      const label = String(row.name || "").toLowerCase();
+      return (
+        row.service === "termite_bait_installation" ||
+        (label.includes("termite") && label.includes("install")) ||
+        (label.includes("trelona") && label.includes("install")) ||
+        (label.includes("install") && Math.abs(row.price - termiteInstallRow.price) <= 0.01)
+      );
+    });
+    if (!hasTermiteInstallRow) addRow(termiteInstallRow);
+  }
+
+  const setupFee = Number(E?.oneTime?.membershipFee ?? setupFeeAmount ?? 0);
+  const targetTotal = Number(oneTimeTotal);
+  const rowsTotal = displayRows.reduce((sum, row) => sum + row.price, 0);
+  const hasSetupRow = displayRows.some((row) => row.service === "waveguard_setup");
+  const targetIncludesSetupFee =
+    includeSetupFees &&
+    setupFee > 0 &&
+    !hasSetupRow &&
+    Number.isFinite(targetTotal) &&
+    targetTotal > 0 &&
+    Math.abs(targetTotal - (rowsTotal + setupFee)) <= 0.01;
+  if (targetIncludesSetupFee) {
+    addRow({
+      service: "waveguard_setup",
+      name: "WaveGuard setup",
+      price: setupFee,
+      detail: "Membership setup fee",
+    });
+  }
+
+  return displayRows;
+}
+
+function firstVisitFeesForCustomerPreview(E, pestTier) {
+  const rows = [];
+  const setupFee = Number(E?.oneTime?.membershipFee || pestTier?.init || 0);
+  if (setupFee > 0) {
+    rows.push({
+      service: "waveguard_setup",
+      name: "WaveGuard setup",
+      price: setupFee,
+      waivedWithPrepay: true,
+    });
+  }
+
+  const oneTimeSources = [
+    ...(E?.oneTime?.items || []),
+    ...(E?.oneTime?.specItems || []),
+    ...(Array.isArray(E?.specItems) ? E.specItems : []),
+  ];
+  const roachItem = oneTimeSources.find((item) => {
+    const name = item?.displayName || item?.label || item?.name || "";
+    return previewServiceKey(item, name) === "pest_initial_roach";
+  });
+  const roachPrice = Number(roachItem?.price ?? roachItem?.amount ?? roachItem?.total ?? 0);
+  if (Number.isFinite(roachPrice) && roachPrice > 0) {
+    rows.push({
+      service: "pest_initial_roach",
+      name: roachItem.displayName || roachItem.label || roachItem.name || "Initial Roach Knockdown",
+      price: roachPrice,
+      detail: roachItem.detail || roachItem.det || roachItem.note || "",
+      waivedWithPrepay: false,
+    });
+  }
+
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${row.service}|${row.name}|${row.price}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function oneTimeChoicePreviewMeta(E, pestTier, oneTimeRows = []) {
+  const rawRows = [
+    ...(E?.oneTime?.items || []),
+    ...(E?.oneTime?.specItems || []),
+    ...(Array.isArray(E?.specItems) ? E.specItems : []),
+  ].map((item) => {
+    const name = item?.displayName || item?.label || item?.name || "One-time service";
+    return {
+      service: previewServiceKey(item, name),
+      name,
+    };
+  });
+  const termiteInstallRow = termiteInstallPreviewRow(E);
+  if (termiteInstallRow) rawRows.push(termiteInstallRow);
+  const candidates = (oneTimeRows.length ? oneTimeRows : rawRows).filter(
+    (row) => row.service !== "waveguard_setup",
+  );
+  const oneTimeText = candidates
+    .map((row) => `${row.service || ""} ${row.name || ""}`)
+    .join(" ")
+    .toLowerCase();
+  const recurringText = (E?.recurring?.services || [])
+    .map((service) => previewRecurringServiceName(service))
+    .join(" ")
+    .toLowerCase();
+  const matches = (needle) =>
+    oneTimeText.includes(needle) || (!oneTimeText && recurringText.includes(needle));
+
+  if (matches("mosquito")) {
+    return {
+      recurringLabel: "Recurring Mosquito Control",
+      oneTimeLabel: "One-Time Mosquito Control",
+      description:
+        "One visit, pay on service day. No recurring schedule, no program discount. Includes the applicable one-time callback period after this visit.",
+    };
+  }
+  if (matches("lawn")) {
+    return {
+      recurringLabel: "Recurring Lawn Care",
+      oneTimeLabel: "One-Time Lawn Care",
+      description:
+        "One visit, pay on service day. No recurring schedule, no program discount.",
+    };
+  }
+  if (matches("termite")) {
+    return {
+      recurringLabel: "Recurring Termite Protection",
+      oneTimeLabel: "One-Time Termite Service",
+      description:
+        "One visit, pay on service day. No recurring schedule, no program discount.",
+    };
+  }
+
+  const hasPest =
+    !!pestTier ||
+    /\b(pest|roach|ant|spider|flea|wasp|bed\s*bug|bedbug)\b/.test(oneTimeText) ||
+    (!oneTimeText && recurringText.includes("pest"));
+  if (hasPest) {
+    return {
+      recurringLabel: "Recurring Pest Control",
+      oneTimeLabel: "One-Time Pest Control",
+      description:
+        "One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pest activity returns after this visit.",
+    };
+  }
+
+  const fallbackName = candidates.find((row) => row.name)?.name || "One-Time Service";
+  return {
+    recurringLabel: "Recurring Service",
+    oneTimeLabel: fallbackName.replace(/^OT\b/i, "One-Time"),
+    description:
+      "One visit, pay on service day. No recurring schedule, no program discount.",
+  };
+}
+
+function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq }) {
+  if (!E) return null;
+
+  const pestTier = selectedPestTierForPreview(R, form);
+  const cadence = pestTier
+    ? cadenceFromPestTier(pestTier)
+    : fallbackCadenceForPreview(E, R, form);
+  const { monthlyTotal, baseMonthly } = customerPreviewPricing(E, pestTier, form);
+  const intervalTotal = Math.round(monthlyTotal * cadence.intervalMonths * 100) / 100;
+  const intervalBase = Math.round(baseMonthly * cadence.intervalMonths * 100) / 100;
+  const intervalSavings = Math.max(0, Math.round((intervalBase - intervalTotal) * 100) / 100);
+  const waveGuardTier = E.recurring?.waveGuardTier || E.recurring?.tier || "Bronze";
+  const firstVisitFees = firstVisitFeesForCustomerPreview(E, pestTier);
+  const dayPrice = monthlyTotal > 0 ? Math.round((monthlyTotal / 30) * 100) / 100 : 0;
+  const serviceLabel = previewServiceLabel(E, R, form);
+  const propertyLine = propertyLineForPreview(E, R);
+  const oneTimeStandaloneTotal = Number(E.oneTime?.total || 0);
+  const hasOneTimeChoice = !!form.showOneTimeOption && oneTimeStandaloneTotal > 0 && monthlyTotal > 0;
+  const oneTimeRows = oneTimeRowsForCustomerPreview(E, {
+    excludeServices: firstVisitFees.map((fee) => fee.service),
+  });
+  const oneTimeChoiceRows = oneTimeRowsForCustomerPreview(E, {
+    includeSetupFees: true,
+    setupFeeAmount: firstVisitFees.find((fee) => fee.service === "waveguard_setup")?.price || 0,
+    oneTimeTotal: oneTimeStandaloneTotal,
+  });
+  const oneTimeChoiceMeta = oneTimeChoicePreviewMeta(E, pestTier, oneTimeChoiceRows);
+  const aiMetrics = [
+    E.property?.homeSqFt ? { label: "Home", value: `${Math.round(E.property.homeSqFt).toLocaleString()} sq ft` } : null,
+    E.property?.lotSqFt ? { label: "Lot", value: `${Math.round(E.property.lotSqFt).toLocaleString()} sq ft` } : null,
+    R?.lawnMeta?.lsf ? { label: "Treatable lawn", value: `${Math.round(R.lawnMeta.lsf).toLocaleString()} sq ft` } : null,
+    E.property?.complexity || E.property?.landscapeComplexity
+      ? { label: "Complexity", value: String(E.property.complexity || E.property.landscapeComplexity).toLowerCase() }
+      : null,
+  ].filter(Boolean);
+
+  return (
+    <div className="customer-preview-scope rounded-sm overflow-hidden border-hairline border-[#E7E2D7] bg-[#FAF8F3] mb-6">
+      <div className="bg-white border-b border-[#E7E2D7] px-5 py-3 flex items-center justify-between gap-4">
+        <span className="text-13 font-semibold text-[#1B2C5B]">(941) 297-5749</span>
+        <img src="/waves-logo.png" alt="Waves" className="h-7 block" />
+      </div>
+
+      <div className="px-5 py-6 max-w-[720px] mx-auto">
+        <div className="text-11 uppercase tracking-[0.12em] font-bold text-[#6B7280] mb-1">
+          Your estimate · {serviceLabel}
+        </div>
+        <h2 className="customer-preview-serif text-[#1B2C5B] text-[34px] leading-[1.08] font-medium tracking-normal m-0">
+          Hey {firstNameFromCustomerName(form.customerName)}, here's your custom quote.
+        </h2>
+        {form.address && (
+          <div className="text-18 text-[#3F4A65] leading-snug mt-4">
+            {form.address}
+          </div>
+        )}
+        {propertyLine && (
+          <div className="text-13 text-[#6B7280] mt-1">{propertyLine}</div>
+        )}
+
+        {pestTier && Array.isArray(R?.pestTiers) && R.pestTiers.length > 1 && (
+          <div className="bg-white rounded-[14px] border border-[#CBD5E1] px-4 py-4 mt-5">
+            <div className="text-12 font-bold uppercase tracking-[0.08em] text-[#64748B] mb-3">
+              How often?
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {R.pestTiers.map((tier) => {
+                const selected = String(tier.apps) === String(form.pestFreq);
+                return (
+                  <button
+                    type="button"
+                    key={tier.label}
+                    onClick={() => onSelectPestFreq?.(tier.apps)}
+                    className={cn(
+                      "rounded-sm border px-3 py-3 text-left transition-colors",
+                      selected
+                        ? "bg-[#009CDE] text-white border-[#009CDE]"
+                        : "bg-white text-[#1B2C5B] border-[#E2E8F0] hover:border-[#009CDE]",
+                    )}
+                  >
+                    <span className="block text-13 font-bold">{tier.label}</span>
+                    <span className={cn("block text-11 mt-1", selected ? "text-white/85" : "text-[#64748B]")}>
+                      {fmt(tier.pa)}/visit
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {hasOneTimeChoice && (
+          <div className="bg-[#F1F5F9] rounded-full p-1 border border-[#E2E8F0] mt-5 flex gap-1 shadow-[0_1px_4px_rgba(15,23,42,0.04)]">
+            <div className="flex-1 rounded-full bg-[#009CDE] text-white text-center text-13 font-semibold px-3 py-2">
+              {oneTimeChoiceMeta.recurringLabel}
+            </div>
+            <div className="flex-1 rounded-full text-[#3F4A65] text-center text-13 font-semibold px-3 py-2">
+              {oneTimeChoiceMeta.oneTimeLabel}
+            </div>
+          </div>
+        )}
+
+        {monthlyTotal > 0 ? (
+          <div className="pt-5 pb-3">
+            <div className="flex items-baseline gap-2 flex-wrap">
+              {intervalSavings > 0 && (
+                <span className="customer-preview-serif text-24 text-[#9CA3AF] line-through">
+                  {fmt(intervalBase)}{cadence.period}
+                </span>
+              )}
+              <span className="customer-preview-serif text-[58px] leading-none font-medium text-[#1B2C5B]">
+                {fmt(intervalTotal)}
+              </span>
+              <span className="text-24 font-medium text-[#6B7280]">{cadence.period}</span>
+              <span className="inline-block px-3 py-1 rounded-sm bg-[#EEF2FF] text-[#1B2C5B] text-12 font-bold tracking-[0.02em]">
+                WaveGuard {waveGuardTier}
+              </span>
+            </div>
+            {intervalSavings > 0 && (
+              <div className="text-14 text-[#16A34A] font-bold mt-2">
+                You save {fmt(intervalSavings)}{cadence.period} with WaveGuard {waveGuardTier}
+              </div>
+            )}
+            {dayPrice > 0 && (
+              <div className="text-14 text-[#6B7280] mt-2">
+                That's just {fmt(dayPrice)}/day for complete home protection.
+              </div>
+            )}
+            {firstVisitFees.map((fee) => (
+              <div
+                key={`${fee.service}-${fee.price}`}
+                className="mt-3 max-w-[520px] p-3.5 rounded-[10px] bg-white border border-[#D4CBB8]"
+              >
+                <div className="text-14 font-bold text-[#1B2C5B]">
+                  + {fmtInt(fee.price)} one-time {fee.name}
+                </div>
+                {fee.detail && (
+                  <div className="text-12 text-[#6B7280] mt-0.5">{fee.detail}</div>
+                )}
+                {fee.waivedWithPrepay && (
+                  <div className="text-12 text-[#6B7280] mt-0.5">
+                    Waived when the customer pays the year in full up front.
+                  </div>
+                )}
+              </div>
+            ))}
+            <div className="text-13 text-[#1B2C5B] mt-3">
+              Try us risk-free — 90-day money-back guarantee.
+            </div>
+          </div>
+        ) : oneTimeStandaloneTotal > 0 ? (
+          <div className="pt-5 pb-3">
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="customer-preview-serif text-[58px] leading-none font-medium text-[#1B2C5B]">
+                {fmt(oneTimeStandaloneTotal)}
+              </span>
+              <span className="text-24 font-medium text-[#6B7280]">one-time</span>
+            </div>
+            <div className="text-14 text-[#6B7280] mt-2">
+              One visit, pay on service day. No recurring schedule.
+            </div>
+          </div>
+        ) : null}
+
+        {hasOneTimeChoice && (
+          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
+            <div className="text-11 uppercase tracking-[0.12em] font-bold text-[#6B7280] mb-1">
+              {oneTimeChoiceMeta.oneTimeLabel}
+            </div>
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="customer-preview-serif text-[42px] leading-none font-medium text-[#1B2C5B]">
+                {fmt(oneTimeStandaloneTotal)}
+              </span>
+              <span className="text-20 font-medium text-[#6B7280]">one-time</span>
+            </div>
+            <div className="text-14 text-[#6B7280] mt-2">
+              {oneTimeChoiceMeta.description}
+            </div>
+            {oneTimeChoiceRows.length > 0 && (
+              <div className="divide-y divide-[#E7E2D7] mt-4">
+                {oneTimeChoiceRows.map((item) => (
+                  <div key={`${item.name}-${item.price}`} className="flex justify-between gap-4 py-2 text-14">
+                    <div className="text-[#3F4A65]">
+                      <div>{item.name}</div>
+                      {item.detail && <div className="text-12 text-[#6B7280] mt-0.5">{item.detail}</div>}
+                    </div>
+                    <div className={cn("font-semibold u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#1B2C5B]")}>
+                      {previewLineAmount(item.price)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {(satelliteUrl || aiMetrics.length > 0) && (
+          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
+            <div className="text-11 uppercase tracking-[0.12em] font-bold text-[#6B7280] mb-1">
+              Waves AI analysis
+            </div>
+            <div className="customer-preview-serif text-24 leading-tight text-[#1B2C5B] mb-2">
+              Here's what we found at your property
+            </div>
+            {satelliteUrl && (
+              <img
+                src={satelliteUrl}
+                alt="Satellite view"
+                className="w-full max-h-64 object-cover rounded-[10px] border border-[#E7E2D7] mb-3"
+              />
+            )}
+            {aiMetrics.length > 0 && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {aiMetrics.map((metric) => (
+                  <div key={metric.label} className="bg-[#F7F5EE] border border-[#E7E2D7] rounded-[10px] px-3 py-2">
+                    <div className="text-10 uppercase tracking-[0.08em] text-[#6B7280] font-bold">
+                      {metric.label}
+                    </div>
+                    <div className="customer-preview-serif text-18 text-[#1B2C5B] capitalize">
+                      {metric.value}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
+          <div className="customer-preview-serif text-24 leading-tight text-[#1B2C5B] mb-3">
+            Find a date &amp; time that works for you
+          </div>
+          <div className="text-14 text-[#6B7280] leading-relaxed mb-4">
+            These are the route windows customers see after opening their secure estimate link.
+          </div>
+          <div className="bg-[#F7F5EE] border border-dashed border-[#D4CBB8] rounded-[10px] p-4 text-center text-13 text-[#6B7280]">
+            Live route availability loads on the public estimate.
+          </div>
+        </div>
+
+        {oneTimeRows.length > 0 && !hasOneTimeChoice && (
+          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
+            <div className="text-15 font-bold text-[#1B2C5B] mb-2">
+              One-time items billed separately
+            </div>
+            <div className="divide-y divide-[#E7E2D7]">
+              {oneTimeRows.map((item) => (
+                <div key={`${item.name}-${item.price}`} className="flex justify-between gap-4 py-2 text-14">
+                  <div className="text-[#3F4A65]">
+                    <div>{item.name}</div>
+                    {item.detail && <div className="text-12 text-[#6B7280] mt-0.5">{item.detail}</div>}
+                  </div>
+                  <div className={cn("font-semibold u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#1B2C5B]")}>
+                    {previewLineAmount(item.price)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {monthlyTotal > 0 && (
+          <div className="bg-white rounded-[14px] border border-[#E7E2D7] p-5 mt-4">
+            <div className="customer-preview-serif text-24 leading-tight text-[#1B2C5B] mb-3">
+              What WaveGuard members get
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2">
+              {CUSTOMER_PREVIEW_PERKS.map((perk) => (
+                <div key={perk} className="text-14 text-[#3F4A65] flex gap-2">
+                  <span className="text-[#16A34A] font-bold">✓</span>
+                  <span>{perk}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="bg-[#1B2C5B] text-white text-center rounded-[14px] border border-[#1B2C5B] p-6 mt-4">
+          <div className="customer-preview-serif text-26 leading-tight">
+            {monthlyTotal > 0
+              ? `Ready to lock in ${fmt(intervalTotal)}${cadence.period}?`
+              : `Ready to lock in ${fmt(oneTimeStandaloneTotal)}?`}
+          </div>
+          <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>
+          <div className="inline-flex mt-4 px-5 py-3 rounded-[10px] bg-white text-[#1B2C5B] text-15 font-semibold">
+            Pick a time and book
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 // MAIN COMPONENT — EstimateToolViewV2
 // State, refs, effects, callbacks all copied verbatim from V1.
@@ -610,7 +1337,7 @@ export default function EstimateToolViewV2({
     manualDiscountValue: "",
     manualDiscountLabel: "",
     grassType: "st_augustine",
-    mosquitoProgram: "monthly",
+    mosquitoProgram: "monthly12",
     mosquitoStationCount: "0",
     mosquitoDunkCount: "0",
     otLawnType: "FERT",
@@ -735,17 +1462,11 @@ export default function EstimateToolViewV2({
       );
     if (form.svcInjection)
       approx.injection = Math.round(
-        ((Number(form.palmCount) || 3) * 35 * 3) / 12,
+        (Math.max(Math.max(1, Math.round((Number(form.palmCount) || 3) * 0.30)) * 75, 75) * 2) / 12,
       );
     if (form.svcMosquito) {
       const programBase =
-        form.mosquitoProgram === "residual_monthly"
-          ? 120
-          : form.mosquitoProgram === "residual_seasonal"
-            ? 95
-            : form.mosquitoProgram === "seasonal"
-              ? 79
-              : 90;
+        form.mosquitoProgram === "seasonal9" ? 105 : 90;
       approx.mosquito = Math.max(
         programBase,
         Math.round(lotSqft * 0.005 + programBase),
@@ -801,6 +1522,7 @@ export default function EstimateToolViewV2({
 
   const [estimate, setEstimate] = useState(null);
   const [savedId, setSavedId] = useState(null);
+  const [savedViewUrl, setSavedViewUrl] = useState(null);
   const [lookupStatus, setLookupStatus] = useState({ type: "", msg: "" });
   const [customerSearch, setCustomerSearch] = useState("");
   const [customers, setCustomers] = useState([]);
@@ -827,16 +1549,19 @@ export default function EstimateToolViewV2({
     if (SEND_FIELDS.has(key)) return;
     if (CONTACT_FIELDS.has(key) || DELIVERY_OPTION_FIELDS.has(key)) {
       setSavedId(null);
+      setSavedViewUrl(null);
       return;
     }
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
   const toggle = useCallback((key) => {
     setForm((f) => ({ ...f, [key]: !f[key] }));
     if (key.startsWith("svc")) {
       setEstimate(null);
       setSavedId(null);
+      setSavedViewUrl(null);
     }
   }, []);
   const applyMosquitoCustomerChoice = useCallback((choice) => {
@@ -852,6 +1577,7 @@ export default function EstimateToolViewV2({
     });
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
   const setCustomerChoiceOption = useCallback((enabled) => {
     setForm((f) => {
@@ -864,6 +1590,7 @@ export default function EstimateToolViewV2({
       return next;
     });
     setSavedId(null);
+    setSavedViewUrl(null);
     setEstimate(null);
   }, []);
 
@@ -875,6 +1602,7 @@ export default function EstimateToolViewV2({
     setForm((f) => ({ ...f, ...(recommendation?.apply || {}) }));
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
 
   const searchSendCustomers = useCallback(async (q) => {
@@ -959,6 +1687,7 @@ export default function EstimateToolViewV2({
     if (!Object.values(incoming).some(Boolean)) return;
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
     setShowSendForm(false);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
@@ -997,6 +1726,7 @@ export default function EstimateToolViewV2({
   function applyDiscountPreset(key) {
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
     if (key === "__custom__" || !key) {
       setForm((f) => ({ ...f, manualDiscountPreset: key || "" }));
       return;
@@ -1293,7 +2023,7 @@ export default function EstimateToolViewV2({
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
         roachModifier: form.roachModifier || "NONE",
-        mosquitoProgram: form.mosquitoProgram || "monthly",
+        mosquitoProgram: form.mosquitoProgram || "monthly12",
         mosquitoStationCount: parseInt(form.mosquitoStationCount, 10) || 0,
         mosquitoDunkCount: parseInt(form.mosquitoDunkCount, 10) || 0,
         urgency: form.urgency || "ROUTINE",
@@ -1305,7 +2035,7 @@ export default function EstimateToolViewV2({
         preslabSqft: parseInt(form.preslabSqft, 10) || 0,
         preslabWarranty: form.preslabWarranty || "BASIC",
         preslabVolume: form.preslabVolume || "NONE",
-        foamPoints: parseInt(form.foamPoints, 10) || 5,
+        foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
         bedbugRooms: parseInt(form.bedbugRooms, 10) || 1,
         bedbugMethod: form.bedbugMethod || "BOTH",
         exclSimple: parseInt(form.exclSimple, 10) || 0,
@@ -1510,6 +2240,7 @@ export default function EstimateToolViewV2({
 
       setEstimate(result);
       setSavedId(null);
+      setSavedViewUrl(null);
       setLookupStatus((s) => ({ ...s, type: "ok" }));
       return result;
     } catch (e) {
@@ -1557,8 +2288,10 @@ export default function EstimateToolViewV2({
         );
       const d = await r.json();
       const id = d.id || d.estimateId;
+      const viewUrl = estimatePreviewUrlFromSave(d);
       setSavedId(id);
-      return id;
+      setSavedViewUrl(viewUrl);
+      return { id, viewUrl };
     } catch (e) {
       alert(e.message);
       return null;
@@ -1676,6 +2409,7 @@ export default function EstimateToolViewV2({
     }));
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
     setShowSendForm(false);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
@@ -1703,8 +2437,45 @@ export default function EstimateToolViewV2({
         return;
       }
     }
-    const id = savedId || (await doSave());
-    if (id) await doSend(id, method);
+    const saved = savedId
+      ? { id: savedId, viewUrl: savedViewUrl }
+      : await doSave();
+    if (saved?.id) await doSend(saved.id, method);
+  }
+
+  async function previewCustomerEstimate() {
+    if (generating || saving || sending) return;
+    if (!estimate) {
+      alert('Click "Generate Estimate" first.');
+      return;
+    }
+
+    const pendingPreviewWindow = savedViewUrl
+      ? null
+      : window.open("about:blank", "_blank");
+    if (pendingPreviewWindow) pendingPreviewWindow.opener = null;
+    if (!savedViewUrl && !pendingPreviewWindow) {
+      alert("Your browser blocked the preview tab. Allow pop-ups and try again.");
+      return;
+    }
+
+    const saved = savedViewUrl
+      ? { id: savedId, viewUrl: savedViewUrl }
+      : await doSave();
+    if (!saved?.id) {
+      if (pendingPreviewWindow) pendingPreviewWindow.close();
+      return;
+    }
+    if (!saved.viewUrl) {
+      if (pendingPreviewWindow) pendingPreviewWindow.close();
+      alert("Preview link unavailable. Save the estimate and try again.");
+      return;
+    }
+    if (pendingPreviewWindow) {
+      pendingPreviewWindow.location.replace(saved.viewUrl);
+    } else {
+      window.open(saved.viewUrl, "_blank", "noopener,noreferrer");
+    }
   }
 
   const E = estimate;
@@ -1771,6 +2542,13 @@ export default function EstimateToolViewV2({
           .waves-roboto-scope,
           .waves-roboto-scope * {
             font-family: ${ROBOTO} !important;
+          }
+          .customer-preview-scope,
+          .customer-preview-scope * {
+            font-family: 'Inter', system-ui, sans-serif !important;
+          }
+          .customer-preview-serif {
+            font-family: 'Source Serif 4', Georgia, serif !important;
           }
         `}</style>{" "}
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
@@ -2441,20 +3219,12 @@ export default function EstimateToolViewV2({
                           k="mosquitoProgram"
                           options={[
                             {
-                              value: "monthly",
-                              label: "Monthly Essential Barrier",
+                              value: "monthly12",
+                              label: "Monthly Program (12 visits)",
                             },
                             {
-                              value: "seasonal",
-                              label: "Seasonal Essential Barrier",
-                            },
-                            {
-                              value: "residual_monthly",
-                              label: "Monthly Precision Barrier",
-                            },
-                            {
-                              value: "residual_seasonal",
-                              label: "Seasonal Precision Barrier",
+                              value: "seasonal9",
+                              label: "Seasonal Program (9 visits)",
                             },
                           ]}
                         />{" "}
@@ -2485,22 +3255,18 @@ export default function EstimateToolViewV2({
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         {" "}
                         <div className="text-12 font-semibold text-zinc-900 mb-1">
-                          Essential Barrier
+                          Seasonal Program
                         </div>
-                        Bifenthrin adulticide with pyriproxyfen + novaluron IGR
-                        support. Best fit for normal mosquito pressure, routine
-                        foliage resting sites, and budget-sensitive recurring
-                        service.
+                        9 applications during mosquito season, roughly every 21
+                        days while pressure is active.
                       </div>{" "}
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         {" "}
                         <div className="text-12 font-semibold text-zinc-900 mb-1">
-                          Precision Barrier
+                          Monthly Program
                         </div>
-                        Gamma-cyhalothrin adulticide with the same IGR support.
-                        Better fit for heavy vegetation, pool cages, water
-                        adjacency, and customers who need a stronger residual
-                        barrier.
+                        12 applications year-round. Recommended for heavy tree
+                        cover, water adjacency, and higher mosquito pressure.
                       </div>{" "}
                     </div>
                   )}
@@ -2946,21 +3712,43 @@ export default function EstimateToolViewV2({
               </div>{" "}
             </div>
             {/* Action buttons */}
-            <div className="grid grid-cols-2 gap-3">
+            <div
+              className={cn(
+                "grid gap-3",
+                estimate ? "grid-cols-3" : "grid-cols-2",
+              )}
+            >
               {" "}
               <Button
                 onClick={() => doGenerate()}
                 disabled={generateBusy}
                 variant="primary"
                 size="md"
-                className="h-12 text-14"
+                className={cn("h-12", estimate ? "text-12" : "text-14")}
               >
-                {generating ? "Generating…" : "Generate Estimate"}
+                {generating
+                  ? "Generating…"
+                  : estimate
+                    ? "Regenerate"
+                    : "Generate Estimate"}
               </Button>{" "}
+              {estimate && (
+                <Button
+                  variant="secondary"
+                  size="md"
+                  className="h-12 text-12 gap-2"
+                  disabled={generateBusy}
+                  onClick={previewCustomerEstimate}
+                  title="Open the customer-facing estimate in a new tab"
+                >
+                  <ExternalLink size={14} strokeWidth={1.8} aria-hidden />
+                  Preview
+                </Button>
+              )}
               <Button
                 variant="secondary"
                 size="md"
-                className="h-12 text-14"
+                className={cn("h-12", estimate ? "text-12" : "text-14")}
                 disabled={generateBusy}
                 onClick={async () => {
                   if (estimate || (await doGenerate())) {
@@ -2968,7 +3756,11 @@ export default function EstimateToolViewV2({
                   }
                 }}
               >
-                {generating ? "Generating…" : "Send Estimate"}
+                {generating
+                  ? "Generating…"
+                  : estimate
+                    ? "Send"
+                    : "Send Estimate"}
               </Button>{" "}
             </div>
             {/* Send form */}
@@ -3256,8 +4048,19 @@ export default function EstimateToolViewV2({
                 {" "}
                 <Card className="p-5">
                   {" "}
-                  <div className="flex justify-end gap-2 mb-2">
+                  <div className="flex flex-wrap justify-end gap-2 mb-2">
                     {" "}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={previewCustomerEstimate}
+                      disabled={sendBusy}
+                      title="Open the customer-facing estimate in a new tab"
+                    >
+                      <ExternalLink size={13} strokeWidth={1.8} aria-hidden />
+                      Customer View
+                    </Button>{" "}
                     <Button
                       variant="secondary"
                       size="sm"
@@ -3271,6 +4074,7 @@ export default function EstimateToolViewV2({
                       onClick={() => {
                         setEstimate(null);
                         setSavedId(null);
+                        setSavedViewUrl(null);
                         setShowSendForm(false);
                       }}
                     >
@@ -3278,6 +4082,24 @@ export default function EstimateToolViewV2({
                     </Button>{" "}
                   </div>{" "}
                   <div className="max-h-[calc(100vh-120px)] overflow-y-auto pr-2">
+                    <CustomerEstimatePreviewV2
+                      E={E}
+                      R={R}
+                      form={form}
+                      satelliteUrl={satelliteData?.imageUrl || null}
+                      onSelectPestFreq={(apps) => {
+                        set("pestFreq", String(apps));
+                        doGenerate({ pestFreq: apps });
+                      }}
+                    />
+                    <details className="border-hairline border-zinc-300 rounded-sm bg-white mb-2">
+                      <summary className="cursor-pointer px-4 py-3 text-13 font-medium text-zinc-900 list-none border-b-hairline border-zinc-200">
+                        Estimator engine details
+                        <span className="block text-11 font-normal text-ink-secondary mt-1">
+                          Property summary, pricing modifiers, production diagnostics, and raw program tiers.
+                        </span>
+                      </summary>
+                      <div className="p-4">
                     {/* Summary Card */}
                     {(E.recurring.serviceCount > 0 ||
                       E.oneTime.total > 0 ||
@@ -3632,7 +4454,10 @@ export default function EstimateToolViewV2({
                               {" "}
                               <TierRowV2
                                 name="Arborjet"
-                                detail={`${R.injection.palms} palms x $55 x 2/yr`}
+                                detail={
+                                  R.injection.detail ||
+                                  `${R.injection.palms} palms x $${R.injection.pricePerPalm || 75} x ${R.injection.appsPerYear || 2}/yr`
+                                }
                                 price={`${fmt(R.injection.mo)}/mo`}
                                 recommended
                               />{" "}
@@ -4196,6 +5021,8 @@ export default function EstimateToolViewV2({
                         </div>{" "}
                       </>
                     )}
+                      </div>
+                    </details>
                   </div>{" "}
                 </Card>{" "}
               </EstimateErrorBoundary>
