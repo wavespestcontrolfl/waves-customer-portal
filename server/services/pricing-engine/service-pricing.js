@@ -4,7 +4,7 @@
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
-  TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, URGENCY,
+  TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 
@@ -845,16 +845,38 @@ function isMissingPrice(value) {
 
 function assertPositiveInteger(value, name) {
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive integer`);
+    throw buildPricingError(`${name} must be a positive integer`, { field: name, value });
   }
   return value;
 }
 
 function assertPositiveNumber(value, name) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    throw new Error(`${name} must be a positive number`);
+    throw buildPricingError(`${name} must be a positive number`, { field: name, value });
   }
   return value;
+}
+
+function assertEnum(value, allowedValues, name) {
+  if (!allowedValues.includes(value)) {
+    throw buildPricingError(`${name} must be one of: ${allowedValues.join(', ')}`, {
+      field: name,
+      value,
+      allowedValues,
+    });
+  }
+  return value;
+}
+
+function buildPricingError(message, metadata = {}) {
+  const err = new Error(message);
+  err.name = 'PricingError';
+  err.status = 400;
+  err.statusCode = 400;
+  err.code = 'PRICING_VALIDATION_ERROR';
+  err.isOperational = true;
+  err.metadata = metadata;
+  return err;
 }
 
 function assertCustomPriceIfPresent(customPricePerPalm) {
@@ -1809,44 +1831,618 @@ function priceGermanRoachInitial(options = {}) {
   };
 }
 
-function priceBedBug(rooms, method = 'chemical', footprint = 2000) {
-  // 'both' returns v2 composite shape; dispatch in estimate-engine decomposes
-  // into two flat line items for downstream pipeline compatibility.
-  if (method === 'both' || method === 'BOTH') {
-    const chem = priceBedBug(rooms, 'chemical', footprint);
-    const heat = priceBedBug(rooms, 'heat', footprint);
+function normalizeBedBugEnum(value) {
+  if (value === null || value === undefined || value === '') return undefined;
+  return String(value).trim().toUpperCase();
+}
+
+function readBedBugEnum(value) {
+  if (value === null || value === undefined || value === '') return undefined;
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+function readBedBugPropertyNumber(value) {
+  if (value === null || value === undefined || value === '' || value === 0 || value === '0') {
+    return undefined;
+  }
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function normalizeBedBugOptions(property = {}, options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw buildPricingError('Bed bug options are required', { field: 'options' });
+  }
+
+  const method = readBedBugEnum(options.method ?? options.bedbugMethod);
+  if (!method) throw buildPricingError('Bed bug method is required', { field: 'method' });
+  if (method === 'BOTH') {
+    throw buildPricingError('Bed bug method BOTH is invalid; use HYBRID for heat plus targeted residual protection', {
+      field: 'method',
+      value: method,
+    });
+  }
+  assertEnum(method, BED_BUG.allowedMethods, 'method');
+
+  const roomsValue = options.rooms ?? options.bedbugRooms;
+  if (roomsValue === null || roomsValue === undefined || roomsValue === '') {
+    throw buildPricingError('Bed bug rooms is required', { field: 'rooms' });
+  }
+  const rooms = assertPositiveInteger(roomsValue, 'rooms');
+
+  const severity = options.severity ?? options.bedbugSeverity;
+  if (!severity) throw buildPricingError('Bed bug severity is required', { field: 'severity' });
+  assertEnum(severity, Object.keys(BED_BUG.severity), 'severity');
+
+  const prepStatus = options.prepStatus ?? options.bedbugPrepStatus;
+  if (!prepStatus) throw buildPricingError('Bed bug prepStatus is required', { field: 'prepStatus' });
+  assertEnum(prepStatus, Object.keys(BED_BUG.prepStatus), 'prepStatus');
+  const quoteRequiredReason = BED_BUG.severity[severity].quoteRequired
+    ? 'SEVERE_INFESTATION'
+    : ((BED_BUG.prepStatus[prepStatus].quoteRequired || BED_BUG.prepStatus[prepStatus].allowed === false)
+        ? 'PREP_REFUSED'
+        : null);
+
+  const occupancyType = options.occupancyType ?? options.bedbugOccupancyType;
+  if (!occupancyType) throw buildPricingError('Bed bug occupancyType is required', { field: 'occupancyType' });
+  assertEnum(occupancyType, Object.keys(BED_BUG.occupancyType), 'occupancyType');
+
+  const hasOptionFootprint = options.footprint !== null &&
+    options.footprint !== undefined &&
+    options.footprint !== '';
+  const propertyFootprint = property.footprint;
+  const footprintValue = hasOptionFootprint
+    ? options.footprint
+    : (
+        propertyFootprint === 0 || propertyFootprint === '0'
+          ? undefined
+          : propertyFootprint
+      );
+  const footprint = footprintValue === null || footprintValue === undefined || footprintValue === ''
+    ? undefined
+    : assertPositiveNumber(footprintValue, 'footprint');
+
+  const storiesValue = options.stories ?? property.stories;
+  const stories = storiesValue === null || storiesValue === undefined || storiesValue === ''
+    ? undefined
+    : assertPositiveInteger(storiesValue, 'stories');
+
+  const equipmentValue = options.equipment ?? options.bedbugEquipment;
+  const equipment = readBedBugEnum(equipmentValue);
+  const heatScope = readBedBugEnum(options.heatScope ?? options.bedbugHeatScope);
+  const warnings = [];
+  let heatAreaSqFt;
+
+  if (method === 'CHEMICAL') {
+    if (equipment) warnings.push('Equipment was supplied for CHEMICAL bed bug pricing and was ignored.');
+    if (heatScope) {
+      assertEnum(heatScope, BED_BUG.heat.heatScope.allowed, 'heatScope');
+      warnings.push('heatScope was supplied for CHEMICAL bed bug pricing and was ignored.');
+    }
+  } else {
+    if (!equipment) throw buildPricingError('equipment is required for HEAT and HYBRID bed bug pricing', { field: 'equipment' });
+    assertEnum(equipment, BED_BUG.heat.allowedEquipment, 'equipment');
+    if (!heatScope) throw buildPricingError('heatScope is required for HEAT and HYBRID bed bug pricing', { field: 'heatScope' });
+    assertEnum(heatScope, BED_BUG.heat.heatScope.allowed, 'heatScope');
+    if (heatScope === 'WHOLE_HOME') {
+      heatAreaSqFt = readBedBugPropertyNumber(
+        options.heatAreaSqFt ?? options.heatSqFt ?? options.homeSqFt ?? property.homeSqFt ?? property.squareFootage,
+      );
+    }
+  }
+
+  const subcontractCostValue = options.subcontractCost ?? options.bedbugSubcontractCost;
+  let subcontractCost;
+  if (quoteRequiredReason) {
+    if (method !== 'CHEMICAL' && equipment === 'SUBCONTRACT' && subcontractCostValue !== null && subcontractCostValue !== undefined && subcontractCostValue !== '') {
+      subcontractCost = assertPositiveNumber(subcontractCostValue, 'subcontractCost');
+    } else if (subcontractCostValue !== null && subcontractCostValue !== undefined && subcontractCostValue !== '') {
+      warnings.push('subcontractCost was supplied for non-subcontract bed bug pricing and was ignored.');
+    }
+
     return {
-      name: 'Bed Bug Treatment',
-      methods: [
-        { method: 'Chemical', price: chem.price, detail: `${rooms} room${rooms > 1 ? 's' : ''}, 2 visits` },
-        { method: 'Heat',     price: heat.price, detail: `${rooms} room${rooms > 1 ? 's' : ''} — $${Math.round(heat.price / rooms)}/room` },
-      ],
+      method,
+      rooms,
+      footprint,
+      heatAreaSqFt,
+      stories,
+      severity,
+      prepStatus,
+      occupancyType,
+      equipment: method === 'CHEMICAL' ? undefined : equipment,
+      heatScope: method === 'CHEMICAL' ? undefined : heatScope,
+      subcontractCost,
+      quoteRequiredReason,
+      urgency: options.urgency ?? options.bedbugUrgency ?? 'standard',
+      afterHours: options.afterHours ?? options.isAfterHours ?? false,
+      includeInternalCostBasis: options.includeInternalCostBasis === true,
+      isInternal: options.internal === true || options.isInternal === true || options.admin === true || options.isAdmin === true || options.debug === true,
+      warnings,
     };
   }
 
-  if (method === 'heat') {
-    const perRoom = rooms <= 1 ? SPECIALTY.bedBug.heat.perRoom[1]
-      : rooms <= 2 ? SPECIALTY.bedBug.heat.perRoom[2]
-      : SPECIALTY.bedBug.heat.perRoom[3];
-    let price = perRoom * rooms;
-    if (footprint > 2500) price = Math.round(price * SPECIALTY.bedBug.heat.footprintMult.over2500);
-    else if (footprint < 1200) price = Math.round(price * SPECIALTY.bedBug.heat.footprintMult.under1200);
-    return { service: 'bed_bug_heat', rooms, price };
+  if (method !== 'CHEMICAL' && equipment === 'SUBCONTRACT') {
+    subcontractCost = subcontractCostValue === null || subcontractCostValue === undefined || subcontractCostValue === ''
+      ? undefined
+      : assertPositiveNumber(subcontractCostValue, 'subcontractCost');
+    if (subcontractCost === undefined) {
+      throw buildPricingError('subcontractCost is required when equipment is SUBCONTRACT', {
+        field: 'subcontractCost',
+        reason: 'MISSING_VENDOR_COST',
+      });
+    }
+  } else if (subcontractCostValue !== null && subcontractCostValue !== undefined && subcontractCostValue !== '') {
+    warnings.push('subcontractCost was supplied for non-subcontract bed bug pricing and was ignored.');
   }
 
-  // Chemical method
-  const mpr = SPECIALTY.bedBug.chemical.materialPerRoom;
-  const driveMin = GLOBAL.DRIVE_TIME;
-  const v1min = 45 + (rooms - 1) * 30 + 30 + driveMin;
-  const v2min = 25 + (rooms - 1) * 20 + driveMin;
-  const cost = (mpr * rooms + GLOBAL.LABOR_RATE * v1min / 60 + mpr * rooms * 0.5 + GLOBAL.LABOR_RATE * v2min / 60);
-  let price = Math.round(cost / SPECIALTY.bedBug.chemical.marginDivisor * 100) / 100;
-  const floor = SPECIALTY.bedBug.chemical.floorBase + Math.max(0, rooms - 1) * SPECIALTY.bedBug.chemical.floorPerExtraRoom;
-  price = Math.max(floor, price);
-  if (footprint > 2500) price = Math.round(price * SPECIALTY.bedBug.chemical.footprintMult.over2500);
-  else if (footprint > 1800) price = Math.round(price * SPECIALTY.bedBug.chemical.footprintMult.over1800);
+  if ((method === 'HEAT' || method === 'HYBRID') && heatScope === 'WHOLE_HOME' && footprint === undefined && heatAreaSqFt === undefined) {
+    throw buildPricingError('footprint is required when heatScope is WHOLE_HOME', {
+      field: 'footprint',
+      reason: 'WHOLE_HOME_REQUIRES_FOOTPRINT',
+    });
+  }
 
-  return { service: 'bed_bug_chemical', rooms, price };
+  return {
+    method,
+    rooms,
+    footprint,
+    heatAreaSqFt,
+    stories,
+    severity,
+    prepStatus,
+    occupancyType,
+    equipment: method === 'CHEMICAL' ? undefined : equipment,
+    heatScope: method === 'CHEMICAL' ? undefined : heatScope,
+    subcontractCost,
+    urgency: options.urgency ?? options.bedbugUrgency ?? 'standard',
+    afterHours: options.afterHours ?? options.isAfterHours ?? false,
+    includeInternalCostBasis: options.includeInternalCostBasis === true,
+    isInternal: options.internal === true || options.isInternal === true || options.admin === true || options.isAdmin === true || options.debug === true,
+    warnings,
+  };
+}
+
+function getStoryMultiplier(stories) {
+  if (!stories) return 1;
+  if (stories <= BED_BUG.stories.one.maxStories) return BED_BUG.stories.one.multiplier;
+  if (stories <= BED_BUG.stories.two.maxStories) return BED_BUG.stories.two.multiplier;
+  return BED_BUG.stories.threePlus.multiplier;
+}
+
+function getFootprintModifier(footprint, modifierRules = []) {
+  if (footprint === undefined || footprint === null) return 1;
+  for (const rule of modifierRules) {
+    if (rule.minFootprintExclusive !== undefined && footprint > rule.minFootprintExclusive) return rule.multiplier;
+    if (rule.maxFootprintExclusive !== undefined && footprint < rule.maxFootprintExclusive) return rule.multiplier;
+  }
+  return 1;
+}
+
+function getUrgencyMultiplier(options = {}) {
+  const afterHours = options.afterHours === true || String(options.afterHours || '').toUpperCase() === 'YES';
+  const key = String(options.urgency || 'standard').trim().replace(/[^a-zA-Z]/g, '').toLowerCase();
+  if (key === 'soonafterhours') return BED_BUG.urgencyMultipliers.soonAfterHours;
+  if (key === 'emergencyafterhours' || key === 'urgentafterhours') return BED_BUG.urgencyMultipliers.emergencyAfterHours;
+  if (key === 'soon') return afterHours ? BED_BUG.urgencyMultipliers.soonAfterHours : BED_BUG.urgencyMultipliers.soon;
+  if (key === 'emergency' || key === 'urgent') return afterHours ? BED_BUG.urgencyMultipliers.emergencyAfterHours : BED_BUG.urgencyMultipliers.emergency;
+  return BED_BUG.urgencyMultipliers.standard;
+}
+
+function getBedBugLaborRate() {
+  const globalRate = Number(GLOBAL.LABOR_RATE);
+  return Number.isFinite(globalRate) && globalRate > 0
+    ? globalRate
+    : BED_BUG.laborRate;
+}
+
+function getBedBugDriveMinutes() {
+  const globalDrive = Number(GLOBAL.DRIVE_TIME);
+  return Number.isFinite(globalDrive) && globalDrive >= 0
+    ? globalDrive
+    : BED_BUG.driveMinutes;
+}
+
+function roundPrice(value) {
+  return Math.round(value);
+}
+
+function roundedRatio(value) {
+  return Math.round(value * 1000) / 1000;
+}
+
+function getBedBugMultipliers(normalized, footprintRules) {
+  return {
+    footprint: getFootprintModifier(normalized.footprint, footprintRules),
+    severity: BED_BUG.severity[normalized.severity].multiplier,
+    prep: BED_BUG.prepStatus[normalized.prepStatus].multiplier,
+    occupancy: BED_BUG.occupancyType[normalized.occupancyType].multiplier,
+    stories: getStoryMultiplier(normalized.stories),
+    urgency: getUrgencyMultiplier(normalized),
+    recurring: 1,
+  };
+}
+
+function applyBedBugMultipliers(basePrice, multipliers) {
+  return basePrice
+    * multipliers.footprint
+    * multipliers.severity
+    * multipliers.prep
+    * multipliers.occupancy
+    * multipliers.stories
+    * multipliers.urgency;
+}
+
+function uniqueWarnings(...groups) {
+  return [...new Set(groups.flat().filter(Boolean))];
+}
+
+function bedBugPrepWarnings(normalized) {
+  return BED_BUG.prepStatus[normalized.prepStatus].warnings || [];
+}
+
+function bedBugMethodLabel(method) {
+  if (method === 'CHEMICAL') return BED_BUG.chemical.label;
+  if (method === 'HEAT') return BED_BUG.heat.label;
+  if (method === 'HYBRID') return BED_BUG.hybrid.label;
+  return 'Bed Bug Treatment';
+}
+
+function buildBedBugChemicalProtocol(includedVisits) {
+  const chemical = BED_BUG.chemical;
+  return {
+    ...(chemical.protocol || {}),
+    includedVisits,
+    followUpDays: chemical.followUpDays,
+  };
+}
+
+function buildBedBugHeatProtocol() {
+  const heat = BED_BUG.heat;
+  return {
+    targetAmbientTempF: heat.protocol.targetAmbientTempF,
+    requiredMinimumTempF: heat.protocol.requiredMinimumTempF,
+    minimumHoldTimeMinutes: heat.protocol.minimumHoldTimeMinutes,
+    minSensors: heat.protocol.minSensors,
+    activeMonitoringRequired: heat.protocol.activeMonitoringRequired,
+    requiresPrepChecklist: heat.protocol.requiresPrepChecklist,
+    requiresHeatSensitiveItemPlan: heat.protocol.requiresHeatSensitiveItemPlan,
+  };
+}
+
+function buildBedBugHybridProtocol(heatProtocol) {
+  return {
+    ...heatProtocol,
+    ...(BED_BUG.hybrid.protocol || {}),
+    postInspectionDays: BED_BUG.hybrid.postInspectionDays,
+  };
+}
+
+function buildBedBugQuoteRequired(normalized, reason, warnings = []) {
+  const label = `${bedBugMethodLabel(normalized.method)} — ${normalized.rooms} room(s) — Quote Required`;
+  const detail = reason === 'PREP_REFUSED'
+    ? 'Prep refused requires inspection/manager quote before treatment.'
+    : 'Inspection and custom quote required before treatment.';
+  return {
+    service: BED_BUG.service,
+    label,
+    method: normalized.method,
+    rooms: normalized.rooms,
+    footprint: normalized.footprint,
+    heatAreaSqFt: normalized.heatAreaSqFt,
+    stories: normalized.stories,
+    severity: normalized.severity,
+    prepStatus: normalized.prepStatus,
+    occupancyType: normalized.occupancyType,
+    equipment: normalized.equipment,
+    heatScope: normalized.heatScope,
+    quoteRequired: true,
+    reason,
+    detail,
+    warnings: uniqueWarnings(warnings, normalized.warnings, bedBugPrepWarnings(normalized)),
+    treatmentLines: [],
+    recurringDiscountEligible: false,
+    recurringDiscountApplied: 0,
+    requiresInspection: true,
+    requiresPrepChecklist: true,
+    requiresCustomerAcknowledgement: true,
+    warrantyEligible: false,
+  };
+}
+
+function bedBugCommonResult(normalized, fields) {
+  const warnings = uniqueWarnings(fields.warnings || [], normalized.warnings, bedBugPrepWarnings(normalized));
+  const price = fields.price;
+  return {
+    service: BED_BUG.service,
+    label: fields.label,
+    method: normalized.method,
+    rooms: normalized.rooms,
+    footprint: normalized.footprint,
+    heatAreaSqFt: normalized.heatAreaSqFt,
+    stories: normalized.stories,
+    severity: normalized.severity,
+    prepStatus: normalized.prepStatus,
+    occupancyType: normalized.occupancyType,
+    equipment: normalized.equipment,
+    heatScope: normalized.heatScope,
+    quoteRequired: false,
+    treatmentLines: (fields.treatmentLines || []).map(line => ({
+      ...line,
+      warnings: uniqueWarnings(line.warnings || [], warnings),
+    })),
+    basePrice: roundCurrency(fields.basePrice),
+    totalBeforeDiscounts: price,
+    totalAfterDiscounts: price,
+    price,
+    multipliers: fields.multipliers,
+    recurringDiscountEligible: false,
+    recurringDiscountApplied: 0,
+    requiresInspection: true,
+    requiresPrepChecklist: true,
+    requiresCustomerAcknowledgement: true,
+    warrantyEligible: false,
+    warnings,
+    discountHandledByPricingFunction: true,
+    recurringCustomerDiscountRate: 0,
+    recurringCustomerDiscountAmount: 0,
+    ...(fields.extra || {}),
+  };
+}
+
+function resolveChemicalPrice(normalized) {
+  const chemical = BED_BUG.chemical;
+  const rooms = normalized.rooms;
+  const extraRooms = rooms - 1;
+  const severityConfig = BED_BUG.severity[normalized.severity];
+  const laborRate = getBedBugLaborRate();
+  const driveMinutes = getBedBugDriveMinutes();
+
+  const visit1Minutes =
+    chemical.visitMinutes.visit1.setupBase
+    + chemical.visitMinutes.visit1.applicationBase
+    + chemical.visitMinutes.visit1.perExtraRoom * extraRooms
+    + driveMinutes;
+  const visit2Minutes =
+    chemical.visitMinutes.visit2.followUpBase
+    + chemical.visitMinutes.visit2.perExtraRoom * extraRooms
+    + driveMinutes;
+  const visit1Material = chemical.materialPerRoomVisit1 * rooms;
+  const visit2Material = chemical.materialPerRoomVisit1 * rooms * chemical.materialPerRoomVisit2Factor;
+
+  let directCost =
+    visit1Material
+    + visit2Material
+    + laborRate * visit1Minutes / 60
+    + laborRate * visit2Minutes / 60;
+
+  const includedVisits = Math.max(chemical.includedVisits, severityConfig.visits);
+  if (includedVisits > 2) {
+    const extraVisitCount = includedVisits - 2;
+    const extraVisitMinutes =
+      chemical.visitMinutes.extraFollowUp.followUpBase
+      + chemical.visitMinutes.extraFollowUp.perExtraRoom * extraRooms
+      + driveMinutes;
+    const extraVisitMaterial =
+      chemical.materialPerRoomVisit1
+      * rooms
+      * chemical.extraFollowUpMaterialFactor;
+    directCost += extraVisitCount * (
+      extraVisitMaterial
+      + laborRate * extraVisitMinutes / 60
+    );
+  }
+
+  const costRatioPrice = directCost / chemical.targetCostRatio;
+  const minimumPrice = chemical.minimumBase + chemical.minimumAdditionalRoom * extraRooms;
+  const baseChemicalPrice = Math.max(costRatioPrice, minimumPrice);
+  const multipliers = getBedBugMultipliers(normalized, chemical.sizeModifiers);
+  const price = roundPrice(applyBedBugMultipliers(baseChemicalPrice, multipliers));
+  const warnings = uniqueWarnings(chemical.warnings);
+  const protocol = buildBedBugChemicalProtocol(includedVisits);
+  const estimatedGrossMargin = price > 0 ? roundedRatio((price - directCost) / price) : 0;
+
+  return bedBugCommonResult(normalized, {
+    label: `${chemical.label} — ${rooms} room(s), ${includedVisits} visit(s)`,
+    basePrice: baseChemicalPrice,
+    price,
+    multipliers,
+    warnings,
+    treatmentLines: [{
+      label: `${chemical.label} — ${rooms} room(s), ${includedVisits} visit(s)`,
+      method: normalized.method,
+      price,
+      includedVisits,
+      followUpDays: chemical.followUpDays,
+      protocol,
+      directCostEstimate: roundCurrency(directCost),
+      costRatio: chemical.targetCostRatio,
+      actualCostRatio: price > 0 ? roundedRatio(directCost / price) : 0,
+      estimatedGrossMargin,
+      warnings,
+    }],
+    extra: {
+      includedVisits,
+      followUpDays: chemical.followUpDays,
+      directCostEstimate: roundCurrency(directCost),
+      costRatio: chemical.targetCostRatio,
+      actualCostRatio: price > 0 ? roundedRatio(directCost / price) : 0,
+      estimatedGrossMargin,
+      pricingModel: chemical.pricingModel,
+      targetCostRatio: chemical.targetCostRatio,
+      protocol,
+    },
+  });
+}
+
+function getHeatRoomRate(rooms) {
+  if (rooms === 1) return BED_BUG.heat.roomRates.oneRoom;
+  if (rooms === 2) return BED_BUG.heat.roomRates.twoRooms;
+  return BED_BUG.heat.roomRates.threePlusRooms;
+}
+
+function resolveHeatPrice(property, normalized, options = {}) {
+  const { applyCommonModifiers = true } = options;
+  const heat = BED_BUG.heat;
+  const rooms = normalized.rooms;
+  const extraRooms = rooms - 1;
+  const roomRate = getHeatRoomRate(rooms);
+  let roomBasedPrice = roomRate * rooms;
+  let equipmentFee = 0;
+  let vendorBasedPrice;
+
+  if (normalized.equipment === 'INHOUSE') {
+    equipmentFee = heat.inHouseEquipmentFee.base + heat.inHouseEquipmentFee.perExtraRoom * extraRooms;
+    roomBasedPrice += equipmentFee;
+    roomBasedPrice = Math.max(roomBasedPrice, heat.minimums.inHouse);
+  } else if (normalized.equipment === 'SUBCONTRACT') {
+    vendorBasedPrice = normalized.subcontractCost * heat.subcontractMarkup;
+    roomBasedPrice = Math.max(roomBasedPrice, vendorBasedPrice, heat.minimums.subcontract);
+  }
+
+  let sqftBasedPrice;
+  let baseHeatPrice = roomBasedPrice;
+  if (normalized.heatScope === 'WHOLE_HOME') {
+    const sqftRate = normalized.equipment === 'INHOUSE'
+      ? heat.sqftRates.inHouse
+      : heat.sqftRates.subcontract;
+    const heatAreaSqFt = normalized.heatAreaSqFt ?? normalized.footprint;
+    sqftBasedPrice = heatAreaSqFt * sqftRate;
+    baseHeatPrice = Math.max(roomBasedPrice, sqftBasedPrice);
+  }
+
+  const multipliers = getBedBugMultipliers(normalized, heat.sizeModifiers);
+  const price = applyCommonModifiers
+    ? roundPrice(applyBedBugMultipliers(baseHeatPrice, multipliers))
+    : roundCurrency(baseHeatPrice);
+  const warnings = uniqueWarnings(heat.warnings);
+  const protocol = buildBedBugHeatProtocol();
+  const line = {
+    label: `${heat.label} — ${rooms} room(s) — ${normalized.equipment}`,
+    method: normalized.method,
+    price,
+    includedTreatmentEvents: heat.includedTreatmentEvents,
+    includePostInspection: heat.includePostInspection,
+    postInspectionDays: heat.postInspectionDays,
+    heatScope: normalized.heatScope,
+    equipment: normalized.equipment,
+    protocol,
+    warnings,
+  };
+
+  const result = {
+    label: line.label,
+    basePrice: baseHeatPrice,
+    price,
+    multipliers,
+    treatmentLines: [line],
+    warnings,
+    extra: {
+      roomRate,
+      roomBasedPrice: roundCurrency(roomBasedPrice),
+      equipmentFee,
+      vendorBasedPrice: vendorBasedPrice === undefined ? undefined : roundCurrency(vendorBasedPrice),
+      sqftBasedPrice: sqftBasedPrice === undefined ? undefined : roundCurrency(sqftBasedPrice),
+      includedTreatmentEvents: heat.includedTreatmentEvents,
+      includePostInspection: heat.includePostInspection,
+      postInspectionDays: heat.postInspectionDays,
+      protocol: line.protocol,
+    },
+  };
+
+  if (!applyCommonModifiers) return result;
+  return bedBugCommonResult(normalized, result);
+}
+
+function resolveHybridPrice(property, normalized) {
+  const heatBase = resolveHeatPrice(property, normalized, { applyCommonModifiers: false });
+  const residualAddOnBase =
+    BED_BUG.hybrid.residualAddOn.base
+    + BED_BUG.hybrid.residualAddOn.perRoom * normalized.rooms;
+  const combinedBase = heatBase.basePrice + residualAddOnBase;
+  const multipliers = getBedBugMultipliers(normalized, BED_BUG.heat.sizeModifiers);
+  const price = roundPrice(applyBedBugMultipliers(combinedBase, multipliers));
+  const warnings = uniqueWarnings(BED_BUG.heat.warnings, BED_BUG.hybrid.warnings);
+  const note = 'Hybrid is heat plus targeted residual protection, not a duplicate full chemical program.';
+  const protocol = buildBedBugHybridProtocol(heatBase.treatmentLines[0].protocol);
+
+  return bedBugCommonResult(normalized, {
+    label: `${BED_BUG.hybrid.label} — ${normalized.rooms} room(s)`,
+    basePrice: combinedBase,
+    price,
+    multipliers,
+    warnings,
+    treatmentLines: [{
+      label: `${BED_BUG.hybrid.label} — ${normalized.rooms} room(s)`,
+      method: normalized.method,
+      price,
+      includedTreatmentEvents: BED_BUG.heat.includedTreatmentEvents,
+      heatEvent: true,
+      residualApplication: true,
+      residualAddOnBase,
+      includePostInspection: BED_BUG.hybrid.includePostInspection,
+      postInspectionDays: BED_BUG.hybrid.postInspectionDays,
+      heatScope: normalized.heatScope,
+      equipment: normalized.equipment,
+      protocol,
+      warnings,
+      note,
+    }],
+    extra: {
+      heatEvent: true,
+      residualApplication: true,
+      residualAddOnBase,
+      combinedBase: roundCurrency(combinedBase),
+      heatBasePrice: roundCurrency(heatBase.basePrice),
+      includePostInspection: BED_BUG.hybrid.includePostInspection,
+      postInspectionDays: BED_BUG.hybrid.postInspectionDays,
+      protocol,
+      note,
+    },
+  });
+}
+
+function priceBedBugTreatment(property, options) {
+  const normalized = normalizeBedBugOptions(property, options);
+  const severityConfig = BED_BUG.severity[normalized.severity];
+  const prepConfig = BED_BUG.prepStatus[normalized.prepStatus];
+
+  if (severityConfig.quoteRequired) {
+    return buildBedBugQuoteRequired(normalized, 'SEVERE_INFESTATION', [
+      'Severe bed bug infestations require inspection and custom quote.',
+    ]);
+  }
+  if (prepConfig.quoteRequired || prepConfig.allowed === false) {
+    return buildBedBugQuoteRequired(normalized, 'PREP_REFUSED', [
+      'Prep refused requires inspection/manager quote before treatment.',
+    ]);
+  }
+
+  let result;
+  if (normalized.method === 'CHEMICAL') result = resolveChemicalPrice(normalized);
+  else if (normalized.method === 'HEAT') result = resolveHeatPrice(property, normalized);
+  else result = resolveHybridPrice(property, normalized);
+
+  if (normalized.includeInternalCostBasis && normalized.isInternal) {
+    result.internalCostBasis = BED_BUG.internalCostBasis;
+  }
+  return result;
+}
+
+// Deprecated compatibility wrapper for old direct imports. New callers must
+// use priceBedBugTreatment(property, options) with strict method/risk inputs.
+function priceBedBug(rooms, method = 'CHEMICAL', footprint = 2000) {
+  const normalizedMethod = normalizeBedBugEnum(method);
+  if (normalizedMethod === 'BOTH') throw buildPricingError('Bed bug method BOTH is invalid; use HYBRID');
+  assertEnum(normalizedMethod, BED_BUG.allowedMethods, 'method');
+  return priceBedBugTreatment({ footprint, stories: 1 }, {
+    rooms,
+    method: normalizedMethod,
+    severity: 'light',
+    prepStatus: 'ready',
+    occupancyType: 'singleFamily',
+    equipment: normalizedMethod === 'CHEMICAL' ? undefined : 'INHOUSE',
+    heatScope: normalizedMethod === 'CHEMICAL' ? undefined : 'ROOMS_ONLY',
+  });
 }
 
 function priceWDO(footprint) {
@@ -2443,7 +3039,7 @@ module.exports = {
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
-  priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,
+  priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   // Spec functions (Apr 2026)

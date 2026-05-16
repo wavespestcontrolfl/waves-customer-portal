@@ -624,7 +624,13 @@ function EstimateToolView() {
     exclAdvanced: "0",
     exclWaive: "NO",
     bedbugRooms: "1",
-    bedbugMethod: "BOTH",
+    bedbugMethod: "CHEMICAL",
+    bedbugSeverity: "light",
+    bedbugPrepStatus: "ready",
+    bedbugOccupancyType: "singleFamily",
+    bedbugEquipment: "INHOUSE",
+    bedbugHeatScope: "ROOMS_ONLY",
+    bedbugSubcontractCost: "",
     boracareSqft: "",
     preslabSqft: "",
     preslabWarranty: "BASIC",
@@ -1150,8 +1156,62 @@ function EstimateToolView() {
 
   /* ── generate estimate ────────────────────────────────────── */
   async function doGenerate(overrides = {}) {
-    // If we have an enriched profile from v2 lookup, use server-side calculation
-    if (enrichedProfile) {
+    const serviceFlagValues = [
+      form.svcLawn,
+      form.svcPest,
+      form.svcTs,
+      form.svcInjection,
+      form.svcMosquito,
+      form.svcTermiteBait,
+      form.svcRodentBait,
+      form.svcOnetimePest,
+      form.svcOnetimeLawn,
+      form.svcOnetimeMosquito,
+      form.svcPlugging,
+      form.svcTopdress,
+      form.svcDethatch,
+      form.svcTrenching,
+      form.svcBoracare,
+      form.svcPreslab,
+      form.svcFoam,
+      form.svcRodentTrap,
+      form.svcFlea,
+      form.svcWasp,
+      form.svcRoach,
+      form.svcBedbug,
+      form.svcExclusion,
+    ];
+    const bedBugOnlyManual =
+      form.svcBedbug && serviceFlagValues.filter(Boolean).length === 1;
+    const hasLawnPricedService =
+      form.svcLawn ||
+      form.svcOnetimeLawn ||
+      form.svcTopdress ||
+      form.svcDethatch ||
+      form.svcPlugging;
+    const hasManualLawnDimensions =
+      (Number(form.lotSqFt) || 0) > 0 ||
+      (Number(form.measuredTurfSf) || 0) > 0 ||
+      (Number(form.estimatedTurfSf) || 0) > 0;
+    const hasManualPropertyDimensions =
+      (Number(form.homeSqFt) || 0) > 0 || (Number(form.lotSqFt) || 0) > 0;
+    const canUseServerForBedBug =
+      enrichedProfile ||
+      (form.svcBedbug && (bedBugOnlyManual || hasManualPropertyDimensions));
+
+    if (form.svcBedbug && hasLawnPricedService && !enrichedProfile && !hasManualLawnDimensions) {
+      alert("Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.");
+      return;
+    }
+
+    if (form.svcBedbug && !canUseServerForBedBug) {
+      alert("Enter home sq ft or run Property Lookup before generating a mixed bed bug estimate.");
+      return;
+    }
+
+    // Bed bug pricing is server-only. Without lookup data, keep the legacy
+    // dimension guard for any non-bed-bug services still selected.
+    if (enrichedProfile || canUseServerForBedBug) {
       try {
         // Don't overwrite lookup status — keep property specs visible
 
@@ -1214,7 +1274,13 @@ function EstimateToolView() {
           preslabVolume: form.preslabVolume || "NONE",
           foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
           bedbugRooms: parseInt(form.bedbugRooms) || 1,
-          bedbugMethod: form.bedbugMethod || "BOTH",
+          bedbugMethod: form.bedbugMethod || "CHEMICAL",
+          bedbugSeverity: form.bedbugSeverity || "light",
+          bedbugPrepStatus: form.bedbugPrepStatus || "ready",
+          bedbugOccupancyType: form.bedbugOccupancyType || "singleFamily",
+          bedbugEquipment: form.bedbugEquipment || "INHOUSE",
+          bedbugHeatScope: form.bedbugHeatScope || "ROOMS_ONLY",
+          bedbugSubcontractCost: form.bedbugSubcontractCost,
           exclSimple: parseInt(form.exclSimple) || 0,
           exclModerate: parseInt(form.exclModerate) || 0,
           exclAdvanced: parseInt(form.exclAdvanced) || 0,
@@ -1223,19 +1289,29 @@ function EstimateToolView() {
           onetimeLawnType: form.otLawnType || "FERT",
         };
 
-        // Override enriched profile with any manual form edits
-        const profile = { ...enrichedProfile };
-        if (form.homeSqFt) profile.homeSqFt = parseInt(form.homeSqFt);
-        if (form.lotSqFt) profile.lotSqFt = parseInt(form.lotSqFt);
-        if (form.stories) profile.stories = parseInt(form.stories);
-        if (form.bedArea) profile.estimatedBedAreaSf = parseInt(form.bedArea);
-        if (form.palmCount)
-          profile.estimatedPalmCount = parseInt(form.palmCount);
-        if (form.treeCount)
-          profile.estimatedTreeCount = parseInt(form.treeCount);
-        profile.footprint = Math.round(
-          profile.homeSqFt / (profile.stories || 1),
+        // Override enriched profile with any manual form edits. When bed bug is
+        // the only service, a minimal manual profile is enough for the server.
+        const profile = { ...(enrichedProfile || {}) };
+        const manualNumber = (value, fallback = 0) => {
+          const n = parseInt(value, 10);
+          return Number.isFinite(n) ? n : fallback;
+        };
+        profile.homeSqFt = manualNumber(
+          form.homeSqFt,
+          Number(profile.homeSqFt || profile.squareFootage) || 0,
         );
+        profile.lotSqFt = manualNumber(form.lotSqFt, Number(profile.lotSqFt) || 0);
+        profile.stories = manualNumber(form.stories, Number(profile.stories) || 1);
+        if (form.bedArea) profile.estimatedBedAreaSf = parseInt(form.bedArea);
+        if (form.palmCount) profile.estimatedPalmCount = parseInt(form.palmCount);
+        if (form.treeCount) profile.estimatedTreeCount = parseInt(form.treeCount);
+        if (profile.homeSqFt > 0) {
+          profile.footprint = Math.round(
+            profile.homeSqFt / (profile.stories || 1),
+          );
+        } else {
+          delete profile.footprint;
+        }
         // Override property features from form dropdowns
         profile.pool = form.hasPool === "YES" ? "YES" : "NO";
         profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
@@ -2478,13 +2554,75 @@ function EstimateToolView() {
                       <Select
                         k="bedbugMethod"
                         options={[
-                          { value: "BOTH", label: "Quote Both" },
                           { value: "CHEMICAL", label: "Chemical Only" },
                           { value: "HEAT", label: "Heat Only" },
+                          { value: "HYBRID", label: "Hybrid" },
                         ]}
                       />
                     </Field>{" "}
                   </div>{" "}
+                  <div style={sRow3}>
+                    <Field label="Severity">
+                      <Select
+                        k="bedbugSeverity"
+                        options={[
+                          { value: "light", label: "Light" },
+                          { value: "moderate", label: "Moderate" },
+                          { value: "heavy", label: "Heavy" },
+                          { value: "severe", label: "Severe/Quote" },
+                        ]}
+                      />
+                    </Field>
+                    <Field label="Prep">
+                      <Select
+                        k="bedbugPrepStatus"
+                        options={[
+                          { value: "ready", label: "Ready" },
+                          { value: "partial", label: "Partial" },
+                          { value: "poor", label: "Poor" },
+                          { value: "refused", label: "Refused/Quote" },
+                        ]}
+                      />
+                    </Field>
+                    <Field label="Occupancy">
+                      <Select
+                        k="bedbugOccupancyType"
+                        options={[
+                          { value: "singleFamily", label: "Single Family" },
+                          { value: "apartment", label: "Apartment" },
+                          { value: "hotel", label: "Hotel" },
+                          { value: "studentHousing", label: "Student Housing" },
+                        ]}
+                      />
+                    </Field>
+                  </div>
+                  {form.bedbugMethod !== "CHEMICAL" && (
+                    <div style={sRow3}>
+                      <Field label="Equipment">
+                        <Select
+                          k="bedbugEquipment"
+                          options={[
+                            { value: "INHOUSE", label: "In-House" },
+                            { value: "SUBCONTRACT", label: "Subcontract" },
+                          ]}
+                        />
+                      </Field>
+                      <Field label="Heat Scope">
+                        <Select
+                          k="bedbugHeatScope"
+                          options={[
+                            { value: "ROOMS_ONLY", label: "Rooms Only" },
+                            { value: "WHOLE_HOME", label: "Whole Home" },
+                          ]}
+                        />
+                      </Field>
+                      {form.bedbugEquipment === "SUBCONTRACT" && (
+                        <Field label="Vendor Cost">
+                          <Input k="bedbugSubcontractCost" type="number" min="1" />
+                        </Field>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               {/* -- Rodent Services -- */}
@@ -3875,7 +4013,7 @@ function EstimateToolView() {
                               {" "}
                               <div style={sSpecName}>{s.name}</div>{" "}
                               <div style={sSpecPrice}>
-                                {s.onProg ? "$0 — Included" : fmtInt(s.price)}
+                                {s.quoteRequired ? "Quote Required" : s.onProg ? "$0 — Included" : fmtInt(s.price)}
                               </div>{" "}
                               <div style={sSpecDet}>{s.det}</div>{" "}
                             </div>
@@ -4270,7 +4408,7 @@ function EstimateToolView() {
                                       color: C.green,
                                     }}
                                   >
-                                    {fmtInt(s.price)}
+                                    {s.quoteRequired ? "Quote Required" : fmtInt(s.price)}
                                   </span>{" "}
                                 </div>
                               ))}

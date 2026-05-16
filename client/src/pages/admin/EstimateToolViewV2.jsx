@@ -1350,7 +1350,13 @@ export default function EstimateToolViewV2({
     sanitationDebris: "0",
     sanitationAccess: "normal",
     bedbugRooms: "1",
-    bedbugMethod: "BOTH",
+    bedbugMethod: "CHEMICAL",
+    bedbugSeverity: "light",
+    bedbugPrepStatus: "ready",
+    bedbugOccupancyType: "singleFamily",
+    bedbugEquipment: "INHOUSE",
+    bedbugHeatScope: "ROOMS_ONLY",
+    bedbugSubcontractCost: "",
     boracareSqft: "",
     preslabSqft: "",
     preslabWarranty: "BASIC",
@@ -2037,7 +2043,13 @@ export default function EstimateToolViewV2({
         preslabVolume: form.preslabVolume || "NONE",
         foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
         bedbugRooms: parseInt(form.bedbugRooms, 10) || 1,
-        bedbugMethod: form.bedbugMethod || "BOTH",
+        bedbugMethod: form.bedbugMethod || "CHEMICAL",
+        bedbugSeverity: form.bedbugSeverity || "light",
+        bedbugPrepStatus: form.bedbugPrepStatus || "ready",
+        bedbugOccupancyType: form.bedbugOccupancyType || "singleFamily",
+        bedbugEquipment: form.bedbugEquipment || "INHOUSE",
+        bedbugHeatScope: form.bedbugHeatScope || "ROOMS_ONLY",
+        bedbugSubcontractCost: form.bedbugSubcontractCost,
         exclSimple: parseInt(form.exclSimple, 10) || 0,
         exclModerate: parseInt(form.exclModerate, 10) || 0,
         exclAdvanced: parseInt(form.exclAdvanced, 10) || 0,
@@ -2114,7 +2126,9 @@ export default function EstimateToolViewV2({
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
-      if (profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      const bedBugOnly =
+        selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
+      if (!bedBugOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }
@@ -3552,13 +3566,75 @@ export default function EstimateToolViewV2({
                       <SelectV2
                         k="bedbugMethod"
                         options={[
-                          { value: "BOTH", label: "Quote Both" },
                           { value: "CHEMICAL", label: "Chemical Only" },
                           { value: "HEAT", label: "Heat Only" },
+                          { value: "HYBRID", label: "Hybrid" },
                         ]}
                       />
                     </FieldV2>{" "}
                   </div>{" "}
+                  <div className="grid grid-cols-3 gap-3 mt-3">
+                    <FieldV2 label="Severity">
+                      <SelectV2
+                        k="bedbugSeverity"
+                        options={[
+                          { value: "light", label: "Light" },
+                          { value: "moderate", label: "Moderate" },
+                          { value: "heavy", label: "Heavy" },
+                          { value: "severe", label: "Severe/Quote" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Prep">
+                      <SelectV2
+                        k="bedbugPrepStatus"
+                        options={[
+                          { value: "ready", label: "Ready" },
+                          { value: "partial", label: "Partial" },
+                          { value: "poor", label: "Poor" },
+                          { value: "refused", label: "Refused/Quote" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Occupancy">
+                      <SelectV2
+                        k="bedbugOccupancyType"
+                        options={[
+                          { value: "singleFamily", label: "Single Family" },
+                          { value: "apartment", label: "Apartment" },
+                          { value: "hotel", label: "Hotel" },
+                          { value: "studentHousing", label: "Student Housing" },
+                        ]}
+                      />
+                    </FieldV2>
+                  </div>
+                  {form.bedbugMethod !== "CHEMICAL" && (
+                    <div className="grid grid-cols-3 gap-3 mt-3">
+                      <FieldV2 label="Equipment">
+                        <SelectV2
+                          k="bedbugEquipment"
+                          options={[
+                            { value: "INHOUSE", label: "In-House" },
+                            { value: "SUBCONTRACT", label: "Subcontract" },
+                          ]}
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Heat Scope">
+                        <SelectV2
+                          k="bedbugHeatScope"
+                          options={[
+                            { value: "ROOMS_ONLY", label: "Rooms Only" },
+                            { value: "WHOLE_HOME", label: "Whole Home" },
+                          ]}
+                        />
+                      </FieldV2>
+                      {form.bedbugEquipment === "SUBCONTRACT" && (
+                        <FieldV2 label="Vendor Cost">
+                          <InputV2 k="bedbugSubcontractCost" type="number" min="1" />
+                        </FieldV2>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               <SubGroupLabel className="mt-3">Rodent</SubGroupLabel>{" "}
@@ -4781,7 +4857,7 @@ export default function EstimateToolViewV2({
                                 {s.name}
                               </div>{" "}
                               <div className="text-18 font-medium text-zinc-900 u-nums">
-                                {s.onProg ? "$0 — Included" : fmtInt(s.price)}
+                                {s.quoteRequired ? "Quote Required" : s.onProg ? "$0 — Included" : fmtInt(s.price)}
                               </div>{" "}
                               <div className="text-12 text-ink-secondary mt-1">
                                 {s.det}
@@ -4993,7 +5069,7 @@ export default function EstimateToolViewV2({
                                   {" "}
                                   <span>{s.name}</span>{" "}
                                   <span className="text-13 u-nums">
-                                    {fmtInt(s.price)}
+                                    {s.quoteRequired ? "Quote Required" : fmtInt(s.price)}
                                   </span>{" "}
                                 </div>
                               ))}

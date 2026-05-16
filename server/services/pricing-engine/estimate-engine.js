@@ -13,7 +13,7 @@ const {
   priceRodentInspection, selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
-  priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,
+  priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
@@ -55,6 +55,43 @@ function normalizeMosquitoProgram(value) {
   if (raw === 'bronze') return 'seasonal9';
   if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly12';
   return raw;
+}
+
+function shouldIncludeInternalPricing(input = {}, serviceOptions = {}) {
+  return !!(
+    input.includeInternalPricing ||
+    input.debugPricing ||
+    serviceOptions.includeInternalPricing ||
+    serviceOptions.debug ||
+    serviceOptions.isInternal ||
+    serviceOptions.admin ||
+    serviceOptions.isAdmin
+  );
+}
+
+function stripBedBugInternalPricing(result) {
+  if (!result || result.service !== 'bed_bug') return result;
+  const clean = { ...result };
+  delete clean.directCostEstimate;
+  delete clean.costRatio;
+  delete clean.actualCostRatio;
+  delete clean.estimatedGrossMargin;
+  delete clean.pricingModel;
+  delete clean.targetCostRatio;
+  delete clean.internalCostBasis;
+
+  clean.treatmentLines = (result.treatmentLines || []).map((line) => {
+    const {
+      directCostEstimate,
+      costRatio,
+      actualCostRatio,
+      estimatedGrossMargin,
+      ...publicLine
+    } = line;
+    return publicLine;
+  });
+
+  return clean;
 }
 
 // ── Generate Complete Estimate ────────────────────────────────
@@ -338,20 +375,16 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.bedBug) {
-    const rooms = services.bedBug.rooms || 1;
-    const method = services.bedBug.method || 'chemical';
-    const result = priceBedBug(rooms, method, property.footprint);
-    if (result.methods) {
-      // 'both' composite → split into two flat line items for pipeline
-      result.methods.forEach(m => lineItems.push({
-        service: m.method === 'Heat' ? 'bed_bug_heat' : 'bed_bug_chemical',
-        rooms,
-        price: m.price,
-        detail: m.detail,
-      }));
-    } else {
-      lineItems.push(result);
-    }
+    const bedBugOptions = typeof services.bedBug === 'object' ? services.bedBug : {};
+    const includeInternalPricing = shouldIncludeInternalPricing(input, bedBugOptions);
+    const result = priceBedBugTreatment(property, {
+      ...bedBugOptions,
+      urgency: bedBugOptions.urgency ?? input.urgency ?? 'standard',
+      afterHours: bedBugOptions.afterHours ?? input.afterHours ?? false,
+      includeInternalCostBasis: includeInternalPricing && bedBugOptions.includeInternalCostBasis === true,
+      isInternal: includeInternalPricing,
+    });
+    lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
   if (services.wdo) {
     const result = priceWDO(property.footprint);

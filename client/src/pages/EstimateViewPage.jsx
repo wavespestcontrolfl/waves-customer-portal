@@ -300,9 +300,11 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service));
   if (items.length === 0) return null;
+  const hasQuoteRequired = items.some((item) => item?.quoteRequired === true || item?.kind === 'quote_required');
   const total = excludeServices.length === 0 && Number.isFinite(Number(breakdown?.total))
     ? Number(breakdown.total)
     : items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  const totalIsQuoteRequired = hasQuoteRequired && total <= 0;
 
   return (
     <div style={{
@@ -315,8 +317,9 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
       </div>
       <div style={{ display: 'grid', gap: 10 }}>
         {items.map((item, i) => {
+          const isQuoteRequired = item.quoteRequired === true || item.kind === 'quote_required';
           const amount = Number(item.amount) || 0;
-          const isDiscount = amount < 0 || item.kind === 'discount';
+          const isDiscount = !isQuoteRequired && (amount < 0 || item.kind === 'discount');
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -335,10 +338,10 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
               </div>
               <div style={{
                 fontSize: 14, fontWeight: 700,
-                color: isDiscount ? COLORS.green : COLORS.navy,
+                color: isQuoteRequired ? COLORS.red : (isDiscount ? COLORS.green : COLORS.navy),
                 whiteSpace: 'nowrap',
               }}>
-                {isDiscount ? '-' : ''}{fmtMoney(Math.abs(amount))}
+                {isQuoteRequired ? 'Quote Required' : `${isDiscount ? '-' : ''}${fmtMoney(Math.abs(amount))}`}
               </div>
             </div>
           );
@@ -349,8 +352,10 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
         borderTop: `1px solid ${COLORS.grayLight}`, marginTop: 12, paddingTop: 12,
         fontSize: 15, fontWeight: 700, color: COLORS.navy,
       }}>
-        <span>One-time total</span>
-        <span>{fmtMoney(total)}</span>
+        <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
+        <span style={totalIsQuoteRequired ? { color: COLORS.red } : null}>
+          {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
+        </span>
       </div>
     </div>
   );

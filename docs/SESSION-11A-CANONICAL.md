@@ -173,7 +173,7 @@ Six gaps surfaced where v2 has dispatch or semantic logic that v1 lacks. Initial
 | # | Gap | v2 path | v1 status | Class |
 |---|-----|---------|-----------|-------|
 | 1 | `preSlab` | `calcPreSlab` → `pricePreSlabTermidor(slabSqFt, volumeDiscount)` | `pricePreSlabTermidor` exists at `service-pricing.js:659` but NO `services.preSlab` branch in orchestrator | Dispatch |
-| 2 | bedbug BOTH method | `calcBedbug` returns `{name, methods: [{method, price, detail}...]}` when method='both' | `priceBedBug(rooms, method, footprint)` handles 'heat' and 'chemical'; falls through for 'both' | Semantic |
+| 2 | bedbug BOTH method (superseded) | Old v2 behavior emitted heat + chemical when method was ambiguous | Replaced by server specialty pricing; `BOTH` is invalid and explicit `HYBRID` is required | Semantic |
 | 3 | ROACH REGULAR | `calcRoach` REGULAR branch: `max(150, pestResult.perApp × 1.15 × 1.30)` | No REGULAR path in `priceGermanRoach`; no separate `priceRegularRoach` | Semantic |
 | 4 | roachModifier wiring | v2 routes `roachModifier='GERMAN'` → german roach service automatically | v1 has `services.germanRoach` branch but no auto-fire from a modifier field | Dispatch (adapter-fixable) |
 | 5 | global urgency/afterHours/recurringCustomer | v2 `applyOT` global multiplier reaches every service | v1 uses per-service `applyUrgency` at each pricing call — needs fan-out at adapter | Contract (adapter-fixable) |
@@ -213,26 +213,21 @@ Byte-parity verified against v2 on preslab_2000sf_basic_warranty
 fixture inputs. No math change.
 ```
 
-**Step 2d-2 — priceBedBug 'both' method + shape adaptation (gap #2)**
+**Step 2d-2 — Bed bug method handling (superseded by specialty pricing)**
 
-v2's calcBedbug returns a composite shape when method='both': `{name: 'Bed Bug', methods: [{method: 'heat', price, detail}, {method: 'chemical', price, detail}]}`. v1's `priceBedBug` handles single-method calls and returns a flat `{name, price, detail}`.
+This earlier migration note is superseded by the server bed bug specialty
+engine. Do not implement or preserve `method='both'`; invalid method values
+must fail closed. Valid methods are `CHEMICAL`, `HEAT`, and explicit `HYBRID`,
+where `HYBRID` means heat plus targeted residual protection rather than full
+heat plus a duplicate full chemical program.
 
-- Extend `priceBedBug(rooms, method, footprint)` at `server/services/pricing-engine/service-pricing.js:684` to accept 'both'
-- When method='both', internally call the heat and chemical branches and return the v2 composite shape
-- Single-method calls continue to return the flat shape — do not break existing v1 regression cases
-- Byte-parity gate: run against `bedbug_3rooms_both_methods` fixture inputs; v1 output must match v2 output exactly before commit
+- Bed bug pricing now belongs in `server/services/pricing-engine/` via `priceBedBugTreatment(property, options)`
+- The deprecated client v1 branch is compatibility-only and must not be the source of truth
+- Regression coverage now uses `v1adapter_bedbug_3rooms_hybrid`
 
 Commit:
 ```
-feat(pricing-v1): extend priceBedBug to support 'both' method
-
-Part of Session 11a v2 retirement (gap #2 of 6). v2's calcBedbug
-returns a composite {methods:[...]} shape when method='both'; v1's
-priceBedBug previously only handled single-method calls.
-
-Extends the function without changing single-method behavior.
-Byte-parity verified against v2 on bedbug_3rooms_both_methods
-fixture inputs.
+feat(pricing): add explicit bed bug specialty pricing
 ```
 
 **Step 2d-3 — priceRegularRoach (or priceGermanRoach roachType extension) (gap #3)**

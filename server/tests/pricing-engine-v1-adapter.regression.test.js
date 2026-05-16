@@ -129,10 +129,18 @@ const REGRESSION_CASES = [
     options: { stingSpecies: 'PAPER_WASP', stingTier: 2, stingRemoval: 'NONE', stingAggressive: 'NO', stingHeight: 'GROUND', stingConfined: 'NO' },
   },
   {
-    name: 'v1adapter_bedbug_3rooms_both_methods',
+    name: 'v1adapter_bedbug_3rooms_hybrid',
     profile: zoneA2000(),
     selectedServices: ['BEDBUG'],
-    options: { bedbugRooms: 3, bedbugMethod: 'BOTH' },
+    options: {
+      bedbugRooms: 3,
+      bedbugMethod: 'HYBRID',
+      bedbugSeverity: 'light',
+      bedbugPrepStatus: 'ready',
+      bedbugOccupancyType: 'singleFamily',
+      bedbugEquipment: 'INHOUSE',
+      bedbugHeatScope: 'ROOMS_ONLY',
+    },
   },
   {
     name: 'v1adapter_exclusion_moderate_waive_inspection',

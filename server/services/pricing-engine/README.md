@@ -222,7 +222,31 @@ Then × 1.50 standalone multiplier on top of recurring per-app rate. Urgency app
 
 ---
 
-## 11. WaveGuard Tiers
+## 11. Bed Bug Specialty
+
+Bed bug pricing now lives in `server/services/pricing-engine/` as `priceBedBugTreatment(property, options)` and `constants.BED_BUG`. The old client `client/src/lib/estimateEngine.js` branch is deprecated and is not the source of truth.
+
+Valid methods are `CHEMICAL`, `HEAT`, and `HYBRID`. Invalid values throw; `BOTH` is intentionally invalid. `HYBRID` must be explicitly selected and means heat plus targeted residual protection, not full heat plus a duplicate full chemical program.
+
+Required inputs: positive integer `rooms`, `method`, `severity` (`light`, `moderate`, `heavy`, `severe`), `prepStatus` (`ready`, `partial`, `poor`, `refused`), and `occupancyType` (`singleFamily`, `apartment`, `hotel`, `studentHousing`). `stories` is optional but must be a positive integer if present. `footprint` is optional for chemical and room-only heat, but whole-home heat requires it.
+
+Heat and hybrid require `equipment` (`INHOUSE` or `SUBCONTRACT`) and `heatScope` (`ROOMS_ONLY` or `WHOLE_HOME`). Subcontract heat requires positive `subcontractCost`.
+
+Chemical is a 35% cost-ratio model: `price = directCost / 0.35`, which produces roughly 65% gross margin before modifiers. Light chemical infestations include 2 visits; moderate and heavy include 3 visits. Severe infestations require quote/inspection.
+
+Modifiers apply after base price: footprint, severity, prep, occupancy, stories, then urgency. Prep refused requires quote/inspection. Poor prep adds a callback-risk warning.
+
+Heat includes one treatment event plus post-inspection/monitoring. Protocol output includes target ambient temperature, required minimum temperature, hold time, sensor count, active monitoring, prep checklist, and heat-sensitive item plan. Heat has no residual effect.
+
+Bed bug services are not eligible for the blanket recurring-customer one-time add-on discount. `recurringDiscountEligible` is false and `recurringDiscountApplied` is 0.
+
+Product cost basis is internal-only and not customer-facing. PT Alpine WSG and Distance IGR metadata are stored for audit; product labels must be verified before adding specific products to customer-facing treatment plans. Distance IGR is disabled until internal label verification confirms valid indoor bed bug structural use.
+
+Customer-facing notes: bed bug treatment requires customer preparation, follow-up monitoring is required, chemical treatment is part of an IPM program, heat has no residual effect, additional follow-up may be required if activity persists, and severe/cluttered/unprepared/multi-unit cases may require inspection and custom quote.
+
+---
+
+## 12. WaveGuard Tiers
 
 Qualifies off count of **qualifying recurring services** bundled together:
 
@@ -239,7 +263,7 @@ Qualifies off count of **qualifying recurring services** bundled together:
 **Excluded from % discount (flat credits instead):**
 - `rodent_bait` — $50 setup credit
 - `palm_injection` — $10/palm/year credit (Gold+ only), applied after billable annual pricing and capped at net $0
-- `bed_bug_chemical`, `bed_bug_heat` — $50 flat member credit
+- `bed_bug`, `bed_bug_chemical`, `bed_bug_heat` — excluded from all blanket recurring-customer bed bug discounts; no flat credit
 - `bora_care`, `pre_slab_termidor` — fully excluded, no discount
 - `german_roach_initial` — excluded to avoid double-dip with baked urgency/rc
 
@@ -247,7 +271,7 @@ Qualifies off count of **qualifying recurring services** bundled together:
 
 ---
 
-## 12. Specialty Services (summary)
+## 13. Specialty Services (summary)
 
 All priced via margin-divisor formula: `price = cost / marginDivisor`. A `marginDivisor` of 0.45 = 55% target margin (margin is share of **price**, not markup over cost).
 
@@ -262,8 +286,9 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 | Pre-slab Termidor | 55% | — | bottle $152.10, 1250 sqft; volume disc 10+ 15% / 5+ 10% |
 | Foam-drill | 55% | $250 | tiered by treatment points (5/10/15/20) |
 | German roach (initial) | — | $400 (base $450) | $100 setup, footprint-bracketed |
-| Bed bug chemical | 65% | $400 base + $250/extra room | $50.42/room material |
-| Bed bug heat | — | $1000/$850/$750 by room count | + $150 in-house base |
+| Bed bug chemical/IPM | 65% gross margin from 35% cost ratio | $400 base + $250/extra room | 2 visits light; 3 visits moderate/heavy; severe quote |
+| Bed bug heat | — | $1000/$850/$750 by room count | requires equipment and heat scope; post-inspection included |
+| Bed bug hybrid | — | heat base + $175 + $75/room residual add-on | explicit method only; not full heat + full chemical |
 | Flea initial | — | floor $185 (base $225) | follow-up floor $95 |
 | Wasp | — | tiered $150/$250/$435/$775 | free with recurring pest |
 | Exclusion | — | $150 | simple/moderate/advanced per-point ($37.50/$75/$150); inspection $85 |
@@ -271,7 +296,7 @@ All priced via margin-divisor formula: `price = cost / marginDivisor`. A `margin
 
 ---
 
-## 13. Payment Adjustments
+## 14. Payment Adjustments
 
 **ACH discount:** retired (0%). Kept as a constant for legacy-caller safety.
 **Card surcharge:** 3.99% added at checkout, not baked into engine output.
