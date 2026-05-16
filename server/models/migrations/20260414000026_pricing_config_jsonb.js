@@ -122,7 +122,7 @@ exports.up = async function(knex) {
     { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing', category: 'one_time', sort_order: 9, data: JSON.stringify({ simple: 37.50, moderate: 75, advanced: 150, inspection_fee: 85 }) },
     { config_key: 'onetime_german_roach', name: 'German Roach Treatment', category: 'one_time', sort_order: 10, data: JSON.stringify({ base: 450, floor: 400, setup_charge: 100 }) },
     { config_key: 'onetime_bed_bug', name: 'Bed Bug Treatment', category: 'one_time', sort_order: 11, data: JSON.stringify({ chemical: { material_per_room: 50.42, floor_base: 400, floor_per_extra_room: 250 }, heat: { per_room_1: 1000, per_room_2: 850, per_room_3: 750 } }) },
-    { config_key: 'onetime_flea', name: 'Flea Treatment', category: 'one_time', sort_order: 12, data: JSON.stringify({ initial_base: 225, initial_floor: 185, followup_base: 125, followup_floor: 95 }) },
+    { config_key: 'onetime_flea', name: 'Flea Treatment', category: 'one_time', sort_order: 12, data: JSON.stringify({ initial: { base: 225, floor: 185 }, followUp: { base: 125, floor: 95 }, exterior: { enabled: true, maxSqFt: 20000, tiers: [{ min: 1, max: 2500, initial: 55, followUp: 35 }, { min: 2501, max: 5000, initial: 75, followUp: 45 }, { min: 5001, max: 7500, initial: 95, followUp: 60 }, { min: 7501, max: 10000, initial: 115, followUp: 75 }, { min: 10001, max: 15000, initial: 155, followUp: 100 }, { min: 15001, max: 20000, initial: 195, followUp: 125 }] } }) },
     { config_key: 'onetime_wdo', name: 'WDO Inspection', category: 'one_time', sort_order: 13, data: JSON.stringify({ brackets: [{ max_sqft: 2500, price: 175 }, { max_sqft: 3500, price: 200 }, { max_sqft: 999999, price: 225 }] }) },
 
     // ── WaveGuard ──

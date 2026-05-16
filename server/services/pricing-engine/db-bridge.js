@@ -674,25 +674,38 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(target.initial, 'floor', initial.floor ?? flea.initial_floor, money);
       setNumber(target.followUp, 'base', followUp.base ?? flea.followup_base ?? flea.followUp_base, money);
       setNumber(target.followUp, 'floor', followUp.floor ?? flea.followup_floor ?? flea.followUp_floor, money);
+
       if (flea.exterior && typeof flea.exterior === 'object') {
         setBoolean(target.exterior, 'enabled', flea.exterior.enabled);
         setNumber(target.exterior, 'maxSqFt', flea.exterior.maxSqFt ?? flea.exterior.max_sqft, Number);
         if (Array.isArray(flea.exterior.tiers)) {
-          target.exterior.tiers = flea.exterior.tiers.map(t => ({
-            min: Number(t.min),
-            max: Number(t.max),
-            initial: money(t.initial),
-            followUp: money(t.followUp ?? t.followup),
-          })).filter(t => Number.isFinite(t.min) && Number.isFinite(t.max));
+          target.exterior.tiers = flea.exterior.tiers
+            .map(t => ({
+              min: Number(t.min),
+              max: Number(t.max),
+              initial: money(t.initial),
+              followUp: money(t.followUp ?? t.followup),
+            }))
+            .filter(t => Number.isFinite(t.min) && Number.isFinite(t.max));
         }
       }
+
       if (flea.footprint && typeof flea.footprint === 'object') {
-        if (Array.isArray(flea.footprint.initial)) target.footprintAdjustments.initial = flea.footprint.initial.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
-        if (Array.isArray(flea.footprint.followUp)) target.footprintAdjustments.followUp = flea.footprint.followUp.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+        if (Array.isArray(flea.footprint.initial)) {
+          target.footprintAdjustments.initial = flea.footprint.initial.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+        }
+        if (Array.isArray(flea.footprint.followUp)) {
+          target.footprintAdjustments.followUp = flea.footprint.followUp.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+        }
       }
+
       if (flea.lot && typeof flea.lot === 'object') {
-        if (Array.isArray(flea.lot.initial)) target.lotAdjustments.initial = flea.lot.initial.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
-        if (Array.isArray(flea.lot.followUp)) target.lotAdjustments.followUp = flea.lot.followUp.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+        if (Array.isArray(flea.lot.initial)) {
+          target.lotAdjustments.initial = flea.lot.initial.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+        }
+        if (Array.isArray(flea.lot.followUp)) {
+          target.lotAdjustments.followUp = flea.lot.followUp.map(b => ({ at: Number(b.at), adj: money(b.adj) }));
+        }
       }
     }
 

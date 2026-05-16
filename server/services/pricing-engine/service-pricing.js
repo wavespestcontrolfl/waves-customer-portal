@@ -2484,11 +2484,164 @@ function priceWDO(footprint) {
   return { service: 'wdo_inspection', price: SPECIALTY.wdo.brackets[SPECIALTY.wdo.brackets.length - 1].price };
 }
 
-function priceFlea(property) {
-  // Simplified — full implementation would use footprint/lot adjustments
-  const initial = SPECIALTY.flea.initial.base;
-  const followUp = SPECIALTY.flea.followUp.base;
-  return { service: 'flea_package', initial, followUp, total: initial + followUp, visits: 2 };
+function normalizeFleaAreaSource(value) {
+  const raw = String(value || '').trim().toUpperCase();
+  if (['AI_ESTIMATE', 'CONFIRMED_SQ_FT', 'MEASURED_TURF', 'MANUAL_OVERRIDE', 'UNKNOWN'].includes(raw)) return raw;
+  return 'UNKNOWN';
+}
+
+function fleaSourceLabel(source) {
+  return {
+    AI_ESTIMATE: 'AI estimate',
+    CONFIRMED_SQ_FT: 'Confirmed Sq Ft',
+    MEASURED_TURF: 'Measured turf',
+    MANUAL_OVERRIDE: 'Manual override',
+    UNKNOWN: 'Unknown',
+  }[source] || 'Unknown';
+}
+
+function priceFleaExterior(areaSqFt, options = {}) {
+  const cfg = SPECIALTY.flea.exterior || {};
+  const area = Math.max(0, Math.round(Number(areaSqFt) || 0));
+  const source = normalizeFleaAreaSource(options.source || options.fleaExteriorAreaSource || 'UNKNOWN');
+  const warningForZero = 'Enter or confirm the exterior flea spray area to price this add-on.';
+  if (cfg.enabled === false || area <= 0) {
+    return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial: 0, followUp: 0, total: 0, priced: false, requiresCustomQuote: false, customQuoteReason: null, warning: area <= 0 ? warningForZero : null, warnings: area <= 0 ? [warningForZero] : [], needsConfirmation: area <= 0 };
+  }
+  if (area > Number(cfg.maxSqFt || 20000)) {
+    const reason = 'Exterior flea spray area exceeds 20,000 sq ft';
+    const warning = 'Exterior flea spray area exceeds 20,000 sf. Custom quote required.';
+    return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial: 0, followUp: 0, total: 0, priced: false, requiresCustomQuote: true, customQuoteReason: reason, warning, warnings: [warning], needsConfirmation: true };
+  }
+  if (source === 'UNKNOWN') {
+    const warning = 'Exterior flea spray area needs confirmation before final quote.';
+    return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial: 0, followUp: 0, total: 0, priced: false, requiresCustomQuote: false, customQuoteReason: null, warning, warnings: [warning], needsConfirmation: true };
+  }
+  const tier = (cfg.tiers || []).find(t => area >= Number(t.min) && area <= Number(t.max));
+  if (!tier) {
+    const reason = 'Exterior flea spray area exceeds 20,000 sq ft';
+    const warning = 'Exterior flea spray area exceeds 20,000 sf. Custom quote required.';
+    return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial: 0, followUp: 0, total: 0, priced: false, requiresCustomQuote: true, customQuoteReason: reason, warning, warnings: [warning], needsConfirmation: true };
+  }
+  const initial = Math.round(Number(tier.initial) || 0);
+  const followUp = Math.round(Number(tier.followUp) || 0);
+  const warnings = source === 'AI_ESTIMATE' ? ['Needs confirmation before final quote.'] : [];
+  return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial, followUp, total: initial + followUp, priced: true, requiresCustomQuote: false, customQuoteReason: null, warning: warnings[0] || null, warnings, needsConfirmation: source === 'AI_ESTIMATE' };
+}
+
+function getFleaUrgencyMultiplier(urgency, afterHours = false) {
+  const raw = String(urgency || 'STANDARD').trim().toUpperCase();
+  return getOneTimeUrgencyMultiplier({
+    urgency: raw === 'ROUTINE' || raw === 'STANDARD' ? 'NONE' : raw,
+    afterHours,
+  });
+}
+
+function isTruthyPricingFlag(value) {
+  if (value === true) return true;
+  if (value === false || value === undefined || value === null) return false;
+  return ['TRUE', 'YES', 'Y', '1'].includes(String(value).trim().toUpperCase());
+}
+
+function fleaAdjustment(initial = 0, followUp = 0) {
+  return { initial: Math.round(Number(initial) || 0), followUp: Math.round(Number(followUp) || 0) };
+}
+
+function priceFlea(property = {}) {
+  const cfg = SPECIALTY.flea;
+  const services = property.services || {};
+  const fleaOptions = typeof services.flea === 'object' && services.flea !== null ? services.flea : {};
+  const footprint = Number(
+    property.footprintSqFt
+    ?? property.footprint
+    ?? (property.homeSqFt ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1)) : undefined)
+    ?? 2000
+  ) || 2000;
+  const lotSqFt = Number(property.lotSqFt ?? property.lotSizeSqFt ?? 7500) || 7500;
+  const features = property.features || {};
+  const treeDensity = String(property.treeDensity ?? features.trees ?? 'light').toLowerCase();
+  const landscapeComplexity = String(property.landscapeComplexity ?? features.complexity ?? 'simple').toLowerCase();
+  const exteriorSelected = !!(property.fleaExterior || services.fleaExterior || fleaOptions.fleaExterior);
+  const exteriorArea = Number(property.fleaExteriorAreaSqFt ?? services.fleaExteriorAreaSqFt ?? fleaOptions.fleaExteriorAreaSqFt ?? 0) || 0;
+  const exteriorSource = normalizeFleaAreaSource(
+    property.fleaExteriorAreaSource
+    ?? services.fleaExteriorAreaSource
+    ?? fleaOptions.fleaExteriorAreaSource
+    ?? (exteriorSelected && exteriorArea > 0 ? 'MANUAL_OVERRIDE' : 'UNKNOWN')
+  );
+  const exterior = exteriorSelected ? priceFleaExterior(exteriorArea, { source: exteriorSource }) : priceFleaExterior(0, { source: exteriorSource });
+  const hasPricedExteriorFleaSpray = exteriorSelected && exterior.priced === true;
+
+  const footprintAdj = fleaAdjustment(
+    interpolate(footprint, cfg.footprintAdjustments?.initial || [], 'at', 'adj'),
+    interpolate(footprint, cfg.footprintAdjustments?.followUp || [], 'at', 'adj')
+  );
+  const lotAdj = hasPricedExteriorFleaSpray ? fleaAdjustment(0, 0) : fleaAdjustment(
+    interpolate(lotSqFt, cfg.lotAdjustments?.initial || [], 'at', 'adj'),
+    interpolate(lotSqFt, cfg.lotAdjustments?.followUp || [], 'at', 'adj')
+  );
+  const treeCfg = cfg.treeDensityAdjustments?.[treeDensity] || cfg.treeDensityAdjustments?.light || {};
+  const complexityCfg = cfg.landscapeComplexityAdjustments?.[landscapeComplexity] || cfg.landscapeComplexityAdjustments?.simple || {};
+  const treeDensityAdj = fleaAdjustment(treeCfg.initial, treeCfg.followUp);
+  const landscapeComplexityAdj = fleaAdjustment(complexityCfg.initial, complexityCfg.followUp);
+
+  const baseInitial = Math.round(Number(cfg.initial.base) || 225);
+  const baseFollowUp = Math.round(Number(cfg.followUp.base) || 125);
+  const rawInitial = Math.max(Math.round(Number(cfg.initial.floor) || 185), baseInitial + footprintAdj.initial + lotAdj.initial + treeDensityAdj.initial + landscapeComplexityAdj.initial) + exterior.initial;
+  const rawFollowUp = Math.max(Math.round(Number(cfg.followUp.floor) || 95), baseFollowUp + footprintAdj.followUp + lotAdj.followUp + treeDensityAdj.followUp + landscapeComplexityAdj.followUp) + exterior.followUp;
+  const urgencyMultiplier = getFleaUrgencyMultiplier(property.urgency ?? fleaOptions.urgency, property.afterHours ?? fleaOptions.afterHours);
+  const isRecurringCustomer = (
+    isTruthyPricingFlag(property.isRecurringCustomer)
+    || isTruthyPricingFlag(property.recurringCustomer)
+    || isTruthyPricingFlag(fleaOptions.isRecurringCustomer)
+    || isTruthyPricingFlag(fleaOptions.recurringCustomer)
+  );
+  const rawTotal = rawInitial + rawFollowUp;
+  const discounted = applyOneTimeRecurringCustomerDiscount(rawTotal * urgencyMultiplier, { isRecurringCustomer });
+  const recurringCustomerMultiplier = 1 - discounted.rate;
+  const total = discounted.price;
+  const initial = Math.round(rawInitial * urgencyMultiplier * recurringCustomerMultiplier);
+  const followUp = total - initial;
+  const exteriorDetail = exteriorSelected && exterior.areaSqFt > 0
+    ? `Exterior flea spray — ${exterior.areaSqFt.toLocaleString()} sf${exterior.source === 'AI_ESTIMATE' ? ' AI estimate' : ''}`
+    : null;
+  const warnings = exteriorSelected ? (exterior.warnings || []) : [];
+
+  return {
+    service: 'flea_package',
+    visits: 2,
+    initial,
+    followUp,
+    total,
+    base: { initial: baseInitial, followUp: baseFollowUp },
+    adjustments: {
+      footprint: footprintAdj,
+      lot: lotAdj,
+      treeDensity: treeDensityAdj,
+      landscapeComplexity: landscapeComplexityAdj,
+      exteriorArea: { areaSqFt: exterior.areaSqFt, source: exterior.source, initial: exterior.initial, followUp: exterior.followUp, total: exterior.total },
+    },
+    modifiers: { urgencyMultiplier, recurringCustomerMultiplier },
+    display: {
+      name: 'Flea Treatment Package — 2 visits',
+      detail: `$${initial} initial + $${followUp} follow-up`,
+      exteriorDetail,
+    },
+    detail: `$${initial} initial + $${followUp} follow-up`,
+    exteriorDetail,
+    scope: 'Exterior flea treatment is applied to eligible targeted outdoor areas where flea activity is likely, such as shaded pet resting areas, under decks, kennels, foundation edges, mulch beds, and other approved areas. Final treatment area is subject to technician confirmation and product label directions.',
+    requiresCustomQuote: !!exterior.requiresCustomQuote,
+    quoteRequired: !!exterior.requiresCustomQuote,
+    customQuoteReason: exterior.customQuoteReason || null,
+    reason: exterior.customQuoteReason || null,
+    warning: warnings[0] || null,
+    warnings,
+    raw: { initial: rawInitial, followUp: rawFollowUp, total: rawTotal },
+    fleaExteriorZones: property.fleaExteriorZones || services.fleaExteriorZones || fleaOptions.fleaExteriorZones || [],
+    discountHandledByPricingFunction: true,
+    recurringCustomerDiscountRate: discounted.rate,
+    subtotalBeforeRecurringCustomerDiscount: rawTotal * urgencyMultiplier,
+  };
 }
 
 function priceTopDressing(lawnSqFt, depth = 'eighth', hasRecurringLawn = false) {
@@ -3071,7 +3224,7 @@ module.exports = {
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
-  priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea,
+  priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   // Spec functions (Apr 2026)

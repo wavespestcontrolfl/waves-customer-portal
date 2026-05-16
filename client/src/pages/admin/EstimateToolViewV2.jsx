@@ -42,6 +42,27 @@ import { ExternalLink } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
+const FLEA_EXTERIOR_SOURCE_OPTIONS = [
+  { value: "UNKNOWN", label: "Unknown" },
+  { value: "AI_ESTIMATE", label: "AI estimate" },
+  { value: "CONFIRMED_SQ_FT", label: "Confirmed Sq Ft" },
+  { value: "MEASURED_TURF", label: "Measured turf" },
+  { value: "MANUAL_OVERRIDE", label: "Manual override" },
+];
+const FLEA_EXTERIOR_ZONES = [
+  { value: "PET_RESTING_AREA", label: "Pet resting area" },
+  { value: "KENNEL_DOG_RUN", label: "Kennel / dog run" },
+  { value: "UNDER_DECK_PATIO", label: "Under deck / patio" },
+  { value: "FOUNDATION_PERIMETER", label: "Foundation perimeter" },
+  { value: "SHADED_TURF", label: "Shaded turf" },
+  { value: "MULCH_LANDSCAPE_BEDS", label: "Mulch / landscape beds" },
+  { value: "CRAWLSPACE_WILDLIFE_ACTIVITY", label: "Crawlspace / wildlife activity area" },
+  { value: "OTHER", label: "Other" },
+];
+
+function fleaExteriorSourceLabel(source) {
+  return FLEA_EXTERIOR_SOURCE_OPTIONS.find((option) => option.value === source)?.label || "Unknown";
+}
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -260,6 +281,22 @@ function parseNonNegativeInteger(value) {
 function formatSqFt(value) {
   const n = parseNonNegativeInteger(value);
   return n === null ? "unknown" : `${n.toLocaleString()} sf`;
+}
+
+function serviceDetailText(item = {}) {
+  const parts = [
+    item.detail || item.det || item.note || "",
+    item.exteriorDetail || "",
+    item.warning || "",
+    item.customQuoteReason || "",
+  ].filter(Boolean);
+  const unique = [];
+  for (const part of parts) {
+    if (unique.includes(part)) continue;
+    if (unique.some((existing) => existing.includes(part))) continue;
+    unique.push(part);
+  }
+  return unique.join(" · ");
 }
 
 function InputV2({ k, type = "text", placeholder, min, max, className }) {
@@ -733,7 +770,7 @@ function oneTimeRowsForCustomerPreview(E, {
   const addRow = (item) => {
     const name = item.displayName || item.label || item.name || "One-time service";
     const price = Number(item.price ?? item.amount ?? item.total ?? 0);
-    const detail = item.detail || item.det || item.note || "";
+    const detail = serviceDetailText(item);
     const service = previewServiceKey(item, name);
     const label = String(name).toLowerCase();
     const isSetupFee =
@@ -1383,6 +1420,10 @@ export default function EstimateToolViewV2({
     svcRodentTrap: false,
     svcRodentSanitation: false,
     svcFlea: false,
+    svcFleaExterior: false,
+    fleaExteriorAreaSqFt: "0",
+    fleaExteriorAreaSource: "UNKNOWN",
+    fleaExteriorZones: [],
     svcWasp: false,
     svcRoach: false,
     svcBedbug: false,
@@ -1573,6 +1614,9 @@ export default function EstimateToolViewV2({
   const toggle = useCallback((key) => {
     setForm((f) => {
       const next = { ...f, [key]: !f[key] };
+      if (key === "svcFlea" && f.svcFlea) {
+        next.svcFleaExterior = false;
+      }
       // Auto-enable "Offer one-time option" only when the bundle is pest-only
       // (svcPest + svcOnetimePest with no other recurring service selected) —
       // that's the single flow the public estimate + accept handler actually
@@ -1720,6 +1764,73 @@ export default function EstimateToolViewV2({
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
+
+  const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
+    const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);
+    const currentSource = currentForm.fleaExteriorAreaSource || "UNKNOWN";
+    if (currentArea !== null && currentArea > 0 && currentSource !== "UNKNOWN") {
+      return { area: currentArea, source: currentSource };
+    }
+
+    const confirmedExterior =
+      parseNonNegativeInteger(enrichedProfile?.confirmedExteriorFleaAreaSqFt) ??
+      parseNonNegativeInteger(satelliteData?.confirmedExteriorFleaAreaSqFt);
+    if (confirmedExterior !== null && confirmedExterior > 0) {
+      return { area: confirmedExterior, source: "CONFIRMED_SQ_FT" };
+    }
+
+    const manual = currentSource === "MANUAL_OVERRIDE" ? currentArea : null;
+    if (manual !== null && manual > 0) {
+      return { area: manual, source: "MANUAL_OVERRIDE" };
+    }
+
+    const measured =
+      parseNonNegativeInteger(currentForm.measuredTurfSf) ??
+      parseNonNegativeInteger(enrichedProfile?.measuredTurfSf);
+    if (measured !== null && measured > 0) {
+      return { area: measured, source: "MEASURED_TURF" };
+    }
+
+    const ai =
+      parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
+      parseNonNegativeInteger(satelliteData?.estimatedTurfSf);
+    if (ai !== null && ai > 0) {
+      return { area: ai, source: "AI_ESTIMATE" };
+    }
+
+    return { area: 0, source: "UNKNOWN" };
+  }, [enrichedProfile, form, satelliteData]);
+
+  const setFleaExteriorEnabled = useCallback((enabled) => {
+    setForm((f) => {
+      const next = {
+        ...f,
+        svcFlea: enabled ? true : f.svcFlea,
+        svcFleaExterior: enabled,
+      };
+      if (enabled) {
+        const resolved = resolveFleaExteriorDefault(f);
+        next.fleaExteriorAreaSqFt = String(resolved.area);
+        next.fleaExteriorAreaSource = resolved.source;
+      }
+      return next;
+    });
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, [resolveFleaExteriorDefault]);
+
+  const setFleaExteriorZone = useCallback((zone, checked) => {
+    setForm((f) => {
+      const zones = new Set(Array.isArray(f.fleaExteriorZones) ? f.fleaExteriorZones : []);
+      if (checked) zones.add(zone);
+      else zones.delete(zone);
+      return { ...f, fleaExteriorZones: Array.from(zones) };
+    });
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, []);
 
   useEffect(() => {
     const incoming = {
@@ -2043,7 +2154,7 @@ export default function EstimateToolViewV2({
       if (form.svcFoam) selectedServices.push("FOAM");
       if (form.svcRodentTrap) selectedServices.push("RODENT_TRAP");
       if (form.svcRodentSanitation) selectedServices.push("RODENT_SANITATION");
-      if (form.svcFlea) selectedServices.push("FLEA");
+      if (form.svcFlea || form.svcFleaExterior) selectedServices.push("FLEA");
       if (form.svcWasp) selectedServices.push("STING");
       if (form.svcRoach) selectedServices.push("ROACH");
       if (form.svcBedbug) selectedServices.push("BEDBUG");
@@ -2101,6 +2212,10 @@ export default function EstimateToolViewV2({
         sanitationAccess: form.sanitationAccess || "normal",
         roachType: form.roachType || "REGULAR",
         onetimeLawnType: form.otLawnType || "FERT",
+        fleaExterior: !!form.svcFleaExterior,
+        fleaExteriorAreaSqFt: parseInt(form.fleaExteriorAreaSqFt, 10) || 0,
+        fleaExteriorAreaSource: form.fleaExteriorAreaSource || "UNKNOWN",
+        fleaExteriorZones: Array.isArray(form.fleaExteriorZones) ? form.fleaExteriorZones : [],
       };
 
       const manualNumber = (value, fallback = 0) => {
@@ -2464,6 +2579,10 @@ export default function EstimateToolViewV2({
       palmCount: "",
       treeCount: "",
       measuredTurfSf: "",
+      svcFleaExterior: false,
+      fleaExteriorAreaSqFt: "0",
+      fleaExteriorAreaSource: "UNKNOWN",
+      fleaExteriorZones: [],
       boracareSqft: "",
       preslabSqft: "",
       customerId: "",
@@ -2563,6 +2682,16 @@ export default function EstimateToolViewV2({
     Math.ceil(Math.max(lotSqFtForTurf, aiTurfSqFt || 0, confirmedTurfSqFt || 0, 5000) / 1000) * 1000,
   );
   const plugAreaSqFt = parseNonNegativeInteger(form.plugArea);
+  const fleaExteriorAreaSqFt = parseNonNegativeInteger(form.fleaExteriorAreaSqFt) ?? 0;
+  const fleaExteriorWarning = !form.svcFleaExterior
+    ? null
+    : fleaExteriorAreaSqFt <= 0
+        ? "Enter or confirm the exterior flea spray area to price this add-on."
+        : form.fleaExteriorAreaSource === "UNKNOWN"
+          ? "Exterior flea spray area needs confirmation before final quote."
+          : fleaExteriorAreaSqFt > 20000
+            ? "Exterior flea spray area exceeds 20,000 sf. Custom quote required."
+            : null;
   const pluggingUsesTurfFallback = !!form.svcPlugging && !(plugAreaSqFt > 0);
   const hasTurfPricedSelection =
     !!form.svcLawn ||
@@ -3591,6 +3720,104 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcOnetimePest" label="Pest Treatment" />{" "}
               <CheckboxV2 k="svcOnetimeMosquito" label="Mosquito Treatment" />{" "}
               <CheckboxV2 k="svcFlea" label="Flea Treatment" />{" "}
+              {form.svcFlea && (
+                <div className="ml-7 mb-3 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <label className="flex items-center gap-2.5 mb-3 cursor-pointer text-14 text-zinc-900 select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!form.svcFleaExterior}
+                      onChange={(e) => setFleaExteriorEnabled(e.target.checked)}
+                      className="h-4 w-4 accent-zinc-900"
+                    />
+                    Add exterior flea spray
+                  </label>
+                  {form.svcFleaExterior && (
+                    <>
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <div className="text-12 font-semibold text-zinc-900">
+                          Exterior Flea Spray Area
+                        </div>
+                        <Badge variant="neutral" className="text-10 u-nums">
+                          Max 20,000 sf
+                        </Badge>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <FieldV2 label="Source" className="mb-0">
+                          <select
+                            value={form.fleaExteriorAreaSource || "UNKNOWN"}
+                            onChange={(e) => set("fleaExteriorAreaSource", e.target.value)}
+                            className={cn(
+                              INPUT_CLS,
+                              "cursor-pointer appearance-none pr-8 bg-no-repeat bg-[right_0.75rem_center]",
+                            )}
+                            style={{
+                              backgroundImage:
+                                "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2371717A' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
+                            }}
+                          >
+                            {FLEA_EXTERIOR_SOURCE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </FieldV2>
+                        <FieldV2 label="Area" className="mb-0">
+                          <div className="h-10 px-3 flex items-center rounded-sm border-hairline border-zinc-300 bg-white text-14 text-zinc-900 u-nums">
+                            {formatSqFt(fleaExteriorAreaSqFt)}
+                          </div>
+                        </FieldV2>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="20000"
+                        step="250"
+                        value={Math.min(fleaExteriorAreaSqFt, 20000)}
+                        onChange={(e) => set("fleaExteriorAreaSqFt", e.target.value)}
+                        className="mt-3 w-full accent-zinc-900"
+                      />
+                      <div className="mt-1 grid grid-cols-6 gap-1 text-10 text-ink-secondary">
+                        {["0 sf", "2,500", "5,000", "10,000", "15,000", "20,000 sf"].map((mark) => (
+                          <span key={mark} className="first:text-left last:text-right text-center">
+                            {mark}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="mt-2 text-12 text-zinc-900 u-nums">
+                        Using {fleaExteriorSourceLabel(form.fleaExteriorAreaSource)}:{" "}
+                        {formatSqFt(fleaExteriorAreaSqFt)}
+                      </div>
+                      {fleaExteriorWarning && (
+                        <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                          {fleaExteriorWarning}
+                        </div>
+                      )}
+                      <div className="mt-3">
+                        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                          Exterior treatment zones
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {FLEA_EXTERIOR_ZONES.map((zone) => (
+                            <label
+                              key={zone.value}
+                              className="flex items-center gap-2 text-12 text-zinc-900 cursor-pointer select-none"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={(form.fleaExteriorZones || []).includes(zone.value)}
+                                onChange={(e) => setFleaExteriorZone(zone.value, e.target.checked)}
+                                className="h-3.5 w-3.5 accent-zinc-900"
+                              />
+                              {zone.label}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
               <CheckboxV2 k="svcRoach" label="Cockroach Treatment" />
               {form.svcRoach && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
@@ -4917,9 +5144,11 @@ export default function EstimateToolViewV2({
                               <div className="text-18 font-medium text-zinc-900 u-nums">
                                 {s.quoteRequired ? "Quote Required" : s.onProg ? "$0 — Included" : fmtInt(s.price)}
                               </div>{" "}
-                              <div className="text-12 text-ink-secondary mt-1">
-                                {s.det}
-                              </div>{" "}
+                              {serviceDetailText(s) && (
+                                <div className="text-12 text-ink-secondary mt-1">
+                                  {serviceDetailText(s)}
+                                </div>
+                              )}{" "}
                             </div>
                           ))}
                         </div>{" "}
@@ -5125,7 +5354,14 @@ export default function EstimateToolViewV2({
                                   className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary"
                                 >
                                   {" "}
-                                  <span>{s.name}</span>{" "}
+                                  <span>
+                                    {s.name}
+                                    {serviceDetailText(s) && (
+                                      <span className="block text-11 text-ink-tertiary leading-snug mt-0.5">
+                                        {serviceDetailText(s)}
+                                      </span>
+                                    )}
+                                  </span>{" "}
                                   <span className="text-13 u-nums">
                                     {s.quoteRequired ? "Quote Required" : fmtInt(s.price)}
                                   </span>{" "}
