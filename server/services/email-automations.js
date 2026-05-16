@@ -31,8 +31,9 @@ const AUTOMATIONS = {
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_RECURRING || 'aut_3f539f94-024a-466f-9d50-4454173627dd',
     tags: ['new customer', 'recurring'],
     smsTemplate: (c) =>
-      `Hello ${c.first_name}! Welcome to a safer, pest-free home with Waves! Check your inbox, we just emailed you our welcome guide.\n\n` +
-      `If you have any questions or need assistance, simply reply to this message.`,
+      `Hello ${c.first_name}! Welcome to Waves!\n\n` +
+      `You can also manage your account at portal.wavespestcontrol.com to view your upcoming appointments, reschedule services, request re-services, view invoices, and more.\n\n` +
+      `Questions or requests? Reply here.`,
     enabled: true,
   },
   cold_lead: {

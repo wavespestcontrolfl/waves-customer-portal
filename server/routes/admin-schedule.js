@@ -18,6 +18,10 @@ const { calculateBoundedTrackingEta } = require('../services/customer-tracking-e
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const {
+  isNewRecurringSignupCandidate,
+  sendNewRecurringWelcome,
+} = require('../services/new-recurring-welcome-sms');
+const {
   recordTrackTransitionFailure,
   recordTrackTransitionResultFailure,
 } = require('../services/track-transition-alerts');
@@ -1271,6 +1275,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const addonCols = pricing.addonLines.length > 0
       ? await db('scheduled_service_addons').columnInfo()
       : {};
+    const shouldSendNewRecurringWelcome = isRecurring
+      ? await isNewRecurringSignupCandidate(customerId)
+      : false;
 
     await db.transaction(async (trx) => {
       const insertData = {
@@ -1459,6 +1466,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
         }
       }
     } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
+
+    if (shouldSendNewRecurringWelcome) {
+      try {
+        await sendNewRecurringWelcome({
+          customer,
+          scheduledServiceId: svc.id,
+          recurringPattern,
+          entryPoint: 'admin_recurring_appointment_created',
+          adminUserId: req.technicianId,
+        });
+      } catch (e) {
+        logger.error(`[schedule] new recurring welcome SMS failed (non-blocking): ${e.message}`);
+      }
+    }
 
     // Optional: push an in-app notification to the assigned tech's PWA queue
     // (honors the "Notify technician" checkbox — unchecked by default).

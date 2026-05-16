@@ -14,7 +14,7 @@ const TEMPLATES = [
     template_key: 'auto_new_recurring',
     name: 'New Recurring Customer',
     category: 'automations',
-    body: 'Hello {first_name}! Welcome to Waves. We just emailed your welcome guide for a safer, pest-free home.\n\nQuestions or requests? Reply here.',
+    body: 'Hello {first_name}! Welcome to Waves!\n\nYou can also manage your account at portal.wavespestcontrol.com to view your upcoming appointments, reschedule services, request re-services, view invoices, and more.\n\nQuestions or requests? Reply here.',
     variables: ['first_name'],
     sort_order: 40,
   },
