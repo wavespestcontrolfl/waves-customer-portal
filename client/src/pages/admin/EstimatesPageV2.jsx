@@ -15,7 +15,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { LeadsSection } from "./LeadsTabs";
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
@@ -23,6 +22,7 @@ import {
   getUrgencyIndicator,
   detectCompetitor,
 } from "./EstimatePage";
+import { LeadsSection } from "./LeadsTabs";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
 import { MarginCalculator } from "./PricingLogicPage";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
@@ -1606,9 +1606,6 @@ function EstimatePipelineViewV2() {
             dateRange={dateRange}
             onDateRangeChange={setDateRange}
           />
-          <div className="mb-5">
-            <LeadsSection embedded showPipelineSummary={false} />
-          </div>
           {/* Search — name / address / phone / email / reference. Sits
               under the Needs Attention strip so the operator can drill
               from "Going cold > 48h" into a specific customer fast. */}
@@ -2220,6 +2217,7 @@ function EstimatePipelineViewV2() {
 }
 
 const TABS = [
+  { key: "leads", label: "Leads", Icon: Users },
   { key: "estimates", label: "Estimates", Icon: ClipboardList },
   { key: "new", label: "Create Estimate", Icon: FilePlus2 },
   { key: "pricing", label: "Pricing Logic", Icon: SlidersHorizontal },
@@ -3233,7 +3231,7 @@ export default function EstimatesPageV2() {
     : null;
 
   const [activeTab, setActiveTab] = useState(
-    initialTab || (hasPrefill ? "new" : "estimates"),
+    initialTab || (hasPrefill ? "new" : "leads"),
   );
   const [mobileView, setMobileView] = useState(
     initialTab === "new" || hasPrefill ? "new" : "list",
@@ -3258,10 +3256,9 @@ export default function EstimatesPageV2() {
       incoming.customerEmail ||
       incoming.serviceInterest
     );
-    const rawTabParam = searchParams.get("tab");
-    const tabParam = rawTabParam === "leads" ? "estimates" : rawTabParam;
+    const tabParam = searchParams.get("tab");
     const hasTabParam = TABS.some((t) => t.key === tabParam);
-    if (!hasIncoming && !hasTabParam && rawTabParam !== "leads") return;
+    if (!hasIncoming && !hasTabParam) return;
     if (hasIncoming) {
       setPrefill(incoming);
       setActiveTab("new");
@@ -3270,7 +3267,7 @@ export default function EstimatesPageV2() {
       setActiveTab(tabParam);
       setMobileView(tabParam === "new" ? "new" : "list");
     }
-    if (hasIncoming || rawTabParam === "leads") {
+    if (hasIncoming) {
       const stripped = new URLSearchParams(searchParams);
       PREFILL_PARAM_KEYS.forEach((k) => stripped.delete(k));
       stripped.delete("tab");
@@ -3295,7 +3292,7 @@ export default function EstimatesPageV2() {
       setActiveTab(key);
       const next = new URLSearchParams(searchParams);
       PREFILL_PARAM_KEYS.forEach((k) => next.delete(k));
-      if (key === "estimates") next.delete("tab");
+      if (key === "leads") next.delete("tab");
       else next.set("tab", key);
       setSearchParams(next, { replace: false });
     },
@@ -3360,6 +3357,7 @@ export default function EstimatesPageV2() {
     <div style={{ fontFamily: ROBOTO }}>
       {" "}
       <PipelineCommandHeader activeTab={activeTab} onTabChange={selectTab} />
+      {activeTab === "leads" && <LeadsSection />}
       {activeTab === "estimates" && <EstimatePipelineViewV2 />}
       {activeTab === "new" && (
         <EstimateToolViewV2
