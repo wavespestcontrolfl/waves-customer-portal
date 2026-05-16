@@ -1197,13 +1197,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
       createInvoice,
       sendConfirmation, serviceId, serviceAddons, assignmentMode, primaryLineDiscount,
       primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
-      parentServiceId, sendConfirmationSms, sendTechNotification,
+      parentServiceId, sendConfirmationSms, sendTechNotification, sourceEstimateId,
     } = req.body;
 
     if (!customerId || !scheduledDate || !serviceType) return res.status(400).json({ error: 'customerId, scheduledDate, serviceType required' });
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
+    let linkedEstimate = null;
+    if (linkedEstimateId) {
+      linkedEstimate = await db('estimates')
+        .where({ id: linkedEstimateId })
+        .first('id', 'customer_id', 'status', 'estimate_data');
+      if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
+      if (linkedEstimate.status !== 'accepted') {
+        return res.status(400).json({ error: 'Only accepted estimates can be linked to new appointments' });
+      }
+      if (String(linkedEstimate.customer_id || '') !== String(customerId)) {
+        return res.status(400).json({ error: 'Linked estimate belongs to a different customer' });
+      }
+    }
     const zone = getZone(customer?.city, customer?.zip);
     let duration = estimateDuration(serviceType, customer?.property_sqft, customer?.lot_sqft);
 
@@ -1296,6 +1310,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
       if (cols.is_callback) insertData.is_callback = isCallback || false;
       if (cols.parent_service_id && parentServiceId) insertData.parent_service_id = parentServiceId;
+      if (cols.source_estimate_id && linkedEstimateId) insertData.source_estimate_id = linkedEstimateId;
       if (cols.recurring_ongoing && isRecurring) insertData.recurring_ongoing = !!recurringOngoing;
       if (isRecurring) {
         if (cols.recurring_nth && monthAnchorOpts.nth != null && monthAnchorOpts.nth !== '' && !isNaN(parseInt(monthAnchorOpts.nth))) insertData.recurring_nth = parseInt(monthAnchorOpts.nth);
@@ -1369,6 +1384,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
+        if (cols.source_estimate_id && linkedEstimateId) childData.source_estimate_id = linkedEstimateId;
         if (cols.estimated_price && finalPrice != null) childData.estimated_price = finalPrice;
         if (cols.primary_line_price && pricing.primaryBase != null) childData.primary_line_price = pricing.primaryBase;
         if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) childData.discount_id = pricing.appointmentDiscount.discountId;
@@ -1426,6 +1442,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
           if (cols.skip_weekends) boosterData.skip_weekends = !!skipWeekends;
           if (cols.weekend_shift && skipWeekends) boosterData.weekend_shift = shiftDir;
+          if (cols.source_estimate_id && linkedEstimateId) boosterData.source_estimate_id = linkedEstimateId;
           if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) boosterData.discount_id = pricing.appointmentDiscount.discountId;
           if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) boosterData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
           if (cols.discount_type && appointmentDiscountType) boosterData.discount_type = appointmentDiscountType;

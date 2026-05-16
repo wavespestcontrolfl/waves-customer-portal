@@ -369,8 +369,9 @@ router.get('/', async (req, res, next) => {
       if (data?.scheduled_service_id) linkedSvcIds.add(data.scheduled_service_id);
     }
     const apptByLinkedId = new Map();
+    const apptBySourceEstimateId = new Map();
     const nextApptByCustomer = new Map();
-    if (customerIdsForAppt.length || linkedSvcIds.size) {
+    if (customerIdsForAppt.length || linkedSvcIds.size || ids.length) {
       // Compare scheduled_date (YYYY-MM-DD in ET) against today in ET so a
       // late-night UTC server doesn't show today's appointment as past.
       const todayET = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
@@ -380,12 +381,16 @@ router.get('/', async (req, res, next) => {
         .where(function () {
           if (customerIdsForAppt.length) this.whereIn('customer_id', customerIdsForAppt);
           if (linkedSvcIds.size) this.orWhereIn('id', [...linkedSvcIds]);
+          if (ids.length) this.orWhereIn('source_estimate_id', ids);
         })
         .orderBy('scheduled_date', 'asc')
         .orderBy('window_start', 'asc')
-        .select('id', 'customer_id', 'scheduled_date', 'window_start', 'window_display', 'service_type');
+        .select('id', 'customer_id', 'source_estimate_id', 'scheduled_date', 'window_start', 'window_display', 'service_type');
       for (const row of apptRows) {
         apptByLinkedId.set(row.id, row);
+        if (row.source_estimate_id && !apptBySourceEstimateId.has(row.source_estimate_id)) {
+          apptBySourceEstimateId.set(row.source_estimate_id, row);
+        }
         if (row.customer_id && !nextApptByCustomer.has(row.customer_id)) {
           nextApptByCustomer.set(row.customer_id, row);
         }
@@ -420,15 +425,19 @@ router.get('/', async (req, res, next) => {
         if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = null; } }
         const linkedSvcId = estData?.scheduled_service_id || null;
         const linkedAppt = linkedSvcId ? apptByLinkedId.get(linkedSvcId) : null;
+        const sourceLinkedAppt = apptBySourceEstimateId.get(e.id) || null;
         const fallbackAppt = e.customer_id ? nextApptByCustomer.get(e.customer_id) : null;
-        const apptRow = linkedAppt || fallbackAppt;
+        const apptRow = linkedAppt || sourceLinkedAppt || fallbackAppt;
         const confirmedAppointment = apptRow ? {
           id: apptRow.id,
           scheduledDate: apptRow.scheduled_date,
           windowDisplay: apptRow.window_display,
           windowStart: apptRow.window_start,
           serviceType: apptRow.service_type,
-          linked: !!(linkedAppt && linkedAppt.id === apptRow.id),
+          linked: !!(
+            (linkedAppt && linkedAppt.id === apptRow.id)
+            || (sourceLinkedAppt && sourceLinkedAppt.id === apptRow.id)
+          ),
         } : null;
         return {
           id: e.id, status: e.status, customerName: e.customer_name,
