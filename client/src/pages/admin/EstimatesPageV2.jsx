@@ -15,7 +15,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { LeadsSection } from "./LeadsTabs";
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
@@ -1606,9 +1605,6 @@ function EstimatePipelineViewV2() {
             dateRange={dateRange}
             onDateRangeChange={setDateRange}
           />
-          <div className="mb-5">
-            <LeadsSection embedded showPipelineSummary={false} />
-          </div>
           {/* Search — name / address / phone / email / reference. Sits
               under the Needs Attention strip so the operator can drill
               from "Going cold > 48h" into a specific customer fast. */}
