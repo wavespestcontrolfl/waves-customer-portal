@@ -1518,6 +1518,13 @@ export default function EstimateToolViewV2({
 
     return {
       recurringCount,
+      // totalRecurringCount includes services like Palm Injection /
+      // Rodent Bait that don't count toward the WaveGuard tier but are
+      // still recurring selections — display surfaces use this to avoid
+      // claiming "0 recurring selected" when only a non-qualifying
+      // service is chosen. Tier-discount math still keys off
+      // recurringCount alone.
+      totalRecurringCount: recurringCount + separateRecurringCount,
       onetimeCount,
       tier,
       recurringMonthly,
@@ -1578,14 +1585,20 @@ export default function EstimateToolViewV2({
         "svcLawn", "svcTs", "svcInjection", "svcMosquito",
         "svcTermiteBait", "svcRodentBait",
       ];
-      // Drive showOneTimeOption to match the gate every toggle so adding a
-      // non-pest recurring service AFTER the auto-enable clears the flag
-      // back to false — otherwise the mixed estimate would still be saved
-      // with show_one_time_option=true and the public accept path would
-      // drop the non-pest recurring services on commit.
       const pestBoth = next.svcPest && next.svcOnetimePest;
       const onlyPestRecurring = OTHER_RECURRING_KEYS.every((k) => !next[k]);
-      next.showOneTimeOption = pestBoth && onlyPestRecurring;
+      // _autoOneTimeOwned marks the flag as "owned by the auto-enable
+      // path" so we can safely flip it back when the bundle stops being
+      // pest-only — without clobbering a manual customer-options check
+      // (which clears _autoOneTimeOwned in setCustomerChoiceOption /
+      // applyMosquitoCustomerChoice).
+      if (pestBoth && onlyPestRecurring) {
+        next.showOneTimeOption = true;
+        next._autoOneTimeOwned = true;
+      } else if (f._autoOneTimeOwned) {
+        next.showOneTimeOption = false;
+        next._autoOneTimeOwned = false;
+      }
       return next;
     });
     if (key.startsWith("svc")) {
@@ -1596,7 +1609,9 @@ export default function EstimateToolViewV2({
   }, []);
   const applyMosquitoCustomerChoice = useCallback((choice) => {
     setForm((f) => {
-      const next = { ...f, showOneTimeOption: true };
+      // Mark the flag as manually owned so toggle()'s auto-clear path
+      // doesn't wipe it the next time the admin checks any service box.
+      const next = { ...f, showOneTimeOption: true, _autoOneTimeOwned: false };
       if (choice === "one_time") next.svcOnetimeMosquito = true;
       if (choice === "recurring") next.svcMosquito = true;
       if (choice === "both") {
@@ -1611,7 +1626,9 @@ export default function EstimateToolViewV2({
   }, []);
   const setCustomerChoiceOption = useCallback((enabled) => {
     setForm((f) => {
-      const next = { ...f, showOneTimeOption: enabled };
+      // Manual customer-options checkbox — own the flag, don't let
+      // toggle()'s auto-clear wipe it on the next service toggle.
+      const next = { ...f, showOneTimeOption: enabled, _autoOneTimeOwned: false };
       if (enabled) {
         if (f.svcMosquito && !f.svcOnetimeMosquito)
           next.svcOnetimeMosquito = true;
@@ -2112,24 +2129,22 @@ export default function EstimateToolViewV2({
           form.bedArea,
           Number(baseProfile.estimatedBedAreaSf) || 0,
         ),
-        estimatedPalmCount: manualNumber(
-          form.palmCount,
-          Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0,
-        ),
         // When admin types a palm count in the form, treat it as the
         // injectable count and skip the 30% satellite-estimate gating in
-        // property-lookup-v2. Admin already knows which palms need treatment.
-        // Palm pricing requires a positive integer — drop non-integer or
-        // <=0 inputs (e.g. "2.5", "0", "-1") so we fall back to the
-        // 30%-of-estimatedPalmCount path instead of silently truncating
-        // and quoting the wrong count. parseInt('2.5') = 2 would pass an
-        // integer check, so use Number() + Number.isInteger() on the raw
-        // value to reject non-integer inputs outright.
+        // property-lookup-v2. Admin already knows which palms need
+        // treatment. Palm pricing requires a positive integer — drop
+        // non-integer or <=0 inputs (e.g. "2.5", "0", "-1") for BOTH
+        // estimatedPalmCount and injectablePalms so we fall back to the
+        // AI/base count instead of silently truncating to 2 and quoting
+        // the wrong palm count.
         ...(() => {
           const raw = String(form.palmCount ?? "").trim();
-          if (raw === "") return {};
           const n = Number(raw);
-          return Number.isInteger(n) && n > 0 ? { injectablePalms: n } : {};
+          const valid = raw !== "" && Number.isInteger(n) && n > 0;
+          const fallback = Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0;
+          return valid
+            ? { estimatedPalmCount: n, injectablePalms: n }
+            : { estimatedPalmCount: fallback };
         })(),
         estimatedTreeCount: treeCount,
         treeCount,
@@ -4134,7 +4149,7 @@ export default function EstimateToolViewV2({
                 <div className="text-14 text-ink-secondary mb-4">
                   {!livePreview.anySelected
                     ? "Select at least one service to see pricing"
-                    : `${livePreview.recurringCount} recurring + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
+                    : `${livePreview.totalRecurringCount} recurring + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
                 </div>
                 {enrichedProfile && (
                   <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-13 text-ink-secondary leading-relaxed">
