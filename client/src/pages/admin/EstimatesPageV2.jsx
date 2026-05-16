@@ -56,6 +56,10 @@ import {
   CalendarCheck,
   ExternalLink,
   ClipboardList,
+  MoreHorizontal,
+  Archive,
+  Link as LinkIcon,
+  RotateCw,
 } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -365,6 +369,133 @@ function UrgencyBadge({ urgency }) {
   const isCritical =
     urgency.label === "Going cold" || urgency.label === "Final follow-up";
   return <Badge tone={isCritical ? "alert" : "neutral"}>{urgency.label}</Badge>;
+}
+
+// Row overflow menu. Holds secondary actions (Audit, Preview, Resend, Copy
+// Link, 1x Option toggle, Invoice toggle, Send Booking Link, Archive, Delete)
+// so the inline action bar stays focused on the single primary action for
+// the row's status. Mobile = bottom sheet, desktop = small centered popover.
+function RowActionsMenu({ items, label = "More actions" }) {
+  const [open, setOpen] = useState(false);
+  const visible = (items || []).filter((it) => it && !it.hidden);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
+
+  if (visible.length === 0) return null;
+
+  return (
+    <>
+      {" "}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+        }}
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={label}
+        className={cn(
+          "inline-flex items-center justify-center flex-shrink-0",
+          "h-11 w-11 sm:h-9 sm:w-9 rounded-xs",
+          "border-hairline border-zinc-300 bg-white text-ink-secondary",
+          "hover:bg-zinc-50 u-focus-ring transition-colors",
+        )}
+      >
+        {" "}
+        <MoreHorizontal size={16} strokeWidth={1.75} aria-hidden />{" "}
+      </button>
+      {open &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            onClick={() => setOpen(false)}
+          >
+            {" "}
+            <div className="absolute inset-0 bg-zinc-900/30" />{" "}
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="relative bg-white border-hairline border-zinc-200 rounded-t-lg sm:rounded-md w-full sm:w-72 max-w-md shadow-lg overflow-hidden"
+            >
+              {" "}
+              <div className="px-4 py-3 border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary font-medium flex items-center justify-between">
+                {" "}
+                <span>Actions</span>{" "}
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  aria-label="Close actions menu"
+                  className="text-ink-tertiary hover:text-ink-primary"
+                >
+                  {" "}
+                  <X size={14} strokeWidth={1.75} aria-hidden />{" "}
+                </button>{" "}
+              </div>{" "}
+              <ul className="py-1 max-h-[70vh] overflow-y-auto">
+                {visible.map((it) => (
+                  <li key={it.key}>
+                    {" "}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpen(false);
+                        it.onClick?.();
+                      }}
+                      disabled={it.disabled}
+                      title={it.title || undefined}
+                      className={cn(
+                        "w-full text-left px-4 py-3 sm:py-2 text-14 flex items-center gap-3 u-focus-ring",
+                        "hover:bg-zinc-50 disabled:opacity-50 disabled:cursor-not-allowed",
+                        it.variant === "danger" &&
+                          "text-alert-fg hover:bg-alert-bg",
+                      )}
+                    >
+                      {it.icon ? (
+                        <span
+                          className={cn(
+                            "flex-shrink-0",
+                            it.variant === "danger"
+                              ? "text-alert-fg"
+                              : "text-ink-tertiary",
+                          )}
+                        >
+                          {it.icon}
+                        </span>
+                      ) : (
+                        <span className="w-4" />
+                      )}{" "}
+                      <span className="flex-1">{it.label}</span>
+                      {it.detail && (
+                        <span className="text-11 text-ink-tertiary">
+                          {it.detail}
+                        </span>
+                      )}{" "}
+                    </button>{" "}
+                  </li>
+                ))}{" "}
+              </ul>{" "}
+            </div>{" "}
+          </div>,
+          document.body,
+        )}{" "}
+    </>
+  );
 }
 
 // Filter — 7 pipeline filters exceed the 4-item pill cap. Per UI SoR §6.1
@@ -1130,8 +1261,13 @@ function estimatePreviewHref(estimate) {
 // in ET to keep day-of-week consistent regardless of viewer locale.
 function formatApptShort(appt) {
   if (!appt?.scheduledDate) return "";
-  // Pin the date to noon ET so day-of-week never flips on a locale shift.
-  const dt = new Date(`${appt.scheduledDate}T12:00:00-05:00`);
+  // Accept either a date-only string (YYYY-MM-DD) or a full ISO timestamp —
+  // production rows sometimes carry the latter, and naive concatenation of
+  // `${scheduledDate}T12:00:00-05:00` against a full ISO produces Invalid
+  // Date (two T-segments). Strip to the date component first.
+  const dateOnly = String(appt.scheduledDate).split("T")[0];
+  const dt = new Date(`${dateOnly}T12:00:00-05:00`);
+  if (Number.isNaN(dt.getTime())) return "";
   const dow = dt.toLocaleDateString("en-US", {
     weekday: "short",
     timeZone: "America/New_York",
@@ -1329,6 +1465,32 @@ function EstimatePipelineViewV2() {
         }
       } catch (err) {
         window.alert("Mark accepted failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
+  const sendBookingLink = useCallback(
+    async (e) => {
+      if (!e.customerPhone) {
+        window.alert(
+          "No phone on file for this estimate — can't text a booking link.",
+        );
+        return;
+      }
+      if (
+        !window.confirm(
+          `Text ${e.customerName || "the customer"} a booking link so they can self-schedule?`,
+        )
+      )
+        return;
+      try {
+        await adminFetch(`/admin/estimates/${e.id}/send-booking-link`, {
+          method: "POST",
+        });
+        refreshEstimates();
+      } catch (err) {
+        window.alert("Send booking link failed: " + err.message);
       }
     },
     [refreshEstimates],
@@ -1706,9 +1868,10 @@ function EstimatePipelineViewV2() {
                         <div>Follow-ups: {e.followUpCount}</div>
                       )}
                     </div>
-                    {/* Actions — flag is its own icon button; primary actions
-                    render as an equal-width pill group (flex-1) to remove
-                    dead space between pills. */}
+                    {/* Actions — flag toggle + primary status action(s) +
+                    overflow menu. Secondary tools (toggles, audit, preview,
+                    copy link, resend, archive, delete) live in the overflow
+                    so the inline row stays scannable. */}
                     <div className="flex items-center gap-1.5 w-full sm:w-auto">
                       {" "}
                       <button
@@ -1722,7 +1885,7 @@ function EstimatePipelineViewV2() {
                           e.isPriority ? "Remove priority" : "Flag as urgent"
                         }
                         className={cn(
-                          "h-11 w-11 sm:h-7 sm:w-7 flex-shrink-0 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors",
+                          "h-11 w-11 sm:h-9 sm:w-9 flex-shrink-0 flex items-center justify-center rounded-full sm:rounded-xs border-hairline u-focus-ring transition-colors",
                           isEstimateTogglePending(e.id, "isPriority") &&
                             "opacity-60 cursor-wait",
                           e.isPriority
@@ -1733,83 +1896,7 @@ function EstimatePipelineViewV2() {
                         {" "}
                         <Flag size={16} strokeWidth={1.75} aria-hidden />{" "}
                       </button>{" "}
-                      <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1">
-                        {["draft", "sent", "viewed"].includes(e.status) && (
-                          <Button
-                            size="sm"
-                            variant={
-                              e.showOneTimeOption ? "secondary" : "ghost"
-                            }
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                            onClick={() => toggleOneTimeOption(e)}
-                            disabled={isEstimateTogglePending(
-                              e.id,
-                              "showOneTimeOption",
-                            )}
-                            title={
-                              e.showOneTimeOption
-                                ? "One-time option is visible to the customer. Click to hide."
-                                : "Let the customer choose one-time instead of recurring."
-                            }
-                          >
-                            {e.showOneTimeOption
-                              ? "1x Option: On"
-                              : "1x Option: Off"}
-                          </Button>
-                        )}
-
-                        {["draft", "sent", "viewed"].includes(e.status) && (
-                          <Button
-                            size="sm"
-                            variant={e.billByInvoice ? "secondary" : "ghost"}
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                            onClick={() => toggleBillByInvoice(e)}
-                            disabled={isEstimateTogglePending(
-                              e.id,
-                              "billByInvoice",
-                            )}
-                            title={
-                              e.billByInvoice
-                                ? "Invoice mode is ON — customer acceptance creates an invoice due immediately and attempts pay-link delivery. Click to switch back to the normal onboarding flow."
-                                : "Switch to invoice mode — skip onboarding / payment up front and create an invoice when the customer accepts."
-                            }
-                          >
-                            {e.billByInvoice ? "Invoice: On" : "Invoice: Off"}
-                          </Button>
-                        )}
-
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                          onClick={() =>
-                            setAuditTarget({ estimate: e, focus: "all" })
-                          }
-                        >
-                          Audit
-                        </Button>
-                        {previewHref && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap gap-1.5"
-                            onClick={() =>
-                              window.open(
-                                previewHref,
-                                "_blank",
-                                "noopener,noreferrer",
-                              )
-                            }
-                            title="Open the customer-facing estimate in a new tab"
-                          >
-                            <ExternalLink
-                              size={13}
-                              strokeWidth={1.75}
-                              aria-hidden
-                            />
-                            Preview
-                          </Button>
-                        )}
+                      <div className="grid grid-cols-2 sm:flex sm:flex-none gap-1.5 flex-1 sm:flex-none">
                         {e.status === "draft" && e.monthlyTotal > 0 && (
                           <Button
                             size="sm"
@@ -1828,21 +1915,10 @@ function EstimatePipelineViewV2() {
                           </Button>
                         )}
 
-                        {canMarkEstimateWon(e) && (
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                            onClick={() => markEstimateAccepted(e)}
-                          >
-                            Mark Won
-                          </Button>
-                        )}
-
                         {(e.status === "sent" || e.status === "viewed") && (
                           <Button
                             size="sm"
-                            variant="secondary"
+                            variant="primary"
                             className="w-full sm:w-auto rounded-full whitespace-nowrap"
                             onClick={() => setFollowUpTarget(e)}
                           >
@@ -1850,71 +1926,34 @@ function EstimatePipelineViewV2() {
                           </Button>
                         )}
 
-                        {(e.status === "sent" || e.status === "viewed") && (
+                        {canMarkEstimateWon(e) && (
                           <Button
                             size="sm"
                             variant="secondary"
                             className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                            onClick={async () => {
-                              if (
-                                !confirm(
-                                  `Resend estimate to ${e.customerName || "customer"} via SMS + email?`,
-                                )
-                              )
-                                return;
-                              try {
-                                await sendEstimateFromPipeline(e.id, "both");
-                                refreshEstimates();
-                              } catch (err) {
-                                window.alert("Send failed: " + err.message);
-                              }
-                            }}
+                            onClick={() => markEstimateAccepted(e)}
                           >
-                            Resend
+                            Mark Won
                           </Button>
                         )}
 
-                        {(e.status === "sent" || e.status === "viewed") && (
+                        {e.status === "accepted" && !e.archivedAt && (
                           <Button
                             size="sm"
-                            variant="secondary"
+                            variant="primary"
                             className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                            onClick={() => setDeclineTarget(e)}
+                            onClick={() => sendBookingLink(e)}
+                            disabled={!e.customerPhone}
+                            title={
+                              e.customerPhone
+                                ? "Text the customer a link to self-schedule"
+                                : "No phone on file"
+                            }
                           >
-                            Mark Lost
+                            Send Booking
                           </Button>
                         )}
 
-                        {(e.status === "sent" || e.status === "viewed") && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                            onClick={() => {
-                              const link = `${window.location.origin}/estimate/${e.token || e.id}`;
-                              navigator.clipboard?.writeText(link);
-                            }}
-                          >
-                            Copy Link
-                          </Button>
-                        )}
-
-                        {/* Archive / Unarchive — archive only shows on closed
-                        rows (declined / expired / accepted). Unarchive shows
-                        whenever archivedAt is set, regardless of status. */}
-                        {!e.archivedAt &&
-                          ["declined", "expired", "accepted"].includes(
-                            e.status,
-                          ) && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                              onClick={() => archiveEstimate(e)}
-                            >
-                              Archive
-                            </Button>
-                          )}
                         {e.archivedAt && (
                           <Button
                             size="sm"
@@ -1925,6 +1964,157 @@ function EstimatePipelineViewV2() {
                             Unarchive
                           </Button>
                         )}
+
+                        <RowActionsMenu
+                          label={`Actions for ${e.customerName || "estimate"}`}
+                          items={[
+                            ["draft", "sent", "viewed"].includes(e.status) && {
+                              key: "one-time",
+                              label: e.showOneTimeOption
+                                ? "1× Option: On"
+                                : "1× Option: Off",
+                              icon: e.showOneTimeOption ? (
+                                <Check size={16} strokeWidth={1.75} />
+                              ) : (
+                                <Plus size={16} strokeWidth={1.75} />
+                              ),
+                              title: e.showOneTimeOption
+                                ? "One-time option is visible to the customer"
+                                : "Let the customer pick one-time instead of recurring",
+                              disabled: isEstimateTogglePending(
+                                e.id,
+                                "showOneTimeOption",
+                              ),
+                              onClick: () => toggleOneTimeOption(e),
+                            },
+                            ["draft", "sent", "viewed"].includes(e.status) && {
+                              key: "invoice",
+                              label: e.billByInvoice
+                                ? "Invoice mode: On"
+                                : "Invoice mode: Off",
+                              icon: e.billByInvoice ? (
+                                <Check size={16} strokeWidth={1.75} />
+                              ) : (
+                                <Plus size={16} strokeWidth={1.75} />
+                              ),
+                              title: e.billByInvoice
+                                ? "Customer acceptance creates an invoice immediately"
+                                : "Switch to invoice mode (skip onboarding, invoice on accept)",
+                              disabled: isEstimateTogglePending(
+                                e.id,
+                                "billByInvoice",
+                              ),
+                              onClick: () => toggleBillByInvoice(e),
+                            },
+                            (e.status === "sent" ||
+                              e.status === "viewed") && {
+                              key: "send-booking",
+                              label: "Send booking link",
+                              icon: (
+                                <CalendarCheck size={16} strokeWidth={1.75} />
+                              ),
+                              disabled: !e.customerPhone,
+                              title: e.customerPhone
+                                ? "Text the customer a link to self-schedule"
+                                : "No phone on file",
+                              onClick: () => sendBookingLink(e),
+                            },
+                            (e.status === "sent" ||
+                              e.status === "viewed") && {
+                              key: "resend",
+                              label: "Resend estimate",
+                              icon: <RotateCw size={16} strokeWidth={1.75} />,
+                              onClick: async () => {
+                                if (
+                                  !confirm(
+                                    `Resend estimate to ${e.customerName || "customer"} via SMS + email?`,
+                                  )
+                                )
+                                  return;
+                                try {
+                                  await sendEstimateFromPipeline(e.id, "both");
+                                  refreshEstimates();
+                                } catch (err) {
+                                  window.alert("Send failed: " + err.message);
+                                }
+                              },
+                            },
+                            (e.status === "sent" ||
+                              e.status === "viewed") && {
+                              key: "copy-link",
+                              label: "Copy estimate link",
+                              icon: <LinkIcon size={16} strokeWidth={1.75} />,
+                              onClick: () => {
+                                const link = `${window.location.origin}/estimate/${e.token || e.id}`;
+                                navigator.clipboard?.writeText(link);
+                              },
+                            },
+                            {
+                              key: "audit",
+                              label: "Audit pricing",
+                              icon: (
+                                <SlidersHorizontal
+                                  size={16}
+                                  strokeWidth={1.75}
+                                />
+                              ),
+                              onClick: () =>
+                                setAuditTarget({ estimate: e, focus: "all" }),
+                            },
+                            previewHref && {
+                              key: "preview",
+                              label: "Preview customer view",
+                              icon: (
+                                <ExternalLink size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () =>
+                                window.open(
+                                  previewHref,
+                                  "_blank",
+                                  "noopener,noreferrer",
+                                ),
+                            },
+                            (e.status === "sent" ||
+                              e.status === "viewed") && {
+                              key: "mark-lost",
+                              label: "Mark lost",
+                              icon: <X size={16} strokeWidth={1.75} />,
+                              onClick: () => setDeclineTarget(e),
+                            },
+                            !e.archivedAt &&
+                              ["declined", "expired", "accepted"].includes(
+                                e.status,
+                              ) && {
+                                key: "archive",
+                                label: "Archive",
+                                icon: <Archive size={16} strokeWidth={1.75} />,
+                                onClick: () => archiveEstimate(e),
+                              },
+                            e.status === "draft" && {
+                              key: "delete",
+                              label: "Delete draft",
+                              icon: <Trash2 size={16} strokeWidth={1.75} />,
+                              variant: "danger",
+                              onClick: async () => {
+                                if (
+                                  !confirm(
+                                    `Delete draft estimate for ${e.customerName || "this customer"}?\n\nThis is permanent.`,
+                                  )
+                                )
+                                  return;
+                                try {
+                                  await adminFetch(
+                                    `/admin/estimates/${e.id}`,
+                                    { method: "DELETE" },
+                                  );
+                                  refreshEstimates();
+                                } catch (err) {
+                                  alert("Delete failed: " + err.message);
+                                }
+                              },
+                            },
+                          ]}
+                        />
                       </div>{" "}
                     </div>{" "}
                   </Card>
@@ -2190,6 +2380,12 @@ function MobileEstimateRow({
   onMarkAccepted,
   onDeleted,
   onAudit,
+  onSendBooking,
+  onArchive,
+  onUnarchive,
+  onDeleteDraft,
+  onResend,
+  onCopyLink,
   v3Flag = false,
 }) {
   const navigate = useNavigate();
@@ -2399,164 +2595,101 @@ function MobileEstimateRow({
           <MessageSquare size={16} strokeWidth={1.75} />{" "}
         </a>
       )}
-      {estimate.customerId && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            const params = new URLSearchParams();
-            params.set("customerId", estimate.customerId);
-            if (estimate.address) params.set("address", estimate.address);
-            if (estimate.customerName)
-              params.set("customerName", estimate.customerName);
-            if (estimate.customerPhone)
-              params.set("customerPhone", estimate.customerPhone);
-            if (estimate.customerEmail)
-              params.set("customerEmail", estimate.customerEmail);
-            navigate(`/admin/estimates?${params.toString()}`);
-          }}
-          aria-label={`Create new estimate for ${customerName}`}
-          title="Create a new estimate for this customer"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-        >
-          {" "}
-          <FilePlus2 size={16} strokeWidth={1.75} />{" "}
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onAudit?.(estimate, "all");
-        }}
-        aria-label={`Audit pricing for ${customerName}`}
-        title="Audit pricing, protocol, COGS, and margin"
-        className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-      >
-        {" "}
-        <SlidersHorizontal size={16} strokeWidth={1.75} />{" "}
-      </button>
-      {["draft", "sent", "viewed"].includes(estimate.status) && (
-        <button
-          type="button"
-          onClick={async (e) => {
-            e.stopPropagation();
-            const action = estimate.status === "draft" ? "Send" : "Resend";
-            if (
-              !window.confirm(
-                `${action} estimate to ${customerName} via SMS + email?`,
+      {/* Trailing actions — Call + Text (when phone) + Overflow. All
+      secondary actions live in the overflow sheet so the row stays a
+      single 64px scan line. */}
+      <RowActionsMenu
+        label={`Actions for ${customerName}`}
+        items={[
+          ["draft", "sent", "viewed"].includes(estimate.status) && {
+            key: "send",
+            label: estimate.status === "draft" ? "Send estimate" : "Resend estimate",
+            icon: <Send size={16} strokeWidth={1.75} />,
+            onClick: async () => {
+              const action = estimate.status === "draft" ? "Send" : "Resend";
+              if (
+                !window.confirm(
+                  `${action} estimate to ${customerName} via SMS + email?`,
+                )
               )
-            )
-              return;
-            try {
-              await sendEstimateFromPipeline(estimate.id, "both");
-              onSend?.();
-            } catch (err) {
-              window.alert("Send failed: " + err.message);
-            }
-          }}
-          aria-label={`${estimate.status === "draft" ? "Send" : "Resend"} estimate`}
-          title={
-            estimate.status === "draft"
-              ? "Send estimate via SMS + email"
-              : "Resend estimate via SMS + email"
-          }
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-        >
-          {" "}
-          <Send size={16} strokeWidth={1.75} />{" "}
-        </button>
-      )}
-      {canMarkEstimateWon(estimate) && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onMarkAccepted?.(estimate);
-          }}
-          aria-label={`Mark ${customerName} accepted from verbal yes`}
-          title="Mark accepted from verbal yes"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-        >
-          {" "}
-          <Check size={16} strokeWidth={1.75} />{" "}
-        </button>
-      )}
-      {estimate.status === "draft" && (
-        <button
-          type="button"
-          onClick={async (e) => {
-            e.stopPropagation();
-            const ok = window.confirm(
-              `Delete draft estimate for ${customerName}?\n\nThis is permanent.`,
-            );
-            if (!ok) return;
-            try {
-              await adminFetch(`/admin/estimates/${estimate.id}`, {
-                method: "DELETE",
-              });
-              onDeleted?.(estimate.id);
-            } catch (err) {
-              alert("Delete failed: " + err.message);
-            }
-          }}
-          aria-label={`Delete draft estimate for ${customerName}`}
-          title="Delete this draft estimate"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-alert-fg/60 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
-        >
-          {" "}
-          <Trash2 size={16} strokeWidth={1.75} />{" "}
-        </button>
-      )}
-      {!estimate.archivedAt &&
-        ["declined", "expired", "accepted"].includes(estimate.status) && (
-          <button
-            type="button"
-            onClick={async (e) => {
-              e.stopPropagation();
-              const ok = window.confirm(
-                `Archive this ${estimate.status} estimate for ${customerName}?`,
-              );
-              if (!ok) return;
+                return;
               try {
-                await adminFetch(`/admin/estimates/${estimate.id}/archive`, {
-                  method: "POST",
-                });
-                onDeleted?.(estimate.id);
+                await sendEstimateFromPipeline(estimate.id, "both");
+                onSend?.();
               } catch (err) {
-                alert("Archive failed: " + err.message);
+                window.alert("Send failed: " + err.message);
               }
-            }}
-            aria-label={`Archive estimate for ${customerName}`}
-            title="Archive this estimate"
-            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50"
-          >
-            {" "}
-            <Trash2 size={16} strokeWidth={1.75} />{" "}
-          </button>
-        )}
-      {estimate.archivedAt && (
-        <button
-          type="button"
-          onClick={async (e) => {
-            e.stopPropagation();
-            try {
-              await adminFetch(`/admin/estimates/${estimate.id}/unarchive`, {
-                method: "POST",
-              });
-              onDeleted?.(estimate.id);
-            } catch (err) {
-              alert("Unarchive failed: " + err.message);
-            }
-          }}
-          aria-label={`Unarchive estimate for ${customerName}`}
-          title="Restore this estimate"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-        >
-          {" "}
-          <ArrowLeft size={16} strokeWidth={1.75} />{" "}
-        </button>
-      )}
+            },
+          },
+          (estimate.status === "sent" ||
+            estimate.status === "viewed" ||
+            (estimate.status === "accepted" && !estimate.archivedAt)) && {
+            key: "send-booking",
+            label: "Send booking link",
+            icon: <CalendarCheck size={16} strokeWidth={1.75} />,
+            disabled: !estimate.customerPhone,
+            title: estimate.customerPhone
+              ? "Text the customer a link to self-schedule"
+              : "No phone on file",
+            onClick: () => onSendBooking?.(estimate),
+          },
+          canMarkEstimateWon(estimate) && {
+            key: "mark-won",
+            label: "Mark won (verbal yes)",
+            icon: <Check size={16} strokeWidth={1.75} />,
+            onClick: () => onMarkAccepted?.(estimate),
+          },
+          (estimate.status === "sent" || estimate.status === "viewed") && {
+            key: "copy-link",
+            label: "Copy estimate link",
+            icon: <LinkIcon size={16} strokeWidth={1.75} />,
+            onClick: () => onCopyLink?.(estimate),
+          },
+          {
+            key: "audit",
+            label: "Audit pricing",
+            icon: <SlidersHorizontal size={16} strokeWidth={1.75} />,
+            onClick: () => onAudit?.(estimate, "all"),
+          },
+          estimate.customerId && {
+            key: "new-estimate",
+            label: "New estimate for customer",
+            icon: <FilePlus2 size={16} strokeWidth={1.75} />,
+            onClick: () => {
+              const params = new URLSearchParams();
+              params.set("customerId", estimate.customerId);
+              if (estimate.address) params.set("address", estimate.address);
+              if (estimate.customerName)
+                params.set("customerName", estimate.customerName);
+              if (estimate.customerPhone)
+                params.set("customerPhone", estimate.customerPhone);
+              if (estimate.customerEmail)
+                params.set("customerEmail", estimate.customerEmail);
+              navigate(`/admin/estimates?${params.toString()}`);
+            },
+          },
+          !estimate.archivedAt &&
+            ["declined", "expired", "accepted"].includes(estimate.status) && {
+              key: "archive",
+              label: "Archive",
+              icon: <Archive size={16} strokeWidth={1.75} />,
+              onClick: () => onArchive?.(estimate),
+            },
+          estimate.archivedAt && {
+            key: "unarchive",
+            label: "Unarchive",
+            icon: <ArrowLeft size={16} strokeWidth={1.75} />,
+            onClick: () => onUnarchive?.(estimate),
+          },
+          estimate.status === "draft" && {
+            key: "delete",
+            label: "Delete draft",
+            icon: <Trash2 size={16} strokeWidth={1.75} />,
+            variant: "danger",
+            onClick: () => onDeleteDraft?.(estimate),
+          },
+        ]}
+      />
     </div>
   );
 }
@@ -2616,6 +2749,105 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
     },
     [refreshEstimates],
   );
+
+  const sendBookingLink = useCallback(
+    async (e) => {
+      if (!e.customerPhone) {
+        window.alert(
+          "No phone on file for this estimate — can't text a booking link.",
+        );
+        return;
+      }
+      if (
+        !window.confirm(
+          `Text ${e.customerName || "the customer"} a booking link so they can self-schedule?`,
+        )
+      )
+        return;
+      try {
+        await adminFetch(`/admin/estimates/${e.id}/send-booking-link`, {
+          method: "POST",
+        });
+        refreshEstimates();
+      } catch (err) {
+        window.alert("Send booking link failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
+  const archiveEstimateMobile = useCallback(
+    async (e) => {
+      if (
+        !window.confirm(
+          `Archive this ${e.status} estimate for ${e.customerName || "this customer"}?`,
+        )
+      )
+        return;
+      try {
+        await adminFetch(`/admin/estimates/${e.id}/archive`, { method: "POST" });
+        refreshEstimates();
+      } catch (err) {
+        window.alert("Archive failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
+  const unarchiveEstimateMobile = useCallback(
+    async (e) => {
+      try {
+        await adminFetch(`/admin/estimates/${e.id}/unarchive`, {
+          method: "POST",
+        });
+        refreshEstimates();
+      } catch (err) {
+        window.alert("Unarchive failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
+  const deleteDraftMobile = useCallback(
+    async (e) => {
+      if (
+        !window.confirm(
+          `Delete draft estimate for ${e.customerName || "this customer"}?\n\nThis is permanent.`,
+        )
+      )
+        return;
+      try {
+        await adminFetch(`/admin/estimates/${e.id}`, { method: "DELETE" });
+        refreshEstimates();
+      } catch (err) {
+        window.alert("Delete failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
+  const resendEstimateMobile = useCallback(
+    async (e) => {
+      if (
+        !window.confirm(
+          `Resend estimate to ${e.customerName || "the customer"} via SMS + email?`,
+        )
+      )
+        return;
+      try {
+        await sendEstimateFromPipeline(e.id, "both");
+        refreshEstimates();
+      } catch (err) {
+        window.alert("Send failed: " + err.message);
+      }
+    },
+    [refreshEstimates],
+  );
+
+  const copyEstimateLinkMobile = useCallback((e) => {
+    const link = `${window.location.origin}/estimate/${e.token || e.id}`;
+    navigator.clipboard?.writeText(link);
+  }, []);
 
   const groups = useMemo(() => {
     const now = Date.now();
@@ -2825,6 +3057,12 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onAudit={(estimate, focus = "all") =>
                 setAuditTarget({ estimate, focus })
               }
+              onSendBooking={sendBookingLink}
+              onArchive={archiveEstimateMobile}
+              onUnarchive={unarchiveEstimateMobile}
+              onDeleteDraft={deleteDraftMobile}
+              onResend={resendEstimateMobile}
+              onCopyLink={copyEstimateLinkMobile}
               v3Flag={v3Flag}
             />
           ))}

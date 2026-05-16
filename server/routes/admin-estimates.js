@@ -23,6 +23,10 @@ const {
   createOrReuseAdminEstimate,
   estimateViewUrl,
 } = require('../services/admin-estimate-persistence');
+const {
+  acceptanceServiceLists,
+  bookingServiceFor,
+} = require('./estimate-public');
 
 const ESTIMATE_LIST_LIMIT = 500;
 
@@ -559,6 +563,130 @@ router.post('/:id/follow-up', async (req, res, next) => {
     });
 
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/estimates/:id/send-booking-link — manual override that
+// mirrors the post-accept one-time booking SMS. Re-fires the same flow the
+// system auto-runs when a customer accepts a one-time estimate: pre-select
+// the service in /book via bookingServiceFor(), use the
+// `estimate_accepted_onetime` template (same first_name + service_label +
+// booking_url vars). Useful when (a) the auto SMS missed (carrier block,
+// no phone at accept time, etc.), (b) admin marked accepted from verbal
+// yes and the customer never got the booking text, or (c) operator wants
+// to nudge a viewed estimate straight into scheduling without the accept
+// step.
+router.post('/:id/send-booking-link', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
+
+    // Status gate — only active offers can be booked. Drafts aren't real
+    // offers yet; declined/expired/archived are intentionally closed and
+    // shouldn't be quietly reopened by a self-schedule text.
+    if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) {
+      return res.status(400).json({
+        error: `Booking link can only be sent for sent/viewed/accepted estimates. Current status: ${estimate.status}.`,
+      });
+    }
+    if (estimate.archived_at) {
+      return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
+    }
+
+    // Invoice mode skips the booking flow by design — acceptance generates
+    // an invoice immediately and there's no slot to pick. Texting a /book
+    // URL would bypass the pay-link delivery the customer is expecting.
+    if (estimate.bill_by_invoice) {
+      return res.status(400).json({
+        error: 'Invoice mode is on for this estimate — booking link not applicable. Disable Invoice mode first.',
+      });
+    }
+
+    // Parse the same one-time line the auto-accept flow uses so we can
+    // pre-select the service in /book. A missing one-time line on a
+    // recurring estimate is a hard refusal: recurring customers belong in
+    // onboarding, not the self-booking flow.
+    let oneTimeLabel = '';
+    try {
+      const estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : estimate.estimate_data;
+      const { oneTimeList } = acceptanceServiceLists(estData || {});
+      oneTimeLabel = oneTimeList[0]?.name || '';
+    } catch (_) { /* fall through to recurring-only refusal below */ }
+    if (!oneTimeLabel && Number(estimate.monthly_total || 0) > 0) {
+      return res.status(400).json({
+        error: 'No one-time service on this estimate — recurring offers route through onboarding, not /book.',
+      });
+    }
+    const primarySvc = bookingServiceFor(oneTimeLabel);
+
+    // Reservation collision guard. If the estimate is already linked to a
+    // confirmed scheduled service, this customer has already picked a
+    // slot — texting a fresh /book URL would invite a second appointment.
+    try {
+      const estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : estimate.estimate_data;
+      const linkedSvcId = estData?.scheduled_service_id || null;
+      if (linkedSvcId) {
+        const linked = await db('scheduled_services')
+          .where({ id: linkedSvcId, status: 'confirmed' })
+          .first();
+        if (linked) {
+          return res.status(409).json({
+            error: `Customer already has a confirmed appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
+          });
+        }
+      }
+    } catch (_) { /* on parse failure fall through — no false positive */ }
+
+    const longBookingUrl = `https://portal.wavespestcontrol.com/book?service=${primarySvc.id}&source=admin-manual-booking-resend`;
+    const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
+      kind: 'booking', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
+    });
+    const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+
+    // Use the same template as the post-accept SMS so the customer sees a
+    // consistent voice. Admin can still override via req.body.message.
+    const fallback = `Hey ${firstName}! Pick your time for your ${primarySvc.label} with Waves here — we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`;
+    const msg = req.body?.message || (await renderTemplate(
+      'estimate_accepted_onetime',
+      { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
+      fallback,
+    ));
+
+    const smsResult = await sendCustomerMessage({
+      to: estimate.customer_phone,
+      body: msg,
+      channel: 'sms',
+      audience: estimate.customer_id ? 'customer' : 'lead',
+      purpose: 'estimate_followup',
+      customerId: estimate.customer_id || undefined,
+      estimateId: estimate.id,
+      identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+      consentBasis: estimate.customer_id ? undefined : {
+        status: 'transactional_allowed',
+        source: 'admin_estimate_send_booking_link',
+        capturedAt: estimate.created_at || new Date().toISOString(),
+      },
+      entryPoint: 'admin_estimate_send_booking_link',
+      metadata: {
+        original_message_type: 'estimate_accepted_onetime_manual_resend',
+        booking_service_id: primarySvc.id,
+        booking_service_label: primarySvc.label,
+      },
+    });
+    if (!smsResult.sent) {
+      return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
+    }
+    await db('estimates').where({ id: estimate.id }).update({
+      follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
+      last_follow_up_at: db.fn.now(),
+    });
+    logger.info(`[estimates] Manual booking-link SMS sent for estimate ${estimate.id} → ${primarySvc.id}`);
+    res.json({ success: true, bookingServiceId: primarySvc.id, bookingServiceLabel: primarySvc.label });
   } catch (err) { next(err); }
 });
 
