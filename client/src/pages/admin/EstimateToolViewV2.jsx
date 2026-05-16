@@ -1578,11 +1578,14 @@ export default function EstimateToolViewV2({
         "svcLawn", "svcTs", "svcInjection", "svcMosquito",
         "svcTermiteBait", "svcRodentBait",
       ];
+      // Drive showOneTimeOption to match the gate every toggle so adding a
+      // non-pest recurring service AFTER the auto-enable clears the flag
+      // back to false — otherwise the mixed estimate would still be saved
+      // with show_one_time_option=true and the public accept path would
+      // drop the non-pest recurring services on commit.
       const pestBoth = next.svcPest && next.svcOnetimePest;
       const onlyPestRecurring = OTHER_RECURRING_KEYS.every((k) => !next[k]);
-      if (pestBoth && onlyPestRecurring) {
-        next.showOneTimeOption = true;
-      }
+      next.showOneTimeOption = pestBoth && onlyPestRecurring;
       return next;
     });
     if (key.startsWith("svc")) {
@@ -2118,11 +2121,14 @@ export default function EstimateToolViewV2({
         // property-lookup-v2. Admin already knows which palms need treatment.
         // Palm pricing requires a positive integer — drop non-integer or
         // <=0 inputs (e.g. "2.5", "0", "-1") so we fall back to the
-        // 30%-of-estimatedPalmCount path instead of throwing in the engine.
+        // 30%-of-estimatedPalmCount path instead of silently truncating
+        // and quoting the wrong count. parseInt('2.5') = 2 would pass an
+        // integer check, so use Number() + Number.isInteger() on the raw
+        // value to reject non-integer inputs outright.
         ...(() => {
           const raw = String(form.palmCount ?? "").trim();
           if (raw === "") return {};
-          const n = parseInt(raw, 10);
+          const n = Number(raw);
           return Number.isInteger(n) && n > 0 ? { injectablePalms: n } : {};
         })(),
         estimatedTreeCount: treeCount,
