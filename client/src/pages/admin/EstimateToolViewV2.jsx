@@ -1428,16 +1428,16 @@ export default function EstimateToolViewV2({
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
-    const recurringKeys = [
+    const qualifyingRecurringKeys = [
       "svcLawn",
       "svcPest",
       "svcTs",
-      "svcInjection",
       "svcMosquito",
       "svcTermiteBait",
-      "svcRodentBait",
     ];
-    const recurringCount = recurringKeys.filter((k) => form[k]).length;
+    const separateRecurringKeys = ["svcInjection", "svcRodentBait"];
+    const recurringCount = qualifyingRecurringKeys.filter((k) => form[k]).length;
+    const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     const tierMap = {
       0: { name: "No recurring bundle", discount: 0 },
@@ -1479,18 +1479,19 @@ export default function EstimateToolViewV2({
       );
     }
     if (form.svcTermiteBait) approx.termiteBait = 50;
-    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 55 : 45;
+    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 69 : 49;
 
-    const recurringMonthlyBefore = Object.values(approx).reduce(
-      (s, v) => s + v,
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0);
+    const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
+      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(
-      recurringMonthlyBefore * (1 - tier.discount),
+      discountableRecurringMonthlyBefore * (1 - tier.discount) + separateRecurringMonthly,
     );
     const annualRecurring = recurringMonthly * 12;
     const annualSavings = Math.round(
-      recurringMonthlyBefore * tier.discount * 12,
+      discountableRecurringMonthlyBefore * tier.discount * 12,
     );
 
     const onetimeKeys = [
@@ -1513,7 +1514,7 @@ export default function EstimateToolViewV2({
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,
@@ -1565,14 +1566,21 @@ export default function EstimateToolViewV2({
   const toggle = useCallback((key) => {
     setForm((f) => {
       const next = { ...f, [key]: !f[key] };
-      // Auto-enable "Offer one-time option" whenever recurring + one-time of
-      // the same service are both selected (pest, lawn, mosquito). Customer
-      // estimate then renders the Recurring / One-time toggle automatically
-      // without the admin needing to also tick the customer-options box.
+      // Auto-enable "Offer one-time option" only when the bundle is pest-only
+      // (svcPest + svcOnetimePest with no other recurring service selected) —
+      // that's the single flow the public estimate + accept handler actually
+      // support without dropping other recurring services from the persisted
+      // total (server/routes/estimate-public.js treats show_one_time_option
+      // as a pest-only choice path). Lawn/mosquito recurring+one-time pairs
+      // still require admin to tick the customer-options box manually until
+      // the downstream choice logic becomes service-aware.
+      const OTHER_RECURRING_KEYS = [
+        "svcLawn", "svcTs", "svcInjection", "svcMosquito",
+        "svcTermiteBait", "svcRodentBait",
+      ];
       const pestBoth = next.svcPest && next.svcOnetimePest;
-      const lawnBoth = next.svcLawn && next.svcOnetimeLawn;
-      const mosquitoBoth = next.svcMosquito && next.svcOnetimeMosquito;
-      if (pestBoth || lawnBoth || mosquitoBoth) {
+      const onlyPestRecurring = OTHER_RECURRING_KEYS.every((k) => !next[k]);
+      if (pestBoth && onlyPestRecurring) {
         next.showOneTimeOption = true;
       }
       return next;
@@ -2108,9 +2116,15 @@ export default function EstimateToolViewV2({
         // When admin types a palm count in the form, treat it as the
         // injectable count and skip the 30% satellite-estimate gating in
         // property-lookup-v2. Admin already knows which palms need treatment.
-        ...(String(form.palmCount ?? "").trim() !== ""
-          ? { injectablePalms: Number(form.palmCount) }
-          : {}),
+        // Palm pricing requires a positive integer — drop non-integer or
+        // <=0 inputs (e.g. "2.5", "0", "-1") so we fall back to the
+        // 30%-of-estimatedPalmCount path instead of throwing in the engine.
+        ...(() => {
+          const raw = String(form.palmCount ?? "").trim();
+          if (raw === "") return {};
+          const n = parseInt(raw, 10);
+          return Number.isInteger(n) && n > 0 ? { injectablePalms: n } : {};
+        })(),
         estimatedTreeCount: treeCount,
         treeCount,
       };
