@@ -21,6 +21,9 @@ const logger = require('./logger');
 const TwilioService = require('./twilio');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
 const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require('./customer-tracking-eta');
+const { ensureCustomerGeocoded } = require('./geocoder');
+
+const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 
 function portalOrigin() {
   return process.env.CLIENT_URL
@@ -32,6 +35,14 @@ async function loadService(serviceId) {
   return db('scheduled_services')
     .where({ id: serviceId })
     .first();
+}
+
+async function withTimeout(promise, timeoutMs, fallbackValue = null) {
+  let timeoutId;
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(fallbackValue), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
 // Best-effort ETA for the en-route SMS. Mirrors track-public.js
@@ -54,19 +65,28 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
     ]);
     const techLat = finiteNumber(ts?.lat);
     const techLng = finiteNumber(ts?.lng);
-    const custLat = finiteNumber(customer?.latitude);
-    const custLng = finiteNumber(customer?.longitude);
+    let custLat = finiteNumber(customer?.latitude);
+    let custLng = finiteNumber(customer?.longitude);
     if (techLat == null || techLng == null) {
       logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no GPS in tech_status`);
-      return null;
-    }
-    if (custLat == null || custLng == null) {
-      logger.info(`[track-transitions] en-route ETA skipped: customer ${customerId} not geocoded`);
       return null;
     }
     if (!isFreshTimestamp(ts.location_updated_at)) {
       logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} GPS stale (updated ${ts.location_updated_at})`);
       return null;
+    }
+    if (custLat == null || custLng == null) {
+      const geocoded = await withTimeout(
+        ensureCustomerGeocoded(customerId),
+        EN_ROUTE_GEOCODE_TIMEOUT_MS,
+        null
+      );
+      custLat = finiteNumber(geocoded?.lat);
+      custLng = finiteNumber(geocoded?.lng);
+      if (custLat == null || custLng == null) {
+        logger.info(`[track-transitions] en-route ETA skipped: customer ${customerId} not geocoded`);
+        return null;
+      }
     }
 
     const eta = await calculateBoundedTrackingEta({

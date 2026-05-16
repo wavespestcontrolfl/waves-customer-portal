@@ -1,3 +1,8 @@
+jest.mock('../services/geocoder', () => ({
+  ensureCustomerGeocoded: jest.fn(),
+}));
+
+const { ensureCustomerGeocoded } = require('../services/geocoder');
 const trackPublicRouter = require('../routes/track-public');
 
 describe('public track token expiry', () => {
@@ -7,6 +12,7 @@ describe('public track token expiry', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+    jest.clearAllMocks();
   });
 
   test('keeps missing and future expirations live', () => {
@@ -25,5 +31,33 @@ describe('public track token expiry', () => {
     expect(trackPublicRouter._test.isFreshVehicleTimestamp('2026-05-05T11:54:59.999Z')).toBe(false);
     expect(trackPublicRouter._test.isFreshVehicleTimestamp(null)).toBe(false);
     expect(trackPublicRouter._test.isFreshVehicleTimestamp('not-a-date')).toBe(false);
+  });
+
+  test('geocodes en-route destination coordinates when customer record is missing them', async () => {
+    ensureCustomerGeocoded.mockResolvedValue({ lat: 27.4208, lng: -82.4929 });
+
+    const row = await trackPublicRouter._test.ensureEnRouteDestinationGeocoded({
+      track_state: 'en_route',
+      customer_id: 'cust-1',
+      latitude: null,
+      longitude: null,
+    });
+
+    expect(ensureCustomerGeocoded).toHaveBeenCalledWith('cust-1');
+    expect(row.latitude).toBe(27.4208);
+    expect(row.longitude).toBe(-82.4929);
+  });
+
+  test('does not geocode non-en-route tracking states', async () => {
+    const row = await trackPublicRouter._test.ensureEnRouteDestinationGeocoded({
+      track_state: 'scheduled',
+      customer_id: 'cust-1',
+      latitude: null,
+      longitude: null,
+    });
+
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(row.latitude).toBeNull();
+    expect(row.longitude).toBeNull();
   });
 });
