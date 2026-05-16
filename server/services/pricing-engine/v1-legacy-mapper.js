@@ -236,15 +236,19 @@ function mapV1ToLegacyShape(v1Result) {
   // Recurring services[] — pre-discount monthlies, matching v2-legacy-mapper
   // convention (see v2-legacy-mapper.js:159). Order matches v2's wg.services:
   // lawn → pest → tree_shrub → mosquito → termite_bait.
+  // perTreatment + visitsPerYear are forwarded so the customer-facing estimate
+  // can render per-application pricing per service.
   const services = [];
   const svcAdd = (name, li, extra = {}) => {
     if (!li) return;
     const mo = li.monthly || 0;
-    services.push({ name, mo, monthly: mo, ...extra });
+    const perTreatment = Number(li.perApp ?? li.perVisit ?? 0) || null;
+    const visitsPerYear = Number(li.visitsPerYear ?? li.visits ?? li.frequency ?? 0) || null;
+    services.push({ name, mo, monthly: mo, perTreatment, visitsPerYear, ...extra });
   };
-  svcAdd('Lawn Care', lawnLI);
-  svcAdd('Pest Control', pestLI);
-  svcAdd('Tree & Shrub', tsLI);
+  svcAdd('Lawn Care', lawnLI, { service: 'lawn_care' });
+  svcAdd('Pest Control', pestLI, { service: 'pest_control' });
+  svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)
       || (mqLI.tiers || []).find(t => t.recommended)
@@ -266,7 +270,7 @@ function mapV1ToLegacyShape(v1Result) {
       addOns: mqLI.addOns || null,
     });
   }
-  svcAdd('Termite Bait', tbLI);
+  svcAdd('Termite Bait', tbLI, { service: 'termite_bait' });
 
   // One-time + specialty split
   const v1OtItems = [];

@@ -584,7 +584,7 @@ export function calculateEstimate(inputs) {
       R.lawn.push({ pa, v: f.v, ann, mo, name: f.name, recommended: rec, dimmed: dim, pricingBasis: price.pricingBasis, pricingSource: price.pricingSource });
     });
     const selectedLawn = R.lawn.find(t => t.recommended) || R.lawn[2];
-    wgServices.push({ name: 'Lawn Care', mo: selectedLawn.mo });
+    wgServices.push({ name: 'Lawn Care', service: 'lawn_care', mo: selectedLawn.mo, perTreatment: selectedLawn.pa, visitsPerYear: selectedLawn.v });
     const customQuoteFlag = lsf > LAWN_TABLE_MAX_SQFT;
     if (customQuoteFlag) {
       addLawnCustomQuoteNote();
@@ -619,7 +619,7 @@ export function calculateEstimate(inputs) {
     });
     R.pestRoachMod = roachMod;
     R.pestInitialRoachPrice = initialRoachPrice(roachMod, fpEff, false);
-    wgServices.push({ name: 'Pest (' + R.pest.label + ')', mo: R.pest.mo });
+    wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps });
   }
 
   /* ── TREE & SHRUB ────────────────────────────────────────── */
@@ -657,7 +657,7 @@ export function calculateEstimate(inputs) {
       const rec = i === 1, dim = i !== 1;
       R.ts.push({ pa, v: t.v, ann, mo, name: t.n, recommended: rec, dimmed: dim });
     });
-    wgServices.push({ name: 'Tree & Shrub (Enhanced)', mo: R.ts[1].mo });
+    wgServices.push({ name: 'Tree & Shrub (Enhanced)', service: 'tree_shrub', mo: R.ts[1].mo, perTreatment: R.ts[1].pa, visitsPerYear: R.ts[1].v });
   }
 
   /* ── PALM INJECTION ──────────────────────────────────────── */
@@ -747,7 +747,7 @@ export function calculateEstimate(inputs) {
       const rec = i === ri, dim = i !== ri;
       R.mq.push({ pv: t.pv, v: t.v, ann, mo, n: t.n, recommended: rec, dimmed: dim });
     });
-    wgServices.push({ name: 'Mosquito (' + R.mq[ri].n + ')', mo: R.mq[ri].mo });
+    wgServices.push({ name: 'Mosquito (' + R.mq[ri].n + ')', service: 'mosquito', mo: R.mq[ri].mo, perTreatment: R.mq[ri].pv, visitsPerYear: R.mq[ri].v });
   }
 
   /* ── TERMITE BAIT ────────────────────────────────────────── */
@@ -761,7 +761,7 @@ export function calculateEstimate(inputs) {
     const ai = Math.round((sta * 14 + sta * 5.25 + sta * 0.75) * 1.75);
     const ti = Math.round((sta * 24 + sta * 5.25 + sta * 0.75) * 1.75);
     R.tmBait = { hi, ai, ti, bmo: 35, pmo: 65, perim, sta };
-    wgServices.push({ name: 'Termite Bait (Basic)', mo: 35 });
+    wgServices.push({ name: 'Termite Bait (Basic)', service: 'termite_bait', mo: 35, perTreatment: null, visitsPerYear: null });
   }
 
   /* ── RODENT BAIT ─────────────────────────────────────────── */
