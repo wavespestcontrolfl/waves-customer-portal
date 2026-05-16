@@ -520,7 +520,10 @@ const LOST_REASONS = [
 // ═══════════════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════
-export function LeadsSection() {
+export function LeadsSection({
+  embedded = false,
+  showPipelineSummary = true,
+} = {}) {
   const navigate = useNavigate();
   const [tab, setTab] = useState("pipeline");
   const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
@@ -625,12 +628,12 @@ export function LeadsSection() {
   useEffect(() => {
     if (tab === "pipeline") {
       loadLeads();
-      loadAnalytics();
+      if (showPipelineSummary) loadAnalytics();
       loadSources();
     }
     if (tab === "sources") loadSources();
     if (tab === "analytics") loadAnalytics();
-  }, [tab, loadLeads, loadSources, loadAnalytics]);
+  }, [tab, loadLeads, loadSources, loadAnalytics, showPipelineSummary]);
 
   const expandLead = async (lead) => {
     if (expandedLead === lead.id) {
@@ -668,7 +671,7 @@ export function LeadsSection() {
     setLoadError(null);
     if (tab === "pipeline") {
       loadLeads();
-      loadAnalytics();
+      if (showPipelineSummary) loadAnalytics();
       loadSources();
     }
     if (tab === "sources") loadSources();
@@ -770,139 +773,145 @@ export function LeadsSection() {
 
     return (
       <>
-        {/* Metric Cards */}
-        <div
-          style={{
-            display: "flex",
-            gap: 16,
-            flexWrap: "wrap",
-            marginBottom: 24,
-          }}
-        >
-          {" "}
-          <MetricCard
-            label="New Leads (Month)"
-            value={ov.total || 0}
-            color={C.teal}
-          />{" "}
-          <MetricCard
-            label="Conversion Rate"
-            value={fmtPct(ov.conversionRate)}
-            color={C.green}
-          />{" "}
-          <MetricCard
-            label="Avg Response Time"
-            value={fmtTime(ov.avgResponseTime)}
-            color={C.amber}
-          />{" "}
-          <MetricCard
-            label="Cost per Acquisition"
-            value={fmtMoney(ov.cpa)}
-            color={C.purple}
-          />{" "}
-          <MetricCard
-            label="Avg Speed to Lead"
-            value={fmtTime(ov.avgResponseTime)}
-            sub={
-              ov.avgResponseTime != null && ov.avgResponseTime < 5
-                ? "Great!"
-                : ov.avgResponseTime != null && ov.avgResponseTime < 15
-                  ? "Good"
-                  : ov.avgResponseTime != null
-                    ? "Needs work"
-                    : null
-            }
-            color={
-              ov.avgResponseTime != null
-                ? ov.avgResponseTime < 5
-                  ? C.green
-                  : ov.avgResponseTime < 15
-                    ? C.amber
-                    : C.red
-                : C.muted
-            }
-          />{" "}
-          <MetricCard
-            label="Monthly ROI"
-            value={ov.roi != null ? fmtPct(ov.roi) : "--"}
-            color={roiColor(ov.roi || 0)}
-          />{" "}
-        </div>
-        {/* Pipeline status */}
-        <Card style={{ marginBottom: 24 }}>
-          {" "}
-          <h2
-            style={{
-              margin: "0 0 6px",
-              color: C.heading,
-              fontSize: 12,
-              fontWeight: 500,
-              fontFamily: ROBOTO,
-              letterSpacing: "0.02em",
-            }}
-          >
-            Pipeline Status
-          </h2>{" "}
-          <div style={{ margin: "0 0 14px", color: C.muted, fontSize: 12 }}>
-            Current lead counts by status for the selected month.
-          </div>{" "}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-end",
-              gap: 6,
-              height: 130,
-            }}
-          >
-            {funnelData.map((f) => {
-              const h = Math.max(18, (f.count / maxPipelineCount) * 104);
-              return (
-                <div
-                  key={f.stage}
-                  style={{
-                    flex: "1 1 84px",
-                    minWidth: 70,
-                    textAlign: "center",
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{
-                      fontSize: 18,
-                      fontWeight: 700,
-                      color: C.heading,
-                      ...mono,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {f.count}
-                  </div>{" "}
-                  <div
-                    style={{
-                      height: h,
-                      backgroundColor: STATUS_COLORS[f.stage] || C.teal,
-                      borderRadius: "6px 6px 0 0",
-                      margin: "0 auto",
-                      width: "70%",
-                      minWidth: 30,
-                      transition: "height 0.3s",
-                    }}
-                  />{" "}
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: C.muted,
-                      marginTop: 6,
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {f.label || f.stage.replace(/_/g, " ")}
-                  </div>{" "}
-                </div>
-              );
-            })}
-          </div>{" "}
-        </Card>
+        {showPipelineSummary && (
+          <>
+            {/* Metric Cards */}
+            <div
+              style={{
+                display: "flex",
+                gap: 16,
+                flexWrap: "wrap",
+                marginBottom: 24,
+              }}
+            >
+              {" "}
+              <MetricCard
+                label="New Leads (Month)"
+                value={ov.total || 0}
+                color={C.teal}
+              />{" "}
+              <MetricCard
+                label="Conversion Rate"
+                value={fmtPct(ov.conversionRate)}
+                color={C.green}
+              />{" "}
+              <MetricCard
+                label="Avg Response Time"
+                value={fmtTime(ov.avgResponseTime)}
+                color={C.amber}
+              />{" "}
+              <MetricCard
+                label="Cost per Acquisition"
+                value={fmtMoney(ov.cpa)}
+                color={C.purple}
+              />{" "}
+              <MetricCard
+                label="Avg Speed to Lead"
+                value={fmtTime(ov.avgResponseTime)}
+                sub={
+                  ov.avgResponseTime != null && ov.avgResponseTime < 5
+                    ? "Great!"
+                    : ov.avgResponseTime != null && ov.avgResponseTime < 15
+                      ? "Good"
+                      : ov.avgResponseTime != null
+                        ? "Needs work"
+                        : null
+                }
+                color={
+                  ov.avgResponseTime != null
+                    ? ov.avgResponseTime < 5
+                      ? C.green
+                      : ov.avgResponseTime < 15
+                        ? C.amber
+                        : C.red
+                    : C.muted
+                }
+              />{" "}
+              <MetricCard
+                label="Monthly ROI"
+                value={ov.roi != null ? fmtPct(ov.roi) : "--"}
+                color={roiColor(ov.roi || 0)}
+              />{" "}
+            </div>
+            {/* Pipeline status */}
+            <Card style={{ marginBottom: 24 }}>
+              {" "}
+              <h2
+                style={{
+                  margin: "0 0 6px",
+                  color: C.heading,
+                  fontSize: 12,
+                  fontWeight: 500,
+                  fontFamily: ROBOTO,
+                  letterSpacing: "0.02em",
+                }}
+              >
+                Pipeline Status
+              </h2>{" "}
+              <div
+                style={{ margin: "0 0 14px", color: C.muted, fontSize: 12 }}
+              >
+                Current lead counts by status for the selected month.
+              </div>{" "}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "flex-end",
+                  gap: 6,
+                  height: 130,
+                }}
+              >
+                {funnelData.map((f) => {
+                  const h = Math.max(18, (f.count / maxPipelineCount) * 104);
+                  return (
+                    <div
+                      key={f.stage}
+                      style={{
+                        flex: "1 1 84px",
+                        minWidth: 70,
+                        textAlign: "center",
+                      }}
+                    >
+                      {" "}
+                      <div
+                        style={{
+                          fontSize: 18,
+                          fontWeight: 700,
+                          color: C.heading,
+                          ...mono,
+                          marginBottom: 4,
+                        }}
+                      >
+                        {f.count}
+                      </div>{" "}
+                      <div
+                        style={{
+                          height: h,
+                          backgroundColor: STATUS_COLORS[f.stage] || C.teal,
+                          borderRadius: "6px 6px 0 0",
+                          margin: "0 auto",
+                          width: "70%",
+                          minWidth: 30,
+                          transition: "height 0.3s",
+                        }}
+                      />{" "}
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: C.muted,
+                          marginTop: 6,
+                          textTransform: "capitalize",
+                        }}
+                      >
+                        {f.label || f.stage.replace(/_/g, " ")}
+                      </div>{" "}
+                    </div>
+                  );
+                })}
+              </div>{" "}
+            </Card>
+          </>
+        )}
         {/* Filters + Actions */}
         <div
           style={{
@@ -1027,11 +1036,8 @@ export function LeadsSection() {
           <>
             {/* Leads Table */}
             <Card style={{ padding: 0, overflow: "hidden" }}>
-              {" "}
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                {" "}
                 <thead>
-                  {" "}
                   <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                     {[
                       "Name / Phone",
@@ -1056,14 +1062,13 @@ export function LeadsSection() {
                         {h}
                       </th>
                     ))}
-                  </tr>{" "}
-                </thead>{" "}
+                  </tr>
+                </thead>
                 <tbody>
                   {leads.map((lead) => {
                     const isExpanded = expandedLead === lead.id;
                     return (
                       <React.Fragment key={lead.id}>
-                        {" "}
                         <tr
                           onClick={() => expandLead(lead)}
                           style={{
@@ -1075,7 +1080,6 @@ export function LeadsSection() {
                             transition: "background 0.15s",
                           }}
                         >
-                          {" "}
                           <td style={{ padding: "12px 16px" }}>
                             {" "}
                             <div
@@ -1104,7 +1108,7 @@ export function LeadsSection() {
                             >
                               {lead.phone || lead.email || "--"}
                             </div>{" "}
-                          </td>{" "}
+                          </td>
                           <td style={{ padding: "12px 16px" }}>
                             {lead.source_name ? (
                               <Badge
@@ -1120,7 +1124,7 @@ export function LeadsSection() {
                                 --
                               </span>
                             )}
-                          </td>{" "}
+                          </td>
                           <td
                             style={{
                               padding: "12px 16px",
@@ -1129,7 +1133,7 @@ export function LeadsSection() {
                             }}
                           >
                             {lead.service_interest || "--"}
-                          </td>{" "}
+                          </td>
                           <td style={{ padding: "12px 16px" }}>
                             {" "}
                             <Badge
@@ -1142,7 +1146,7 @@ export function LeadsSection() {
                                     : C.muted
                               }
                             />{" "}
-                          </td>{" "}
+                          </td>
                           <td
                             style={{ padding: "12px 16px" }}
                             onClick={(e) => e.stopPropagation()}
@@ -1170,7 +1174,7 @@ export function LeadsSection() {
                                 </option>
                               ))}
                             </select>{" "}
-                          </td>{" "}
+                          </td>
                           <td
                             style={{
                               padding: "12px 16px",
@@ -1195,7 +1199,7 @@ export function LeadsSection() {
                             ) : (
                               fmtTime(lead.response_time_minutes)
                             )}
-                          </td>{" "}
+                          </td>
                           <td
                             style={{
                               padding: "12px 16px",
@@ -1204,7 +1208,7 @@ export function LeadsSection() {
                             }}
                           >
                             {lead.assigned_name || "--"}
-                          </td>{" "}
+                          </td>
                         </tr>
                         {isExpanded && (
                           <tr>
@@ -1863,8 +1867,8 @@ export function LeadsSection() {
                       </td>
                     </tr>
                   )}
-                </tbody>{" "}
-              </table>{" "}
+                </tbody>
+              </table>
             </Card>
             {/* Pagination */}
             {leadsTotal > 50 && (
@@ -3438,23 +3442,25 @@ export function LeadsSection() {
   return (
     <div
       style={{
-        padding: 24,
-        maxWidth: 1400,
-        margin: "0 auto",
+        padding: embedded ? 0 : 24,
+        maxWidth: embedded ? "none" : 1400,
+        margin: embedded ? 0 : "0 auto",
         color: C.text,
         fontFamily: ROBOTO,
       }}
     >
       {" "}
-      <LeadsWorkspaceNav
-        active={tab}
-        onChange={setTab}
-        counts={{
-          pipeline: leadsTotal || leads.length,
-          sources: sources.length,
-          analytics: bySource.length || byChannel.length,
-        }}
-      />
+      {!embedded && (
+        <LeadsWorkspaceNav
+          active={tab}
+          onChange={setTab}
+          counts={{
+            pipeline: leadsTotal || leads.length,
+            sources: sources.length,
+            analytics: bySource.length || byChannel.length,
+          }}
+        />
+      )}
       {loadError && (
         <div
           style={{
