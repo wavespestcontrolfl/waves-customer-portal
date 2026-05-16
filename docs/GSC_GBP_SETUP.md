@@ -8,7 +8,7 @@ The SEO Grade shows **N/A** when the `gsc_*` and `gbp_performance_daily` tables 
 |---|---|---|
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Full JSON of service account key | Paste the entire JSON blob (single line or multi-line, both work). Used by `server/services/seo/search-console.js:66`. |
 | `GSC_SITE_URL` | `https://www.wavespestcontrol.com/` **or** `sc-domain:wavespestcontrol.com` | Must match a property the service account can access. Domain properties use the `sc-domain:` prefix. URL-prefix properties must include the exact protocol, host, and trailing slash shown in GSC. |
-| `GA4_PROPERTY_ID` | Numeric GA4 property ID | Used by `server/services/analytics/google-analytics.js`. This is not the `G-...` measurement ID. |
+| `GA4_PROPERTY_ID` | `487785917` | Used by `server/services/analytics/google-analytics.js`. This is the numeric GA4 property ID, not the `G-...` measurement ID or the Google Analytics account ID. |
 
 `GOOGLE_API_KEY` is **not** sufficient for Search Console or GA4 Data API access — both require OAuth/service-account auth and product-level permissions.
 
@@ -41,6 +41,8 @@ If Railway uses `GSC_SITE_URL=sc-domain:wavespestcontrol.com`, the service accou
 3. **Admin → Property access management → Add users**.
 4. Paste the same `client_email`, set role to **Viewer**, save.
 
+For Waves, the Google Analytics account ID is `353979644`, but the GA4 property/app ID used by the Data API is `487785917`. Railway should use `GA4_PROPERTY_ID=487785917`.
+
 ## Step 4 — Grant access to Google Business Profile (optional, for GBP data)
 
 1. https://business.google.com → open your account.
@@ -51,7 +53,7 @@ If Railway uses `GSC_SITE_URL=sc-domain:wavespestcontrol.com`, the service accou
 ```
 railway variables set GOOGLE_SERVICE_ACCOUNT_JSON="$(cat path/to/key.json)"
 railway variables set GSC_SITE_URL="https://www.wavespestcontrol.com/"
-railway variables set GA4_PROPERTY_ID="123456789"
+railway variables set GA4_PROPERTY_ID="487785917"
 ```
 
 Or via the Railway dashboard → Variables tab → **Raw Editor** (safer for multi-line JSON).
