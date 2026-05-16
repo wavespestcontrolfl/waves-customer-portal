@@ -34,6 +34,7 @@ import PipelineAnalytics, {
 import {
   FollowUpModalV2,
   DeclineModalV2,
+  ExtendEstimateModalV2,
 } from "../../components/admin/EstimateModalsV2";
 import useIsMobile from "../../hooks/useIsMobile";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
@@ -1310,9 +1311,11 @@ function EstimatePipelineViewV2() {
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [filter, setFilter] = useState("all");
   const [dateRange, setDateRange] = useState("all");
+  const [search, setSearch] = useState("");
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
+  const [extendTarget, setExtendTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
 
   const refreshEstimates = useCallback(() => {
@@ -1533,7 +1536,20 @@ function EstimatePipelineViewV2() {
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
   );
 
-  const filtered = sorted.filter((e) => estimateMatchesFilter(e, filter));
+  const filtered = sorted
+    .filter((e) => estimateMatchesFilter(e, filter))
+    .filter((e) => {
+      const q = search.trim().toLowerCase();
+      if (!q) return true;
+      const ref = shortEstimateRef(e.id).toLowerCase();
+      return (
+        (e.customerName || "").toLowerCase().includes(q) ||
+        (e.address || "").toLowerCase().includes(q) ||
+        (e.customerEmail || "").toLowerCase().includes(q) ||
+        (e.customerPhone || "").includes(q) ||
+        ref.includes(q)
+      );
+    });
 
   return (
     <div style={{ fontFamily: ROBOTO }}>
@@ -1553,6 +1569,16 @@ function EstimatePipelineViewV2() {
           onClose={() => setDeclineTarget(null)}
           onSaved={() => {
             setDeclineTarget(null);
+            refreshEstimates();
+          }}
+        />
+      )}
+      {extendTarget && (
+        <ExtendEstimateModalV2
+          estimate={extendTarget}
+          onClose={() => setExtendTarget(null)}
+          onExtended={() => {
+            setExtendTarget(null);
             refreshEstimates();
           }}
         />
@@ -1580,6 +1606,42 @@ function EstimatePipelineViewV2() {
             dateRange={dateRange}
             onDateRangeChange={setDateRange}
           />
+          {/* Search — name / address / phone / email / reference. Sits
+              under the Needs Attention strip so the operator can drill
+              from "Going cold > 48h" into a specific customer fast. */}
+          <div className="mb-3 relative">
+            {" "}
+            <input
+              type="search"
+              value={search}
+              onChange={(ev) => setSearch(ev.target.value)}
+              placeholder="Search by customer name, address, phone, email, or #ref"
+              aria-label="Search estimates"
+              className={cn(
+                "w-full h-10 pl-10 pr-10 text-14 rounded-sm",
+                "bg-white border-hairline border-zinc-300",
+                "placeholder:text-ink-tertiary u-focus-ring",
+              )}
+            />{" "}
+            <span
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-tertiary pointer-events-none"
+              aria-hidden
+            >
+              {" "}
+              <SlidersHorizontal size={16} strokeWidth={1.75} />{" "}
+            </span>
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center h-7 w-7 rounded-full text-ink-tertiary hover:bg-zinc-100 u-focus-ring"
+              >
+                {" "}
+                <X size={14} strokeWidth={1.75} aria-hidden />{" "}
+              </button>
+            )}{" "}
+          </div>
           {/* Estimates list */}
           {filtered.length === 0 ? (
             <div className="p-10 text-center text-13 text-ink-secondary">
@@ -2022,6 +2084,19 @@ function EstimatePipelineViewV2() {
                                 : "No phone on file",
                               onClick: () => sendBookingLink(e),
                             },
+                            ["sent", "viewed", "expired"].includes(
+                              e.status,
+                            ) && {
+                              key: "extend",
+                              label:
+                                e.status === "expired"
+                                  ? "Reopen + extend"
+                                  : "Extend estimate",
+                              icon: (
+                                <CalendarCheck size={16} strokeWidth={1.75} />
+                              ),
+                              onClick: () => setExtendTarget(e),
+                            },
                             (e.status === "sent" ||
                               e.status === "viewed") && {
                               key: "resend",
@@ -2394,6 +2469,7 @@ function MobileEstimateRow({
   onDeleteDraft,
   onResend,
   onCopyLink,
+  onExtend,
   v3Flag = false,
 }) {
   const navigate = useNavigate();
@@ -2641,6 +2717,15 @@ function MobileEstimateRow({
               : "No phone on file",
             onClick: () => onSendBooking?.(estimate),
           },
+          ["sent", "viewed", "expired"].includes(estimate.status) && {
+            key: "extend",
+            label:
+              estimate.status === "expired"
+                ? "Reopen + extend"
+                : "Extend estimate",
+            icon: <CalendarCheck size={16} strokeWidth={1.75} />,
+            onClick: () => onExtend?.(estimate),
+          },
           canMarkEstimateWon(estimate) && {
             key: "mark-won",
             label: "Mark won (verbal yes)",
@@ -2717,6 +2802,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
+  const [extendTarget, setExtendTarget] = useState(null);
   const [sort, setSort] = useState("newest");
 
   const refreshEstimates = useCallback(() => {
@@ -3073,6 +3159,7 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
               onDeleteDraft={deleteDraftMobile}
               onResend={resendEstimateMobile}
               onCopyLink={copyEstimateLinkMobile}
+              onExtend={setExtendTarget}
               v3Flag={v3Flag}
             />
           ))}
@@ -3090,6 +3177,16 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
           estimate={auditTarget.estimate || auditTarget}
           initialFocus={auditTarget.focus || "all"}
           onClose={() => setAuditTarget(null)}
+        />
+      )}
+      {extendTarget && (
+        <ExtendEstimateModalV2
+          estimate={extendTarget}
+          onClose={() => setExtendTarget(null)}
+          onExtended={() => {
+            setExtendTarget(null);
+            refreshEstimates();
+          }}
         />
       )}
     </div>
