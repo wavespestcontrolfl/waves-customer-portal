@@ -1903,7 +1903,7 @@ function ServicesTab() {
                                 borderRadius: 8,
                               }}
                             >
-                              <Icon name="document" size={16} strokeWidth={1.75} /> Download PDF
+                              <Icon name="document" size={16} strokeWidth={1.75} /> {s.reportUrl ? 'View report' : 'Download PDF'}
                             </a>
                             <div style={{ fontSize: 12, color: muted }}>Waves Pest Control · (941) 297-5749</div>
                           </div>

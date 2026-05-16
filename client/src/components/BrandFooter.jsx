@@ -1,7 +1,51 @@
 import { COLORS as B, FONTS } from '../theme-brand';
 import NewsletterSignup from './NewsletterSignup';
 
+const GBP_LOCATION_LINKS = [
+  { label: 'Lakewood Ranch', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Lakewood%20Ranch&query_place_id=ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
+  { label: 'Parrish', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Parrish&query_place_id=ChIJM32aQRIlw4gRr7goqhbAVpw' },
+  { label: 'Sarasota', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Sarasota&query_place_id=ChIJeT_63_Y5w4gRGTNLozgSmdw' },
+  { label: 'Venice', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Venice&query_place_id=ChIJ81vmrblZw4gRREDmlDUpq0E' },
+];
+
+function ServiceAreaLinks({ color }) {
+  return (
+    <>
+      {GBP_LOCATION_LINKS.map((location, index) => (
+        <span key={location.label}>
+          {index > 0 && <span aria-hidden="true"> · </span>}
+          <a
+            href={location.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color, textDecoration: 'underline', textUnderlineOffset: 3 }}
+          >
+            {location.label}
+          </a>
+        </span>
+      ))}
+    </>
+  );
+}
+
 export default function BrandFooter({ borderColor, variant }) {
+  if (variant === 'document') {
+    return (
+      <div style={{
+        textAlign: 'center', marginTop: 28, paddingTop: 18,
+        borderTop: `1px solid ${borderColor || B.grayLight}`,
+      }}>
+        <img src="/waves-logo.png" alt="" style={{ height: 26, opacity: 0.62, marginBottom: 8 }} />
+        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Waves Pest Control, LLC</div>
+        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 5, lineHeight: 1.6 }}>Family-owned pest control and lawn care in Southwest Florida</div>
+        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 5, lineHeight: 1.6 }}>
+          <ServiceAreaLinks color={B.grayDark} />
+        </div>
+        <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>© {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved</div>
+      </div>
+    );
+  }
+
   const onDark = variant === 'dark';
   const headingColor = onDark ? '#fff' : B.navy;
   const accentColor = onDark ? B.yellow : B.wavesBlue;
@@ -53,7 +97,9 @@ export default function BrandFooter({ borderColor, variant }) {
       <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: logoOpacity, marginBottom: 6 }} />
       <div style={{ fontSize: 13, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading }}>Waves Pest Control, LLC</div>
       <div style={{ fontSize: 12, color: bodyColor, marginTop: 4, lineHeight: 1.6 }}>Family-owned pest control &amp; lawn care · Southwest Florida</div>
-      <div style={{ fontSize: 12, color: bodyColor, marginTop: 6, lineHeight: 1.6 }}>Lakewood Ranch · Parrish · Sarasota · Venice</div>
+      <div style={{ fontSize: 12, color: bodyColor, marginTop: 6, lineHeight: 1.6 }}>
+        <ServiceAreaLinks color={bodyColor} />
+      </div>
       <div style={{ fontSize: 11, color: mutedColor, marginTop: 10 }}>© {new Date().getFullYear()} Waves Pest Control, LLC · All rights reserved</div>
     </div>
   );

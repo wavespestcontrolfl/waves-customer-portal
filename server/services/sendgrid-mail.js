@@ -96,7 +96,7 @@ function asmBlockFor(groupId) {
  * Send one email. Used for test sends and one-off transactional. Returns
  * { messageId } where messageId is read from the X-Message-Id response header.
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const payload = {
@@ -113,6 +113,7 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
     ],
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
+    attachments: Array.isArray(attachments) && attachments.length ? attachments : undefined,
     // Disable SendGrid's own tracking pixels by default — we use our own
     // open/click events via webhooks. Operator can re-enable via env later.
     tracking_settings: {
