@@ -48,7 +48,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
     setLoading(true);
     setErrorMsg('');
     try {
-      const token = localStorage.getItem('adminToken');
+      const token = localStorage.getItem('adminToken') || localStorage.getItem('waves_admin_token');
       const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -87,7 +87,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       fd.append('photo', file);
       fd.append('photoType', photoType);
       if (caption.trim()) fd.append('caption', caption.trim());
-      const token = localStorage.getItem('adminToken');
+      const token = localStorage.getItem('adminToken') || localStorage.getItem('waves_admin_token');
       const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },

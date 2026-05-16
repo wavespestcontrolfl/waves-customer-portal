@@ -374,6 +374,139 @@ describe('service report v1', () => {
     expect(data.zones.map((zone) => zone.label)).toEqual(['Perimeter']);
   });
 
+  test('v1 data carries completion panel fields into the public report payload', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-complete',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-15',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Perimeter', 'Customer spoke with tech']),
+      customer_interaction: null,
+      soil_temp: 78,
+      thatch_measurement: 0.5,
+      soil_ph: 6.8,
+      soil_moisture: 24,
+      structured_notes: JSON.stringify({
+        customerRecap: 'Treated the front entry and garage, then reviewed the concern with the customer.',
+        timeOnSite: '42:00',
+        customerInteraction: 'spoke',
+        areasTreated: ['Perimeter', 'Garage'],
+        protocolActionsCompleted: ['Treated front entry trail'],
+        observations: ['Light ant activity at front entry'],
+        recommendations: ['Seal the small gap under the front door'],
+      }),
+      service_data: '{}',
+    }, 'token-complete', knex);
+
+    expect(data.summary).toBe('Treated the front entry and garage, then reviewed the concern with the customer.');
+    expect(data.customerInteraction).toBe('spoke');
+    expect(data.serviceAreas).toEqual(['Perimeter', 'Garage']);
+    expect(data.measurements).toMatchObject({
+      soilTemp: 78,
+      thatch: 0.5,
+      soilPh: 6.8,
+      moisture: 24,
+    });
+    expect(data.protocol.actions).toEqual(['Treated front entry trail']);
+    expect(data.protocol.observations).toEqual(['Light ant activity at front entry']);
+    expect(data.recommendations).toContain('Seal the small gap under the front door');
+    expect(data.metrics.find((metric) => metric.key === 'on_site_min')).toMatchObject({ value: 42 });
+  });
+
+  test('v1 data filters saved property zones to the report service line', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [
+        {
+          id: 'zone-lawn',
+          customer_id: 'customer-1',
+          is_active: true,
+          letter: 'A',
+          label: 'Front lawn',
+          category: 'lawn',
+          geometry: { x: 60, y: 40, w: 160, h: 80 },
+          service_lines: ['lawn'],
+        },
+        {
+          id: 'zone-pest',
+          customer_id: 'customer-1',
+          is_active: true,
+          letter: 'B',
+          label: 'Kitchen baseboards',
+          category: 'interior',
+          geometry: { x: 260, y: 140, w: 90, h: 60 },
+          service_lines: ['pest'],
+        },
+      ],
+      service_findings: [],
+      service_photos: [],
+      lawn_assessments: [],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy(column, direction = 'asc') {
+          rows.sort((a, b) => {
+            const av = a[column] ?? '';
+            const bv = b[column] ?? '';
+            const result = String(av).localeCompare(String(bv));
+            return String(direction).toLowerCase() === 'desc' ? -result : result;
+          });
+          return query;
+        },
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-lawn-zones',
+      customer_id: 'customer-1',
+      service_line: 'lawn',
+      service_type: 'Weed Control',
+      service_date: '2026-05-16',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Front lawn']),
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-lawn-zones', knex);
+
+    expect(data.zones.map((zone) => zone.label)).toEqual(['Front lawn']);
+  });
+
   test('v1 data includes linked lawn assessment and exposes lawn health metrics', async () => {
     const fixtures = {
       service_products: [],

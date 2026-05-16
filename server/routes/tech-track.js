@@ -227,10 +227,9 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    // Same ownership rule as the en-route route — tech can only
-    // attach photos to their own assigned services. Admins go
-    // through the admin-projects flow.
-    if (svc.technician_id !== req.technicianId) {
+    // Techs can only attach photos to their own assigned services.
+    // Admin dispatch can attach completion-panel photos for any route row.
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 
@@ -339,7 +338,7 @@ router.get('/:id/photos', async (req, res, next) => {
       .where({ id: req.params.id })
       .first('id', 'customer_id', 'technician_id', 'scheduled_date');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    if (svc.technician_id !== req.technicianId) {
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
 

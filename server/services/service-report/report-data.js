@@ -36,6 +36,15 @@ function parseJsonArray(value) {
   }
 }
 
+function zoneSupportsServiceLine(zone, serviceLine) {
+  const serviceLines = parseJsonArray(zone?.service_lines)
+    .map((line) => String(line || '').trim().toLowerCase())
+    .filter(Boolean);
+  if (!serviceLines.length) return true;
+  if (!serviceLine) return true;
+  return serviceLines.includes(String(serviceLine).toLowerCase());
+}
+
 function uniqueStrings(values) {
   const out = [];
   const seen = new Set();
@@ -499,7 +508,8 @@ async function buildReportV1Data(service, token, knex = db) {
     ...parseJsonArray(structured.areasServiced),
     ...parseJsonArray(structured.areasTreated),
   ]);
-  const zones = dbZones.length ? dbZones : defaultZones(areaLabels, serviceLine);
+  const supportedDbZones = dbZones.filter((zone) => zoneSupportsServiceLine(zone, serviceLine));
+  const zones = supportedDbZones.length ? supportedDbZones : defaultZones(areaLabels, serviceLine);
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
@@ -648,6 +658,15 @@ async function buildReportV1Data(service, token, knex = db) {
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     serviceAddress: compactAddress(service),
     visitOutcome: protocol.visitOutcome || 'completed',
+    summary: structured.customerRecap || '',
+    customerInteraction: service.customer_interaction || structured.customerInteraction || null,
+    serviceAreas: areaLabels,
+    measurements: {
+      soilTemp: service.soil_temp,
+      thatch: service.thatch_measurement,
+      soilPh: service.soil_ph,
+      moisture: service.soil_moisture,
+    },
     pressureIndex,
     metrics,
     mapSvg,
@@ -705,4 +724,5 @@ module.exports = {
   buildLawnAssessmentReportData,
   defaultGeometry,
   defaultZones,
+  zoneSupportsServiceLine,
 };

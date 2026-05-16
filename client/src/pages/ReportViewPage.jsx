@@ -1637,6 +1637,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
   const serviceNotes = String(data.legacy?.notes || '').trim();
+  const visitSummary = String(data.summary || '').trim();
+  const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas.filter(Boolean) : [];
+  const measurements = data.measurements || data.legacy?.measurements || {};
+  const measurementRows = [
+    ['Soil temp', measurements.soilTemp, '°F'],
+    ['Thatch', measurements.thatch, '"'],
+    ['Soil pH', measurements.soilPh, ''],
+    ['Moisture', measurements.moisture, '%'],
+  ].filter(([, value]) => value != null && value !== '');
+  const hasVisitSummary = Boolean(
+    visitSummary ||
+    data.customerInteraction ||
+    serviceAreas.length ||
+    measurementRows.length,
+  );
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
@@ -3033,6 +3048,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             serviceLine={data.serviceLine}
           />
         ) : null}
+
+        {hasVisitSummary && (
+          <section className="sr-section" id="visit-summary">
+            <h2>Visit summary</h2>
+            {visitSummary && <p style={{ margin: '0 0 16px', color: '#404040', lineHeight: 1.6 }}>{visitSummary}</p>}
+            <div className="sr-grid-3">
+              {data.customerInteraction && (
+                <div className="sr-cell">
+                  <div className="sr-cell-label">Customer interaction</div>
+                  <div className="sr-cell-value">{formatEnumLabel(data.customerInteraction)}</div>
+                </div>
+              )}
+              {serviceAreas.length > 0 && (
+                <div className="sr-cell">
+                  <div className="sr-cell-label">Areas serviced</div>
+                  <div className="sr-cell-value">{serviceAreas.join(', ')}</div>
+                </div>
+              )}
+              {measurementRows.map(([label, value, suffix]) => (
+                <div className="sr-cell" key={label}>
+                  <div className="sr-cell-label">{label}</div>
+                  <div className="sr-cell-value">{valueOrDash(value, suffix)}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         <div id="map">
           <TreatmentMapSection data={data} mode={mode} token={token} showTapPrompt={mode === 'live'} />
