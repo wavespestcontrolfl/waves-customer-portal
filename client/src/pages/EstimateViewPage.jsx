@@ -184,7 +184,7 @@ function PerTreatmentBreakdownCard({ rows, total }) {
             <div style={{ fontSize: 15, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
               {row.label || 'Service'}
               {row.visitsPerYear ? (
-                <span style={{ fontSize: 13, color: ESTIMATE_MUTED, marginLeft: 6 }}>
+                <span style={{ fontSize: 14, color: ESTIMATE_MUTED, marginLeft: 6 }}>
                   · {row.visitsPerYear}/yr
                 </span>
               ) : null}
