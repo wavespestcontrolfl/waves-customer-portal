@@ -27,6 +27,10 @@ import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
 import { MarginCalculator } from "./PricingLogicPage";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
+import PipelineAnalytics, {
+  isFollowUpOverdueEstimate,
+  isGoingColdEstimate,
+} from "./PipelineAnalytics";
 import {
   FollowUpModalV2,
   DeclineModalV2,
@@ -262,11 +266,29 @@ const PIPELINE_AND_RISK_FILTERS = [
 
 function estimateMatchesFilter(e, filter) {
   if (filter === "all") return true;
+  if (filter === "drafts")
+    return e._class === "needs_estimate" || e._class === "ready_to_send";
+  if (filter === "sent_group")
+    return (
+      e._class === "awaiting" ||
+      e._class === "follow_up" ||
+      e._class === "scheduled"
+    );
+  if (filter === "follow_up_overdue") return isFollowUpOverdueEstimate(e);
+  if (filter === "going_cold") return isGoingColdEstimate(e);
   if (filter === "pricing_risk") return !!e.pricingRisk?.hasRisk;
   if (filter === "missing_cogs")
     return (e.pricingRisk?.missingCogsCount || 0) > 0;
   if (filter === "low_margin") return (e.pricingRisk?.lowMarginCount || 0) > 0;
   return e._class === filter;
+}
+
+function estimateFilterLabel(filter) {
+  if (filter === "drafts") return "Drafts";
+  if (filter === "sent_group") return "Sent";
+  if (filter === "follow_up_overdue") return "Follow-up overdue";
+  if (filter === "going_cold") return "Going cold";
+  return PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label;
 }
 
 function serviceLineFromAuditLine(line) {
@@ -1148,6 +1170,7 @@ function EstimatePipelineViewV2() {
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [filter, setFilter] = useState("all");
+  const [dateRange, setDateRange] = useState("all");
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -1345,69 +1368,6 @@ function EstimatePipelineViewV2() {
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt),
   );
 
-  // Stats — preserved 1:1 from V1
-  const total = estimates.length;
-  const accepted = estimates.filter((e) => e.status === "accepted").length;
-  const sent = estimates.filter((e) =>
-    ["sent", "viewed"].includes(e.status),
-  ).length;
-  const declined = estimates.filter(
-    (e) => e.status === "declined" || e.status === "expired",
-  ).length;
-  const totalMRRWon = estimates
-    .filter((e) => e.status === "accepted")
-    .reduce((s, e) => s + (e.monthlyTotal || 0), 0);
-  const pipelineValue = estimates
-    .filter((e) => !["accepted", "declined", "expired"].includes(e.status))
-    .reduce((s, e) => s + (e.monthlyTotal || 0), 0);
-  const conversionRate =
-    sent + accepted + declined > 0
-      ? Math.round((accepted / (sent + accepted + declined)) * 100)
-      : 0;
-  const avgEstimateValue =
-    total > 0
-      ? Math.round(
-          estimates.reduce((s, e) => s + (e.monthlyTotal || 0), 0) / total,
-        )
-      : 0;
-
-  const HOUR = 3600000;
-  const now = Date.now();
-  const followUpOverdue = estimates.filter((e) => {
-    if (
-      e.status === "sent" &&
-      !e.viewedAt &&
-      e.sentAt &&
-      now - new Date(e.sentAt).getTime() > 72 * HOUR
-    )
-      return true;
-    if (
-      e.status === "viewed" &&
-      e.viewedAt &&
-      now - new Date(e.viewedAt).getTime() > 48 * HOUR
-    )
-      return true;
-    return false;
-  }).length;
-  const pricingRiskCount = estimates.filter(
-    (e) => e.pricingRisk?.hasRisk,
-  ).length;
-  const missingCogsCount = estimates.filter(
-    (e) => (e.pricingRisk?.missingCogsCount || 0) > 0,
-  ).length;
-  const lowMarginCount = estimates.filter(
-    (e) => (e.pricingRisk?.lowMarginCount || 0) > 0,
-  ).length;
-
-  // Filter counts
-  const filterCounts = {};
-  for (const f of PIPELINE_AND_RISK_FILTERS) {
-    filterCounts[f.key] =
-      f.key === "all"
-        ? total
-        : classified.filter((e) => estimateMatchesFilter(e, f.key)).length;
-  }
-
   const filtered = sorted.filter((e) => estimateMatchesFilter(e, filter));
 
   return (
@@ -1446,70 +1406,21 @@ function EstimatePipelineViewV2() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-[220px_minmax(0,1fr)] gap-4 items-start">
-        {" "}
-        <WorkQueueRail
-          value={filter}
-          onChange={setFilter}
-          counts={filterCounts}
-        />{" "}
+      <div className="grid gap-4 items-start grid-cols-1">
         <div className="min-w-0">
-          {/* Stats bar */}
-          <div className="flex gap-2 mb-5 flex-wrap">
-            {" "}
-            <StatCard
-              label="Pipeline Value"
-              value={`$${Math.round(pipelineValue)}`}
-              sub="/mo potential"
-            />{" "}
-            <StatCard
-              label="MRR Won"
-              value={`$${Math.round(totalMRRWon)}`}
-              sub="/mo closed"
-            />{" "}
-            <StatCard
-              label="Conversion"
-              value={`${conversionRate}%`}
-              sub={`${accepted} of ${sent + accepted + declined}`}
-            />{" "}
-            <StatCard
-              label="Avg Estimate"
-              value={`$${avgEstimateValue}`}
-              sub="/mo"
-            />{" "}
-            <StatCard
-              label="Follow-Up Overdue"
-              value={followUpOverdue}
-              sub={followUpOverdue > 0 ? "need attention" : "all clear"}
-              alert={followUpOverdue > 0}
-            />{" "}
-            <StatCard
-              label="Pricing Risk"
-              value={pricingRiskCount}
-              sub={`${missingCogsCount} COGS · ${lowMarginCount} margin`}
-              alert={pricingRiskCount > 0}
-            />{" "}
-            <StatCard
-              label="Total"
-              value={total}
-              sub={`${accepted} won · ${declined} lost`}
-            />{" "}
-          </div>{" "}
-          <div className="mb-4 flex justify-center sm:justify-start xl:hidden">
-            {" "}
-            <FilterSheetV2
-              value={filter}
-              onChange={setFilter}
-              options={PIPELINE_AND_RISK_FILTERS}
-              counts={filterCounts}
-            />{" "}
-          </div>
+          <PipelineAnalytics
+            estimates={estimates}
+            activeFilter={filter}
+            onFilterChange={setFilter}
+            dateRange={dateRange}
+            onDateRangeChange={setDateRange}
+          />
           {/* Estimates list */}
           {filtered.length === 0 ? (
             <div className="p-10 text-center text-13 text-ink-secondary">
               No estimates{" "}
               {filter !== "all"
-                ? `in "${PIPELINE_AND_RISK_FILTERS.find((f) => f.key === filter)?.label}"`
+                ? `in "${estimateFilterLabel(filter) || filter}"`
                 : "yet"}
               . Create one using the Create Estimate tab.
             </div>
