@@ -36,7 +36,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
-const CONFIRMED_ACTION_TOOL_NAMES = new Set(['request_instant_payout']);
+const CONFIRMED_ACTION_TOOL_NAMES = new Set(['request_instant_payout', 'request_standard_payout']);
 
 function isToolFailure(result) {
   return result && typeof result === 'object' && (result.error || result.failed === true);
@@ -488,14 +488,14 @@ BANKING CAPABILITIES:
 - Payout history with transaction-level detail (which customers paid in each deposit)
 - Cash flow analysis (money in vs out, net, trend)
 - Fee analysis (effective processing rate, card vs ACH comparison)
-- Instant payout planning (1% fee). The query bar can calculate and explain the payout, but execution must go through the confirmed action endpoint.
+- Standard payout planning (no Instant Payout fee) and Instant payout planning (1.5% US fee estimate). Execution must go through the confirmed action endpoint.
 - Reconciliation tracking (match Stripe deposits to bank records)
 - CSV/OFX export for Capital One import or CPA handoff
 
 KEY FACTS:
 - Payments are processed via Stripe (card, Apple Pay, Google Pay, ACH)
-- Standard payouts take 2 business days to reach Capital One
-- Instant payouts arrive in minutes but cost 1% of the amount
+- Standard manual payouts avoid the Instant Payout fee and arrive on Stripe's standard bank payout timing
+- Instant payouts arrive in minutes but cost about 1.5% of the amount for US Dashboard users
 - The business bank is Capital One
 
 RESPONSE STYLE:
@@ -504,7 +504,8 @@ RESPONSE STYLE:
 - For payouts, include the arrival date (when it actually hits the bank)
 - For cash flow, always show net (in minus out) with a clear positive/negative indicator
 - When discussing fees, show both the dollar amount and the effective percentage rate
-- For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute from the query flow.`,
+- For standard payouts, say clearly that this avoids the Instant Payout fee but still uses Stripe's standard payout timing.
+- For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute payouts from the query flow.`,
 };
 
 function getToolsForContext(context) {

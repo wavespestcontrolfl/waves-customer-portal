@@ -3,7 +3,7 @@
  * server/services/stripe-banking.js
  *
  * Syncs payouts from Stripe, provides cash flow analysis,
- * reconciliation tools, and instant payout support.
+ * reconciliation tools, and manual payout support.
  */
 
 const Stripe = require('stripe');
@@ -11,6 +11,8 @@ const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
 const BankingExport = require('./banking-export');
+
+const INSTANT_PAYOUT_FEE_RATE_US = 0.015;
 
 // ═══════════════════════════════════════════════════════════════
 // Lazy-init Stripe client — don't crash if key is missing
@@ -420,39 +422,55 @@ async function getPayoutDetails(payoutId) {
 
 
 // ═══════════════════════════════════════════════════════════════
-// CREATE INSTANT PAYOUT
+// CREATE MANUAL PAYOUTS
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Request an instant payout from Stripe.
+ * Request a manual payout from Stripe.
  * @param {number} amountDollars — amount in dollars
+ * @param {object} opts
+ * @param {'standard'|'instant'} opts.method — payout speed
  */
-async function createInstantPayout(amountDollars, opts = {}) {
+async function createPayout(amountDollars, opts = {}) {
   const stripe = getStripe();
   if (!stripe) throw new Error('Stripe not configured');
 
   try {
-    const amountCents = Math.round(amountDollars * 100);
-    const balance = await stripe.balance.retrieve();
-    const availableUsdCents = (balance.available || [])
-      .filter(b => String(b.currency || '').toLowerCase() === 'usd')
-      .reduce((sum, b) => sum + Number(b.amount || 0), 0);
-    if (amountCents > availableUsdCents) {
-      throw new Error(`Instant payout amount exceeds available Stripe balance ($${(availableUsdCents / 100).toFixed(2)})`);
+    const method = String(opts.method || 'standard').toLowerCase();
+    if (!['standard', 'instant'].includes(method)) {
+      throw new Error(`Invalid payout method: ${method}`);
+    }
+
+    const amountCents = Math.round(Number(amountDollars) * 100);
+    if (!Number.isFinite(amountCents) || amountCents <= 0) {
+      throw new Error('Payout amount must be a positive number');
     }
 
     // Idempotency key: collapses retries within the same minute for the same amount.
     // Stripe honors this for 24h; duplicate submissions in that window return the original payout.
     const minuteBucket = Math.floor(Date.now() / 60000);
-    const idempotencyKey = opts.idempotencyKey && /^[a-zA-Z0-9._:-]{8,120}$/.test(String(opts.idempotencyKey))
+    const idempotencyPrefix = method === 'instant' ? 'ipo' : 'spo';
+    const providedIdempotencyKey = opts.idempotencyKey && /^[a-zA-Z0-9._:-]{8,120}$/.test(String(opts.idempotencyKey))
       ? String(opts.idempotencyKey)
-      : `ipo_${amountCents}_${minuteBucket}`;
+      : null;
+    const idempotencyKey = providedIdempotencyKey || `${idempotencyPrefix}_${amountCents}_${minuteBucket}`;
+
+    const balance = await stripe.balance.retrieve();
+    const availableUsdCents = (balance.available || [])
+      .filter(b => String(b.currency || '').toLowerCase() === 'usd')
+      .reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    if (amountCents > availableUsdCents && !providedIdempotencyKey) {
+      const label = method === 'instant' ? 'Instant payout' : 'Standard payout';
+      throw new Error(`${label} amount exceeds available Stripe balance ($${(availableUsdCents / 100).toFixed(2)})`);
+    }
 
     const actorId = nonPiiActorId(opts.requestedBy);
+    const description = method === 'instant' ? 'Instant payout' : 'Standard payout';
     const createParams = {
       amount: amountCents,
       currency: 'usd',
-      method: 'instant',
+      method,
+      description,
     };
     if (actorId) {
       createParams.metadata = { waves_requested_by: actorId };
@@ -468,26 +486,35 @@ async function createInstantPayout(amountDollars, opts = {}) {
       status: payout.status,
       arrival_date: payout.arrival_date ? new Date(payout.arrival_date * 1000).toISOString() : null,
       created_at_stripe: payout.created ? new Date(payout.created * 1000).toISOString() : null,
-      method: 'instant',
+      method: payout.method || method,
       type: payout.type,
-      description: payout.description || 'Instant payout',
+      description: payout.description || description,
+      metadata: JSON.stringify(payout.metadata || {}),
       synced_at: new Date().toISOString(),
     }).onConflict('stripe_payout_id').merge();
 
-    logger.info(`[stripe-banking] Instant payout created: $${amountDollars}, payout ${payout.id}, requestedBy=${actorId || 'unknown'}`);
+    logger.info(`[stripe-banking] ${method} payout created: $${amountDollars}, payout ${payout.id}, requestedBy=${actorId || 'unknown'}`);
 
     return {
       payout_id: payout.id,
       amount: payout.amount / 100,
       status: payout.status,
       arrival_date: payout.arrival_date ? new Date(payout.arrival_date * 1000).toISOString() : null,
-      method: 'instant',
-      fee_estimate: amountDollars * 0.01, // Stripe instant payout fee is ~1%
+      method: payout.method || method,
+      fee_estimate: method === 'instant' ? Number(amountDollars) * INSTANT_PAYOUT_FEE_RATE_US : 0,
     };
   } catch (err) {
-    logger.error('[stripe-banking] createInstantPayout failed:', err.message);
+    logger.error('[stripe-banking] createPayout failed:', err.message);
     throw err;
   }
+}
+
+async function createInstantPayout(amountDollars, opts = {}) {
+  return createPayout(amountDollars, { ...opts, method: 'instant' });
+}
+
+async function createStandardPayout(amountDollars, opts = {}) {
+  return createPayout(amountDollars, { ...opts, method: 'standard' });
 }
 
 
@@ -786,7 +813,9 @@ module.exports = {
   syncPayoutTransactions,
   upsertPayoutFromEvent,
   getPayoutDetails,
+  createPayout,
   createInstantPayout,
+  createStandardPayout,
   getCashFlow,
   reconcilePayout,
   generateExport,
