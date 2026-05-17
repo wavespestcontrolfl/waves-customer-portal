@@ -283,9 +283,25 @@ function evaluateProjectReadiness({
     const productName = findings?.product_name === "Other"
       ? findings?.product_name_other
       : findings?.product_name;
-    const treatmentMethod = findings?.treatment_method === "Other"
+    const rawMethod = findings?.treatment_method;
+    const treatmentMethod = rawMethod === "Other"
       ? findings?.treatment_method_other
-      : findings?.treatment_method;
+      : rawMethod;
+    // Mirror server-side method-aware coverage requirements in
+    // server/routes/admin-projects.js — bait systems have no gallons, borate
+    // wood treatments may not either.
+    const isBaitSystem = rawMethod === "Bait system";
+    const isWoodTreatment = rawMethod === "Wood treatment (borate)";
+    const needsGallons = !isBaitSystem && !isWoodTreatment;
+    const hasArea =
+      hasMeaningfulValue(findings?.square_footage) ||
+      hasMeaningfulValue(findings?.linear_feet);
+    const coverageOk = needsGallons
+      ? hasArea && hasMeaningfulValue(findings?.gallons_applied)
+      : hasArea;
+    const coverageLabel = needsGallons
+      ? "Coverage + gallons applied"
+      : "Coverage (sq ft or linear ft)";
     required.push(
       {
         label: "Treatment address or lot/block",
@@ -314,11 +330,8 @@ function evaluateProjectReadiness({
           hasMeaningfulValue(findings?.concentration_pct),
       },
       {
-        label: "Coverage + gallons applied",
-        ok:
-          (hasMeaningfulValue(findings?.square_footage) ||
-            hasMeaningfulValue(findings?.linear_feet)) &&
-          hasMeaningfulValue(findings?.gallons_applied),
+        label: coverageLabel,
+        ok: coverageOk,
       },
       {
         label: "Applicator's printed name",
