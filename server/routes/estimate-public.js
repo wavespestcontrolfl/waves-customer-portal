@@ -17,6 +17,7 @@ const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME } = require('../services/pricing-engine/constants');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
+const BillingCadence = require('../services/billing-cadence');
 const {
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateViewed,
@@ -1213,8 +1214,9 @@ ${shellQuestionsBar()}
       const body = await r.json();
       const primary = body.primary || [];
       const expander = body.expander || [];
-      const slots = primary.slice(0, 3);
-      const moreSlots = expander.slice(0, 3);
+      const allSlots = primary.concat(expander);
+      const slots = allSlots.slice(0, 3);
+      const moreSlots = allSlots.slice(3, 6);
       if (!slots.length) {
         area.className = 'booking-state';
         area.innerHTML = 'No times available in the next 2 weeks. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll get you on the schedule.';
@@ -1784,6 +1786,17 @@ router.put('/:token/accept', async (req, res, next) => {
       ? Number(selectedFrequency.annual)
       : Number(estimate.annual_total || 0);
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
+    const effectiveBillingCadence = !treatAsOneTime
+      ? BillingCadence.resolveBillingCadence({
+          monthlyRate: effectiveMonthlyTotal,
+          frequencyKey: selectedFrequency?.key || selectedFrequencyKey,
+          estimateData: estData,
+          fallbackFrequencyKey: 'quarterly',
+        })
+      : null;
+    const visitEstimatedPrice = treatAsOneTime
+      ? effectiveOneTimeTotal
+      : (billingTerm === 'prepay_annual' ? null : effectiveBillingCadence?.amount);
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
@@ -1803,6 +1816,9 @@ router.put('/:token/accept', async (req, res, next) => {
           frequencyLabel: selectedFrequency.label,
           monthlyTotal: effectiveMonthlyTotal,
           annualTotal: effectiveAnnualTotal,
+          billingAmount: effectiveBillingCadence.amount,
+          billingIntervalMonths: effectiveBillingCadence.intervalMonths,
+          billingPeriodLabel: effectiveBillingCadence.periodLabel,
           selectedAt: new Date().toISOString(),
         };
         if (estimate.show_one_time_option && Array.isArray(nextEstimateData.result?.recurring?.services)) {
@@ -1891,6 +1907,7 @@ router.put('/:token/accept', async (req, res, next) => {
             scheduledServiceId: reservationRow.id,
             customerId,
             paymentMethodPreference,
+            estimatedPrice: visitEstimatedPrice,
             trx,
           });
           reservationCommitted = true;

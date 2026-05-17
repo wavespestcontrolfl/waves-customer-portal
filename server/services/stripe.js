@@ -154,13 +154,18 @@ const StripeService = {
    * the payment method in our DB. Supports card + us_bank_account.
    * @param {string} customerId — Waves customer UUID
    * @param {string} paymentMethodId — Stripe pm_xxx ID
+   * @param {object} [options]
+   * @param {boolean} [options.enableAutopay=true] — mark this method chargeable by the monthly autopay cron
+   * @param {boolean} [options.makeDefault=true] — make this the customer's default saved method
    * @returns {object} payment_methods row
    */
-  async savePaymentMethod(customerId, paymentMethodId) {
+  async savePaymentMethod(customerId, paymentMethodId, options = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
     const stripeCustomerId = await this.ensureStripeCustomer(customerId);
+    const enableAutopay = options.enableAutopay !== false;
+    const makeDefault = options.makeDefault !== false;
 
     try {
       // Retrieve PM first to verify it's not already attached to a DIFFERENT customer
@@ -192,8 +197,8 @@ const StripeService = {
         processor: 'stripe',
         stripe_payment_method_id: paymentMethodId,
         stripe_customer_id: stripeCustomerId,
-        is_default: true,
-        autopay_enabled: true,
+        is_default: makeDefault,
+        autopay_enabled: enableAutopay,
       };
 
       if (pm.type === 'card' && pm.card) {
@@ -212,10 +217,12 @@ const StripeService = {
 
       const saved = await db.transaction(async trx => {
         const [inserted] = await trx('payment_methods').insert(record).returning('*');
-        await trx('payment_methods')
-          .where({ customer_id: customerId })
-          .whereNot({ id: inserted.id })
-          .update({ is_default: false });
+        if (makeDefault) {
+          await trx('payment_methods')
+            .where({ customer_id: customerId })
+            .whereNot({ id: inserted.id })
+            .update({ is_default: false });
+        }
         return inserted;
       });
 

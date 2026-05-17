@@ -11,6 +11,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD } = require('./pricing-engine/constants');
+const {
+  inferFrequencyKeyFromEstimateData,
+  resolveBillingCadence,
+} = require('./billing-cadence');
 
 /**
  * Pick the first service date for a freshly-converted customer.
@@ -129,6 +133,16 @@ const EstimateConverter = {
 
     // Calculate monthly rate from estimate
     const monthlyRate = parseFloat(estimate.monthly_total || 0);
+    const inferredFrequencyKey = estimateData.customerSelection?.frequency
+      || inferFrequencyKeyFromEstimateData(estimateData);
+    const billingCadence = inferredFrequencyKey
+      ? resolveBillingCadence({
+          monthlyRate,
+          frequencyKey: inferredFrequencyKey,
+          estimateData,
+          fallbackFrequencyKey: inferredFrequencyKey,
+        })
+      : null;
 
     // 1. Update customer to active
     await database('customers').where({ id: customerId }).update({
@@ -185,16 +199,21 @@ const EstimateConverter = {
       for (const svc of recurringServices) {
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
         const frequency = svc.frequency || 'monthly';
+        const estimatedPrice = billingCadence && recurringServices.length === 1
+          ? billingCadence.amount
+          : null;
 
         try {
-          await database('scheduled_services').insert({
+          const row = {
             customer_id: customerId,
             scheduled_date: firstServiceDate,
             service_type: serviceName,
             status: 'pending',
             notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}`,
             source_estimate_id: estimateId,
-          });
+          };
+          if (estimatedPrice) row.estimated_price = estimatedPrice;
+          await database('scheduled_services').insert(row);
           scheduledCount++;
         } catch (e) {
           logger.error(`[estimate-converter] Failed to create scheduled_service: ${e.message}`);
