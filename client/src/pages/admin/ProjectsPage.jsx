@@ -43,6 +43,7 @@ const TYPE_LABELS = {
   flea: "Flea",
   rodent_exclusion: "Rodent",
   bed_bug: "Bed Bug",
+  pre_treatment_termite_certificate: "Pre-Treat Cert",
 };
 const WDO_TYPE = "wdo_inspection";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
