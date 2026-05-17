@@ -102,10 +102,11 @@ const CAT_ICONS = {
 };
 const STATUS_COLORS = {
   active: D.green,
-  in_service: D.teal,
+  maintenance: D.amber,
   retired: D.muted,
   sold: D.muted,
   lost: D.red,
+  in_service: D.green,
 };
 const SEV_COLORS = {
   critical: D.red,
@@ -188,8 +189,11 @@ function StatCard({ label, value, color, sub }) {
 // ═══════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════
-export default function EquipmentMaintenancePage() {
-  const [tab, setTab] = useState("fleet");
+export default function EquipmentMaintenancePage({
+  embedded = false,
+  initialTab = "fleet",
+}) {
+  const [tab, setTab] = useState(initialTab);
   const [toast, setToast] = useState("");
   const showToast = (m) => {
     setToast(m);
@@ -261,6 +265,9 @@ export default function EquipmentMaintenancePage() {
     loadFleet();
   }, [loadFleet]);
   useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
+  useEffect(() => {
     if (tab === "analytics") loadAnalytics();
   }, [tab, loadAnalytics]);
 
@@ -299,17 +306,19 @@ export default function EquipmentMaintenancePage() {
 
   // ─── RENDER ─────────────────────────────────────────────────────
   return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
+    <div style={embedded ? undefined : { maxWidth: 1300, margin: "0 auto" }}>
       {" "}
-      <AdminCommandHeader
-        title="Fleet"
-        icon={Truck}
-        sections={FLEET_SECTIONS}
-        activeKey={tab}
-        onSectionChange={setTab}
-        ariaLabel="Fleet section"
-        navGridClassName="grid-cols-2"
-      />
+      {!embedded && (
+        <AdminCommandHeader
+          title="Fleet"
+          icon={Truck}
+          sections={FLEET_SECTIONS}
+          activeKey={tab}
+          onSectionChange={setTab}
+          ariaLabel="Fleet section"
+          navGridClassName="grid-cols-2"
+        />
+      )}
       {/* Toast */}
       {toast && (
         <div
@@ -514,8 +523,10 @@ function FleetTab({
           {" "}
           <option value="">All Statuses</option>{" "}
           <option value="active">Active</option>{" "}
-          <option value="in_service">In Service</option>{" "}
+          <option value="maintenance">Maintenance</option>{" "}
           <option value="retired">Retired</option>{" "}
+          <option value="sold">Sold</option>{" "}
+          <option value="lost">Lost</option>{" "}
         </select>{" "}
         <select
           value={sortBy}
@@ -1990,45 +2001,41 @@ function AnalyticsTab({
           Cost of Ownership
         </div>{" "}
         <div style={{ overflowX: "auto" }}>
-          {" "}
           <table
             style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
           >
-            {" "}
             <thead>
-              {" "}
               <tr style={{ borderBottom: `1px solid ${D.border}` }}>
-                {" "}
                 <th
                   style={{ textAlign: "left", padding: "8px", color: D.muted }}
                 >
                   Equipment
-                </th>{" "}
+                </th>
                 <th
                   style={{ textAlign: "left", padding: "8px", color: D.muted }}
                 >
                   Category
-                </th>{" "}
+                </th>
                 <th
                   style={{ textAlign: "right", padding: "8px", color: D.muted }}
                 >
                   Age (mo)
-                </th>{" "}
+                </th>
                 <th
                   style={{ textAlign: "right", padding: "8px", color: D.muted }}
                 >
                   Purchase
-                </th>{" "}
+                </th>
                 <th
                   style={{ textAlign: "right", padding: "8px", color: D.muted }}
                 >
                   Maintenance
-                </th>{" "}
+                </th>
                 <th
                   style={{ textAlign: "right", padding: "8px", color: D.muted }}
                 >
                   Monthly
-                </th>{" "}
+                </th>
                 <th
                   style={{
                     textAlign: "center",
@@ -2037,16 +2044,15 @@ function AnalyticsTab({
                   }}
                 >
                   Condition
-                </th>{" "}
-              </tr>{" "}
-            </thead>{" "}
+                </th>
+              </tr>
+            </thead>
             <tbody>
               {costs.map((c) => (
                 <tr
                   key={c.equipment_id}
                   style={{ borderBottom: `1px solid ${D.border}` }}
                 >
-                  {" "}
                   <td style={{ padding: "8px", color: D.text }}>
                     {CAT_ICONS[c.category] || ""} {c.equipment_name}
                     {c.asset_tag && (
@@ -2056,10 +2062,10 @@ function AnalyticsTab({
                         {c.asset_tag}
                       </span>
                     )}
-                  </td>{" "}
+                  </td>
                   <td style={{ padding: "8px", color: D.muted }}>
                     {c.category}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px",
@@ -2068,7 +2074,7 @@ function AnalyticsTab({
                     }}
                   >
                     {c.age_months}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px",
@@ -2077,7 +2083,7 @@ function AnalyticsTab({
                     }}
                   >
                     {fmt(c.purchase_price)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px",
@@ -2086,7 +2092,7 @@ function AnalyticsTab({
                     }}
                   >
                     {fmt(c.total_maintenance)}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px",
@@ -2096,18 +2102,16 @@ function AnalyticsTab({
                     }}
                   >
                     {fmt(c.monthly_cost)}
-                  </td>{" "}
+                  </td>
                   <td style={{ padding: "8px" }}>
                     <ConditionBar rating={c.condition_rating} />
-                  </td>{" "}
+                  </td>
                 </tr>
               ))}
             </tbody>
             {costs.length > 0 && (
               <tfoot>
-                {" "}
                 <tr style={{ borderTop: `2px solid ${D.border}` }}>
-                  {" "}
                   <td
                     style={{
                       padding: "8px",
@@ -2117,7 +2121,7 @@ function AnalyticsTab({
                     colSpan={3}
                   >
                     Totals
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px",
@@ -2127,7 +2131,7 @@ function AnalyticsTab({
                     }}
                   >
                     {fmt(costs.reduce((s, c) => s + c.purchase_price, 0))}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px",
@@ -2137,7 +2141,7 @@ function AnalyticsTab({
                     }}
                   >
                     {fmt(costs.reduce((s, c) => s + c.total_maintenance, 0))}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       padding: "8px",
@@ -2147,12 +2151,12 @@ function AnalyticsTab({
                     }}
                   >
                     {fmt(costs.reduce((s, c) => s + c.monthly_cost, 0))}
-                  </td>{" "}
-                  <td />{" "}
-                </tr>{" "}
+                  </td>
+                  <td />
+                </tr>
               </tfoot>
             )}
-          </table>{" "}
+          </table>
         </div>{" "}
       </div>
       {/* Monthly Cost Trend - SVG Bar Chart */}

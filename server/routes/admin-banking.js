@@ -11,6 +11,7 @@ router.use(adminAuthenticate, requireAdmin);
 
 const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || 'America/New_York';
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 
 function validateDateParam(value, name) {
   if (value && !ISO_DATE_RE.test(String(value))) {
@@ -28,6 +29,18 @@ function applyBusinessDateRange(query, column, startDate, endDate) {
 
 function getAdminActorId(req) {
   return String(req.technicianId || req.technician?.id || 'admin');
+}
+
+function parsePayoutAmount(value) {
+  const raw = String(value ?? '').trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) return null;
+  const amount = Number(raw);
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+function parseIdempotencyKey(value) {
+  const key = String(value || '').trim();
+  return IDEMPOTENCY_KEY_RE.test(key) ? key : null;
 }
 
 function summarizeCashFlowForUi(cashFlow, period) {
@@ -182,18 +195,46 @@ router.get('/payouts/:id', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 router.post('/payouts/instant', async (req, res) => {
   try {
-    const amount = Number(req.body.amount);
-    if (!Number.isFinite(amount) || amount <= 0) {
+    const amount = parsePayoutAmount(req.body.amount);
+    if (amount == null) {
       return res.status(400).json({ error: 'Invalid amount — must be a positive number' });
+    }
+    const idempotencyKey = parseIdempotencyKey(req.body.idempotency_key);
+    if (!idempotencyKey) {
+      return res.status(400).json({ error: 'A valid idempotency key is required' });
     }
     const result = await StripeBanking.createInstantPayout(amount, {
       requestedBy: getAdminActorId(req),
-      idempotencyKey: req.body.idempotency_key,
+      idempotencyKey,
     });
     res.json(result);
   } catch (err) {
     logger.error('[banking] Instant payout failed:', err);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /payouts/standard — request a standard manual payout
+// ═══════════════════════════════════════════════════════════════
+router.post('/payouts/standard', async (req, res) => {
+  try {
+    const amount = parsePayoutAmount(req.body.amount);
+    if (amount == null) {
+      return res.status(400).json({ error: 'Invalid amount — must be a positive number' });
+    }
+    const idempotencyKey = parseIdempotencyKey(req.body.idempotency_key);
+    if (!idempotencyKey) {
+      return res.status(400).json({ error: 'A valid idempotency key is required' });
+    }
+    const result = await StripeBanking.createStandardPayout(amount, {
+      requestedBy: getAdminActorId(req),
+      idempotencyKey,
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error('[banking] Standard payout failed:', err);
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

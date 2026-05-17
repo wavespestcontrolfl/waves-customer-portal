@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
+import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
 
 const DARK = {
   bg: '#0f1923',
@@ -25,13 +26,12 @@ export default function TechLayout() {
   const [techName, setTechName] = useState('Tech');
 
   useEffect(() => {
-    const token = localStorage.getItem('adminToken');
+    const token = getAdminAuthToken();
     if (!token) {
       navigate('/admin/login', { replace: true });
       return;
     }
-    const name = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
-    setTechName(name);
+    setTechName(getAdminDisplayName('Tech'));
   }, [navigate]);
 
   const isActive = (item) => {

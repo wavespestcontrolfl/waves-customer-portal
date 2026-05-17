@@ -9,6 +9,7 @@ const {
   calculateBoundedTrackingEta,
   finiteNumber,
 } = require('../services/customer-tracking-eta');
+const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 
 router.use(authenticate);
 
@@ -215,21 +216,19 @@ async function enrichScheduledWithTechStatus(tracker, service, customer) {
       tracker.customerLocation = { lat: custLat, lng: custLng };
     }
     if (!service?.technician_id) return tracker;
-    const ts = await db('tech_status')
-      .where({ tech_id: service.technician_id })
-      .first('lat', 'lng', 'location_updated_at', 'updated_at');
-    if (!ts || finiteNumber(ts.lat) == null || finiteNumber(ts.lng) == null) return tracker;
-    const lat = finiteNumber(ts.lat);
-    const lng = finiteNumber(ts.lng);
+    const position = await resolveFreshTechPosition({
+      techId: service.technician_id,
+      logPrefix: 'tracking',
+    });
+    if (!position) return tracker;
     let eta = null;
-    const lastReportedAt = ts.location_updated_at;
-    if (!isFreshTechStatusTimestamp(lastReportedAt)) return tracker;
+    const lastReportedAt = position.lastReportedAt;
 
     if (tracker.customerLocation) {
       const BouncieService = require('../services/bouncie');
       const etaData = await calculateBoundedTrackingEta({
-        techLat: lat,
-        techLng: lng,
+        techLat: position.lat,
+        techLng: position.lng,
         customerLat: custLat,
         customerLng: custLng,
         techUpdatedAt: lastReportedAt,
@@ -247,13 +246,14 @@ async function enrichScheduledWithTechStatus(tracker, service, customer) {
       }
     }
     tracker.techPosition = {
-      lat,
-      lng,
-      heading: null,
-      isRunning: null,
+      lat: position.lat,
+      lng: position.lng,
+      heading: position.heading ?? null,
+      isRunning: position.isRunning ?? null,
       updatedAt: lastReportedAt,
       lastReportedAt,
       stale: false,
+      source: position.source || null,
       eta,
     };
   } catch {

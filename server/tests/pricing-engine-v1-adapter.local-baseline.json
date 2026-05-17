@@ -249,7 +249,7 @@
       "year2": 0
     }
   },
-  "v1adapter_bedbug_3rooms_both_methods": {
+  "v1adapter_bedbug_3rooms_hybrid": {
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
@@ -267,22 +267,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 3351,
+      "total": 2950,
       "tmInstall": 0,
       "items": [],
       "specItems": [
         {
-          "name": "Bed Bug (Chemical)",
-          "price": 1101
-        },
-        {
-          "name": "Bed Bug (Heat)",
-          "price": 2250
+          "name": "Bed Bug Hybrid Heat + Residual Program — 3 room(s)",
+          "price": 2950
         }
       ]
     },
     "totals": {
-      "year1": 3351,
+      "year1": 2950,
       "year2": 0
     }
   },
@@ -493,10 +489,10 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 2161.3,
-      "annualAfterDiscount": 1837.1,
-      "monthlyTotal": 153.09,
-      "savings": 324.2,
+      "annualBeforeDiscount": 2009.7,
+      "annualAfterDiscount": 1708.25,
+      "monthlyTotal": 142.35,
+      "savings": 301.45,
       "serviceCount": 3
     },
     "results": {
@@ -524,19 +520,19 @@
       ],
       "pestTiers": [
         {
-          "mo": 43.68,
+          "mo": 39,
           "apps": 4,
           "recommended": false,
           "label": "Quarterly"
         },
         {
-          "mo": 55.69,
+          "mo": 49.73,
           "apps": 6,
           "recommended": true,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 91.73,
+          "mo": 81.9,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -544,7 +540,7 @@
       ],
       "ts": [
         {
-          "mo": 62.42,
+          "mo": 55.75,
           "recommended": true,
           "name": "Standard"
         }
@@ -559,18 +555,18 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1936.1,
-      "year2": 1837.1
+      "year1": 1807.25,
+      "year2": 1708.25
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1221.6,
-      "annualAfterDiscount": 1099.44,
-      "monthlyTotal": 91.62,
-      "savings": 122.16,
+      "annualBeforeDiscount": 1128,
+      "annualAfterDiscount": 1015.2,
+      "monthlyTotal": 84.6,
+      "savings": 112.8,
       "serviceCount": 2
     },
     "results": {
@@ -598,19 +594,19 @@
       ],
       "pestTiers": [
         {
-          "mo": 46.8,
+          "mo": 39,
           "apps": 4,
           "recommended": true,
           "label": "Quarterly"
         },
         {
-          "mo": 59.67,
+          "mo": 49.73,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 98.28,
+          "mo": 81.9,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -627,8 +623,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1198.44,
-      "year2": 1099.44
+      "year1": 1114.2,
+      "year2": 1015.2
     }
   }
 }

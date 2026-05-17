@@ -27,15 +27,20 @@ const IRS_MILEAGE_RATES = {
 };
 
 // In-memory token (shared with routes/bouncie.js pattern)
-let currentToken = config.bouncie.accessToken;
-let currentRefresh = config.bouncie.refreshToken;
+function cleanToken(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed || null;
+}
+
+let currentToken = cleanToken(config.bouncie.accessToken);
+let currentRefresh = cleanToken(config.bouncie.refreshToken);
 let hydratedTokens = false;
 
 async function hydrateTokens(force = false) {
   if (hydratedTokens && !force) return;
   const stored = await tokenStore.loadTokens();
-  if (stored?.accessToken) currentToken = stored.accessToken;
-  if (stored?.refreshToken) currentRefresh = stored.refreshToken;
+  if (stored?.accessToken) currentToken = cleanToken(stored.accessToken);
+  if (stored?.refreshToken) currentRefresh = cleanToken(stored.refreshToken);
   hydratedTokens = true;
 }
 
@@ -45,7 +50,8 @@ async function hydrateTokens(force = false) {
 async function refreshAccessToken() {
   try {
     await hydrateTokens();
-    if (!currentRefresh) {
+    const refreshToken = cleanToken(currentRefresh);
+    if (!refreshToken) {
       logger.error('[bouncie] Token refresh failed: no refresh token configured');
       return false;
     }
@@ -57,7 +63,7 @@ async function refreshAccessToken() {
         client_id: config.bouncie.clientId,
         client_secret: config.bouncie.clientSecret,
         grant_type: 'refresh_token',
-        refresh_token: currentRefresh,
+        refresh_token: refreshToken,
       }),
     });
 
@@ -68,11 +74,11 @@ async function refreshAccessToken() {
     }
 
     const data = await res.json();
-    currentToken = data.access_token;
-    if (data.refresh_token) currentRefresh = data.refresh_token;
+    currentToken = cleanToken(data.access_token);
+    if (data.refresh_token) currentRefresh = cleanToken(data.refresh_token);
     await tokenStore.saveTokens({
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
+      accessToken: currentToken,
+      refreshToken: data.refresh_token ? currentRefresh : null,
       expiresIn: data.expires_in,
     });
     logger.info('[bouncie] Access token refreshed');
@@ -95,7 +101,7 @@ async function bouncieRequest(path) {
 
   const doFetch = () => fetch(`${API_BASE}${path}`, {
     headers: {
-      'Authorization': currentToken,
+      'Authorization': cleanToken(currentToken),
       'Content-Type': 'application/json',
     },
   });
@@ -126,6 +132,15 @@ function getIrsRate(year) {
 }
 
 class BouncieService {
+  /**
+   * Verify outbound OAuth credentials using the same request path as all
+   * other Bouncie API calls. This refreshes an expired access token before
+   * reporting health.
+   */
+  async checkAuth() {
+    return bouncieRequest('/user');
+  }
+
   /**
    * List all registered vehicles from Bouncie
    * @returns {Array} vehicles
@@ -276,8 +291,9 @@ class BouncieService {
         lat: match.lastLocation.lat,
         lng: match.lastLocation.lon || match.lastLocation.lng,
         isRunning: !!match.isRunning,
+        speed: match.speed ?? null,
         heading: match.lastLocation.heading ?? null,
-        updatedAt: match.lastLocation.timestamp || null,
+        updatedAt: match.lastLocation.timestamp || match.lastUpdated || null,
       };
     } catch (err) {
       logger.error(`[bouncie] getLocationByImei failed: ${err.message}`);
@@ -415,13 +431,13 @@ class BouncieService {
    * Update in-memory tokens (called from OAuth callback route)
    */
   async updateTokens(accessToken, refreshToken, options = {}) {
-    if (accessToken) currentToken = accessToken;
-    if (refreshToken) currentRefresh = refreshToken;
+    if (accessToken) currentToken = cleanToken(accessToken);
+    if (refreshToken) currentRefresh = cleanToken(refreshToken);
     hydratedTokens = true;
     if (options.persist !== false) {
       await tokenStore.saveTokens({
-        accessToken,
-        refreshToken,
+        accessToken: cleanToken(accessToken),
+        refreshToken: cleanToken(refreshToken),
         expiresIn: options.expiresIn,
       });
     }

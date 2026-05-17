@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // Match LawnAssessmentPanel's V2 token pass for visual consistency.
@@ -82,13 +82,24 @@ export default function EquipmentCalibrationPanel() {
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  const [reconciliation, setReconciliation] = useState(null);
+  const [reconciliationLoading, setReconciliationLoading] = useState(false);
+
+  const loadReconciliation = useCallback(() => {
+    setReconciliationLoading(true);
+    return adminFetch("/admin/equipment-systems/reconciliation")
+      .then((d) => setReconciliation(d))
+      .catch(() => setReconciliation(null))
+      .finally(() => setReconciliationLoading(false));
+  }, []);
 
   // Load systems on mount.
   useEffect(() => {
     adminFetch("/admin/equipment-systems")
       .then((d) => setSystems(d.systems || []))
       .catch(() => {});
-  }, []);
+    loadReconciliation();
+  }, [loadReconciliation]);
 
   // When the tech picks a system, fetch its current active calibration
   // so they can see what they're about to supersede.
@@ -129,6 +140,9 @@ export default function EquipmentCalibrationPanel() {
   );
 
   const selectedSystem = systems.find((s) => s.id === selectedSystemId);
+  const selectedReconciliationSystem = reconciliation?.systems?.find(
+    (s) => s.id === selectedSystemId,
+  );
 
   const canSave = !!selectedSystemId && computedRate != null && !saving;
 
@@ -173,6 +187,7 @@ export default function EquipmentCalibrationPanel() {
       setPressurePsi("");
       setEngineRpm("");
       setNotes("");
+      loadReconciliation();
     } catch (e) {
       alert("Save failed: " + e.message);
     } finally {
@@ -187,7 +202,7 @@ export default function EquipmentCalibrationPanel() {
   };
 
   return (
-    <div style={{ maxWidth: 640, margin: "0 auto" }}>
+    <div style={{ maxWidth: 900, margin: "0 auto" }}>
       {" "}
       <div
         style={{
@@ -232,6 +247,9 @@ export default function EquipmentCalibrationPanel() {
           >
             {selectedSystem.notes}
           </div>
+        )}
+        {selectedReconciliationSystem && (
+          <SystemLinkSummary system={selectedReconciliationSystem} />
         )}
         {/* Current active calibration — what we'll supersede on save */}
         {selectedSystemId &&
@@ -432,6 +450,233 @@ export default function EquipmentCalibrationPanel() {
           </div>
         )}
       </div>{" "}
+      <ReconciliationPanel
+        report={reconciliation}
+        loading={reconciliationLoading}
+        onRefresh={loadReconciliation}
+      />
+    </div>
+  );
+}
+
+function assetName(asset) {
+  if (!asset) return null;
+  return `${asset.asset_tag ? `${asset.asset_tag} - ` : ""}${asset.name}`;
+}
+
+function SystemLinkSummary({ system }) {
+  const componentAssets = Object.entries(system.component_assets || {})
+    .filter(([, asset]) => asset)
+    .map(([role, asset]) => ({ role, asset }));
+  const suggestions = system.suggested_equipment_matches || [];
+
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        padding: "8px 10px",
+        background: D.bg,
+        borderRadius: 6,
+        fontSize: 12,
+        color: D.text,
+        lineHeight: 1.4,
+      }}
+    >
+      <div style={{ fontWeight: 700, color: D.heading, marginBottom: 4 }}>
+        Operational links
+      </div>
+      {system.primary_equipment ? (
+        <div>
+          <span style={{ color: D.muted }}>Primary:</span>{" "}
+          {assetName(system.primary_equipment)}
+        </div>
+      ) : (
+        <div style={{ color: D.amber }}>No primary equipment linked</div>
+      )}
+      {componentAssets.length > 0 && (
+        <div style={{ marginTop: 4 }}>
+          <span style={{ color: D.muted }}>Components:</span>{" "}
+          {componentAssets
+            .map(({ role, asset }) => `${role}: ${assetName(asset)}`)
+            .join("; ")}
+        </div>
+      )}
+      {!system.primary_equipment && suggestions.length > 0 && (
+        <div style={{ marginTop: 4, color: D.muted }}>
+          Suggested: {suggestions.map((s) => assetName(s)).join(", ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReconciliationPanel({ report, loading, onRefresh }) {
+  const summary = report?.summary || {};
+  const issues = report?.issues || [];
+  const unlinkedSystems = (report?.systems || []).filter(
+    (s) =>
+      s.active !== false &&
+      !(s.active_linked_equipment_ids || s.linked_equipment_ids || []).length,
+  );
+  const missingTaxLinks = (report?.equipment || []).filter(
+    (e) => !e.tax_register && Number(e.purchase_price || 0) > 0,
+  );
+
+  return (
+    <div style={{ ...cardStyle, marginBottom: 16 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 12,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>
+            Equipment reconciliation
+          </div>
+          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+            Links calibrated systems, operational assets, and tax register rows.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          style={{
+            ...btnStyle(D.teal),
+            padding: "8px 12px",
+            fontSize: 12,
+            opacity: loading ? 0.6 : 1,
+          }}
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      {!report && (
+        <div style={{ fontSize: 12, color: loading ? D.muted : D.amber }}>
+          {loading
+            ? "Loading reconciliation report..."
+            : "Reconciliation report unavailable."}
+        </div>
+      )}
+
+      {report && (
+        <>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+              gap: 8,
+              marginBottom: 14,
+            }}
+          >
+            <SummaryTile
+              label="Systems linked"
+              value={`${summary.systems_with_any_equipment_link ?? 0}/${summary.systems_active ?? 0}`}
+            />
+            <SummaryTile
+              label="No system link"
+              value={summary.systems_without_equipment_link ?? 0}
+              color={
+                summary.systems_without_equipment_link > 0 ? D.amber : D.green
+              }
+            />
+            <SummaryTile
+              label="Equipment tax links"
+              value={`${summary.equipment_with_tax_link ?? 0}/${summary.equipment_active ?? 0}`}
+            />
+            <SummaryTile
+              label="Tax rows unlinked"
+              value={summary.tax_register_unlinked ?? 0}
+              color={summary.tax_register_unlinked > 0 ? D.amber : D.green}
+            />
+          </div>
+
+          {unlinkedSystems.length > 0 && (
+            <IssueSection
+              title="Systems needing operational links"
+              rows={unlinkedSystems.slice(0, 5).map((s) => ({
+                id: s.id,
+                label: s.name,
+                detail: s.suggested_equipment_matches?.length
+                  ? `Suggested: ${s.suggested_equipment_matches
+                      .map((m) => assetName(m))
+                      .join(", ")}`
+                  : "No strong match found",
+              }))}
+            />
+          )}
+
+          {missingTaxLinks.length > 0 && (
+            <IssueSection
+              title="Operational equipment missing tax link"
+              rows={missingTaxLinks.slice(0, 5).map((e) => ({
+                id: e.id,
+                label: assetName(e),
+                detail: e.suggested_tax_matches?.length
+                  ? `Suggested: ${e.suggested_tax_matches
+                      .map((m) => m.name)
+                      .join(", ")}`
+                  : "No strong tax-register match found",
+              }))}
+            />
+          )}
+
+          {issues.length === 0 && !loading && (
+            <div style={{ fontSize: 12, color: D.green }}>
+              No reconciliation issues detected.
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function SummaryTile({ label, value, color = D.heading }) {
+  return (
+    <div
+      style={{
+        border: `1px solid ${D.border}`,
+        borderRadius: 8,
+        padding: 10,
+        minHeight: 64,
+      }}
+    >
+      <div style={{ fontSize: 10, color: D.muted, marginBottom: 4 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 20, fontWeight: 800, color }}>{value}</div>
+    </div>
+  );
+}
+
+function IssueSection({ title, rows }) {
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: D.heading }}>
+        {title}
+      </div>
+      <div style={{ marginTop: 6, display: "grid", gap: 6 }}>
+        {rows.map((row) => (
+          <div
+            key={row.id}
+            style={{
+              border: `1px solid ${D.border}`,
+              borderRadius: 8,
+              padding: "8px 10px",
+              fontSize: 12,
+            }}
+          >
+            <div style={{ color: D.text, fontWeight: 600 }}>{row.label}</div>
+            <div style={{ color: D.muted, marginTop: 2 }}>{row.detail}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

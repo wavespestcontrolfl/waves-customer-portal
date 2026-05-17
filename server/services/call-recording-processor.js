@@ -29,10 +29,6 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
-const {
-  blockIfAutomatedEstimateDuplicate,
-  withAutomatedEstimatePhoneLock,
-} = require('./estimate-automation-duplicates');
 
 const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam B.';
 
@@ -697,7 +693,6 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
-  "wants_estimate": true/false,
   "is_voicemail": true/false,
   "is_spam": true/false,
   "sentiment": "positive/neutral/negative/frustrated",
@@ -717,12 +712,6 @@ IMPORTANT — appointment_confirmed rules:
   - Do set appointment_confirmed to true when a builder or construction company explicitly books a Waves pre-slab/preconstruction termite, soil-treatment, or concrete-pour field-service appointment with a specific date and time.
 - Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.
 - If the caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, new-construction termite treatment, or treatment before a slab/concrete pour, matched_service must be "Pre-Slab Termidor" — not "Termite Inspection".
-
-IMPORTANT — wants_estimate rules:
-- Set wants_estimate to true only if the caller explicitly asks for a quote, estimate, bid, proposal, or asks Waves to send/give/prepare a price.
-- Do not set wants_estimate to true for casual cost discussion during scheduling or when the call's outcome is simply a booked appointment.
-- true even if they also booked an appointment — quote intent and service intent are not mutually exclusive.
-- false for existing-customer service questions, complaints, billing calls, rescheduling, voicemail, or spam.
 
 IMPORTANT — customer name rules:
 - Capture both first_name and last_name whenever the caller clearly states both.
@@ -760,25 +749,8 @@ Return ONLY valid JSON.`;
     return JSON.parse(cleaned);
   } catch (e) {
     logger.error(`[call-proc] Invalid JSON from Gemini: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
-    return { first_name: null, wants_estimate: false, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
+    return { first_name: null, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
   }
-}
-
-const ESTIMATE_INTENT_PATTERNS = [
-  /\b(quote|quotation|estimate|bid|proposal)\b/i,
-  /\bcan you (?:give|send|write|prepare|put together) (?:me )?(?:a |an )?(?:quote|estimate|price|proposal|bid)\b/i,
-  /\bneed (?:a |an )?(?:quote|estimate|price|proposal|bid)\b/i,
-  /\blooking for (?:a |an )?(?:quote|estimate|price|proposal|bid)\b/i,
-  /\b(?:send|give|write|prepare|put together) (?:me )?(?:a |an )?(?:written )?(?:price|pricing|number|ballpark)\b/i,
-];
-
-function hasEstimateIntent(transcription, extracted = {}) {
-  const text = String(transcription || '').toLowerCase();
-  const hasTranscriptEvidence = ESTIMATE_INTENT_PATTERNS.some(pattern => pattern.test(text));
-  if (extracted.wants_estimate && !hasTranscriptEvidence) {
-    logger.info('[call-proc] Ignoring AI wants_estimate=true because transcript has no quote/price request language');
-  }
-  return hasTranscriptEvidence;
 }
 
 // ── Lead Synopsis via Claude (Sales Strategist prompt) ──
@@ -1230,97 +1202,6 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Step 4c: If caller wants a quote/estimate, enqueue a draft estimate.
-    // `status: 'draft'` is the queue state — EstimatesPageV2's Drafts tab
-    // already surfaces these; `source: 'call_recording'` is the discriminator
-    // so Virginia can tell auto-queued ones from hand-started drafts.
-    let estimateQueueResult = null;
-    const wantsEstimate = hasEstimateIntent(transcription, extracted);
-    if (wantsEstimate && !customerId && !phone) {
-      logger.warn(`[call-proc] Skipping estimate enqueue for ${callSid} — no stable customer or phone dedupe key`);
-      estimateQueueResult = { skipped: true, reason: 'missing_customer_or_phone' };
-    } else if (wantsEstimate && !extracted.is_spam && !extracted.is_voicemail) {
-      try {
-        // Dedup: skip if an open draft already exists for this customer or
-        // caller phone in the last 24h, so reprocessing or back-to-back calls
-        // don't stack duplicates.
-        const recentDraft = (customerId || phone)
-          ? await db('estimates')
-            .where({ status: 'draft' })
-            .where(function () {
-              if (customerId) this.where('customer_id', customerId);
-              if (phone) {
-                if (customerId) this.orWhere('customer_phone', phone);
-                else this.where('customer_phone', phone);
-              }
-            })
-            .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-            .first()
-          : null;
-
-        if (recentDraft) {
-          logger.info(`[call-proc] Skipping estimate enqueue — draft ${recentDraft.id} exists for ${customerId ? `customer ${customerId}` : 'caller phone'}`);
-          estimateQueueResult = { skipped: true, existingEstimateId: recentDraft.id };
-        } else {
-          await withAutomatedEstimatePhoneLock(phone, async (trx) => {
-            const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx });
-            if (duplicateBlock) {
-              logger.info(`[call-proc] Estimate enqueue blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for call ${callSid}`);
-              estimateQueueResult = {
-                skipped: true,
-                reason: duplicateBlock.reason,
-                existingEstimateId: duplicateBlock.existingEstimateId,
-              };
-              return;
-            }
-
-            const customerName = [extracted.first_name, extracted.last_name].filter(Boolean).map(capitalizeName).join(' ') || null;
-            const shortId = crypto.randomBytes(4).toString('hex');
-            const nameSlug = (customerName || 'customer').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-            const token = `${nameSlug}-${shortId}`;
-            const expiresAt = new Date();
-            expiresAt.setDate(expiresAt.getDate() + 7);
-
-            const isPriority = extracted.lead_quality === 'hot' || extracted.sentiment === 'frustrated';
-            const urgency = extracted.lead_quality === 'hot' ? 3 : extracted.lead_quality === 'warm' ? 2 : 1;
-
-            const [est] = await trx('estimates').insert({
-              customer_id: customerId || null,
-              status: 'draft',
-              source: 'call_recording',
-              service_interest: extracted.matched_service || extracted.requested_service || null,
-              is_priority: isPriority,
-              urgency,
-              customer_name: customerName,
-              customer_phone: phone || null,
-              customer_email: extracted.email || null,
-              address: extracted.address_line1 || null,
-              token,
-              expires_at: expiresAt,
-              notes: extracted.call_summary || null,
-              estimate_data: JSON.stringify({
-                callSid: call.twilio_call_sid,
-                leadId: leadId || null,
-                requested_service: extracted.requested_service,
-                matched_service: extracted.matched_service,
-                pain_points: extracted.pain_points,
-                sentiment: extracted.sentiment,
-                lead_quality: extracted.lead_quality,
-                city: extracted.city,
-                zip: extracted.zip,
-              }),
-            }).returning('*');
-
-            logger.info(`[call-proc] Queued draft estimate ${est.id} (${extracted.matched_service || 'unspecified service'}) for ${customerId ? `customer ${customerId}` : 'caller phone'}`);
-            estimateQueueResult = { created: true, estimateId: est.id, token };
-          });
-        }
-      } catch (err) {
-        logger.error(`[call-proc] Estimate enqueue failed (non-blocking): ${err.message}`);
-        estimateQueueResult = { error: err.message };
-      }
-    }
-
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
     // Guard: reject vague date/time (must contain an actual time like "10 AM", "2:30 PM", "noon")
     let appointmentResult = null;
@@ -1550,29 +1431,6 @@ const CallRecordingProcessor = {
                 });
               }
 
-              // Stitch the schedule row back into the draft estimate's
-              // estimate_data JSON when the same call produced both, so the
-              // Estimates list can show "Already scheduled · …" pointing at
-              // exactly this appointment (vs. a vague "customer has SOME
-              // upcoming appointment" fallback). Read-merge-write because
-              // estimate_data is a JSON-stringified text column, not jsonb.
-              if (estimateQueueResult?.created && estimateQueueResult.estimateId) {
-                try {
-                  const linkedEst = await db('estimates').where({ id: estimateQueueResult.estimateId }).first();
-                  let data = linkedEst?.estimate_data;
-                  if (typeof data === 'string') {
-                    try { data = JSON.parse(data); } catch { data = {}; }
-                  }
-                  data = { ...(data || {}), scheduled_service_id: svc.id, scheduled_date: scheduledDate, window_start: windowStart };
-                  await db('estimates').where({ id: estimateQueueResult.estimateId }).update({
-                    estimate_data: JSON.stringify(data),
-                    updated_at: new Date(),
-                  });
-                  logger.info(`[call-proc] Linked draft estimate ${estimateQueueResult.estimateId} → scheduled_service ${svc.id}`);
-                } catch (linkErr) {
-                  logger.warn(`[call-proc] Failed to link estimate to schedule: ${linkErr.message}`);
-                }
-              }
             } else {
               logger.warn(`[call-proc] Could not parse date from: ${extracted.preferred_date_time}; skipping schedule + SMS`);
               appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false };
@@ -1760,7 +1618,6 @@ const CallRecordingProcessor = {
       leadId,
       extracted,
       appointmentResult,
-      estimateQueueResult,
       newsletterResult,
       beehiivResult,
     };

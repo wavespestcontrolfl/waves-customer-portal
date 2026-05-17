@@ -1,6 +1,7 @@
 const logger = require('./logger');
 
 const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
+const FUTURE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
 const CUSTOMER_TRACKING_ETA_TIMEOUT_MS = 750;
 
 function finiteNumber(value) {
@@ -12,7 +13,9 @@ function finiteNumber(value) {
 function isFreshTimestamp(value, nowMs = Date.now(), staleMs = STALE_TECH_STATUS_MS) {
   if (!value) return false;
   const updatedMs = new Date(value).getTime();
-  return Number.isFinite(updatedMs) && nowMs - updatedMs <= staleMs;
+  return Number.isFinite(updatedMs)
+    && updatedMs - nowMs <= FUTURE_TIMESTAMP_TOLERANCE_MS
+    && nowMs - updatedMs <= staleMs;
 }
 
 async function calculateBoundedTrackingEta({
@@ -62,6 +65,7 @@ async function calculateBoundedTrackingEta({
 
 module.exports = {
   STALE_TECH_STATUS_MS,
+  FUTURE_TIMESTAMP_TOLERANCE_MS,
   CUSTOMER_TRACKING_ETA_TIMEOUT_MS,
   finiteNumber,
   isFreshTimestamp,

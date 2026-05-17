@@ -126,6 +126,16 @@ describe('tech_status GPS freshness writes', () => {
     jest.useRealTimers();
   });
 
+  test('provider GPS timestamps are clamped when too far in the future', () => {
+    const now = new Date('2026-05-05T12:00:00.000Z');
+    expect(techStatus._test.normalizeProviderTimestamp('2026-05-05T12:01:59.000Z', now))
+      .toEqual(new Date('2026-05-05T12:01:59.000Z'));
+    expect(techStatus._test.normalizeProviderTimestamp('2026-05-05T12:02:01.000Z', now))
+      .toBe(now);
+    expect(techStatus._test.normalizeProviderTimestamp('not-a-date', now))
+      .toBe(now);
+  });
+
   test('GPS pings refresh location_updated_at with coordinates', async () => {
     const raw = jest.fn().mockResolvedValue({
       rows: [{
@@ -149,8 +159,39 @@ describe('tech_status GPS freshness writes', () => {
     });
 
     const [sql] = raw.mock.calls[0];
+    const [, values] = raw.mock.calls[0];
     expect(sql).toContain('location_updated_at)');
-    expect(sql).toContain('location_updated_at = NOW()');
+    expect(sql).toContain('EXCLUDED.location_updated_at >= tech_status.location_updated_at');
+    expect(sql).toContain('ELSE tech_status.location_updated_at');
     expect(sql).toContain('RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at, location_updated_at');
+    expect(values).toHaveLength(5);
+    expect(values[4]).toBeInstanceOf(Date);
+  });
+
+  test('GPS pings preserve provider-reported freshness timestamps', async () => {
+    const raw = jest.fn().mockResolvedValue({
+      rows: [{
+        tech_id: 'tech-1',
+        status: 'driving',
+        lat: 27.1,
+        lng: -82.2,
+        current_job_id: null,
+        updated_at: '2026-05-05T12:00:00.000Z',
+        location_updated_at: '2026-05-05T11:58:00.000Z',
+      }],
+    });
+    db.transaction = jest.fn(async (cb) => cb({ raw }));
+
+    await techStatus.pingTechLocation({
+      tech_id: 'tech-1',
+      lat: 27.1,
+      lng: -82.2,
+      ignition: true,
+      speed_mph: 12,
+      reported_at: '2026-05-05T11:58:00.000Z',
+    });
+
+    const [, values] = raw.mock.calls[0];
+    expect(values[4]).toEqual(new Date('2026-05-05T11:58:00.000Z'));
   });
 });

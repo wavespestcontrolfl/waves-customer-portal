@@ -30,6 +30,7 @@
 const db = require('../models/db');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
+const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('./customer-tracking-eta');
 
 const ROOM = 'dispatch:admins';
 const EVENT = 'dispatch:tech_status';
@@ -48,6 +49,15 @@ function sanitizeTechStatusForDispatch(row) {
     lng: null,
     eta_minutes: null,
   };
+}
+
+function normalizeProviderTimestamp(value, now = new Date()) {
+  const parsed = value ? new Date(value) : now;
+  const parsedMs = parsed.getTime();
+  const nowMs = now.getTime();
+  if (!Number.isFinite(parsedMs)) return now;
+  if (parsedMs - nowMs > FUTURE_TIMESTAMP_TOLERANCE_MS) return now;
+  return parsed;
 }
 
 /**
@@ -208,8 +218,9 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' })
  * @param {number} args.lng              required
  * @param {boolean|null} [args.ignition] optional, used for status derivation
  * @param {number|null}  [args.speed_mph] optional, used for status derivation
+ * @param {string|Date|null} [args.reported_at] GPS sample timestamp from provider
  */
-async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph }) {
+async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at }) {
   if (!tech_id || lat == null || lng == null) {
     throw new Error('pingTechLocation: tech_id, lat, lng are required');
   }
@@ -217,6 +228,7 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph }) {
   const speedMoving = Number(speed_mph || 0) > 5;
   const moving = ignition === false ? false : speedMoving;
   const derivedStatus = moving ? 'driving' : 'idle';
+  const locationUpdatedAt = normalizeProviderTimestamp(reported_at);
 
   let row;
   await db.transaction(async (trx) => {
@@ -226,20 +238,43 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph }) {
     const [committed] = await trx.raw(
       `
       INSERT INTO tech_status (tech_id, status, lat, lng, updated_at, location_updated_at)
-      VALUES (?, ?, ?, ?, NOW(), NOW())
+      VALUES (?, ?, ?, ?, NOW(), ?)
       ON CONFLICT (tech_id) DO UPDATE SET
-        lat = EXCLUDED.lat,
-        lng = EXCLUDED.lng,
-        updated_at = NOW(),
-        location_updated_at = NOW(),
+        lat = CASE
+          WHEN tech_status.location_updated_at IS NULL
+            OR EXCLUDED.location_updated_at >= tech_status.location_updated_at
+            THEN EXCLUDED.lat
+          ELSE tech_status.lat
+        END,
+        lng = CASE
+          WHEN tech_status.location_updated_at IS NULL
+            OR EXCLUDED.location_updated_at >= tech_status.location_updated_at
+            THEN EXCLUDED.lng
+          ELSE tech_status.lng
+        END,
+        updated_at = CASE
+          WHEN tech_status.location_updated_at IS NULL
+            OR EXCLUDED.location_updated_at >= tech_status.location_updated_at
+            THEN NOW()
+          ELSE tech_status.updated_at
+        END,
+        location_updated_at = CASE
+          WHEN tech_status.location_updated_at IS NULL
+            OR EXCLUDED.location_updated_at >= tech_status.location_updated_at
+            THEN EXCLUDED.location_updated_at
+          ELSE tech_status.location_updated_at
+        END,
         status = CASE
           WHEN tech_status.status IN ('en_route','on_site','wrapping_up')
+            THEN tech_status.status
+          WHEN tech_status.location_updated_at IS NOT NULL
+            AND EXCLUDED.location_updated_at < tech_status.location_updated_at
             THEN tech_status.status
           ELSE EXCLUDED.status
         END
       RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at, location_updated_at
       `,
-      [tech_id, derivedStatus, lat, lng]
+      [tech_id, derivedStatus, lat, lng, locationUpdatedAt]
     ).then((r) => r.rows);
     row = committed;
   });
@@ -307,5 +342,6 @@ module.exports = {
   _test: {
     sanitizeTechStatusForDispatch,
     isFreshDispatchLocation,
+    normalizeProviderTimestamp,
   },
 };

@@ -257,7 +257,7 @@
       "year2": 0
     }
   },
-  "v1adapter_bedbug_3rooms_both_methods": {
+  "v1adapter_bedbug_3rooms_hybrid": {
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
@@ -275,22 +275,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 3351,
+      "total": 2950,
       "tmInstall": 0,
       "items": [],
       "specItems": [
         {
-          "name": "Bed Bug (Chemical)",
-          "price": 1101
-        },
-        {
-          "name": "Bed Bug (Heat)",
-          "price": 2250
+          "name": "Bed Bug Hybrid Heat + Residual Program — 3 room(s)",
+          "price": 2950
         }
       ]
     },
     "totals": {
-      "year1": 3351,
+      "year1": 2950,
       "year2": 0
     }
   },

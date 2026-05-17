@@ -20,7 +20,7 @@ async function checkMaintenanceDue() {
     const schedules = await db('maintenance_schedules')
       .join('equipment', 'maintenance_schedules.equipment_id', 'equipment.id')
       .where('maintenance_schedules.is_active', true)
-      .whereIn('equipment.status', ['active', 'in_service'])
+      .whereIn('equipment.status', ['active', 'maintenance', 'in_service'])
       .select(
         'maintenance_schedules.*',
         'equipment.name as equipment_name',
@@ -126,7 +126,7 @@ async function checkMaintenanceDue() {
  */
 async function recordMaintenance({
   equipmentId, scheduleId, maintenanceType, taskName, description,
-  performedBy, vendorName, milesAtService, hoursAtService,
+  performedBy, performedAt, vendorName, milesAtService, hoursAtService,
   conditionBefore, conditionAfter, partsCost = 0, laborCost = 0,
   vendorCost = 0, partsUsed, downtimeHours = 0, followUpNeeded = false,
   followUpNotes, followUpDate, warrantyClaim = false, receiptUrl,
@@ -143,7 +143,7 @@ async function recordMaintenance({
       maintenance_type: maintenanceType || 'scheduled',
       task_name: taskName,
       description: description || null,
-      performed_at: db.fn.now(),
+      performed_at: performedAt || db.fn.now(),
       performed_by: performedBy || null,
       vendor_name: vendorName || null,
       miles_at_service: milesAtService || null,
@@ -455,7 +455,7 @@ async function generateMaintenanceAlert(schedule, isOverdue) {
 async function getFleetOverview() {
   try {
     const totalAssets = await db('equipment')
-      .whereNot('status', 'retired')
+      .whereNotIn('status', ['retired', 'sold', 'lost'])
       .count('id as count')
       .first();
 
@@ -496,7 +496,7 @@ async function getFleetOverview() {
 
     const lowCondition = await db('equipment')
       .where('condition_rating', '<=', 5)
-      .whereNot('status', 'retired')
+      .whereNotIn('status', ['retired', 'sold', 'lost'])
       .count('id as count')
       .first();
 

@@ -31,6 +31,14 @@ function adminFetch(path, options = {}) {
   });
 }
 
+function isAdminUser() {
+  try {
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin";
+  } catch {
+    return false;
+  }
+}
+
 // Tier 2 monochrome palette — WAVES_COLORS keys preserved so the 90+
 // call sites keep their semantic roles. Dark-mode glows neutralized to
 // light pastel tints; accents fold into zinc-900 per V2 admin spec.
@@ -479,6 +487,7 @@ export default function WavesSEODashboard() {
   const [backlinkData, setBacklinkData] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
+  const canRunSeoActions = isAdminUser();
 
   useEffect(() => {
     setLoading(true);
@@ -639,6 +648,7 @@ export default function WavesSEODashboard() {
   }
 
   const runSync = async () => {
+    if (!canRunSeoActions) return;
     setSyncing(true);
     setSyncMsg("Syncing GSC data...");
     try {
@@ -690,23 +700,25 @@ export default function WavesSEODashboard() {
           Sync Google Search Console data and run the SEO analyzer to populate
           this dashboard.
         </div>{" "}
-        <button
-          onClick={runSync}
-          disabled={syncing}
-          style={{
-            padding: "12px 24px",
-            borderRadius: 10,
-            border: "none",
-            cursor: syncing ? "default" : "pointer",
-            background: WAVES_COLORS.accent || "#0ea5e9",
-            color: "#fff",
-            fontSize: 14,
-            fontWeight: 700,
-            opacity: syncing ? 0.7 : 1,
-          }}
-        >
-          {syncing ? syncMsg : "Sync & Generate SEO Report"}
-        </button>
+        {canRunSeoActions && (
+          <button
+            onClick={runSync}
+            disabled={syncing}
+            style={{
+              padding: "12px 24px",
+              borderRadius: 10,
+              border: "none",
+              cursor: syncing ? "default" : "pointer",
+              background: WAVES_COLORS.accent || "#0ea5e9",
+              color: "#fff",
+              fontSize: 14,
+              fontWeight: 700,
+              opacity: syncing ? 0.7 : 1,
+            }}
+          >
+            {syncing ? syncMsg : "Sync & Generate SEO Report"}
+          </button>
+        )}
         {syncMsg && !syncing && (
           <div
             style={{

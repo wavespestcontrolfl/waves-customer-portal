@@ -114,6 +114,47 @@ describe('estimate v2 service toggle adapter', () => {
     }));
   });
 
+  test('maps exterior flea spray options into the authoritative server flea package', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        homeSqFt: 2000,
+        lotSqFt: 7500,
+        footprint: 2000,
+        treeDensity: 'LIGHT',
+        landscapeComplexity: 'SIMPLE',
+      },
+      ['FLEA'],
+      {
+        fleaExterior: true,
+        fleaExteriorAreaSqFt: 5000,
+        fleaExteriorAreaSource: 'CONFIRMED_SQ_FT',
+        fleaExteriorZones: ['PET_RESTING_AREA'],
+      }
+    );
+
+    expect(input.services.flea).toEqual(expect.objectContaining({
+      fleaExterior: true,
+      fleaExteriorAreaSqFt: 5000,
+      fleaExteriorAreaSource: 'CONFIRMED_SQ_FT',
+      fleaExteriorZones: ['PET_RESTING_AREA'],
+    }));
+
+    const estimate = generateEstimate(input);
+    const item = estimate.lineItems.find((line) => line.service === 'flea_package');
+    expect(item.total).toBe(470);
+
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.hasOneTime).toBe(true);
+    expect(mapped.oneTime.specItems).toContainEqual(expect.objectContaining({
+      service: 'flea_package',
+      name: 'Flea Treatment Package — 2 visits',
+      price: 470,
+      exteriorDetail: 'Exterior flea spray — 5,000 sf',
+      fleaExteriorZones: ['PET_RESTING_AREA'],
+    }));
+  });
+
   test('maps palm injection selection with explicit medium palm size for strict tiered pricing', () => {
     const input = translateV2CallToV1Input(
       {
@@ -195,7 +236,7 @@ describe('estimate v2 service toggle adapter', () => {
     expect(mapped.totals.year2).toBeCloseTo(estimate.summary.recurringAnnualAfterDiscount);
   });
 
-  test('uses zoned recurring mosquito add-on amounts in detail copy', () => {
+  test('uses recurring mosquito add-on amounts in detail copy', () => {
     const input = translateV2CallToV1Input(
       {
         ...baseProfile(),
@@ -218,8 +259,8 @@ describe('estimate v2 service toggle adapter', () => {
 
     const mapped = mapV1ToLegacyShape(generateEstimate(input));
     const mosquito = mapped.recurring.services.find((svc) => svc.service === 'mosquito');
-    expect(mosquito.detail).toContain('2 mosquito stations (+$94/yr)');
-    expect(mosquito.detail).toContain('4 Bti dunk tablets (+$19/yr)');
+    expect(mosquito.detail).toContain('2 mosquito stations (+$78/yr)');
+    expect(mosquito.detail).toContain('4 Bti dunk tablets (+$16/yr)');
   });
 
   test('does not double-bill recurring German roach initial when standalone German roach is also selected', () => {

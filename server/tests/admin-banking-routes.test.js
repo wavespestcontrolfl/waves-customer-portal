@@ -9,6 +9,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/stripe-banking', () => ({
   getBalance: jest.fn(),
   createInstantPayout: jest.fn(),
+  createStandardPayout: jest.fn(),
   syncPayouts: jest.fn(),
   getCashFlow: jest.fn(),
   reconcilePayout: jest.fn(),
@@ -143,6 +144,37 @@ describe('admin banking routes', () => {
         requestedBy: 'admin-1',
         idempotencyKey: 'ipo_attempt_123',
       });
+    });
+  });
+
+  test('standard payout uses stable non-PII admin actor with client idempotency key', async () => {
+    StripeBanking.createStandardPayout.mockResolvedValue({ payout_id: 'po_standard', status: 'pending', method: 'standard' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/banking/payouts/standard`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: 75, idempotency_key: 'spo_attempt_123' }),
+      });
+      expect(res.status).toBe(200);
+      expect(StripeBanking.createStandardPayout).toHaveBeenCalledWith(75, {
+        requestedBy: 'admin-1',
+        idempotencyKey: 'spo_attempt_123',
+      });
+    });
+  });
+
+  test('standard payout rejects amounts with more than two decimal places', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/banking/payouts/standard`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: 75.005, idempotency_key: 'spo_attempt_123' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('Invalid amount — must be a positive number');
+      expect(StripeBanking.createStandardPayout).not.toHaveBeenCalled();
     });
   });
 });

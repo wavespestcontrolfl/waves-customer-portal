@@ -113,7 +113,7 @@ Rules in v4.3:
 3. **Excluded services** (`WAVEGUARD.excludedFromPercentDiscount`) get
    no percentage discount. Some get a fixed flat credit:
    - `palm_injection`: $10/palm/yr for Gold+ members
-   - `rodent_bait`: $50 setup credit for any WaveGuard member
+   - `rodent_bait`: no WaveGuard credit, coupon, setup credit, discount, or tier benefit
    - `bed_bug_chemical` / `bed_bug_heat`: $50 flat WaveGuard credit
    - `bora_care`, `pre_slab_termidor`, `german_roach_initial`,
      `pest_initial_roach`: no discount, no credit. These are non-waivable
@@ -200,7 +200,7 @@ moves materially:
 operator's actual SWFL routes (Manatee + Sarasota + Charlotte). Used to
 compute the labor cost contribution from drive in
 `service-pricing.js`. This is a fleet average, not a per-property value
-— Zone multipliers (`ZONES.A/B/C/D`) handle the geographic spread.
+— service zones remain routing/metadata labels and do not change price.
 
 **`ADMIN_ANNUAL`**: $51 per service per year for billing, scheduling,
 CRM, and dispatch overhead. Allocated annually because the underlying

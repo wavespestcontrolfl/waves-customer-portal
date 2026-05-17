@@ -17,17 +17,15 @@ const GLOBAL = {
   CONDITIONAL_CEILING: 60,    // $/property/yr max conditional material before reprice
 };
 
-// ── Zone Multipliers ──────────────────────────────────────────
-// Must match modifiers.zoneMultiplier(). Startup assertion in
-// estimate-engine.js verifies alignment at module load.
-// Session 3 aligned v1, v2, and DB to these values (changelog id=3).
-// Prior v1 had Zone C at 1.10 (vs 1.12 in v2/DB) and was missing Zone D entirely.
+// ── Service Zones ─────────────────────────────────────────────
+// Zones are retained as routing/metadata labels only. They do not affect
+// estimator pricing; all multipliers are intentionally neutral.
 const ZONES = {
   A: { name: 'Manatee/Sarasota core', multiplier: 1.00 },
-  B: { name: 'Extended service area', multiplier: 1.05 },
-  C: { name: 'Charlotte outskirts',   multiplier: 1.12 },
-  D: { name: 'Far reach',              multiplier: 1.20 },
-  UNKNOWN: { name: 'Default',          multiplier: 1.00 },  // Codifies live behavior — modifiers.zoneMultiplier() default returns 1.0.
+  B: { name: 'Extended service area', multiplier: 1.00 },
+  C: { name: 'Charlotte outskirts',   multiplier: 1.00 },
+  D: { name: 'Far reach',              multiplier: 1.00 },
+  UNKNOWN: { name: 'Default',          multiplier: 1.00 },
 };
 
 // ── Urgency Multipliers ──────────────────────────────────────
@@ -533,7 +531,7 @@ const TERMITE = {
 // ============================================================
 // Staged-remediation pricing model (Apr 2026 v2):
 //   1. Inspection / diagnosis (creditable)
-//   2. Active trapping (setup + 2 follow-ups, with home/lot/pressure adj)
+//   2. Active trapping (setup + unlimited trap checks during active window)
 //   3. Exclusion (per-point with home-size minimums + access multipliers)
 //   4. Sanitation (light / standard / heavy with sqft + debris scaling)
 //   5. Bundle discount (7% / 5% / 10% with floors)
@@ -571,11 +569,12 @@ const RODENT = {
 
   // ── Trapping ──────────────────────────────────────────────
   trapping: {
-    base: r(395),                       // Includes 2 follow-up checks
+    base: r(395),                       // Includes active-window trap checks
     floor: r(350),
     ceilingBeforeCustom: r(795),
-    includedFollowUps: 2,
-    additionalFollowUpRate: r(95),
+    includedFollowUps: 'unlimited',
+    activeWindowDays: 14,
+    additionalFollowUpRate: 0,
     homeSizeAdjustments: [
       { maxSqFt: 1200,     adjustment: -r(25) },
       { maxSqFt: 2500,     adjustment: 0 },
@@ -672,10 +671,10 @@ const RODENT = {
     ],
   },
 
-  // WaveGuard rules: NOT a tier qualifier, excluded from % discounts
+  // WaveGuard rules: NOT a tier qualifier, excluded from all WaveGuard benefits
   tierQualifier: false,
   excludeFromPctDiscount: true,
-  setupCredit: 50, // Legacy WG credit, retained for migration compatibility
+  setupCredit: 0,
 };
 
 // ============================================================
@@ -824,6 +823,55 @@ const SPECIALTY = {
   flea: {
     initial: { base: r(225), floor: r(185) },
     followUp: { base: r(125), floor: r(95) },
+    footprintAdjustments: {
+      initial: [
+        { at: 800, adj: -r(25) }, { at: 1200, adj: -r(15) },
+        { at: 1500, adj: -r(5) }, { at: 2000, adj: 0 },
+        { at: 2500, adj: r(15) }, { at: 3000, adj: r(25) },
+        { at: 4000, adj: r(40) },
+      ],
+      followUp: [
+        { at: 800, adj: -r(15) }, { at: 1200, adj: -r(10) },
+        { at: 1500, adj: -r(3) }, { at: 2000, adj: 0 },
+        { at: 2500, adj: r(8) }, { at: 3000, adj: r(15) },
+        { at: 4000, adj: r(25) },
+      ],
+    },
+    lotAdjustments: {
+      initial: [
+        { at: 3000, adj: -r(15) }, { at: 5000, adj: -r(5) },
+        { at: 7500, adj: 0 }, { at: 10000, adj: r(10) },
+        { at: 15000, adj: r(20) }, { at: 25000, adj: r(35) },
+      ],
+      followUp: [
+        { at: 3000, adj: -r(8) }, { at: 5000, adj: -r(3) },
+        { at: 7500, adj: 0 }, { at: 10000, adj: r(5) },
+        { at: 15000, adj: r(12) }, { at: 25000, adj: r(20) },
+      ],
+    },
+    treeDensityAdjustments: {
+      heavy: { initial: r(20), followUp: r(10) },
+      moderate: { initial: r(10), followUp: r(5) },
+      light: { initial: 0, followUp: 0 },
+      none: { initial: 0, followUp: 0 },
+    },
+    landscapeComplexityAdjustments: {
+      complex: { initial: r(15), followUp: r(10) },
+      moderate: { initial: r(5), followUp: r(5) },
+      simple: { initial: 0, followUp: 0 },
+    },
+    exterior: {
+      enabled: true,
+      maxSqFt: 20000,
+      tiers: [
+        { min: 1, max: 2500, initial: r(55), followUp: r(35) },
+        { min: 2501, max: 5000, initial: r(75), followUp: r(45) },
+        { min: 5001, max: 7500, initial: r(95), followUp: r(60) },
+        { min: 7501, max: 10000, initial: r(115), followUp: r(75) },
+        { min: 10001, max: 15000, initial: r(155), followUp: r(100) },
+        { min: 15001, max: 20000, initial: r(195), followUp: r(125) },
+      ],
+    },
   },
   wasp: {
     tiers: [r(150), r(250), r(435), r(775)],
@@ -875,6 +923,186 @@ const SPECIALTY = {
 };
 
 // ============================================================
+// BED BUG SPECIALTY TREATMENT
+// ============================================================
+const BED_BUG = {
+  service: 'bed_bug',
+
+  laborRate: 35,
+  driveMinutes: 20,
+
+  recurringDiscountEligible: false,
+  maxRecurringDiscountPct: 0,
+
+  allowedMethods: ['CHEMICAL', 'HEAT', 'HYBRID'],
+
+  severity: {
+    light: { label: 'Light', visits: 2, multiplier: 1.00, quoteRequired: false },
+    moderate: { label: 'Moderate', visits: 3, multiplier: 1.15, quoteRequired: false },
+    heavy: { label: 'Heavy', visits: 3, multiplier: 1.30, quoteRequired: false },
+    severe: { label: 'Severe', visits: null, multiplier: null, quoteRequired: true },
+  },
+
+  prepStatus: {
+    ready: { label: 'Ready', multiplier: 1.00, allowed: true },
+    partial: { label: 'Partial Prep', multiplier: 1.15, allowed: true },
+    poor: {
+      label: 'Poor Prep',
+      multiplier: 1.30,
+      allowed: true,
+      warnings: ['Poor prep materially increases failure/callback risk.'],
+    },
+    refused: {
+      label: 'Prep Refused',
+      multiplier: null,
+      allowed: false,
+      quoteRequired: true,
+    },
+  },
+
+  occupancyType: {
+    singleFamily: { label: 'Single Family', multiplier: 1.00 },
+    apartment: { label: 'Apartment / Multi-Family', multiplier: 1.15 },
+    hotel: { label: 'Hotel / Hospitality', multiplier: 1.30 },
+    studentHousing: { label: 'Student Housing', multiplier: 1.35 },
+  },
+
+  stories: {
+    one: { maxStories: 1, multiplier: 1.00 },
+    two: { maxStories: 2, multiplier: 1.05 },
+    threePlus: { maxStories: null, multiplier: 1.10 },
+  },
+
+  urgencyMultipliers: {
+    standard: 1.00,
+    soon: 1.25,
+    soonAfterHours: 1.50,
+    emergency: 1.50,
+    emergencyAfterHours: 2.00,
+  },
+
+  chemical: {
+    label: 'Bed Bug Chemical/IPM Program',
+    includedVisits: 2,
+    followUpDays: 14,
+    materialPerRoomVisit1: 50.42,
+    materialPerRoomVisit2Factor: 0.50,
+    extraFollowUpMaterialFactor: 0.25,
+    pricingModel: 'costRatio',
+    targetCostRatio: 0.35,
+    minimumBase: 400,
+    minimumAdditionalRoom: 250,
+    visitMinutes: {
+      visit1: { setupBase: 45, applicationBase: 30, perExtraRoom: 30, drive: 20 },
+      visit2: { followUpBase: 25, perExtraRoom: 20, drive: 20 },
+      extraFollowUp: { followUpBase: 25, perExtraRoom: 20, drive: 20 },
+    },
+    sizeModifiers: [
+      { minFootprintExclusive: 2500, multiplier: 1.10 },
+      { minFootprintExclusive: 1800, multiplier: 1.05 },
+    ],
+    additionalFollowUpPrice: { base: 175, perRoom: 75 },
+    productBasis: {
+      residual: {
+        product: 'PT Alpine WSG',
+        internalCost: { containerPrice: 220.53, containerGrams: 500 },
+        labelVerificationRequired: true,
+      },
+      igr: {
+        product: 'TBD',
+        disabledUntilLabelVerified: true,
+        notes: [
+          'Do not assume Distance IGR is valid for indoor bed bug use unless internal label verification confirms it.',
+        ],
+      },
+      roomMaterialAllowance: 50.42,
+    },
+    protocol: {
+      programType: 'IPM',
+      residualApplication: true,
+      requiresPrepChecklist: true,
+      requiresFollowUpMonitoring: true,
+      requiresCustomerAcknowledgement: true,
+      productLabelVerificationRequired: true,
+    },
+    warnings: [
+      'Chemical treatment should be sold as an IPM program, not spray-only.',
+      'Customer prep and follow-up monitoring are required.',
+      'Additional follow-up may be needed if activity persists.',
+    ],
+  },
+
+  heat: {
+    label: 'Bed Bug Heat Treatment',
+    includedTreatmentEvents: 1,
+    includePostInspection: true,
+    postInspectionDays: 14,
+    allowedEquipment: ['INHOUSE', 'SUBCONTRACT'],
+    roomRates: { oneRoom: 1000, twoRooms: 850, threePlusRooms: 750 },
+    inHouseEquipmentFee: { base: 150, perExtraRoom: 75 },
+    subcontractMarkup: 1.25,
+    minimums: { inHouse: 1150, subcontract: 1000 },
+    heatScope: { allowed: ['ROOMS_ONLY', 'WHOLE_HOME'] },
+    sqftRates: { inHouse: 2.00, subcontract: 2.00 },
+    sizeModifiers: [
+      { minFootprintExclusive: 2500, multiplier: 1.10 },
+      { maxFootprintExclusive: 1200, multiplier: 0.95 },
+    ],
+    protocol: {
+      targetAmbientTempF: 135,
+      requiredMinimumTempF: 120,
+      minimumHoldTimeMinutes: 90,
+      activeMonitoringRequired: true,
+      minSensors: 5,
+      requiresPrepChecklist: true,
+      requiresHeatSensitiveItemPlan: true,
+    },
+    warnings: [
+      'Heat treatment has no residual effect.',
+      'Customer must complete prep checklist and heat-sensitive item plan.',
+      'Post-treatment monitoring/inspection is required.',
+    ],
+  },
+
+  hybrid: {
+    label: 'Bed Bug Hybrid Heat + Residual Program',
+    heatEvent: true,
+    residualApplication: true,
+    includePostInspection: true,
+    postInspectionDays: 14,
+    residualAddOn: { base: 175, perRoom: 75 },
+    protocol: {
+      heatEvent: true,
+      residualApplication: true,
+      residualApplicationType: 'targeted',
+      requiresPrepChecklist: true,
+      requiresFollowUpMonitoring: true,
+      requiresCustomerAcknowledgement: true,
+    },
+    warnings: [
+      'Hybrid must be explicitly selected.',
+      'Do not trigger hybrid from invalid method input.',
+      'Hybrid is heat plus targeted residual protection, not a duplicate full chemical program.',
+    ],
+  },
+
+  internalCostBasis: {
+    ptAlpineWsg500g: {
+      product: 'PT Alpine WSG Insecticide 500 gm',
+      unitPrice: 220.53,
+      unitGrams: 500,
+      labelVerificationRequired: true,
+    },
+    distanceIgr1qt: {
+      product: 'Distance IGR Insecticide 1 qt',
+      unitPrice: 377.68,
+      disabledUntilLabelVerified: true,
+      labelVerificationRequired: true,
+    },
+  },
+};
+
+// ============================================================
 // WAVEGUARD BUNDLE
 // ============================================================
 const WAVEGUARD = {
@@ -888,12 +1116,13 @@ const WAVEGUARD = {
     'lawn_care', 'pest_control', 'tree_shrub', 'mosquito', 'termite_bait',
     // palm_injection and rodent_bait are NOT qualifiers
   ],
-  // Services excluded from percentage discounts (get flat credits instead, where applicable)
+  // Services excluded from percentage discounts (flat credits only where explicitly allowed)
   excludedFromPercentDiscount: {
-    rodent_bait: true,          // Flat $50 setup credit for WaveGuard members
+    rodent_bait: true,          // Fully excluded: no tier count, %, setup credit, coupon, or benefit
     palm_injection: true,       // $10/palm/yr Gold+ flat credit
-    bed_bug_chemical: true,     // $50 flat member credit
-    bed_bug_heat: true,         // $50 flat member credit
+    bed_bug: true,              // Bed bug services are not eligible for recurring-customer discounts
+    bed_bug_chemical: true,     // Legacy key; excluded with no flat credit
+    bed_bug_heat: true,         // Legacy key; excluded with no flat credit
     bora_care: true,            // Excluded — no discount
     pre_slab_termidor: true,    // Excluded — no discount
     // priceGermanRoachInitial bakes urgency × rc in a single Math.round to
@@ -932,6 +1161,6 @@ module.exports = {
   PEST, LAWN_TIERS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, PALM, MOSQUITO, TERMITE, RODENT,
-  ONE_TIME, SPECIALTY, WAVEGUARD, ACH_DISCOUNT,
+  ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   PROCESSING_ADJUSTMENT,
 };

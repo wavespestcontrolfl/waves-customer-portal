@@ -36,7 +36,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
-const CONFIRMED_ACTION_TOOL_NAMES = new Set(['request_instant_payout']);
+const CONFIRMED_ACTION_TOOL_NAMES = new Set(['request_instant_payout', 'request_standard_payout']);
 
 function isToolFailure(result) {
   return result && typeof result === 'object' && (result.error || result.failed === true);
@@ -51,6 +51,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
 const MAX_TOOL_ROUNDS = 8;
+const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
@@ -69,6 +70,18 @@ const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
 
 function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
+}
+
+function getAdminActorId(req) {
+  return String(req.technicianId || req.technician?.id || 'admin');
+}
+
+function getConfirmedActionIdempotencyKey(req, params) {
+  const key = params?.idempotencyKey || params?.idempotency_key || req.body.idempotency_key;
+  if (!key || !IDEMPOTENCY_KEY_RE.test(String(key))) {
+    return null;
+  }
+  return String(key);
 }
 
 // Context-specific system prompt extensions
@@ -387,7 +400,7 @@ LEADS PIPELINE CONTEXT:
 You are on the Leads page. Virginia uses this daily to manage the sales pipeline.
 
 PIPELINE STAGES (in order):
-new → contacted → estimate_sent → estimate_viewed → negotiating → won
+new → contacted → estimate_sent → estimate_viewed → won
 Dead ends: lost, unresponsive, disqualified, duplicate
 
 LEAD SOURCES: Google Ads, Google LSA, Organic, Referral, Door Knock campaigns, Nextdoor, Facebook, Walk-In, AI Agent, Voicemail, Email
@@ -488,14 +501,14 @@ BANKING CAPABILITIES:
 - Payout history with transaction-level detail (which customers paid in each deposit)
 - Cash flow analysis (money in vs out, net, trend)
 - Fee analysis (effective processing rate, card vs ACH comparison)
-- Instant payout planning (1% fee). The query bar can calculate and explain the payout, but execution must go through the confirmed action endpoint.
+- Standard payout planning (no Instant Payout fee) and Instant payout planning (1.5% US fee estimate). Execution must go through the confirmed action endpoint.
 - Reconciliation tracking (match Stripe deposits to bank records)
 - CSV/OFX export for Capital One import or CPA handoff
 
 KEY FACTS:
 - Payments are processed via Stripe (card, Apple Pay, Google Pay, ACH)
-- Standard payouts take 2 business days to reach Capital One
-- Instant payouts arrive in minutes but cost 1% of the amount
+- Standard manual payouts avoid the Instant Payout fee and arrive on Stripe's standard bank payout timing
+- Instant payouts arrive in minutes but cost about 1.5% of the amount for US Dashboard users
 - The business bank is Capital One
 
 RESPONSE STYLE:
@@ -504,7 +517,8 @@ RESPONSE STYLE:
 - For payouts, include the arrival date (when it actually hits the bank)
 - For cash flow, always show net (in minus out) with a clear positive/negative indicator
 - When discussing fees, show both the dollar amount and the effective percentage rate
-- For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute from the query flow.`,
+- For standard payouts, say clearly that this avoids the Instant Payout fee but still uses Stripe's standard payout timing.
+- For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute payouts from the query flow.`,
 };
 
 function getToolsForContext(context) {
@@ -831,9 +845,25 @@ router.post('/execute', async (req, res, next) => {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
     }
 
-    const result = await executeToolByName(action, params || {});
+    let executionParams = params || {};
+    if (CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
+      const idempotencyKey = getConfirmedActionIdempotencyKey(req, executionParams);
+      if (!idempotencyKey) {
+        return res.status(400).json({ error: 'A valid idempotency key is required for this action' });
+      }
+      executionParams = {
+        ...executionParams,
+        idempotencyKey,
+        requestedBy: getAdminActorId(req),
+      };
+    }
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, params);
+    const result = await executeToolByName(action, executionParams);
+
+    logger.info(`[intelligence-bar] Executed action: ${action}`, {
+      ...executionParams,
+      ...(executionParams.idempotencyKey ? { idempotencyKey: '[redacted]' } : {}),
+    });
 
     res.json({
       success: !result.error,

@@ -74,6 +74,14 @@ function ScheduleRedirect() {
   return <Navigate to={`/admin/dispatch?${params.toString()}`} replace />;
 }
 
+function FleetRedirect() {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  const requestedTab = params.get('tab');
+  params.set('tab', requestedTab === 'analytics' ? 'analytics' : 'maintenance');
+  return <Navigate to={`/admin/equipment?${params.toString()}`} replace />;
+}
+
 const SERVICE_ESTIMATE_SLUGS = new Set([
   'mosquito',
   'termite',
@@ -167,7 +175,6 @@ const ReviewPage = lazyWithRetry(() => import('./pages/ReviewPage'));
 const CustomerHealthPage = lazyWithRetry(() => import('./pages/admin/CustomerHealthPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
 const LeadsPage = lazyWithRetry(() => import('./pages/admin/LeadsPage'));
-const EquipmentMaintenancePage = lazyWithRetry(() => import('./pages/admin/EquipmentMaintenancePage'));
 const ServiceLibraryPage = lazyWithRetry(() => import('./pages/admin/ServiceLibraryPage'));
 const ProjectsPage = lazyWithRetry(() => import('./pages/admin/ProjectsPage'));
 const CredentialsPage = lazyWithRetry(() => import('./pages/admin/CredentialsPage'));
@@ -314,7 +321,7 @@ export default function App() {
             <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
             <Route path="timetracking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading time tracking...</div>}><TimeTrackingPage /></Suspense>} />
             <Route path="leads" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><LeadsPage /></Suspense>} />
-            <Route path="fleet" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading fleet...</div>}><EquipmentMaintenancePage /></Suspense>} />
+            <Route path="fleet" element={<FleetRedirect />} />
             <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
             <Route path="projects" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading projects...</div>}><ProjectsPage /></Suspense>} />
             <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
@@ -327,6 +334,7 @@ export default function App() {
             <Route path="email" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading email...</div>}><AdminEmailPage /></Suspense>} />
             <Route path="banking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading banking...</div>}><AdminBankingPage /></Suspense>} />
             <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingLogicPage /></Suspense>} />
+            <Route path="pricing-reality-check" element={<Navigate to="/admin/pricing-logic?section=reality" replace />} />
             <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
             <Route path="more" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading…</div>}><AdminMorePage /></Suspense>} />
             <Route path="_design-system" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading design system...</div>}><DesignSystemPage /></Suspense>} />

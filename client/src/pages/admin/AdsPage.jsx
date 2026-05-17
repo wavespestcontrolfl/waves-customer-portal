@@ -59,6 +59,14 @@ function adminPost(path, body) {
   }).then((r) => r.json());
 }
 
+function isAdminUser() {
+  try {
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin";
+  } catch {
+    return false;
+  }
+}
+
 function fmt(n) {
   return (
     "$" +
@@ -1403,6 +1411,7 @@ function SEODashboardTab() {
   const [period, setPeriod] = useState(28);
   const [queryFilter, setQueryFilter] = useState("all"); // all, nonbrand, branded
   const [syncing, setSyncing] = useState(false);
+  const canRunSeoActions = isAdminUser();
 
   useEffect(() => {
     setLoading(true);
@@ -1415,6 +1424,7 @@ function SEODashboardTab() {
   }, [period]);
 
   const handleSync = async () => {
+    if (!canRunSeoActions) return;
     setSyncing(true);
     await adminPost("/admin/seo/sync", { daysBack: 7 });
     setSyncing(false);
@@ -1460,23 +1470,25 @@ function SEODashboardTab() {
             Connect your Google Search Console account to start tracking organic
             search performance, query rankings, and page visibility.
           </div>{" "}
-          <button
-            onClick={handleSync}
-            disabled={syncing}
-            style={{
-              padding: "10px 20px",
-              borderRadius: 8,
-              border: `1px solid ${D.teal}`,
-              background: "transparent",
-              color: D.teal,
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: "pointer",
-              opacity: syncing ? 0.5 : 1,
-            }}
-          >
-            {syncing ? "Syncing..." : "Sync GSC Data"}
-          </button>{" "}
+          {canRunSeoActions && (
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              style={{
+                padding: "10px 20px",
+                borderRadius: 8,
+                border: `1px solid ${D.teal}`,
+                background: "transparent",
+                color: D.teal,
+                fontSize: 13,
+                fontWeight: 500,
+                cursor: "pointer",
+                opacity: syncing ? 0.5 : 1,
+              }}
+            >
+              {syncing ? "Syncing..." : "Sync GSC Data"}
+            </button>
+          )}{" "}
         </Card>{" "}
       </div>
     );
@@ -1532,22 +1544,24 @@ function SEODashboardTab() {
             </button>
           ))}
         </div>{" "}
-        <button
-          onClick={handleSync}
-          disabled={syncing}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 6,
-            border: `1px solid ${D.border}`,
-            background: "transparent",
-            color: D.muted,
-            fontSize: 12,
-            cursor: "pointer",
-            opacity: syncing ? 0.5 : 1,
-          }}
-        >
-          {syncing ? "Syncing..." : "Sync GSC"}
-        </button>{" "}
+        {canRunSeoActions && (
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 6,
+              border: `1px solid ${D.border}`,
+              background: "transparent",
+              color: D.muted,
+              fontSize: 12,
+              cursor: "pointer",
+              opacity: syncing ? 0.5 : 1,
+            }}
+          >
+            {syncing ? "Syncing..." : "Sync GSC"}
+          </button>
+        )}{" "}
       </div>
       {/* Core 4 KPIs */}
       <div
@@ -2188,6 +2202,7 @@ function SEOAdvisorTab() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const canRunSeoActions = isAdminUser();
 
   useEffect(() => {
     Promise.all([
@@ -2203,6 +2218,7 @@ function SEOAdvisorTab() {
   }, []);
 
   const handleGenerate = async () => {
+    if (!canRunSeoActions) return;
     setGenerating(true);
     const r = await adminPost("/admin/seo/advisor/generate", {});
     setReport({
@@ -2248,23 +2264,25 @@ function SEOAdvisorTab() {
             ? `— ${new Date(report.date + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`
             : ""}
         </div>{" "}
-        <button
-          onClick={handleGenerate}
-          disabled={generating}
-          style={{
-            padding: "8px 16px",
-            borderRadius: 8,
-            border: `1px solid ${D.teal}`,
-            background: "transparent",
-            color: D.teal,
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: "pointer",
-            opacity: generating ? 0.5 : 1,
-          }}
-        >
-          {generating ? "Generating..." : "Generate SEO Report"}
-        </button>{" "}
+        {canRunSeoActions && (
+          <button
+            onClick={handleGenerate}
+            disabled={generating}
+            style={{
+              padding: "8px 16px",
+              borderRadius: 8,
+              border: `1px solid ${D.teal}`,
+              background: "transparent",
+              color: D.teal,
+              fontSize: 13,
+              fontWeight: 500,
+              cursor: "pointer",
+              opacity: generating ? 0.5 : 1,
+            }}
+          >
+            {generating ? "Generating..." : "Generate SEO Report"}
+          </button>
+        )}{" "}
       </div>
       {!report ? (
         <Card style={{ textAlign: "center", padding: 60 }}>
@@ -2281,8 +2299,9 @@ function SEOAdvisorTab() {
             No SEO Reports Yet
           </div>{" "}
           <div style={{ fontSize: 14, color: D.muted }}>
-            Click "Generate SEO Report" or wait for the weekly Monday 7 AM
-            auto-run.
+            {canRunSeoActions
+              ? 'Click "Generate SEO Report" or wait for the weekly Monday 7 AM auto-run.'
+              : "No weekly SEO report has been generated yet."}
           </div>{" "}
         </Card>
       ) : (
@@ -3676,6 +3695,7 @@ function SiteAuditTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const canRunSeoActions = isAdminUser();
 
   useEffect(() => {
     adminFetch("/admin/seo/audit")
@@ -3687,6 +3707,7 @@ function SiteAuditTab() {
   }, []);
 
   const runAudit = async () => {
+    if (!canRunSeoActions) return;
     setRunning(true);
     await adminPost("/admin/seo/audit/run", {});
     const d = await adminFetch("/admin/seo/audit");
@@ -3716,23 +3737,25 @@ function SiteAuditTab() {
         <div style={{ fontSize: 14, color: D.muted, marginBottom: 20 }}>
           Run a site-wide technical audit to check all pages.
         </div>{" "}
-        <button
-          onClick={runAudit}
-          disabled={running}
-          style={{
-            padding: "10px 20px",
-            borderRadius: 8,
-            border: "none",
-            background: D.teal,
-            color: "#fff",
-            fontSize: 14,
-            fontWeight: 600,
-            cursor: "pointer",
-            opacity: running ? 0.5 : 1,
-          }}
-        >
-          {running ? "Auditing..." : "Run Site Audit"}
-        </button>{" "}
+        {canRunSeoActions && (
+          <button
+            onClick={runAudit}
+            disabled={running}
+            style={{
+              padding: "10px 20px",
+              borderRadius: 8,
+              border: "none",
+              background: D.teal,
+              color: "#fff",
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: "pointer",
+              opacity: running ? 0.5 : 1,
+            }}
+          >
+            {running ? "Auditing..." : "Run Site Audit"}
+          </button>
+        )}{" "}
       </Card>
     );
 
@@ -3759,22 +3782,24 @@ function SiteAuditTab() {
             {run.duration_seconds}s)
           </div>{" "}
         </div>{" "}
-        <button
-          onClick={runAudit}
-          disabled={running}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 6,
-            border: `1px solid ${D.teal}`,
-            background: "transparent",
-            color: D.teal,
-            fontSize: 12,
-            cursor: "pointer",
-            opacity: running ? 0.5 : 1,
-          }}
-        >
-          {running ? "Running..." : "Re-run Audit"}
-        </button>{" "}
+        {canRunSeoActions && (
+          <button
+            onClick={runAudit}
+            disabled={running}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 6,
+              border: `1px solid ${D.teal}`,
+              background: "transparent",
+              color: D.teal,
+              fontSize: 12,
+              cursor: "pointer",
+              opacity: running ? 0.5 : 1,
+            }}
+          >
+            {running ? "Running..." : "Re-run Audit"}
+          </button>
+        )}{" "}
       </div>
       {/* Score + summary */}
       <div

@@ -3,6 +3,7 @@ import { Calendar, ClipboardList, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
+import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 
 /**
  * Projects — post-service inspection / documentation reports.
@@ -43,8 +44,10 @@ const TYPE_LABELS = {
   flea: "Flea",
   rodent_exclusion: "Rodent",
   bed_bug: "Bed Bug",
+  pre_treatment_termite_certificate: "Pre-Treat Cert",
 };
 const WDO_TYPE = "wdo_inspection";
+const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
@@ -173,6 +176,35 @@ function hasMeaningfulValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== "";
 }
 
+function formatProjectCustomerAddress(project) {
+  const line1 = project?.address_line1 || "";
+  const city = project?.city || "";
+  const state = project?.state || "";
+  const zip = project?.zip || "";
+  return [line1, [city, state].filter(Boolean).join(", "), zip]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function mergeWdoSuggestions(current, suggestions, overwrite = false) {
+  const allowed = [
+    "property_address",
+    "structures_inspected",
+    "inspection_scope",
+    "previous_treatment_evidence",
+    "previous_treatment_notes",
+  ];
+  const next = { ...current };
+  for (const key of allowed) {
+    const value = suggestions?.[key];
+    if (!hasMeaningfulValue(value)) continue;
+    if (overwrite || !hasMeaningfulValue(next[key])) next[key] = value;
+  }
+  return next;
+}
+
 async function readJsonResponse(response, fallbackMessage) {
   let payload = {};
   try {
@@ -209,8 +241,9 @@ function evaluateProjectReadiness({
   projectDate,
   photos,
 }) {
+  const isCertificate = project?.project_type === CERTIFICATE_TYPE;
   const required = [
-    { label: "Inspection date", ok: hasMeaningfulValue(projectDate) },
+    { label: isCertificate ? "Treatment date" : "Inspection date", ok: hasMeaningfulValue(projectDate) },
     { label: "Customer", ok: hasMeaningfulValue(project?.customer_name) },
     {
       label: "Report title or type",
@@ -222,10 +255,12 @@ function evaluateProjectReadiness({
       label: "Findings captured",
       ok: Object.values(findings || {}).some(hasMeaningfulValue),
     },
-    {
-      label: "Recommendation / notes",
-      ok: hasMeaningfulValue(recommendations),
-    },
+    ...(isCertificate
+      ? []
+      : [{
+        label: "Recommendation / notes",
+        ok: hasMeaningfulValue(recommendations),
+      }]),
     { label: "Photos attached", ok: (photos || []).length > 0 },
   ];
   if (project?.project_type === WDO_TYPE) {
@@ -244,13 +279,68 @@ function evaluateProjectReadiness({
       },
     );
   }
+  if (isCertificate) {
+    const productName = findings?.product_name === "Other"
+      ? findings?.product_name_other
+      : findings?.product_name;
+    const treatmentMethod = findings?.treatment_method === "Other"
+      ? findings?.treatment_method_other
+      : findings?.treatment_method;
+    required.push(
+      {
+        label: "Treatment address or lot/block",
+        ok:
+          hasMeaningfulValue(findings?.treatment_address) ||
+          hasMeaningfulValue(findings?.lot_block),
+      },
+      {
+        label: "Date of treatment",
+        ok:
+          hasMeaningfulValue(findings?.treatment_date) ||
+          hasMeaningfulValue(projectDate),
+      },
+      {
+        label: "Method of treatment",
+        ok: hasMeaningfulValue(treatmentMethod),
+      },
+      {
+        label: "Product used",
+        ok: hasMeaningfulValue(productName),
+      },
+      {
+        label: "Active ingredient + concentration",
+        ok:
+          hasMeaningfulValue(findings?.active_ingredient) &&
+          hasMeaningfulValue(findings?.concentration_pct),
+      },
+      {
+        label: "Coverage + gallons applied",
+        ok:
+          (hasMeaningfulValue(findings?.square_footage) ||
+            hasMeaningfulValue(findings?.linear_feet)) &&
+          hasMeaningfulValue(findings?.gallons_applied),
+      },
+      {
+        label: "Applicator's printed name",
+        ok: hasMeaningfulValue(findings?.applicator_name),
+      },
+      {
+        label: "Applicator FDACS ID #",
+        ok: hasMeaningfulValue(findings?.applicator_fdacs_id),
+      },
+      {
+        label: "Applicator attestation",
+        ok: hasMeaningfulValue(findings?.applicator_attestation),
+      },
+    );
+  }
 
   const text = [recommendations, ...Object.values(findings || {})]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
   const quality = [];
-  if (recommendations && recommendations.length < 80) {
+  if (!isCertificate && recommendations && recommendations.length < 80) {
     quality.push(
       "Recommendation is short; add what was found, why it matters, and the next step.",
     );
@@ -267,6 +357,7 @@ function evaluateProjectReadiness({
     /\b(treat|treatment|apply|application|boracare|bora care|bait|exclusion|follow[-\s]?up)\b/.test(
       text,
     ) &&
+    !isCertificate &&
     !recommendations
   ) {
     quality.push(
@@ -1247,7 +1338,8 @@ function ProjectDetail({
   const [aiUseComms, setAiUseComms] = useState(true);
   const [aiUsePhotos, setAiUsePhotos] = useState(true);
 
-  async function load() {
+  async function load(options = {}) {
+    const { preserveEdits = false } = options;
     setLoading(true);
     setError("");
     try {
@@ -1262,13 +1354,15 @@ function ProjectDetail({
       );
       d.activity = activityData.activity || [];
       setData(d);
-      setEditFindings(d.project.findings || {});
-      setEditRecs(d.project.recommendations || "");
-      setEditTitle(d.project.title || "");
-      setEditProjectDate(
-        dateInputValue(d.project.project_date || d.project.created_at),
-      );
-      setDirty(false);
+      if (!preserveEdits) {
+        setEditFindings(d.project.findings || {});
+        setEditRecs(d.project.recommendations || "");
+        setEditTitle(d.project.title || "");
+        setEditProjectDate(
+          dateInputValue(d.project.project_date || d.project.created_at),
+        );
+        setDirty(false);
+      }
       if (d.project.report_token) {
         setSentLink(
           `${window.location.origin}${d.project.report_url || `/report/project/${d.project.report_token}`}`,
@@ -1518,6 +1612,19 @@ function ProjectDetail({
     }
   }
 
+  async function uploadProjectPhoto(file, { category, caption } = {}) {
+    const fd = new FormData();
+    fd.append("photo", file);
+    if (category) fd.append("category", category);
+    if (caption) fd.append("caption", caption);
+    const r = await adminFetch(`/admin/projects/${projectId}/photos`, {
+      method: "POST",
+      body: fd,
+      headers: {},
+    });
+    await readJsonResponse(r, `Could not upload ${file.name}`);
+  }
+
   async function handlePhotoUpload(e) {
     const files = Array.from(e.target.files || []);
     e.target.value = "";
@@ -1527,15 +1634,8 @@ function ProjectDetail({
     setNotice("");
     const failed = [];
     for (const f of files) {
-      const fd = new FormData();
-      fd.append("photo", f);
       try {
-        const r = await adminFetch(`/admin/projects/${projectId}/photos`, {
-          method: "POST",
-          body: fd,
-          headers: {},
-        });
-        await readJsonResponse(r, `Could not upload ${f.name}`);
+        await uploadProjectPhoto(f);
       } catch (e) {
         failed.push(`${f.name}: ${e.message || "upload failed"}`);
       }
@@ -1551,9 +1651,42 @@ function ProjectDetail({
     setSaving(false);
   }
 
+  async function handleEvidencePhotoSelected(file) {
+    if (!file) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await uploadProjectPhoto(file, {
+        category: "previous_treatment",
+        caption: "Previous treatment evidence review",
+      });
+      await load({ preserveEdits: true });
+      setNotice("Previous-treatment photo uploaded.");
+    } catch (e) {
+      setError(e.message || "Could not upload previous-treatment photo");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function appendTechnicalSnippet(text) {
     setEditRecs((prev) =>
       prev.trim() ? `${prev.trimEnd()}\n\n${text}` : text,
+    );
+    setDirty(true);
+  }
+
+  function fillWdoAddressFromCustomer() {
+    const address = formatProjectCustomerAddress(project);
+    if (!address) return;
+    setEditFindings((f) => ({ ...f, property_address: address }));
+    setDirty(true);
+  }
+
+  function applyWdoSuggestions(suggestions, options = {}) {
+    setEditFindings((f) =>
+      mergeWdoSuggestions(f, suggestions, options.overwrite),
     );
     setDirty(true);
   }
@@ -1815,11 +1948,70 @@ function ProjectDetail({
             style={inputStyle}
           />{" "}
         </div>
+        {project.project_type === WDO_TYPE && (
+          <WdoIntelligenceBar
+            projectId={projectId}
+            customerId={project.customer_id}
+            propertyAddress={
+              editFindings.property_address || formatProjectCustomerAddress(project)
+            }
+            findings={editFindings}
+            onApplySuggestions={applyWdoSuggestions}
+            onEvidencePhotoSelected={handleEvidencePhotoSelected}
+            disabled={saving || aiWriting}
+            palette={{
+              card: D.card,
+              bg: D.pill,
+              border: D.border,
+              heading: D.heading,
+              text: D.text,
+              muted: D.muted,
+              accent: D.accent,
+              accentText: "#fff",
+              red: D.red,
+            }}
+          />
+        )}
         {/* Type-specific findings */}
         {typeCfg?.findingsFields?.map((field) => (
           <div key={field.key}>
             {" "}
-            <Label htmlFor={fieldInputId(field.key)}>{field.label}</Label>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                marginBottom: 6,
+              }}
+            >
+              <Label
+                htmlFor={fieldInputId(field.key)}
+                style={{ marginBottom: 0 }}
+              >
+                {field.label}
+              </Label>
+              {project.project_type === WDO_TYPE &&
+                field.key === "property_address" &&
+                formatProjectCustomerAddress(project) && (
+                  <button
+                    type="button"
+                    onClick={fillWdoAddressFromCustomer}
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      color: D.accent,
+                      fontSize: 11,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                      padding: 0,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Fill from customer
+                  </button>
+                )}
+            </div>
             {field.type === "select" ? (
               <select
                 id={fieldInputId(field.key)}

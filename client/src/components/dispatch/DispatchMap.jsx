@@ -5,10 +5,10 @@
  * marker rendering).
  *
  * Markers:
- *   - <Marker> per tech with valid lat/lng → "truck" pin colored by
+ *   - <Marker> per tech with valid lat/lng → Waves van pin colored by
  *     tech.id (deterministic hash → palette). Click → setSelectedTechId.
  *   - <Marker> per job with valid lat/lng → "job" pin colored by the
- *     assigned technician_id (matches the tech truck color so unassigned
+ *     assigned technician_id (matches the tech van color so unassigned
  *     jobs render in a neutral gray). Click → onSelectJob(job.id) opens
  *     the JobDrawer; drag onto a tech roster card → reassign.
  *
@@ -81,18 +81,30 @@ function colorForTech(techId) {
   return PALETTE[hashId(techId) % PALETTE.length];
 }
 
-function svgPin(color, isSelected = false, isTruck = false) {
-  // Inline SVG so we don't ship marker images. Truck pins are diamond,
-  // job pins are circles — gives an at-a-glance read of "tech is here"
-  // vs "job is there" without legend.
+function svgPin(color, isSelected = false) {
+  // Job circle pin (inline SVG). Tech markers use the Waves logo raster
+  // asset instead — see techIcon() below.
   const stroke = isSelected ? '#18181B' : '#FFFFFF';
   const strokeWidth = isSelected ? 3 : 1.5;
   const size = isSelected ? 28 : 22;
-  const shape = isTruck
-    ? `<polygon points="14,2 26,14 14,26 2,14" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`
-    : `<circle cx="14" cy="14" r="9" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`;
+  const shape = `<circle cx="14" cy="14" r="9" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 28 28">${shape}</svg>`;
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+// Tech marker — Waves logo served from client/public/waves-logo.png.
+// Sized to match the previous van pin (34 / 38 selected), anchored
+// center so the icon sits over the lat/lng. scaledSize/anchor are
+// constructed with window.google.maps.* and therefore must only be
+// called after the Maps SDK has loaded (we already gate on isLoaded
+// below).
+function techIcon(isSelected) {
+  const size = isSelected ? 38 : 34;
+  return {
+    url: '/waves-logo.png',
+    scaledSize: new window.google.maps.Size(size, size),
+    anchor: new window.google.maps.Point(size / 2, size / 2),
+  };
 }
 
 export default function DispatchMap({
@@ -213,9 +225,7 @@ export default function DispatchMap({
             <Marker
               key={`tech-${tech.id}`}
               position={{ lat: tech.lat, lng: tech.lng }}
-              icon={{
-                url: svgPin(colorForTech(tech.id), tech.id === selectedTechId, true),
-              }}
+              icon={techIcon(tech.id === selectedTechId)}
               title={tech.name}
               onClick={() => onSelectTech(tech.id)}
             />
@@ -227,7 +237,7 @@ export default function DispatchMap({
               key={`job-${job.id}`}
               position={{ lat: job.lat, lng: job.lng }}
               icon={{
-                url: svgPin(colorForTech(job.technician_id), false, false),
+                url: svgPin(colorForTech(job.technician_id), false),
               }}
               title={`${job.customer_name} — ${job.service_type || 'service'}`}
               draggable={dragEnabled}

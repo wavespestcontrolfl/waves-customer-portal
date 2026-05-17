@@ -1407,7 +1407,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   }
   if (sel.has('RODENT_TRAP')) services.rodentTrapping = {};
   if (sel.has('WDO')) services.wdo = {};
-  if (sel.has('FLEA')) services.flea = {};
+  if (sel.has('FLEA')) {
+    services.flea = {
+      urgency,
+      afterHours,
+      fleaExterior: !!o.fleaExterior,
+      fleaExteriorAreaSqFt: o.fleaExteriorAreaSqFt,
+      fleaExteriorAreaSource: o.fleaExteriorAreaSource,
+      fleaExteriorZones: Array.isArray(o.fleaExteriorZones) ? o.fleaExteriorZones : [],
+    };
+  }
   // ROACH: manual specialty (full $450+ program) vs recurring auto-fire.
   // The modular estimate engine auto-adds pest_initial_roach when recurring
   // pest carries any non-none roachType. Do not also inject the older
@@ -1430,9 +1439,24 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     }
   }
   if (sel.has('BEDBUG')) {
+    const bedbugRooms = Number(o.bedbugRooms);
+    const subcontractCost = Number(o.bedbugSubcontractCost);
+    const bedbugMethod = o.bedbugMethod;
+    const isChemicalBedBug = bedbugMethod === 'CHEMICAL';
+    const bedbugEquipment = isChemicalBedBug ? undefined : o.bedbugEquipment;
     services.bedBug = {
-      rooms: o.bedbugRooms || 1,
-      method: (o.bedbugMethod || 'BOTH').toLowerCase(),
+      rooms: Number.isFinite(bedbugRooms) ? bedbugRooms : o.bedbugRooms,
+      method: bedbugMethod,
+      severity: o.bedbugSeverity,
+      prepStatus: o.bedbugPrepStatus,
+      occupancyType: o.bedbugOccupancyType,
+      equipment: bedbugEquipment,
+      heatScope: isChemicalBedBug ? undefined : o.bedbugHeatScope,
+      subcontractCost: bedbugEquipment === 'SUBCONTRACT' && Number.isFinite(subcontractCost) && o.bedbugSubcontractCost !== ''
+        ? subcontractCost
+        : undefined,
+      urgency,
+      afterHours,
     };
   }
   if (sel.has('STING')) {
@@ -1522,6 +1546,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     maintenanceCondition: p.maintenanceCondition,
     overallPestPressure: p.overallPestPressure,
     recurringCustomer,
+    fleaExterior: !!o.fleaExterior,
+    fleaExteriorAreaSqFt: o.fleaExteriorAreaSqFt,
+    fleaExteriorAreaSource: o.fleaExteriorAreaSource,
+    fleaExteriorZones: Array.isArray(o.fleaExteriorZones) ? o.fleaExteriorZones : [],
     // Step 2b-4: pass-through. v1 engine applies it to recurring annual
     // after WaveGuard, capped at base — exact mirror of v2 calcTotals.
     manualDiscount: o.manualDiscount || null,

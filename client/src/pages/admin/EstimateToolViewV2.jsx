@@ -42,6 +42,27 @@ import { ExternalLink } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
+const FLEA_EXTERIOR_SOURCE_OPTIONS = [
+  { value: "UNKNOWN", label: "Unknown" },
+  { value: "AI_ESTIMATE", label: "AI estimate" },
+  { value: "CONFIRMED_SQ_FT", label: "Confirmed Sq Ft" },
+  { value: "MEASURED_TURF", label: "Measured turf" },
+  { value: "MANUAL_OVERRIDE", label: "Manual override" },
+];
+const FLEA_EXTERIOR_ZONES = [
+  { value: "PET_RESTING_AREA", label: "Pet resting area" },
+  { value: "KENNEL_DOG_RUN", label: "Kennel / dog run" },
+  { value: "UNDER_DECK_PATIO", label: "Under deck / patio" },
+  { value: "FOUNDATION_PERIMETER", label: "Foundation perimeter" },
+  { value: "SHADED_TURF", label: "Shaded turf" },
+  { value: "MULCH_LANDSCAPE_BEDS", label: "Mulch / landscape beds" },
+  { value: "CRAWLSPACE_WILDLIFE_ACTIVITY", label: "Crawlspace / wildlife activity area" },
+  { value: "OTHER", label: "Other" },
+];
+
+function fleaExteriorSourceLabel(source) {
+  return FLEA_EXTERIOR_SOURCE_OPTIONS.find((option) => option.value === source)?.label || "Unknown";
+}
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -262,6 +283,22 @@ function formatSqFt(value) {
   return n === null ? "unknown" : `${n.toLocaleString()} sf`;
 }
 
+function serviceDetailText(item = {}) {
+  const parts = [
+    item.detail || item.det || item.note || "",
+    item.exteriorDetail || "",
+    item.warning || "",
+    item.customQuoteReason || "",
+  ].filter(Boolean);
+  const unique = [];
+  for (const part of parts) {
+    if (unique.includes(part)) continue;
+    if (unique.some((existing) => existing.includes(part))) continue;
+    unique.push(part);
+  }
+  return unique.join(" · ");
+}
+
 function InputV2({ k, type = "text", placeholder, min, max, className }) {
   const { form, set } = useContext(FormCtx);
   return (
@@ -305,7 +342,7 @@ function CheckboxV2({ k, label }) {
   const { form, toggle } = useContext(FormCtx);
   const checked = !!form[k];
   return (
-    <label className="flex items-center gap-2.5 mb-2.5 cursor-pointer text-14 text-zinc-900 select-none">
+    <label className="relative flex items-center gap-2.5 mb-2.5 cursor-pointer text-14 text-zinc-900 select-none">
       {" "}
       <span
         className={cn(
@@ -733,7 +770,7 @@ function oneTimeRowsForCustomerPreview(E, {
   const addRow = (item) => {
     const name = item.displayName || item.label || item.name || "One-time service";
     const price = Number(item.price ?? item.amount ?? item.total ?? 0);
-    const detail = item.detail || item.det || item.note || "";
+    const detail = serviceDetailText(item);
     const service = previewServiceKey(item, name);
     const label = String(name).toLowerCase();
     const isSetupFee =
@@ -769,12 +806,11 @@ function oneTimeRowsForCustomerPreview(E, {
     if (!hasTermiteInstallRow) addRow(termiteInstallRow);
   }
 
-  const setupFee = Number(E?.oneTime?.membershipFee ?? setupFeeAmount ?? 0);
+  const setupFee = includeSetupFees ? Number(setupFeeAmount || 0) : 0;
   const targetTotal = Number(oneTimeTotal);
   const rowsTotal = displayRows.reduce((sum, row) => sum + row.price, 0);
   const hasSetupRow = displayRows.some((row) => row.service === "waveguard_setup");
   const targetIncludesSetupFee =
-    includeSetupFees &&
     setupFee > 0 &&
     !hasSetupRow &&
     Number.isFinite(targetTotal) &&
@@ -794,7 +830,10 @@ function oneTimeRowsForCustomerPreview(E, {
 
 function firstVisitFeesForCustomerPreview(E, pestTier) {
   const rows = [];
-  const setupFee = Number(E?.oneTime?.membershipFee || pestTier?.init || 0);
+  const hasRecurringPest = !!pestTier;
+  const setupFee = hasRecurringPest
+    ? Number(E?.oneTime?.membershipFee || pestTier?.init || 0)
+    : 0;
   if (setupFee > 0) {
     rows.push({
       service: "waveguard_setup",
@@ -1186,9 +1225,7 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
 
         <div className="bg-[#1B2C5B] text-white text-center rounded-[14px] border border-[#1B2C5B] p-6 mt-4">
           <div className="customer-preview-serif text-26 leading-tight">
-            {monthlyTotal > 0
-              ? `Ready to lock in ${fmt(intervalTotal)}${cadence.period}?`
-              : `Ready to lock in ${fmt(oneTimeStandaloneTotal)}?`}
+            Go Waves!
           </div>
           <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>
           <div className="inline-flex mt-4 px-5 py-3 rounded-[10px] bg-white text-[#1B2C5B] text-15 font-semibold">
@@ -1350,7 +1387,13 @@ export default function EstimateToolViewV2({
     sanitationDebris: "0",
     sanitationAccess: "normal",
     bedbugRooms: "1",
-    bedbugMethod: "BOTH",
+    bedbugMethod: "CHEMICAL",
+    bedbugSeverity: "light",
+    bedbugPrepStatus: "ready",
+    bedbugOccupancyType: "singleFamily",
+    bedbugEquipment: "INHOUSE",
+    bedbugHeatScope: "ROOMS_ONLY",
+    bedbugSubcontractCost: "",
     boracareSqft: "",
     preslabSqft: "",
     preslabWarranty: "BASIC",
@@ -1377,6 +1420,10 @@ export default function EstimateToolViewV2({
     svcRodentTrap: false,
     svcRodentSanitation: false,
     svcFlea: false,
+    svcFleaExterior: false,
+    fleaExteriorAreaSqFt: "0",
+    fleaExteriorAreaSource: "UNKNOWN",
+    fleaExteriorZones: [],
     svcWasp: false,
     svcRoach: false,
     svcBedbug: false,
@@ -1422,16 +1469,16 @@ export default function EstimateToolViewV2({
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
-    const recurringKeys = [
+    const qualifyingRecurringKeys = [
       "svcLawn",
       "svcPest",
       "svcTs",
-      "svcInjection",
       "svcMosquito",
       "svcTermiteBait",
-      "svcRodentBait",
     ];
-    const recurringCount = recurringKeys.filter((k) => form[k]).length;
+    const separateRecurringKeys = ["svcInjection", "svcRodentBait"];
+    const recurringCount = qualifyingRecurringKeys.filter((k) => form[k]).length;
+    const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     const tierMap = {
       0: { name: "No recurring bundle", discount: 0 },
@@ -1473,18 +1520,19 @@ export default function EstimateToolViewV2({
       );
     }
     if (form.svcTermiteBait) approx.termiteBait = 50;
-    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 55 : 45;
+    if (form.svcRodentBait) approx.rodentBait = sqft > 2500 ? 69 : 49;
 
-    const recurringMonthlyBefore = Object.values(approx).reduce(
-      (s, v) => s + v,
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0);
+    const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
+      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(
-      recurringMonthlyBefore * (1 - tier.discount),
+      discountableRecurringMonthlyBefore * (1 - tier.discount) + separateRecurringMonthly,
     );
     const annualRecurring = recurringMonthly * 12;
     const annualSavings = Math.round(
-      recurringMonthlyBefore * tier.discount * 12,
+      discountableRecurringMonthlyBefore * tier.discount * 12,
     );
 
     const onetimeKeys = [
@@ -1507,10 +1555,17 @@ export default function EstimateToolViewV2({
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,
+      // totalRecurringCount includes services like Palm Injection /
+      // Rodent Bait that don't count toward the WaveGuard tier but are
+      // still recurring selections — display surfaces use this to avoid
+      // claiming "0 recurring selected" when only a non-qualifying
+      // service is chosen. Tier-discount math still keys off
+      // recurringCount alone.
+      totalRecurringCount: recurringCount + separateRecurringCount,
       onetimeCount,
       tier,
       recurringMonthly,
@@ -1557,7 +1612,39 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }, []);
   const toggle = useCallback((key) => {
-    setForm((f) => ({ ...f, [key]: !f[key] }));
+    setForm((f) => {
+      const next = { ...f, [key]: !f[key] };
+      if (key === "svcFlea" && f.svcFlea) {
+        next.svcFleaExterior = false;
+      }
+      // Auto-enable "Offer one-time option" only when the bundle is pest-only
+      // (svcPest + svcOnetimePest with no other recurring service selected) —
+      // that's the single flow the public estimate + accept handler actually
+      // support without dropping other recurring services from the persisted
+      // total (server/routes/estimate-public.js treats show_one_time_option
+      // as a pest-only choice path). Lawn/mosquito recurring+one-time pairs
+      // still require admin to tick the customer-options box manually until
+      // the downstream choice logic becomes service-aware.
+      const OTHER_RECURRING_KEYS = [
+        "svcLawn", "svcTs", "svcInjection", "svcMosquito",
+        "svcTermiteBait", "svcRodentBait",
+      ];
+      const pestBoth = next.svcPest && next.svcOnetimePest;
+      const onlyPestRecurring = OTHER_RECURRING_KEYS.every((k) => !next[k]);
+      // _autoOneTimeOwned marks the flag as "owned by the auto-enable
+      // path" so we can safely flip it back when the bundle stops being
+      // pest-only — without clobbering a manual customer-options check
+      // (which clears _autoOneTimeOwned in setCustomerChoiceOption /
+      // applyMosquitoCustomerChoice).
+      if (pestBoth && onlyPestRecurring) {
+        next.showOneTimeOption = true;
+        next._autoOneTimeOwned = true;
+      } else if (f._autoOneTimeOwned) {
+        next.showOneTimeOption = false;
+        next._autoOneTimeOwned = false;
+      }
+      return next;
+    });
     if (key.startsWith("svc")) {
       setEstimate(null);
       setSavedId(null);
@@ -1566,7 +1653,9 @@ export default function EstimateToolViewV2({
   }, []);
   const applyMosquitoCustomerChoice = useCallback((choice) => {
     setForm((f) => {
-      const next = { ...f, showOneTimeOption: true };
+      // Mark the flag as manually owned so toggle()'s auto-clear path
+      // doesn't wipe it the next time the admin checks any service box.
+      const next = { ...f, showOneTimeOption: true, _autoOneTimeOwned: false };
       if (choice === "one_time") next.svcOnetimeMosquito = true;
       if (choice === "recurring") next.svcMosquito = true;
       if (choice === "both") {
@@ -1581,7 +1670,9 @@ export default function EstimateToolViewV2({
   }, []);
   const setCustomerChoiceOption = useCallback((enabled) => {
     setForm((f) => {
-      const next = { ...f, showOneTimeOption: enabled };
+      // Manual customer-options checkbox — own the flag, don't let
+      // toggle()'s auto-clear wipe it on the next service toggle.
+      const next = { ...f, showOneTimeOption: enabled, _autoOneTimeOwned: false };
       if (enabled) {
         if (f.svcMosquito && !f.svcOnetimeMosquito)
           next.svcOnetimeMosquito = true;
@@ -1673,6 +1764,73 @@ export default function EstimateToolViewV2({
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
+
+  const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
+    const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);
+    const currentSource = currentForm.fleaExteriorAreaSource || "UNKNOWN";
+    if (currentArea !== null && currentArea > 0 && currentSource !== "UNKNOWN") {
+      return { area: currentArea, source: currentSource };
+    }
+
+    const confirmedExterior =
+      parseNonNegativeInteger(enrichedProfile?.confirmedExteriorFleaAreaSqFt) ??
+      parseNonNegativeInteger(satelliteData?.confirmedExteriorFleaAreaSqFt);
+    if (confirmedExterior !== null && confirmedExterior > 0) {
+      return { area: confirmedExterior, source: "CONFIRMED_SQ_FT" };
+    }
+
+    const manual = currentSource === "MANUAL_OVERRIDE" ? currentArea : null;
+    if (manual !== null && manual > 0) {
+      return { area: manual, source: "MANUAL_OVERRIDE" };
+    }
+
+    const measured =
+      parseNonNegativeInteger(currentForm.measuredTurfSf) ??
+      parseNonNegativeInteger(enrichedProfile?.measuredTurfSf);
+    if (measured !== null && measured > 0) {
+      return { area: measured, source: "MEASURED_TURF" };
+    }
+
+    const ai =
+      parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
+      parseNonNegativeInteger(satelliteData?.estimatedTurfSf);
+    if (ai !== null && ai > 0) {
+      return { area: ai, source: "AI_ESTIMATE" };
+    }
+
+    return { area: 0, source: "UNKNOWN" };
+  }, [enrichedProfile, form, satelliteData]);
+
+  const setFleaExteriorEnabled = useCallback((enabled) => {
+    setForm((f) => {
+      const next = {
+        ...f,
+        svcFlea: enabled ? true : f.svcFlea,
+        svcFleaExterior: enabled,
+      };
+      if (enabled) {
+        const resolved = resolveFleaExteriorDefault(f);
+        next.fleaExteriorAreaSqFt = String(resolved.area);
+        next.fleaExteriorAreaSource = resolved.source;
+      }
+      return next;
+    });
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, [resolveFleaExteriorDefault]);
+
+  const setFleaExteriorZone = useCallback((zone, checked) => {
+    setForm((f) => {
+      const zones = new Set(Array.isArray(f.fleaExteriorZones) ? f.fleaExteriorZones : []);
+      if (checked) zones.add(zone);
+      else zones.delete(zone);
+      return { ...f, fleaExteriorZones: Array.from(zones) };
+    });
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, []);
 
   useEffect(() => {
     const incoming = {
@@ -1996,7 +2154,7 @@ export default function EstimateToolViewV2({
       if (form.svcFoam) selectedServices.push("FOAM");
       if (form.svcRodentTrap) selectedServices.push("RODENT_TRAP");
       if (form.svcRodentSanitation) selectedServices.push("RODENT_SANITATION");
-      if (form.svcFlea) selectedServices.push("FLEA");
+      if (form.svcFlea || form.svcFleaExterior) selectedServices.push("FLEA");
       if (form.svcWasp) selectedServices.push("STING");
       if (form.svcRoach) selectedServices.push("ROACH");
       if (form.svcBedbug) selectedServices.push("BEDBUG");
@@ -2037,7 +2195,13 @@ export default function EstimateToolViewV2({
         preslabVolume: form.preslabVolume || "NONE",
         foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
         bedbugRooms: parseInt(form.bedbugRooms, 10) || 1,
-        bedbugMethod: form.bedbugMethod || "BOTH",
+        bedbugMethod: form.bedbugMethod || "CHEMICAL",
+        bedbugSeverity: form.bedbugSeverity || "light",
+        bedbugPrepStatus: form.bedbugPrepStatus || "ready",
+        bedbugOccupancyType: form.bedbugOccupancyType || "singleFamily",
+        bedbugEquipment: form.bedbugEquipment || "INHOUSE",
+        bedbugHeatScope: form.bedbugHeatScope || "ROOMS_ONLY",
+        bedbugSubcontractCost: form.bedbugSubcontractCost,
         exclSimple: parseInt(form.exclSimple, 10) || 0,
         exclModerate: parseInt(form.exclModerate, 10) || 0,
         exclAdvanced: parseInt(form.exclAdvanced, 10) || 0,
@@ -2048,6 +2212,10 @@ export default function EstimateToolViewV2({
         sanitationAccess: form.sanitationAccess || "normal",
         roachType: form.roachType || "REGULAR",
         onetimeLawnType: form.otLawnType || "FERT",
+        fleaExterior: !!form.svcFleaExterior,
+        fleaExteriorAreaSqFt: parseInt(form.fleaExteriorAreaSqFt, 10) || 0,
+        fleaExteriorAreaSource: form.fleaExteriorAreaSource || "UNKNOWN",
+        fleaExteriorZones: Array.isArray(form.fleaExteriorZones) ? form.fleaExteriorZones : [],
       };
 
       const manualNumber = (value, fallback = 0) => {
@@ -2076,10 +2244,23 @@ export default function EstimateToolViewV2({
           form.bedArea,
           Number(baseProfile.estimatedBedAreaSf) || 0,
         ),
-        estimatedPalmCount: manualNumber(
-          form.palmCount,
-          Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0,
-        ),
+        // When admin types a palm count in the form, treat it as the
+        // injectable count and skip the 30% satellite-estimate gating in
+        // property-lookup-v2. Admin already knows which palms need
+        // treatment. Palm pricing requires a positive integer — drop
+        // non-integer or <=0 inputs (e.g. "2.5", "0", "-1") for BOTH
+        // estimatedPalmCount and injectablePalms so we fall back to the
+        // AI/base count instead of silently truncating to 2 and quoting
+        // the wrong palm count.
+        ...(() => {
+          const raw = String(form.palmCount ?? "").trim();
+          const n = Number(raw);
+          const valid = raw !== "" && Number.isInteger(n) && n > 0;
+          const fallback = Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0;
+          return valid
+            ? { estimatedPalmCount: n, injectablePalms: n }
+            : { estimatedPalmCount: fallback };
+        })(),
         estimatedTreeCount: treeCount,
         treeCount,
       };
@@ -2114,7 +2295,9 @@ export default function EstimateToolViewV2({
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
-      if (profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      const bedBugOnly =
+        selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
+      if (!bedBugOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }
@@ -2396,6 +2579,10 @@ export default function EstimateToolViewV2({
       palmCount: "",
       treeCount: "",
       measuredTurfSf: "",
+      svcFleaExterior: false,
+      fleaExteriorAreaSqFt: "0",
+      fleaExteriorAreaSource: "UNKNOWN",
+      fleaExteriorZones: [],
       boracareSqft: "",
       preslabSqft: "",
       customerId: "",
@@ -2495,6 +2682,16 @@ export default function EstimateToolViewV2({
     Math.ceil(Math.max(lotSqFtForTurf, aiTurfSqFt || 0, confirmedTurfSqFt || 0, 5000) / 1000) * 1000,
   );
   const plugAreaSqFt = parseNonNegativeInteger(form.plugArea);
+  const fleaExteriorAreaSqFt = parseNonNegativeInteger(form.fleaExteriorAreaSqFt) ?? 0;
+  const fleaExteriorWarning = !form.svcFleaExterior
+    ? null
+    : fleaExteriorAreaSqFt <= 0
+        ? "Enter or confirm the exterior flea spray area to price this add-on."
+        : form.fleaExteriorAreaSource === "UNKNOWN"
+          ? "Exterior flea spray area needs confirmation before final quote."
+          : fleaExteriorAreaSqFt > 20000
+            ? "Exterior flea spray area exceeds 20,000 sf. Custom quote required."
+            : null;
   const pluggingUsesTurfFallback = !!form.svcPlugging && !(plugAreaSqFt > 0);
   const hasTurfPricedSelection =
     !!form.svcLawn ||
@@ -2921,25 +3118,29 @@ export default function EstimateToolViewV2({
               <FieldV2 label="Lot Sq Ft">
                 <InputV2 k="lotSqFt" type="number" placeholder="8000" />
               </FieldV2>
-              {form.svcTs && (
+              {(form.svcTs || form.svcInjection) && (
                 <>
                   {" "}
                   <div className="grid grid-cols-2 gap-3">
                     {" "}
-                    <FieldV2 label="Bed Area (sq ft)">
-                      <InputV2
-                        k="bedArea"
-                        type="number"
-                        placeholder="Auto-estimate"
-                      />
-                    </FieldV2>{" "}
+                    {form.svcTs && (
+                      <FieldV2 label="Bed Area (sq ft)">
+                        <InputV2
+                          k="bedArea"
+                          type="number"
+                          placeholder="Auto-estimate"
+                        />
+                      </FieldV2>
+                    )}{" "}
                     <FieldV2 label="Palm Count">
                       <InputV2 k="palmCount" type="number" placeholder="Auto" />
                     </FieldV2>{" "}
                   </div>{" "}
-                  <FieldV2 label="Tree Count">
-                    <InputV2 k="treeCount" type="number" placeholder="Auto" />
-                  </FieldV2>{" "}
+                  {form.svcTs && (
+                    <FieldV2 label="Tree Count">
+                      <InputV2 k="treeCount" type="number" placeholder="Auto" />
+                    </FieldV2>
+                  )}{" "}
                 </>
               )}
             </div>
@@ -3519,6 +3720,104 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcOnetimePest" label="Pest Treatment" />{" "}
               <CheckboxV2 k="svcOnetimeMosquito" label="Mosquito Treatment" />{" "}
               <CheckboxV2 k="svcFlea" label="Flea Treatment" />{" "}
+              {form.svcFlea && (
+                <div className="ml-7 mb-3 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <label className="flex items-center gap-2.5 mb-3 cursor-pointer text-14 text-zinc-900 select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!form.svcFleaExterior}
+                      onChange={(e) => setFleaExteriorEnabled(e.target.checked)}
+                      className="h-4 w-4 accent-zinc-900"
+                    />
+                    Add exterior flea spray
+                  </label>
+                  {form.svcFleaExterior && (
+                    <>
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <div className="text-12 font-semibold text-zinc-900">
+                          Exterior Flea Spray Area
+                        </div>
+                        <Badge variant="neutral" className="text-10 u-nums">
+                          Max 20,000 sf
+                        </Badge>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <FieldV2 label="Source" className="mb-0">
+                          <select
+                            value={form.fleaExteriorAreaSource || "UNKNOWN"}
+                            onChange={(e) => set("fleaExteriorAreaSource", e.target.value)}
+                            className={cn(
+                              INPUT_CLS,
+                              "cursor-pointer appearance-none pr-8 bg-no-repeat bg-[right_0.75rem_center]",
+                            )}
+                            style={{
+                              backgroundImage:
+                                "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2371717A' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
+                            }}
+                          >
+                            {FLEA_EXTERIOR_SOURCE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </FieldV2>
+                        <FieldV2 label="Area" className="mb-0">
+                          <div className="h-10 px-3 flex items-center rounded-sm border-hairline border-zinc-300 bg-white text-14 text-zinc-900 u-nums">
+                            {formatSqFt(fleaExteriorAreaSqFt)}
+                          </div>
+                        </FieldV2>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="20000"
+                        step="250"
+                        value={Math.min(fleaExteriorAreaSqFt, 20000)}
+                        onChange={(e) => set("fleaExteriorAreaSqFt", e.target.value)}
+                        className="mt-3 w-full accent-zinc-900"
+                      />
+                      <div className="mt-1 grid grid-cols-6 gap-1 text-10 text-ink-secondary">
+                        {["0 sf", "2,500", "5,000", "10,000", "15,000", "20,000 sf"].map((mark) => (
+                          <span key={mark} className="first:text-left last:text-right text-center">
+                            {mark}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="mt-2 text-12 text-zinc-900 u-nums">
+                        Using {fleaExteriorSourceLabel(form.fleaExteriorAreaSource)}:{" "}
+                        {formatSqFt(fleaExteriorAreaSqFt)}
+                      </div>
+                      {fleaExteriorWarning && (
+                        <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                          {fleaExteriorWarning}
+                        </div>
+                      )}
+                      <div className="mt-3">
+                        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                          Exterior treatment zones
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {FLEA_EXTERIOR_ZONES.map((zone) => (
+                            <label
+                              key={zone.value}
+                              className="flex items-center gap-2 text-12 text-zinc-900 cursor-pointer select-none"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={(form.fleaExteriorZones || []).includes(zone.value)}
+                                onChange={(e) => setFleaExteriorZone(zone.value, e.target.checked)}
+                                className="h-3.5 w-3.5 accent-zinc-900"
+                              />
+                              {zone.label}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
               <CheckboxV2 k="svcRoach" label="Cockroach Treatment" />
               {form.svcRoach && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
@@ -3552,13 +3851,75 @@ export default function EstimateToolViewV2({
                       <SelectV2
                         k="bedbugMethod"
                         options={[
-                          { value: "BOTH", label: "Quote Both" },
                           { value: "CHEMICAL", label: "Chemical Only" },
                           { value: "HEAT", label: "Heat Only" },
+                          { value: "HYBRID", label: "Hybrid" },
                         ]}
                       />
                     </FieldV2>{" "}
                   </div>{" "}
+                  <div className="grid grid-cols-3 gap-3 mt-3">
+                    <FieldV2 label="Severity">
+                      <SelectV2
+                        k="bedbugSeverity"
+                        options={[
+                          { value: "light", label: "Light" },
+                          { value: "moderate", label: "Moderate" },
+                          { value: "heavy", label: "Heavy" },
+                          { value: "severe", label: "Severe/Quote" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Prep">
+                      <SelectV2
+                        k="bedbugPrepStatus"
+                        options={[
+                          { value: "ready", label: "Ready" },
+                          { value: "partial", label: "Partial" },
+                          { value: "poor", label: "Poor" },
+                          { value: "refused", label: "Refused/Quote" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Occupancy">
+                      <SelectV2
+                        k="bedbugOccupancyType"
+                        options={[
+                          { value: "singleFamily", label: "Single Family" },
+                          { value: "apartment", label: "Apartment" },
+                          { value: "hotel", label: "Hotel" },
+                          { value: "studentHousing", label: "Student Housing" },
+                        ]}
+                      />
+                    </FieldV2>
+                  </div>
+                  {form.bedbugMethod !== "CHEMICAL" && (
+                    <div className="grid grid-cols-3 gap-3 mt-3">
+                      <FieldV2 label="Equipment">
+                        <SelectV2
+                          k="bedbugEquipment"
+                          options={[
+                            { value: "INHOUSE", label: "In-House" },
+                            { value: "SUBCONTRACT", label: "Subcontract" },
+                          ]}
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Heat Scope">
+                        <SelectV2
+                          k="bedbugHeatScope"
+                          options={[
+                            { value: "ROOMS_ONLY", label: "Rooms Only" },
+                            { value: "WHOLE_HOME", label: "Whole Home" },
+                          ]}
+                        />
+                      </FieldV2>
+                      {form.bedbugEquipment === "SUBCONTRACT" && (
+                        <FieldV2 label="Vendor Cost">
+                          <InputV2 k="bedbugSubcontractCost" type="number" min="1" />
+                        </FieldV2>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               <SubGroupLabel className="mt-3">Rodent</SubGroupLabel>{" "}
@@ -4015,7 +4376,7 @@ export default function EstimateToolViewV2({
                 <div className="text-14 text-ink-secondary mb-4">
                   {!livePreview.anySelected
                     ? "Select at least one service to see pricing"
-                    : `${livePreview.recurringCount} recurring + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
+                    : `${livePreview.totalRecurringCount} recurring + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
                 </div>
                 {enrichedProfile && (
                   <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-13 text-ink-secondary leading-relaxed">
@@ -4781,11 +5142,13 @@ export default function EstimateToolViewV2({
                                 {s.name}
                               </div>{" "}
                               <div className="text-18 font-medium text-zinc-900 u-nums">
-                                {s.onProg ? "$0 — Included" : fmtInt(s.price)}
+                                {s.quoteRequired ? "Quote Required" : s.onProg ? "$0 — Included" : fmtInt(s.price)}
                               </div>{" "}
-                              <div className="text-12 text-ink-secondary mt-1">
-                                {s.det}
-                              </div>{" "}
+                              {serviceDetailText(s) && (
+                                <div className="text-12 text-ink-secondary mt-1">
+                                  {serviceDetailText(s)}
+                                </div>
+                              )}{" "}
                             </div>
                           ))}
                         </div>{" "}
@@ -4991,9 +5354,16 @@ export default function EstimateToolViewV2({
                                   className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary"
                                 >
                                   {" "}
-                                  <span>{s.name}</span>{" "}
+                                  <span>
+                                    {s.name}
+                                    {serviceDetailText(s) && (
+                                      <span className="block text-11 text-ink-tertiary leading-snug mt-0.5">
+                                        {serviceDetailText(s)}
+                                      </span>
+                                    )}
+                                  </span>{" "}
                                   <span className="text-13 u-nums">
-                                    {fmtInt(s.price)}
+                                    {s.quoteRequired ? "Quote Required" : fmtInt(s.price)}
                                   </span>{" "}
                                 </div>
                               ))}

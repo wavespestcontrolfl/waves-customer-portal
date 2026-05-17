@@ -21,6 +21,13 @@ const logger = require('./logger');
 const TwilioService = require('./twilio');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
 const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require('./customer-tracking-eta');
+const { ensureCustomerGeocoded } = require('./geocoder');
+const {
+  buildOnSiteLifecycleUpdates,
+  buildCompletionLifecycleUpdates,
+} = require('../utils/service-duration-capture');
+
+const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 
 function portalOrigin() {
   return process.env.CLIENT_URL
@@ -32,6 +39,14 @@ async function loadService(serviceId) {
   return db('scheduled_services')
     .where({ id: serviceId })
     .first();
+}
+
+async function withTimeout(promise, timeoutMs, fallbackValue = null) {
+  let timeoutId;
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(fallbackValue), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
 // Best-effort ETA for the en-route SMS. Mirrors track-public.js
@@ -54,19 +69,28 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
     ]);
     const techLat = finiteNumber(ts?.lat);
     const techLng = finiteNumber(ts?.lng);
-    const custLat = finiteNumber(customer?.latitude);
-    const custLng = finiteNumber(customer?.longitude);
+    let custLat = finiteNumber(customer?.latitude);
+    let custLng = finiteNumber(customer?.longitude);
     if (techLat == null || techLng == null) {
       logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no GPS in tech_status`);
-      return null;
-    }
-    if (custLat == null || custLng == null) {
-      logger.info(`[track-transitions] en-route ETA skipped: customer ${customerId} not geocoded`);
       return null;
     }
     if (!isFreshTimestamp(ts.location_updated_at)) {
       logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} GPS stale (updated ${ts.location_updated_at})`);
       return null;
+    }
+    if (custLat == null || custLng == null) {
+      const geocoded = await withTimeout(
+        ensureCustomerGeocoded(customerId),
+        EN_ROUTE_GEOCODE_TIMEOUT_MS,
+        null
+      );
+      custLat = finiteNumber(geocoded?.lat);
+      custLng = finiteNumber(geocoded?.lng);
+      if (custLat == null || custLng == null) {
+        logger.info(`[track-transitions] en-route ETA skipped: customer ${customerId} not geocoded`);
+        return null;
+      }
     }
 
     const eta = await calculateBoundedTrackingEta({
@@ -259,6 +283,12 @@ async function markOnProperty(serviceId) {
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
   if (svc.track_state === 'on_property') {
+    const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, svc.arrived_at || new Date());
+    if (Object.keys(lifecycleUpdates).length > 0) {
+      await db('scheduled_services')
+        .where({ id: serviceId })
+        .update({ ...lifecycleUpdates, updated_at: new Date() });
+    }
     try {
       await syncOperationalStatus(svc, 'on_site');
     } catch (err) {
@@ -275,7 +305,7 @@ async function markOnProperty(serviceId) {
         logger.error(`[track-transitions] tech_status on_site idempotent sync failed: ${err.message}`);
       }
     }
-    return { ok: true, state: 'on_property', arrivedAt: svc.arrived_at };
+    return { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   }
   // Geofence arrival can be the first signal we get when a tech forgot
   // to tap En Route. Treat scheduled -> on_property as a valid forward
@@ -289,7 +319,11 @@ async function markOnProperty(serviceId) {
   const updated = await db('scheduled_services')
     .where({ id: serviceId })
     .whereIn('track_state', ['scheduled', 'en_route'])
-    .update({ track_state: 'on_property', arrived_at: now, updated_at: now });
+    .update({
+      track_state: 'on_property',
+      ...buildOnSiteLifecycleUpdates(svc, now),
+      updated_at: now,
+    });
   if (updated === 0) {
     const fresh = await loadService(serviceId);
     if (fresh?.technician_id && fresh.track_state === 'on_property') {
@@ -343,7 +377,12 @@ async function markComplete(serviceId, opts = {}) {
   const updated = await db('scheduled_services')
     .where({ id: serviceId })
     .whereIn('track_state', ['scheduled', 'en_route', 'on_property'])
-    .update({ track_state: 'complete', completed_at: now, updated_at: now });
+    .update({
+      track_state: 'complete',
+      completed_at: now,
+      ...buildCompletionLifecycleUpdates(svc, now),
+      updated_at: now,
+    });
   if (updated === 0) {
     const fresh = await loadService(serviceId);
     return { ok: true, state: fresh?.track_state || 'complete', completedAt: fresh?.completed_at || null };

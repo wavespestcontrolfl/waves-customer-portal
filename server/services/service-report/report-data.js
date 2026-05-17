@@ -5,6 +5,7 @@ const { pressureFromFindings } = require('./pressure-index');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { resolveTechPhotoUrl } = require('../tech-photo');
+const { minutesFromElapsed } = require('../../utils/duration-minutes');
 
 let PhotoService = null;
 try {
@@ -85,18 +86,6 @@ function taggedNoteLines(notes, tags) {
     })
     .filter((entry) => entry && tagSet.has(entry.tag))
     .map((entry) => entry.text);
-}
-
-function minutesFromElapsed(value) {
-  if (!value) return null;
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value);
-  const text = String(value);
-  const hms = text.match(/^(\d+):(\d{2}):(\d{2})$/);
-  if (hms) return Math.round((Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3])) / 60);
-  const ms = text.match(/^(\d+):(\d{2})$/);
-  if (ms) return Math.round((Number(ms[1]) * 60 + Number(ms[2])) / 60);
-  const numeric = Number(text);
-  return Number.isFinite(numeric) ? Math.round(numeric) : null;
 }
 
 function methodFromProduct(product, serviceLine) {

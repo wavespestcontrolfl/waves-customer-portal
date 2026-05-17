@@ -57,6 +57,29 @@ export default function TerminalStateCard({ state, customerFirstName, address })
     );
   }
 
+  if (state === 'quote_required') {
+    return (
+      <div style={{
+        background: W.white, borderRadius: 16, padding: 24,
+        borderTop: '#F97316 4px solid', boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 20, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
+          This treatment needs an inspection.
+        </div>
+        <div style={{ fontSize: 15, color: W.textBody, lineHeight: 1.55 }}>
+          Hi {who} — this estimate includes a treatment that needs a custom quote before it can be accepted online.
+          Call <a href={`tel:${WAVES_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE}</a> and we'll finish it with you.
+        </div>
+        <a href={`tel:${WAVES_TEL}`} style={{
+          display: 'inline-block', marginTop: 14, padding: '12px 20px',
+          background: W.blueBright, color: W.white, textDecoration: 'none',
+          borderRadius: 12, fontWeight: 600, fontSize: 15,
+        }}>Call {WAVES_PHONE}</a>
+      </div>
+    );
+  }
+
   // expired (or anything else)
   return (
     <div style={{

@@ -8,6 +8,21 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-05-16 service zone pricing removal
+
+Service Zone A/B/C/D is now routing/metadata only in the modular estimator. It no longer applies a recurring-service price multiplier.
+
+Updated local v1 regression baselines:
+- `zone_b_monthly_pest_bermuda_premium`
+- `zone_c_bimonthly_pest_zoysia_standard_treeshrub`
+- `zone_d_quarterly_pest_bahia_basic`
+- `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub`
+- `v1adapter_zone_d_quarterly_pest_bahia`
+
+See pricing_changelog entry `codex-2026-05-16` for rationale.
+
+---
+
 ## Baseline context that differed from the original v4.3 build brief
 
 ### Anomaly 1 — Platinum WaveGuard already at 20%, not 18%
@@ -135,7 +150,7 @@ Extraction was behavior-preserving by construction. The 170-line inline remap (p
 
 **Structural parity:** proven. LOCAL and HTTP produce envelopes with identical keys, types, and array shapes.
 
-**Numeric parity:** data-state dependent. LOCAL mode reads `pricing_config` from the local DB, which lags prod. Cases touching DB-driven values (zone multipliers, lawn brackets, pest base rates, discount tiers) will diverge numerically in LOCAL runs until a prod-mirror seed script lands. See `project_prod_mirror_local_db.md` memory — tracked as a Session 9 dependency. Until then, treat LOCAL-mode numeric diffs as data-state drift, not engine regressions; use HTTP mode against prod for numeric baseline verification.
+**Numeric parity:** data-state dependent. LOCAL mode reads `pricing_config` from the local DB, which lags prod. Cases touching DB-driven values (lawn brackets, pest base rates, discount tiers) will diverge numerically in LOCAL runs until a prod-mirror seed script lands. See `project_prod_mirror_local_db.md` memory — tracked as a Session 9 dependency. Until then, treat LOCAL-mode numeric diffs as data-state drift, not engine regressions; use HTTP mode against prod for numeric baseline verification.
 
 ### Gate 3 — deliberate-break verification
 
@@ -297,7 +312,7 @@ Recurring customer impact in the reconciliation window (Apr 14 → Apr 17): **ze
 | `v2_boracare_attic_2000sf` | $1,946 | $1,946 | **0** | No pest path. |
 | `v2_preslab_2000sf_basic_warranty` | $852 | $852 | **0** | No pest path. |
 | `v2_stinging_wasp_ground_tier2` | $250 | $250 | **0** | No pest path. |
-| `v2_bedbug_3rooms_both_methods` | $3,351 | $3,351 | **0** | No pest path. |
+| `v1adapter_bedbug_3rooms_hybrid` | $2,950 | $2,950 | **0** | Explicit HYBRID bed bug path; no duplicate heat + chemical lines. |
 | `v2_exclusion_moderate_waive_inspection` | $450 | $450 | **0** | No pest path. |
 | `v2_onetime_pest_urgent_afterhours` | $300 | $318 | **+$18 (+6.0%)** | One-time pest with drifted features × urgency multiplier. |
 | `v2_onetime_pest_recurring_customer` | $128 | $135 | **+$7 (+5.5%)** | One-time pest + moderate features drift. |

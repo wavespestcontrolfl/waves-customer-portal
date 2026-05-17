@@ -4,6 +4,91 @@
 
 Railway handles Node.js + PostgreSQL with minimal configuration.
 
+## Current Production Runbook
+
+Production is deployed by Railway from the GitHub `main` branch for
+`wavespestcontrolfl/waves-customer-portal`.
+
+- Railway project: `waves-pest-control`
+- Railway environment: `production`
+- Railway service: `waves-customer-portal`
+- Custom domain: `https://portal.wavespestcontrol.com`
+- Health check: `https://portal.wavespestcontrol.com/api/health`
+- Config-as-code file: `railway.toml`
+- Pre-deploy command: `npm run db:migrate`
+- Start command: `npm start`
+
+### Confirm a Production Deploy
+
+Use these checks after a merge to `main`:
+
+```bash
+gh api repos/wavespestcontrolfl/waves-customer-portal/commits/main \
+  --jq '{sha:.sha,date:.commit.committer.date,message:.commit.message}'
+
+railway deployment list --environment production --service waves-customer-portal --json --limit 5
+
+railway service status --environment production --service waves-customer-portal --json
+
+curl -sS -D - https://portal.wavespestcontrol.com/api/health
+```
+
+The active Railway deployment should have:
+
+- `status: SUCCESS`
+- `stopped: false`
+- `meta.branch: main`
+- `meta.commitHash` matching the intended GitHub `main` commit or a later
+  commit that contains it
+- `meta.configFile: /railway.toml`
+- `meta.serviceManifest.deploy.healthcheckPath: /api/health`
+
+### Roll Back Production
+
+Avoid `railway up` for normal production releases. It creates a deployment
+from the local checkout/archive instead of the GitHub `main` integration.
+For routine changes, merge to `main` and let Railway auto-deploy from GitHub.
+
+Do not use `railway down` as rollback. It removes the latest deployment from
+the service and can take the app offline if no older active deployment remains.
+
+Preferred rollback path:
+
+1. Open Railway dashboard -> `waves-pest-control` -> `production` ->
+   `waves-customer-portal` -> Deployments.
+2. Find the most recent known-good deployment from `main`.
+3. Confirm it is for the expected commit and has `status: SUCCESS`.
+4. Use Railway's Rollback action for that deployment.
+5. Re-run the production deploy checks above.
+
+Emergency API rollback path:
+
+```bash
+# Requires a Railway token with access to the production project.
+export RAILWAY_TOKEN=<token>
+export RAILWAY_DEPLOYMENT_ID=<known-good-deployment-id>
+
+curl -sS https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"mutation($id:String!){ deploymentRollback(id:$id) }","variables":{"id":"'"${RAILWAY_DEPLOYMENT_ID}"'"}}'
+```
+
+After rollback, wait for `railway service status` to report `SUCCESS` and
+`stopped: false`, then verify both:
+
+```bash
+curl -sS -D - https://portal.wavespestcontrol.com/api/health
+curl -sS -D - https://waves-customer-portal-production.up.railway.app/api/health
+```
+
+### Staging Status
+
+There is no active staging service. The Railway project currently has a
+`codex-dev` environment, but it has no services or deployments. Do not treat
+staging as deployed until an app service, database, variables, and deployment
+trigger are explicitly provisioned there.
+
 ### Step 1: Prepare Repository
 ```bash
 # Initialize git if not already

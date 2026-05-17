@@ -15,7 +15,7 @@ const PROJECT_TYPES = {
     short: 'WDO',
     description: 'FDACS-13645 wood-destroying organism inspection report for real estate / pre-purchase files.',
     requiresFollowup: false,
-    photoCategories: ['exterior', 'living_area', 'kitchen', 'bathroom', 'garage', 'attic', 'crawlspace', 'other'],
+    photoCategories: ['exterior', 'living_area', 'kitchen', 'bathroom', 'garage', 'attic', 'crawlspace', 'previous_treatment', 'other'],
     findingsFields: [
       { key: 'property_address', label: 'Property inspected', type: 'text', placeholder: 'Street address, city, state, ZIP' },
       { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', placeholder: 'Main home, detached garage, shed, addition…' },
@@ -115,6 +115,44 @@ const PROJECT_TYPES = {
       { key: 'treatment_method', label: 'Treatment method', type: 'select', options: ['Chemical only', 'Heat only', 'Chemical + heat', 'Steam + chemical'] },
       { key: 'products_used', label: 'Products used', type: 'textarea' },
       { key: 'prep_for_customer', label: 'Customer prep for follow-up', type: 'textarea', placeholder: 'Instructions for the customer before the 14-day return visit.' },
+    ],
+  },
+
+  pre_treatment_termite_certificate: {
+    label: 'Pre-Treatment Certificate of Compliance',
+    short: 'Pre-Treat Cert',
+    description: 'Florida Building Code 1816.1.7 Certificate of Compliance for pre-construction subterranean termite soil treatment. Doubles as the FDACS Rule 5E-14.106 treatment record.',
+    requiresFollowup: false,
+    photoCategories: ['slab_prep', 'soil_treatment', 'perimeter', 'equipment', 'before', 'after', 'other'],
+    findingsFields: [
+      { key: 'treatment_address', label: 'Treatment address', type: 'text', placeholder: 'Street, city, state, ZIP' },
+      { key: 'lot_block', label: 'Lot / Block', type: 'text', placeholder: 'Lot 12, Block C (pre-construction lots)' },
+      { key: 'subdivision', label: 'Subdivision / Community', type: 'text', placeholder: 'e.g. Lakewood Ranch — Star Farms' },
+      { key: 'permit_number', label: 'Building permit #', type: 'text', placeholder: 'Issued by the building department' },
+      { key: 'builder_contractor', label: 'Builder / General contractor', type: 'text' },
+      { key: 'treatment_date', label: 'Date of treatment', type: 'text', placeholder: 'YYYY-MM-DD' },
+      { key: 'treatment_time', label: 'Time of treatment', type: 'text', placeholder: 'e.g. 9:30 AM' },
+      { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
+      { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text' },
+      { key: 'wdo_target', label: 'Wood-destroying organism treated for', type: 'text', placeholder: 'e.g. Subterranean termites (Reticulitermes spp.)' },
+      { key: 'product_name', label: 'Product used', type: 'select', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care', 'Other'] },
+      { key: 'product_name_other', label: 'Product (if Other)', type: 'text' },
+      { key: 'epa_registration', label: 'EPA registration #', type: 'text', placeholder: 'e.g. 7969-210' },
+      { key: 'active_ingredient', label: 'Active ingredient', type: 'text', placeholder: 'e.g. fipronil' },
+      { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', placeholder: 'e.g. 0.060' },
+      { key: 'square_footage', label: 'Square footage treated', type: 'text' },
+      { key: 'linear_feet', label: 'Linear feet treated', type: 'text', placeholder: 'For trenching / perimeter applications' },
+      { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text' },
+      { key: 'applicator_name', label: "Applicator's printed name", type: 'text' },
+      { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text' },
+      // FBC 1816.1.7 requires an "authorized signature of the licensed
+      // applicator." A typed attestation paired with the printed name +
+      // FDACS ID + treatment date is the standard pattern for portal-
+      // generated certificates accepted by Florida building departments.
+      { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).'] },
+      { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'No warranty'] },
+      { key: 'renewal_due', label: 'Renewal due by', type: 'text', placeholder: 'YYYY-MM-DD' },
+      { key: 'comments', label: 'Additional notes', type: 'textarea', placeholder: 'Pre-pour conditions, weather, retreatment triggers, etc.' },
     ],
   },
 };

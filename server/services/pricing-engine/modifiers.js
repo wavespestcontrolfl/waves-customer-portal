@@ -3,7 +3,7 @@
 //
 // Derives multiplicative / additive adjustments from an enriched property
 // profile (year built, construction material, foundation, roof, water
-// proximity, HOA, service zone) and exposes them to the service pricing
+// proximity, HOA) and exposes them to the service pricing
 // functions. Keeps all the per-service math in service-pricing.js.
 // ============================================================
 
@@ -70,18 +70,6 @@ function mosquitoWaterMult(nearWater) {
   }
 }
 
-// ── Service zone → distance-based labor multiplier ───────────
-// Zone A = local core, B = standard, C = reach, D = far
-function zoneMultiplier(zone) {
-  switch ((zone || 'A').toUpperCase()) {
-    case 'A': return 1.0;
-    case 'B': return 1.05;
-    case 'C': return 1.12;
-    case 'D': return 1.20;
-    default:  return 1.0;
-  }
-}
-
 // ── WDO inspection time (new construction vs old) ────────────
 function wdoTimeMult(yearBuilt) {
   if (!yearBuilt) return 1.0;
@@ -102,7 +90,6 @@ function deriveModifiers(profile = {}) {
     wdoTimeMult: wdoTimeMult(profile.yearBuilt),
     rodentRoofAdj: rodentRoofAdj(profile.roofType),
     mosquitoWaterMult: mosquitoWaterMult(profile.nearWater),
-    zoneMult: zoneMultiplier(profile.serviceZone),
   };
 }
 
@@ -142,7 +129,6 @@ module.exports = {
   foundationAdj,
   rodentRoofAdj,
   mosquitoWaterMult,
-  zoneMultiplier,
   wdoTimeMult,
   deriveModifiers,
   deriveNotes,

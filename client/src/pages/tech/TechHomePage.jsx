@@ -46,6 +46,7 @@ import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal from '../../components/tech/CreateProjectModal';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
+import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 
 const DARK = {
@@ -80,6 +81,17 @@ function getGreeting() {
   return 'Good evening';
 }
 
+function scheduleRowsFromResponse(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.services)) return data.services;
+  if (Array.isArray(data?.schedule)) return data.schedule;
+  return [];
+}
+
+function serviceTechnicianId(service) {
+  return service?.technicianId || service?.technician_id || service?.tech_id || '';
+}
+
 // Mirrors server-side PRE_EN_ROUTE in tech-track.js. Tapping outside
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
@@ -105,29 +117,25 @@ export default function TechHomePage() {
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
-  const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
+  const techName = getAdminDisplayName('Tech');
   const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
   // Use it to scope `schedule` to this tech's own jobs — /api/admin/schedule
   // returns the whole route board (not tech-filtered), so without this
   // guard nextStop could land on another tech's job and the En Route
   // POST would 403 server-side (tech-track.js ownership guard).
-  let currentTechId = null;
-  try {
-    const u = JSON.parse(localStorage.getItem('waves_admin_user') || 'null');
-    currentTechId = u?.id || null;
-  } catch { /* ignore */ }
+  const currentTechId = getAdminUser()?.id || null;
 
   const fetchSchedule = useCallback(async () => {
     try {
-      const token = localStorage.getItem('adminToken');
+      const token = getAdminAuthToken();
       const today = etDateString();
       const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         const data = await res.json();
-        setSchedule(Array.isArray(data) ? data : data.schedule || []);
+        setSchedule(scheduleRowsFromResponse(data));
       }
     } catch (err) {
       console.error('Failed to fetch schedule:', err);
@@ -159,7 +167,7 @@ export default function TechHomePage() {
     if (!serviceId || enRouteState.pendingId) return;
     setEnRouteState({ pendingId: serviceId, message: '', isError: false });
     try {
-      const token = localStorage.getItem('adminToken');
+      const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/en-route`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
@@ -200,7 +208,7 @@ export default function TechHomePage() {
   // pattern in useDispatchAlerts / useDispatchBoard / TrackPage.
   // Either alone leaks on every navigation away from the tech home.
   useEffect(() => {
-    const token = localStorage.getItem('adminToken');
+    const token = getAdminAuthToken();
     if (!token) return undefined;
     const origin = socketOrigin();
     const opts = { auth: { token }, transports: ['websocket', 'polling'], reconnection: true };
@@ -221,7 +229,7 @@ export default function TechHomePage() {
   // entire dispatch board, so nextStop, counts, and the Today's
   // Services list all need filtering before they're consumed.
   const myServices = currentTechId
-    ? schedule.filter((s) => s.technician_id === currentTechId)
+    ? schedule.filter((s) => String(serviceTechnicianId(s)) === String(currentTechId))
     : schedule;
   const completed = myServices.filter((s) => s.status === 'completed').length;
   const total = myServices.length;
@@ -555,7 +563,7 @@ function TimecardSignoffCard({ techName }) {
       // sign right now?" — Railway runs UTC, browser may not be in ET,
       // so computing the boundary client-side drifts near midnight.
       // The endpoint anchors on ET via shared helpers.
-      const token = localStorage.getItem('adminToken');
+      const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/timetracking/pending-signoff`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -620,7 +628,7 @@ function TimecardSignoffCard({ techName }) {
     setSubmitting(true);
     setFeedback(null);
     try {
-      const token = localStorage.getItem('adminToken');
+      const token = getAdminAuthToken();
       const r = await fetch(`${API}/api/tech/timetracking/sign-week`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },

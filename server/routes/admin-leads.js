@@ -8,6 +8,20 @@ const { startOfETMonth } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+const LEAD_STATUSES = [
+  'new',
+  'contacted',
+  'estimate_sent',
+  'estimate_viewed',
+  'won',
+  'lost',
+  'unresponsive',
+  'disqualified',
+  'duplicate',
+];
+const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
+const FIRST_RESPONSE_STATUSES = new Set(['contacted', 'estimate_sent', 'estimate_viewed', 'won']);
+
 // Auto-create leads tables if missing — uses raw SQL CREATE IF NOT EXISTS to avoid pg_type conflicts
 async function ensureLeadsTables(db) {
   const tables = [
@@ -210,8 +224,7 @@ router.get('/analytics/funnel', async (req, res, next) => {
     const funnel = [
       { stage: 'new', label: 'New Leads', count: stageMap.new || 0 },
       { stage: 'contacted', label: 'Contacted', count: stageMap.contacted || 0 },
-      { stage: 'estimate_sent', label: 'Estimate Sent', count: (stageMap.estimate_sent || 0) + (stageMap.estimate_viewed || 0) },
-      { stage: 'negotiating', label: 'Negotiating', count: stageMap.negotiating || 0 },
+      { stage: 'estimate_sent', label: 'Estimate Sent', count: (stageMap.estimate_sent || 0) + (stageMap.estimate_viewed || 0) + (stageMap.negotiating || 0) },
       { stage: 'won', label: 'Won', count: stageMap.won || 0 },
       { stage: 'lost', label: 'Lost', count: stageMap.lost || 0 },
       { stage: 'unresponsive', label: 'Unresponsive', count: stageMap.unresponsive || 0 },
@@ -645,6 +658,9 @@ router.put('/:id', async (req, res, next) => {
     for (const key of allowed) {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     }
+    if (updates.status !== undefined && !LEAD_STATUS_SET.has(updates.status)) {
+      return res.status(400).json({ error: 'Invalid lead status' });
+    }
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
     updates.updated_at = new Date();
 
@@ -652,12 +668,11 @@ router.put('/:id', async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     let responseLead = lead;
 
-    const contactStatuses = new Set(['contacted', 'estimate_sent', 'estimate_viewed', 'negotiating', 'won']);
     if (
       updates.status
       && updates.status !== existingLead.status
       && existingLead.response_time_minutes == null
-      && contactStatuses.has(updates.status)
+      && FIRST_RESPONSE_STATUSES.has(updates.status)
     ) {
       await leadAttribution.logFirstResponse(req.params.id);
       responseLead = await db('leads').where('id', req.params.id).first();

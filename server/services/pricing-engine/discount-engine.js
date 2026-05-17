@@ -11,8 +11,9 @@
 //      WaveGuard tier (one-time services never see tier discount; recurring
 //      services never see the perk).
 //
-// Excluded services: rodent_bait, palm_injection, bed_bug_*, bora_care,
-//   pre_slab_termidor. No % discount. Flat credits where applicable.
+// Excluded services: rodent_bait, palm_injection, bed_bug*, bora_care,
+//   pre_slab_termidor. No % discount. Flat credits only where explicitly
+//   allowed. Rodent bait receives no WaveGuard credit or tier benefit.
 //
 // Removed in v4.3 Session 6:
 //   - Composite discount cap (was 0.25)
@@ -21,7 +22,7 @@
 //   - Frequency discount tracking in the stack
 //   - ACH discount plumbing (retired to 0% in an earlier session)
 // ============================================================
-const { WAVEGUARD, PALM, RODENT, GLOBAL, TREE_SHRUB } = require('./constants');
+const { WAVEGUARD, PALM, GLOBAL, TREE_SHRUB } = require('./constants');
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -37,6 +38,19 @@ function roundRatio(value) {
 
 function roundCurrency(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+// Tier discount applies only to lawn, pest, tree & shrub, mosquito, and
+// termite bait station. lawn_care_enhanced / lawn_care_premium are tier
+// variants of lawn_care that resolveDiscountKey emits.
+const TIER_DISCOUNT_ELIGIBLE = new Set([
+  ...WAVEGUARD.qualifyingServices,
+  'lawn_care_enhanced',
+  'lawn_care_premium',
+]);
+
+function isTierDiscountEligible(serviceKey) {
+  return TIER_DISCOUNT_ELIGIBLE.has(serviceKey);
 }
 
 // ── Determine WaveGuard tier from active services ─────────────
@@ -105,22 +119,6 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
         });
       }
     }
-    if (serviceKey === 'rodent_bait') {
-      result.setupCredit = RODENT.setupCredit;
-      result.appliedDiscounts.push({
-        type: 'setup_credit',
-        amount: RODENT.setupCredit,
-        reason: `One-time $${RODENT.setupCredit} WaveGuard member credit`,
-      });
-    }
-    if (serviceKey === 'bed_bug_chemical' || serviceKey === 'bed_bug_heat') {
-      const tierRank = { bronze: 0, silver: 1, gold: 2, platinum: 3 };
-      if (tierRank[waveGuardTier.tier] >= tierRank.silver) {
-        result.flatCredit = 50;
-        result.appliedDiscounts.push({ type: 'flat_credit', amount: 50, reason: '$50 WaveGuard member credit' });
-      }
-    }
-
     // totalDiscount stays 0 — no % discount applies
     return result;
   }
@@ -136,8 +134,10 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
         amount: WAVEGUARD.recurringCustomerOneTimePerk,
       });
     }
-  } else {
-    // Recurring services get WaveGuard tier discount. No caps, no stacking.
+  } else if (isTierDiscountEligible(serviceKey)) {
+    // Tier discount applies only to the qualifying recurring services
+    // (lawn_care, pest_control, tree_shrub, mosquito, termite_bait).
+    // lawn_care_enhanced/lawn_care_premium are tier variants of lawn_care.
     if (waveGuardTier.discount > 0) {
       result.effectiveDiscount = waveGuardTier.discount;
       result.appliedDiscounts.push({

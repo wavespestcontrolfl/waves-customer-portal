@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
+import WdoIntelligenceBar from './WdoIntelligenceBar';
 
 /**
  * CreateProjectModal — form for creating a Project (inspection or
@@ -195,6 +196,42 @@ function todayDateInput() {
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
+function hasMeaningfulValue(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
+function formatCustomerAddress(customer) {
+  if (!customer) return '';
+  if (typeof customer.address === 'string') return customer.address.replace(/^,\s*/, '').trim();
+  const address = customer.address && typeof customer.address === 'object' ? customer.address : null;
+  const line1 = address?.line1 || customer.addressLine1 || customer.address_line1 || '';
+  const city = address?.city || customer.city || '';
+  const state = address?.state || customer.state || '';
+  const zip = address?.zip || customer.zip || '';
+  return [line1, [city, state].filter(Boolean).join(', '), zip]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function mergeSuggestionsIntoFindings(current, suggestions, overwrite = false) {
+  const allowed = [
+    'property_address',
+    'structures_inspected',
+    'inspection_scope',
+    'previous_treatment_evidence',
+    'previous_treatment_notes',
+  ];
+  const next = { ...current };
+  for (const key of allowed) {
+    const value = suggestions?.[key];
+    if (!hasMeaningfulValue(value)) continue;
+    if (overwrite || !hasMeaningfulValue(next[key])) next[key] = value;
+  }
+  return next;
+}
+
 export default function CreateProjectModal({
   onClose, onCreated,
   defaultCustomerId, defaultServiceRecordId, defaultScheduledServiceId,
@@ -233,6 +270,7 @@ export default function CreateProjectModal({
   const [customerQuery, setCustomerQuery] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLabel, setCustomerLabel] = useState(defaultCustomerLabel || '');
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [projectDate, setProjectDate] = useState(
     defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
@@ -258,6 +296,22 @@ export default function CreateProjectModal({
       .then(d => setTypesRegistry(d.types))
       .catch(() => setError('Could not load project types'));
   }, []);
+
+  useEffect(() => {
+    if (!customerId) {
+      setSelectedCustomer(null);
+      return;
+    }
+    if (selectedCustomer?.id === customerId) return;
+    let cancelled = false;
+    adminFetch(`/admin/customers/${customerId}/estimates-summary`)
+      .then(r => r.json())
+      .then(d => {
+        if (!cancelled && d.customer) setSelectedCustomer(d.customer);
+      })
+      .catch(() => { /* non-blocking: search result may already have enough */ });
+    return () => { cancelled = true; };
+  }, [customerId, selectedCustomer?.id]);
 
   // Debounced customer search
   useEffect(() => {
@@ -303,6 +357,13 @@ export default function CreateProjectModal({
     ? Object.entries(typesRegistry).filter(([key]) => !allowedProjectTypes || allowedProjectTypes.includes(key))
     : [];
 
+  useEffect(() => {
+    if (projectType !== 'wdo_inspection') return;
+    const address = formatCustomerAddress(selectedCustomer);
+    if (!address) return;
+    setFindings(prev => prev.property_address ? prev : { ...prev, property_address: address });
+  }, [projectType, selectedCustomer]);
+
   function handleFindingChange(key, value) {
     setFindings(prev => ({ ...prev, [key]: value }));
   }
@@ -318,6 +379,16 @@ export default function CreateProjectModal({
     }
     if (action.note) appendRecommendation(action.prefix || 'Note', action.note);
     if (action.title && !title.trim()) setTitle(action.title);
+  }
+
+  function fillWdoAddressFromCustomer() {
+    const address = formatCustomerAddress(selectedCustomer);
+    if (!address) return;
+    setFindings(prev => ({ ...prev, property_address: address }));
+  }
+
+  function applyWdoSuggestions(suggestions, options = {}) {
+    setFindings(prev => mergeSuggestionsIntoFindings(prev, suggestions, options.overwrite));
   }
 
   async function handleAiDraft() {
@@ -536,7 +607,7 @@ export default function CreateProjectModal({
                 <span style={{ fontSize: 13, color: P.text }}>{customerLabel || customerId}</span>
                 <button
                   type="button"
-                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); }}
+                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); }}
                   style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
                 >Change</button>
               </div>
@@ -560,9 +631,14 @@ export default function CreateProjectModal({
                         type="button"
                         onClick={() => {
                           setCustomerId(c.id);
+                          setSelectedCustomer(c);
                           const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();
                           const phone = c.phone || '';
                           setCustomerLabel([name, phone].filter(Boolean).join(' · ') || c.id);
+                          const address = formatCustomerAddress(c);
+                          if (projectType === 'wdo_inspection' && address) {
+                            setFindings(prev => ({ ...prev, property_address: address }));
+                          }
                         }}
                         style={{
                           width: '100%', textAlign: 'left', background: 'transparent',
@@ -642,9 +718,43 @@ export default function CreateProjectModal({
                 />
               </div>
 
+              {projectType === 'wdo_inspection' && (
+                <WdoIntelligenceBar
+                  customerId={customerId}
+                  serviceRecordId={defaultServiceRecordId}
+                  scheduledServiceId={defaultScheduledServiceId}
+                  propertyAddress={findings.property_address || formatCustomerAddress(selectedCustomer)}
+                  findings={findings}
+                  onApplySuggestions={applyWdoSuggestions}
+                  onEvidencePhotoSelected={(file) => queuePhoto(file, 'previous_treatment')}
+                  disabled={saving || aiWriting}
+                  palette={P}
+                />
+              )}
+
               {typeCfg.findingsFields.map(field => (
                 <div key={field.key}>
-                  <label style={labelStyle}>{field.label}</label>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                    <label style={{ ...labelStyle, marginBottom: 0 }}>{field.label}</label>
+                    {projectType === 'wdo_inspection' && field.key === 'property_address' && formatCustomerAddress(selectedCustomer) && (
+                      <button
+                        type="button"
+                        onClick={fillWdoAddressFromCustomer}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: P.accent,
+                          fontSize: 11,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          padding: 0,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Fill from customer
+                      </button>
+                    )}
+                  </div>
                   {field.type === 'select' ? (
                     <select
                       value={findings[field.key] || ''}

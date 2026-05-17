@@ -192,38 +192,32 @@ async function checkGBP(locationKey) {
 async function checkBouncie() {
   const platform = 'bouncie';
   const envVarName = 'BOUNCIE_REFRESH_TOKEN';
-  let token = process.env.BOUNCIE_ACCESS_TOKEN;
+  let accessToken = String(process.env.BOUNCIE_ACCESS_TOKEN || '').trim();
+  let refreshToken = String(process.env.BOUNCIE_REFRESH_TOKEN || '').trim();
   try {
     const tokenStore = require('./bouncie-token-store');
     const stored = await tokenStore.loadTokens();
-    token = stored?.accessToken || token;
+    accessToken = String(stored?.accessToken || accessToken || '').trim();
+    refreshToken = String(stored?.refreshToken || refreshToken || '').trim();
   } catch (_) {
     // fall back to env bootstrap token
   }
 
-  if (!token) {
-    const result = { platform, status: 'not_configured', lastError: 'No Bouncie access token in DB or env', expiresAt: null };
+  if (!accessToken && !refreshToken) {
+    const result = { platform, status: 'not_configured', lastError: 'No Bouncie OAuth token in DB or env', expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   }
 
   try {
-    const res = await fetch('https://api.bouncie.dev/v1/user', {
-      headers: { Authorization: token },
-    });
-
-    if (res.ok) {
-      const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
-      await upsertResult({ ...result, tokenType: 'oauth', envVarName });
-      return result;
-    }
-
-    const status = (res.status === 401 || res.status === 403) ? 'expired' : 'error';
-    const result = { platform, status, lastError: `HTTP ${res.status}`, expiresAt: null };
+    const bouncie = require('./bouncie');
+    await bouncie.checkAuth();
+    const result = { platform, status: 'healthy', lastError: null, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   } catch (err) {
-    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    const status = /\b(401|403)\b/.test(String(err.message)) ? 'expired' : 'error';
+    const result = { platform, status, lastError: err.message, expiresAt: null };
     await upsertResult({ ...result, tokenType: 'oauth', envVarName });
     return result;
   }

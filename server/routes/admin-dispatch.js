@@ -25,6 +25,7 @@ const { computePressureIndex } = require('../services/service-report/pressure-in
 const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
+  buildServiceReportV1DeliveryContext,
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
@@ -36,6 +37,10 @@ const {
   recordTrackTransitionFailure,
   recordTrackTransitionResultFailure,
 } = require('../services/track-transition-alerts');
+const {
+  buildOnSiteLifecycleUpdates,
+  buildCompletionLifecycleUpdates,
+} = require('../utils/service-duration-capture');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -79,6 +84,10 @@ async function runtimeServiceReportFlag(req, flagKey, envKey, defaultValue = fal
   return isUserFeatureEnabled(req.technicianId, flagKey, defaultValue).catch(() => !!defaultValue);
 }
 
+function oneTapCompletionSubmitEnabled() {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env.ONE_TAP_COMPLETION_SUBMIT_ENABLED || '').trim().toLowerCase());
+}
+
 async function renderRequiredTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -89,6 +98,17 @@ async function renderRequiredTemplate(templateKey, vars) {
     throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
   }
   throw new Error(`SMS template ${templateKey} is missing or inactive`);
+}
+
+function ensureSmsContainsReportLink(body, reportLink) {
+  const text = String(body || '').trim();
+  const link = String(reportLink || '').trim();
+  if (!text || !link || text.includes(link)) return text;
+  const portalRootRe = /\b(?:https?:\/\/)?portal\.wavespestcontrol\.com(?:\/report\/[a-f0-9]{32})?/i;
+  if (portalRootRe.test(text)) {
+    return text.replace(portalRootRe, link);
+  }
+  return `${text}\n${link}`;
 }
 
 const MAX_REVIEW_DELAY_MINUTES = 60 * 24 * 30;
@@ -932,17 +952,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // Lifecycle timestamps live on the same row as status; flip
         // them inside the same trx so a rollback also rolls back the
         // timestamp change. transitionJobStatus owns the status +
-        // updated_at columns (atomic guard); we own the actual_*
+        // updated_at columns (atomic guard); we own the service timing
         // columns (no constraint conflict).
         const lifecycleUpdates = {};
-        if (toStatus === 'on_site') lifecycleUpdates.actual_start_time = trx.fn.now();
+        const lifecycleAt = new Date();
+        if (toStatus === 'on_site') {
+          Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, lifecycleAt));
+        }
         if (toStatus === 'completed') {
-          lifecycleUpdates.actual_end_time = trx.fn.now();
-          if (svc.actual_start_time) {
-            lifecycleUpdates.service_time_minutes = Math.round(
-              (Date.now() - new Date(svc.actual_start_time)) / 60000
-            );
-          }
+          Object.assign(lifecycleUpdates, buildCompletionLifecycleUpdates(svc, lifecycleAt));
         }
         if (Object.keys(lifecycleUpdates).length > 0) {
           await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
@@ -1064,14 +1082,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
 // GET /api/admin/dispatch/:serviceId/complete-preview
 //
-// Read-only preview for the one-tap "Complete — Protocol Performed"
+// Read-only preview for the one-tap "Complete - Protocol Performed"
 // flow. Resolves the standard protocol defaults for the service
 // without writing anything, and returns the bundle the tech would be
-// attesting to plus a stable snapshot hash. PR #3 will add the
-// submit-side handshake: the client sends back this hash as
-// expectedSnapshotHash, and the route returns 409 completion_preview_
-// stale if the resolver computes a different hash at submit time
-// (active protocol template changed between preview and submit).
+// attesting to plus a stable snapshot hash. It is intentionally gated
+// until the submit-side handshake/resume path is present; otherwise a
+// backend-only preview can advertise an action the UI cannot safely
+// complete.
 //
 // Response shape:
 //   200 { available: true, mode: 'one_tap_available',
@@ -1094,6 +1111,14 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
         error: 'Invalid customerInteraction value.',
         code: 'customer_interaction_invalid',
         validChoices: CUSTOMER_INTERACTION_CHOICES,
+      });
+    }
+
+    if (!oneTapCompletionSubmitEnabled()) {
+      return res.json({
+        available: false,
+        reason: 'one_tap_submit_not_enabled',
+        mode: 'detailed_form_required',
       });
     }
 
@@ -1443,6 +1468,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }).catch(() => null)
           : null;
         await db.transaction(async (trx) => {
+          const completionEndedAt = new Date();
+          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
           const structuredNotes = {
             visitOutcome,
             requestReview: isIncompleteVisit ? false : requestReview !== false,
@@ -1508,8 +1535,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
           if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
-          if (serviceRecordCols.started_at) recordInsert.started_at = svc.actual_start_time || svc.check_in_time || null;
-          if (serviceRecordCols.ended_at) recordInsert.ended_at = trx.fn.now();
+          if (serviceRecordCols.started_at) {
+            recordInsert.started_at = lifecycleUpdates.actual_start_time
+              || svc.actual_start_time
+              || svc.check_in_time
+              || svc.arrived_at
+              || null;
+          }
+          if (serviceRecordCols.ended_at) recordInsert.ended_at = completionEndedAt;
           if (serviceRecordCols.conditions && conditionsAtApplication) recordInsert.conditions = serializeJsonb(conditionsAtApplication);
           if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
@@ -1525,6 +1558,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               },
             ));
           }
+          if (serviceRecordCols.completion_source) recordInsert.completion_source = 'detailed_form';
+          if (serviceRecordCols.protocol_defaults_used) recordInsert.protocol_defaults_used = false;
 
         // 1. service_record — the canonical "completion happened" audit.
         // scheduled_service_id is the FK back to the source row so
@@ -1702,15 +1737,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
 
         // 3. Lifecycle timestamps the route owns. transitionJobStatus
-        // owns status + updated_at; we own actual_end_time +
-        // service_time_minutes. No constraint conflict — separate
-        // columns on the same row.
-        const lifecycleUpdates = {
-          actual_end_time: trx.fn.now(),
-          service_time_minutes: svc.actual_start_time
-            ? Math.round((Date.now() - new Date(svc.actual_start_time)) / 60000)
-            : null,
-        };
+        // owns status + updated_at; we own the service timing columns
+        // on the same row.
         await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
 
         // 5. Status flip via the canonical sole-writer.
@@ -2281,7 +2309,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           || prepaidCovered
           || autopayCoversVisit
           || String(invoice?.status || '').toLowerCase() === 'paid';
-        if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
+        const serviceReportV1SmsContext = serviceReportV1Delivery
+          ? buildServiceReportV1DeliveryContext({
+            record,
+            service: svc,
+            reportUrl,
+            smsReportUrl: reportSmsUrl,
+            payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
+          })
+          : null;
+        if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
+          sentSmsType = serviceReportV1SmsContext.smsType;
+          sentSmsBody = `${serviceReportV1SmsContext.body}${reviewSuffix}`.trim();
+          completionSmsWasTruncated = false;
+        } else if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${reportSmsUrl || reportUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply here.`;
           const body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
@@ -2304,12 +2345,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sentSmsBody = `${body}${reviewSuffix}`.trim();
             completionSmsWasTruncated = false;
           } else {
-            const fallback = `Hello ${svc.first_name}! Your service report is ready: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.`;
+            const fallback = `Hello ${svc.first_name}! Your service report is ready: ${reportSmsUrl || reportUrl}\n\nQuestions or requests? Reply here.`;
             let body = await renderTemplate('service_complete', {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
             }, fallback);
+            body = ensureSmsContainsReportLink(body, reportSmsUrl || reportUrl);
             sentSmsType = 'service_complete';
             if (serviceReportV1Delivery) {
               sentSmsBody = `${body}${reviewSuffix}`.trim();

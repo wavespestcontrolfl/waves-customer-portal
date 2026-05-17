@@ -158,60 +158,6 @@ function getServiceLabel(frequency, estimate, pricing) {
   return 'Custom quote';
 }
 
-function PerTreatmentBreakdownCard({ rows, total }) {
-  const usable = (Array.isArray(rows) ? rows : []).filter(
-    (r) => Number.isFinite(Number(r?.perTreatment)) && Number(r.perTreatment) > 0,
-  );
-  if (usable.length === 0) return null;
-  const sum = Number.isFinite(Number(total)) && Number(total) > 0
-    ? Number(total)
-    : usable.reduce((s, r) => s + Number(r.perTreatment), 0);
-  const showSum = usable.length > 1;
-  return (
-    <div style={{
-      background: COLORS.white, borderRadius: 12, padding: 16,
-      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 16,
-      boxShadow: '0 1px 4px rgba(15,23,42,.04)',
-    }}>
-      <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 10, letterSpacing: '0.02em' }}>
-        Per treatment
-      </div>
-      <div style={{ display: 'grid', gap: 8 }}>
-        {usable.map((row, i) => (
-          <div key={`${row.service || row.label || 'row'}-${i}`} style={{
-            display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'baseline', gap: 12,
-          }}>
-            <div style={{ fontSize: 15, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
-              {row.label || 'Service'}
-              {row.visitsPerYear ? (
-                <span style={{ fontSize: 14, color: ESTIMATE_MUTED, marginLeft: 6 }}>
-                  · {row.visitsPerYear}/yr
-                </span>
-              ) : null}
-            </div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, whiteSpace: 'nowrap' }}>
-              {fmtMoney(row.perTreatment)}<span style={{ fontWeight: 500, color: ESTIMATE_MUTED }}>/treatment</span>
-            </div>
-          </div>
-        ))}
-        {showSum ? (
-          <div style={{
-            display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'baseline',
-            gap: 12, borderTop: `1px solid ${ESTIMATE_BORDER}`, paddingTop: 10, marginTop: 2,
-          }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT }}>
-              Same-day visit total
-            </div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, whiteSpace: 'nowrap' }}>
-              {fmtMoney(sum)}<span style={{ fontWeight: 500, color: ESTIMATE_MUTED }}>/treatment</span>
-            </div>
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 function SetupFeeCard({ fee }) {
   if (!fee) return null;
   return (
@@ -300,9 +246,11 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service));
   if (items.length === 0) return null;
+  const hasQuoteRequired = items.some((item) => item?.quoteRequired === true || item?.kind === 'quote_required');
   const total = excludeServices.length === 0 && Number.isFinite(Number(breakdown?.total))
     ? Number(breakdown.total)
     : items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  const totalIsQuoteRequired = hasQuoteRequired && total <= 0;
 
   return (
     <div style={{
@@ -315,8 +263,9 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
       </div>
       <div style={{ display: 'grid', gap: 10 }}>
         {items.map((item, i) => {
+          const isQuoteRequired = item.quoteRequired === true || item.kind === 'quote_required';
           const amount = Number(item.amount) || 0;
-          const isDiscount = amount < 0 || item.kind === 'discount';
+          const isDiscount = !isQuoteRequired && (amount < 0 || item.kind === 'discount');
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -335,10 +284,10 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
               </div>
               <div style={{
                 fontSize: 14, fontWeight: 700,
-                color: isDiscount ? COLORS.green : COLORS.navy,
+                color: isQuoteRequired ? COLORS.red : (isDiscount ? COLORS.green : COLORS.navy),
                 whiteSpace: 'nowrap',
               }}>
-                {isDiscount ? '-' : ''}{fmtMoney(Math.abs(amount))}
+                {isQuoteRequired ? 'Quote Required' : `${isDiscount ? '-' : ''}${fmtMoney(Math.abs(amount))}`}
               </div>
             </div>
           );
@@ -349,8 +298,10 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
         borderTop: `1px solid ${COLORS.grayLight}`, marginTop: 12, paddingTop: 12,
         fontSize: 15, fontWeight: 700, color: COLORS.navy,
       }}>
-        <span>One-time total</span>
-        <span>{fmtMoney(total)}</span>
+        <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
+        <span style={totalIsQuoteRequired ? { color: COLORS.red } : null}>
+          {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
+        </span>
       </div>
     </div>
   );
@@ -852,11 +803,6 @@ export default function EstimateViewPage() {
               <PriceCard
                 frequency={currentFrequency}
                 waveGuardTier={pricing.waveGuardTier}
-              />
-
-              <PerTreatmentBreakdownCard
-                rows={currentFrequency?.perServiceTreatments || []}
-                total={currentFrequency?.sameDayTreatmentTotal}
               />
 
               {(pricing.firstVisitFees && pricing.firstVisitFees.length > 0

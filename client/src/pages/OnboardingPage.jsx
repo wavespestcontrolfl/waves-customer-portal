@@ -70,6 +70,17 @@ function money(value) {
   return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function billingDisplay(quote) {
+  const billing = quote?.billing || {};
+  return {
+    amount: billing.amount ?? quote?.monthlyRate ?? 0,
+    suffix: billing.displaySuffix || '/ mo',
+    planLabel: billing.planLabel || 'Monthly plan',
+    periodText: billing.periodLabel ? `per ${billing.periodLabel}` : 'per month',
+    visitChargeLabel: billing.visitChargeLabel || 'Charged after each visit',
+  };
+}
+
 function fmtTime(t) {
   if (!t) return '';
   const [h, m] = t.split(':').map(Number);
@@ -168,6 +179,7 @@ function DetailRow({ label, value }) {
 }
 
 function PlanSummary({ customer, quote, service, payAtVisit, card }) {
+  const billing = billingDisplay(quote);
   return (
     <BrandCard padding={24} style={{ position: 'sticky', top: 20 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
@@ -190,7 +202,7 @@ function PlanSummary({ customer, quote, service, payAtVisit, card }) {
       </div>
 
       <div style={{ fontSize: 24, lineHeight: 1.05, fontWeight: 850, color: 'var(--text)', marginBottom: 4 }}>
-        {money(quote?.monthlyRate)}<span style={{ fontSize: 14, color: 'var(--text-muted)', fontWeight: 650 }}> / mo</span>
+        {money(billing.amount)}<span style={{ fontSize: 14, color: 'var(--text-muted)', fontWeight: 650 }}> {billing.suffix}</span>
       </div>
       <div style={{ fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45, marginBottom: 14 }}>
         {quote?.serviceType || 'Waves service'}
@@ -636,7 +648,11 @@ export default function OnboardingPage() {
         setData(prev => ({
           ...prev,
           status: { ...prev.status, paymentCollected: true },
-          card: { brand: result.card?.card_brand || 'CARD', lastFour: result.card?.last_four || '****', autopay: true },
+          card: {
+            brand: result.card?.card_brand || 'CARD',
+            lastFour: result.card?.last_four || '****',
+            autopay: result.card?.autopay_enabled === true || result.card?.autopay === true,
+          },
         }));
         setTimeout(() => setScreen(2), 700);
       }
@@ -759,6 +775,7 @@ export default function OnboardingPage() {
   const c = data.customer;
   const q = data.quote;
   const svc = data.scheduledService;
+  const billing = billingDisplay(q);
   const serviceConfirmed = data.status.serviceConfirmed || svc?.confirmed;
 
   const headerTitle = screen === 0
@@ -827,8 +844,9 @@ export default function OnboardingPage() {
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 14, marginBottom: 22 }}>
                   <div style={{ padding: '14px 0', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase' }}>Monthly plan</div>
-                    <div style={{ fontSize: 28, fontWeight: 850, color: 'var(--text)', marginTop: 6 }}>{money(q.monthlyRate)}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase' }}>{billing.planLabel}</div>
+                    <div style={{ fontSize: 28, fontWeight: 850, color: 'var(--text)', marginTop: 6 }}>{money(billing.amount)}</div>
+                    <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 3 }}>{billing.periodText}</div>
                   </div>
                   <div style={{ padding: '14px 0', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}>
                     <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase' }}>Payment</div>
@@ -899,10 +917,12 @@ export default function OnboardingPage() {
                     marginBottom: 16,
                   }}>
                     <div>
-                      <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text)' }}>Auto Pay</div>
-                      <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Enabled for approved recurring service payments.</div>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text)' }}>Card on file</div>
+                      <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>
+                        {billing.visitChargeLabel}: {money(billing.amount)} {billing.suffix}.
+                      </div>
                     </div>
-                    <ToggleSwitch value onChange={() => {}} label="Auto Pay enabled" />
+                    <StatusPill tone="brand">Visit-day charge</StatusPill>
                   </div>
 
                   <SaveCardConsent locked onChange={() => {}} />
@@ -1174,7 +1194,7 @@ export default function OnboardingPage() {
                   <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase' }}>Plan</div>
                   <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--text)', marginTop: 6 }}>{q.serviceType}</div>
                   {q.tier && <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 3 }}>WaveGuard {q.tier}</div>}
-                  <div style={{ fontSize: 20, fontWeight: 850, color: 'var(--text)', marginTop: 6 }}>{money(q.monthlyRate)} / mo</div>
+                  <div style={{ fontSize: 20, fontWeight: 850, color: 'var(--text)', marginTop: 6 }}>{money(billing.amount)} {billing.suffix}</div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase' }}>First visit</div>
@@ -1189,7 +1209,7 @@ export default function OnboardingPage() {
                     {data.card ? `${data.card.brand} ending ${data.card.lastFour}` : payAtVisit ? 'Pay at visit' : 'On file'}
                   </div>
                   <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 3 }}>
-                    {data.card?.autopay ? 'Auto Pay enabled' : 'No Auto Pay change'}
+                    {data.card?.autopay ? 'Auto Pay enabled' : data.card ? 'Card saved for visit-day charges' : 'No card saved'}
                   </div>
                 </div>
               </div>

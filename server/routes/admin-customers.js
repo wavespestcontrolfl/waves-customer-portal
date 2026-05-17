@@ -8,6 +8,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('../services/audit-log');
 const PhotoService = require('../services/photos');
+const { acceptanceServiceLists } = require('./estimate-public');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -22,6 +23,259 @@ const CUSTOMER_STAGES = [
   'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'lost', 'dormant',
 ];
 const CUSTOMER_STAGE_SET = new Set(CUSTOMER_STAGES);
+
+const SERVICE_KEY_ALIASES = {
+  pest_control: ['pest_general_quarterly'],
+  pest_initial_roach: ['pest_initial_cleanout'],
+  german_roach: ['pest_initial_cleanout'],
+  german_roach_initial: ['pest_initial_cleanout'],
+  lawn_care: ['lawn_fertilization'],
+  tree_shrub: ['tree_shrub_program'],
+  mosquito: ['mosquito_monthly'],
+  termite_bait: ['termite_bait'],
+  termite_bait_installation: ['termite_bait'],
+  rodent_bait: ['rodent_monitoring'],
+  rodent_monitoring: ['rodent_monitoring'],
+  rodent_trapping: ['rodent_exclusion'],
+  rodent_exclusion: ['rodent_exclusion'],
+  trenching: ['termite_liquid'],
+  termite_liquid: ['termite_liquid'],
+  wdo: ['wdo_inspection'],
+  wdo_inspection: ['wdo_inspection'],
+  flea: ['flea_tick'],
+  flea_exterior: ['flea_tick'],
+  fire_ant: ['fire_ant'],
+  bee_wasp: ['bee_wasp_removal'],
+  bee_wasp_removal: ['bee_wasp_removal'],
+  palm_injection: ['palm_treatment'],
+  palm_treatment: ['palm_treatment'],
+};
+
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function moneyOrNull(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) return Math.round(n * 100) / 100;
+  }
+  return null;
+}
+
+function normalizeServiceKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function cadenceFromEstimateLine(line, fallback = 'one_time') {
+  const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
+  const frequencyKey = frequency.replace(/[-_\s]+/g, '');
+  const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
+  if (frequencyKey.includes('bimonthly') || frequencyKey.includes('every2month') || frequencyKey.includes('everyothermonth')) return 'bimonthly';
+  if (frequencyKey.includes('triannual') || frequencyKey.includes('every4month')) return 'triannual';
+  if (frequencyKey.includes('semiannual') || frequencyKey.includes('biannual') || frequencyKey.includes('every6month')) return 'semiannual';
+  if (frequencyKey.includes('quarter') || frequencyKey.includes('every3month')) return 'quarterly';
+  if (frequencyKey.includes('monthly') || frequencyKey === 'month') return 'monthly';
+  if (frequencyKey.includes('annual') || frequencyKey.includes('year')) return 'annual';
+  if (visits === 12) return 'monthly';
+  if (visits === 6) return 'bimonthly';
+  if (visits === 4) return 'quarterly';
+  if (visits === 3) return 'triannual';
+  if (visits === 2) return 'semiannual';
+  if (visits === 1 && fallback !== 'one_time') return 'annual';
+  return fallback;
+}
+
+function indexServicesForSchedule(rows = []) {
+  const byKey = new Map();
+  const byName = new Map();
+  for (const row of rows) {
+    if (row.service_key) byKey.set(normalizeServiceKey(row.service_key), row);
+    if (row.name) byName.set(normalizeServiceKey(row.name), row);
+    if (row.short_name) byName.set(normalizeServiceKey(row.short_name), row);
+  }
+  return { byKey, byName, rows };
+}
+
+function serviceCatalogMatch(line, serviceIndex) {
+  const rawKey = normalizeServiceKey(line?.service || line?.serviceKey || line?.key || '');
+  const labelKey = normalizeServiceKey(line?.name || line?.label || line?.displayName || '');
+  const candidates = [
+    rawKey,
+    labelKey,
+    ...(SERVICE_KEY_ALIASES[rawKey] || []),
+    ...(SERVICE_KEY_ALIASES[labelKey] || []),
+  ].filter(Boolean);
+
+  for (const key of candidates) {
+    const exact = serviceIndex.byKey.get(normalizeServiceKey(key)) || serviceIndex.byName.get(normalizeServiceKey(key));
+    if (exact) return exact;
+  }
+
+  const text = `${rawKey} ${labelKey}`.replace(/_/g, ' ');
+  const pick = (key) => serviceIndex.byKey.get(key);
+  if (/termite|bait/.test(text) && /install|station|bait/.test(text)) return pick('termite_bait');
+  if (/termite|wdo/.test(text) && /inspect|letter/.test(text)) return pick('wdo_inspection');
+  if (/termite|trench|liquid/.test(text)) return pick('termite_liquid');
+  if (/rodent|rat|mouse/.test(text) && /monitor|bait|monthly/.test(text)) return pick('rodent_monitoring');
+  if (/rodent|rat|mouse|exclusion|trapping/.test(text)) return pick('rodent_exclusion');
+  if (/tree|shrub|ornamental/.test(text)) return pick('tree_shrub_program');
+  if (/palm/.test(text)) return pick('palm_treatment');
+  if (/mosquito/.test(text)) return pick('mosquito_monthly');
+  if (/lawn|turf|weed|fertil/.test(text)) return pick('lawn_fertilization');
+  if (/flea|tick/.test(text)) return pick('flea_tick');
+  if (/fire\s*ant/.test(text)) return pick('fire_ant');
+  if (/bee|wasp|hornet|yellow/.test(text)) return pick('bee_wasp_removal');
+  if (/pest|roach|ant|spider/.test(text)) {
+    if (/monthly/.test(text)) return pick('pest_general_monthly');
+    return pick('pest_general_quarterly') || pick('pest_initial_cleanout');
+  }
+  return null;
+}
+
+function isSchedulableOneTimeEstimateLine(line) {
+  const kind = String(line?.kind || '').toLowerCase();
+  const status = String(line?.status || '').toLowerCase();
+  if (kind === 'discount' || kind === 'quote_required' || line?.quoteRequired === true || status === 'quote_required') return false;
+
+  const rawAmount = [
+    line?.priceAfterDiscount,
+    line?.amountAfterDiscount,
+    line?.totalAfterDiscount,
+    line?.price,
+    line?.amount,
+    line?.total,
+  ].find((value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)));
+  if (rawAmount != null && Number(rawAmount) < 0) return false;
+
+  const service = normalizeServiceKey(line?.service || line?.serviceKey || line?.key || '');
+  const label = normalizeServiceKey(line?.displayName || line?.label || line?.name || line?.serviceName || '');
+  const detail = normalizeServiceKey(line?.detail || line?.description || '');
+  const text = `${service} ${label} ${detail}`;
+
+  if (service === 'waveguard_setup') return false;
+  if (text.includes('membership_setup_fee')) return false;
+  return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
+}
+
+function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
+  const name = String(line?.displayName || line?.label || line?.name || line?.serviceName || line?.service || '').trim();
+  if (!name) return null;
+  const price = kind === 'recurring'
+    ? moneyOrNull(
+        line?.perTreatment,
+        line?.perApp,
+        line?.perVisit,
+        line?.pricePerVisit,
+        line?.priceAfterDiscount,
+        line?.amountAfterDiscount,
+        line?.totalAfterDiscount,
+        line?.price,
+        line?.amount,
+        line?.total,
+        line?.mo,
+        line?.monthly,
+      )
+    : moneyOrNull(line?.priceAfterDiscount, line?.amountAfterDiscount, line?.totalAfterDiscount, line?.price, line?.amount, line?.total);
+  if (kind !== 'recurring' && price == null) return null;
+
+  const matched = serviceCatalogMatch({ ...line, name }, serviceIndex);
+  const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, 'quarterly') : 'one_time';
+  return {
+    serviceId: matched?.id || null,
+    serviceKey: matched?.service_key || line?.service || null,
+    name: matched?.name || name,
+    estimateLabel: name,
+    category: matched?.category || null,
+    billingType: matched?.billing_type || (kind === 'recurring' ? 'recurring' : 'one_time'),
+    frequency: matched?.frequency || line?.frequency || null,
+    visitsPerYear: matched?.visits_per_year || line?.visitsPerYear || null,
+    duration: matched?.default_duration_minutes || null,
+    price,
+    cadence,
+    source: kind,
+    estimateId: estimate.id,
+  };
+}
+
+function scheduleLinesFromEstimate(estimate, serviceIndex) {
+  const estData = parseJsonObject(estimate.estimate_data);
+  let recurringSvcList = [];
+  let oneTimeList = [];
+  try {
+    const lists = acceptanceServiceLists(estData);
+    recurringSvcList = lists.recurringSvcList || [];
+    oneTimeList = lists.oneTimeList || [];
+  } catch {
+    recurringSvcList = [];
+    oneTimeList = [];
+  }
+  const schedulableOneTimeList = oneTimeList.filter(isSchedulableOneTimeEstimateLine);
+  const monthlyTotal = Number(estimate.monthly_total || 0);
+  const annualTotal = Number(estimate.annual_total || 0);
+  const hasRecurringEstimateTotal = monthlyTotal > 0 || annualTotal > 0;
+  const onlyFilteredBillingRows = recurringSvcList.length === 0
+    && oneTimeList.length > 0
+    && schedulableOneTimeList.length === 0;
+  const suppressFallback = onlyFilteredBillingRows && !hasRecurringEstimateTotal;
+
+  const lines = [
+    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex })),
+    ...schedulableOneTimeList.map((line) => formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex })),
+  ].filter(Boolean);
+
+  if (lines.length === 1 && lines[0].price == null) {
+    lines[0].price = moneyOrNull(estimate.onetime_total, estimate.monthly_total);
+  }
+
+  if (lines.length === 0 && !suppressFallback) {
+    const annualMonthlyEquivalent = annualTotal > 0
+      ? annualTotal / 12
+      : null;
+    const fallbackPrice = hasRecurringEstimateTotal
+      ? moneyOrNull(monthlyTotal > 0 ? monthlyTotal : null, annualMonthlyEquivalent)
+      : moneyOrNull(estimate.onetime_total, estimate.monthly_total);
+    const fallbackName = estimate.service_interest || estimate.waveguard_tier || 'Accepted estimate';
+    const matched = serviceCatalogMatch({ name: fallbackName }, serviceIndex);
+    const fallbackIsRecurring = hasRecurringEstimateTotal;
+    lines.push({
+      serviceId: matched?.id || null,
+      serviceKey: matched?.service_key || null,
+      name: matched?.name || fallbackName,
+      estimateLabel: fallbackName,
+      category: matched?.category || null,
+      billingType: matched?.billing_type || (fallbackIsRecurring ? 'recurring' : 'one_time'),
+      frequency: matched?.frequency || null,
+      visitsPerYear: matched?.visits_per_year || null,
+      duration: matched?.default_duration_minutes || null,
+      price: fallbackPrice,
+      cadence: fallbackIsRecurring ? 'quarterly' : 'one_time',
+      source: fallbackIsRecurring ? 'recurring' : 'one_time',
+      estimateId: estimate.id,
+    });
+  }
+
+  const seen = new Set();
+  return lines.filter((line) => {
+    const key = `${line.serviceId || line.name}|${line.price ?? ''}|${line.cadence}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 let healthScoreColumnsCache = null;
 
@@ -837,6 +1091,83 @@ router.get('/:id/comms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/customers/:id/schedule-estimates — accepted estimates
+// formatted for the New Appointment modal. This keeps the UI from guessing
+// at estimate_data shapes and returns service-library ids when we can match
+// the quoted line to a schedulable service.
+router.get('/:id/schedule-estimates', async (req, res, next) => {
+  try {
+    const customer = await db('customers')
+      .where({ id: req.params.id })
+      .whereNull('deleted_at')
+      .first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const [estimates, serviceRows] = await Promise.all([
+      db('estimates')
+        .where({ customer_id: customer.id, status: 'accepted' })
+        .whereNull('archived_at')
+        .orderBy('accepted_at', 'desc')
+        .orderBy('created_at', 'desc')
+        .select(
+          'id', 'status', 'token', 'service_interest', 'estimate_data',
+          'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
+          'created_at', 'accepted_at',
+        ),
+      db('services')
+        .where({ is_active: true })
+        .select(
+          'id', 'service_key', 'name', 'short_name', 'category', 'billing_type',
+          'frequency', 'visits_per_year', 'default_duration_minutes',
+          'base_price', 'price_range_min', 'price_range_max',
+        )
+        .catch(() => []),
+    ]);
+
+    const estimateIds = estimates.map((e) => e.id);
+    const linkedByEstimate = new Map();
+    if (estimateIds.length) {
+      const linkedRows = await db('scheduled_services')
+        .whereIn('source_estimate_id', estimateIds)
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .orderBy('scheduled_date', 'asc')
+        .orderBy('window_start', 'asc')
+        .select('id', 'source_estimate_id', 'scheduled_date', 'window_start', 'service_type', 'status');
+      for (const row of linkedRows) {
+        if (!linkedByEstimate.has(row.source_estimate_id)) linkedByEstimate.set(row.source_estimate_id, row);
+      }
+    }
+
+    const serviceIndex = indexServicesForSchedule(serviceRows);
+    res.json({
+      estimates: estimates.map((estimate) => {
+        const lines = scheduleLinesFromEstimate(estimate, serviceIndex);
+        const linked = linkedByEstimate.get(estimate.id) || null;
+        return {
+          id: estimate.id,
+          token: estimate.token,
+          status: estimate.status,
+          serviceInterest: estimate.service_interest,
+          acceptedAt: estimate.accepted_at,
+          createdAt: estimate.created_at,
+          monthlyTotal: estimate.monthly_total != null ? Number(estimate.monthly_total) : null,
+          annualTotal: estimate.annual_total != null ? Number(estimate.annual_total) : null,
+          onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
+          waveguardTier: estimate.waveguard_tier,
+          lines,
+          linkedAppointment: linked ? {
+            id: linked.id,
+            scheduledDate: linked.scheduled_date,
+            windowStart: linked.window_start,
+            serviceType: linked.service_type,
+            status: linked.status,
+          } : null,
+        };
+      }),
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/customers/:id/estimates-summary — compact payload for the
 // Estimates page's customer slide-over. Returns customer basics, the full
 // estimate history for that customer, aggregate conversion stats, and the
@@ -1578,8 +1909,11 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  cadenceFromEstimateLine,
+  isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapPipelineCustomer,
+  scheduleLinesFromEstimate,
 };
 
 module.exports = router;

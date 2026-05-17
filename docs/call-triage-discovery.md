@@ -8,7 +8,7 @@ author: Claude Code (Opus 4.7) + Adam + ChatGPT review
 # AI Call Triage — Discovery + Strategy v2
 
 > **Read this if you have 60 seconds.**
-> The naive prompt asks Claude Code to "build a call-triage pipeline." ~80% of that pipeline is already shipping (Twilio webhooks → Gemini extraction → routing into customers/estimates/appointments + SMS confirmations). The actual gap is **silent hallucinations writing to canonical customer/appointment data with no audit and no second-source check**. Strategy v2 inserts a deterministic enrichment layer (Google **Address Validation** API, behind a provider abstraction) and an evidence-based Anthropic validation layer between the existing Gemini extraction and the existing routing branches, plus an outbox for SMS, a `route_decisions` immutable record, a `customer_field_candidates` staging table, a `triage_items` review queue (decoupled from `scheduled_services.status`), Twilio signature validation across all 5 webhooks, and an FL-consent recording disclosure fix in the inbound greeting. Phased across 4 reversible PRs.
+> The naive prompt asks Claude Code to "build a call-triage pipeline." ~80% of that pipeline is already shipping (Twilio webhooks → Gemini extraction → routing into customers/appointments + SMS confirmations). The actual gap is **silent hallucinations writing to canonical customer/appointment data with no audit and no second-source check**. Strategy v2 inserts a deterministic enrichment layer (Google **Address Validation** API, behind a provider abstraction) and an evidence-based Anthropic validation layer between the existing Gemini extraction and the existing routing branches, plus an outbox for SMS, a `route_decisions` immutable record, a `customer_field_candidates` staging table, a `triage_items` review queue (decoupled from `scheduled_services.status`), Twilio signature validation across all 5 webhooks, and an FL-consent recording disclosure fix in the inbound greeting. Phased across 4 reversible PRs.
 
 ---
 
@@ -25,7 +25,7 @@ author: Claude Code (Opus 4.7) + Adam + ChatGPT review
 | Call-complete callback | same file:169 | Voicemail fork at line 192 plays `WAVES_VOICEMAIL_URL` (opaque content) + `<Record transcribe="true">` — **no inline disclosure**. |
 | Extraction | `server/services/call-recording-processor.js:103` | `gemini-2.5-flash`, temp 0.2, `response_mime_type: 'application/json'`. Output → `call_log.ai_extraction` (jsonb). Prompt at line 108–149 (verbatim in original §3 audit). |
 | Synopsis | same file:184+ | Anthropic `MODELS.FLAGSHIP` → `call_log.lead_synopsis`. |
-| Routing — estimate | same file:619 | Gates on `customerId && wants_estimate && !spam && !voicemail`. Always `status='draft'`. 24h dedupe. Low-risk path. |
+| Routing — estimate | same file | Removed from the call-recording processor. Recordings no longer extract quote intent or auto-queue draft estimates. |
 | Routing — appointment | same file:685 | Gates on `appointment_confirmed && preferred_date_time && customerId && hasSpecificTime` (regex at line 687). **High-risk path: real `scheduled_services` row + SMS confirmation.** |
 | Routing — customer upsert | same file:400+ | Phone-keyed match (last 10 digits). Updates only-null fields on existing rows. **No audit log.** |
 | Concurrency fence | `call_log.processing_token` (varchar 32) | Prevents double-processing. |
@@ -51,7 +51,7 @@ author: Claude Code (Opus 4.7) + Adam + ChatGPT review
 | `requested_service` | 21 | 18% |
 | `matched_service` | 37 | 32% |
 
-`appointment_confirmed=true`: 21/117 (18%). `wants_estimate=true`: 6/117 (5%). Lead quality: 43 hot / 42 warm / 29 cold.
+`appointment_confirmed=true`: 21/117 (18%). Historical pre-removal quote-intent flag: 6/117 (5%). Lead quality: 43 hot / 42 warm / 29 cold.
 
 **Hallucination signals on processed rows:**
 
@@ -65,7 +65,7 @@ author: Claude Code (Opus 4.7) + Adam + ChatGPT review
 | Address first-token absent from transcript | 1 | 0.85% | Strong grounding |
 | Email user-part absent from transcript | 27 | 23% | False positive — most are spelled-out emails ("R-I-C-J-U-D-I-T") |
 
-**Blast radius:** 27 distinct appointments auto-created within 2h of a `processed` call. 1 estimate auto-queued in same window (rare path). Customer-row writes: 55 of 117 processed calls touched `customers` (47%) — this is the silent-pollution surface.
+**Blast radius:** 27 distinct appointments auto-created within 2h of a `processed` call. Historical legacy behavior auto-queued 1 estimate in the same window; call recordings no longer do this. Customer-row writes: 55 of 117 processed calls touched `customers` (47%) — this is the silent-pollution surface.
 
 ### 4. Phone normalization
 
@@ -239,9 +239,8 @@ AUTO_CREATE_APPOINTMENT — all of the following:
   no name_likely_misheard
   no duplicate source_call_group_id
 
-AUTO_QUEUE_DRAFT_ESTIMATE — unchanged (drafts already require human send):
-  wants_estimate=true AND !spam AND !voicemail
-  validation issues attached as notes, not blockers
+AUTO_QUEUE_DRAFT_ESTIMATE:
+  Removed from the call-recording processor. Draft estimates should be created by explicit lead/quote tooling, not inferred from recordings.
 
 UPSERT_CUSTOMER_ONLY (per-field, via candidates):
   field is supported_by_transcript=true
@@ -344,7 +343,7 @@ For each triage item:
   For address issues: caller-stated vs. AV-suggested, which components
     were inferred/replaced/missing, service-area result, reason auto-create blocked
   Buttons: accept field / reject field / edit value
-           create appointment / create draft estimate
+           create appointment
            mark spam / mark resolved
 ```
 
@@ -523,7 +522,7 @@ Files:
 - `server/services/call-extraction-enrichment.js` — orchestrates address validation + properCase + email lowercase + phone normalization; writes to `call_log.ai_extraction_enriched`
 - `server/services/call-validation.js` — Anthropic structured-output call; writes to `call_log.ai_validation` + `route_decisions` row with `mode='shadow'`
 - `server/services/prompts/call-validation.v1.txt`
-- Pipeline integration in `server/services/call-recording-processor.js`: after extract, call enrich → validate → write `route_decisions` row in `mode='shadow'`. Existing routing branches unchanged.
+- Pipeline integration in `server/services/call-recording-processor.js`: after extract, call enrich → validate → write `route_decisions` row in `mode='shadow'`. Existing customer/appointment routing branches unchanged.
 - Nightly cleanup job for expired Google-derived candidate values
 
 Tests: 15-fixture suite (§17 below), Google AV mocked; validator catches Sperrydas/Mueller-class hallucinations; `address_replaced_material_component` veto fires; out-of-county routes to review; idempotency on CallSid; expired cache values not consumed.
@@ -546,9 +545,8 @@ Accept criteria: every `triage_items.status='open'` row is actionable in ≤3 cl
 
 Changes:
 - Pipeline writes `route_decisions.mode='enforce'` instead of `'shadow'`
-- Existing routing branches at `call-recording-processor.js:619` (estimate) and `:685` (appointment) consult the validator output:
+- Existing routing branches in `call-recording-processor.js` consult the validator output:
   - Appointment branch: ALL the §9 `AUTO_CREATE_APPOINTMENT` conditions must pass
-  - Estimate branch: unchanged (already low-risk)
   - Customer upsert: replaced with promotion-from-candidates
 - SMS send moves to outbox worker
 

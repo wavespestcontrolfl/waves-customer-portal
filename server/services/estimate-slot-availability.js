@@ -36,8 +36,9 @@ const DEFAULT_OPTS = {
   windowDays: 14,
   maxResults: 3,
   proximityDriveMinutes: 20,
-  expanderMaxResults: 2,
+  expanderMaxResults: 3,
   durationMinutes: 60,
+  includeWeekends: true,
 };
 
 // ---------- in-memory caches ----------
@@ -256,6 +257,69 @@ function spreadWindowsAcrossDay(slots) {
   });
 }
 
+function splitSlotResults(slots, maxResults, expanderMaxResults) {
+  const visibleCount = Math.max(0, Number(maxResults) || 0);
+  const moreCount = Math.max(0, Number(expanderMaxResults) || 0);
+  const safeSlots = Array.isArray(slots) ? slots : [];
+  return {
+    primary: safeSlots.slice(0, visibleCount),
+    expander: safeSlots.slice(visibleCount, visibleCount + moreCount),
+  };
+}
+
+// Drop any candidate whose rounded display window collides with a real
+// booking on the same tech/date. find-time evaluates the un-rounded
+// earliestStart; the hour-rounding done in classifySlot can shift the
+// displayed window forward by up to 59 minutes, which can land on top of
+// the very next anchor that find-time was routing around. Without this
+// guard the slot is shown to the customer but reserveSlot() then fails
+// with SLOT_UNAVAILABLE on tap.
+async function filterCollidingSlots(slots, { dateFrom, dateTo }) {
+  if (!Array.isArray(slots) || slots.length === 0) return slots;
+  const rows = await db('scheduled_services')
+    .whereBetween('scheduled_date', [dateFrom, dateTo])
+    .whereNotIn('status', ['cancelled'])
+    .andWhere((q) => {
+      q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
+    })
+    .select('technician_id', 'scheduled_date', 'window_start', 'window_end');
+
+  const byTechDate = new Map();
+  for (const row of rows) {
+    const date = (typeof row.scheduled_date === 'string'
+      ? row.scheduled_date
+      : row.scheduled_date.toISOString()).slice(0, 10);
+    const key = `${row.technician_id || 'unassigned'}|${date}`;
+    if (!byTechDate.has(key)) byTechDate.set(key, []);
+    byTechDate.get(key).push({
+      startMin: timeToMinutes(String(row.window_start || '').slice(0, 5)),
+      endMin: timeToMinutes(String(row.window_end || '').slice(0, 5)),
+    });
+  }
+
+  return slots.filter((s) => {
+    const key = `${s.techId || 'unassigned'}|${s.date}`;
+    const existing = byTechDate.get(key) || [];
+    if (existing.length === 0) return true;
+    const slotStart = timeToMinutes(s.windowStart);
+    const slotEnd = timeToMinutes(s.windowEnd);
+    if (slotStart == null || slotEnd == null) return true;
+    return !existing.some((b) => {
+      if (b.startMin == null || b.endMin == null) return false;
+      return slotStart < b.endMin && slotEnd > b.startMin;
+    });
+  });
+}
+
+function timeToMinutes(hhmm) {
+  if (!hhmm) return null;
+  const parts = String(hhmm).split(':');
+  const h = Number(parts[0]);
+  const m = Number(parts[1] || 0);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+
 function classifySlot(slot, proximityDriveMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
@@ -347,9 +411,13 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     dateFrom,
     dateTo,
     topN: 50,
+    includeWeekends: opts.includeWeekends,
   });
 
-  const classified = (raw?.slots || []).map((s) => classifySlot(s, opts.proximityDriveMinutes));
+  const classifiedRaw = (raw?.slots || []).map((s) => classifySlot(s, opts.proximityDriveMinutes));
+  // Drop candidates whose rounded display window collides with a real
+  // existing booking on the same tech/date — see filterCollidingSlots.
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo });
 
   // Primary: route-optimal only, sorted by detour asc then date asc.
   // find-time's default sort is close to this already (detour + day penalty),
@@ -393,8 +461,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   }
 
   const combined = [...routeOptimalSlots, ...interleaved].slice(0, TARGET_TOTAL);
-  const primary = spreadWindowsAcrossDay(combined);
-  const expander = []; // kept for backward-compat with the client renderer
+  const spread = spreadWindowsAcrossDay(combined);
+  // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
+  // slots; that can land them on an existing booking, so re-filter once
+  // more before returning.
+  const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
+  const { primary, expander } = splitSlotResults(filtered, opts.maxResults, opts.expanderMaxResults);
 
   const result = {
     primary,
@@ -405,6 +477,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       coordsSource: coords.source,
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
+      includeWeekends: opts.includeWeekends,
       generatedAt: new Date().toISOString(),
       cacheHit: false,
       // TODO: PR B's accept-handler invalidates this cache on every new
@@ -453,6 +526,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     dateFrom,
     dateTo,
     topN: 200, // broad — debug surface wants everything
+    includeWeekends: opts.includeWeekends,
   });
 
   const classified = (raw?.slots || []).map((s) => ({
@@ -514,6 +588,7 @@ module.exports = {
     parseAnchorTime,
     pickNearbyAnchor,
     classifySlot,
+    splitSlotResults,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); },
   },
 };

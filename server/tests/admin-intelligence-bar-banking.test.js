@@ -31,6 +31,7 @@ jest.mock('../services/intelligence-bar/estimate-tools', () => ({ ESTIMATE_TOOLS
 jest.mock('../services/intelligence-bar/banking-tools', () => ({
   BANKING_TOOLS: [
     { name: 'request_instant_payout', input_schema: { type: 'object', properties: {} } },
+    { name: 'request_standard_payout', input_schema: { type: 'object', properties: {} } },
     { name: 'get_stripe_balance', input_schema: { type: 'object', properties: {} } },
   ],
   BANKING_QUERY_TOOLS: [
@@ -135,12 +136,74 @@ describe('banking intelligence-bar action guard', () => {
       const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
         method: 'POST',
         headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'request_instant_payout', confirmed: true, params: { amount: 50 } }),
+        body: JSON.stringify({
+          action: 'request_instant_payout',
+          confirmed: true,
+          idempotency_key: 'ipo_confirm_123',
+          params: { amount: 50 },
+        }),
       });
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
-      expect(mockExecuteBankingTool).toHaveBeenCalledWith('request_instant_payout', { amount: 50 });
+      expect(mockExecuteBankingTool).toHaveBeenCalledWith('request_instant_payout', {
+        amount: 50,
+        idempotencyKey: 'ipo_confirm_123',
+        requestedBy: 'admin-1',
+      });
+    });
+  });
+
+  test('admin standard payout action requires explicit confirmation', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'request_standard_payout', params: { amount: 50 } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('Explicit confirmation is required for this action');
+      expect(mockExecuteBankingTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('admin confirmed standard payout action requires a valid idempotency key', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'request_standard_payout', confirmed: true, params: { amount: 50 } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('A valid idempotency key is required for this action');
+      expect(mockExecuteBankingTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('admin confirmed standard payout action executes with actor and idempotency key', async () => {
+    mockExecuteBankingTool.mockResolvedValue({ payout_id: 'po_standard' });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'request_standard_payout',
+          confirmed: true,
+          params: { amount: 75, idempotency_key: 'spo_confirm_123' },
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(mockExecuteBankingTool).toHaveBeenCalledWith('request_standard_payout', {
+        amount: 75,
+        idempotency_key: 'spo_confirm_123',
+        idempotencyKey: 'spo_confirm_123',
+        requestedBy: 'admin-1',
+      });
     });
   });
 });

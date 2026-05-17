@@ -22,6 +22,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } = require('../services/project-types');
+const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const serviceLibrary = require('../services/service-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { wrapEmail, formatDate, plainText } = require('../services/email-template');
@@ -186,15 +187,237 @@ function normalizeFindings(value) {
   return {};
 }
 
+function cleanOneLine(value, max = 500) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > max ? text.slice(0, max).trim() : text;
+}
+
+function cleanMultiline(value, max = 1800) {
+  const text = String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!text) return '';
+  return text.length > max ? text.slice(0, max).trim() : text;
+}
+
+function formatCustomerPropertyAddress(customer) {
+  if (!customer) return '';
+  return [
+    customer.address_line1,
+    [customer.city, customer.state].filter(Boolean).join(', '),
+    customer.zip,
+  ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function compactPropertyProfile(profile) {
+  if (!profile) return null;
+  const sourceUrl = profile._aiSourceUrl || profile._sourceUrl || profile._raw?._sourceUrl || null;
+  return {
+    propertyType: profile.propertyType || null,
+    squareFootage: Number(profile.squareFootage || 0) || null,
+    lotSize: Number(profile.lotSize || 0) || null,
+    yearBuilt: profile.yearBuilt || null,
+    bedrooms: Number(profile.bedrooms || 0) || null,
+    bathrooms: Number(profile.bathrooms || 0) || null,
+    stories: profile.stories || null,
+    constructionMaterial: profile.constructionMaterial && profile.constructionMaterial !== 'UNKNOWN'
+      ? profile.constructionMaterial
+      : null,
+    foundationType: profile.foundationType && profile.foundationType !== 'UNKNOWN' ? profile.foundationType : null,
+    sourceUrl,
+    confidence: profile._aiConfidence || profile._confidence || profile._dataQuality?.level || null,
+  };
+}
+
+function propertyProfileLines(profile) {
+  const facts = compactPropertyProfile(profile);
+  if (!facts) return '[no property facts found]';
+  const lines = [];
+  if (facts.propertyType) lines.push(`Property type: ${facts.propertyType}`);
+  if (facts.squareFootage) lines.push(`Living area: ${facts.squareFootage} sq ft`);
+  if (facts.lotSize) lines.push(`Lot size: ${facts.lotSize} sq ft`);
+  if (facts.yearBuilt) lines.push(`Year built: ${facts.yearBuilt}`);
+  if (facts.bedrooms) lines.push(`Bedrooms: ${facts.bedrooms}`);
+  if (facts.bathrooms) lines.push(`Bathrooms: ${facts.bathrooms}`);
+  if (facts.stories) lines.push(`Stories: ${facts.stories}`);
+  if (facts.constructionMaterial) lines.push(`Construction: ${facts.constructionMaterial}`);
+  if (facts.foundationType) lines.push(`Foundation: ${facts.foundationType}`);
+  if (facts.sourceUrl) lines.push(`Source: ${facts.sourceUrl}`);
+  if (facts.confidence) lines.push(`Property data confidence: ${facts.confidence}`);
+  return lines.length ? lines.join('\n') : '[no property facts found]';
+}
+
+function parseAiJsonObject(text) {
+  const cleaned = String(text || '').replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeWdoIntelligenceResult(raw, fallbackAddress, options = {}) {
+  const { hasPreviousTreatmentContext = false } = options;
+  const suggested = raw?.suggestedFindings || raw?.findings || {};
+  const previousTreatment = cleanOneLine(suggested.previous_treatment_evidence || '', 20);
+  const normalizedPreviousTreatment = hasPreviousTreatmentContext
+    ? (/^yes$/i.test(previousTreatment) ? 'Yes' : /^no$/i.test(previousTreatment) ? 'No' : '')
+    : '';
+
+  return {
+    suggestedFindings: {
+      property_address: cleanOneLine(fallbackAddress, 500),
+      structures_inspected: cleanMultiline(suggested.structures_inspected, 900),
+      inspection_scope: cleanMultiline(suggested.inspection_scope, 900),
+      previous_treatment_evidence: normalizedPreviousTreatment,
+      previous_treatment_notes: hasPreviousTreatmentContext
+        ? cleanMultiline(suggested.previous_treatment_notes, 1200)
+        : '',
+    },
+    propertySummary: cleanMultiline(raw?.propertySummary || raw?.property_summary, 1000),
+    confidence: ['high', 'medium', 'low'].includes(String(raw?.confidence || '').toLowerCase())
+      ? String(raw.confidence).toLowerCase()
+      : 'low',
+    reviewNotes: Array.isArray(raw?.reviewNotes || raw?.review_notes)
+      ? (raw.reviewNotes || raw.review_notes).map((item) => cleanOneLine(item, 260)).filter(Boolean).slice(0, 4)
+      : [],
+  };
+}
+
+function buildWdoIntelligencePrompt({ customer, propertyAddress, currentFindings, propertyProfile, hasPreviousTreatmentPhoto }) {
+  const customerName = [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || '[not provided]';
+  const existingLines = Object.entries(currentFindings || {})
+    .filter(([, value]) => hasMeaningfulValue(value))
+    .map(([key, value]) => `${key}: ${value}`)
+    .join('\n') || '[none]';
+
+  return `You are helping a Florida pest-control operator prefill structured fields for an FDACS-13645 WDO inspection project.
+
+Return JSON only. Do not write report prose. Be conservative and do not invent a detached structure, crawlspace, prior treatment, organism, damage, or inaccessible area unless the input supports it.
+
+Prefill only these fields:
+- property_address
+- structures_inspected
+- inspection_scope
+- previous_treatment_evidence ("Yes" or "No" only; leave blank if not supported)
+- previous_treatment_notes
+
+Rules:
+1. property_address should use the exact selected customer property address when available.
+2. structures_inspected should describe the primary residential structure from the home facts. Mention an attached garage only if it is part of a typical main home description or supported by the facts. Do not mention detached buildings unless clearly supported.
+3. inspection_scope should be a defensible WDO scope for visible and readily accessible areas. Include interior, garage, attic access, exterior perimeter, and accessible structural components when reasonable. Mention crawlspace only if the property facts indicate one.
+4. Previous treatment is photo-grounded. If a prior-treatment photo is provided, look for visible treatment stickers/notices, drill holes, bait stations, patching, trench/rod marks, old treatment tags, or other visible treatment indicators. Use cautious language such as "photo appears to show" when the evidence is not definitive.
+5. If no prior-treatment photo is provided and the existing fields do not mention prior treatment, leave previous_treatment_evidence and previous_treatment_notes blank. Do not default to "No" just because no photo was uploaded.
+6. Do not fill FDACS finding, live WDO, WDO evidence, damage, treatment performed, pesticide, or treatment method.
+
+Selected customer: ${customerName}
+Property address: ${propertyAddress || '[not provided]'}
+
+Property/home facts:
+${propertyProfileLines(propertyProfile)}
+
+Existing WDO fields:
+${existingLines}
+
+Prior-treatment photo attached: ${hasPreviousTreatmentPhoto ? 'yes' : 'no'}
+
+Respond with exactly this JSON shape:
+{
+  "suggestedFindings": {
+    "property_address": "<address or blank>",
+    "structures_inspected": "<short field text or blank>",
+    "inspection_scope": "<short field text or blank>",
+    "previous_treatment_evidence": "Yes|No|",
+    "previous_treatment_notes": "<short field text or blank>"
+  },
+  "propertySummary": "<one sentence about the home facts used, or blank>",
+  "confidence": "high|medium|low",
+  "reviewNotes": ["<operator review note>", "..."]
+}`;
+}
+
+async function analyzeWdoProjectIntelligence({ customer, propertyAddress, currentFindings = {}, previousTreatmentPhoto = null }) {
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  let propertyProfile = null;
+
+  if (propertyAddress) {
+    try {
+      propertyProfile = await lookupPropertyFromAITrio(propertyAddress);
+    } catch (err) {
+      logger.warn(`[projects] WDO property lookup failed: ${err.message}`);
+    }
+  }
+
+  const content = [{
+    type: 'text',
+    text: buildWdoIntelligencePrompt({
+      customer,
+      propertyAddress,
+      currentFindings,
+      propertyProfile,
+      hasPreviousTreatmentPhoto: Boolean(previousTreatmentPhoto),
+    }),
+  }];
+
+  if (previousTreatmentPhoto) {
+    content.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: previousTreatmentPhoto.mediaType,
+        data: previousTreatmentPhoto.buffer.toString('base64'),
+      },
+    });
+  }
+
+  const request = {
+    model: previousTreatmentPhoto ? MODELS.VISION : MODELS.WORKHORSE,
+    max_tokens: 900,
+    messages: [{ role: 'user', content }],
+  };
+  if (previousTreatmentPhoto) request.temperature = 0.2;
+  const msg = await anthropic.messages.create(request);
+
+  const text = (msg.content || []).filter((block) => block.type === 'text').map((block) => block.text).join('\n');
+  const parsed = parseAiJsonObject(text);
+  if (!parsed) {
+    const err = new Error('AI returned an unreadable WDO prefill response');
+    err.status = 502;
+    throw err;
+  }
+  const normalized = normalizeWdoIntelligenceResult(parsed, propertyAddress, {
+    hasPreviousTreatmentContext: Boolean(previousTreatmentPhoto)
+      || hasMeaningfulValue(currentFindings.previous_treatment_evidence)
+      || hasMeaningfulValue(currentFindings.previous_treatment_notes),
+  });
+  return {
+    ...normalized,
+    propertyProfile: compactPropertyProfile(propertyProfile),
+  };
+}
+
 function evaluateProjectSendReadiness({ project, customer, photoCount = 0 }) {
   const typeCfg = getProjectType(project?.project_type);
   const findings = normalizeFindings(project?.findings);
+  // Certificate of Compliance is structured-findings + photos only — there is
+  // no narrative "Recommendations" section on the rendered document, so the
+  // shared recommendations check would force techs to type unrelated copy
+  // (or override) just to satisfy a field that never reaches the customer.
+  const isCertificate = project?.project_type === 'pre_treatment_termite_certificate';
   const required = [
-    { key: 'project_date', label: 'Inspection date', ok: hasMeaningfulValue(project?.project_date) },
+    { key: 'project_date', label: isCertificate ? 'Treatment date' : 'Inspection date', ok: hasMeaningfulValue(project?.project_date) },
     { key: 'customer', label: 'Customer', ok: Boolean(customer?.id || project?.customer_id) },
     { key: 'project_type', label: 'Report title or type', ok: hasMeaningfulValue(project?.title) || Boolean(typeCfg) },
     { key: 'findings', label: 'Findings captured', ok: Object.values(findings).some(hasMeaningfulValue) },
-    { key: 'recommendations', label: 'Recommendation / notes', ok: hasMeaningfulValue(project?.recommendations) },
+    ...(isCertificate ? [] : [
+      { key: 'recommendations', label: 'Recommendation / notes', ok: hasMeaningfulValue(project?.recommendations) },
+    ]),
     { key: 'photos', label: 'Photos attached', ok: Number(photoCount) > 0 },
   ];
 
@@ -203,6 +426,24 @@ function evaluateProjectSendReadiness({ project, customer, photoCount = 0 }) {
       { key: 'wdo_property_address', label: 'Property inspected', ok: hasMeaningfulValue(findings.property_address) },
       { key: 'wdo_finding', label: 'FDACS finding selected', ok: hasMeaningfulValue(findings.wdo_finding) },
       { key: 'wdo_inspection_scope', label: 'Visible/access scope', ok: hasMeaningfulValue(findings.inspection_scope) },
+    );
+  }
+
+  if (project?.project_type === 'pre_treatment_termite_certificate') {
+    const productName = findings.product_name === 'Other' ? findings.product_name_other : findings.product_name;
+    const method = findings.treatment_method === 'Other' ? findings.treatment_method_other : findings.treatment_method;
+    required.push(
+      { key: 'cert_treatment_address', label: 'Treatment address (or lot/block)', ok: hasMeaningfulValue(findings.treatment_address) || hasMeaningfulValue(findings.lot_block) },
+      { key: 'cert_treatment_date', label: 'Date of treatment', ok: hasMeaningfulValue(findings.treatment_date) || hasMeaningfulValue(project?.project_date) },
+      { key: 'cert_treatment_method', label: 'Method of treatment', ok: hasMeaningfulValue(method) },
+      { key: 'cert_product', label: 'Product used', ok: hasMeaningfulValue(productName) },
+      { key: 'cert_active_ingredient', label: 'Active ingredient + concentration', ok: hasMeaningfulValue(findings.active_ingredient) && hasMeaningfulValue(findings.concentration_pct) },
+      { key: 'cert_coverage', label: 'Coverage (sq ft or linear ft + gallons applied)', ok: (hasMeaningfulValue(findings.square_footage) || hasMeaningfulValue(findings.linear_feet)) && hasMeaningfulValue(findings.gallons_applied) },
+      { key: 'cert_applicator_name', label: "Applicator's printed name", ok: hasMeaningfulValue(findings.applicator_name) },
+      { key: 'cert_applicator_fdacs_id', label: 'Applicator FDACS ID #', ok: hasMeaningfulValue(findings.applicator_fdacs_id) },
+      // Applicator attestation satisfies FBC 1816.1.7 authorized-signature
+      // requirement when paired with the typed name + FDACS ID + date.
+      { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
   }
 
@@ -875,6 +1116,76 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
     res.json({ report });
   } catch (err) {
     logger.error(`[projects] ai-write-preview failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/wdo-intelligence — prefill high-signal WDO fields
+// from the selected customer/property and an optional prior-treatment photo.
+// ---------------------------------------------------------------------------
+router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+
+    const customerId = req.body.customer_id || null;
+    const projectId = req.body.project_id || null;
+    const serviceRecordId = req.body.service_record_id || null;
+    const scheduledServiceId = req.body.scheduled_service_id || null;
+    const currentFindings = normalizeFindings(req.body.findings);
+    let scopedCustomerId = customerId;
+
+    if (projectId) {
+      const project = await db('projects').where({ id: projectId }).first();
+      if (!(await requireProjectAccess(req, res, project))) return;
+      if (project.project_type !== 'wdo_inspection') return res.status(400).json({ error: 'Project is not a WDO inspection' });
+      if (customerId && project.customer_id && String(customerId) !== String(project.customer_id)) {
+        return res.status(400).json({ error: 'Customer does not belong to the selected project' });
+      }
+      scopedCustomerId = project.customer_id || customerId;
+    } else if (!isAdmin(req)) {
+      if (!customerId) return res.status(400).json({ error: 'Customer required for technician WDO intelligence' });
+      await validateProjectCreateScope(req, {
+        customer_id: customerId,
+        service_record_id: serviceRecordId,
+        scheduled_service_id: scheduledServiceId,
+      });
+    }
+
+    const customer = scopedCustomerId
+      ? await db('customers').where({ id: scopedCustomerId }).whereNull('deleted_at').first()
+      : null;
+    if (scopedCustomerId && !customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const explicitAddress = cleanOneLine(req.body.property_address, 500);
+    const propertyAddress = explicitAddress || formatCustomerPropertyAddress(customer);
+    if (!propertyAddress) {
+      return res.status(400).json({ error: 'Property address required' });
+    }
+    if (req.file?.buffer?.length > AI_PHOTO_MAX_BYTES) {
+      return res.status(400).json({ error: 'Prior-treatment photo is too large for AI review' });
+    }
+
+    const previousTreatmentPhoto = req.file
+      ? { buffer: req.file.buffer, mediaType: validateUploadedImage(req.file) }
+      : null;
+
+    const result = await analyzeWdoProjectIntelligence({
+      customer,
+      propertyAddress,
+      currentFindings,
+      previousTreatmentPhoto,
+    });
+
+    logger.info('[projects] WDO intelligence generated', {
+      customerId,
+      hasPhoto: Boolean(previousTreatmentPhoto),
+      confidence: result.confidence,
+      fields: Object.keys(result.suggestedFindings || {}).filter((key) => hasMeaningfulValue(result.suggestedFindings[key])),
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error(`[projects] WDO intelligence failed: ${err.message}`);
     next(err);
   }
 });

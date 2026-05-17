@@ -9,7 +9,6 @@ const { pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
 const { calculatePropertyProfile } = require('./property-calculator');
 const { determineWaveGuardTier, getEffectiveDiscount } = require('./discount-engine');
 const { ZONES } = require('./constants');
-const { zoneMultiplier } = require('./modifiers');
 
 const fmt = (n) => typeof n === 'number' ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}` : n;
 const pct = (n) => typeof n === 'number' ? `${(n * 100).toFixed(1)}%` : n;
@@ -177,7 +176,7 @@ console.log(`  Lawn Enhanced @ Platinum: ${pct(disc.effectiveDiscount)} (should 
 
 // Rodent (excluded from %)
 disc = getEffectiveDiscount('rodent_bait', goldTier);
-console.log(`  Rodent Bait @ Gold: ${pct(disc.effectiveDiscount)} discount (should be 0%) + setup credit: $${disc.setupCredit || 0}`);
+console.log(`  Rodent Bait @ Gold: ${pct(disc.effectiveDiscount)} discount (should be 0%) + setup credit: $${disc.setupCredit || 0} (should be $0)`);
 
 // Palm (excluded, flat credit)
 disc = getEffectiveDiscount('palm_injection', goldTier);
@@ -262,19 +261,15 @@ console.log(`    Card monthly:  ${fmt(estimate.summary.recurringMonthlyAfterDisc
 console.log(`    ACH monthly:   ${fmt(achEstimate.summary.recurringMonthlyAfterDiscount)}`);
 console.log(`    ACH savings:   ${fmt(achEstimate.achSavings)}/yr`);
 
-// ── ZONE MULTIPLIER REGRESSION ────────────────────────────────
-// Session 6 pre-work: insurance against the Session 3 bug class where
-// constants.ZONES and modifiers.zoneMultiplier() drifted apart. The
-// startup assertion in estimate-engine.js only covers A/B/C/D — this
-// block exposes UNKNOWN and any default-case divergence.
+// ── SERVICE ZONE NEUTRALITY ───────────────────────────────────
+// Service zones are routing/metadata labels only.
 console.log('\n' + '═'.repeat(70));
-console.log('ZONE MULTIPLIER ALIGNMENT (constants.ZONES vs modifiers.zoneMultiplier)');
+console.log('SERVICE ZONE NEUTRALITY (constants.ZONES)');
 console.log('═'.repeat(70));
 for (const z of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
   const c = ZONES[z]?.multiplier;
-  const m = zoneMultiplier(z);
-  const aligned = typeof c === 'number' && Math.abs(c - m) < 0.0001;
-  console.log(`  ${z.padEnd(8)} | constants: ${c ?? 'MISSING'} | modifiers: ${m} ${aligned ? '✓' : '⚠ DRIFT'}`);
+  const neutral = typeof c === 'number' && Math.abs(c - 1.0) < 0.0001;
+  console.log(`  ${z.padEnd(8)} | constants: ${c ?? 'MISSING'} ${neutral ? '✓' : '⚠ NOT NEUTRAL'}`);
 }
 // Also exercise the actual engine path with zone='UNKNOWN' — ref customer,
 // v1 quarterly pest only. Output should be a stable number we can eyeball

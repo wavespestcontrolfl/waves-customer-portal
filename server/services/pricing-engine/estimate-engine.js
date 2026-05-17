@@ -5,7 +5,7 @@
 // ============================================================
 const { GLOBAL, WAVEGUARD, ZONES, URGENCY, SPECIALTY } = require('./constants');
 const { calculatePropertyProfile } = require('./property-calculator');
-const { deriveModifiers, deriveNotes, zoneMultiplier } = require('./modifiers');
+const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
@@ -13,7 +13,7 @@ const {
   priceRodentInspection, selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
-  priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceWDO, priceFlea,
+  priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
@@ -22,25 +22,6 @@ const {
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
 } = require('./discount-engine');
-
-// ── Startup assertion — zone alignment ────────────────────────
-// Fail-fast at module load if constants.ZONES drifts from
-// modifiers.zoneMultiplier(). Without this, future edits to one
-// source and not the other would silently misprice quotes until
-// a regression test happened to notice.
-for (const zone of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
-  const cz = ZONES[zone];
-  if (!cz) {
-    throw new Error(`[pricing-engine startup] Zone ${zone} missing from constants.ZONES`);
-  }
-  const mz = zoneMultiplier(zone);
-  if (Math.abs(cz.multiplier - mz) > 0.0001) {
-    throw new Error(
-      `[pricing-engine startup] Zone ${zone} multiplier mismatch: ` +
-      `constants.ZONES=${cz.multiplier}, modifiers.zoneMultiplier=${mz}`
-    );
-  }
-}
 
 function normalizeMosquitoProgram(value) {
   if (value == null || value === '') return null;
@@ -55,6 +36,43 @@ function normalizeMosquitoProgram(value) {
   if (raw === 'bronze') return 'seasonal9';
   if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly12';
   return raw;
+}
+
+function shouldIncludeInternalPricing(input = {}, serviceOptions = {}) {
+  return !!(
+    input.includeInternalPricing ||
+    input.debugPricing ||
+    serviceOptions.includeInternalPricing ||
+    serviceOptions.debug ||
+    serviceOptions.isInternal ||
+    serviceOptions.admin ||
+    serviceOptions.isAdmin
+  );
+}
+
+function stripBedBugInternalPricing(result) {
+  if (!result || result.service !== 'bed_bug') return result;
+  const clean = { ...result };
+  delete clean.directCostEstimate;
+  delete clean.costRatio;
+  delete clean.actualCostRatio;
+  delete clean.estimatedGrossMargin;
+  delete clean.pricingModel;
+  delete clean.targetCostRatio;
+  delete clean.internalCostBasis;
+
+  clean.treatmentLines = (result.treatmentLines || []).map((line) => {
+    const {
+      directCostEstimate,
+      costRatio,
+      actualCostRatio,
+      estimatedGrossMargin,
+      ...publicLine
+    } = line;
+    return publicLine;
+  });
+
+  return clean;
 }
 
 // ── Generate Complete Estimate ────────────────────────────────
@@ -100,15 +118,6 @@ function generateEstimate(input) {
   const modifiers = deriveModifiers(property);
   const structuralNotes = deriveNotes(property);
 
-  // ── 3. Zone multiplier ────────────────────────────────────
-  // Strict use of modifiers.zoneMult (deriveModifiers always returns a value —
-  // defaults to 1.0 for unknown zones). constants.ZONES is no longer consulted
-  // here; it's now only a reference table verified against modifiers at startup.
-  const zoneMult = modifiers.zoneMult;
-  if (typeof zoneMult !== 'number') {
-    throw new Error(`No zone multiplier derived for zone ${input.zone}`);
-  }
-
   // ── 3. Price each requested service ────────────────────────
   const services = input.services || {};
   const lineItems = [];
@@ -122,18 +131,17 @@ function generateEstimate(input) {
       roachType: services.pest.roachType || 'none',
       modifiers,
     });
-    // 2-decimal rounding matches v2 (pricing-engine-v2.js:758-760).
-    result.annual = Math.round(result.annual * zoneMult * 100) / 100;
+    result.annual = Math.round(result.annual * 100) / 100;
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.perApp = Math.round(result.annual / result.visitsPerYear * 100) / 100;
     if (Array.isArray(result.tiers)) {
       result.tiers = result.tiers.map(t => {
-        const zAnn = Math.round(t.annual * zoneMult * 100) / 100;
+        const annual = Math.round(t.annual * 100) / 100;
         return {
           ...t,
-          perApp: Math.round(t.perApp * zoneMult * 100) / 100,
-          annual: zAnn,
-          monthly: Math.round(zAnn / 12 * 100) / 100,
+          perApp: Math.round(t.perApp * 100) / 100,
+          annual,
+          monthly: Math.round(annual / 12 * 100) / 100,
         };
       });
     }
@@ -179,7 +187,7 @@ function generateEstimate(input) {
       access: services.treeShrub.access || 'easy',
       treeCount: services.treeShrub.treeCount ?? property.features?.treeCount ?? 0,
     });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.internalPerVisitRevenue = Math.round(result.annual / result.frequency * 100) / 100;
     result.perApp = result.internalPerVisitRevenue;
@@ -190,7 +198,7 @@ function generateEstimate(input) {
   // Palm Injection
   if (services.palm) {
     const result = pricePalmInjection(property, { ...services.palm });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.annualBeforeCredits = result.annual;
     result.monthlyBeforeCredits = result.monthly;
@@ -206,7 +214,7 @@ function generateEstimate(input) {
       stationCount: services.mosquito.stationCount,
       dunkCount: services.mosquito.dunkCount,
     });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     lineItems.push(result);
     activeServiceKeys.push('mosquito');
@@ -219,7 +227,7 @@ function generateEstimate(input) {
       monitoringTier: services.termite.monitoringTier || 'basic',
       modifiers,
     });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     lineItems.push(result);
     activeServiceKeys.push('termite_bait');
@@ -228,7 +236,7 @@ function generateEstimate(input) {
   // Rodent Bait
   if (services.rodentBait) {
     const result = priceRodentBait(property, { modifiers });
-    result.annual = Math.round(result.annual * zoneMult);
+    result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     lineItems.push(result);
     // Rodent does NOT add to activeServiceKeys for tier determination
@@ -244,9 +252,7 @@ function generateEstimate(input) {
       ? !!input.isRecurringCustomer
       : activeServiceKeys.length > 0;
 
-  // One-time and specialty services are ZONE-AGNOSTIC (v2 parity — see
-  // Session 11a Step 2b-2). Zone multiplier is applied only to recurring
-  // services above; one-times use the floor/formula price straight through.
+  // One-time and specialty services are zone-agnostic.
   if (services.oneTimePest) {
     const result = priceOneTimePest(property, {
       urgency: services.oneTimePest.urgency || 'NONE',
@@ -338,27 +344,37 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.bedBug) {
-    const rooms = services.bedBug.rooms || 1;
-    const method = services.bedBug.method || 'chemical';
-    const result = priceBedBug(rooms, method, property.footprint);
-    if (result.methods) {
-      // 'both' composite → split into two flat line items for pipeline
-      result.methods.forEach(m => lineItems.push({
-        service: m.method === 'Heat' ? 'bed_bug_heat' : 'bed_bug_chemical',
-        rooms,
-        price: m.price,
-        detail: m.detail,
-      }));
-    } else {
-      lineItems.push(result);
-    }
+    const bedBugOptions = typeof services.bedBug === 'object' ? services.bedBug : {};
+    const includeInternalPricing = shouldIncludeInternalPricing(input, bedBugOptions);
+    const result = priceBedBugTreatment(property, {
+      ...bedBugOptions,
+      urgency: bedBugOptions.urgency ?? input.urgency ?? 'standard',
+      afterHours: bedBugOptions.afterHours ?? input.afterHours ?? false,
+      includeInternalCostBasis: includeInternalPricing && bedBugOptions.includeInternalCostBasis === true,
+      isInternal: includeInternalPricing,
+    });
+    lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
   if (services.wdo) {
     const result = priceWDO(property.footprint);
     lineItems.push(result);
   }
-  if (services.flea) {
-    const result = priceFlea(property);
+  if (services.flea || services.fleaExterior) {
+    const fleaOptions = typeof services.flea === 'object' && services.flea !== null ? services.flea : {};
+    const result = priceFlea({
+      ...property,
+      services: {
+        ...(property.services || {}),
+        flea: true,
+        fleaExterior: fleaOptions.fleaExterior ?? services.fleaExterior ?? input.fleaExterior,
+      },
+      fleaExteriorAreaSqFt: fleaOptions.fleaExteriorAreaSqFt ?? services.fleaExteriorAreaSqFt ?? input.fleaExteriorAreaSqFt,
+      fleaExteriorAreaSource: fleaOptions.fleaExteriorAreaSource ?? services.fleaExteriorAreaSource ?? input.fleaExteriorAreaSource,
+      fleaExteriorZones: fleaOptions.fleaExteriorZones ?? services.fleaExteriorZones ?? input.fleaExteriorZones,
+      urgency: fleaOptions.urgency ?? input.urgency ?? 'STANDARD',
+      afterHours: fleaOptions.afterHours ?? input.afterHours ?? false,
+      isRecurringCustomer,
+    });
     lineItems.push(result);
   }
   if (services.topDressing) {
@@ -410,10 +426,10 @@ function generateEstimate(input) {
   }
   if (services.exclusion) {
     // Auto-waive inspection fee when any rodent service is opted in
-    // alongside exclusion (trap, bait, sanitation). Standalone exclusion
-    // with no other rodent service still incurs the $125 inspection.
+    // alongside exclusion (trapping or sanitation). Bait stations are fully
+    // excluded from rodent remediation benefits and do not waive inspection.
     const hasRodentServiceOptIn = !!(
-      services.rodentTrapping || services.rodentBait || services.sanitation
+      services.rodentTrapping || services.sanitation
     );
     const result = priceExclusion({
       simple: services.exclusion.simple || 0,
@@ -449,12 +465,15 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
 
-  // Additional trap follow-up visits beyond the 2 included in base trapping
+  // Legacy explicit trap-check rows are included during the active window.
   if (services.rodentTrappingFollowups) {
+    const followupOptions = typeof services.rodentTrappingFollowups === 'object'
+      ? services.rodentTrappingFollowups
+      : {};
     const count = typeof services.rodentTrappingFollowups === 'number'
       ? services.rodentTrappingFollowups
-      : (services.rodentTrappingFollowups.count || 0);
-    const result = priceRodentTrappingFollowups(count);
+      : (followupOptions.count || 0);
+    const result = priceRodentTrappingFollowups(count, followupOptions);
     if (result) lineItems.push(result);
   }
 
@@ -495,17 +514,19 @@ function generateEstimate(input) {
     if (bundle) {
       const componentTotal = (trapItem?.price || 0) + (exclItem?.price || 0) + (sanItem?.price || 0);
       const { discounted, savings } = applyRodentBundle(componentTotal, bundle);
-      lineItems.push({
-        service: 'rodent_bundle_discount',
-        name: `Rodent ${bundle.kind} bundle`,
-        price: -savings,
-        bundleKind: bundle.kind,
-        discount: bundle.discount,
-        floor: bundle.floor,
-        bundledTotal: discounted,
-        componentTotal,
-        detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
-      });
+      if (savings > 0) {
+        lineItems.push({
+          service: 'rodent_bundle_discount',
+          name: `Rodent ${bundle.kind} bundle`,
+          price: -savings,
+          bundleKind: bundle.kind,
+          discount: bundle.discount,
+          floor: bundle.floor,
+          bundledTotal: discounted,
+          componentTotal,
+          detail: `${bundle.kind} bundle: $${componentTotal} → $${discounted} (saves $${savings})`,
+        });
+      }
     }
   }
 
@@ -597,6 +618,10 @@ function generateEstimate(input) {
         item.priceBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.price;
         item.priceAfterDiscount = item.price;
       }
+      if (item.total) {
+        item.totalBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.total;
+        item.totalAfterDiscount = item.total;
+      }
       continue;
     }
 
@@ -659,19 +684,23 @@ function generateEstimate(input) {
 
   // Session 11a Step 2b-4: manual discount fan-out. Mirrors v2's calcTotals
   // (pricing-engine-v2.js:1417-1437) — applies to the WaveGuard-discounted
-  // recurring annual (including rodent bait), capped at the base. Does not
+  // recurring annual, excluding rodent bait because it receives no WaveGuard
+  // credit, discount, setup credit, coupon, or tier benefit. Does not
   // touch one-time/specialty totals.
   let manualDiscountAmount = 0;
   let manualDiscountInfo = null;
+  const manualDiscountableRecurringAnnual = recurringItems
+    .filter(i => resolveDiscountKey(i) !== 'rodent_bait')
+    .reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
   const md = input.manualDiscount;
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
     if (md.type === 'PERCENT') {
-      manualDiscountAmount = Math.round(recurringAnnualAfterWG * (v / 100) * 100) / 100;
+      manualDiscountAmount = Math.round(manualDiscountableRecurringAnnual * (v / 100) * 100) / 100;
     } else {
       manualDiscountAmount = Math.round(v * 100) / 100;
     }
-    manualDiscountAmount = Math.min(manualDiscountAmount, recurringAnnualAfterWG);
+    manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual);
     manualDiscountInfo = {
       type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
       value: v,
@@ -722,7 +751,7 @@ function generateEstimate(input) {
     zone: (() => {
       const zoneKey = (input.serviceZone || input.zone || 'UNKNOWN').toUpperCase();
       const info = ZONES[zoneKey] || ZONES.UNKNOWN;
-      return { key: zoneKey, name: info.name, multiplier: zoneMult };
+      return { key: zoneKey, name: info.name, multiplier: 1 };
     })(),
 
     // WaveGuard

@@ -194,6 +194,11 @@ export function calculateEstimate(inputs) {
     exclWaive: exW,
     bedbugRooms: _bedbugRooms,
     bedbugMethod,
+    bedbugSeverity,
+    bedbugPrepStatus,
+    bedbugOccupancyType,
+    bedbugHeatScope,
+    bedbugSubcontractCost,
     boracareSqft: bcSqft,
     preslabSqft: psSqft,
     preslabWarranty,
@@ -775,7 +780,7 @@ export function calculateEstimate(inputs) {
     if (lotSqFt >= 20000) rodentScore += 2; else if (lotSqFt >= 12000) rodentScore += 1;
     if (nearWater) rodentScore += 1;
     if (treeDensity === 'HEAVY') rodentScore += 1;
-    const rmo = rodentScore >= 3 ? 109 : rodentScore <= 1 ? 75 : 89;
+    const rmo = rodentScore >= 3 ? 69 : rodentScore <= 1 ? 49 : 59;
     R.rodBaitMo = rmo;
     R.rodBaitSize = rodentScore >= 3 ? 'Large' : rodentScore <= 1 ? 'Small' : 'Medium';
     R.rodBaitScore = rodentScore;
@@ -1034,8 +1039,34 @@ export function calculateEstimate(inputs) {
 
   /* ── Bed Bug ─────────────────────────────────────────────── */
   if (svcBedbug) {
-    const rm = bedbugRooms, meth = bedbugMethod;
-    if (meth !== 'HEAT') {
+    // Deprecated v1 fallback only. Source of truth is server/services/pricing-engine/
+    // priceBedBugTreatment. TODO(2026-05-16, pricing-owner): remove after all
+    // estimate surfaces use POST /admin/pricing-config/estimate for bed bugs.
+    const rm = bedbugRooms;
+    const meth = String(bedbugMethod || '').trim().toUpperCase();
+    if (!['CHEMICAL', 'HEAT', 'HYBRID'].includes(meth)) {
+      throw new Error('Invalid bedbugMethod. Use CHEMICAL, HEAT, or HYBRID.');
+    }
+    if (meth === 'HYBRID') {
+      throw new Error('HYBRID bed bug pricing is server-only in the deprecated v1 estimator.');
+    }
+    const sev = bedbugSeverity || 'light';
+    const prep = bedbugPrepStatus || 'ready';
+    const occ = bedbugOccupancyType || 'singleFamily';
+    if (sev !== 'light' || prep !== 'ready' || occ !== 'singleFamily') {
+      throw new Error('Deprecated v1 bed bug pricing only supports light/ready/singleFamily; use server pricing endpoint.');
+    }
+    if (meth === 'HEAT' && String(bedbugHeatScope || 'ROOMS_ONLY').trim().toUpperCase() !== 'ROOMS_ONLY') {
+      throw new Error('Whole-home bed bug heat pricing is server-only in the deprecated v1 estimator.');
+    }
+    if (meth === 'HEAT' && bedbugEquipment === 'SUBCONTRACT') {
+      throw new Error('Subcontract bed bug heat pricing is server-only in the deprecated v1 estimator.');
+    }
+    if (bedbugSubcontractCost !== undefined && bedbugSubcontractCost !== null && bedbugSubcontractCost !== '') {
+      throw new Error('Subcontract bed bug inputs are server-only in the deprecated v1 estimator.');
+    }
+    const bedBugP = (b) => Math.round(b * urgMult);
+    if (meth === 'CHEMICAL') {
       const lv1 = 45 + Math.max(0, (rm - 1) * 30) + 30 + DRIVE;
       const lv2 = 25 + Math.max(0, (rm - 1) * 20) + DRIVE;
       const mpr = 50.42;
@@ -1044,9 +1075,9 @@ export function calculateEstimate(inputs) {
       if (cp < fl) cp = fl;
       if (footprint > 2500) cp = Math.round(cp * 1.10);
       else if (footprint > 1800) cp = Math.round(cp * 1.05);
-      specItems.push({ name: 'Bed Bug Chemical', price: otP(cp), det: rm + ' room' + (rm > 1 ? 's' : '') + ', 2 visits' });
+      specItems.push({ name: 'Bed Bug Chemical', price: bedBugP(cp), det: rm + ' room' + (rm > 1 ? 's' : '') + ', 2 visits' });
     }
-    if (meth !== 'CHEMICAL') {
+    if (meth === 'HEAT') {
       let hpr = rm === 1 ? 1000 : rm === 2 ? 850 : 750;
       let hp = hpr * rm;
       // v1.5: in-house heat adds equipment cost (heaters, fans, monitoring)
@@ -1057,7 +1088,7 @@ export function calculateEstimate(inputs) {
       }
       if (footprint > 2500) hp = Math.round(hp * 1.10);
       else if (footprint < 1200) hp = Math.round(hp * 0.95);
-      const fp = otP(hp);
+      const fp = bedBugP(hp);
       specItems.push({ name: 'Bed Bug Heat', price: fp, det: rm + ' room' + (rm > 1 ? 's' : '') + ' — ' + fmtInt(fp / rm) + '/room' + (bedbugEquipment === 'INHOUSE' ? ' (in-house)' : '') });
     }
   }

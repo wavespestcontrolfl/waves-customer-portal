@@ -15,12 +15,28 @@ const SECRET_KEYS = new Set([
   'bouncieWebhookKey',
 ]);
 
+function cleanSecretValue(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed || null;
+}
+
 function timingSafeEqualString(a, b) {
-  if (!a || !b) return false;
-  const left = Buffer.from(String(a));
-  const right = Buffer.from(String(b));
+  const leftValue = cleanSecretValue(a);
+  const rightValue = cleanSecretValue(b);
+  if (!leftValue || !rightValue) return false;
+  const left = Buffer.from(leftValue);
+  const right = Buffer.from(rightValue);
   if (left.length !== right.length) return false;
   return crypto.timingSafeEqual(left, right);
+}
+
+function headerAuthCandidates(label, value) {
+  const cleaned = cleanSecretValue(value);
+  if (!cleaned) return [];
+  const candidates = [[label, cleaned]];
+  const bearer = cleaned.match(/^Bearer\s+(.+)$/i);
+  if (bearer?.[1]) candidates.push([`${label}:bearer`, bearer[1].trim()]);
+  return candidates;
 }
 
 function verificationMode(env = process.env) {
@@ -32,7 +48,7 @@ function verificationMode(env = process.env) {
 }
 
 function inspectBouncieWebhook(req, env = process.env) {
-  const expected = env.BOUNCIE_WEBHOOK_SECRET;
+  const expected = cleanSecretValue(env.BOUNCIE_WEBHOOK_SECRET);
   const mode = verificationMode(env);
   if (!expected) {
     return {
@@ -45,7 +61,7 @@ function inspectBouncieWebhook(req, env = process.env) {
   }
 
   const candidates = [
-    ['header:authorization', req.get?.('authorization')],
+    ...headerAuthCandidates('header:authorization', req.get?.('authorization')),
     ['header:x-bouncie-authorization', req.get?.('x-bouncie-authorization')],
     ['header:x-webhook-key', req.get?.('x-webhook-key')],
     ['header:x-bouncie-webhook-key', req.get?.('x-bouncie-webhook-key')],

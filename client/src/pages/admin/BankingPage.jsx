@@ -1,6 +1,7 @@
 import { Fragment, useState, useEffect, useCallback } from "react";
 import {
   CheckCircle2,
+  Clock3,
   Download,
   Landmark,
   TrendingUp,
@@ -77,11 +78,13 @@ const STATUS_COLORS = {
   in_transit: "#0A7EC2",
   failed: D.red,
 };
+const INSTANT_PAYOUT_FEE_RATE = 0.015;
 
-function newInstantPayoutIdempotencyKey() {
+function newPayoutIdempotencyKey(method = "standard") {
+  const prefix = method === "instant" ? "ipo" : "spo";
   return globalThis.crypto?.randomUUID
-    ? `ipo_${globalThis.crypto.randomUUID()}`
-    : `ipo_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    ? `${prefix}_${globalThis.crypto.randomUUID()}`
+    : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
 function Badge({ children, color }) {
@@ -188,28 +191,22 @@ function PayoutsTab() {
 
   return (
     <div>
-      {" "}
       <div style={{ overflowX: "auto" }}>
-        {" "}
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          {" "}
           <thead>
-            {" "}
             <tr>
-              {" "}
-              <th style={thStyle}>Date</th>{" "}
-              <th style={{ ...thStyle, textAlign: "right" }}>Amount</th>{" "}
-              <th style={thStyle}>Status</th>{" "}
-              <th style={{ ...thStyle, textAlign: "right" }}>Transactions</th>{" "}
-              <th style={{ ...thStyle, textAlign: "right" }}>Fees</th>{" "}
-              <th style={thStyle}>Arrival</th>{" "}
-              <th style={thStyle}>Reconciled</th>{" "}
-            </tr>{" "}
-          </thead>{" "}
+              <th style={thStyle}>Date</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Amount</th>
+              <th style={thStyle}>Status</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Transactions</th>
+              <th style={{ ...thStyle, textAlign: "right" }}>Fees</th>
+              <th style={thStyle}>Arrival</th>
+              <th style={thStyle}>Reconciled</th>
+            </tr>
+          </thead>
           <tbody>
             {payouts.map((p) => (
               <Fragment key={p.id}>
-                {" "}
                 <tr
                   onClick={() => toggleExpand(p.id)}
                   style={{
@@ -226,8 +223,14 @@ function PayoutsTab() {
                       e.currentTarget.style.background = "transparent";
                   }}
                 >
-                  {" "}
-                  <td style={tdStyle}>{fmtD(p.date || p.created)}</td>{" "}
+                  <td style={tdStyle}>
+                    {fmtD(
+                      p.created_at_stripe ||
+                        p.created_at ||
+                        p.date ||
+                        p.created,
+                    )}
+                  </td>
                   <td
                     style={{
                       ...tdStyle,
@@ -237,17 +240,17 @@ function PayoutsTab() {
                     }}
                   >
                     {fmtM(p.amount)}
-                  </td>{" "}
+                  </td>
                   <td style={tdStyle}>
                     <Badge color={STATUS_COLORS[p.status] || D.muted}>
                       {p.status}
                     </Badge>
-                  </td>{" "}
+                  </td>
                   <td
                     style={{ ...tdStyle, textAlign: "right", fontFamily: MONO }}
                   >
                     {p.transaction_count ?? "--"}
-                  </td>{" "}
+                  </td>
                   <td
                     style={{
                       ...tdStyle,
@@ -256,9 +259,13 @@ function PayoutsTab() {
                       color: D.muted,
                     }}
                   >
-                    {p.fees != null ? fmtM(p.fees) : "--"}
-                  </td>{" "}
-                  <td style={tdStyle}>{fmtD(p.arrival_date)}</td>{" "}
+                    {p.fee_total != null
+                      ? fmtM(p.fee_total)
+                      : p.fees != null
+                      ? fmtM(p.fees)
+                      : "--"}
+                  </td>
+                  <td style={tdStyle}>{fmtD(p.arrival_date)}</td>
                   <td style={{ ...tdStyle, textAlign: "center" }}>
                     {p.reconciled ? (
                       <span style={{ color: D.green, fontSize: 16 }}>
@@ -267,13 +274,11 @@ function PayoutsTab() {
                     ) : (
                       <span style={{ color: D.muted }}>--</span>
                     )}
-                  </td>{" "}
+                  </td>
                 </tr>
                 {expanded === p.id && (
                   <tr key={`${p.id}-detail`}>
-                    {" "}
                     <td colSpan={7} style={{ padding: 0, background: D.bg }}>
-                      {" "}
                       <div style={{ padding: "12px 20px" }}>
                         {!txns[p.id] ? (
                           <div style={{ color: D.muted, fontSize: 12 }}>
@@ -290,17 +295,14 @@ function PayoutsTab() {
                               borderCollapse: "collapse",
                             }}
                           >
-                            {" "}
                             <thead>
-                              {" "}
                               <tr>
-                                {" "}
                                 <th style={{ ...thStyle, fontSize: 9 }}>
                                   Customer / Type
-                                </th>{" "}
+                                </th>
                                 <th style={{ ...thStyle, fontSize: 9 }}>
                                   Description
-                                </th>{" "}
+                                </th>
                                 <th
                                   style={{
                                     ...thStyle,
@@ -309,7 +311,7 @@ function PayoutsTab() {
                                   }}
                                 >
                                   Amount
-                                </th>{" "}
+                                </th>
                                 <th
                                   style={{
                                     ...thStyle,
@@ -318,7 +320,7 @@ function PayoutsTab() {
                                   }}
                                 >
                                   Fee
-                                </th>{" "}
+                                </th>
                                 <th
                                   style={{
                                     ...thStyle,
@@ -327,9 +329,9 @@ function PayoutsTab() {
                                   }}
                                 >
                                   Net
-                                </th>{" "}
-                              </tr>{" "}
-                            </thead>{" "}
+                                </th>
+                              </tr>
+                            </thead>
                             <tbody>
                               {txns[p.id].map((t, i) => {
                                 const isFee =
@@ -339,7 +341,6 @@ function PayoutsTab() {
                                     key={i}
                                     style={{ opacity: isFee ? 0.5 : 1 }}
                                   >
-                                    {" "}
                                     <td
                                       style={{
                                         ...tdStyle,
@@ -348,7 +349,7 @@ function PayoutsTab() {
                                       }}
                                     >
                                       {t.customer_name || t.type || "--"}
-                                    </td>{" "}
+                                    </td>
                                     <td
                                       style={{
                                         ...tdStyle,
@@ -357,7 +358,7 @@ function PayoutsTab() {
                                       }}
                                     >
                                       {t.description || "--"}
-                                    </td>{" "}
+                                    </td>
                                     <td
                                       style={{
                                         ...tdStyle,
@@ -367,7 +368,7 @@ function PayoutsTab() {
                                       }}
                                     >
                                       {fmtM(t.amount)}
-                                    </td>{" "}
+                                    </td>
                                     <td
                                       style={{
                                         ...tdStyle,
@@ -378,7 +379,7 @@ function PayoutsTab() {
                                       }}
                                     >
                                       {t.fee != null ? fmtM(t.fee) : "--"}
-                                    </td>{" "}
+                                    </td>
                                     <td
                                       style={{
                                         ...tdStyle,
@@ -389,21 +390,21 @@ function PayoutsTab() {
                                       }}
                                     >
                                       {t.net != null ? fmtM(t.net) : "--"}
-                                    </td>{" "}
+                                    </td>
                                   </tr>
                                 );
                               })}
-                            </tbody>{" "}
+                            </tbody>
                           </table>
                         )}
                       </div>{" "}
-                    </td>{" "}
+                    </td>
                   </tr>
                 )}
               </Fragment>
             ))}
-          </tbody>{" "}
-        </table>{" "}
+          </tbody>
+        </table>
       </div>
       {loading && (
         <div
@@ -425,7 +426,6 @@ function PayoutsTab() {
           marginTop: 16,
         }}
       >
-        {" "}
         <button
           disabled={page <= 1}
           onClick={() => setPage((p) => p - 1)}
@@ -506,7 +506,6 @@ function CashFlowTab() {
 
   return (
     <div>
-      {" "}
       <div
         style={{
           display: "flex",
@@ -516,7 +515,6 @@ function CashFlowTab() {
           alignItems: "center",
         }}
       >
-        {" "}
         <div style={{ display: "flex", gap: 4 }}>
           {["weekly", "monthly"].map((p) => (
             <button
@@ -574,14 +572,11 @@ function CashFlowTab() {
             marginBottom: 20,
           }}
         >
-          {" "}
           <ResponsiveContainer width="100%" height={320}>
-            {" "}
             <BarChart
               data={chartData}
               margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
             >
-              {" "}
               <CartesianGrid strokeDasharray="3 3" stroke={D.border} />{" "}
               <XAxis
                 dataKey="label"
@@ -619,7 +614,6 @@ function CashFlowTab() {
             gap: 10,
           }}
         >
-          {" "}
           <SummaryCard
             label="Revenue In"
             value={fmtM(totalIn)}
@@ -658,7 +652,6 @@ function CashFlowTooltip({ active, payload, label }) {
         fontSize: 13,
       }}
     >
-      {" "}
       <div style={{ color: D.muted, marginBottom: 4 }}>{label}</div>
       {payload.map((p, i) => (
         <div key={i} style={{ color: p.color, fontFamily: MONO }}>
@@ -679,7 +672,6 @@ function SummaryCard({ label, value, color }) {
         padding: isMobile ? "12px 10px" : "16px 20px",
       }}
     >
-      {" "}
       <div
         style={{
           color: D.muted,
@@ -796,7 +788,6 @@ function ReconciliationTab() {
               marginBottom: 8,
             }}
           >
-            {" "}
             <div
               style={{
                 display: "flex",
@@ -805,9 +796,7 @@ function ReconciliationTab() {
                 flexWrap: "wrap",
               }}
             >
-              {" "}
               <div style={{ flex: 1, minWidth: 150 }}>
-                {" "}
                 <div
                   style={{ fontSize: 13, fontWeight: 600, color: D.heading }}
                 >
@@ -822,12 +811,10 @@ function ReconciliationTab() {
               </div>
               {item.reconciled ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  {" "}
                   <span style={{ color: D.green, fontSize: 16 }}>
                     &#10003;
                   </span>{" "}
                   <div style={{ fontSize: 11, color: D.muted }}>
-                    {" "}
                     <div>
                       Actual:{" "}
                       <span style={{ fontFamily: MONO, color: D.green }}>
@@ -849,9 +836,7 @@ function ReconciliationTab() {
                     flexWrap: "wrap",
                   }}
                 >
-                  {" "}
                   <div>
-                    {" "}
                     <div
                       style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}
                     >
@@ -888,7 +873,6 @@ function ReconciliationTab() {
                     </div>
                   )}
                   <div>
-                    {" "}
                     <div
                       style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}
                     >
@@ -1012,7 +996,6 @@ function ExportsTab() {
 
   return (
     <div>
-      {" "}
       <div
         style={{
           background: D.card,
@@ -1022,7 +1005,6 @@ function ExportsTab() {
           marginBottom: 16,
         }}
       >
-        {" "}
         <div
           style={{
             fontSize: 14,
@@ -1043,9 +1025,7 @@ function ExportsTab() {
             alignItems: "center",
           }}
         >
-          {" "}
           <div>
-            {" "}
             <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
               Start Date
             </div>{" "}
@@ -1057,7 +1037,6 @@ function ExportsTab() {
             />{" "}
           </div>{" "}
           <div>
-            {" "}
             <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
               End Date
             </div>{" "}
@@ -1112,7 +1091,6 @@ function ExportsTab() {
         </div>
         {/* Format */}
         <div style={{ marginBottom: 16 }}>
-          {" "}
           <div
             style={{
               fontSize: 10,
@@ -1174,7 +1152,6 @@ function ExportsTab() {
             padding: 20,
           }}
         >
-          {" "}
           <div
             style={{
               fontSize: 12,
@@ -1186,22 +1163,25 @@ function ExportsTab() {
             Preview (first 5 payouts in range)
           </div>{" "}
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            {" "}
             <thead>
-              {" "}
               <tr>
-                {" "}
-                <th style={thStyle}>Date</th>{" "}
-                <th style={{ ...thStyle, textAlign: "right" }}>Amount</th>{" "}
-                <th style={thStyle}>Status</th>{" "}
-                <th style={thStyle}>Arrival</th>{" "}
-              </tr>{" "}
-            </thead>{" "}
+                <th style={thStyle}>Date</th>
+                <th style={{ ...thStyle, textAlign: "right" }}>Amount</th>
+                <th style={thStyle}>Status</th>
+                <th style={thStyle}>Arrival</th>
+              </tr>
+            </thead>
             <tbody>
               {preview.map((p, i) => (
                 <tr key={i}>
-                  {" "}
-                  <td style={tdStyle}>{fmtD(p.date || p.created)}</td>{" "}
+                  <td style={tdStyle}>
+                    {fmtD(
+                      p.created_at_stripe ||
+                        p.created_at ||
+                        p.date ||
+                        p.created,
+                    )}
+                  </td>
                   <td
                     style={{
                       ...tdStyle,
@@ -1211,17 +1191,17 @@ function ExportsTab() {
                     }}
                   >
                     {fmtM(p.amount)}
-                  </td>{" "}
+                  </td>
                   <td style={tdStyle}>
                     <Badge color={STATUS_COLORS[p.status] || D.muted}>
                       {p.status}
                     </Badge>
-                  </td>{" "}
-                  <td style={tdStyle}>{fmtD(p.arrival_date)}</td>{" "}
+                  </td>
+                  <td style={tdStyle}>{fmtD(p.arrival_date)}</td>
                 </tr>
               ))}
-            </tbody>{" "}
-          </table>{" "}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -1229,37 +1209,55 @@ function ExportsTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// INSTANT PAYOUT MODAL
+// PAYOUT MODAL
 // ═══════════════════════════════════════════════════════════════
-function InstantPayoutModal({ available, onClose, onSuccess }) {
+function PayoutModal({
+  available,
+  initialMethod = "standard",
+  onClose,
+  onSuccess,
+}) {
+  const [method, setMethod] = useState(initialMethod);
   const [amount, setAmount] = useState(available || 0);
   const [idempotencyKey, setIdempotencyKey] = useState(() =>
-    newInstantPayoutIdempotencyKey(),
+    newPayoutIdempotencyKey(initialMethod),
   );
   const [submitting, setSubmitting] = useState(false);
 
-  const fee = (parseFloat(amount) || 0) * 0.01;
-  const net = (parseFloat(amount) || 0) - fee;
+  const parsedAmount = parseFloat(amount) || 0;
+  const isInstant = method === "instant";
+  const fee = isInstant ? parsedAmount * INSTANT_PAYOUT_FEE_RATE : 0;
+  const net = parsedAmount - fee;
+
+  const selectMethod = (nextMethod) => {
+    setMethod(nextMethod);
+    setIdempotencyKey(newPayoutIdempotencyKey(nextMethod));
+  };
 
   const handleSubmit = async () => {
-    const parsedAmount = parseFloat(amount);
     if (!amount || parsedAmount <= 0) return;
     if (parsedAmount > (available || 0)) {
-      alert("Instant payout amount exceeds available balance.");
+      alert("Payout amount exceeds available balance.");
       return;
     }
     setSubmitting(true);
     try {
-      await adminFetch("/admin/banking/payouts/instant", {
+      const endpoint =
+        method === "instant"
+          ? "/admin/banking/payouts/instant"
+          : "/admin/banking/payouts/standard";
+      await adminFetch(endpoint, {
         method: "POST",
         body: JSON.stringify({
           amount: parsedAmount,
           idempotency_key: idempotencyKey,
         }),
       });
+      setSubmitting(false);
       onSuccess();
+      return;
     } catch (e) {
-      alert("Instant payout failed: " + e.message);
+      alert("Payout failed: " + e.message);
     }
     setSubmitting(false);
   };
@@ -1277,7 +1275,6 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
       }}
       onClick={onClose}
     >
-      {" "}
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -1289,7 +1286,6 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
           maxWidth: 400,
         }}
       >
-        {" "}
         <div
           style={{
             fontSize: 18,
@@ -1298,13 +1294,73 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
             marginBottom: 4,
           }}
         >
-          Instant Payout
+          Transfer Stripe Balance
         </div>{" "}
         <div style={{ fontSize: 12, color: D.muted, marginBottom: 20 }}>
-          Funds sent immediately to your bank. 1% fee applies.
+          Standard payout avoids the Instant Payout fee. Instant is available
+          when speed matters.
+        </div>{" "}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 8,
+            marginBottom: 18,
+          }}
+        >
+          {[
+            {
+              key: "standard",
+              label: "Standard",
+              note: "No instant fee",
+              Icon: Clock3,
+            },
+            { key: "instant", label: "Instant", note: "~1.5% fee", Icon: Zap },
+          ].map(({ key, label, note, Icon }) => {
+            const selected = method === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => selectMethod(key)}
+                style={{
+                  border: `1px solid ${selected ? D.heading : D.border}`,
+                  background: selected ? D.heading : D.bg,
+                  color: selected ? D.white : D.text,
+                  borderRadius: 8,
+                  padding: "10px 12px",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  minHeight: 58,
+                }}
+              >
+                <span
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    fontSize: 13,
+                    fontWeight: 700,
+                  }}
+                >
+                  <Icon size={16} strokeWidth={2} />
+                  {label}
+                </span>
+                <span
+                  style={{
+                    display: "block",
+                    marginTop: 4,
+                    fontSize: 11,
+                    color: selected ? "#D4D4D8" : D.muted,
+                  }}
+                >
+                  {note}
+                </span>
+              </button>
+            );
+          })}
         </div>{" "}
         <div style={{ marginBottom: 16 }}>
-          {" "}
           <div
             style={{
               fontSize: 10,
@@ -1324,7 +1380,7 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
             value={amount}
             onChange={(e) => {
               setAmount(e.target.value);
-              setIdempotencyKey(newInstantPayoutIdempotencyKey());
+              setIdempotencyKey(newPayoutIdempotencyKey(method));
             }}
             style={{
               ...inputStyle,
@@ -1350,7 +1406,6 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
             marginBottom: 20,
           }}
         >
-          {" "}
           <div
             style={{
               display: "flex",
@@ -1358,10 +1413,9 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
               marginBottom: 6,
             }}
           >
-            {" "}
             <span style={{ fontSize: 12, color: D.muted }}>Amount</span>{" "}
             <span style={{ fontFamily: MONO, fontSize: 13, color: D.text }}>
-              {fmtM(parseFloat(amount) || 0)}
+              {fmtM(parsedAmount)}
             </span>{" "}
           </div>{" "}
           <div
@@ -1371,9 +1425,16 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
               marginBottom: 6,
             }}
           >
-            {" "}
-            <span style={{ fontSize: 12, color: D.muted }}>Fee (1%)</span>{" "}
-            <span style={{ fontFamily: MONO, fontSize: 13, color: D.amber }}>
+            <span style={{ fontSize: 12, color: D.muted }}>
+              {isInstant ? "Instant fee estimate" : "Instant fee"}
+            </span>{" "}
+            <span
+              style={{
+                fontFamily: MONO,
+                fontSize: 13,
+                color: isInstant ? D.amber : D.green,
+              }}
+            >
               {fmtM(fee)}
             </span>{" "}
           </div>{" "}
@@ -1385,9 +1446,8 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
               justifyContent: "space-between",
             }}
           >
-            {" "}
             <span style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
-              Net Payout
+              Net Transfer
             </span>{" "}
             <span
               style={{
@@ -1402,7 +1462,6 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
           </div>{" "}
         </div>{" "}
         <div style={{ display: "flex", gap: 10 }}>
-          {" "}
           <button
             onClick={onClose}
             style={{
@@ -1434,7 +1493,9 @@ function InstantPayoutModal({ available, onClose, onSuccess }) {
               opacity: submitting ? 0.6 : 1,
             }}
           >
-            {submitting ? "Processing..." : "Confirm Payout"}
+            {submitting
+              ? "Processing..."
+              : `Confirm ${isInstant ? "Instant" : "Standard"}`}
           </button>{" "}
         </div>{" "}
       </div>{" "}
@@ -1449,7 +1510,7 @@ export default function BankingPage() {
   const [tab, setTab] = useState("payouts");
   const [balance, setBalance] = useState(null);
   const [stats, setStats] = useState(null);
-  const [showPayoutModal, setShowPayoutModal] = useState(false);
+  const [payoutModalMethod, setPayoutModalMethod] = useState(null);
 
   const loadBalance = useCallback(async () => {
     try {
@@ -1481,14 +1542,13 @@ export default function BankingPage() {
   const pending = balance?.total_pending ?? 0;
 
   const handlePayoutSuccess = () => {
-    setShowPayoutModal(false);
+    setPayoutModalMethod(null);
     loadBalance();
     loadStats();
   };
 
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
-      {" "}
       <AdminCommandHeader
         title="Banking"
         icon={Landmark}
@@ -1496,16 +1556,15 @@ export default function BankingPage() {
         activeKey={tab}
         onSectionChange={setTab}
         action={{
-          label: "Instant Payout",
-          icon: Zap,
-          onClick: () => setShowPayoutModal(true),
+          label: "Standard Payout",
+          icon: Clock3,
+          onClick: () => setPayoutModalMethod("standard"),
           disabled: !available || available <= 0,
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4"
       />
-      {/* Hero balance — Stripe account label, big balance, instant-payout pill */}
+      {/* Hero balance — Stripe account label, big balance, payout actions */}
       <div style={{ marginBottom: 32 }}>
-        {" "}
         <a
           href="https://dashboard.stripe.com/payouts"
           target="_blank"
@@ -1542,9 +1601,8 @@ export default function BankingPage() {
         <div
           style={{ display: "flex", gap: 10, marginTop: 20, flexWrap: "wrap" }}
         >
-          {" "}
           <button
-            onClick={() => setShowPayoutModal(true)}
+            onClick={() => setPayoutModalMethod("standard")}
             disabled={!available || available <= 0}
             style={{
               background: D.heading,
@@ -1552,6 +1610,24 @@ export default function BankingPage() {
               borderRadius: 9999,
               padding: "12px 28px",
               color: D.white,
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: !available || available <= 0 ? "not-allowed" : "pointer",
+              opacity: !available || available <= 0 ? 0.4 : 1,
+              minHeight: 44,
+            }}
+          >
+            Standard Payout
+          </button>{" "}
+          <button
+            onClick={() => setPayoutModalMethod("instant")}
+            disabled={!available || available <= 0}
+            style={{
+              background: D.card,
+              border: `1px solid ${D.border}`,
+              borderRadius: 9999,
+              padding: "12px 24px",
+              color: D.text,
               fontSize: 14,
               fontWeight: 600,
               cursor: !available || available <= 0 ? "not-allowed" : "pointer",
@@ -1572,7 +1648,6 @@ export default function BankingPage() {
           marginBottom: 28,
         }}
       >
-        {" "}
         <div
           style={{
             background: D.card,
@@ -1581,7 +1656,6 @@ export default function BankingPage() {
             padding: isMobile ? "14px 12px" : "16px 20px",
           }}
         >
-          {" "}
           <div
             style={{
               color: D.muted,
@@ -1615,7 +1689,6 @@ export default function BankingPage() {
             padding: isMobile ? "14px 12px" : "16px 20px",
           }}
         >
-          {" "}
           <div
             style={{
               color: D.muted,
@@ -1651,7 +1724,6 @@ export default function BankingPage() {
             padding: isMobile ? "14px 12px" : "16px 20px",
           }}
         >
-          {" "}
           <div
             style={{
               color: D.muted,
@@ -1683,11 +1755,12 @@ export default function BankingPage() {
       {tab === "cashflow" && <CashFlowTab />}
       {tab === "reconciliation" && <ReconciliationTab />}
       {tab === "exports" && <ExportsTab />}
-      {/* Instant Payout Modal */}
-      {showPayoutModal && (
-        <InstantPayoutModal
+      {/* Payout Modal */}
+      {payoutModalMethod && (
+        <PayoutModal
           available={available}
-          onClose={() => setShowPayoutModal(false)}
+          initialMethod={payoutModalMethod}
+          onClose={() => setPayoutModalMethod(null)}
           onSuccess={handlePayoutSuccess}
         />
       )}

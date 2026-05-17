@@ -227,6 +227,31 @@ describe('pricing engine one-time treatment rules', () => {
     }
   });
 
+  test('recurring services are zone-agnostic across A through D', () => {
+    const services = {
+      pest: { frequency: 'quarterly' },
+      treeShrub: { tier: 'enhanced', treeCount: 5 },
+      palm: { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' },
+      mosquito: { tier: 'monthly12', stationCount: 2, dunkCount: 4 },
+      termite: { system: 'advance', monitoringTier: 'basic' },
+      rodentBait: {},
+    };
+    const zoneA = generateEstimate(estimateInput({ zone: 'A', services }));
+    const zoneD = generateEstimate(estimateInput({ zone: 'D', services }));
+
+    expect(zoneA.zone.multiplier).toBe(1);
+    expect(zoneD.zone.multiplier).toBe(1);
+    expect(zoneA.summary.recurringAnnualBeforeDiscount).toBe(zoneD.summary.recurringAnnualBeforeDiscount);
+    expect(zoneA.summary.recurringAnnualAfterDiscount).toBe(zoneD.summary.recurringAnnualAfterDiscount);
+
+    for (const service of ['pest_control', 'tree_shrub', 'palm_injection', 'mosquito', 'termite_bait', 'rodent_bait']) {
+      const a = zoneA.lineItems.find(i => i.service === service);
+      const d = zoneD.lineItems.find(i => i.service === service);
+      expect(d.annual).toBe(a.annual);
+      expect(d.monthly).toBe(a.monthly);
+    }
+  });
+
   test('foam drill selects tiers by point range and never falls back to Spot for higher counts', () => {
     const spot = priceFoamDrill(5);
     const moderate = priceFoamDrill(6);

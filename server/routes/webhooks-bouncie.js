@@ -25,6 +25,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const { pingTechLocation } = require('../services/tech-status');
+const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('../services/customer-tracking-eta');
 const {
   inspectBouncieWebhook,
   stringifyBounciePayload,
@@ -44,20 +45,65 @@ const {
 
 // ---------- persistence ----------
 
+function normalizeLocationReportedAt(value, now = new Date()) {
+  const parsed = value ? new Date(value) : now;
+  const parsedMs = parsed.getTime();
+  const nowMs = now.getTime();
+  if (!Number.isFinite(parsedMs)) return now;
+  if (parsedMs - nowMs > FUTURE_TIMESTAMP_TOLERANCE_MS) return now;
+  return parsed;
+}
+
 async function upsertLocation(imei, point) {
   if (!imei || !point) return;
+  const locationReportedAt = normalizeLocationReportedAt(point.reported_at);
   await db.raw(
     `INSERT INTO vehicle_locations
        (bouncie_imei, lat, lng, heading, speed_mph, ignition, reported_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
      ON CONFLICT (bouncie_imei) DO UPDATE SET
-       lat = EXCLUDED.lat,
-       lng = EXCLUDED.lng,
-       heading = EXCLUDED.heading,
-       speed_mph = EXCLUDED.speed_mph,
-       ignition = EXCLUDED.ignition,
-       reported_at = EXCLUDED.reported_at,
-       updated_at = NOW()`,
+       lat = CASE
+         WHEN vehicle_locations.reported_at IS NULL
+           OR EXCLUDED.reported_at >= vehicle_locations.reported_at
+           THEN EXCLUDED.lat
+         ELSE vehicle_locations.lat
+       END,
+       lng = CASE
+         WHEN vehicle_locations.reported_at IS NULL
+           OR EXCLUDED.reported_at >= vehicle_locations.reported_at
+           THEN EXCLUDED.lng
+         ELSE vehicle_locations.lng
+       END,
+       heading = CASE
+         WHEN vehicle_locations.reported_at IS NULL
+           OR EXCLUDED.reported_at >= vehicle_locations.reported_at
+           THEN EXCLUDED.heading
+         ELSE vehicle_locations.heading
+       END,
+       speed_mph = CASE
+         WHEN vehicle_locations.reported_at IS NULL
+           OR EXCLUDED.reported_at >= vehicle_locations.reported_at
+           THEN EXCLUDED.speed_mph
+         ELSE vehicle_locations.speed_mph
+       END,
+       ignition = CASE
+         WHEN vehicle_locations.reported_at IS NULL
+           OR EXCLUDED.reported_at >= vehicle_locations.reported_at
+           THEN EXCLUDED.ignition
+         ELSE vehicle_locations.ignition
+       END,
+       reported_at = CASE
+         WHEN vehicle_locations.reported_at IS NULL
+           OR EXCLUDED.reported_at >= vehicle_locations.reported_at
+           THEN EXCLUDED.reported_at
+         ELSE vehicle_locations.reported_at
+       END,
+       updated_at = CASE
+         WHEN vehicle_locations.reported_at IS NULL
+           OR EXCLUDED.reported_at >= vehicle_locations.reported_at
+           THEN NOW()
+         ELSE vehicle_locations.updated_at
+       END`,
     [
       imei,
       point.lat,
@@ -65,7 +111,7 @@ async function upsertLocation(imei, point) {
       point.heading,
       point.speed_mph,
       point.ignition,
-      point.reported_at ? new Date(point.reported_at) : new Date(),
+      locationReportedAt,
     ]
   );
 }
@@ -145,6 +191,7 @@ async function processTrackingEvent({ logId, eventType, payload }) {
           lng: point.lng,
           ignition: point.ignition,
           speed_mph: point.speed_mph,
+          reported_at: point.reported_at,
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] pingTechLocation failed: ${err.message}`);
@@ -240,5 +287,7 @@ module.exports = router;
 
 router._test = {
   normalizeTripMetricsPayload,
+  normalizeLocationReportedAt,
   processTrackingEvent,
+  upsertLocation,
 };
