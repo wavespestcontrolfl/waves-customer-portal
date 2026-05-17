@@ -50,4 +50,19 @@ describe('intelligence bar banking tools', () => {
     });
     expect(result.note).toContain('Standard payout of $75.00 requested');
   });
+
+  test('standard payout forwards idempotency key and actor when provided', async () => {
+    StripeBanking.createStandardPayout.mockResolvedValue({ payout_id: 'po_standard', status: 'pending' });
+
+    await executeBankingTool('request_standard_payout', {
+      amount: 75,
+      idempotencyKey: 'spo_confirm_123',
+      requestedBy: 'admin-1',
+    });
+
+    expect(StripeBanking.createStandardPayout).toHaveBeenCalledWith(75, {
+      idempotencyKey: 'spo_confirm_123',
+      requestedBy: 'admin-1',
+    });
+  });
 });

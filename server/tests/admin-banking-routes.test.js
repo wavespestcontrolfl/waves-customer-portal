@@ -163,4 +163,18 @@ describe('admin banking routes', () => {
       });
     });
   });
+
+  test('standard payout rejects amounts with more than two decimal places', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/banking/payouts/standard`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: 75.005, idempotency_key: 'spo_attempt_123' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('Invalid amount — must be a positive number');
+      expect(StripeBanking.createStandardPayout).not.toHaveBeenCalled();
+    });
+  });
 });
