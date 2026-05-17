@@ -91,14 +91,20 @@ function distanceMiles(from, to) {
 async function fetchStationRows() {
   if (_stationCache && Date.now() - _stationCacheTime < CACHE_TTL) return _stationCache;
 
-  const res = await fetch(FAWN_URL);
-  if (!res.ok) throw new Error(`FAWN HTTP ${res.status}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const res = await fetch(FAWN_URL, { signal: controller.signal });
+    if (!res.ok) throw new Error(`FAWN HTTP ${res.status}`);
 
-  const data = await res.json();
-  const rows = Array.isArray(data) ? data : [];
-  _stationCache = rows;
-  _stationCacheTime = Date.now();
-  return rows;
+    const data = await res.json();
+    const rows = Array.isArray(data) ? data : [];
+    _stationCache = rows;
+    _stationCacheTime = Date.now();
+    return rows;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function selectStation(stations = [], { latitude, longitude } = {}) {

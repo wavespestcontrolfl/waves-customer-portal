@@ -146,6 +146,10 @@ describe('service report v1', () => {
       interior_reentry_min: 120,
       irrigation_hold_hr: 24,
     };
+    const unknownScope = normalizeAdvisoryForTreatmentScope(advisory, {
+      service: { areas_serviced: JSON.stringify([]) },
+      applications: [{ application_method: 'perimeter_spray' }],
+    });
     const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
       service: { areas_serviced: JSON.stringify(['Exterior perimeter']) },
       applications: [{ application_area: 'Exterior perimeter', application_method: 'perimeter_spray' }],
@@ -158,6 +162,7 @@ describe('service report v1', () => {
       advisory,
     }, new Date('2026-05-16T13:25:00.000Z'));
 
+    expect(unknownScope).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
     expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
     expect(context.targets.map((target) => target.key)).toEqual(['exterior']);
   });

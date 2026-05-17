@@ -134,10 +134,6 @@ function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
       app.applicationArea,
       app.application_area,
       app.area,
-      app.method,
-      app.methodLabel,
-      app.applicationMethod,
-      app.application_method,
     );
     values.push(...parseJsonArray(app.targets));
   }
@@ -163,10 +159,10 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   const normalized = { ...parseJsonObject(advisory) };
   const scope = treatmentScope({ service, applications, zones });
 
-  if (normalized.interior_reentry_min != null && !scope.hasInterior) {
+  if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
   }
-  if (normalized.exterior_reentry_min != null && scope.hasInterior && !scope.hasExterior) {
+  if (normalized.exterior_reentry_min != null && scope.hasExplicitScope && scope.hasInterior && !scope.hasExterior) {
     normalized.exterior_reentry_min = 0;
   }
 
