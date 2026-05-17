@@ -7,7 +7,7 @@
 //
 // The protocols middleware uses requireTechOrAdmin (admin-protocols.js
 // line 5) so tech JWTs hit these routes directly with the same
-// adminToken the rest of the tech portal uses.
+// admin token the rest of the tech portal uses.
 //
 // Three tabs:
 //   - Photos: pest/weed/disease ID guide — context-aware via
@@ -23,6 +23,7 @@
 //     deserve their own surface.
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { getAdminAuthToken } from '../../lib/adminAuth';
 import { etParts } from '../../lib/timezone';
 
 const DARK = {
@@ -70,7 +71,7 @@ export default function TechProtocolsPage() {
     setErr('');
     (async () => {
       try {
-        const token = localStorage.getItem('adminToken');
+        const token = getAdminAuthToken();
         const headers = { Authorization: `Bearer ${token}` };
 
         let path;

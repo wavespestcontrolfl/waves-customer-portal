@@ -7,12 +7,13 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { getAdminAuthToken, getAdminDisplayName } from '../../lib/adminAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
 
 function techFetch(path, options = {}) {
-  const token = localStorage.getItem('adminToken') || localStorage.getItem('waves_admin_token');
+  const token = getAdminAuthToken();
   return fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     ...options,
@@ -44,7 +45,7 @@ export default function TechIntelligenceBar() {
   const [quickActions, setQuickActions] = useState([]);
   const [expanded, setExpanded] = useState(false);
 
-  const techName = localStorage.getItem('techName') || localStorage.getItem('adminName') || 'Tech';
+  const techName = getAdminDisplayName('Tech');
 
   useEffect(() => {
     techFetch('/admin/intelligence-bar/quick-actions?context=tech')
@@ -101,6 +102,8 @@ export default function TechIntelligenceBar() {
           fontSize: 13, flexShrink: 0,
         }}>⚡</div>
         <input
+          id="tech-intelligence-prompt"
+          name="tech-intelligence-prompt"
           value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
           onFocus={() => setExpanded(true)}
           placeholder="Ask anything..."
