@@ -18,6 +18,12 @@ function reportTokenFromPath(reqPath = '') {
   return match ? match[1] : null;
 }
 
+function redactReportPath(reqPath = '') {
+  const path = String(reqPath || '');
+  const token = reportTokenFromPath(path);
+  return token ? path.replace(token, '[redacted]') : path;
+}
+
 function serviceDateToNoonUtc(value) {
   if (!value) return null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
@@ -105,5 +111,6 @@ module.exports = {
   formatReportDate,
   loadServiceReportPageMetadata,
   metadataForServiceReport,
+  redactReportPath,
   reportTokenFromPath,
 };

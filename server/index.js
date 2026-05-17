@@ -427,6 +427,7 @@ if (config.nodeEnv === 'production') {
   const {
     applyHtmlMetadata,
     loadServiceReportPageMetadata,
+    redactReportPath,
   } = require('./services/report-page-metadata');
 
   // Per-section PWA shape. /admin and /tech each install as their own
@@ -473,9 +474,19 @@ if (config.nodeEnv === 'production') {
       const reportMetadata = await loadServiceReportPageMetadata(reqPath);
       if (reportMetadata) html = applyHtmlMetadata(html, reportMetadata);
     } catch (err) {
-      logger.warn(`[report-meta] Failed to render report metadata for ${reqPath}: ${err.message}`);
+      logger.warn(`[report-meta] Failed to render report metadata for ${redactReportPath(reqPath)}: ${err.message}`);
     }
     return html;
+  }
+
+  async function sendSpaHtml(req, res, next) {
+    try {
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      return res.send(await renderHTML(req.path));
+    } catch (err) {
+      return next(err);
+    }
   }
 
   // Never cache sw.js or index.html — ensures deploys are picked up immediately
@@ -484,14 +495,13 @@ if (config.nodeEnv === 'production') {
     res.set('Service-Worker-Allowed', '/');
     res.sendFile(path.join(clientBuild, 'sw.js'));
   });
-  app.get('/', async (req, res, next) => {
+  app.get('/', (req, res, next) => {
     if (req.accepts('html')) {
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.set('Content-Type', 'text/html; charset=utf-8');
-      return res.send(await renderHTML(req.path));
+      return sendSpaHtml(req, res, next);
     }
     next();
   });
+  app.get(/^\/report\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
 
   app.use(express.static(clientBuild, {
     maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year
@@ -507,12 +517,11 @@ if (config.nodeEnv === 'production') {
   // SPA fallback — serve index.html for all non-API routes, with the
   // per-section title/manifest swap so /admin and /tech install as
   // their own PWAs.
-  app.get('*', async (req, res) => {
+  app.get('*', (req, res, next) => {
     if (!req.path.startsWith('/api')) {
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.set('Content-Type', 'text/html; charset=utf-8');
-      res.send(await renderHTML(req.path));
+      return sendSpaHtml(req, res, next);
     }
+    return next();
   });
 }
 

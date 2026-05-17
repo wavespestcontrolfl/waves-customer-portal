@@ -2,6 +2,7 @@ const {
   applyHtmlMetadata,
   loadServiceReportPageMetadata,
   metadataForServiceReport,
+  redactReportPath,
   reportTokenFromPath,
 } = require('../services/report-page-metadata');
 
@@ -11,6 +12,12 @@ describe('report page metadata', () => {
     expect(reportTokenFromPath('/report/0123456789abcdef0123456789abcdef/')).toBe('0123456789abcdef0123456789abcdef');
     expect(reportTokenFromPath('/report/project/georgia-lobban-0123456789ab')).toBe(null);
     expect(reportTokenFromPath('/api/reports/0123456789abcdef0123456789abcdef/data')).toBe(null);
+  });
+
+  test('redacts service report bearer tokens before logging paths', () => {
+    expect(redactReportPath('/report/0123456789abcdef0123456789abcdef')).toBe('/report/[redacted]');
+    expect(redactReportPath('/report/0123456789abcdef0123456789abcdef/')).toBe('/report/[redacted]/');
+    expect(redactReportPath('/report/project/0123456789abcdef0123456789abcdef')).toBe('/report/project/0123456789abcdef0123456789abcdef');
   });
 
   test('builds report-specific title and share description from the service record', () => {
