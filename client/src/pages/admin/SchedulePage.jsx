@@ -4475,6 +4475,32 @@ const scoreButtonStyle = {
   cursor: "pointer",
 };
 
+function serviceLineFromType(serviceType = "") {
+  const text = String(serviceType || "").toLowerCase();
+  if (text.includes("lawn")) return "lawn";
+  if (text.includes("mosquito")) return "mosquito";
+  if (text.includes("termite")) return "termite";
+  if (text.includes("rodent")) return "rodent";
+  return "pest";
+}
+
+function defaultApplicationMethod(product = {}, serviceType = "") {
+  const category = String(product.category || product.product_category || "").toLowerCase();
+  const explicit = product.application_method || product.method;
+  if (explicit) return String(explicit).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (category.includes("bait") || category.includes("gel") || category.includes("glue")) return "bait_placement";
+  if (category.includes("fert") || category.includes("granular")) return "granular_broadcast";
+  const serviceLine = serviceLineFromType(serviceType);
+  if (serviceLine === "mosquito") return "fog_ulv";
+  if (serviceLine === "lawn") return category.includes("herb") ? "spot_treatment" : "broadcast_spray";
+  if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
+  return "perimeter_spray";
+}
+
+function requiresLinearFt(method) {
+  return ["perimeter_spray", "broadcast_spray"].includes(method);
+}
+
 export function CompletionPanel({
   service,
   products,
@@ -5341,6 +5367,7 @@ export function CompletionPanel({
   }
   function addProduct(product) {
     if (selectedProducts.find((p) => p.productId === product.id)) return;
+    const applicationMethod = defaultApplicationMethod(product, service?.serviceType || service?.service_type);
     const defaultUnit =
       product.defaultUnit ||
       product.default_unit ||
@@ -5361,9 +5388,10 @@ export function CompletionPanel({
           null,
         totalAmount: "",
         amountUnit: defaultUnit,
+        applicationMethod,
         applicationArea: "",
         areaValue: "",
-        areaUnit: "sqft",
+        areaUnit: requiresLinearFt(applicationMethod) ? "linear_ft" : "sqft",
       },
     ]);
     setProductSearch("");
@@ -5375,9 +5403,14 @@ export function CompletionPanel({
   }
   function updateProduct(productId, field, value) {
     setSelectedProducts((prev) =>
-      prev.map((p) =>
-        p.productId === productId ? { ...p, [field]: value } : p,
-      ),
+      prev.map((p) => {
+        if (p.productId !== productId) return p;
+        const next = { ...p, [field]: value };
+        if (field === "applicationMethod" && requiresLinearFt(value)) {
+          next.areaUnit = "linear_ft";
+        }
+        return next;
+      }),
     );
   }
   function toggleArea(area) {
@@ -5474,6 +5507,15 @@ export function CompletionPanel({
         return;
       }
     }
+    const missingLinearFtProduct = selectedProducts.find((p) => {
+      if (!requiresLinearFt(p.applicationMethod)) return false;
+      const feet = Number(p.areaValue);
+      return !Number.isFinite(feet) || feet <= 0 || p.areaUnit !== "linear_ft";
+    });
+    if (!isIncompleteVisit && missingLinearFtProduct) {
+      alert(`Enter linear feet for ${missingLinearFtProduct.name}.`);
+      return;
+    }
     setSubmitting(true);
     try {
       if (!completionIdempotencyKeyRef.current) {
@@ -5532,6 +5574,7 @@ export function CompletionPanel({
           rateUnit: p.rateUnit,
           totalAmount: p.totalAmount,
           amountUnit: p.amountUnit,
+          applicationMethod: p.applicationMethod,
           applicationArea:
             p.applicationArea ||
             (areasServiced.length === 1 ? areasServiced[0] : null),
@@ -6844,6 +6887,52 @@ export function CompletionPanel({
                             </option>
                           ))}
                         </select>
+                      )}
+                      <select
+                        value={sp.applicationMethod || "perimeter_spray"}
+                        onChange={(e) =>
+                          updateProduct(
+                            sp.productId,
+                            "applicationMethod",
+                            e.target.value,
+                          )
+                        }
+                        style={{
+                          ...mInput,
+                          minWidth: 150,
+                          flex: "1 1 150px",
+                          height: 40,
+                          padding: "0 12px",
+                        }}
+                      >
+                        <option value="perimeter_spray">Perimeter spray</option>
+                        <option value="broadcast_spray">Broadcast spray</option>
+                        <option value="spot_treatment">Spot treatment</option>
+                        <option value="granular_broadcast">Granular</option>
+                        <option value="bait_placement">Bait</option>
+                        <option value="station_check">Station check</option>
+                        <option value="fog_ulv">Fog/ULV</option>
+                      </select>
+                      {requiresLinearFt(sp.applicationMethod) && (
+                        <input
+                          type="number"
+                          min="1"
+                          placeholder="Linear ft"
+                          value={sp.areaValue || ""}
+                          onChange={(e) =>
+                            updateProduct(
+                              sp.productId,
+                              "areaValue",
+                              e.target.value,
+                            )
+                          }
+                          style={{
+                            ...mInput,
+                            width: 112,
+                            height: 40,
+                            padding: "0 12px",
+                          }}
+                        />
                       )}
                       <button
                         type="button"
@@ -8347,6 +8436,46 @@ export function CompletionPanel({
                         </option>
                       ))}
                     </select>
+                  )}
+                  <select
+                    value={sp.applicationMethod || "perimeter_spray"}
+                    onChange={(e) =>
+                      updateProduct(
+                        sp.productId,
+                        "applicationMethod",
+                        e.target.value,
+                      )
+                    }
+                    style={{
+                      ...inputStyle,
+                      minWidth: 150,
+                      flex: "1 1 150px",
+                      marginBottom: 0,
+                    }}
+                  >
+                    <option value="perimeter_spray">Perimeter spray</option>
+                    <option value="broadcast_spray">Broadcast spray</option>
+                    <option value="spot_treatment">Spot treatment</option>
+                    <option value="granular_broadcast">Granular</option>
+                    <option value="bait_placement">Bait</option>
+                    <option value="station_check">Station check</option>
+                    <option value="fog_ulv">Fog/ULV</option>
+                  </select>
+                  {requiresLinearFt(sp.applicationMethod) && (
+                    <input
+                      type="number"
+                      min="1"
+                      placeholder="Linear ft"
+                      value={sp.areaValue || ""}
+                      onChange={(e) =>
+                        updateProduct(
+                          sp.productId,
+                          "areaValue",
+                          e.target.value,
+                        )
+                      }
+                      style={{ ...inputStyle, width: 98, marginBottom: 0 }}
+                    />
                   )}
                   <button
                     onClick={() => removeProduct(sp.productId)}

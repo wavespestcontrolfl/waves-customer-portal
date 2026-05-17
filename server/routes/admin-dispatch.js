@@ -29,6 +29,7 @@ const {
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
+const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
 const { uploadServicePhotoDataUrls } = require('../services/service-photos');
@@ -86,6 +87,21 @@ async function runtimeServiceReportFlag(req, flagKey, envKey, defaultValue = fal
 
 function oneTapCompletionSubmitEnabled() {
   return ['1', 'true', 'yes', 'on'].includes(String(process.env.ONE_TAP_COMPLETION_SUBMIT_ENABLED || '').trim().toLowerCase());
+}
+
+function inferServiceReportApplicationMethod(product = {}, productInput = {}, serviceLine = 'pest') {
+  const explicit = String(productInput.applicationMethod || productInput.method || product.application_method || product.method || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_');
+  if (explicit) return explicit;
+  const category = String(product.category || product.product_category || '').toLowerCase();
+  if (category.includes('bait') || category.includes('gel') || category.includes('glue')) return 'bait_placement';
+  if (category.includes('fert') || category.includes('granular')) return 'granular_broadcast';
+  if (serviceLine === 'mosquito') return 'fog_ulv';
+  if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : 'broadcast_spray';
+  if (serviceLine === 'rodent' || serviceLine === 'termite') return 'station_check';
+  return 'perimeter_spray';
 }
 
 async function renderRequiredTemplate(templateKey, vars) {
@@ -1598,6 +1614,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }));
           await trx('service_findings').insert(findingRows);
         }
+        if (useServiceReportV1 && serviceFindingsAvailable && !reportObservations.length && !isIncompleteVisit) {
+          await trx('service_findings').insert({
+            service_record_id: record.id,
+            category: 'no_activity',
+            severity: 'info',
+            title: 'No activity observed this visit',
+            detail: 'All inspected zones were clear of pest activity and conducive conditions. Continuing routine protective service per schedule.',
+            recommendation: null,
+          });
+        }
         if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index) {
           const pressureIndex = await computePressureIndex(record.id, trx);
           record.pressure_index = pressureIndex;
@@ -1685,6 +1711,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
+            const applicationMethod = inferServiceReportApplicationMethod(product, p, reportServiceLine);
+            const areaValue = p.areaValue != null && p.areaValue !== '' ? Number(p.areaValue) : null;
+            const areaUnit = p.areaUnit || null;
+            if (
+              ['perimeter_spray', 'broadcast_spray'].includes(applicationMethod)
+              && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'linear_ft')
+            ) {
+              const err = new Error(`Linear feet are required for ${product.name}`);
+              err.isOperational = true; err.statusCode = 400;
+              err.code = 'linear_ft_required';
+              throw err;
+            }
             const appliedAmount = p.totalAmount != null && p.totalAmount !== ''
               ? parseFloat(p.totalAmount)
               : null;
@@ -1711,16 +1749,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               amount_unit: appliedAmountUnit,
             };
             if (serviceProductCols.product_id) serviceProductInsert.product_id = product.id;
-            if (serviceProductCols.application_method) serviceProductInsert.application_method = p.applicationMethod || p.method || null;
+            if (serviceProductCols.application_method) serviceProductInsert.application_method = applicationMethod;
             if (serviceProductCols.application_area) serviceProductInsert.application_area = p.applicationArea || p.area || null;
-            if (serviceProductCols.epa_reg_number) serviceProductInsert.epa_reg_number = product.epa_reg_number || null;
+            if (serviceProductCols.epa_reg_number) serviceProductInsert.epa_reg_number = product.epa_reg_number || product.epa_registration_number || null;
             if (serviceProductCols.zone_ids) serviceProductInsert.zone_ids = Array.isArray(p.zoneIds) ? p.zoneIds : [];
             if (serviceProductCols.targets) serviceProductInsert.targets = Array.isArray(p.targets) ? p.targets : [];
             if (serviceProductCols.area_value) {
-              const areaValue = p.areaValue != null && p.areaValue !== '' ? Number(p.areaValue) : null;
               serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
             }
-            if (serviceProductCols.area_unit) serviceProductInsert.area_unit = p.areaUnit || null;
+            if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
 
             await recordServiceProductNutrients(trx, {
@@ -2122,6 +2159,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       logger.error(`[dispatch] service report token mint failed: ${err.message}`);
     }
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
+    if (serviceReportV1Delivery && reportToken) {
+      await enqueuePdfRenderJob({
+        serviceRecordId: record.id,
+        payload: {
+          source: 'dispatch_complete',
+          token: reportToken,
+        },
+      }).catch((err) => {
+        logger.warn(`[dispatch] service report PDF render queue failed for ${record.id}: ${err.message}`);
+      });
+    }
     let reportSmsUrl = reportUrl;
     if (serviceReportV1Delivery && reportUrl && reportUrl !== portalUrl) {
       reportSmsUrl = await shortenOrPassthrough(reportUrl, {

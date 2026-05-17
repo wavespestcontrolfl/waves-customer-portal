@@ -392,6 +392,21 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN — Retry queued service report PDF renders
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { processDuePdfRenderJobs } = require('./service-report/pdf-queue');
+      const result = await processDuePdfRenderJobs();
+      if (result.claimed || result.succeeded || result.failed || result.requeued || result.recovered) {
+        logger.info(`Service report PDF renders: ${result.succeeded} succeeded, ${result.requeued} queued for retry, ${result.failed} failed, ${result.recovered} recovered`);
+      }
+    } catch (err) {
+      logger.error(`Service report PDF render cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 2:45AM — Build anonymized service report neighborhood pressure rolls
   // =========================================================================
   cron.schedule('45 2 * * *', async () => {

@@ -11,6 +11,10 @@ const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const {
+  getHealthyStoredReportPdf,
+  putReportPdf,
+} = require('../services/service-report/pdf-storage');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
   answerServiceReportQuestion,
@@ -400,8 +404,27 @@ router.get('/:token', async (req, res, next) => {
     await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
 
     if (service.report_template_version === 'service_report_v1') {
+      const storedPdf = await getHealthyStoredReportPdf(service.pdf_storage_key);
+      if (storedPdf) {
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+        res.setHeader('Cache-Control', 'no-store');
+        return res.send(storedPdf);
+      }
+
       const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf' });
-      const pdf = await renderServiceReportV1Pdf(data, { token: req.params.token, req, logger });
+      const pdf = await renderServiceReportV1Pdf(data, {
+        token: req.params.token,
+        req,
+        logger,
+        serviceRecordId: service.id,
+      });
+      try {
+        const key = await putReportPdf(service.id, pdf);
+        await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
+      } catch (storageErr) {
+        logger.warn(`[reports-public] PDF storage skipped for ${service.id}: ${storageErr.message}`);
+      }
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
       res.setHeader('Cache-Control', 'no-store');

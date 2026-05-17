@@ -138,7 +138,7 @@ export default function ToolHealthPage() {
     );
   }
 
-  const { overallStatus, summary, agents, contexts, recentErrors, alerts } =
+  const { overallStatus, summary, agents, contexts, pdfRenderer, recentErrors, alerts } =
     data;
 
   return (
@@ -204,6 +204,49 @@ export default function ToolHealthPage() {
           />{" "}
         </div>{" "}
       </div>
+      {pdfRenderer && (
+        <div style={sCard}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 16,
+              flexWrap: "wrap",
+            }}
+          >
+            <div>
+              <div style={sLabel}>PDF Renderer</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+                PDF render success rate
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+              <Metric
+                label="Success rate"
+                value={
+                  pdfRenderer.successRate == null
+                    ? "—"
+                    : pct(pdfRenderer.successRate)
+                }
+              />
+              <Metric label="Succeeded" value={pdfRenderer.succeeded || 0} />
+              <Metric
+                label="Terminal failures"
+                value={pdfRenderer.terminalFailed || 0}
+              />
+              <Metric
+                label="P95 latency"
+                value={
+                  pdfRenderer.p95LatencyMs
+                    ? `${pdfRenderer.p95LatencyMs}ms`
+                    : "—"
+                }
+              />
+            </div>
+          </div>
+        </div>
+      )}
       {/* Alerts */}
       {alerts.length > 0 && (
         <div style={sCard}>

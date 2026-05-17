@@ -4,8 +4,13 @@ const { detectServiceLine, getServiceLineConfig } = require('./service-line-conf
 const { pressureFromFindings } = require('./pressure-index');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
+const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
 const { resolveTechPhotoUrl } = require('../tech-photo');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
+const {
+  formatTechnicianForCustomer,
+  initialsForCustomerTechnicianName,
+} = require('../../utils/technician-name');
 
 let PhotoService = null;
 try {
@@ -170,11 +175,6 @@ function compactAddress(record) {
   return [street, region].filter(Boolean).join(', ');
 }
 
-function initialsForName(value) {
-  const parts = String(value || 'Waves team').trim().split(/\s+/).filter(Boolean);
-  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'W';
-}
-
 function aggregateApplicationArea(applications, preferredUnits = []) {
   const preferred = new Set(preferredUnits);
   return applications.reduce((sum, app) => {
@@ -192,6 +192,7 @@ function metricValue(metric, context) {
   if (metric.aggregate === 'count_findings') return context.findings.length;
   if (metric.aggregate === 'pressure_index') return context.pressureIndex;
   if (metric.key === 'linear_ft') {
+    if (context.linearFt != null) return context.linearFt;
     const total = Math.round(aggregateApplicationArea(context.applications, ['linear_ft']));
     return total > 0 ? total : null;
   }
@@ -627,10 +628,11 @@ async function buildReportV1Data(service, token, knex = db) {
     mode: 'live',
   }).catch(() => ({ available: false, fallbackReason: 'build_failed' }));
 
-  const onSiteMin = minutesFromElapsed(structured.timeOnSite)
-    || (service.started_at && service.ended_at
-      ? Math.max(0, Math.round((new Date(service.ended_at) - new Date(service.started_at)) / 60000))
-      : null);
+  const onSiteMin = computeOnSiteMin({
+    ...service,
+    timeOnSite: structured.timeOnSite,
+  });
+  const linearFt = await computeLinearFt(service.id, knex).catch(() => null);
   const treatedZoneIds = new Set(applications.flatMap((app) => app.zone_ids || []));
   const recommendations = uniqueStrings([
     ...protocol.recommendations,
@@ -663,6 +665,7 @@ async function buildReportV1Data(service, token, knex = db) {
     applications,
     findings,
     pressureIndex,
+    linearFt,
     serviceData,
   }).map((metric) => (
     lawnAssessment && metric.key === 'pressure_index'
@@ -676,7 +679,11 @@ async function buildReportV1Data(service, token, knex = db) {
       }
       : metric
   ));
-  const technicianName = service.technician_name || 'Waves team';
+  const technicianName = formatTechnicianForCustomer({
+    name: service.technician_name,
+    first_name: service.technician_first_name,
+    last_name: service.technician_last_name,
+  });
   const technicianPhotoUrl = await resolveTechPhotoUrl(
     service.technician_photo_s3_key,
     service.technician_avatar_url || service.technician_photo_url,
@@ -695,7 +702,7 @@ async function buildReportV1Data(service, token, knex = db) {
     technician: {
       name: technicianName,
       photoUrl: technicianPhotoUrl,
-      initials: initialsForName(technicianName),
+      initials: initialsForCustomerTechnicianName(technicianName),
     },
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,

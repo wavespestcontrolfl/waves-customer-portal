@@ -350,7 +350,7 @@ function answerFindings({ data = {} } = {}) {
   const lawnAssessment = data.lawnAssessment || null;
   const findings = Array.isArray(data.findings) ? data.findings : [];
   if (lawnAssessment?.observations) return lawnAssessment.observations;
-  if (!findings.length) return 'No issues were documented during this visit.';
+  if (!findings.length) return 'No activity was observed this visit. Routine protective service will continue on schedule.';
   return findings.slice(0, 3).map((finding) => {
     const detail = finding.detail ? ` ${finding.detail}` : '';
     const rec = finding.recommendation ? ` Recommended: ${finding.recommendation}` : '';

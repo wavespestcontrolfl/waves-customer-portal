@@ -14,7 +14,6 @@ const {
   validatePhotoChainRows,
 } = require('../services/service-report/photo-chain');
 const {
-  renderFallbackPdf,
   serviceReportViewerUrl,
 } = require('../services/service-report/pdf');
 const {
@@ -67,6 +66,10 @@ describe('service report v1', () => {
     expect(routine).toBe(0.6);
     expect(callback).toBeGreaterThan(routine);
     expect(callback).toBe(2.0);
+  });
+
+  test('pressure index floors clean first visits at 0.3', () => {
+    expect(pressureFromFindings([])).toBe(0.3);
   });
 
   test('dynamic pressure trend includes current override and customer ROI copy', () => {
@@ -941,32 +944,9 @@ describe('service report v1', () => {
     });
   });
 
-  test('v1 PDF fallback is a real PDF and viewer URL points to the report page', async () => {
+  test('v1 PDF renderer has no compact fallback and viewer URL points to the report page', () => {
     expect(serviceReportViewerUrl('token-1')).toBe('http://localhost:5173/report/token-1?mode=pdf');
-
-    const pdf = await renderFallbackPdf({
-      serviceLineDisplay: 'WaveGuard pest control',
-      serviceType: 'Residential Pest Control',
-      serviceDate: '2026-05-15',
-      technicianName: 'Waves team',
-      cityState: 'Lakewood Ranch, FL',
-      metrics: [
-        { label: 'On-site', value: 12, unit: 'min' },
-        { label: 'Zones', value: '4/4' },
-        { label: 'Linear ft', value: 180 },
-        { label: 'Pressure index', value: 1.2 },
-      ],
-      advisory: {
-        exterior_reentry_min: 30,
-        interior_reentry_min: 120,
-        irrigation_hold_hr: 24,
-        pet_advisory: 'Keep pets off treated zones until dry.',
-      },
-      applications: [],
-      findings: [],
-    });
-
-    expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
+    expect(require('../services/service-report/pdf').renderFallbackPdf).toBeUndefined();
   });
 
   test('v1 SMS delivery copy includes public report link and advisory re-entry', () => {
