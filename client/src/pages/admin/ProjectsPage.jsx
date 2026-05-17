@@ -292,19 +292,16 @@ function evaluateProjectReadiness({
     // wood treatments may not either.
     const isBaitSystem = rawMethod === "Bait system";
     const isWoodTreatment = rawMethod === "Wood treatment (borate)";
+    const needsGallons = !isBaitSystem && !isWoodTreatment;
     const hasArea =
       hasMeaningfulValue(findings?.square_footage) ||
       hasMeaningfulValue(findings?.linear_feet);
-    const coverageOk = isBaitSystem
-      ? hasMeaningfulValue(findings?.square_footage)
-      : isWoodTreatment
-      ? hasArea
-      : hasArea && hasMeaningfulValue(findings?.gallons_applied);
-    const coverageLabel = isBaitSystem
-      ? "Perimeter coverage (square footage)"
-      : isWoodTreatment
-      ? "Coverage (sq ft or linear ft)"
-      : "Coverage + gallons applied";
+    const coverageOk = needsGallons
+      ? hasArea && hasMeaningfulValue(findings?.gallons_applied)
+      : hasArea;
+    const coverageLabel = needsGallons
+      ? "Coverage + gallons applied"
+      : "Coverage (sq ft or linear ft)";
     required.push(
       {
         label: "Treatment address or lot/block",
