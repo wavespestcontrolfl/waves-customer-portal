@@ -78,6 +78,17 @@ function treatmentForMethod(method) {
   return 'url(#hatch-spray)';
 }
 
+function applicationZoneIds(app = {}) {
+  const ids = Array.isArray(app.zone_ids)
+    ? app.zone_ids
+    : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
+  return ids.map((id) => String(id)).filter(Boolean);
+}
+
+function isRenderableApplication(app = {}) {
+  return (app.method || 'perimeter_spray') !== 'station_check';
+}
+
 function renderFogArrows(box) {
   const y = num(box.y) + num(box.h) / 2;
   const x = num(box.x);
@@ -88,34 +99,47 @@ function renderFogArrows(box) {
   }).join('');
 }
 
-function renderApplicationLayer(app, zonesById, fallbackSequenceStart) {
+function renderApplicationBadge(center, number) {
+  return `<g class="app-badge" transform="translate(${num(center.x)} ${num(center.y)})"><circle r="8" class="app-badge-fill"/><text y="3.5" text-anchor="middle" class="app-badge-label">${esc(number)}</text></g>`;
+}
+
+function renderApplicationLayer(app, zonesById, fallbackSequenceStart, applicationNumber, zoneApplicationIds, applicationId) {
   const method = app.method || 'perimeter_spray';
   if (method === 'station_check') return '';
 
   let baitSeq = fallbackSequenceStart;
-  const zoneIds = Array.isArray(app.zone_ids) ? app.zone_ids : [];
+  const zoneIds = applicationZoneIds(app);
   const zones = zoneIds.map((id) => zonesById.get(String(id))).filter(Boolean);
   if (!zones.length) return '';
+  const appId = String(applicationId || app.id || `application-${applicationNumber}`);
 
   const dataAttrs = [
-    `data-application-id="${esc(app.id)}"`,
+    `data-application-id="${esc(appId)}"`,
+    `data-map-number="${esc(applicationNumber)}"`,
     `data-product-name="${esc(app.product?.name || '')}"`,
     `data-epa-reg="${esc(app.product?.epa_reg || '')}"`,
     `data-method="${esc(method)}"`,
+    `data-method-label="${esc(METHOD_LABELS[method] || method)}"`,
   ].join(' ');
 
   const content = zones.map((zone) => {
     const center = zoneCenter(zone);
+    const zoneAppIds = zoneApplicationIds.get(String(zone.id)) || [appId];
+    const appPosition = Math.max(0, zoneAppIds.indexOf(appId));
+    const badgeCenter = {
+      x: center.x,
+      y: center.y + (appPosition - ((zoneAppIds.length || 1) - 1) / 2) * 18,
+    };
     if (method === 'bait_placement') {
       const label = app.sequence || baitSeq++;
-      return `<g class="bait-marker" data-zone-id="${esc(zone.id)}"><circle cx="${center.x}" cy="${center.y}" r="6" class="app-fill app-stroke"/><text x="${center.x}" y="${center.y + 3}" text-anchor="middle" class="bait-label">${esc(label)}</text></g>`;
+      return `<g class="bait-marker" data-zone-id="${esc(zone.id)}" data-marker-sequence="${esc(label)}"><circle cx="${badgeCenter.x}" cy="${badgeCenter.y}" r="8" class="app-badge-fill"/><text x="${badgeCenter.x}" y="${badgeCenter.y + 3.5}" text-anchor="middle" class="app-badge-label">${esc(applicationNumber)}</text></g>`;
     }
     if (method === 'trunk_injection') {
-      return `<line x1="${center.x}" y1="${center.y - 7}" x2="${center.x}" y2="${center.y + 7}" class="app-stroke injection-marker" data-zone-id="${esc(zone.id)}"/>`;
+      return `<g data-zone-id="${esc(zone.id)}"><line x1="${center.x}" y1="${center.y - 7}" x2="${center.x}" y2="${center.y + 7}" class="app-stroke injection-marker"/>${renderApplicationBadge(badgeCenter, applicationNumber)}</g>`;
     }
     const box = zoneBox(zone);
     const arrows = method === 'fog_ulv' ? renderFogArrows(box) : '';
-    return `<g data-zone-id="${esc(zone.id)}"><rect ${rectAttrs(box)} fill="${treatmentForMethod(method)}" class="app-overlay"/><rect ${rectAttrs(box)} class="app-overlay-outline"/>${arrows}</g>`;
+    return `<g data-zone-id="${esc(zone.id)}"><rect ${rectAttrs(box)} fill="${treatmentForMethod(method)}" class="app-overlay"/><rect ${rectAttrs(box)} class="app-overlay-outline"/>${arrows}${renderApplicationBadge(badgeCenter, applicationNumber)}</g>`;
   }).join('');
 
   return `<g class="app-layer" ${dataAttrs}>${content}</g>`;
@@ -149,19 +173,38 @@ function renderTreatmentMap(input) {
   const zones = (input.zones || []).map((zone) => ({ ...zone, id: String(zone.id) }));
   const zonesById = new Map(zones.map((zone) => [String(zone.id), zone]));
   const applications = input.applications || [];
+  const renderableApplications = applications.map((app, index) => {
+    const appId = String(app.id || `application-${index + 1}`);
+    const zoneIds = applicationZoneIds(app).filter((zoneId) => zonesById.has(String(zoneId)));
+    return {
+      app: { ...app, id: appId, zone_ids: zoneIds },
+      appId,
+      zoneIds,
+    };
+  }).filter(({ app, zoneIds }) => isRenderableApplication(app) && zoneIds.length);
   const usedMethods = [];
   const seenMethods = new Set();
-  for (const app of applications) {
+  for (const { app } of renderableApplications) {
     if (!app.method || app.method === 'station_check' || seenMethods.has(app.method)) continue;
     seenMethods.add(app.method);
     usedMethods.push(app.method);
   }
 
   let baitSequence = 1;
-  const appLayers = applications.map((app) => {
-    const layer = renderApplicationLayer(app, zonesById, baitSequence);
+  const zoneApplicationIds = new Map();
+  renderableApplications.forEach(({ app, appId }) => {
+    const zoneIds = applicationZoneIds(app);
+    zoneIds.forEach((zoneId) => {
+      const key = String(zoneId);
+      const ids = zoneApplicationIds.get(key) || [];
+      ids.push(appId);
+      zoneApplicationIds.set(key, ids);
+    });
+  });
+  const appLayers = renderableApplications.map(({ app, appId }, index) => {
+    const layer = renderApplicationLayer(app, zonesById, baitSequence, index + 1, zoneApplicationIds, appId);
     if (app.method === 'bait_placement') {
-      const count = Array.isArray(app.zone_ids) ? app.zone_ids.length : 0;
+      const count = applicationZoneIds(app).length;
       baitSequence += count;
     }
     return layer;
@@ -182,7 +225,7 @@ function renderTreatmentMap(input) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VIEWBOX_W} ${VIEWBOX_H}" role="img" aria-label="Treatment map">
 ${renderDefs()}
 <style>
-.map-bg{fill:#fafafa}.lot-bg{fill:url(#lot-dot);stroke:#d4d4d4;stroke-width:.5}.footprint{fill:#f5f5f5;stroke:#a3a3a3;stroke-width:.5}.water{fill:#eef2f7;stroke:#a3a3a3;stroke-width:.5}.drive{fill:#f0f0f0;stroke:#a3a3a3;stroke-width:.5}.zone-outline{fill:none;stroke:#737373;stroke-width:.5;stroke-dasharray:4 4}.zone-letter,.map-small{font-family:Inter,Arial,sans-serif;font-size:10px;fill:#404040}.map-label{font-weight:600}.app-overlay{opacity:.5}.app-overlay-outline,.app-stroke{fill:none;stroke:#404040;stroke-width:.7}.app-fill{fill:#fff}.bait-label{font-family:Inter,Arial,sans-serif;font-size:8px;fill:#111}.injection-marker{stroke-width:1.5}.flag-fill{fill:#b91c1c}.flag-mark{font-family:Inter,Arial,sans-serif;font-size:11px;font-weight:700;fill:#fff}.flag-label{font-family:Inter,Arial,sans-serif;font-size:10px;fill:#b91c1c}.map-ink-fill{fill:#262626}.map-ink-stroke{stroke:#262626;stroke-width:.7}.legend-box{fill:rgba(255,255,255,.92);stroke:#d4d4d4;stroke-width:.5}.legend-swatch{stroke:#404040;stroke-width:.5}
+.map-bg{fill:#fafafa}.lot-bg{fill:url(#lot-dot);stroke:#d4d4d4;stroke-width:.5}.footprint{fill:#f5f5f5;stroke:#a3a3a3;stroke-width:.5}.water{fill:#eef2f7;stroke:#a3a3a3;stroke-width:.5}.drive{fill:#f0f0f0;stroke:#a3a3a3;stroke-width:.5}.zone-outline{fill:none;stroke:#737373;stroke-width:.5;stroke-dasharray:4 4}.zone-letter,.map-small{font-family:Inter,Arial,sans-serif;font-size:10px;fill:#404040}.map-label{font-weight:600}.app-layer{cursor:pointer}.app-overlay{opacity:.5}.app-overlay-outline,.app-stroke{fill:none;stroke:#404040;stroke-width:.7}.app-fill{fill:#fff}.app-badge-fill{fill:#262626;stroke:#fff;stroke-width:1}.app-badge-label{font-family:Inter,Arial,sans-serif;font-size:8px;font-weight:700;fill:#fff}.bait-label{font-family:Inter,Arial,sans-serif;font-size:8px;fill:#111}.injection-marker{stroke-width:1.5}.flag-fill{fill:#b91c1c}.flag-mark{font-family:Inter,Arial,sans-serif;font-size:11px;font-weight:700;fill:#fff}.flag-label{font-family:Inter,Arial,sans-serif;font-size:10px;fill:#b91c1c}.map-ink-fill{fill:#262626}.map-ink-stroke{stroke:#262626;stroke-width:.7}.legend-box{fill:rgba(255,255,255,.92);stroke:#d4d4d4;stroke-width:.5}.legend-swatch{stroke:#404040;stroke-width:.5}
 </style>
 <rect width="${VIEWBOX_W}" height="${VIEWBOX_H}" class="map-bg"/>
 <rect x="10" y="10" width="${num(lot.w, VIEWBOX_W - 20)}" height="${num(lot.h, VIEWBOX_H - 20)}" class="lot-bg"/>
