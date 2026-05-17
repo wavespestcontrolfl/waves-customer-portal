@@ -39,7 +39,7 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
       gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
       emulateMediaType: 'print',
       pdfOptions: {
-        format: 'Letter',
+        format: 'letter',
         printBackground: true,
         margin: {
           top: '0.5in',
