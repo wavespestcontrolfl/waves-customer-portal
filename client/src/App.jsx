@@ -175,6 +175,7 @@ const GeofenceEventsPage = lazyWithRetry(() => import('./pages/admin/GeofenceEve
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
 const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
 const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
+const PricingRealityCheckPage = lazyWithRetry(() => import('./pages/admin/PricingRealityCheckPage'));
 const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemPage'));
 const DesignSystemFlagsPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemFlagsPage'));
 const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
@@ -327,6 +328,7 @@ export default function App() {
             <Route path="email" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading email...</div>}><AdminEmailPage /></Suspense>} />
             <Route path="banking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading banking...</div>}><AdminBankingPage /></Suspense>} />
             <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingLogicPage /></Suspense>} />
+            <Route path="pricing-reality-check" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing reality check...</div>}><PricingRealityCheckPage /></Suspense>} />
             <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
             <Route path="more" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading…</div>}><AdminMorePage /></Suspense>} />
             <Route path="_design-system" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading design system...</div>}><DesignSystemPage /></Suspense>} />
