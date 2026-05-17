@@ -80,6 +80,7 @@ Use for: "instant payout", "send $500 to bank now", "emergency payout"`,
       type: 'object',
       properties: {
         amount: { type: 'number', description: 'Amount in dollars to pay out instantly' },
+        idempotency_key: { type: 'string', description: 'Stable per-confirmation idempotency key' },
       },
       required: ['amount'],
     },
@@ -92,6 +93,7 @@ Use for: "standard payout", "send money to the bank without instant fees", "tran
       type: 'object',
       properties: {
         amount: { type: 'number', description: 'Amount in dollars to pay out on Stripe standard timing' },
+        idempotency_key: { type: 'string', description: 'Stable per-confirmation idempotency key' },
       },
       required: ['amount'],
     },
@@ -128,6 +130,17 @@ const BANKING_QUERY_TOOLS = BANKING_TOOLS.filter(t => !BANKING_WRITE_TOOL_NAMES.
 function getValidPayoutAmount(input) {
   const amount = input?.amount;
   return typeof amount === 'number' && Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+function getPayoutOptions(input) {
+  const options = {};
+  if (input?.idempotencyKey || input?.idempotency_key) {
+    options.idempotencyKey = input.idempotencyKey || input.idempotency_key;
+  }
+  if (input?.requestedBy) {
+    options.requestedBy = input.requestedBy;
+  }
+  return options;
 }
 
 
@@ -346,7 +359,10 @@ async function requestInstantPayout(input) {
   const netAmount = Math.round((amount - estimatedFee) * 100) / 100;
 
   try {
-    const result = await StripeBanking.createInstantPayout(amount);
+    const options = getPayoutOptions(input);
+    const result = Object.keys(options).length
+      ? await StripeBanking.createInstantPayout(amount, options)
+      : await StripeBanking.createInstantPayout(amount);
     return {
       ...result,
       estimated_fee: estimatedFee,
@@ -366,7 +382,10 @@ async function requestStandardPayout(input) {
   }
 
   try {
-    const result = await StripeBanking.createStandardPayout(amount);
+    const options = getPayoutOptions(input);
+    const result = Object.keys(options).length
+      ? await StripeBanking.createStandardPayout(amount, options)
+      : await StripeBanking.createStandardPayout(amount);
     return {
       ...result,
       estimated_fee: 0,

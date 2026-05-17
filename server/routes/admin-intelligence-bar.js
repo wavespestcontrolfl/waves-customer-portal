@@ -51,6 +51,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
 const MAX_TOOL_ROUNDS = 8;
+const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
@@ -69,6 +70,18 @@ const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
 
 function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
+}
+
+function getAdminActorId(req) {
+  return String(req.technicianId || req.technician?.id || 'admin');
+}
+
+function getConfirmedActionIdempotencyKey(req, params) {
+  const key = params?.idempotencyKey || params?.idempotency_key || req.body.idempotency_key;
+  if (!key || !IDEMPOTENCY_KEY_RE.test(String(key))) {
+    return null;
+  }
+  return String(key);
 }
 
 // Context-specific system prompt extensions
@@ -832,9 +845,25 @@ router.post('/execute', async (req, res, next) => {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
     }
 
-    const result = await executeToolByName(action, params || {});
+    let executionParams = params || {};
+    if (CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
+      const idempotencyKey = getConfirmedActionIdempotencyKey(req, executionParams);
+      if (!idempotencyKey) {
+        return res.status(400).json({ error: 'A valid idempotency key is required for this action' });
+      }
+      executionParams = {
+        ...executionParams,
+        idempotencyKey,
+        requestedBy: getAdminActorId(req),
+      };
+    }
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, params);
+    const result = await executeToolByName(action, executionParams);
+
+    logger.info(`[intelligence-bar] Executed action: ${action}`, {
+      ...executionParams,
+      ...(executionParams.idempotencyKey ? { idempotencyKey: '[redacted]' } : {}),
+    });
 
     res.json({
       success: !result.error,
