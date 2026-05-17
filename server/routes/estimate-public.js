@@ -663,7 +663,7 @@ function renderPage(token, estimate, estData) {
   const setupDueToday = showMembershipFee ? membershipFee : 0;
   const showAnnualPrepayOption = showMembershipFee;
   const billingLede = showAnnualPrepayOption
-    ? 'Billed after each completed service visit through autopay unless you choose the 12-month prepay option at signup.'
+    ? 'Billed after each completed service visit through autopay unless you choose to pay the 12-month plan in full at signup.'
     : 'Billed after each completed service visit through autopay.';
   const recurringBillCadenceWord = selectedRecurringFrequencyKey === 'quarterly'
     ? 'quarterly'
