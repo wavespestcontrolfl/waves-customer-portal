@@ -81,36 +81,30 @@ function colorForTech(techId) {
   return PALETTE[hashId(techId) % PALETTE.length];
 }
 
-function svgPin(color, isSelected = false, isTruck = false) {
-  // Inline SVG so we don't ship marker images. Tech pins are Waves
-  // van icons; job pins stay circles for an at-a-glance "tech is here"
-  // vs "job is there" read without a legend.
+function svgPin(color, isSelected = false) {
+  // Job circle pin (inline SVG). Tech markers use the asb.png raster
+  // asset instead — see techIcon() below.
   const stroke = isSelected ? '#18181B' : '#FFFFFF';
   const strokeWidth = isSelected ? 3 : 1.5;
-  if (isTruck) {
-    const size = isSelected ? 38 : 34;
-    const haloStroke = isSelected ? '#18181B' : color;
-    const stripe = color === '#F0A500' ? '#0A7EC2' : '#F0A500';
-    const svg = `
-      <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 40 40">
-        <circle cx="20" cy="20" r="${isSelected ? 17 : 15}" fill="#FFFFFF" stroke="${haloStroke}" stroke-width="${isSelected ? 3 : 2}"/>
-        <g transform="translate(4 10)">
-          <path d="M3 8.5C3 6.6 4.6 5 6.5 5h13.6c1.7 0 3.2.9 4.1 2.3l2.7 4.2H31c1.1 0 2 .9 2 2V18H3V8.5Z" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linejoin="round"/>
-          <path d="M7 8h6.6v4.1H7V8Zm9 0h4.2c.8 0 1.5.4 1.9 1.1l1.8 3H16V8Z" fill="#DFF2FF"/>
-          <path d="M5.3 14.6h25.8" stroke="${stripe}" stroke-width="2" stroke-linecap="round"/>
-          <circle cx="10" cy="18" r="3.1" fill="#18181B"/>
-          <circle cx="26" cy="18" r="3.1" fill="#18181B"/>
-          <circle cx="10" cy="18" r="1.2" fill="#FFFFFF"/>
-          <circle cx="26" cy="18" r="1.2" fill="#FFFFFF"/>
-          <circle cx="30" cy="7" r="3" fill="#FFFFFF" stroke="${color}" stroke-width="1.5"/>
-        </g>
-      </svg>`;
-    return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
-  }
   const size = isSelected ? 28 : 22;
   const shape = `<circle cx="14" cy="14" r="9" fill="${color}" stroke="${stroke}" stroke-width="${strokeWidth}"/>`;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 28 28">${shape}</svg>`;
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+// Tech marker — Waves logo served from client/public/waves-logo.png.
+// Sized to match the previous van pin (34 / 38 selected), anchored
+// center so the icon sits over the lat/lng. scaledSize/anchor are
+// constructed with window.google.maps.* and therefore must only be
+// called after the Maps SDK has loaded (we already gate on isLoaded
+// below).
+function techIcon(isSelected) {
+  const size = isSelected ? 38 : 34;
+  return {
+    url: '/waves-logo.png',
+    scaledSize: new window.google.maps.Size(size, size),
+    anchor: new window.google.maps.Point(size / 2, size / 2),
+  };
 }
 
 export default function DispatchMap({
@@ -231,9 +225,7 @@ export default function DispatchMap({
             <Marker
               key={`tech-${tech.id}`}
               position={{ lat: tech.lat, lng: tech.lng }}
-              icon={{
-                url: svgPin(colorForTech(tech.id), tech.id === selectedTechId, true),
-              }}
+              icon={techIcon(tech.id === selectedTechId)}
               title={tech.name}
               onClick={() => onSelectTech(tech.id)}
             />
@@ -245,7 +237,7 @@ export default function DispatchMap({
               key={`job-${job.id}`}
               position={{ lat: job.lat, lng: job.lng }}
               icon={{
-                url: svgPin(colorForTech(job.technician_id), false, false),
+                url: svgPin(colorForTech(job.technician_id), false),
               }}
               title={`${job.customer_name} — ${job.service_type || 'service'}`}
               draggable={dragEnabled}
