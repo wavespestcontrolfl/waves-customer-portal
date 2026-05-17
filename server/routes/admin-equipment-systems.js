@@ -25,6 +25,12 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const {
+  SYSTEM_ASSET_FIELDS,
+  COMPONENT_ASSET_FIELDS,
+  SYSTEM_ASSET_LABELS,
+  buildEquipmentReconciliation,
+} = require('../services/equipment-reconciliation');
 
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
@@ -35,6 +41,7 @@ router.use(requireTechOrAdmin);
 const CARRIER_MIN = 0.05;
 const CARRIER_MAX = 10.0;
 const DEFAULT_EXPIRY_DAYS = 30;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // technician_id intentionally NOT in this whitelist. POST always uses
 // the auth-derived req.technicianId; PUT never lets the caller change
@@ -54,6 +61,66 @@ function pickCalibrationFields(body) {
     if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
   }
   return out;
+}
+
+function pickSystemAssetFields(body) {
+  const out = {};
+  for (const k of SYSTEM_ASSET_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(body, k)) {
+      out[k] = body[k] === '' ? null : body[k];
+    }
+  }
+  return out;
+}
+
+function invalidSystemAssetIdFields(payload) {
+  return Object.entries(payload)
+    .filter(([, value]) => value != null && !(typeof value === 'string' && UUID_RE.test(value)))
+    .map(([field]) => field);
+}
+
+function compactEquipmentAsset(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    asset_tag: row.asset_tag,
+    category: row.category,
+    status: row.status,
+    make: row.make,
+    model: row.model,
+    serial_number: row.serial_number,
+  };
+}
+
+async function loadSystemAssets(system) {
+  const ids = SYSTEM_ASSET_FIELDS
+    .map(field => system?.[field])
+    .filter(Boolean);
+
+  if (!ids.length) {
+    return {
+      primary_equipment: null,
+      component_assets: Object.fromEntries(
+        COMPONENT_ASSET_FIELDS.map(field => [field.replace('_asset_id', ''), null]),
+      ),
+    };
+  }
+
+  const rows = await db('equipment')
+    .whereIn('id', [...new Set(ids)])
+    .select('id', 'name', 'asset_tag', 'category', 'status', 'make', 'model', 'serial_number');
+  const byId = new Map(rows.map(row => [row.id, row]));
+
+  return {
+    primary_equipment: compactEquipmentAsset(byId.get(system.primary_equipment_id)),
+    component_assets: Object.fromEntries(
+      COMPONENT_ASSET_FIELDS.map(field => [
+        field.replace('_asset_id', ''),
+        compactEquipmentAsset(byId.get(system[field])),
+      ]),
+    ),
+  };
 }
 
 // Columns that the schema declares NOT NULL. Sending an explicit null
@@ -229,6 +296,57 @@ router.get('/', async (req, res, next) => {
 });
 
 // =========================================================================
+// GET /reconciliation — operational/tax/system linkage report
+// =========================================================================
+router.get('/reconciliation', async (req, res, next) => {
+  try {
+    const [systems, equipment, taxRegister, calibrations] = await Promise.all([
+      db('equipment_systems')
+        .orderBy('active', 'desc')
+        .orderBy('system_type', 'asc')
+        .orderBy('name', 'asc'),
+      db('equipment')
+        .select(
+          'id',
+          'name',
+          'asset_tag',
+          'category',
+          'status',
+          'make',
+          'model',
+          'serial_number',
+          'purchase_price',
+          'tax_equipment_id',
+        )
+        .orderBy('name', 'asc'),
+      db('equipment_register')
+        .select(
+          'id',
+          'name',
+          'asset_category',
+          'active',
+          'disposed',
+          'purchase_cost',
+          'current_book_value',
+          'serial_number',
+          'make_model',
+        )
+        .orderBy('name', 'asc'),
+      db('equipment_calibrations')
+        .where({ active: true })
+        .select('id', 'equipment_system_id', 'carrier_gal_per_1000', 'calibrated_at', 'expires_at'),
+    ]);
+
+    res.json(buildEquipmentReconciliation({
+      systems,
+      equipment,
+      taxRegister,
+      calibrations,
+    }));
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
 // GET /calibrations — active calibrations across all systems
 // (declared BEFORE /:id so Express doesn't match "calibrations" as an id)
 // =========================================================================
@@ -337,6 +455,63 @@ router.put('/calibrations/:id', async (req, res, next) => {
 });
 
 // =========================================================================
+// PUT /:id/assets — link a calibrated system to operational equipment
+// =========================================================================
+router.put('/:id/assets', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid equipment system id' });
+    }
+
+    const system = await db('equipment_systems').where({ id: req.params.id }).first();
+    if (!system) return res.status(404).json({ error: 'Equipment system not found' });
+
+    const payload = pickSystemAssetFields(req.body || {});
+    const fields = Object.keys(payload);
+    if (!fields.length) {
+      return res.status(400).json({
+        error: 'No equipment links supplied',
+        allowed_fields: SYSTEM_ASSET_FIELDS,
+      });
+    }
+
+    const invalidFields = invalidSystemAssetIdFields(payload);
+    if (invalidFields.length) {
+      return res.status(400).json({
+        error: 'Invalid equipment link ids',
+        invalid_fields: invalidFields,
+      });
+    }
+
+    const ids = [...new Set(Object.values(payload).filter(Boolean))];
+    if (ids.length) {
+      const found = await db('equipment').whereIn('id', ids).select('id');
+      const foundIds = new Set(found.map(row => row.id));
+      const missing = ids.filter(id => !foundIds.has(id));
+      if (missing.length) {
+        return res.status(400).json({
+          error: 'One or more equipment links do not exist',
+          missing_equipment_ids: missing,
+        });
+      }
+    }
+
+    const [updated] = await db('equipment_systems')
+      .where({ id: req.params.id })
+      .update({ ...payload, updated_at: db.fn.now() })
+      .returning('*');
+    const linkedAssets = await loadSystemAssets(updated);
+
+    logger.info?.(`[equipment] system asset links updated system=${req.params.id} fields=${fields.join(',')}`);
+    res.json({
+      system: updated,
+      link_labels: SYSTEM_ASSET_LABELS,
+      ...linkedAssets,
+    });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
 // GET /:id — system + active calibration
 // =========================================================================
 router.get('/:id', async (req, res, next) => {
@@ -348,7 +523,14 @@ router.get('/:id', async (req, res, next) => {
       .where({ equipment_system_id: req.params.id, active: true })
       .first();
 
-    res.json({ system, calibration: calibration || null });
+    const linkedAssets = await loadSystemAssets(system);
+
+    res.json({
+      system,
+      calibration: calibration || null,
+      link_labels: SYSTEM_ASSET_LABELS,
+      ...linkedAssets,
+    });
   } catch (err) { next(err); }
 });
 
