@@ -506,6 +506,40 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("changeBookingPickBtn.addEventListener('click', cancelReservation)");
   });
 
+  test('server-rendered bundled estimate showcases per-application prices by service', () => {
+    const html = renderPage('bundle-token', {
+      status: 'sent',
+      customerName: 'Stan Customer',
+      address: '4407 Lake Fox Pl',
+      monthlyTotal: 193.5,
+      annualTotal: 2322,
+      onetimeTotal: 0,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', mo: 128 },
+            { name: 'Lawn Care', mo: 87, perTreatment: 116, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          pest: { apps: 4 },
+          pestTiers: [{ label: 'Quarterly', mo: 128, pa: 128, apps: 4 }],
+        },
+      },
+    });
+
+    expect(html).toContain('Price per application');
+    expect(html).toContain('Quarterly service &middot; 4 applications/year');
+    expect(html).toContain('9 applications/year');
+    expect(html).toContain('$115.20 <span class="pt-suffix">/ application</span>');
+    expect(html).toContain('$104.40 <span class="pt-suffix">/ application</span>');
+    expect(html).not.toContain('/ treatment</span>');
+  });
+
   test('accept success payload marks invoice payment as the next step', () => {
     expect(buildAcceptSuccessPayload({
       invoiceMode: true,

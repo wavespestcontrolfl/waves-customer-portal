@@ -639,8 +639,8 @@ function renderPage(token, estimate, estData) {
       const basePrice = basePerTreatmentForRecurringService(svc, visits);
       const price = adjustedPerTreatmentForRecurringService(svc, visits, basePrice);
       const visitText = visits
-        ? `${Math.round(visits).toLocaleString()} ${visits === 1 ? 'treatment' : 'treatments'}/year`
-        : 'Service visits/year';
+        ? `${Math.round(visits).toLocaleString()} ${visits === 1 ? 'application' : 'applications'}/year`
+        : 'Service applications/year';
       const cadenceText = isPest && pestTierCadence ? `${pestTierCadence} service` : '';
       return {
         name,
@@ -657,7 +657,7 @@ function renderPage(token, estimate, estData) {
             <div class="billing-service-name">${escapeHtml(row.name)}</div>
             <div class="billing-service-detail">${row.detailHtml}</div>
           </div>
-          ${row.price != null ? `<div class="billing-service-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span>/ treatment</span></div>` : ''}
+          ${row.price != null ? `<div class="billing-service-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span>/ application</span></div>` : ''}
         </div>`).join('');
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
@@ -708,7 +708,22 @@ function renderPage(token, estimate, estData) {
     </div>` : ''}
   </section>` : '';
 
-  const perTreatmentHtml = '';
+  const perTreatmentRowsHtml = billingServiceRows
+    .filter((row) => row.price != null)
+    .map((row) => `
+        <div class="pt-row">
+          <div>
+            <div class="pt-label">${escapeHtml(row.name)}</div>
+            <div class="pt-cadence">${row.detailHtml}</div>
+          </div>
+          <div class="pt-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span class="pt-suffix">/ application</span></div>
+        </div>`)
+    .join('');
+  const perTreatmentHtml = perTreatmentRowsHtml ? `
+    <div class="per-treatment" data-mode-only="recurring">
+      <div class="per-treatment-title">Price per application</div>
+      <div class="per-treatment-rows">${perTreatmentRowsHtml}</div>
+    </div>` : '';
 
   const realOneTimeRows = oneTimeItems.map((it) => {
     const label = String(it.name || it.label || '').toLowerCase();
@@ -848,7 +863,7 @@ function renderPage(token, estimate, estData) {
   .pt-label{font-size:14px;color:#1B2C5B;line-height:1.35}
   .pt-cadence{font-size:12px;color:#6B7280;margin-left:2px}
   .pt-price{font-size:14px;font-weight:700;color:#1B2C5B;white-space:nowrap}
-  .pt-suffix{font-weight:500;color:#6B7280}
+  .pt-price span,.pt-suffix{font-weight:500;color:#6B7280}
   .pt-total{border-top:1px solid #E7E2D7;padding-top:8px;margin-top:2px}
   .pt-total .pt-label{font-weight:700}
   .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
@@ -1202,7 +1217,7 @@ ${shellQuestionsBar()}
         ? (prefOff * 12) / visits
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
-      el.innerHTML = fmt(adjusted) + ' <span>/ treatment</span>';
+      el.innerHTML = fmt(adjusted) + ' <span>/ application</span>';
     });
   };
 
