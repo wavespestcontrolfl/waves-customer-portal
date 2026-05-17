@@ -13,6 +13,7 @@ import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
+const DEFAULT_PORTAL_DESCRIPTION = 'Your Waves service reports, billing, and account — view past visits, track action items, and schedule the next service.';
 const sentReportEvents = new Set();
 const REVIEW_LOCATIONS = [
   {
@@ -107,8 +108,73 @@ function formatClockTime(value, timezone = SERVICE_REPORT_TIME_ZONE) {
   });
 }
 
+function formatReportTitleDate(value) {
+  if (!value) return '';
+  const raw = String(value);
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  const date = dateOnly
+    ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12))
+    : new Date(raw);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-US', {
+    timeZone: SERVICE_REPORT_TIME_ZONE,
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
 function serviceDisplayName(data = {}) {
   return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
+}
+
+function reportDocumentTitle(data = {}) {
+  if (!data || data.error) return 'Waves Customer Portal';
+  const serviceName = serviceDisplayName(data);
+  const date = formatReportTitleDate(data.serviceDate);
+  if (data.reportVersion === 'service_report_v1' || serviceName !== 'Service') {
+    return ['Service report', date, serviceName].filter(Boolean).join(' · ');
+  }
+  return 'Waves Customer Portal';
+}
+
+function reportDocumentDescription(data = {}) {
+  if (!data || data.error) return DEFAULT_PORTAL_DESCRIPTION;
+  const serviceName = serviceDisplayName(data);
+  const date = formatReportTitleDate(data.serviceDate);
+  if (serviceName === 'Service' && !date) return DEFAULT_PORTAL_DESCRIPTION;
+  return date
+    ? `Waves service report for ${date}: ${serviceName}. View visit details, action items, and next service.`
+    : `Waves service report: ${serviceName}. View visit details, action items, and next service.`;
+}
+
+function updateDocumentMeta(selector, attrName, value) {
+  if (typeof document === 'undefined' || !value) return;
+  let element = document.head.querySelector(selector);
+  if (!element) {
+    element = document.createElement('meta');
+    if (selector.includes('property=')) {
+      const property = selector.match(/property="([^"]+)"/)?.[1];
+      if (property) element.setAttribute('property', property);
+    } else {
+      const name = selector.match(/name="([^"]+)"/)?.[1];
+      if (name) element.setAttribute('name', name);
+    }
+    document.head.appendChild(element);
+  }
+  element.setAttribute(attrName, value);
+}
+
+function applyReportDocumentMetadata(data = {}) {
+  if (typeof document === 'undefined') return;
+  const title = reportDocumentTitle(data);
+  const description = reportDocumentDescription(data);
+  document.title = title;
+  updateDocumentMeta('meta[name="description"]', 'content', description);
+  updateDocumentMeta('meta[property="og:title"]', 'content', title);
+  updateDocumentMeta('meta[property="og:description"]', 'content', description);
+  updateDocumentMeta('meta[name="twitter:title"]', 'content', title);
+  updateDocumentMeta('meta[name="twitter:description"]', 'content', description);
 }
 
 function visitTimeRange(data = {}) {
@@ -3598,6 +3664,11 @@ export default function ReportViewPage() {
       cancelled = true;
     };
   }, [token]);
+
+  useEffect(() => {
+    if (!data || data.error) return;
+    applyReportDocumentMetadata(data);
+  }, [data]);
 
   if (loading) return <LoadingState />;
   if (!data || data.error) return <NotFoundState />;

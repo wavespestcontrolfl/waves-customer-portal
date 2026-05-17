@@ -424,6 +424,10 @@ app.get('/api/health', (req, res) => {
 if (config.nodeEnv === 'production') {
   const clientBuild = path.join(__dirname, '..', 'client', 'dist');
   const fs = require('fs');
+  const {
+    applyHtmlMetadata,
+    loadServiceReportPageMetadata,
+  } = require('./services/report-page-metadata');
 
   // Per-section PWA shape. /admin and /tech each install as their own
   // home-screen icon with their own name/manifest/start_url, instead of
@@ -445,26 +449,32 @@ if (config.nodeEnv === 'production') {
       manifest: '/tech-manifest.json',
       title: 'Waves Tech',
       appleTitle: 'Waves Tech',
-      themeColor: '#0ea5e9',
+      themeColor: '#111111',
     },
   ];
   function pickSection(reqPath) {
     return SECTIONS.find((s) => reqPath === s.prefix || reqPath.startsWith(s.prefix + '/')) || null;
   }
-  function renderHTML(reqPath) {
+  async function renderHTML(reqPath) {
     // Read fresh each call — index.html is small (~3KB) and the
     // surrounding handlers are already no-cache, so fresh reads keep
     // deploys snappy without a stale-cache footgun.
     let html = fs.readFileSync(path.join(clientBuild, 'index.html'), 'utf8');
     const section = pickSection(reqPath);
-    if (!section) return html;
-    html = html
-      .replace(/href="\/manifest\.json"/, `href="${section.manifest}"`)
-      .replace(/<title>[^<]*<\/title>/, `<title>${section.title}</title>`)
-      .replace(/<meta name="apple-mobile-web-app-title" content="[^"]*"/,
-               `<meta name="apple-mobile-web-app-title" content="${section.appleTitle}"`)
-      .replace(/<meta name="theme-color" content="[^"]*"/,
-               `<meta name="theme-color" content="${section.themeColor}"`);
+    if (section) {
+      html = html.replace(/href="\/manifest\.json"/, `href="${section.manifest}"`);
+      html = applyHtmlMetadata(html, {
+        title: section.title,
+        appleTitle: section.appleTitle,
+        themeColor: section.themeColor,
+      });
+    }
+    try {
+      const reportMetadata = await loadServiceReportPageMetadata(reqPath);
+      if (reportMetadata) html = applyHtmlMetadata(html, reportMetadata);
+    } catch (err) {
+      logger.warn(`[report-meta] Failed to render report metadata for ${reqPath}: ${err.message}`);
+    }
     return html;
   }
 
@@ -474,11 +484,11 @@ if (config.nodeEnv === 'production') {
     res.set('Service-Worker-Allowed', '/');
     res.sendFile(path.join(clientBuild, 'sw.js'));
   });
-  app.get('/', (req, res, next) => {
+  app.get('/', async (req, res, next) => {
     if (req.accepts('html')) {
       res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.set('Content-Type', 'text/html; charset=utf-8');
-      return res.send(renderHTML(req.path));
+      return res.send(await renderHTML(req.path));
     }
     next();
   });
@@ -497,11 +507,11 @@ if (config.nodeEnv === 'production') {
   // SPA fallback — serve index.html for all non-API routes, with the
   // per-section title/manifest swap so /admin and /tech install as
   // their own PWAs.
-  app.get('*', (req, res) => {
+  app.get('*', async (req, res) => {
     if (!req.path.startsWith('/api')) {
       res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.set('Content-Type', 'text/html; charset=utf-8');
-      res.send(renderHTML(req.path));
+      res.send(await renderHTML(req.path));
     }
   });
 }
