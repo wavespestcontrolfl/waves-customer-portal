@@ -81,6 +81,13 @@ function overlayZone(zone) {
   };
 }
 
+function applicationZoneIds(app = {}) {
+  const ids = Array.isArray(app.zone_ids)
+    ? app.zone_ids
+    : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
+  return ids.map(String);
+}
+
 async function buildSatelliteTreatmentMapContext({
   service,
   zones = [],
@@ -118,6 +125,9 @@ async function buildSatelliteTreatmentMapContext({
   });
   if (!liveConfig?.imageUrl) return { available: false, fallbackReason: 'provider_config_unavailable' };
 
+  const overlayZones = zones.map(overlayZone);
+  const overlayZoneById = new Map(overlayZones.map((zone) => [String(zone.id), zone]));
+
   return {
     available: true,
     provider: provider.key,
@@ -136,15 +146,21 @@ async function buildSatelliteTreatmentMapContext({
     overlay: {
       width: VIEWBOX_W,
       height: VIEWBOX_H,
-      zones: zones.map(overlayZone),
-      applications: applications.map((app) => ({
-        id: app.id,
-        method: app.method,
-        methodLabel: app.methodLabel,
-        productName: app.product?.name || '',
-        epaReg: app.product?.epa_reg || '',
-        zoneIds: (app.zone_ids || []).map(String),
-      })),
+      zones: overlayZones,
+      applications: applications.map((app) => {
+        const zoneIds = applicationZoneIds(app);
+        return {
+          id: app.id,
+          method: app.method,
+          methodLabel: app.methodLabel,
+          productName: app.product?.name || '',
+          epaReg: app.product?.epa_reg || '',
+          activeIngredient: app.product?.active_ingredient || '',
+          targets: Array.isArray(app.targets) ? app.targets.map(String) : [],
+          zoneIds,
+          zoneLabels: zoneIds.map((zoneId) => overlayZoneById.get(String(zoneId))?.label).filter(Boolean),
+        };
+      }),
       flags: flags.map((flag) => ({
         zoneId: String(flag.zone_id),
         label: flag.label,

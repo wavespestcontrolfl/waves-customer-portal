@@ -44,6 +44,7 @@ const REVIEW_LOCATIONS = [
     match: ['lakewood ranch', 'bradenton', '34202', '34203', '34205', '34208', '34209', '34210', '34211', '34212'],
   },
 ];
+const TREATMENT_OVERLAY_COLORS = ['#0f766e', '#b45309', '#2563eb', '#be123c', '#4d7c0f', '#7c2d12', '#4338ca', '#047857'];
 
 function formatDate(value) {
   if (!value) return '';
@@ -308,6 +309,66 @@ function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
   details.push(`${productName} was documented for this service visit. The application is interpreted with the treated zones, target pests, technician findings, site conditions, and recent service history.`);
   details.push(...productIdentifierDetails(app));
   return details;
+}
+
+function applicationZoneIds(app = {}) {
+  const ids = Array.isArray(app.zone_ids)
+    ? app.zone_ids
+    : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
+  return ids.map((id) => String(id)).filter(Boolean);
+}
+
+function applicationProductName(app = {}) {
+  return app.product?.name || app.productName || 'Product application';
+}
+
+function applicationEpaReg(app = {}) {
+  return app.product?.epa_reg || app.epaReg || '';
+}
+
+function applicationActiveIngredient(app = {}) {
+  return app.product?.active_ingredient || app.activeIngredient || '';
+}
+
+function buildTreatmentOverlayRows(data = {}) {
+  const applications = Array.isArray(data.applications) ? data.applications : [];
+  const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
+  return applications.map((app, index) => {
+    const id = String(app.id || `application-${index + 1}`);
+    const zoneIds = applicationZoneIds(app);
+    const zones = zoneIds.map((zoneId) => zoneById.get(String(zoneId))).filter(Boolean);
+    const zoneLetters = zones.map((zone) => zone.letter).filter(Boolean);
+    const zoneLabels = zones.map((zone) => zone.label).filter(Boolean);
+    const targets = Array.isArray(app.targets) ? app.targets.map(formatEnumLabel).filter(Boolean) : [];
+    const technicalDetails = applicationTechnicalExplanation(app, data.serviceLine);
+    const customerDetail = technicalDetails.find((detail) => (
+      !/^EPA registration number recorded:/i.test(detail)
+      && !/^Active ingredient recorded:/i.test(detail)
+    )) || applicationPurposeCopy(app, data.serviceLine);
+    const rateDetails = [
+      app.rate && app.rateUnit ? `Rate ${app.rate} ${app.rateUnit}` : null,
+      app.totalAmount && app.amountUnit ? `Total ${app.totalAmount} ${app.amountUnit}` : null,
+    ].filter(Boolean);
+
+    return {
+      id,
+      mapNumber: String(index + 1),
+      color: TREATMENT_OVERLAY_COLORS[index % TREATMENT_OVERLAY_COLORS.length],
+      productName: applicationProductName(app),
+      purpose: applicationPurpose(app, data.serviceLine),
+      methodLabel: app.methodLabel || formatEnumLabel(app.method) || 'Application',
+      zoneIds,
+      zones,
+      zoneText: zoneLetters.length
+        ? `Zones ${zoneLetters.join(', ')}${zoneLabels.length ? `: ${zoneLabels.join(', ')}` : ''}`
+        : (app.applicationArea || 'Treated area recorded'),
+      targetText: targets.length ? targets.join(', ') : '',
+      epaReg: applicationEpaReg(app),
+      activeIngredient: applicationActiveIngredient(app),
+      rateDetails,
+      customerDetail,
+    };
+  }).filter((row) => row.zoneIds.length);
 }
 
 function conditionInterpretation(conditions = {}) {
@@ -1339,20 +1400,39 @@ function OverlayShape({ geometry, className = '', fill, children }) {
   return <rect x={box.x} y={box.y} width={box.w} height={box.h} className={className} fill={fill}>{children}</rect>;
 }
 
-function SatelliteTreatmentOverlay({ satellite }) {
+function SatelliteTreatmentOverlay({ satellite, applicationRows = [], selectedApplicationId, onSelectApplication }) {
   const overlay = satellite?.overlay || {};
   const zones = overlay.zones || [];
   const zonesById = new Map(zones.map((zone) => [String(zone.id), zone]));
   const applications = overlay.applications || [];
+  const rowById = new Map(applicationRows.map((row) => [String(row.id), row]));
+  const zoneApplicationIds = new Map();
+  applications.forEach((app) => {
+    const appId = String(app.id);
+    (app.zoneIds || []).forEach((zoneId) => {
+      const key = String(zoneId);
+      const ids = zoneApplicationIds.get(key) || [];
+      ids.push(appId);
+      zoneApplicationIds.set(key, ids);
+    });
+  });
   const flags = overlay.flags || [];
   let baitSequence = 1;
 
-  const fillForMethod = (method) => {
+  const fillForMethod = (method, color) => {
     if (method === 'bait_placement') return 'none';
-    if (method === 'spot_treatment' || method === 'pin_stream') return 'url(#sat-dots)';
-    if (method === 'granular_broadcast') return 'url(#sat-crosshatch)';
-    if (method === 'fog_ulv') return 'url(#sat-wide-hatch)';
-    return 'url(#sat-hatch)';
+    return color || '#0f766e';
+  };
+
+  const handleSelect = (appId, event) => {
+    event.stopPropagation();
+    if (appId) onSelectApplication?.(String(appId), 'satellite');
+  };
+
+  const handleKeySelect = (appId, event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    handleSelect(appId, event);
   };
 
   return (
@@ -1387,38 +1467,66 @@ function SatelliteTreatmentOverlay({ satellite }) {
         ))}
       </g>
       <g className="satellite-applications">
-        {applications.map((app) => (
-          <g
-            key={app.id}
-            className="app-layer"
-            data-application-id={app.id}
-            data-product-name={app.productName}
-            data-epa-reg={app.epaReg}
-          >
-            {(app.zoneIds || []).map((zoneId) => {
+        {applications.map((app, fallbackIndex) => {
+          const appId = String(app.id);
+          const row = rowById.get(appId);
+          const color = row?.color || TREATMENT_OVERLAY_COLORS[fallbackIndex % TREATMENT_OVERLAY_COLORS.length];
+          const mapNumber = row?.mapNumber || String(fallbackIndex + 1);
+          const appLabel = [
+            row?.productName || app.productName || 'Product application',
+            row?.methodLabel || app.methodLabel || formatEnumLabel(app.method),
+            row?.zoneText,
+          ].filter(Boolean).join(', ');
+          const selected = String(selectedApplicationId || '') === appId;
+          return (
+            <g
+              key={app.id}
+              className={`app-layer satellite-application-hit${selected ? ' is-selected' : ''}`}
+              data-application-id={app.id}
+              data-product-name={app.productName}
+              data-epa-reg={app.epaReg}
+              role="button"
+              tabIndex={0}
+              aria-label={`Show ${appLabel}`}
+              style={{ '--app-color': color }}
+              onClick={(event) => handleSelect(appId, event)}
+              onKeyDown={(event) => handleKeySelect(appId, event)}
+            >
+              <title>{appLabel}</title>
+              {(app.zoneIds || []).map((zoneId) => {
               const zone = zonesById.get(String(zoneId));
               if (!zone) return null;
+              const center = overlayCenter(zone.geometry);
+              const zoneAppIds = zoneApplicationIds.get(String(zoneId)) || [];
+              const zoneAppIndex = Math.max(0, zoneAppIds.indexOf(appId));
+              const badgeY = center.y + (zoneAppIndex - ((zoneAppIds.length || 1) - 1) / 2) * 20;
+              const badgeWidth = Math.max(22, 14 + mapNumber.length * 7);
               if (app.method === 'bait_placement') {
-                const center = overlayCenter(zone.geometry);
                 const sequence = baitSequence++;
                 return (
-                  <g key={`${app.id}-${zoneId}`} className="satellite-bait-marker">
-                    <circle cx={center.x} cy={center.y} r="8" className="satellite-bait-circle" />
-                    <text x={center.x} y={center.y + 4} textAnchor="middle" className="satellite-bait-label">{sequence}</text>
+                  <g key={`${app.id}-${zoneId}`} className="satellite-bait-marker" data-marker-sequence={sequence}>
+                    <circle cx={center.x} cy={badgeY} r="10" className="satellite-bait-circle" />
+                    <text x={center.x} y={badgeY + 4} textAnchor="middle" className="satellite-bait-label">{mapNumber}</text>
                   </g>
                 );
               }
               return (
-                <OverlayShape
-                  key={`${app.id}-${zoneId}`}
-                  geometry={zone.geometry}
-                  className="satellite-application-overlay"
-                  fill={fillForMethod(app.method)}
-                />
+                <g key={`${app.id}-${zoneId}`} data-zone-id={zoneId}>
+                  <OverlayShape
+                    geometry={zone.geometry}
+                    className="satellite-application-overlay"
+                    fill={fillForMethod(app.method, color)}
+                  />
+                  <g className="satellite-application-badge" transform={`translate(${center.x} ${badgeY})`}>
+                    <rect x={-badgeWidth / 2} y="-10" width={badgeWidth} height="20" rx="10" />
+                    <text x="0" y="4" textAnchor="middle">{mapNumber}</text>
+                  </g>
+                </g>
               );
-            })}
-          </g>
-        ))}
+              })}
+            </g>
+          );
+        })}
       </g>
       <g className="satellite-flag-markers">
         {flags.map((flag) => {
@@ -1438,20 +1546,90 @@ function SatelliteTreatmentOverlay({ satellite }) {
   );
 }
 
+function TreatmentOverlayKey({ rows = [], selectedRow, onSelect }) {
+  if (!rows.length || !selectedRow) return null;
+  const identifiers = [
+    selectedRow.epaReg ? `EPA reg. ${selectedRow.epaReg}` : null,
+    selectedRow.activeIngredient ? `Active ingredient: ${selectedRow.activeIngredient}` : null,
+    ...(selectedRow.rateDetails || []),
+  ].filter(Boolean);
+  return (
+    <div className="treatment-overlay-key">
+      <div className="treatment-overlay-list" aria-label="Treatment overlay key">
+        {rows.map((row) => (
+          <button
+            type="button"
+            key={row.id}
+            className={`treatment-overlay-row${row.id === selectedRow.id ? ' is-active' : ''}`}
+            style={{ '--app-color': row.color }}
+            aria-pressed={row.id === selectedRow.id}
+            onClick={() => onSelect?.(row.id, 'overlay_key')}
+          >
+            <span className="treatment-overlay-number">{row.mapNumber}</span>
+            <span className="treatment-overlay-row-copy">
+              <strong>{row.productName}</strong>
+              <span>{row.methodLabel} · {row.zoneText}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      <div className="treatment-overlay-detail" aria-live="polite">
+        <div className="sr-cell-label">Selected treatment</div>
+        <h3>{selectedRow.productName}</h3>
+        <p>{selectedRow.customerDetail}</p>
+        <div className="treatment-overlay-meta">
+          <span>{selectedRow.purpose}</span>
+          <span>{selectedRow.methodLabel}</span>
+          <span>{selectedRow.zoneText}</span>
+          {selectedRow.targetText && <span>Targets: {selectedRow.targetText}</span>}
+          {identifiers.map((detail) => <span key={detail}>{detail}</span>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TreatmentMapSection({ data, mode, token, showTapPrompt = false }) {
   const satellite = data.treatmentMap?.satellite;
   const canShowSatellite = mode === 'live' && satellite?.available && satellite.live?.url;
   const [view, setView] = useState(canShowSatellite ? 'satellite' : 'schematic');
+  const overlayRows = useMemo(() => buildTreatmentOverlayRows(data), [data]);
+  const [selectedAppId, setSelectedAppId] = useState('');
 
   useEffect(() => {
     if (!canShowSatellite && view !== 'schematic') setView('schematic');
   }, [canShowSatellite, view]);
 
+  useEffect(() => {
+    if (!overlayRows.length) {
+      if (selectedAppId) setSelectedAppId('');
+      return;
+    }
+    if (!overlayRows.some((row) => row.id === selectedAppId)) {
+      setSelectedAppId(overlayRows[0].id);
+    }
+  }, [overlayRows, selectedAppId]);
+
   if (!data.mapSvg) return null;
   const activeView = canShowSatellite && view === 'satellite' ? 'satellite' : 'schematic';
+  const selectedRow = overlayRows.find((row) => row.id === selectedAppId) || overlayRows[0] || null;
   const description = activeView === 'satellite'
-    ? 'Aerial view with Waves treatment overlays. Service zones are approximate.'
-    : 'Schematic view of inspected and treated zones. Service zones are approximate.';
+    ? 'Aerial view with product overlays. Service zones are approximate.'
+    : 'Schematic view of product overlays and treated zones. Service zones are approximate.';
+  const selectApplication = (applicationId, source) => {
+    if (!applicationId) return;
+    const id = String(applicationId);
+    setSelectedAppId(id);
+    trackReportEvent(token, 'map_interacted', { view: source, application_id: id });
+  };
+  const handleSchematicClick = (event) => {
+    const appLayer = event.target?.closest?.('.app-layer');
+    if (appLayer?.dataset?.applicationId) {
+      selectApplication(appLayer.dataset.applicationId, 'schematic');
+      return;
+    }
+    trackReportEvent(token, 'map_interacted', { view: 'schematic' });
+  };
 
   return (
     <section className="sr-section treatment-map-section">
@@ -1459,7 +1637,7 @@ function TreatmentMapSection({ data, mode, token, showTapPrompt = false }) {
         <div>
           <h2>Where we treated today</h2>
           <p className="map-context-copy">{description}</p>
-          {showTapPrompt && <p className="map-tap-prompt">Tap the map to see what happened where.</p>}
+          {showTapPrompt && overlayRows.length > 0 && <p className="map-tap-prompt">Product numbers on the map match the treatment key below.</p>}
         </div>
         {canShowSatellite && (
           <div className="map-toggle" aria-label="Treatment map view">
@@ -1472,16 +1650,22 @@ function TreatmentMapSection({ data, mode, token, showTapPrompt = false }) {
       {activeView === 'satellite' ? (
         <div className="satellite-treatment-map" onClick={() => trackReportEvent(token, 'map_interacted', { view: 'satellite' })}>
           <img src={satellite.live.url} alt="" className="satellite-basemap-image" />
-          <SatelliteTreatmentOverlay satellite={satellite} />
+          <SatelliteTreatmentOverlay
+            satellite={satellite}
+            applicationRows={overlayRows}
+            selectedApplicationId={selectedRow?.id}
+            onSelectApplication={selectApplication}
+          />
           {satellite.attributionText && <div className="map-attribution">{satellite.attributionText}</div>}
         </div>
       ) : (
         <div
           className="sr-map"
-          onClick={() => trackReportEvent(token, 'map_interacted', { view: 'schematic' })}
+          onClick={handleSchematicClick}
           dangerouslySetInnerHTML={{ __html: data.mapSvg }}
         />
       )}
+      <TreatmentOverlayKey rows={overlayRows} selectedRow={selectedRow} onSelect={selectApplication} />
       <p className="map-footnote">{data.treatmentMap?.footer || 'Treatment areas are technician-reported service zones, not survey boundaries.'}</p>
     </section>
   );
@@ -2039,9 +2223,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .satellite-basemap-image {
           object-fit: cover;
           filter: grayscale(100%) contrast(.88) brightness(1.1);
+          pointer-events: none;
         }
         .satellite-treatment-overlay {
-          pointer-events: none;
+          pointer-events: auto;
+        }
+        .satellite-application-hit {
+          cursor: pointer;
+          outline: none;
         }
         .satellite-zone-outline {
           fill: rgba(255,255,255,.16);
@@ -2066,10 +2255,28 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-width: 3px;
         }
         .satellite-application-overlay {
-          opacity: .68;
-          stroke: #111;
-          stroke-width: .8;
+          fill-opacity: .34;
+          stroke: var(--app-color, #111);
+          stroke-width: 1.1;
           vector-effect: non-scaling-stroke;
+        }
+        .satellite-application-hit.is-selected .satellite-application-overlay,
+        .satellite-application-hit:focus .satellite-application-overlay {
+          fill-opacity: .5;
+          stroke-width: 2;
+        }
+        .satellite-application-badge rect {
+          fill: var(--app-color, #111);
+          stroke: rgba(255,255,255,.92);
+          stroke-width: 1.2;
+          vector-effect: non-scaling-stroke;
+        }
+        .satellite-application-badge text {
+          fill: #fff;
+          font-family: Inter, Arial, sans-serif;
+          font-size: 10px;
+          font-weight: 800;
+          letter-spacing: 0;
         }
         .sat-pattern-line,
         .sat-pattern-path {
@@ -2083,15 +2290,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           fill: #111;
         }
         .satellite-bait-circle {
-          fill: #fff;
-          stroke: #111;
-          stroke-width: 1;
+          fill: var(--app-color, #fff);
+          stroke: rgba(255,255,255,.92);
+          stroke-width: 1.2;
           vector-effect: non-scaling-stroke;
         }
         .satellite-bait-label {
-          fill: #111;
+          fill: #fff;
           font-size: 10px;
-          font-weight: 600;
+          font-weight: 800;
         }
         .satellite-flag-circle {
           fill: var(--red);
@@ -2121,6 +2328,105 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding: 3px 6px;
           font-size: 10px;
           line-height: 1.2;
+        }
+        .treatment-overlay-key {
+          display: grid;
+          grid-template-columns: minmax(0, .95fr) minmax(0, 1.2fr);
+          gap: 12px;
+          margin-top: 12px;
+          align-items: stretch;
+        }
+        .treatment-overlay-list {
+          display: grid;
+          gap: 8px;
+          align-content: start;
+        }
+        .treatment-overlay-row {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr);
+          gap: 10px;
+          align-items: center;
+          width: 100%;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: #fff;
+          color: var(--text);
+          padding: 10px;
+          text-align: left;
+          font: inherit;
+          cursor: pointer;
+        }
+        .treatment-overlay-row.is-active {
+          border-color: var(--app-color, ${B.blueDark});
+          box-shadow: inset 0 0 0 1px var(--app-color, ${B.blueDark});
+          background: #fdfdfd;
+        }
+        .treatment-overlay-number {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 26px;
+          height: 26px;
+          border-radius: 999px;
+          background: var(--app-color, ${B.blueDark});
+          color: #fff;
+          font-size: 12px;
+          line-height: 1;
+          font-weight: 850;
+        }
+        .treatment-overlay-row-copy {
+          min-width: 0;
+          display: grid;
+          gap: 3px;
+        }
+        .treatment-overlay-row-copy strong {
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.2;
+          font-weight: 800;
+          overflow-wrap: anywhere;
+        }
+        .treatment-overlay-row-copy span {
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.35;
+        }
+        .treatment-overlay-detail {
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 14px;
+          min-height: 148px;
+        }
+        .treatment-overlay-detail h3 {
+          margin: 6px 0 8px;
+          color: var(--text);
+          font-size: 19px;
+          line-height: 1.2;
+          font-weight: 850;
+          letter-spacing: 0;
+        }
+        .treatment-overlay-detail p {
+          margin: 0;
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.5;
+        }
+        .treatment-overlay-meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-top: 12px;
+        }
+        .treatment-overlay-meta span {
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--text);
+          font-size: 12px;
+          line-height: 1;
+          font-weight: 750;
+          padding: 6px 8px;
         }
         .sr-grid-2 { display: grid; grid-template-columns: 1fr; gap: 0; }
         .sr-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--line); }
@@ -2983,6 +3289,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .treatment-map-header { flex-direction: column; }
           .map-toggle { width: 100%; }
           .map-toggle button { flex: 1; }
+          .treatment-overlay-key { grid-template-columns: 1fr; }
           .where-row { grid-template-columns: 1fr; }
           .reentry-target-grid, .pressure-trend-layout { grid-template-columns: 1fr; }
           .pressure-trend-chart { justify-self: stretch; max-width: none; }

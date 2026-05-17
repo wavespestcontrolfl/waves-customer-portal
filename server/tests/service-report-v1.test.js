@@ -441,7 +441,9 @@ describe('service report v1', () => {
 
     expect(first).toBe(second);
     expect(first).toContain('data-application-id="app-1"');
+    expect(first).toContain('data-map-number="1"');
     expect(first).toContain('data-product-name="Demand CS"');
+    expect(first).toContain('class="app-badge"');
     expect(first).toContain('url(#hatch-spray)');
     expect(first).toContain('Ant trail');
   });
@@ -462,7 +464,13 @@ describe('service report v1', () => {
       const enabled = await buildSatelliteTreatmentMapContext({
         service: { customer_latitude: 27.39, customer_longitude: -82.43 },
         zones: [{ id: 'zone-a', letter: 'A', label: 'Front entry', category: 'perimeter', geometry: { x: 60, y: 40, w: 120, h: 40 } }],
-        applications: [{ id: 'app-1', method: 'perimeter_spray', product: { name: 'Demand CS' }, zone_ids: ['zone-a'] }],
+        applications: [{
+          id: 'app-1',
+          method: 'perimeter_spray',
+          product: { name: 'Demand CS', epa_reg: '100-1066', active_ingredient: 'lambda-cyhalothrin' },
+          targets: ['ghost_ant'],
+          zone_ids: ['zone-a'],
+        }],
       });
 
       expect(enabled.available).toBe(true);
@@ -471,6 +479,14 @@ describe('service report v1', () => {
       expect(enabled.capabilities.canUseInPdf).toBe(false);
       expect(enabled.capabilities.canUseInSmsPreview).toBe(false);
       expect(enabled.overlay.zones[0].overlaySource).toBe('local_schematic');
+      expect(enabled.overlay.applications[0]).toMatchObject({
+        productName: 'Demand CS',
+        epaReg: '100-1066',
+        activeIngredient: 'lambda-cyhalothrin',
+        targets: ['ghost_ant'],
+        zoneIds: ['zone-a'],
+        zoneLabels: ['Front entry'],
+      });
     } finally {
       if (previousEnabled === undefined) delete process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED;
       else process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED = previousEnabled;
