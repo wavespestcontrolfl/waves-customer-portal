@@ -8,7 +8,8 @@ function normalizeMinutes(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
-  return Math.max(0, Math.round(n));
+  const rounded = Math.round(n);
+  return rounded > 0 ? rounded : null;
 }
 
 function normalizeAdvisory(advisory = {}, fallback = {}) {
@@ -55,8 +56,12 @@ function buildServiceReportV1Sms({
     `${greeting} your Waves service report is ready: ${url}`,
   ];
 
-  if (exterior !== null || interior !== null) {
-    lines.push(`Re-entry: ${exterior ?? 0} min outside, ${interior ?? 0} min inside.`);
+  if (exterior !== null && interior !== null) {
+    lines.push(`Re-entry: ${exterior} min outside, ${interior} min inside.`);
+  } else if (exterior !== null) {
+    lines.push(`Re-entry: ${exterior} min outside.`);
+  } else if (interior !== null) {
+    lines.push(`Re-entry: ${interior} min inside.`);
   }
 
   const invoiceUrl = String(payUrl || '').trim();

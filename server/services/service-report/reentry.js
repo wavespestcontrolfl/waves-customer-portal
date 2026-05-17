@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { DEFAULT_TIME_ZONE, formatReadyTime, normalizeDate } = require('./time-format');
-const { parseJsonObject } = require('./report-data');
+const { normalizeAdvisoryForTreatmentScope, parseJsonObject } = require('./report-data');
 
 function addMinutes(date, minutes) {
   return new Date(date.getTime() + (minutes * 60 * 1000));
@@ -53,7 +53,10 @@ function buildReentryContextFromRecord(record, now = new Date()) {
 
   if (!anchorDate) return undefined;
 
-  const advisory = parseJsonObject(record?.advisory);
+  const advisory = normalizeAdvisoryForTreatmentScope(
+    parseJsonObject(record?.advisory),
+    { service: record, applications },
+  );
   const exteriorMin = numericMinutes(advisory.exterior_reentry_min);
   const interiorMin = numericMinutes(advisory.interior_reentry_min);
   const targets = [];
@@ -80,7 +83,7 @@ async function buildReentryContext({ record, now = new Date(), knex = db } = {})
   if (!applications) {
     applications = await knex('service_products')
       .where({ service_record_id: record.id })
-      .select('id', 'applied_at', 'created_at')
+      .select('id', 'applied_at', 'created_at', 'application_area', 'application_method', 'targets')
       .catch(() => []);
   }
   return buildReentryContextFromRecord({ ...record, applications }, now);

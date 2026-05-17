@@ -22,6 +22,8 @@ const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
 const { computePressureIndex } = require('../services/service-report/pressure-index');
+const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
+const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
@@ -1225,6 +1227,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
         'customers.city', 'customers.property_type',
+        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
         'customers.autopay_enabled as cust_autopay_enabled',
@@ -1257,6 +1260,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       db.schema.hasTable('service_findings').catch(() => false),
     ]);
     const useServiceReportV1 = true;
+    let conditionsAtApplication = null;
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
       && await db.schema.hasColumn('lawn_assessments', 'service_record_id').catch(() => false);
@@ -1432,6 +1436,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       durableCompletionCommitted = true;
     } else {
       try {
+        conditionsAtApplication = serviceRecordCols.conditions && useServiceReportV1 && !isIncompleteVisit
+          ? await fetchApplicationConditions({
+            latitude: svc.customer_latitude,
+            longitude: svc.customer_longitude,
+          }).catch(() => null)
+          : null;
         await db.transaction(async (trx) => {
           const structuredNotes = {
             visitOutcome,
@@ -1500,9 +1510,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
           if (serviceRecordCols.started_at) recordInsert.started_at = svc.actual_start_time || svc.check_in_time || null;
           if (serviceRecordCols.ended_at) recordInsert.ended_at = trx.fn.now();
+          if (serviceRecordCols.conditions && conditionsAtApplication) recordInsert.conditions = serializeJsonb(conditionsAtApplication);
           if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
-          if (serviceRecordCols.advisory && useServiceReportV1) recordInsert.advisory = serializeJsonb(reportConfig.advisoryDefaults);
+          if (serviceRecordCols.advisory && useServiceReportV1) {
+            recordInsert.advisory = serializeJsonb(normalizeAdvisoryForTreatmentScope(
+              reportConfig.advisoryDefaults,
+              {
+                service: {
+                  areas_serviced: completionAreas,
+                  structured_notes: { areasTreated: completionAreas },
+                },
+                applications: products || [],
+              },
+            ));
+          }
 
         // 1. service_record — the canonical "completion happened" audit.
         // scheduled_service_id is the FK back to the source row so

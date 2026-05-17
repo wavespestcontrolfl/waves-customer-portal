@@ -73,6 +73,29 @@ function writeKeyValue(doc, label, value, x, y, width = 150) {
   doc.font('Helvetica').fontSize(13).fillColor('#171717').text(value || '-', x, y + 12, { width });
 }
 
+function serviceDisplayName(data = {}) {
+  return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service report';
+}
+
+function positiveNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function advisoryRows(advisory = {}) {
+  return [
+    positiveNumber(advisory.exterior_reentry_min) != null
+      ? ['Exterior re-entry', `${Math.round(positiveNumber(advisory.exterior_reentry_min))} min`]
+      : null,
+    positiveNumber(advisory.interior_reentry_min) != null
+      ? ['Interior re-entry', `${Math.round(positiveNumber(advisory.interior_reentry_min))} min`]
+      : null,
+    positiveNumber(advisory.irrigation_hold_hr) != null
+      ? ['Irrigation hold', `${Math.round(positiveNumber(advisory.irrigation_hold_hr))} hr`]
+      : null,
+  ].filter(Boolean);
+}
+
 function renderFallbackPdf(data) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'LETTER', margin: 42 });
@@ -84,7 +107,7 @@ function renderFallbackPdf(data) {
     const left = 42;
     const width = 528;
     doc.font('Helvetica').fontSize(10).fillColor('#525252').text('Waves service report', left, 42);
-    doc.font('Helvetica').fontSize(28).fillColor('#171717').text(data.serviceLineDisplay || data.serviceType || 'Service report', left, 64, {
+    doc.font('Helvetica').fontSize(28).fillColor('#171717').text(serviceDisplayName(data), left, 64, {
       width,
       lineGap: 2,
     });
@@ -108,9 +131,9 @@ function renderFallbackPdf(data) {
     doc.font('Helvetica').fontSize(16).fillColor('#171717').text('Customer advisory', left, y);
     y += 26;
     const advisory = data.advisory || {};
-    writeKeyValue(doc, 'Exterior re-entry', advisory.exterior_reentry_min != null ? `${advisory.exterior_reentry_min} min` : '-', left, y, 160);
-    writeKeyValue(doc, 'Interior re-entry', advisory.interior_reentry_min != null ? `${advisory.interior_reentry_min} min` : '-', left + 180, y, 160);
-    writeKeyValue(doc, 'Irrigation hold', advisory.irrigation_hold_hr != null ? `${advisory.irrigation_hold_hr} hr` : '-', left + 360, y, 160);
+    advisoryRows(advisory).forEach(([label, value], index) => {
+      writeKeyValue(doc, label, value, left + (index * 180), y, 160);
+    });
     y += 58;
     if (advisory.pet_advisory) {
       doc.font('Helvetica').fontSize(10).fillColor('#525252').text(advisory.pet_advisory, left, y, { width });
