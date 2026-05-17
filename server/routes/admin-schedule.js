@@ -2277,6 +2277,26 @@ router.put('/:id/status', async (req, res, next) => {
       } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
     }
 
+    if (toStatus === 'on_site') {
+      try {
+        const result = await trackTransitions.markOnProperty(svc.id);
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_on_property',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[on-site] markOnProperty failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'mark_on_property',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
+    }
+
     // Completed: review SMS schedule + in-app notification + the full
     // post-service automation chain (compliance records, customer
     // health score, time tracking close, upsell trigger, recurring
@@ -2284,12 +2304,56 @@ router.put('/:id/status', async (req, res, next) => {
     // opportunity check). All fire-and-forget against the freshly
     // committed status flip.
     if (toStatus === 'completed') {
+      try {
+        const result = await trackTransitions.markComplete(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_complete',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[completed] markComplete failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'mark_complete',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
+
       // Schedule a review request SMS for 2 hours after completion.
       // Honor the "Send review request" toggle if the caller passed it.
       // Default to true so older callers (that don't send the flag) keep
       // the existing auto-ask behavior.
       if (requestReview !== false) {
-        scheduleReviewRequest(svc);
+        await scheduleReviewRequest(svc);
+      }
+
+      // Re-emit after any review artifact is queued so an already-open
+      // customer tracker can refetch the complete card with final links.
+      try {
+        const result = await trackTransitions.markComplete(svc.id, {
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'refresh_complete_tracker',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[completed] refresh complete tracker failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'refresh_complete_tracker',
+          actorId: req.technicianId,
+          error: e,
+        });
       }
 
       // In-app notification: service completed

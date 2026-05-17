@@ -19,6 +19,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
+const { getIo } = require('../sockets');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
 const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require('./customer-tracking-eta');
 const { ensureCustomerGeocoded } = require('./geocoder');
@@ -28,6 +29,7 @@ const {
 } = require('../utils/service-duration-capture');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
+const CUSTOMER_EVENT = 'customer:job_update';
 
 function portalOrigin() {
   return process.env.CLIENT_URL
@@ -39,6 +41,37 @@ async function loadService(serviceId) {
   return db('scheduled_services')
     .where({ id: serviceId })
     .first();
+}
+
+function customerRoom(customerId) {
+  return `customer:${customerId}`;
+}
+
+function operationalStatusForTrackState(trackState) {
+  return {
+    scheduled: 'scheduled',
+    en_route: 'en_route',
+    on_property: 'on_site',
+    complete: 'completed',
+    cancelled: 'cancelled',
+  }[trackState] || trackState || null;
+}
+
+function emitCustomerTrackRefresh(svc, trackState, updatedAt = new Date()) {
+  if (!svc?.customer_id) return;
+  const io = getIo();
+  if (!io) {
+    logger.warn('[track-transitions] io not initialized; skipping customer tracker refresh');
+    return;
+  }
+  io.to(customerRoom(svc.customer_id)).emit(CUSTOMER_EVENT, {
+    job_id: svc.id,
+    status: operationalStatusForTrackState(trackState),
+    eta: null,
+    tech_id: svc.technician_id || null,
+    tech_first_name: null,
+    updated_at: updatedAt,
+  });
 }
 
 async function withTimeout(promise, timeoutMs, fallbackValue = null) {
@@ -166,6 +199,9 @@ async function markEnRoute(serviceId, opts = {}) {
         logger.error(`[track-transitions] tech_status en_route idempotent sync failed: ${err.message}`);
       }
     }
+    if (svc.track_state === 'en_route') {
+      emitCustomerTrackRefresh(svc, 'en_route', svc.en_route_at || new Date());
+    }
     return {
       ok: true,
       state: svc.track_state,
@@ -223,6 +259,7 @@ async function markEnRoute(serviceId, opts = {}) {
       logger.error(`[track-transitions] tech_status en_route sync failed: ${err.message}`);
     }
   }
+  emitCustomerTrackRefresh(svc, 'en_route', now);
 
   // SMS — guarded by track_sms_sent_at. A retap that won the UPDATE race
   // above still can't re-send because this check runs after the write.
@@ -305,6 +342,7 @@ async function markOnProperty(serviceId) {
         logger.error(`[track-transitions] tech_status on_site idempotent sync failed: ${err.message}`);
       }
     }
+    emitCustomerTrackRefresh(svc, 'on_property', svc.arrived_at || lifecycleUpdates.arrived_at || new Date());
     return { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   }
   // Geofence arrival can be the first signal we get when a tech forgot
@@ -355,6 +393,7 @@ async function markOnProperty(serviceId) {
       logger.error(`[track-transitions] tech_status on_site sync failed: ${err.message}`);
     }
   }
+  emitCustomerTrackRefresh(svc, 'on_property', now);
   return { ok: true, state: 'on_property', arrivedAt: now };
 }
 
@@ -367,6 +406,7 @@ async function markComplete(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.track_state === 'complete') {
+    emitCustomerTrackRefresh(svc, 'complete', svc.completed_at || new Date());
     return { ok: true, state: 'complete', completedAt: svc.completed_at };
   }
   if (!['scheduled', 'en_route', 'on_property'].includes(svc.track_state)) {
@@ -398,6 +438,7 @@ async function markComplete(serviceId, opts = {}) {
       logger.error(`[track-transitions] tech_status complete clear failed: ${err.message}`);
     }
   }
+  emitCustomerTrackRefresh(svc, 'complete', now);
   return {
     ok: true,
     state: 'complete',
@@ -414,6 +455,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.track_state === 'cancelled') {
+    emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
     return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
   if (svc.track_state === 'complete') {
@@ -447,6 +489,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
       logger.error(`[track-transitions] tech_status cancel clear failed: ${err.message}`);
     }
   }
+  emitCustomerTrackRefresh(svc, 'cancelled', now);
   return {
     ok: true,
     state: 'cancelled',
@@ -462,4 +505,7 @@ module.exports = {
   markComplete,
   cancel,
   portalOrigin,
+  _test: {
+    operationalStatusForTrackState,
+  },
 };
