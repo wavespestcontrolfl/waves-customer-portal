@@ -198,6 +198,26 @@ router.post('/payouts/instant', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// POST /payouts/standard — request a standard manual payout
+// ═══════════════════════════════════════════════════════════════
+router.post('/payouts/standard', async (req, res) => {
+  try {
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount — must be a positive number' });
+    }
+    const result = await StripeBanking.createStandardPayout(amount, {
+      requestedBy: getAdminActorId(req),
+      idempotencyKey: req.body.idempotency_key,
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error('[banking] Standard payout failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
 // POST /sync — sync payouts from Stripe
 // ═══════════════════════════════════════════════════════════════
 router.post('/sync', async (req, res) => {

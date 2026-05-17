@@ -116,6 +116,7 @@ describe('stripe banking service', () => {
         amount: 5000,
         currency: 'usd',
         method: 'instant',
+        description: 'Instant payout',
         metadata: { waves_requested_by: 'admin-1' },
       },
       { idempotencyKey: 'ipo_test_key_123' },
@@ -124,6 +125,101 @@ describe('stripe banking service', () => {
     expect(conflictColumn).toBe('stripe_payout_id');
     expect(mergeCalled).toBe(true);
     expect(result.amount).toBe(50);
+    expect(result.fee_estimate).toBe(0.75);
+  });
+
+  test('createStandardPayout creates a standard payout with no instant fee estimate', async () => {
+    let insertPayload;
+    db.mockImplementation((table) => {
+      if (table !== 'stripe_payouts') throw new Error(`Unexpected table ${table}`);
+      return {
+        insert: jest.fn((payload) => {
+          insertPayload = payload;
+          return {
+            onConflict: jest.fn(() => ({
+              merge: jest.fn().mockResolvedValue(1),
+            })),
+          };
+        }),
+      };
+    });
+    stripeClient.balance.retrieve.mockResolvedValue({ available: [{ currency: 'usd', amount: 10000 }] });
+    stripeClient.payouts.create.mockResolvedValue({
+      id: 'po_standard',
+      amount: 7500,
+      currency: 'usd',
+      status: 'pending',
+      arrival_date: 1770000000,
+      created: 1770000000,
+      method: 'standard',
+      type: 'bank_account',
+      description: 'Standard payout',
+      metadata: { waves_requested_by: 'admin-1' },
+    });
+
+    const result = await service.createStandardPayout(75, {
+      requestedBy: 'admin-1',
+      idempotencyKey: 'spo_test_key_123',
+    });
+
+    expect(stripeClient.payouts.create).toHaveBeenCalledWith(
+      {
+        amount: 7500,
+        currency: 'usd',
+        method: 'standard',
+        description: 'Standard payout',
+        metadata: { waves_requested_by: 'admin-1' },
+      },
+      { idempotencyKey: 'spo_test_key_123' },
+    );
+    expect(insertPayload.method).toBe('standard');
+    expect(result).toMatchObject({ amount: 75, method: 'standard', fee_estimate: 0 });
+  });
+
+  test('createStandardPayout lets valid idempotent retries reach Stripe when local balance changed', async () => {
+    let insertPayload;
+    db.mockImplementation((table) => {
+      if (table !== 'stripe_payouts') throw new Error(`Unexpected table ${table}`);
+      return {
+        insert: jest.fn((payload) => {
+          insertPayload = payload;
+          return {
+            onConflict: jest.fn(() => ({
+              merge: jest.fn().mockResolvedValue(1),
+            })),
+          };
+        }),
+      };
+    });
+    stripeClient.balance.retrieve.mockResolvedValue({ available: [{ currency: 'usd', amount: 0 }] });
+    stripeClient.payouts.create.mockResolvedValue({
+      id: 'po_standard_retry',
+      amount: 7500,
+      currency: 'usd',
+      status: 'pending',
+      arrival_date: 1770000000,
+      created: 1770000000,
+      method: 'standard',
+      type: 'bank_account',
+      description: 'Standard payout',
+      metadata: {},
+    });
+
+    const result = await service.createStandardPayout(75, {
+      idempotencyKey: 'spo_retry_key_123',
+    });
+
+    expect(stripeClient.payouts.create).toHaveBeenCalledWith(
+      {
+        amount: 7500,
+        currency: 'usd',
+        method: 'standard',
+        description: 'Standard payout',
+      },
+      { idempotencyKey: 'spo_retry_key_123' },
+    );
+    expect(insertPayload.stripe_payout_id).toBe('po_standard_retry');
+    expect(result).toMatchObject({ payout_id: 'po_standard_retry', amount: 75, method: 'standard' });
   });
 
   test('createInstantPayout rejects amounts over available Stripe balance', async () => {

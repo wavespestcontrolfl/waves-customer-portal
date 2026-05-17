@@ -31,6 +31,7 @@ jest.mock('../services/intelligence-bar/estimate-tools', () => ({ ESTIMATE_TOOLS
 jest.mock('../services/intelligence-bar/banking-tools', () => ({
   BANKING_TOOLS: [
     { name: 'request_instant_payout', input_schema: { type: 'object', properties: {} } },
+    { name: 'request_standard_payout', input_schema: { type: 'object', properties: {} } },
     { name: 'get_stripe_balance', input_schema: { type: 'object', properties: {} } },
   ],
   BANKING_QUERY_TOOLS: [
@@ -141,6 +142,20 @@ describe('banking intelligence-bar action guard', () => {
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
       expect(mockExecuteBankingTool).toHaveBeenCalledWith('request_instant_payout', { amount: 50 });
+    });
+  });
+
+  test('admin standard payout action requires explicit confirmation', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'request_standard_payout', params: { amount: 50 } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('Explicit confirmation is required for this action');
+      expect(mockExecuteBankingTool).not.toHaveBeenCalled();
     });
   });
 });

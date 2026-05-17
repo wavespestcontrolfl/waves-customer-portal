@@ -11,6 +11,8 @@ const logger = require('../logger');
 const StripeBanking = require('../stripe-banking');
 const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
+const INSTANT_PAYOUT_FEE_RATE_US = 0.015;
+
 const BANKING_TOOLS = [
   {
     name: 'get_stripe_balance',
@@ -72,12 +74,24 @@ Use for: "how much are we paying in Stripe fees?", "what's our effective process
   },
   {
     name: 'request_instant_payout',
-    description: `Request an instant payout from Stripe to the linked bank account. Instant payouts have a ~1% fee. THIS IS A WRITE OPERATION — confirm the amount with the operator before executing.
+    description: `Request an instant payout from Stripe to the linked bank account. US Instant Payouts have a ~1.5% fee. THIS IS A WRITE OPERATION — confirm the amount with the operator before executing.
 Use for: "instant payout", "send $500 to bank now", "emergency payout"`,
     input_schema: {
       type: 'object',
       properties: {
         amount: { type: 'number', description: 'Amount in dollars to pay out instantly' },
+      },
+      required: ['amount'],
+    },
+  },
+  {
+    name: 'request_standard_payout',
+    description: `Request a standard manual payout from Stripe to the linked bank account. This avoids the Instant Payout fee and uses Stripe's standard bank payout timing. THIS IS A WRITE OPERATION — confirm the amount with the operator before executing.
+Use for: "standard payout", "send money to the bank without instant fees", "transfer available Stripe balance without the instant fee"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: 'Amount in dollars to pay out on Stripe standard timing' },
       },
       required: ['amount'],
     },
@@ -108,7 +122,13 @@ Use for: "export payouts for QuickBooks", "download payout CSV", "OFX export for
   },
 ];
 
-const BANKING_QUERY_TOOLS = BANKING_TOOLS.filter(t => t.name !== 'request_instant_payout');
+const BANKING_WRITE_TOOL_NAMES = new Set(['request_instant_payout', 'request_standard_payout']);
+const BANKING_QUERY_TOOLS = BANKING_TOOLS.filter(t => !BANKING_WRITE_TOOL_NAMES.has(t.name));
+
+function getValidPayoutAmount(input) {
+  const amount = input?.amount;
+  return typeof amount === 'number' && Number.isFinite(amount) && amount > 0 ? amount : null;
+}
 
 
 // ─── EXECUTION ──────────────────────────────────────────────────
@@ -122,6 +142,7 @@ async function executeBankingTool(toolName, input) {
       case 'get_cash_flow': return await getCashFlowHandler(input);
       case 'get_fee_analysis': return await getFeeAnalysis(input);
       case 'request_instant_payout': return await requestInstantPayout(input);
+      case 'request_standard_payout': return await requestStandardPayout(input);
       case 'get_unreconciled_payouts': return await getUnreconciledPayouts(input);
       case 'export_payouts': return await exportPayouts(input);
       default: return { error: `Unknown banking tool: ${toolName}` };
@@ -314,14 +335,14 @@ async function getFeeAnalysis(input) {
 
 
 async function requestInstantPayout(input) {
-  const { amount } = input;
+  const amount = getValidPayoutAmount(input);
 
-  if (!amount || amount <= 0) {
+  if (amount == null) {
     return { error: 'Amount must be a positive number.' };
   }
 
-  // Calculate instant payout fee (~1%)
-  const estimatedFee = Math.round(amount * 0.01 * 100) / 100;
+  // Estimate US Dashboard Instant Payout fee from Stripe's published rate.
+  const estimatedFee = Math.round(amount * INSTANT_PAYOUT_FEE_RATE_US * 100) / 100;
   const netAmount = Math.round((amount - estimatedFee) * 100) / 100;
 
   try {
@@ -330,10 +351,30 @@ async function requestInstantPayout(input) {
       ...result,
       estimated_fee: estimatedFee,
       net_after_fee: netAmount,
-      note: `Instant payout of $${amount.toFixed(2)} requested. Estimated fee: $${estimatedFee.toFixed(2)} (~1%). Funds should arrive within minutes.`,
+      note: `Instant payout of $${amount.toFixed(2)} requested. Estimated fee: $${estimatedFee.toFixed(2)} (~1.5%). Funds should arrive within minutes.`,
     };
   } catch (err) {
     return { error: `Instant payout failed: ${err.message}` };
+  }
+}
+
+async function requestStandardPayout(input) {
+  const amount = getValidPayoutAmount(input);
+
+  if (amount == null) {
+    return { error: 'Amount must be a positive number.' };
+  }
+
+  try {
+    const result = await StripeBanking.createStandardPayout(amount);
+    return {
+      ...result,
+      estimated_fee: 0,
+      net_after_fee: Math.round(amount * 100) / 100,
+      note: `Standard payout of $${amount.toFixed(2)} requested. No Instant Payout fee was added; arrival follows Stripe's standard payout timing.`,
+    };
+  } catch (err) {
+    return { error: `Standard payout failed: ${err.message}` };
   }
 }
 
