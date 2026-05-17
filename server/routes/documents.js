@@ -657,6 +657,7 @@ router.get('/', authenticate, async (req, res, next) => {
         flea: 'Flea Service',
         rodent_exclusion: 'Rodent Exclusion',
         bed_bug: 'Bed Bug Treatment',
+        pre_treatment_termite_certificate: 'Certificate of Compliance',
       };
       const label = typeLabels[p.project_type] || 'Inspection';
       const viewUrl = await projectReportPathForProject(db, p, p);

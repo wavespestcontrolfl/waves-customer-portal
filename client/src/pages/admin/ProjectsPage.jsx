@@ -44,8 +44,10 @@ const TYPE_LABELS = {
   flea: "Flea",
   rodent_exclusion: "Rodent",
   bed_bug: "Bed Bug",
+  pre_treatment_termite_certificate: "Pre-Treat Cert",
 };
 const WDO_TYPE = "wdo_inspection";
+const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
@@ -239,8 +241,9 @@ function evaluateProjectReadiness({
   projectDate,
   photos,
 }) {
+  const isCertificate = project?.project_type === CERTIFICATE_TYPE;
   const required = [
-    { label: "Inspection date", ok: hasMeaningfulValue(projectDate) },
+    { label: isCertificate ? "Treatment date" : "Inspection date", ok: hasMeaningfulValue(projectDate) },
     { label: "Customer", ok: hasMeaningfulValue(project?.customer_name) },
     {
       label: "Report title or type",
@@ -252,10 +255,12 @@ function evaluateProjectReadiness({
       label: "Findings captured",
       ok: Object.values(findings || {}).some(hasMeaningfulValue),
     },
-    {
-      label: "Recommendation / notes",
-      ok: hasMeaningfulValue(recommendations),
-    },
+    ...(isCertificate
+      ? []
+      : [{
+        label: "Recommendation / notes",
+        ok: hasMeaningfulValue(recommendations),
+      }]),
     { label: "Photos attached", ok: (photos || []).length > 0 },
   ];
   if (project?.project_type === WDO_TYPE) {
@@ -274,13 +279,68 @@ function evaluateProjectReadiness({
       },
     );
   }
+  if (isCertificate) {
+    const productName = findings?.product_name === "Other"
+      ? findings?.product_name_other
+      : findings?.product_name;
+    const treatmentMethod = findings?.treatment_method === "Other"
+      ? findings?.treatment_method_other
+      : findings?.treatment_method;
+    required.push(
+      {
+        label: "Treatment address or lot/block",
+        ok:
+          hasMeaningfulValue(findings?.treatment_address) ||
+          hasMeaningfulValue(findings?.lot_block),
+      },
+      {
+        label: "Date of treatment",
+        ok:
+          hasMeaningfulValue(findings?.treatment_date) ||
+          hasMeaningfulValue(projectDate),
+      },
+      {
+        label: "Method of treatment",
+        ok: hasMeaningfulValue(treatmentMethod),
+      },
+      {
+        label: "Product used",
+        ok: hasMeaningfulValue(productName),
+      },
+      {
+        label: "Active ingredient + concentration",
+        ok:
+          hasMeaningfulValue(findings?.active_ingredient) &&
+          hasMeaningfulValue(findings?.concentration_pct),
+      },
+      {
+        label: "Coverage + gallons applied",
+        ok:
+          (hasMeaningfulValue(findings?.square_footage) ||
+            hasMeaningfulValue(findings?.linear_feet)) &&
+          hasMeaningfulValue(findings?.gallons_applied),
+      },
+      {
+        label: "Applicator's printed name",
+        ok: hasMeaningfulValue(findings?.applicator_name),
+      },
+      {
+        label: "Applicator FDACS ID #",
+        ok: hasMeaningfulValue(findings?.applicator_fdacs_id),
+      },
+      {
+        label: "Applicator attestation",
+        ok: hasMeaningfulValue(findings?.applicator_attestation),
+      },
+    );
+  }
 
   const text = [recommendations, ...Object.values(findings || {})]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
   const quality = [];
-  if (recommendations && recommendations.length < 80) {
+  if (!isCertificate && recommendations && recommendations.length < 80) {
     quality.push(
       "Recommendation is short; add what was found, why it matters, and the next step.",
     );
@@ -297,6 +357,7 @@ function evaluateProjectReadiness({
     /\b(treat|treatment|apply|application|boracare|bora care|bait|exclusion|follow[-\s]?up)\b/.test(
       text,
     ) &&
+    !isCertificate &&
     !recommendations
   ) {
     quality.push(

@@ -405,12 +405,19 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
 function evaluateProjectSendReadiness({ project, customer, photoCount = 0 }) {
   const typeCfg = getProjectType(project?.project_type);
   const findings = normalizeFindings(project?.findings);
+  // Certificate of Compliance is structured-findings + photos only — there is
+  // no narrative "Recommendations" section on the rendered document, so the
+  // shared recommendations check would force techs to type unrelated copy
+  // (or override) just to satisfy a field that never reaches the customer.
+  const isCertificate = project?.project_type === 'pre_treatment_termite_certificate';
   const required = [
-    { key: 'project_date', label: 'Inspection date', ok: hasMeaningfulValue(project?.project_date) },
+    { key: 'project_date', label: isCertificate ? 'Treatment date' : 'Inspection date', ok: hasMeaningfulValue(project?.project_date) },
     { key: 'customer', label: 'Customer', ok: Boolean(customer?.id || project?.customer_id) },
     { key: 'project_type', label: 'Report title or type', ok: hasMeaningfulValue(project?.title) || Boolean(typeCfg) },
     { key: 'findings', label: 'Findings captured', ok: Object.values(findings).some(hasMeaningfulValue) },
-    { key: 'recommendations', label: 'Recommendation / notes', ok: hasMeaningfulValue(project?.recommendations) },
+    ...(isCertificate ? [] : [
+      { key: 'recommendations', label: 'Recommendation / notes', ok: hasMeaningfulValue(project?.recommendations) },
+    ]),
     { key: 'photos', label: 'Photos attached', ok: Number(photoCount) > 0 },
   ];
 
@@ -419,6 +426,24 @@ function evaluateProjectSendReadiness({ project, customer, photoCount = 0 }) {
       { key: 'wdo_property_address', label: 'Property inspected', ok: hasMeaningfulValue(findings.property_address) },
       { key: 'wdo_finding', label: 'FDACS finding selected', ok: hasMeaningfulValue(findings.wdo_finding) },
       { key: 'wdo_inspection_scope', label: 'Visible/access scope', ok: hasMeaningfulValue(findings.inspection_scope) },
+    );
+  }
+
+  if (project?.project_type === 'pre_treatment_termite_certificate') {
+    const productName = findings.product_name === 'Other' ? findings.product_name_other : findings.product_name;
+    const method = findings.treatment_method === 'Other' ? findings.treatment_method_other : findings.treatment_method;
+    required.push(
+      { key: 'cert_treatment_address', label: 'Treatment address (or lot/block)', ok: hasMeaningfulValue(findings.treatment_address) || hasMeaningfulValue(findings.lot_block) },
+      { key: 'cert_treatment_date', label: 'Date of treatment', ok: hasMeaningfulValue(findings.treatment_date) || hasMeaningfulValue(project?.project_date) },
+      { key: 'cert_treatment_method', label: 'Method of treatment', ok: hasMeaningfulValue(method) },
+      { key: 'cert_product', label: 'Product used', ok: hasMeaningfulValue(productName) },
+      { key: 'cert_active_ingredient', label: 'Active ingredient + concentration', ok: hasMeaningfulValue(findings.active_ingredient) && hasMeaningfulValue(findings.concentration_pct) },
+      { key: 'cert_coverage', label: 'Coverage (sq ft or linear ft + gallons applied)', ok: (hasMeaningfulValue(findings.square_footage) || hasMeaningfulValue(findings.linear_feet)) && hasMeaningfulValue(findings.gallons_applied) },
+      { key: 'cert_applicator_name', label: "Applicator's printed name", ok: hasMeaningfulValue(findings.applicator_name) },
+      { key: 'cert_applicator_fdacs_id', label: 'Applicator FDACS ID #', ok: hasMeaningfulValue(findings.applicator_fdacs_id) },
+      // Applicator attestation satisfies FBC 1816.1.7 authorized-signature
+      // requirement when paired with the typed name + FDACS ID + date.
+      { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
   }
 

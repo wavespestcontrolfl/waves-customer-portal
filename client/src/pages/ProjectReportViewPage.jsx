@@ -27,6 +27,7 @@ const TYPE_LABELS = {
   flea: 'Flea Service',
   rodent_exclusion: 'Rodent Exclusion',
   bed_bug: 'Bed Bug Treatment',
+  pre_treatment_termite_certificate: 'Certificate of Compliance — Pre-Construction Termite Treatment',
 };
 
 function formatReportDate(value) {
@@ -139,6 +140,29 @@ const FIELD_LABELS = {
   prep_for_customer: 'Customer prep for follow-up',
   host_activity: 'Host / activity notes',
   treatment_areas: 'Treatment areas',
+  // Pre-treatment Certificate of Compliance fields (FBC 1816.1.7)
+  treatment_address: 'Treatment address',
+  lot_block: 'Lot / Block',
+  subdivision: 'Subdivision / Community',
+  permit_number: 'Building permit #',
+  builder_contractor: 'Builder / General contractor',
+  treatment_date: 'Date of treatment',
+  treatment_time: 'Time of treatment',
+  treatment_method_other: 'Method description',
+  wdo_target: 'Wood-destroying organism treated for',
+  product_name: 'Product used',
+  product_name_other: 'Product (other)',
+  epa_registration: 'EPA registration #',
+  active_ingredient: 'Active ingredient',
+  concentration_pct: 'Concentration (%)',
+  square_footage: 'Square footage treated',
+  linear_feet: 'Linear feet treated',
+  gallons_applied: 'Gallons applied',
+  applicator_name: "Applicator's printed name",
+  applicator_fdacs_id: 'Applicator FDACS ID #',
+  applicator_attestation: 'Applicator attestation',
+  warranty_type: 'Warranty / retreatment bond',
+  renewal_due: 'Renewal due by',
 };
 
 function humanizeKey(k) {
@@ -183,6 +207,7 @@ function getProjectKind(projectType) {
   if (projectType === 'bed_bug') return 'bed_bug';
   if (projectType === 'flea') return 'flea';
   if (projectType === 'pest_inspection') return 'pest';
+  if (projectType === 'pre_treatment_termite_certificate') return 'pre_treat_cert';
   return 'general';
 }
 
@@ -218,6 +243,11 @@ function getRiskInsight(kind, allText) {
 }
 
 function buildClientSnapshot({ projectType, findings, recommendations }) {
+  const kind = getProjectKind(projectType);
+  // Certificate of Compliance is a delivered legal document, not a sales/triage
+  // snapshot — the document itself communicates "next step" via warranty terms.
+  if (kind === 'pre_treat_cert') return null;
+
   const allText = [
     projectType,
     recommendations,
@@ -225,7 +255,6 @@ function buildClientSnapshot({ projectType, findings, recommendations }) {
   ].filter(Boolean).join(' ').toLowerCase();
 
   const hasAction = shouldShowBookingCta(recommendations);
-  const kind = getProjectKind(projectType);
   const hasMoisture = includesAny(allText, ['moisture', 'wood rot', 'rot ', 'leak', 'eave', 'attic']);
   const hasWdo = includesAny(allText, ['termite', 'wdo', 'wood-destroying', 'shelter tube', 'frass', 'boracare', 'bora care']);
   const hasRodent = includesAny(allText, ['rodent', 'rat', 'mouse', 'entry point', 'exclusion', 'trap']);
@@ -374,8 +403,12 @@ export default function ProjectReportViewPage() {
   const sentDateLabel = data.sentAt ? formatReportDate(data.sentAt) : '';
   const showSentDate = sentDateLabel && reportDateKey(data.sentAt) !== reportDateKey(data.projectDate);
   const reportMetaStyle = { fontSize: 14, color: B.grayDark, lineHeight: 1.45 };
+  const isCertificate = data.projectType === 'pre_treatment_termite_certificate';
+  const contactDateLabel = isCertificate
+    ? (projectDateLabel ? `Treatment date: ${projectDateLabel}${data.technicianName ? ` · Applicator: ${data.technicianName}` : ''}` : '')
+    : (projectDateLabel ? `Inspection date: ${projectDateLabel}${data.technicianName ? ` · ${data.technicianName}` : ''}` : '');
   const contactRows = [
-    projectDateLabel ? `Inspection date: ${projectDateLabel}${data.technicianName ? ` · ${data.technicianName}` : ''}` : '',
+    contactDateLabel,
     showSentDate ? `Report sent: ${sentDateLabel}` : '',
     data.customerAddress || '',
     data.customerEmail ? `Email: ${data.customerEmail}` : '',
@@ -426,7 +459,7 @@ export default function ProjectReportViewPage() {
             </div>
           )}
 
-          {atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
+          {!isCertificate && atAGlanceRows.length > 0 && <AtAGlance rows={atAGlanceRows} />}
 
           {clientSnapshot && (
             <div style={{
@@ -453,8 +486,10 @@ export default function ProjectReportViewPage() {
             </div>
           )}
 
-          {/* Findings */}
-          {findingsEntries.length > 0 && (
+          {/* Findings — suppressed on the Certificate of Compliance because
+              the Certificate block below renders the same data in its
+              branded, FBC-compliant document layout. */}
+          {!isCertificate && findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                 Findings
@@ -502,7 +537,7 @@ export default function ProjectReportViewPage() {
           {/* Recommendations — if the text is the three-section AI-drafted
                format, render each section with its own heading. Otherwise
                fall back to the single "Recommendations" block. */}
-          {data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
+          {!isCertificate && data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
         </div>
 
         {data.projectType === 'wdo_inspection' && (
@@ -524,6 +559,16 @@ export default function ProjectReportViewPage() {
               <Icon name="document" size={15} strokeWidth={2} /> View FDACS-13645
             </a>
           </div>
+        )}
+
+        {isCertificate && (
+          <CertificateOfCompliance
+            findings={findings}
+            customerName={data.customerName}
+            customerAddress={data.customerAddress}
+            technicianName={data.technicianName}
+            projectDateLabel={projectDateLabel}
+          />
         )}
 
         {/* Primary visit photos */}
@@ -592,6 +637,314 @@ function AtAGlance({ rows }) {
             <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.45 }}>{value}</div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * CertificateOfCompliance — Florida Building Code 1816.1.7 Certificate for
+ * pre-construction subterranean termite soil treatment. Visual family matches
+ * the v10 Permanent Notice sticker (wavesBlue header band, navy field labels,
+ * red statutory line, blue footer band) so the permit-folder packet reads as
+ * one coordinated document set. Stamp ID: WV-002 (sticker is WV-001).
+ *
+ * Required content per FBC 1816.1.7: company name + phone, treatment address
+ * or lot/block, method of treatment, the exact compliance statement, and an
+ * authorized applicator signature. Additional fields (product/EPA/A.I./
+ * concentration, sq ft, gallons, FDACS ID, warranty) satisfy FDACS Rule
+ * 5E-14.106 treatment-record requirements simultaneously.
+ */
+function CertificateOfCompliance({ findings, customerName, customerAddress, technicianName, projectDateLabel }) {
+  const f = findings || {};
+  const method = f.treatment_method === 'Other' && f.treatment_method_other
+    ? f.treatment_method_other
+    : f.treatment_method;
+  const product = f.product_name === 'Other' && f.product_name_other
+    ? f.product_name_other
+    : f.product_name;
+  const productLine = [product, f.epa_registration ? `EPA Reg. ${f.epa_registration}` : '']
+    .filter(Boolean)
+    .join(' · ');
+  const aiLine = [
+    f.active_ingredient,
+    f.concentration_pct ? `${String(f.concentration_pct).replace(/%$/, '')}%` : '',
+  ].filter(Boolean).join(' — ');
+  const coverageLine = [
+    f.square_footage ? `${f.square_footage} sq ft` : '',
+    f.linear_feet ? `${f.linear_feet} linear ft` : '',
+    f.gallons_applied ? `${f.gallons_applied} gal applied` : '',
+  ].filter(Boolean).join(' · ');
+  const treatmentDateValue = [
+    f.treatment_date || projectDateLabel || '',
+    f.treatment_time || '',
+  ].filter(Boolean).join(' · ');
+  const addressValue = f.treatment_address || customerAddress || '';
+  const lotLine = [f.lot_block, f.subdivision].filter(Boolean).join(' · ');
+  const applicatorLine = [
+    f.applicator_name || technicianName || '',
+    f.applicator_fdacs_id ? `FDACS ID ${f.applicator_fdacs_id}` : '',
+  ].filter(Boolean).join(' · ');
+  const warrantyLine = [
+    f.warranty_type,
+    f.renewal_due ? `Renewal due ${f.renewal_due}` : '',
+  ].filter(Boolean).join(' · ');
+
+  const fields = [
+    ['Treatment address', addressValue],
+    ['Lot / Block / Subdivision', lotLine],
+    ['Building permit #', f.permit_number],
+    ['Builder / General contractor', f.builder_contractor],
+    ['Date & time of treatment', treatmentDateValue],
+    ['Method of treatment', method],
+    ['Wood-destroying organism treated for', f.wdo_target],
+    ['Product used', productLine],
+    ['Active ingredient & concentration', aiLine],
+    ['Coverage', coverageLine],
+    ['Applicator', applicatorLine],
+    ['Warranty / retreatment bond', warrantyLine],
+  ];
+
+  return (
+    <div style={{
+      marginTop: 16,
+      background: '#fff',
+      borderRadius: 16,
+      border: `1px solid ${B.bluePale}`,
+      overflow: 'hidden',
+      position: 'relative',
+    }}>
+      {/* Blue header band — matches v10 sticker */}
+      <div style={{
+        background: B.wavesBlue,
+        padding: '18px 20px 16px',
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+      }}>
+        <div style={{ flex: 1 }}>
+          <div style={{
+            fontFamily: FONTS.heading,
+            fontSize: 14,
+            fontWeight: 700,
+            color: '#fff',
+            opacity: 0.92,
+            textTransform: 'uppercase',
+            letterSpacing: 1,
+            marginBottom: 4,
+          }}>
+            Florida Certificate of Compliance
+          </div>
+          <div style={{
+            fontFamily: FONTS.heading,
+            fontSize: 18,
+            fontWeight: 800,
+            color: '#fff',
+            lineHeight: 1.15,
+            letterSpacing: 0.5,
+            textTransform: 'uppercase',
+          }}>
+            Pre-Construction Termite Protection
+          </div>
+          <div style={{
+            fontSize: 14,
+            color: '#fff',
+            opacity: 0.92,
+            marginTop: 8,
+            lineHeight: 1.4,
+          }}>
+            Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. JB351547
+          </div>
+        </div>
+        <img src="/waves-logo.png" alt="Waves" style={{ height: 36, flexShrink: 0 }} />
+      </div>
+
+      {/* Property + customer header */}
+      <div style={{ padding: '14px 20px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {customerName && (
+          <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            Issued to: {customerName}
+          </div>
+        )}
+      </div>
+
+      {/* Field grid — value above italic label, sticker-style */}
+      <div style={{
+        padding: '14px 20px 6px',
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+        rowGap: 14,
+        columnGap: 18,
+      }}>
+        {fields.map(([label, value]) => (
+          <div key={label}>
+            <div style={{
+              fontFamily: FONTS.body,
+              fontSize: 14,
+              fontWeight: 700,
+              color: B.navy,
+              minHeight: 20,
+              borderBottom: `1px solid ${B.grayLight}`,
+              paddingBottom: 4,
+              wordBreak: 'break-word',
+            }}>
+              {value || '—'}
+            </div>
+            <div style={{
+              fontFamily: FONTS.body,
+              fontSize: 14,
+              fontStyle: 'italic',
+              color: B.grayMid,
+              marginTop: 4,
+            }}>
+              {label}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* FBC required compliance statement (exact wording per 1816.1.7) */}
+      <div style={{ padding: '14px 20px 4px' }}>
+        <div style={{
+          fontSize: 14,
+          color: B.grayDark,
+          lineHeight: 1.55,
+          fontStyle: 'italic',
+          textAlign: 'center',
+          padding: '0 8px',
+        }}>
+          The building has received a complete treatment for the prevention of subterranean termites.
+          Treatment is in accordance with rules and laws established by the Florida Department of
+          Agriculture and Consumer Services.
+        </div>
+        <div style={{
+          fontSize: 14,
+          color: B.red,
+          fontWeight: 700,
+          lineHeight: 1.5,
+          textAlign: 'center',
+          marginTop: 10,
+          padding: '0 8px',
+        }}>
+          This Certificate must be retained in the building permit file as required by FBC 1816.1.7.
+        </div>
+        {f.comments && (
+          <div style={{
+            marginTop: 12,
+            padding: '10px 12px',
+            borderRadius: 8,
+            background: B.blueSurface,
+            border: `1px solid ${B.bluePale}`,
+            fontSize: 14,
+            color: B.grayDark,
+            lineHeight: 1.55,
+            whiteSpace: 'pre-wrap',
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
+              Applicator notes
+            </div>
+            {f.comments}
+          </div>
+        )}
+      </div>
+
+      {/* Electronic signature / attestation block — FBC 1816.1.7 requires
+          an authorized applicator signature. The typed attestation + printed
+          name + FDACS ID + treatment date together constitute an electronic
+          signature accepted by Florida building departments. */}
+      {f.applicator_attestation && (f.applicator_name || technicianName) && (
+        <div style={{
+          margin: '14px 20px 0',
+          padding: '12px 14px',
+          borderRadius: 10,
+          background: B.blueSurface,
+          border: `1px solid ${B.bluePale}`,
+        }}>
+          <div style={{
+            fontSize: 14,
+            fontWeight: 800,
+            color: B.navy,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            marginBottom: 6,
+          }}>
+            Signed electronically
+          </div>
+          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, fontStyle: 'italic' }}>
+            {f.applicator_attestation}
+          </div>
+          <div style={{
+            marginTop: 10,
+            paddingTop: 10,
+            borderTop: `1px solid ${B.bluePale}`,
+            fontSize: 14,
+            color: B.navy,
+            lineHeight: 1.5,
+          }}>
+            <span style={{ color: B.green, fontWeight: 800, marginRight: 6 }}>Signed by</span>
+            <span style={{ fontWeight: 700 }}>{f.applicator_name || technicianName}</span>
+            {f.applicator_fdacs_id ? ` · FDACS ID ${f.applicator_fdacs_id}` : ''}
+            {(f.treatment_date || projectDateLabel) ? (
+              <>
+                <br />
+                <span style={{ color: B.grayDark, fontSize: 14 }}>
+                  Attested on {f.treatment_date || projectDateLabel}
+                </span>
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {/* Blue footer band — Activate Your Termite Warranty (matches v10 sticker) */}
+      <div style={{
+        marginTop: 14,
+        background: B.wavesBlue,
+        padding: '14px 20px 12px',
+        textAlign: 'center',
+      }}>
+        <div style={{
+          fontFamily: FONTS.heading,
+          fontSize: 15,
+          fontWeight: 800,
+          color: '#fff',
+          textTransform: 'uppercase',
+          letterSpacing: 0.5,
+        }}>
+          Activate Your Termite Warranty
+        </div>
+        <div style={{
+          fontSize: 14,
+          color: '#fff',
+          opacity: 0.95,
+          marginTop: 4,
+          letterSpacing: 0.3,
+        }}>
+          (941) 297-5749 • wavespestcontrol.com/register
+        </div>
+        <div style={{
+          fontSize: 10,
+          color: '#fff',
+          opacity: 0.85,
+          marginTop: 6,
+        }}>
+          Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
+        </div>
+      </div>
+
+      {/* Form-ID stamp — bottom right, matches v10 "WV-001" treatment */}
+      <div style={{
+        position: 'absolute',
+        bottom: 4,
+        right: 8,
+        fontSize: 9,
+        color: '#fff',
+        opacity: 0.75,
+        letterSpacing: 0.5,
+        fontFamily: FONTS.mono,
+      }}>
+        WV-002
       </div>
     </div>
   );
