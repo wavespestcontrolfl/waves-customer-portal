@@ -255,7 +255,7 @@ function WaveGuardIntelligenceCard({ intelligence, address }) {
               }}
             >
               <div style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: ESTIMATE_MUTED,
                 textTransform: 'uppercase',
                 letterSpacing: '0.08em',
@@ -293,7 +293,7 @@ function WaveGuardIntelligenceCard({ intelligence, address }) {
                 background: COLORS.white,
                 padding: '10px 12px',
                 color: '#3F4A65',
-                fontSize: 13,
+                fontSize: 16,
                 lineHeight: 1.45,
               }}
             >
