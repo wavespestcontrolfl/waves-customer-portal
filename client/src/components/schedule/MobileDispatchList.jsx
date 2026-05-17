@@ -11,7 +11,8 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Leaf, ShieldCheck, Truck } from 'lucide-react';
+import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
+import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
 import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib/timezone';
@@ -212,7 +213,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           title="Tech En Route"
           aria-label="Tech En Route"
         >
-          <Truck size={18} strokeWidth={1.75} />
+          <WavesMark size={18} fill="#009CDE" title="Waves logo" />
         </button>
       )}
     </div>

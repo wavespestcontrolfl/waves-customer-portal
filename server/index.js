@@ -374,7 +374,6 @@ app.use('/api/admin/kb', require('./routes/admin-kb'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/customer-notifications', require('./routes/customer-notifications'));
 app.use('/api/billing/autopay', require('./routes/customer-autopay'));
-app.use('/api/admin', require('./routes/admin-billing-health'));
 app.use('/api/admin/payments', require('./routes/admin-payments-reconcile'));
 app.use('/api/review', reviewPublicRoutes);
 app.use('/api/admin/review-requests', adminReviewRequestRoutes);
@@ -396,7 +395,6 @@ app.use('/api/admin/sms-templates', require('./routes/admin-sms-templates'));
 app.use('/api/admin/email', require('./routes/admin-email'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));
 app.use('/api/admin/pricing-proposals', require('./routes/admin-pricing-proposals'));
-app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/tech/field-lead', require('./routes/tech-field-lead'));
 app.use('/api/notification-prefs', require('./routes/notification-prefs'));
 app.use('/api/bouncie', require('./routes/bouncie-webhook'));
@@ -404,6 +402,7 @@ app.use('/api/webhooks/bouncie', require('./routes/webhooks-bouncie'));
 app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
+app.use('/api/admin', require('./routes/admin-billing-health'));
 
 // Health check
 app.get('/api/health', (req, res) => {

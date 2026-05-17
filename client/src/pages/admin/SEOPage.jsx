@@ -67,6 +67,14 @@ function adminPost(path, body) {
   return adminFetch(path, { method: "POST", body });
 }
 
+function isAdminUser() {
+  try {
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin";
+  } catch {
+    return false;
+  }
+}
+
 function fmt(n) {
   return (
     "$" +
@@ -528,6 +536,7 @@ function AdvisorTab() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const canRunSeoActions = isAdminUser();
   useEffect(() => {
     adminFetch("/admin/seo/advisor")
       .then((d) => {
@@ -543,6 +552,7 @@ function AdvisorTab() {
       </div>
     );
   const generate = async () => {
+    if (!canRunSeoActions) return;
     setGenerating(true);
     try {
       await adminPost("/admin/seo/sync", { daysBack: 28 }).catch(() => {});
@@ -563,25 +573,27 @@ function AdvisorTab() {
           <div style={{ color: D.muted, marginBottom: 16 }}>
             No SEO reports yet.
           </div>{" "}
-          <button
-            onClick={generate}
-            disabled={generating}
-            style={{
-              padding: "10px 20px",
-              borderRadius: 8,
-              border: "none",
-              cursor: "pointer",
-              background: D.teal,
-              color: "#fff",
-              fontSize: 13,
-              fontWeight: 600,
-              opacity: generating ? 0.7 : 1,
-            }}
-          >
-            {generating
-              ? "Syncing & generating..."
-              : "Sync GSC & Generate Report"}
-          </button>{" "}
+          {canRunSeoActions && (
+            <button
+              onClick={generate}
+              disabled={generating}
+              style={{
+                padding: "10px 20px",
+                borderRadius: 8,
+                border: "none",
+                cursor: "pointer",
+                background: D.teal,
+                color: "#fff",
+                fontSize: 13,
+                fontWeight: 600,
+                opacity: generating ? 0.7 : 1,
+              }}
+            >
+              {generating
+                ? "Syncing & generating..."
+                : "Sync GSC & Generate Report"}
+            </button>
+          )}{" "}
         </Card>{" "}
       </div>
     );
@@ -872,6 +884,7 @@ function BacklinksTab() {
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [subTab, setSubTab] = useState("overview");
+  const canRunSeoActions = isAdminUser();
 
   useEffect(() => {
     adminFetch("/admin/seo/backlinks")
@@ -883,6 +896,7 @@ function BacklinksTab() {
   }, []);
 
   const handleScan = async () => {
+    if (!canRunSeoActions) return;
     setScanning(true);
     try {
       await adminPost("/admin/seo/backlinks/scan", {});
@@ -903,7 +917,7 @@ function BacklinksTab() {
     return (
       <Card style={{ padding: 40, textAlign: "center" }}>
         <div style={{ color: D.muted }}>
-          No backlink data yet. Click "Scan" to pull from DataForSEO.
+          No backlink data yet.
         </div>
       </Card>
     );
@@ -970,22 +984,24 @@ function BacklinksTab() {
             </button>
           ))}
         </div>{" "}
-        <button
-          onClick={handleScan}
-          disabled={scanning}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 6,
-            border: `1px solid ${D.teal}`,
-            background: "transparent",
-            color: D.teal,
-            fontSize: 12,
-            cursor: "pointer",
-            opacity: scanning ? 0.5 : 1,
-          }}
-        >
-          {scanning ? "Scanning..." : "Scan Backlinks"}
-        </button>{" "}
+        {canRunSeoActions && (
+          <button
+            onClick={handleScan}
+            disabled={scanning}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 6,
+              border: `1px solid ${D.teal}`,
+              background: "transparent",
+              color: D.teal,
+              fontSize: 12,
+              cursor: "pointer",
+              opacity: scanning ? 0.5 : 1,
+            }}
+          >
+            {scanning ? "Scanning..." : "Scan Backlinks"}
+          </button>
+        )}{" "}
       </div>
       {/* Stats */}
       <div
@@ -1323,20 +1339,22 @@ function BacklinksTab() {
               LLM Mentions ({data.llmStats?.wavesMentioned || 0}/
               {data.llmStats?.total || 0} mentioning Waves)
             </div>{" "}
-            <button
-              onClick={() => adminPost("/admin/seo/backlinks/llm-mentions", {})}
-              style={{
-                padding: "4px 10px",
-                borderRadius: 4,
-                border: `1px solid ${D.teal}`,
-                background: "transparent",
-                color: D.teal,
-                fontSize: 11,
-                cursor: "pointer",
-              }}
-            >
-              Check Now
-            </button>{" "}
+            {canRunSeoActions && (
+              <button
+                onClick={() => adminPost("/admin/seo/backlinks/llm-mentions", {})}
+                style={{
+                  padding: "4px 10px",
+                  borderRadius: 4,
+                  border: `1px solid ${D.teal}`,
+                  background: "transparent",
+                  color: D.teal,
+                  fontSize: 11,
+                  cursor: "pointer",
+                }}
+              >
+                Check Now
+              </button>
+            )}{" "}
           </div>
           {(data.llmMentions || []).length === 0 ? (
             <div
@@ -1347,7 +1365,9 @@ function BacklinksTab() {
                 textAlign: "center",
               }}
             >
-              Click "Check Now" to scan LLM responses for Waves mentions
+              {canRunSeoActions
+                ? 'Click "Check Now" to scan LLM responses for Waves mentions'
+                : "No LLM mentions found."}
             </div>
           ) : (
             (data.llmMentions || []).map((m, i) => (
@@ -2643,6 +2663,7 @@ function SiteAuditTab() {
   const [running, setRunning] = useState(false);
   const [filter, setFilter] = useState("all"); // all, critical, warning, healthy
   const [expandedPage, setExpandedPage] = useState(null);
+  const canRunSeoActions = isAdminUser();
 
   useEffect(() => {
     adminFetch("/admin/seo/audit")
@@ -2654,6 +2675,7 @@ function SiteAuditTab() {
   }, []);
 
   const runAudit = async () => {
+    if (!canRunSeoActions) return;
     setRunning(true);
     try {
       await adminPost("/admin/seo/audit/run", {});
@@ -2685,23 +2707,25 @@ function SiteAuditTab() {
         >
           No Audit Data Yet
         </div>{" "}
-        <button
-          onClick={runAudit}
-          disabled={running}
-          style={{
-            padding: "10px 20px",
-            borderRadius: 8,
-            border: "none",
-            background: D.teal,
-            color: "#fff",
-            fontSize: 14,
-            fontWeight: 600,
-            cursor: "pointer",
-            opacity: running ? 0.5 : 1,
-          }}
-        >
-          {running ? "Auditing..." : "Run Site Audit"}
-        </button>{" "}
+        {canRunSeoActions && (
+          <button
+            onClick={runAudit}
+            disabled={running}
+            style={{
+              padding: "10px 20px",
+              borderRadius: 8,
+              border: "none",
+              background: D.teal,
+              color: "#fff",
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: "pointer",
+              opacity: running ? 0.5 : 1,
+            }}
+          >
+            {running ? "Auditing..." : "Run Site Audit"}
+          </button>
+        )}{" "}
       </Card>
     );
 
@@ -2721,6 +2745,17 @@ function SiteAuditTab() {
     if (p.issue_count_critical > 0) return "critical";
     if (p.issue_count_warning > 0) return "warning";
     return "healthy";
+  };
+
+  const parseAuditIssues = (value) => {
+    if (Array.isArray(value)) return value;
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   };
 
   const filteredPages = pages.filter((p) => {
@@ -2828,23 +2863,25 @@ function SiteAuditTab() {
           Last audit:{" "}
           {run.run_date ? new Date(run.run_date).toLocaleString() : "N/A"}
         </div>{" "}
-        <button
-          onClick={runAudit}
-          disabled={running}
-          style={{
-            padding: "8px 16px",
-            borderRadius: 8,
-            border: "none",
-            background: D.teal,
-            color: "#fff",
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: "pointer",
-            opacity: running ? 0.5 : 1,
-          }}
-        >
-          {running ? "Running..." : "Re-run Audit"}
-        </button>{" "}
+        {canRunSeoActions && (
+          <button
+            onClick={runAudit}
+            disabled={running}
+            style={{
+              padding: "8px 16px",
+              borderRadius: 8,
+              border: "none",
+              background: D.teal,
+              color: "#fff",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+              opacity: running ? 0.5 : 1,
+            }}
+          >
+            {running ? "Running..." : "Re-run Audit"}
+          </button>
+        )}{" "}
       </div>
       {/* Top Issues Summary */}
       {issues.length > 0 && (
@@ -2957,13 +2994,7 @@ function SiteAuditTab() {
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {filteredPages.slice(0, 50).map((p, i) => {
             const status = getPageStatus(p);
-            const pageIssues = (() => {
-              try {
-                return JSON.parse(p.issues || "[]");
-              } catch {
-                return [];
-              }
-            })();
+            const pageIssues = parseAuditIssues(p.issues);
             const isExpanded = expandedPage === i;
             return (
               <div key={i}>
