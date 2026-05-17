@@ -507,7 +507,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("changeBookingPickBtn.addEventListener('click', cancelReservation)");
   });
 
-  test('builds WaveGuard Intelligence payload from estimate property signals', () => {
+  test('builds Waves AI payload from estimate property signals', () => {
     const payload = buildWaveGuardIntelligencePayload({
       satelliteUrl: 'https://maps.example/satellite.png',
       tier: 'Silver',
@@ -528,7 +528,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.eyebrow).toBe('WaveGuard Intelligence');
+    expect(payload.eyebrow).toBe('Waves AI');
     expect(payload.title).toContain('Waves AI reviewed your property');
     expect(payload.satelliteUrl).toBe('https://maps.example/satellite.png');
     expect(payload.metrics).toEqual(expect.arrayContaining([
@@ -537,11 +537,10 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Treatable lawn', value: '5,200 sq ft' },
       { label: 'Complexity', value: 'Moderate' },
     ]));
-    expect(payload.signals.join(' ')).toContain('Pest Control and Lawn Care cadence and visit counts');
-    expect(payload.signals.join(' ')).toContain('WaveGuard Silver pricing');
+    expect(payload.signals).toEqual([]);
   });
 
-  test('WaveGuard Intelligence does not claim a Bronze bundle discount', () => {
+  test('Waves AI payload does not add customer-facing bundle copy for Bronze', () => {
     const payload = buildWaveGuardIntelligencePayload({
       tier: 'Bronze',
     }, {
@@ -552,11 +551,11 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.signals.join(' ')).toContain('WaveGuard Bronze pricing is applied');
-    expect(payload.signals.join(' ')).not.toContain('bundle discount');
+    expect(payload.signals).toEqual([]);
+    expect(JSON.stringify(payload)).not.toContain('bundle discount');
   });
 
-  test('server-rendered estimates show the WaveGuard Intelligence feature', () => {
+  test('server-rendered estimates show the Waves AI feature', () => {
     const html = renderPage('intelligence-token', {
       status: 'sent',
       customerName: 'Pat Customer',
@@ -580,11 +579,14 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('WaveGuard Intelligence');
+    expect(html).toContain('Waves AI');
     expect(html).toContain('Waves AI reviewed your property before pricing this estimate');
     expect(html).toContain('class="intelligence-badge">Waves AI</div>');
     expect(html).toContain('Satellite view of 123 Main St');
     expect(html).toContain('1,800 sq ft');
+    expect(html).toContain('Wave Goodbye to Pests!');
+    expect(html).not.toContain('cadence and visit counts');
+    expect(html).not.toContain('Your technician verifies measurements');
     expect(html).not.toContain('class="waves-intelligence"');
   });
 

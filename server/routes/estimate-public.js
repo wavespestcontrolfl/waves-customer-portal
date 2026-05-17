@@ -498,31 +498,15 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   ].filter(Boolean);
 
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
-  const tier = estimate.waveguard_tier || estimate.tier || opts.pricingBundle?.waveGuardTier || null;
-  const tierDiscountPct = tier ? tierDiscount(tier) : 0;
-  const serviceLabel = sentenceList([...new Set(serviceNames)]);
-  const pricingSignal = tier
-    ? (tierDiscountPct > 0
-        ? `WaveGuard ${tier} pricing reflects the bundle discount shown on this estimate.`
-        : `WaveGuard ${tier} pricing is applied to the services shown on this estimate.`)
-    : null;
-  const signals = [
-    serviceLabel
-      ? `${serviceLabel} cadence and visit counts are matched to this property profile.`
-      : 'Service cadence and visit counts are matched to the property details available on this estimate.',
-    pricingSignal,
-    'Your technician verifies measurements and site conditions during the first visit.',
-  ].filter(Boolean);
-
   return {
-    eyebrow: 'WaveGuard Intelligence',
+    eyebrow: 'Waves AI',
     title: 'Waves AI reviewed your property before pricing this estimate',
     body: satelliteUrl || metrics.length
       ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
       : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.',
     satelliteUrl,
     metrics,
-    signals,
+    signals: [],
   };
 }
 
@@ -907,7 +891,7 @@ function renderPage(token, estimate, estData) {
   }));
   const socialsHtml = SOCIAL_LINKS.map((s) => `<a class="soc" href="${s.url}" target="_blank" rel="noopener" aria-label="${escapeHtml(s.name)}"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="${s.path}"/></svg></a>`).join('');
 
-  // ── WaveGuard Intelligence block ────────────────────────────────
+  // ── Waves AI block ──────────────────────────────────────────────
   // Canonical customer-facing AI/property explanation. The same payload
   // is exposed to the React v2 estimate via GET /:token/data.
   const intelligence = buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
@@ -1311,8 +1295,8 @@ ${shellTopBar()}
     </div>
   </div>` : `
   <div class="final">
-    <h2 data-mode-only="recurring">Go Waves!</h2>
-    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves!</h2>` : ''}
+    <h2 data-mode-only="recurring">Wave Goodbye to Pests!</h2>
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Wave Goodbye to Pests!</h2>` : ''}
     <p>No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">

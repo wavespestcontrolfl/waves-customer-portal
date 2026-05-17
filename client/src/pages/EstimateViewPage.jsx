@@ -181,7 +181,7 @@ function WaveGuardIntelligenceCard({ intelligence, address }) {
             fontWeight: 700,
             marginBottom: 6,
           }}>
-            {intelligence.eyebrow || 'WaveGuard Intelligence'}
+            {intelligence.eyebrow || 'Waves AI'}
           </div>
           <h2 style={{
             fontFamily: FONTS.serif,
