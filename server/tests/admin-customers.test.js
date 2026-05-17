@@ -1,8 +1,11 @@
 const adminCustomersRoute = require('../routes/admin-customers');
 
 const {
+  cadenceFromEstimateLine,
+  isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapPipelineCustomer,
+  scheduleLinesFromEstimate,
 } = adminCustomersRoute._private;
 
 describe('admin customers route helpers', () => {
@@ -42,6 +45,112 @@ describe('admin customers route helpers', () => {
       monthlyRate: 129.5,
       pipelineStage: 'estimate_sent',
       stageEnteredAt: changedAt,
+    });
+  });
+
+  test('parses explicit recurring cadence before generic month and annual tokens', () => {
+    expect(cadenceFromEstimateLine({ frequency: 'Bi-Monthly' }, 'quarterly')).toBe('bimonthly');
+    expect(cadenceFromEstimateLine({ frequency: 'Triannual (every 4 months)' }, 'quarterly')).toBe('triannual');
+    expect(cadenceFromEstimateLine({ frequency: 'Semi-Annual' }, 'quarterly')).toBe('semiannual');
+    expect(cadenceFromEstimateLine({ frequency: 'Monthly' }, 'quarterly')).toBe('monthly');
+  });
+
+  test('excludes billing-only one-time estimate rows from scheduling', () => {
+    expect(isSchedulableOneTimeEstimateLine({ service: 'waveguard_setup', price: 199 })).toBe(false);
+    expect(isSchedulableOneTimeEstimateLine({ kind: 'discount', price: -50 })).toBe(false);
+    expect(isSchedulableOneTimeEstimateLine({ service: 'bed_bug', quoteRequired: true })).toBe(false);
+    expect(isSchedulableOneTimeEstimateLine({ label: 'Membership setup fee', amount: 99 })).toBe(false);
+    expect(isSchedulableOneTimeEstimateLine({ service: 'termite_bait', label: 'Termite bait installation', amount: 499 })).toBe(true);
+  });
+
+  test('does not create fallback schedule lines from billing-only estimate rows', () => {
+    const lines = scheduleLinesFromEstimate({
+      id: 'estimate-1',
+      service_interest: 'WaveGuard setup',
+      onetime_total: 99,
+      monthly_total: 0,
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 99,
+            items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+          },
+        },
+      },
+    }, { byKey: new Map(), byName: new Map(), rows: [] });
+
+    expect(lines).toEqual([]);
+  });
+
+  test('does not create fallback schedule lines from quote-required estimate rows', () => {
+    const lines = scheduleLinesFromEstimate({
+      id: 'estimate-quote-required',
+      service_interest: 'Bed Bug',
+      onetime_total: 0,
+      monthly_total: 0,
+      estimate_data: {
+        result: {
+          oneTime: {
+            specItems: [{ service: 'bed_bug', name: 'Bed Bug - Quote Required', price: null, quoteRequired: true }],
+          },
+        },
+      },
+    }, { byKey: new Map(), byName: new Map(), rows: [] });
+
+    expect(lines).toEqual([]);
+  });
+
+  test('preserves fallback schedule line for recurring estimate totals with filtered billing rows', () => {
+    const lines = scheduleLinesFromEstimate({
+      id: 'estimate-recurring',
+      service_interest: 'Pest Control',
+      onetime_total: 99,
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 99,
+            items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+          },
+        },
+      },
+    }, { byKey: new Map(), byName: new Map(), rows: [] });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      name: 'Pest Control',
+      price: 50,
+      cadence: 'quarterly',
+      source: 'recurring',
+      estimateId: 'estimate-recurring',
+    });
+  });
+
+  test('uses annual recurring totals for fallback schedule metadata when monthly total is absent', () => {
+    const lines = scheduleLinesFromEstimate({
+      id: 'estimate-annual-recurring',
+      service_interest: 'Pest Control',
+      onetime_total: 99,
+      monthly_total: 0,
+      annual_total: 600,
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 99,
+            items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+          },
+        },
+      },
+    }, { byKey: new Map(), byName: new Map(), rows: [] });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      billingType: 'recurring',
+      price: 50,
+      cadence: 'quarterly',
+      source: 'recurring',
+      estimateId: 'estimate-annual-recurring',
     });
   });
 });

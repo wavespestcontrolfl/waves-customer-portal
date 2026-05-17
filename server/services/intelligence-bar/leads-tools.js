@@ -10,7 +10,19 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 
-const ACTIVE_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'negotiating'];
+const LEAD_STATUSES = [
+  'new',
+  'contacted',
+  'estimate_sent',
+  'estimate_viewed',
+  'won',
+  'lost',
+  'unresponsive',
+  'disqualified',
+  'duplicate',
+];
+const LEAD_STATUS_SET = new Set(LEAD_STATUSES);
+const ACTIVE_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 const CLOSED_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
 
 const LEADS_TOOLS = [
@@ -32,7 +44,7 @@ Use for: "show me all new leads", "leads from Google Ads", "find the Henderson l
     input_schema: {
       type: 'object',
       properties: {
-        status: { type: 'string', enum: ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'negotiating', 'won', 'lost', 'unresponsive', 'disqualified', 'duplicate'] },
+        status: { type: 'string', enum: LEAD_STATUSES },
         source: { type: 'string', description: 'Lead source name (e.g. Google Ads, Referral, Door Knock)' },
         search: { type: 'string', description: 'Search name, phone, email, address, or service interest' },
         days_back: { type: 'number', description: 'Only leads from last N days' },
@@ -106,7 +118,7 @@ Use for: "move Henderson to contacted", "mark the Smith lead as lost — chose c
       properties: {
         lead_id: { type: 'string' },
         lead_name: { type: 'string', description: 'Find lead by name (partial match)' },
-        new_status: { type: 'string', enum: ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'negotiating', 'won', 'lost', 'unresponsive', 'disqualified', 'duplicate'] },
+        new_status: { type: 'string', enum: LEAD_STATUSES },
         lost_reason: { type: 'string', description: 'Required when marking as lost' },
         notes: { type: 'string' },
       },
@@ -298,7 +310,7 @@ async function getLeadFunnel(days) {
   const countMap = {};
   stages.forEach(s => { countMap[s.status] = parseInt(s.count); });
 
-  const funnelOrder = ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'negotiating', 'won'];
+  const funnelOrder = ['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'won'];
   const funnel = funnelOrder.map((stage, i) => {
     const count = countMap[stage] || 0;
     const prevCount = i > 0 ? (countMap[funnelOrder[i - 1]] || 0) : count;
@@ -452,6 +464,9 @@ async function getResponseTimes(days) {
 
 async function updateLeadStatus(input) {
   const { lead_id, lead_name, new_status, lost_reason, notes } = input;
+  if (!LEAD_STATUS_SET.has(new_status)) {
+    return { error: `Invalid lead status: ${new_status}` };
+  }
 
   let lead;
   if (lead_id) {
@@ -493,6 +508,9 @@ async function updateLeadStatus(input) {
 
 async function bulkUpdateLeads(input) {
   const { current_status, older_than_days, new_status, lost_reason, dry_run = true } = input;
+  if (!LEAD_STATUS_SET.has(new_status)) {
+    return { error: `Invalid lead status: ${new_status}` };
+  }
   const cutoff = older_than_days ? new Date(Date.now() - older_than_days * 86400000).toISOString() : null;
 
   let query = db('leads').where('status', current_status);
