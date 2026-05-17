@@ -1,6 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockS3Send = jest.fn();
+const mockAnthropicCreate = jest.fn();
 
 jest.mock('../models/db', () => {
   const mock = jest.fn();
@@ -50,9 +51,16 @@ jest.mock('@aws-sdk/client-s3', () => ({
 jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: jest.fn().mockResolvedValue('https://signed.example/photo.jpg'),
 }));
+jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
+  messages: { create: mockAnthropicCreate },
+})));
+jest.mock('../services/property-lookup/ai-property-lookup', () => ({
+  lookupPropertyFromAITrio: jest.fn(),
+}));
 
 const express = require('express');
 const db = require('../models/db');
+const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const projectsRouter = require('../routes/admin-projects');
 
 function chain(overrides = {}) {
@@ -102,6 +110,7 @@ async function withServer(fn) {
 describe('admin projects routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.ANTHROPIC_API_KEY;
     db.fn.now.mockReturnValue('NOW');
     mockS3Send.mockResolvedValue({});
   });
@@ -288,6 +297,138 @@ describe('admin projects routes', () => {
         metadata: expect.objectContaining({ project_id: 'project-1', project_type: 'pest_inspection' }),
       }));
     });
+  });
+
+  test('wdo intelligence uses selected customer address and returns field suggestions', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    lookupPropertyFromAITrio.mockResolvedValue({
+      propertyType: 'Single Family',
+      squareFootage: 1840,
+      yearBuilt: 2004,
+      stories: 1,
+      constructionMaterial: 'CBS',
+      _aiConfidence: 'medium',
+      _aiSourceUrl: 'https://example.test/property',
+    });
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          suggestedFindings: {
+            property_address: '8920 Forty Ninth Ave Bradenton FL',
+            structures_inspected: 'Main single-family residential structure and attached garage.',
+            inspection_scope: 'Visible and readily accessible interior areas, garage, attic access, exterior perimeter, and accessible structural components.',
+            previous_treatment_evidence: 'Yes',
+            previous_treatment_notes: 'Photo appears to show a prior treatment notice near the garage.',
+          },
+          propertySummary: 'Single-family CBS home, approximately 1,840 square feet.',
+          confidence: 'medium',
+          reviewNotes: ['Verify any detached structures in the field.'],
+        }),
+      }],
+    });
+
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'customer-1',
+        first_name: 'Van',
+        last_name: 'Lee',
+        address_line1: '8920 49th Ave E',
+        city: 'Bradenton',
+        state: 'FL',
+        zip: '34211',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: 'customer-1',
+          findings: { property_address: '' },
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(lookupPropertyFromAITrio).toHaveBeenCalledWith('8920 49th Ave E Bradenton, FL 34211');
+      expect(body.suggestedFindings).toEqual(expect.objectContaining({
+        property_address: '8920 49th Ave E Bradenton, FL 34211',
+        structures_inspected: 'Main single-family residential structure and attached garage.',
+        inspection_scope: expect.stringContaining('Visible and readily accessible'),
+      }));
+      expect(body.suggestedFindings.property_address).toBe('8920 49th Ave E Bradenton, FL 34211');
+      expect(body.suggestedFindings.previous_treatment_evidence).toBe('');
+      expect(body.suggestedFindings.previous_treatment_notes).toBe('');
+      expect(body.propertyProfile).toEqual(expect.objectContaining({
+        propertyType: 'Single Family',
+        squareFootage: 1840,
+      }));
+      expect(mockAnthropicCreate).toHaveBeenCalledWith(expect.objectContaining({
+        model: expect.any(String),
+        messages: expect.any(Array),
+      }));
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  test('wdo intelligence requires technician project or assigned visit scope', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'customer-1' }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tech-1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: 'customer-1',
+          property_address: '8920 49th Ave E Bradenton, FL 34211',
+          findings: {},
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(403);
+      expect(body.error).toBe('Technician projects must be linked to an assigned visit');
+      expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  test('wdo intelligence rejects oversized prior-treatment photos before AI review', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    db.mockImplementation((table) => {
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const fd = new FormData();
+      fd.append('property_address', '8920 49th Ave E Bradenton, FL 34211');
+      fd.append('findings', JSON.stringify({ property_address: '' }));
+      fd.append('previous_treatment_photo', new Blob([new Uint8Array(5 * 1024 * 1024)], { type: 'image/png' }), 'large.png');
+
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+        body: fd,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toMatch(/too large/i);
+      expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+    delete process.env.ANTHROPIC_API_KEY;
   });
 
   test('technician cannot create an ad hoc project without an assigned visit link', async () => {
