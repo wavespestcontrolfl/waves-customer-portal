@@ -26,6 +26,20 @@ describe('report page metadata', () => {
     });
   });
 
+  test('formats service DATE values as calendar dates instead of UTC instants', () => {
+    const fromDateObject = metadataForServiceReport({
+      service_type: 'Quarterly Pest Control Service',
+      service_date: new Date('2026-05-16T00:00:00.000Z'),
+    });
+    const fromIsoMidnight = metadataForServiceReport({
+      service_type: 'Quarterly Pest Control Service',
+      service_date: '2026-05-16T00:00:00.000Z',
+    });
+
+    expect(fromDateObject.title).toBe('Service report · May 16, 2026 · Quarterly Pest Control Service');
+    expect(fromIsoMidnight.title).toBe('Service report · May 16, 2026 · Quarterly Pest Control Service');
+  });
+
   test('applies title, social description, and monochrome theme color to index html', () => {
     const html = [
       '<html><head>',

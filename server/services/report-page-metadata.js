@@ -18,14 +18,23 @@ function reportTokenFromPath(reqPath = '') {
   return match ? match[1] : null;
 }
 
-function formatReportDate(value) {
-  if (!value) return '';
+function serviceDateToNoonUtc(value) {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate(), 12));
+  }
   const raw = String(value);
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
-  const date = dateOnly
-    ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12))
-    : new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+  if (dateOnly) {
+    return new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12));
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatReportDate(value) {
+  const date = serviceDateToNoonUtc(value);
+  if (!date) return '';
   return date.toLocaleDateString('en-US', {
     timeZone: SERVICE_REPORT_TIME_ZONE,
     month: 'long',

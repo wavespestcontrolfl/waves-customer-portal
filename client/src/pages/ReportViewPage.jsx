@@ -110,12 +110,16 @@ function formatClockTime(value, timezone = SERVICE_REPORT_TIME_ZONE) {
 
 function formatReportTitleDate(value) {
   if (!value) return '';
-  const raw = String(value);
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
-  const date = dateOnly
-    ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12))
-    : new Date(raw);
-  if (Number.isNaN(date.getTime())) return '';
+  const date = value instanceof Date && !Number.isNaN(value.getTime())
+    ? new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate(), 12))
+    : (() => {
+      const raw = String(value);
+      const dateOnly = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+      if (dateOnly) return new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12));
+      const parsed = new Date(raw);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    })();
+  if (!date) return '';
   return date.toLocaleDateString('en-US', {
     timeZone: SERVICE_REPORT_TIME_ZONE,
     month: 'long',
