@@ -266,7 +266,9 @@ router.post('/pricing', async (req, res, next) => {
         const insertData = {
           name: product,
           category: (category || 'Uncategorized').substring(0, 100),
-          active_ingredient: activeIngredient || null,
+          active_ingredient: activeIngredient || 'Unknown - pending SDS',
+          epa_reg_number: 'N/A',
+          formulation: 'unspecified',
           container_size: size || null,
           needs_pricing: !priceStr,
         };

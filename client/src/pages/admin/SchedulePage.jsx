@@ -4484,10 +4484,38 @@ function serviceLineFromType(serviceType = "") {
   return "pest";
 }
 
+function normalizeApplicationMethod(value = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!normalized) return "";
+  if (
+    [
+      "perimeter_spray",
+      "broadcast_spray",
+      "spot_treatment",
+      "granular_broadcast",
+      "bait_placement",
+      "station_check",
+      "fog_ulv",
+    ].includes(normalized)
+  ) return normalized;
+  if (normalized.includes("granular")) return "granular_broadcast";
+  if (normalized.includes("bait") || normalized.includes("gel") || normalized.includes("glue")) return "bait_placement";
+  if (normalized.includes("station")) return "station_check";
+  if (normalized.includes("fog") || normalized.includes("ulv")) return "fog_ulv";
+  if (normalized.includes("spot")) return "spot_treatment";
+  if (normalized.includes("broadcast")) return "broadcast_spray";
+  if (normalized.includes("perimeter") || normalized.includes("band")) return "perimeter_spray";
+  return normalized;
+}
+
 function defaultApplicationMethod(product = {}, serviceType = "") {
   const category = String(product.category || product.product_category || "").toLowerCase();
   const explicit = product.application_method || product.method;
-  if (explicit) return String(explicit).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (explicit) return normalizeApplicationMethod(explicit);
   if (category.includes("bait") || category.includes("gel") || category.includes("glue")) return "bait_placement";
   if (category.includes("fert") || category.includes("granular")) return "granular_broadcast";
   const serviceLine = serviceLineFromType(serviceType);
@@ -4498,11 +4526,11 @@ function defaultApplicationMethod(product = {}, serviceType = "") {
 }
 
 function requiresLinearFt(method) {
-  return ["perimeter_spray", "broadcast_spray"].includes(method);
+  return ["perimeter_spray", "broadcast_spray"].includes(normalizeApplicationMethod(method));
 }
 
 function effectiveApplicationMethod(method) {
-  return method || "perimeter_spray";
+  return normalizeApplicationMethod(method) || "perimeter_spray";
 }
 
 export function CompletionPanel({

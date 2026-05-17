@@ -89,11 +89,36 @@ function oneTapCompletionSubmitEnabled() {
   return ['1', 'true', 'yes', 'on'].includes(String(process.env.ONE_TAP_COMPLETION_SUBMIT_ENABLED || '').trim().toLowerCase());
 }
 
-function inferServiceReportApplicationMethod(product = {}, productInput = {}, serviceLine = 'pest') {
-  const explicit = String(productInput.applicationMethod || productInput.method || product.application_method || product.method || '')
+function normalizeServiceReportApplicationMethod(value = '') {
+  const normalized = String(value || '')
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_');
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!normalized) return '';
+  if ([
+    'perimeter_spray',
+    'broadcast_spray',
+    'spot_treatment',
+    'granular_broadcast',
+    'bait_placement',
+    'station_check',
+    'fog_ulv',
+  ].includes(normalized)) return normalized;
+  if (normalized.includes('granular')) return 'granular_broadcast';
+  if (normalized.includes('bait') || normalized.includes('gel') || normalized.includes('glue')) return 'bait_placement';
+  if (normalized.includes('station')) return 'station_check';
+  if (normalized.includes('fog') || normalized.includes('ulv')) return 'fog_ulv';
+  if (normalized.includes('spot')) return 'spot_treatment';
+  if (normalized.includes('broadcast')) return 'broadcast_spray';
+  if (normalized.includes('perimeter') || normalized.includes('band')) return 'perimeter_spray';
+  return normalized;
+}
+
+function inferServiceReportApplicationMethod(product = {}, productInput = {}, serviceLine = 'pest') {
+  const explicit = normalizeServiceReportApplicationMethod(
+    productInput.applicationMethod || productInput.method || product.application_method || product.method,
+  );
   if (explicit) return explicit;
   const category = String(product.category || product.product_category || '').toLowerCase();
   if (category.includes('bait') || category.includes('gel') || category.includes('glue')) return 'bait_placement';

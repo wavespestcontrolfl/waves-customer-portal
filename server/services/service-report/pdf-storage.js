@@ -81,22 +81,29 @@ async function getReportPdf(key) {
   }
 }
 
+function reportPdfBufferHasFallbackMarker(bytes) {
+  if (!bytes) return true;
+  const prefix = bytes.toString('utf8', 0, Math.min(bytes.length, 50000));
+  return prefix.includes(FALLBACK_PDF_MARKER);
+}
+
 async function storedReportPdfLooksBroken(key) {
   if (!key) return true;
   const head = await headReportPdf(key);
   if (!head) return true;
   if (Number(head.size || 0) < MIN_EXPECTED_REPORT_BYTES) return true;
   const bytes = await getReportPdf(key);
-  if (!bytes) return true;
-  const prefix = bytes.toString('utf8', 0, Math.min(bytes.length, 50000));
-  return prefix.includes(FALLBACK_PDF_MARKER);
+  return reportPdfBufferHasFallbackMarker(bytes);
 }
 
 async function getHealthyStoredReportPdf(key) {
   if (!key) return null;
   try {
-    if (await storedReportPdfLooksBroken(key)) return null;
-    return getReportPdf(key);
+    const head = await headReportPdf(key);
+    if (!head || Number(head.size || 0) < MIN_EXPECTED_REPORT_BYTES) return null;
+    const bytes = await getReportPdf(key);
+    if (reportPdfBufferHasFallbackMarker(bytes)) return null;
+    return bytes;
   } catch (err) {
     logger.warn(`[service-report-pdf-storage] stored PDF read failed for ${key}: ${err.message}`);
     return null;
@@ -110,6 +117,7 @@ module.exports = {
   getReportPdf,
   headReportPdf,
   putReportPdf,
+  reportPdfBufferHasFallbackMarker,
   reportPdfStorageKey,
   storedReportPdfLooksBroken,
 };
