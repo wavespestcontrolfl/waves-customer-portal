@@ -225,17 +225,14 @@ function evaluateProjectSendReadiness({ project, customer, photoCount = 0 }) {
     // check accordingly so the send flow doesn't 422 on bait-system jobs.
     const isBaitSystem = rawMethod === 'Bait system';
     const isWoodTreatment = rawMethod === 'Wood treatment (borate)';
+    const needsGallons = !isBaitSystem && !isWoodTreatment;
     const hasArea = hasMeaningfulValue(findings.square_footage) || hasMeaningfulValue(findings.linear_feet);
-    const coverageOk = isBaitSystem
-      ? hasMeaningfulValue(findings.square_footage)
-      : isWoodTreatment
-      ? hasArea
-      : hasArea && hasMeaningfulValue(findings.gallons_applied);
-    const coverageLabel = isBaitSystem
-      ? 'Perimeter coverage (square footage)'
-      : isWoodTreatment
-      ? 'Coverage (sq ft or linear ft)'
-      : 'Coverage (sq ft or linear ft + gallons applied)';
+    const coverageOk = needsGallons
+      ? hasArea && hasMeaningfulValue(findings.gallons_applied)
+      : hasArea;
+    const coverageLabel = needsGallons
+      ? 'Coverage (sq ft or linear ft + gallons applied)'
+      : 'Coverage (sq ft or linear ft)';
     required.push(
       { key: 'cert_treatment_address', label: 'Treatment address (or lot/block)', ok: hasMeaningfulValue(findings.treatment_address) || hasMeaningfulValue(findings.lot_block) },
       { key: 'cert_treatment_date', label: 'Date of treatment', ok: hasMeaningfulValue(findings.treatment_date) || hasMeaningfulValue(project?.project_date) },
