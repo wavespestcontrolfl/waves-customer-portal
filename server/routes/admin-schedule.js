@@ -25,6 +25,10 @@ const {
   recordTrackTransitionFailure,
   recordTrackTransitionResultFailure,
 } = require('../services/track-transition-alerts');
+const {
+  buildOnSiteLifecycleUpdates,
+  buildCompletionLifecycleUpdates,
+} = require('../utils/service-duration-capture');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -2163,11 +2167,10 @@ router.post('/:id/invoice', async (req, res, next) => {
 //   6. Post-completion automation chain only fires on success.
 //      Cancellation handler likewise.
 //
-// Note on column names: this route uses check_in_time / check_out_time /
-// actual_duration_minutes (different from the dispatch route's
-// actual_start_time / actual_end_time / service_time_minutes). Both
-// sets exist on scheduled_services for legacy reasons; this PR doesn't
-// consolidate them.
+// Note on column names: scheduled_services still carries both the
+// check_in/check_out/actual_duration and actual_start/actual_end/
+// service_time families for legacy reasons. Status changes write both
+// families so downstream reporting can read either shape.
 router.put('/:id/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, requestReview } = req.body;
@@ -2200,14 +2203,9 @@ router.put('/:id/status', async (req, res, next) => {
         if (toStatus === 'confirmed') {
           lifecycleUpdates.customer_confirmed = true;
         } else if (toStatus === 'on_site') {
-          lifecycleUpdates.check_in_time = trx.fn.now();
+          Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, new Date()));
         } else if (toStatus === 'completed') {
-          lifecycleUpdates.check_out_time = trx.fn.now();
-          if (svc.check_in_time) {
-            lifecycleUpdates.actual_duration_minutes = Math.round(
-              (Date.now() - new Date(svc.check_in_time)) / 60000
-            );
-          }
+          Object.assign(lifecycleUpdates, buildCompletionLifecycleUpdates(svc, new Date()));
         }
         if (Object.keys(lifecycleUpdates).length > 0) {
           await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);

@@ -61,6 +61,37 @@ describe('pricing reality check calculations', () => {
     expect(result.segments[0].weightedPercentVariance).toBeCloseTo(5, 5);
   });
 
+  test('uses service record timeOnSite as actual minutes when scheduled service duration is missing', () => {
+    const result = buildPricingRealityCheckFromRows([
+      completedRow({
+        estimated_duration_minutes: 30,
+        service_record_structured_notes: JSON.stringify({ timeOnSite: '42:35' }),
+      }),
+    ], { lookbackDays: 90, groupBy: 'service_type' });
+
+    expect(result.coverage).toMatchObject({
+      completedServiceCount: 1,
+      includedServiceCount: 1,
+    });
+    expect(result.summary.avgActualMinutes).toBe(43);
+  });
+
+  test('uses service record start and end timestamps as an actual duration fallback', () => {
+    const result = buildPricingRealityCheckFromRows([
+      completedRow({
+        estimated_duration_minutes: 30,
+        service_record_started_at: '2026-05-15T14:00:00.000Z',
+        service_record_ended_at: '2026-05-15T14:45:00.000Z',
+      }),
+    ], { lookbackDays: 90, groupBy: 'service_type' });
+
+    expect(result.coverage).toMatchObject({
+      completedServiceCount: 1,
+      includedServiceCount: 1,
+    });
+    expect(result.summary.avgActualMinutes).toBe(45);
+  });
+
   test('groups completed services by Eastern month', () => {
     const result = buildPricingRealityCheckFromRows([
       completedRow({
