@@ -14,6 +14,7 @@ const {
   validatePhotoChainRows,
 } = require('../services/service-report/photo-chain');
 const {
+  renderReportPdfWithCloudflare,
   serviceReportViewerUrl,
 } = require('../services/service-report/pdf');
 const {
@@ -947,6 +948,52 @@ describe('service report v1', () => {
   test('v1 PDF renderer has no compact fallback and viewer URL points to the report page', () => {
     expect(serviceReportViewerUrl('token-1')).toBe('http://localhost:5173/report/token-1?mode=pdf');
     expect(require('../services/service-report/pdf').renderFallbackPdf).toBeUndefined();
+  });
+
+  test('Cloudflare PDF renderer sends the Browser Run pdfOptions payload', async () => {
+    const originalFetch = global.fetch;
+    const originalAccountId = process.env.CF_ACCOUNT_ID;
+    const originalToken = process.env.CF_BROWSER_RENDERING_TOKEN;
+    const calls = [];
+
+    process.env.CF_ACCOUNT_ID = 'account-1';
+    process.env.CF_BROWSER_RENDERING_TOKEN = 'token-1';
+    global.fetch = jest.fn(async (endpoint, options) => {
+      calls.push({ endpoint, options, body: JSON.parse(options.body) });
+      return {
+        ok: true,
+        arrayBuffer: async () => Buffer.from('%PDF-1.4\n').buffer,
+      };
+    });
+
+    try {
+      const pdf = await renderReportPdfWithCloudflare('https://example.test/report/token-1?mode=pdf', {
+        serviceRecordId: 'service-1',
+      });
+
+      expect(Buffer.isBuffer(pdf)).toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].endpoint).toBe(
+        'https://api.cloudflare.com/client/v4/accounts/account-1/browser-rendering/pdf',
+      );
+      expect(calls[0].options.headers.Authorization).toBe('Bearer token-1');
+      expect(calls[0].body).toMatchObject({
+        url: 'https://example.test/report/token-1?mode=pdf',
+        viewport: { width: 816, height: 1056 },
+        gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
+        emulateMediaType: 'print',
+        pdfOptions: {
+          format: 'letter',
+          printBackground: true,
+          displayHeaderFooter: true,
+        },
+      });
+      expect(calls[0].body.pdf).toBeUndefined();
+    } finally {
+      global.fetch = originalFetch;
+      process.env.CF_ACCOUNT_ID = originalAccountId;
+      process.env.CF_BROWSER_RENDERING_TOKEN = originalToken;
+    }
   });
 
   test('v1 SMS delivery copy includes public report link and advisory re-entry', () => {
