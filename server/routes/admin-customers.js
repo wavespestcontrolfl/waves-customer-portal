@@ -82,12 +82,14 @@ function normalizeServiceKey(value) {
 
 function cadenceFromEstimateLine(line, fallback = 'one_time') {
   const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
+  const frequencyKey = frequency.replace(/[-_\s]+/g, '');
   const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
-  if (frequency.includes('month') && frequency.includes('2')) return 'bimonthly';
-  if (frequency.includes('quarter')) return 'quarterly';
-  if (frequency.includes('semi')) return 'semiannual';
-  if (frequency.includes('annual') || frequency.includes('year')) return 'annual';
-  if (frequency.includes('month')) return 'monthly';
+  if (frequencyKey.includes('bimonthly') || frequencyKey.includes('every2month') || frequencyKey.includes('everyothermonth')) return 'bimonthly';
+  if (frequencyKey.includes('triannual') || frequencyKey.includes('every4month')) return 'triannual';
+  if (frequencyKey.includes('semiannual') || frequencyKey.includes('biannual') || frequencyKey.includes('every6month')) return 'semiannual';
+  if (frequencyKey.includes('quarter') || frequencyKey.includes('every3month')) return 'quarterly';
+  if (frequencyKey.includes('monthly') || frequencyKey === 'month') return 'monthly';
+  if (frequencyKey.includes('annual') || frequencyKey.includes('year')) return 'annual';
   if (visits === 12) return 'monthly';
   if (visits === 6) return 'bimonthly';
   if (visits === 4) return 'quarterly';
@@ -144,6 +146,31 @@ function serviceCatalogMatch(line, serviceIndex) {
   return null;
 }
 
+function isSchedulableOneTimeEstimateLine(line) {
+  const kind = String(line?.kind || '').toLowerCase();
+  const status = String(line?.status || '').toLowerCase();
+  if (kind === 'discount' || kind === 'quote_required' || line?.quoteRequired === true || status === 'quote_required') return false;
+
+  const rawAmount = [
+    line?.priceAfterDiscount,
+    line?.amountAfterDiscount,
+    line?.totalAfterDiscount,
+    line?.price,
+    line?.amount,
+    line?.total,
+  ].find((value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)));
+  if (rawAmount != null && Number(rawAmount) < 0) return false;
+
+  const service = normalizeServiceKey(line?.service || line?.serviceKey || line?.key || '');
+  const label = normalizeServiceKey(line?.displayName || line?.label || line?.name || line?.serviceName || '');
+  const detail = normalizeServiceKey(line?.detail || line?.description || '');
+  const text = `${service} ${label} ${detail}`;
+
+  if (service === 'waveguard_setup') return false;
+  if (text.includes('membership_setup_fee')) return false;
+  return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
+}
+
 function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
   const name = String(line?.displayName || line?.label || line?.name || line?.serviceName || line?.service || '').trim();
   if (!name) return null;
@@ -196,33 +223,47 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
     recurringSvcList = [];
     oneTimeList = [];
   }
+  const schedulableOneTimeList = oneTimeList.filter(isSchedulableOneTimeEstimateLine);
+  const monthlyTotal = Number(estimate.monthly_total || 0);
+  const annualTotal = Number(estimate.annual_total || 0);
+  const hasRecurringEstimateTotal = monthlyTotal > 0 || annualTotal > 0;
+  const onlyFilteredBillingRows = recurringSvcList.length === 0
+    && oneTimeList.length > 0
+    && schedulableOneTimeList.length === 0;
+  const suppressFallback = onlyFilteredBillingRows && !hasRecurringEstimateTotal;
 
   const lines = [
     ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex })),
-    ...oneTimeList.map((line) => formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex })),
+    ...schedulableOneTimeList.map((line) => formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex })),
   ].filter(Boolean);
 
   if (lines.length === 1 && lines[0].price == null) {
     lines[0].price = moneyOrNull(estimate.onetime_total, estimate.monthly_total);
   }
 
-  if (lines.length === 0) {
-    const fallbackPrice = moneyOrNull(estimate.onetime_total, estimate.monthly_total);
+  if (lines.length === 0 && !suppressFallback) {
+    const annualMonthlyEquivalent = annualTotal > 0
+      ? annualTotal / 12
+      : null;
+    const fallbackPrice = hasRecurringEstimateTotal
+      ? moneyOrNull(monthlyTotal > 0 ? monthlyTotal : null, annualMonthlyEquivalent)
+      : moneyOrNull(estimate.onetime_total, estimate.monthly_total);
     const fallbackName = estimate.service_interest || estimate.waveguard_tier || 'Accepted estimate';
     const matched = serviceCatalogMatch({ name: fallbackName }, serviceIndex);
+    const fallbackIsRecurring = hasRecurringEstimateTotal;
     lines.push({
       serviceId: matched?.id || null,
       serviceKey: matched?.service_key || null,
       name: matched?.name || fallbackName,
       estimateLabel: fallbackName,
       category: matched?.category || null,
-      billingType: matched?.billing_type || (Number(estimate.monthly_total || 0) > 0 ? 'recurring' : 'one_time'),
+      billingType: matched?.billing_type || (fallbackIsRecurring ? 'recurring' : 'one_time'),
       frequency: matched?.frequency || null,
       visitsPerYear: matched?.visits_per_year || null,
       duration: matched?.default_duration_minutes || null,
       price: fallbackPrice,
-      cadence: Number(estimate.monthly_total || 0) > 0 ? 'quarterly' : 'one_time',
-      source: Number(estimate.monthly_total || 0) > 0 ? 'recurring' : 'one_time',
+      cadence: fallbackIsRecurring ? 'quarterly' : 'one_time',
+      source: fallbackIsRecurring ? 'recurring' : 'one_time',
       estimateId: estimate.id,
     });
   }
@@ -1868,8 +1909,11 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  cadenceFromEstimateLine,
+  isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapPipelineCustomer,
+  scheduleLinesFromEstimate,
 };
 
 module.exports = router;

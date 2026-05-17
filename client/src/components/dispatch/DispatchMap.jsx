@@ -82,7 +82,7 @@ function colorForTech(techId) {
 }
 
 function svgPin(color, isSelected = false) {
-  // Job circle pin (inline SVG). Tech markers use the asb.png raster
+  // Job circle pin (inline SVG). Tech markers use the Waves logo raster
   // asset instead — see techIcon() below.
   const stroke = isSelected ? '#18181B' : '#FFFFFF';
   const strokeWidth = isSelected ? 3 : 1.5;

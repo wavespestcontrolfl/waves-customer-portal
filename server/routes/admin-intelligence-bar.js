@@ -387,7 +387,7 @@ LEADS PIPELINE CONTEXT:
 You are on the Leads page. Virginia uses this daily to manage the sales pipeline.
 
 PIPELINE STAGES (in order):
-new → contacted → estimate_sent → estimate_viewed → negotiating → won
+new → contacted → estimate_sent → estimate_viewed → won
 Dead ends: lost, unresponsive, disqualified, duplicate
 
 LEAD SOURCES: Google Ads, Google LSA, Organic, Referral, Door Knock campaigns, Nextdoor, Facebook, Walk-In, AI Agent, Voicemail, Email
