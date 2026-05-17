@@ -450,7 +450,7 @@ function renderPage(token, estimate, estData) {
   const showOneTimeOption = !!est.showOneTimeOption;
   const oneTimeChoicePrice = Number(est.oneTimeChoicePrice || 0);
   const canChooseOneTime = showOneTimeOption && oneTimeChoicePrice > 0;
-  const isOneTimeOnly = !recurring.length && (oneTimeItems.length > 0 || Number(est.onetimeTotal || 0) > 0);
+  const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, est);
   const displayPestOnly = canChooseOneTime && Number(pestRecurring?.monthlyBase || 0) > 0;
   const billingRecurring = displayPestOnly
     ? recurring.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))
@@ -3176,6 +3176,8 @@ function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
     recurring.annualAfterDiscount,
     estimate.monthly_total,
     estimate.annual_total,
+    estimate.monthlyTotal,
+    estimate.annualTotal,
   ].some((value) => Number(value || 0) > 0);
   const oneTimeBreakdown = normalizeOneTimeBreakdown(estData);
 
