@@ -195,20 +195,6 @@ function WaveGuardIntelligenceCard({ intelligence, address }) {
             {intelligence.title || 'Waves AI reviewed your property before pricing this estimate'}
           </h2>
         </div>
-        <div style={{
-          flex: '0 0 auto',
-          padding: '6px 10px',
-          borderRadius: 999,
-          background: '#E3F5FD',
-          color: COLORS.blueDark,
-          fontSize: 12,
-          fontWeight: 800,
-          lineHeight: 1,
-          letterSpacing: 0,
-          textTransform: 'uppercase',
-        }}>
-          Waves AI
-        </div>
       </div>
 
       <p style={{

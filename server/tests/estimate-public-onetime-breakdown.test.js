@@ -581,7 +581,7 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('Waves AI');
     expect(html).toContain('Waves AI reviewed your property before pricing this estimate');
-    expect(html).toContain('class="intelligence-badge">Waves AI</div>');
+    expect(html).not.toContain('class="intelligence-badge"');
     expect(html).toContain('Satellite view of 123 Main St');
     expect(html).toContain('1,800 sq ft');
     expect(html).toContain('Wave Goodbye to Pests!');

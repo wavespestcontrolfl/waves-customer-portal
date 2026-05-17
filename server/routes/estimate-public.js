@@ -902,7 +902,6 @@ function renderPage(token, estimate, estData) {
         <div class="eyebrow">${escapeHtml(intelligence.eyebrow)}</div>
         <h2>${escapeHtml(intelligence.title)}</h2>
       </div>
-      <div class="intelligence-badge">Waves AI</div>
     </div>
     <p class="ai-blurb">${escapeHtml(intelligence.body)}</p>
     ${intelligence.satelliteUrl ? `<img class="ai-satellite" src="${escapeHtml(intelligence.satelliteUrl)}" alt="Satellite view of ${escapeHtml(est.address || 'your property')}" loading="lazy"/>` : ''}
