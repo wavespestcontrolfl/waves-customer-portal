@@ -330,13 +330,19 @@ function applicationActiveIngredient(app = {}) {
   return app.product?.active_ingredient || app.activeIngredient || '';
 }
 
+function isRenderableTreatmentApplication(app = {}) {
+  return String(app.method || '').toLowerCase() !== 'station_check';
+}
+
 function buildTreatmentOverlayRows(data = {}) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
-  return applications.map((app, index) => {
-    const id = String(app.id || `application-${index + 1}`);
+  return applications.map((app, originalIndex) => {
+    const id = String(app.id || `application-${originalIndex + 1}`);
     const zoneIds = applicationZoneIds(app);
     const zones = zoneIds.map((zoneId) => zoneById.get(String(zoneId))).filter(Boolean);
+    return { app, id, zoneIds, zones };
+  }).filter(({ app, zones }) => isRenderableTreatmentApplication(app) && zones.length).map(({ app, id, zoneIds, zones }, index) => {
     const zoneLetters = zones.map((zone) => zone.letter).filter(Boolean);
     const zoneLabels = zones.map((zone) => zone.label).filter(Boolean);
     const targets = Array.isArray(app.targets) ? app.targets.map(formatEnumLabel).filter(Boolean) : [];
@@ -368,7 +374,7 @@ function buildTreatmentOverlayRows(data = {}) {
       rateDetails,
       customerDetail,
     };
-  }).filter((row) => row.zoneIds.length);
+  });
 }
 
 function conditionInterpretation(conditions = {}) {

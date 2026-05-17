@@ -88,6 +88,10 @@ function applicationZoneIds(app = {}) {
   return ids.map(String);
 }
 
+function isRenderableApplication(app = {}) {
+  return (app.method || 'perimeter_spray') !== 'station_check';
+}
+
 async function buildSatelliteTreatmentMapContext({
   service,
   zones = [],
@@ -127,6 +131,10 @@ async function buildSatelliteTreatmentMapContext({
 
   const overlayZones = zones.map(overlayZone);
   const overlayZoneById = new Map(overlayZones.map((zone) => [String(zone.id), zone]));
+  const renderableApplications = applications.map((app) => {
+    const zoneIds = applicationZoneIds(app).filter((zoneId) => overlayZoneById.has(String(zoneId)));
+    return { app, zoneIds };
+  }).filter(({ app, zoneIds }) => isRenderableApplication(app) && zoneIds.length);
 
   return {
     available: true,
@@ -147,8 +155,7 @@ async function buildSatelliteTreatmentMapContext({
       width: VIEWBOX_W,
       height: VIEWBOX_H,
       zones: overlayZones,
-      applications: applications.map((app) => {
-        const zoneIds = applicationZoneIds(app);
+      applications: renderableApplications.map(({ app, zoneIds }) => {
         return {
           id: app.id,
           method: app.method,

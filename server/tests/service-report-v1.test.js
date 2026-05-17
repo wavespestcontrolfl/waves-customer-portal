@@ -421,6 +421,12 @@ describe('service report v1', () => {
       ],
       applications: [
         {
+          id: 'app-station',
+          product: { name: 'Station inspection', epa_reg: '' },
+          method: 'station_check',
+          zone_ids: ['zone-b'],
+        },
+        {
           id: 'app-1',
           product: { name: 'Demand CS', epa_reg: '100-1066' },
           method: 'perimeter_spray',
@@ -440,6 +446,7 @@ describe('service report v1', () => {
     const second = renderTreatmentMap(input);
 
     expect(first).toBe(second);
+    expect(first).not.toContain('data-application-id="app-station"');
     expect(first).toContain('data-application-id="app-1"');
     expect(first).toContain('data-map-number="1"');
     expect(first).toContain('data-product-name="Demand CS"');
@@ -464,13 +471,21 @@ describe('service report v1', () => {
       const enabled = await buildSatelliteTreatmentMapContext({
         service: { customer_latitude: 27.39, customer_longitude: -82.43 },
         zones: [{ id: 'zone-a', letter: 'A', label: 'Front entry', category: 'perimeter', geometry: { x: 60, y: 40, w: 120, h: 40 } }],
-        applications: [{
-          id: 'app-1',
-          method: 'perimeter_spray',
-          product: { name: 'Demand CS', epa_reg: '100-1066', active_ingredient: 'lambda-cyhalothrin' },
-          targets: ['ghost_ant'],
-          zone_ids: ['zone-a'],
-        }],
+        applications: [
+          {
+            id: 'station-check-1',
+            method: 'station_check',
+            product: { name: 'Station check' },
+            zone_ids: ['zone-a'],
+          },
+          {
+            id: 'app-1',
+            method: 'perimeter_spray',
+            product: { name: 'Demand CS', epa_reg: '100-1066', active_ingredient: 'lambda-cyhalothrin' },
+            targets: ['ghost_ant'],
+            zone_ids: ['zone-a'],
+          },
+        ],
       });
 
       expect(enabled.available).toBe(true);
@@ -479,7 +494,9 @@ describe('service report v1', () => {
       expect(enabled.capabilities.canUseInPdf).toBe(false);
       expect(enabled.capabilities.canUseInSmsPreview).toBe(false);
       expect(enabled.overlay.zones[0].overlaySource).toBe('local_schematic');
+      expect(enabled.overlay.applications).toHaveLength(1);
       expect(enabled.overlay.applications[0]).toMatchObject({
+        id: 'app-1',
         productName: 'Demand CS',
         epaReg: '100-1066',
         activeIngredient: 'lambda-cyhalothrin',

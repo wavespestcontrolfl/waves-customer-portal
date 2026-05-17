@@ -78,6 +78,17 @@ function treatmentForMethod(method) {
   return 'url(#hatch-spray)';
 }
 
+function applicationZoneIds(app = {}) {
+  const ids = Array.isArray(app.zone_ids)
+    ? app.zone_ids
+    : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
+  return ids.map((id) => String(id)).filter(Boolean);
+}
+
+function isRenderableApplication(app = {}) {
+  return (app.method || 'perimeter_spray') !== 'station_check';
+}
+
 function renderFogArrows(box) {
   const y = num(box.y) + num(box.h) / 2;
   const x = num(box.x);
@@ -97,7 +108,7 @@ function renderApplicationLayer(app, zonesById, fallbackSequenceStart, applicati
   if (method === 'station_check') return '';
 
   let baitSeq = fallbackSequenceStart;
-  const zoneIds = Array.isArray(app.zone_ids) ? app.zone_ids : [];
+  const zoneIds = applicationZoneIds(app);
   const zones = zoneIds.map((id) => zonesById.get(String(id))).filter(Boolean);
   if (!zones.length) return '';
   const appId = String(applicationId || app.id || `application-${applicationNumber}`);
@@ -162,9 +173,18 @@ function renderTreatmentMap(input) {
   const zones = (input.zones || []).map((zone) => ({ ...zone, id: String(zone.id) }));
   const zonesById = new Map(zones.map((zone) => [String(zone.id), zone]));
   const applications = input.applications || [];
+  const renderableApplications = applications.map((app, index) => {
+    const appId = String(app.id || `application-${index + 1}`);
+    const zoneIds = applicationZoneIds(app).filter((zoneId) => zonesById.has(String(zoneId)));
+    return {
+      app: { ...app, id: appId, zone_ids: zoneIds },
+      appId,
+      zoneIds,
+    };
+  }).filter(({ app, zoneIds }) => isRenderableApplication(app) && zoneIds.length);
   const usedMethods = [];
   const seenMethods = new Set();
-  for (const app of applications) {
+  for (const { app } of renderableApplications) {
     if (!app.method || app.method === 'station_check' || seenMethods.has(app.method)) continue;
     seenMethods.add(app.method);
     usedMethods.push(app.method);
@@ -172,9 +192,8 @@ function renderTreatmentMap(input) {
 
   let baitSequence = 1;
   const zoneApplicationIds = new Map();
-  applications.forEach((app, index) => {
-    const appId = String(app.id || `application-${index + 1}`);
-    const zoneIds = Array.isArray(app.zone_ids) ? app.zone_ids : [];
+  renderableApplications.forEach(({ app, appId }) => {
+    const zoneIds = applicationZoneIds(app);
     zoneIds.forEach((zoneId) => {
       const key = String(zoneId);
       const ids = zoneApplicationIds.get(key) || [];
@@ -182,11 +201,10 @@ function renderTreatmentMap(input) {
       zoneApplicationIds.set(key, ids);
     });
   });
-  const appLayers = applications.map((app, index) => {
-    const appId = String(app.id || `application-${index + 1}`);
+  const appLayers = renderableApplications.map(({ app, appId }, index) => {
     const layer = renderApplicationLayer(app, zonesById, baitSequence, index + 1, zoneApplicationIds, appId);
     if (app.method === 'bait_placement') {
-      const count = Array.isArray(app.zone_ids) ? app.zone_ids.length : 0;
+      const count = applicationZoneIds(app).length;
       baitSequence += count;
     }
     return layer;
