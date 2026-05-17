@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const { etParts, parseETDateTime } = require('../utils/datetime-et');
+const { minutesFromElapsed } = require('../utils/duration-minutes');
 
 const LABOR_RATE_DOLLARS_PER_HOUR = 35;
 const DEFAULT_LOOKBACK_DAYS = 90;
@@ -258,6 +259,7 @@ function resolveActualMinutes(row) {
     row.service_time_minutes,
     row.actual_duration_minutes,
     row.time_entry_minutes,
+    serviceRecordTimeOnSiteMinutes(row),
   );
   if (persisted != null) return persisted;
 
@@ -266,6 +268,7 @@ function resolveActualMinutes(row) {
     minutesBetween(row.check_in_time, row.check_out_time),
     minutesBetween(row.arrived_at, row.completed_at),
     minutesBetween(row.time_entry_clock_in, row.time_entry_clock_out),
+    minutesBetween(row.service_record_started_at, row.service_record_ended_at),
   );
 }
 
@@ -278,10 +281,17 @@ function hasInvalidActualDuration(row) {
     minutesBetween(row.check_in_time, row.check_out_time),
     minutesBetween(row.arrived_at, row.completed_at),
     minutesBetween(row.time_entry_clock_in, row.time_entry_clock_out),
+    serviceRecordTimeOnSiteMinutes(row),
+    minutesBetween(row.service_record_started_at, row.service_record_ended_at),
   ].some((value) => {
     const n = finiteNumber(value);
     return n != null && n <= 0;
   });
+}
+
+function serviceRecordTimeOnSiteMinutes(row) {
+  const notes = parseJson(row.service_record_structured_notes);
+  return minutesFromElapsed(notes?.timeOnSite);
 }
 
 function sqftBand(value) {
@@ -359,6 +369,7 @@ function normalizeServiceRow(row) {
     row.actual_end_time,
     row.check_out_time,
     row.time_entry_clock_out,
+    row.service_record_ended_at,
     row.scheduled_date,
   );
   const quotedMinutes = resolveQuotedMinutes(row);
@@ -609,9 +620,20 @@ async function fetchPricingRealityRows({ lookbackDays }) {
     .whereNotNull('job_id')
     .groupBy('job_id')
     .as('te');
+  const serviceRecords = db.raw(`(
+    SELECT DISTINCT ON (scheduled_service_id)
+      scheduled_service_id,
+      started_at AS service_record_started_at,
+      ended_at AS service_record_ended_at,
+      structured_notes AS service_record_structured_notes
+    FROM service_records
+    WHERE scheduled_service_id IS NOT NULL
+    ORDER BY scheduled_service_id, created_at DESC
+  ) AS sr`);
 
   return db('scheduled_services as s')
     .leftJoin(timeEntries, 'te.job_id', 's.id')
+    .leftJoin(serviceRecords, 'sr.scheduled_service_id', 's.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .leftJoin('technicians as tech', 's.technician_id', 'tech.id')
     .leftJoin('estimates as e', 's.source_estimate_id', 'e.id')
@@ -622,7 +644,7 @@ async function fetchPricingRealityRows({ lookbackDays }) {
     })
     .where('s.status', 'completed')
     .whereRaw(
-      'COALESCE(s.completed_at, s.actual_end_time, s.check_out_time, te.time_entry_clock_out, s.scheduled_date::timestamp) >= ?',
+      'COALESCE(s.completed_at, s.actual_end_time, s.check_out_time, te.time_entry_clock_out, sr.service_record_ended_at, s.scheduled_date::timestamp) >= ?',
       [cutoff],
     )
     .select({
@@ -659,6 +681,9 @@ async function fetchPricingRealityRows({ lookbackDays }) {
       time_entry_minutes: 'te.time_entry_minutes',
       time_entry_clock_in: 'te.time_entry_clock_in',
       time_entry_clock_out: 'te.time_entry_clock_out',
+      service_record_started_at: 'sr.service_record_started_at',
+      service_record_ended_at: 'sr.service_record_ended_at',
+      service_record_structured_notes: 'sr.service_record_structured_notes',
     });
 }
 

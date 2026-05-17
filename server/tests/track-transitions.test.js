@@ -11,7 +11,7 @@ jest.mock('../services/job-status', () => ({
 }));
 
 const db = require('../models/db');
-const { setTechJobStatus } = require('../services/tech-status');
+const { setTechJobStatus, clearTechCurrentJob } = require('../services/tech-status');
 const { transitionJobStatus } = require('../services/job-status');
 const trackTransitions = require('../services/track-transitions');
 
@@ -27,6 +27,7 @@ function query(result) {
 describe('track-transitions lifecycle side effects', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.useRealTimers();
   });
 
   test('markEnRoute sets tech_status current job without relying on Bouncie', async () => {
@@ -79,10 +80,53 @@ describe('track-transitions lifecycle side effects', () => {
       transitionedBy: null,
     });
     expect(update.whereIn).toHaveBeenCalledWith('track_state', ['scheduled', 'en_route']);
+    const payload = update.update.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      track_state: 'on_property',
+      actual_start_time: expect.any(Date),
+      check_in_time: expect.any(Date),
+      arrived_at: expect.any(Date),
+    });
     expect(setTechJobStatus).toHaveBeenCalledWith({
       tech_id: 'tech-2',
       status: 'on_site',
       current_job_id: 'job-2',
+    });
+  });
+
+  test('markComplete writes end aliases and duration from the captured start time', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-05-15T14:45:00.000Z'));
+    const start = new Date('2026-05-15T14:00:00.000Z');
+    const svc = {
+      id: 'job-3',
+      technician_id: 'tech-3',
+      track_state: 'on_property',
+      actual_start_time: start,
+      check_in_time: start,
+      arrived_at: start,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-3');
+
+    expect(result.ok).toBe(true);
+    expect(result.state).toBe('complete');
+    expect(update.whereIn).toHaveBeenCalledWith('track_state', ['scheduled', 'en_route', 'on_property']);
+    expect(update.update.mock.calls[0][0]).toMatchObject({
+      track_state: 'complete',
+      completed_at: new Date('2026-05-15T14:45:00.000Z'),
+      actual_end_time: new Date('2026-05-15T14:45:00.000Z'),
+      check_out_time: new Date('2026-05-15T14:45:00.000Z'),
+      service_time_minutes: 45,
+      actual_duration_minutes: 45,
+    });
+    expect(clearTechCurrentJob).toHaveBeenCalledWith({
+      tech_id: 'tech-3',
+      current_job_id: 'job-3',
+      status: 'idle',
     });
   });
 });

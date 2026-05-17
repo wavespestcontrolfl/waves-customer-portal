@@ -35,6 +35,10 @@ const {
   recordTrackTransitionFailure,
   recordTrackTransitionResultFailure,
 } = require('../services/track-transition-alerts');
+const {
+  buildOnSiteLifecycleUpdates,
+  buildCompletionLifecycleUpdates,
+} = require('../utils/service-duration-capture');
 
 // Haversine ETA for the dispatch board tech cards. Returns a whole
 // number of minutes, or null when any input is missing or the tech is
@@ -946,17 +950,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // Lifecycle timestamps live on the same row as status; flip
         // them inside the same trx so a rollback also rolls back the
         // timestamp change. transitionJobStatus owns the status +
-        // updated_at columns (atomic guard); we own the actual_*
+        // updated_at columns (atomic guard); we own the service timing
         // columns (no constraint conflict).
         const lifecycleUpdates = {};
-        if (toStatus === 'on_site') lifecycleUpdates.actual_start_time = trx.fn.now();
+        const lifecycleAt = new Date();
+        if (toStatus === 'on_site') {
+          Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, lifecycleAt));
+        }
         if (toStatus === 'completed') {
-          lifecycleUpdates.actual_end_time = trx.fn.now();
-          if (svc.actual_start_time) {
-            lifecycleUpdates.service_time_minutes = Math.round(
-              (Date.now() - new Date(svc.actual_start_time)) / 60000
-            );
-          }
+          Object.assign(lifecycleUpdates, buildCompletionLifecycleUpdates(svc, lifecycleAt));
         }
         if (Object.keys(lifecycleUpdates).length > 0) {
           await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
@@ -1456,6 +1458,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     } else {
       try {
         await db.transaction(async (trx) => {
+          const completionEndedAt = new Date();
+          const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
           const structuredNotes = {
             visitOutcome,
             requestReview: isIncompleteVisit ? false : requestReview !== false,
@@ -1521,8 +1525,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
           if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
-          if (serviceRecordCols.started_at) recordInsert.started_at = svc.actual_start_time || svc.check_in_time || null;
-          if (serviceRecordCols.ended_at) recordInsert.ended_at = trx.fn.now();
+          if (serviceRecordCols.started_at) {
+            recordInsert.started_at = lifecycleUpdates.actual_start_time
+              || svc.actual_start_time
+              || svc.check_in_time
+              || svc.arrived_at
+              || null;
+          }
+          if (serviceRecordCols.ended_at) recordInsert.ended_at = completionEndedAt;
           if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
           if (serviceRecordCols.advisory && useServiceReportV1) recordInsert.advisory = serializeJsonb(reportConfig.advisoryDefaults);
@@ -1705,15 +1715,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
 
         // 3. Lifecycle timestamps the route owns. transitionJobStatus
-        // owns status + updated_at; we own actual_end_time +
-        // service_time_minutes. No constraint conflict — separate
-        // columns on the same row.
-        const lifecycleUpdates = {
-          actual_end_time: trx.fn.now(),
-          service_time_minutes: svc.actual_start_time
-            ? Math.round((Date.now() - new Date(svc.actual_start_time)) / 60000)
-            : null,
-        };
+        // owns status + updated_at; we own the service timing columns
+        // on the same row.
         await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
 
         // 5. Status flip via the canonical sole-writer.
