@@ -15,7 +15,7 @@ const PROJECT_TYPES = {
     short: 'WDO',
     description: 'FDACS-13645 wood-destroying organism inspection report for real estate / pre-purchase files.',
     requiresFollowup: false,
-    photoCategories: ['exterior', 'living_area', 'kitchen', 'bathroom', 'garage', 'attic', 'crawlspace', 'other'],
+    photoCategories: ['exterior', 'living_area', 'kitchen', 'bathroom', 'garage', 'attic', 'crawlspace', 'previous_treatment', 'other'],
     findingsFields: [
       { key: 'property_address', label: 'Property inspected', type: 'text', placeholder: 'Street address, city, state, ZIP' },
       { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', placeholder: 'Main home, detached garage, shed, addition…' },
