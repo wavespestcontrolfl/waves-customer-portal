@@ -734,12 +734,22 @@ function renderPage(token, estimate, estData) {
         </section>`;
     })
     .join('');
+  const serviceCardsMonthlyTotal = billingServiceRows.reduce((sum, row) => {
+    if (row.price == null || !(row.visits > 0)) return null;
+    if (sum == null) return null;
+    return sum + (row.price * row.visits / 12);
+  }, 0);
+  const serviceCardsCoverRecurringTotal = billingRecurring.length > 0
+    && servicePriceCardsHtml
+    && billingServiceRows.every((row) => row.price != null && row.visits > 0)
+    && serviceCardsMonthlyTotal != null
+    && Math.abs(serviceCardsMonthlyTotal - monthlyTotal) < 0.05;
   const recurringHeroPriceHtml = quoteRequired ? `
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
       <div class="day-price" data-mode-only="recurring">Inspection required before final pricing.</div>
-    ` : (servicePriceCardsHtml ? `
+    ` : (serviceCardsCoverRecurringTotal ? `
       <div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>
     ` : `
       <div class="big-price" data-mode-only="recurring">

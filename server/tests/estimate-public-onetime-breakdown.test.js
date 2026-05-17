@@ -511,8 +511,8 @@ describe('public estimate one-time breakdown', () => {
       status: 'sent',
       customerName: 'Stan Customer',
       address: '4407 Lake Fox Pl',
-      monthlyTotal: 193.5,
-      annualTotal: 2322,
+      monthlyTotal: 116.7,
+      annualTotal: 1400.4,
       onetimeTotal: 0,
       tier: 'Silver',
     }, {
@@ -545,8 +545,38 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('You save <span data-service-card-savings data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4" data-service-anchor-price="116">$11.60</span> / application with WaveGuard Silver');
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2">$1.28</span>/day for pest control.');
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4">$2.61</span>/day for lawn care.');
-    expect(html).not.toContain('id="monthly-display">$580.50</span>');
+    expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('/ treatment</span>');
+  });
+
+  test('server-rendered estimate keeps aggregate hero when service cards do not cover the full total', () => {
+    const html = renderPage('partial-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 95,
+      annualTotal: 1140,
+      onetimeTotal: 0,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', mo: 50 },
+            { name: 'Special Recurring Service', mo: 45 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          pest: { apps: 4 },
+          pestTiers: [{ label: 'Quarterly', mo: 50, pa: 150, apps: 4 }],
+        },
+      },
+    });
+
+    expect(html).not.toContain('class="service-price-list"');
+    expect(html).toContain('id="monthly-display">$285</span>');
   });
 
   test('accept success payload marks invoice payment as the next step', () => {
