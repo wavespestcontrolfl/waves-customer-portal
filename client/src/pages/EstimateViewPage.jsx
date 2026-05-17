@@ -150,6 +150,162 @@ function Header({ customerFirstName, address, serviceLabel, canChooseOneTime }) 
   );
 }
 
+function WaveGuardIntelligenceCard({ intelligence, address }) {
+  if (!intelligence) return null;
+  const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
+  const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
+  const satelliteUrl = intelligence.satelliteUrl;
+
+  return (
+    <section style={{
+      background: 'linear-gradient(180deg, #F5F1E6 0%, #FFFFFF 100%)',
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      borderRadius: 12,
+      padding: 24,
+      marginBottom: 16,
+    }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        gap: 16,
+        flexWrap: 'wrap',
+        marginBottom: 10,
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            fontSize: 12,
+            color: ESTIMATE_MUTED,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            fontWeight: 700,
+            marginBottom: 6,
+          }}>
+            {intelligence.eyebrow || 'WaveGuard Intelligence'}
+          </div>
+          <h2 style={{
+            fontFamily: FONTS.serif,
+            fontSize: 28,
+            fontWeight: 500,
+            lineHeight: 1.18,
+            color: ESTIMATE_TEXT,
+            margin: 0,
+            letterSpacing: 0,
+          }}>
+            {intelligence.title || 'Waves AI reviewed your property before pricing this estimate'}
+          </h2>
+        </div>
+        <div style={{
+          flex: '0 0 auto',
+          padding: '6px 10px',
+          borderRadius: 999,
+          background: '#E3F5FD',
+          color: COLORS.blueDark,
+          fontSize: 12,
+          fontWeight: 800,
+          lineHeight: 1,
+          letterSpacing: 0,
+          textTransform: 'uppercase',
+        }}>
+          Waves AI
+        </div>
+      </div>
+
+      <p style={{
+        margin: satelliteUrl || metrics.length ? '0 0 14px' : '0',
+        color: '#3F4A65',
+        fontSize: 14,
+        lineHeight: 1.55,
+      }}>
+        {intelligence.body}
+      </p>
+
+      {satelliteUrl ? (
+        <img
+          src={satelliteUrl}
+          alt={`Satellite view of ${address || 'your property'}`}
+          loading="lazy"
+          style={{
+            display: 'block',
+            width: '100%',
+            maxHeight: 320,
+            objectFit: 'cover',
+            borderRadius: 10,
+            border: `1px solid ${ESTIMATE_BORDER}`,
+            background: '#F7F5EE',
+          }}
+        />
+      ) : null}
+
+      {metrics.length ? (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(132px, 1fr))',
+          gap: 10,
+          marginTop: 14,
+        }}>
+          {metrics.map((metric) => (
+            <div
+              key={`${metric.label}-${metric.value}`}
+              style={{
+                background: COLORS.white,
+                border: `1px solid ${ESTIMATE_BORDER}`,
+                borderRadius: 10,
+                padding: '10px 12px',
+              }}
+            >
+              <div style={{
+                fontSize: 11,
+                color: ESTIMATE_MUTED,
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                marginBottom: 4,
+              }}>
+                {metric.label}
+              </div>
+              <div style={{
+                fontFamily: FONTS.serif,
+                fontSize: 18,
+                fontWeight: 500,
+                color: ESTIMATE_TEXT,
+              }}>
+                {metric.value}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {signals.length ? (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+          gap: 10,
+          marginTop: 14,
+        }}>
+          {signals.map((signal) => (
+            <div
+              key={signal}
+              style={{
+                border: `1px solid ${ESTIMATE_BORDER}`,
+                borderLeft: `4px solid ${COLORS.blueBright}`,
+                borderRadius: 10,
+                background: COLORS.white,
+                padding: '10px 12px',
+                color: '#3F4A65',
+                fontSize: 13,
+                lineHeight: 1.45,
+              }}
+            >
+              {signal}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function getServiceLabel(frequency, estimate, pricing) {
   if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
     return `${frequency?.label || 'Quarterly'} Pest Control or One-Time Pest Control`;
@@ -726,6 +882,7 @@ export default function EstimateViewPage() {
     return (
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
+        <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} />
         <TerminalStateCard
           state={cta.terminalState}
           customerFirstName={estimate.customerFirstName}
@@ -754,6 +911,8 @@ export default function EstimateViewPage() {
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
         canChooseOneTime={estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0}
       />
+
+      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} />
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner

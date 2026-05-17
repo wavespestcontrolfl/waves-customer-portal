@@ -7,6 +7,7 @@ const {
   buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
   buildPricingBundle,
+  buildWaveGuardIntelligencePayload,
   isEstimateAcceptActive,
   isStructuralOneTimeOnlyEstimate,
   normalizeAcceptPaymentMethodPreference,
@@ -504,6 +505,72 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('onclick="cancelReservation()"');
     expect(html).toContain("confirmBookBtn.addEventListener('click', confirmBooking)");
     expect(html).toContain("changeBookingPickBtn.addEventListener('click', cancelReservation)");
+  });
+
+  test('builds WaveGuard Intelligence payload from estimate property signals', () => {
+    const payload = buildWaveGuardIntelligencePayload({
+      satelliteUrl: 'https://maps.example/satellite.png',
+      tier: 'Silver',
+    }, {
+      inputs: {
+        homeSqFt: 2400,
+        lotSqFt: 9000,
+        lawnSqFt: 5200,
+        landscapeComplexity: 'MODERATE',
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control' },
+            { name: 'Lawn Care' },
+          ],
+        },
+      },
+    });
+
+    expect(payload.eyebrow).toBe('WaveGuard Intelligence');
+    expect(payload.title).toContain('Waves AI reviewed your property');
+    expect(payload.satelliteUrl).toBe('https://maps.example/satellite.png');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Home', value: '2,400 sq ft' },
+      { label: 'Lot', value: '9,000 sq ft' },
+      { label: 'Treatable lawn', value: '5,200 sq ft' },
+      { label: 'Complexity', value: 'Moderate' },
+    ]));
+    expect(payload.signals.join(' ')).toContain('Pest Control and Lawn Care cadence and visit counts');
+    expect(payload.signals.join(' ')).toContain('WaveGuard Silver pricing');
+  });
+
+  test('server-rendered estimates show the WaveGuard Intelligence feature', () => {
+    const html = renderPage('intelligence-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Silver',
+      satelliteUrl: 'https://maps.example/satellite.png',
+    }, {
+      inputs: {
+        homeSqFt: 1800,
+        lotSqFt: 7000,
+        landscapeComplexity: 'SIMPLE',
+      },
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+
+    expect(html).toContain('WaveGuard Intelligence');
+    expect(html).toContain('Waves AI reviewed your property before pricing this estimate');
+    expect(html).toContain('class="intelligence-badge">Waves AI</div>');
+    expect(html).toContain('Satellite view of 123 Main St');
+    expect(html).toContain('1,800 sq ft');
+    expect(html).not.toContain('class="waves-intelligence"');
   });
 
   test('server-rendered bundled estimate showcases per-application prices by service', () => {

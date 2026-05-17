@@ -398,6 +398,128 @@ function fmtMoney(n) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
 }
 
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function prettySignalValue(value) {
+  if (!value) return null;
+  return String(value)
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function sentenceList(items) {
+  const clean = items.map((item) => String(item || '').trim()).filter(Boolean);
+  if (clean.length <= 1) return clean[0] || '';
+  if (clean.length === 2) return `${clean[0]} and ${clean[1]}`;
+  return `${clean.slice(0, -1).join(', ')}, and ${clean[clean.length - 1]}`;
+}
+
+function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {}) {
+  let parsedData = estData;
+  if (typeof parsedData === 'string') {
+    try { parsedData = JSON.parse(parsedData); } catch { parsedData = {}; }
+  }
+  parsedData = parsedData && typeof parsedData === 'object' ? parsedData : {};
+
+  const estResult = parsedData.result || parsedData.engineResult || parsedData || {};
+  const inputs = parsedData.inputs || parsedData.engineInputs || {};
+  const property = estResult.property || parsedData.property || {};
+  const resultStats = estResult.results || parsedData.results || {};
+  const recurringServices = Array.isArray(opts.recurringServices)
+    ? opts.recurringServices
+    : (estResult.recurring?.services || parsedData.recurring?.services || []);
+  const inputServices = inputs.services || {};
+  const serviceNames = recurringServices
+    .map((svc) => svc?.name || svc?.label || svc?.displayName || svc?.service)
+    .filter(Boolean)
+    .map((name) => {
+      const raw = String(name);
+      switch (raw) {
+        case 'pest_control': return 'Pest Control';
+        case 'lawn_care': return 'Lawn Care';
+        case 'tree_shrub': return 'Tree & Shrub';
+        case 'termite_bait': return 'Termite Bait';
+        default: return raw;
+      }
+    });
+  const hasLawn = serviceNames.some((name) => /lawn/i.test(name))
+    || !!inputServices.lawn
+    || !!inputServices.lawnCare
+    || inputs.svcLawn === true;
+  const hasTermiteBait = serviceNames.some((name) => isTermiteBaitServiceName(name))
+    || !!inputServices.termiteBait
+    || !!inputServices.termite;
+
+  const stories = firstPositiveNumber(inputs.stories, property.stories) || 1;
+  const homeSqFt = firstPositiveNumber(
+    inputs.homeSqFt,
+    inputs.home_sqft,
+    property.homeSqFt,
+    property.home_sqft,
+    Number(property.footprint || 0) * stories,
+  );
+  const lotSqFt = firstPositiveNumber(
+    inputs.lotSqFt,
+    inputs.lot_sqft,
+    property.lotSqFt,
+    property.lot_sqft,
+  );
+  const lawnSqFt = hasLawn ? firstPositiveNumber(
+    inputs.lawnSqFt,
+    inputs.turfSqFt,
+    property.lawnSqFt,
+    property.turfSqFt,
+  ) : null;
+  const termitePerimeterFt = hasTermiteBait
+    ? firstPositiveNumber(resultStats.tmBait?.perim, property.termitePerimeterFt, inputs.termitePerimeterFt)
+    : null;
+  const aiAnalysis = parsedData.aiAnalysis || estResult.aiAnalysis || {};
+  const complexity = prettySignalValue(
+    aiAnalysis.landscape_complexity
+    || aiAnalysis.landscapeComplexity
+    || property.landscapeComplexity
+    || inputs.landscapeComplexity
+  );
+
+  const metrics = [
+    homeSqFt ? { label: 'Home', value: `${Math.round(homeSqFt).toLocaleString()} sq ft` } : null,
+    lotSqFt ? { label: 'Lot', value: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
+    lawnSqFt ? { label: 'Treatable lawn', value: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
+    termitePerimeterFt ? { label: 'Termite perimeter', value: `${Math.round(termitePerimeterFt).toLocaleString()} linear ft` } : null,
+    complexity ? { label: 'Complexity', value: complexity } : null,
+  ].filter(Boolean);
+
+  const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
+  const tier = estimate.waveguard_tier || estimate.tier || opts.pricingBundle?.waveGuardTier || null;
+  const serviceLabel = sentenceList([...new Set(serviceNames)]);
+  const signals = [
+    serviceLabel
+      ? `${serviceLabel} cadence and visit counts are matched to this property profile.`
+      : 'Service cadence and visit counts are matched to the property details available on this estimate.',
+    tier ? `WaveGuard ${tier} pricing reflects the bundle discount shown on this estimate.` : null,
+    'Your technician verifies measurements and site conditions during the first visit.',
+  ].filter(Boolean);
+
+  return {
+    eyebrow: 'WaveGuard Intelligence',
+    title: 'Waves AI reviewed your property before pricing this estimate',
+    body: satelliteUrl || metrics.length
+      ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
+      : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.',
+    satelliteUrl,
+    metrics,
+    signals,
+  };
+}
+
 function renderExpiredPage(estimate) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Estimate Expired — Waves</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
@@ -678,10 +800,6 @@ function renderPage(token, estimate, estData) {
   <section class="card billing-card"${billingModeAttr}>
     <h2>Choose how you want to pay</h2>
     <p class="billing-lede">${escapeHtml(billingLede)}</p>
-    <div class="waves-intelligence">
-      <div class="eyebrow">Waves Intelligence</div>
-      <p>Visit counts, service cadence, and pricing are matched to this property profile, local seasonality, and the bundle discount shown on this estimate.</p>
-    </div>
     <div class="payment-choice-grid">
       <div class="payment-choice">
         <h3>Pay after each visit</h3>
@@ -783,33 +901,26 @@ function renderPage(token, estimate, estData) {
   }));
   const socialsHtml = SOCIAL_LINKS.map((s) => `<a class="soc" href="${s.url}" target="_blank" rel="noopener" aria-label="${escapeHtml(s.name)}"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="${s.path}"/></svg></a>`).join('');
 
-  // ── Waves AI analysis block ────────────────────────────────────
-  // Shows satellite image of the home plus four property measurements:
-  // home sq ft, lot sq ft, treatable lawn area (lawn only), and landscape
-  // complexity. The complexity signal comes from the AI vision analyzer
-  // (SIMPLE / MODERATE / COMPLEX) and falls back to property inputs.
-  const satelliteUrl = est.satelliteUrl || null;
-  const aiAnalysis = estData?.aiAnalysis || estResult?.aiAnalysis || {};
-  const complexityRaw = aiAnalysis.landscape_complexity || estResult?.property?.landscapeComplexity || inputs.landscapeComplexity || null;
-  const complexityPretty = complexityRaw
-    ? String(complexityRaw).charAt(0).toUpperCase() + String(complexityRaw).slice(1).toLowerCase()
-    : null;
-  const aiMetricsArr = [
-    homeSqFt ? { label: 'Home', val: `${Math.round(homeSqFt).toLocaleString()} sq ft` } : null,
-    lotSqFt ? { label: 'Lot', val: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
-    lawnSqFt ? { label: 'Treatable lawn', val: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
-    complexityPretty ? { label: 'Complexity', val: complexityPretty } : null,
-  ].filter(Boolean);
-  const hasAiBlock = !!(satelliteUrl || aiMetricsArr.length);
-  const aiEngineBlurb = "We reviewed satellite imagery, property records, and visible lawn areas to estimate the service area for your home. Your technician will verify the property details during the first visit.";
-  const aiBlockHtml = hasAiBlock ? `
-  <section class="card ai-card">
-    <div class="eyebrow">Property details used for this estimate</div>
-    <h2>Here's what we found at your property</h2>
-    <p class="ai-blurb">${escapeHtml(aiEngineBlurb)}</p>
-    ${satelliteUrl ? `<img class="ai-satellite" src="${escapeHtml(satelliteUrl)}" alt="Satellite view of ${address}" loading="lazy"/>` : ''}
-    ${aiMetricsArr.length ? `<div class="ai-grid">
-      ${aiMetricsArr.map((m) => `<div class="ai-metric"><div class="ai-metric-label">${escapeHtml(m.label)}</div><div class="ai-metric-val">${escapeHtml(m.val)}</div></div>`).join('')}
+  // ── WaveGuard Intelligence block ────────────────────────────────
+  // Canonical customer-facing AI/property explanation. The same payload
+  // is exposed to the React v2 estimate via GET /:token/data.
+  const intelligence = buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+  const aiBlockHtml = intelligence ? `
+  <section class="card ai-card waveguard-ai-card">
+    <div class="intelligence-header">
+      <div>
+        <div class="eyebrow">${escapeHtml(intelligence.eyebrow)}</div>
+        <h2>${escapeHtml(intelligence.title)}</h2>
+      </div>
+      <div class="intelligence-badge">Waves AI</div>
+    </div>
+    <p class="ai-blurb">${escapeHtml(intelligence.body)}</p>
+    ${intelligence.satelliteUrl ? `<img class="ai-satellite" src="${escapeHtml(intelligence.satelliteUrl)}" alt="Satellite view of ${escapeHtml(est.address || 'your property')}" loading="lazy"/>` : ''}
+    ${intelligence.metrics.length ? `<div class="ai-grid">
+      ${intelligence.metrics.map((m) => `<div class="ai-metric"><div class="ai-metric-label">${escapeHtml(m.label)}</div><div class="ai-metric-val">${escapeHtml(m.value)}</div></div>`).join('')}
+    </div>` : ''}
+    ${intelligence.signals.length ? `<div class="intelligence-signals">
+      ${intelligence.signals.map((signal) => `<div class="intelligence-signal">${escapeHtml(signal)}</div>`).join('')}
     </div>` : ''}
   </section>` : '';
 
@@ -924,6 +1035,10 @@ function renderPage(token, estimate, estData) {
   .card h3{margin:0 0 10px}
   .card-sub{color:#6B7280;font-size:14px;margin:0 0 14px}
   .ai-card{background:linear-gradient(180deg,#F5F1E6 0%,#fff 100%)}
+  .waveguard-ai-card{display:grid;gap:14px}
+  .intelligence-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+  .intelligence-header h2{margin-bottom:0}
+  .intelligence-badge{flex:none;align-self:flex-start;padding:6px 10px;border-radius:999px;background:#E3F5FD;color:#065A8C;font-size:12px;font-weight:800;line-height:1;letter-spacing:0;text-transform:uppercase}
   .ai-blurb{margin:0 0 14px;color:#3F4A65;font-size:14px;line-height:1.55}
   .ai-satellite{display:block;width:100%;max-height:320px;object-fit:cover;border-radius:10px;border:1px solid #E7E2D7;margin-top:0;background:#F7F5EE}
   .ai-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}
@@ -931,12 +1046,12 @@ function renderPage(token, estimate, estData) {
   .ai-metric{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
   .ai-metric-label{font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
   .ai-metric-val{font-family:'Source Serif 4',Georgia,serif;font-size:18px;font-weight:500;color:#1B2C5B}
+  .intelligence-signals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2px}
+  @media(max-width:760px){.intelligence-header{display:grid}.intelligence-signals{grid-template-columns:1fr}}
+  .intelligence-signal{border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;background:#fff;padding:10px 12px;color:#3F4A65;font-size:13px;line-height:1.45}
   .billing-card{display:grid;gap:16px}
   .billing-card h2{margin-bottom:0}
   .billing-lede{margin:0;color:#3F4A65;font-size:15px;line-height:1.6}
-  .waves-intelligence{width:100%;padding:16px;border-radius:10px;background:#F7F5EE;border:1px solid #E7E2D7}
-  .waves-intelligence .eyebrow{margin-bottom:4px}
-  .waves-intelligence p{margin:0;color:#3F4A65;font-size:14px;line-height:1.55}
   .payment-choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   @media(max-width:760px){.payment-choice-grid{grid-template-columns:1fr}}
   .payment-choice{border:1px solid #E7E2D7;border-radius:10px;background:#fff;padding:18px;display:flex;flex-direction:column;gap:10px}
@@ -3870,8 +3985,26 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-data] office SMS failed: ${e.message}`); }
     }
 
+    let estimateDataForIntelligence = {};
+    try {
+      estimateDataForIntelligence = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : (estimate.estimate_data || {});
+    } catch {
+      estimateDataForIntelligence = {};
+    }
+
     const pricingBundle = await buildPricingBundle(estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const intelligence = buildWaveGuardIntelligencePayload(
+      {
+        ...estimate,
+        satelliteUrl: estimate.satellite_url || null,
+        tier: estimate.waveguard_tier || null,
+      },
+      estimateDataForIntelligence,
+      { pricingBundle },
+    );
 
     const terminalState = (() => {
       if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
@@ -3895,6 +4028,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         expiresAt: estimate.expires_at,
         status: estimate.status,
         satelliteUrl: estimate.satellite_url || null,
+        intelligence,
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
@@ -3919,6 +4053,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 module.exports = router;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.buildPricingBundle = buildPricingBundle;
+module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
 module.exports.renderPage = renderPage;
