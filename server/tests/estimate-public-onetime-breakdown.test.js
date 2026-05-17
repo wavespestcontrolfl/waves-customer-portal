@@ -532,11 +532,20 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('Price per application');
+    expect(html).toContain('class="service-price-list"');
+    expect(html).toContain('class="service-price-name">Pest Control</div>');
+    expect(html).toContain('class="service-price-name">Lawn Care</div>');
     expect(html).toContain('Quarterly service &middot; 4 applications/year');
     expect(html).toContain('9 applications/year');
-    expect(html).toContain('$115.20 <span class="pt-suffix">/ application</span>');
-    expect(html).toContain('$104.40 <span class="pt-suffix">/ application</span>');
+    expect(html).toContain('$128 / application</span>');
+    expect(html).toContain('$116 / application</span>');
+    expect(html).toContain('$115.20</span>');
+    expect(html).toContain('$104.40</span>');
+    expect(html).toContain('You save <span data-service-card-savings data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2" data-service-anchor-price="128">$12.80</span> / application with WaveGuard Silver');
+    expect(html).toContain('You save <span data-service-card-savings data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4" data-service-anchor-price="116">$11.60</span> / application with WaveGuard Silver');
+    expect(html).toContain('That’s just <span data-service-card-day data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2">$1.28</span>/day for pest control.');
+    expect(html).toContain('That’s just <span data-service-card-day data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4">$2.61</span>/day for lawn care.');
+    expect(html).not.toContain('id="monthly-display">$580.50</span>');
     expect(html).not.toContain('/ treatment</span>');
   });
 

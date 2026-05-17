@@ -597,7 +597,7 @@ function renderPage(token, estimate, estData) {
     if (Number.isFinite(explicit) && explicit > 0) return explicit;
     return Number(visitsForService(svc?.name || svc?.label || svc?.service)) || null;
   };
-  const basePerTreatmentForRecurringService = (svc, visits) => {
+  const rawPerTreatmentForRecurringService = (svc, visits) => {
     const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
     let base = null;
     if (n.includes('pest')) {
@@ -612,6 +612,10 @@ function renderPage(token, estimate, estData) {
       const monthly = Number(svc?.mo || svc?.monthly || 0);
       if (monthly > 0) base = (monthly * 12) / visits;
     }
+    return base == null ? null : Math.round(base * 100) / 100;
+  };
+  const basePerTreatmentForRecurringService = (svc, visits) => {
+    const base = rawPerTreatmentForRecurringService(svc, visits);
     return base == null ? null : Math.round(base * (1 - tierDiscount(tier)) * 100) / 100;
   };
   const adjustedPerTreatmentForRecurringService = (svc, visits, basePrice) => {
@@ -636,6 +640,7 @@ function renderPage(token, estimate, estData) {
       const visits = visitsForRecurringService(svc);
       const isPest = /pest/i.test(String(name));
       const isLawn = /lawn/i.test(String(name));
+      const anchorPrice = rawPerTreatmentForRecurringService(svc, visits);
       const basePrice = basePerTreatmentForRecurringService(svc, visits);
       const price = adjustedPerTreatmentForRecurringService(svc, visits, basePrice);
       const visitText = visits
@@ -647,6 +652,7 @@ function renderPage(token, estimate, estData) {
         detailHtml: cadenceText ? `${escapeHtml(cadenceText)} &middot; ${escapeHtml(visitText)}` : escapeHtml(visitText),
         kind: isPest ? 'pest' : (isLawn ? 'lawn' : 'other'),
         visits,
+        anchorPrice,
         basePrice,
         price,
       };
@@ -708,22 +714,43 @@ function renderPage(token, estimate, estData) {
     </div>` : ''}
   </section>` : '';
 
-  const perTreatmentRowsHtml = billingServiceRows
+  const servicePriceCardsHtml = billingServiceRows
     .filter((row) => row.price != null)
-    .map((row) => `
-        <div class="pt-row">
-          <div>
-            <div class="pt-label">${escapeHtml(row.name)}</div>
-            <div class="pt-cadence">${row.detailHtml}</div>
+    .map((row) => {
+      const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
+      const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
+      return `
+        <section class="service-price-card">
+          <div class="service-price-name">${escapeHtml(row.name)}</div>
+          <div class="service-price-detail">${row.detailHtml}</div>
+          <div class="big-price service-big-price">
+            ${savings > 0 ? `<span class="anchor">${fmtMoney(row.anchorPrice)} / application</span>` : ''}
+            <span class="num" data-service-card-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)}</span>
+            <span class="per">application</span>
+            <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
           </div>
-          <div class="pt-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span class="pt-suffix">/ application</span></div>
-        </div>`)
+          ${savings > 0 ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
+          ${day != null ? `<div class="day-price">That\u2019s just <span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
+        </section>`;
+    })
     .join('');
-  const perTreatmentHtml = perTreatmentRowsHtml ? `
-    <div class="per-treatment" data-mode-only="recurring">
-      <div class="per-treatment-title">Price per application</div>
-      <div class="per-treatment-rows">${perTreatmentRowsHtml}</div>
-    </div>` : '';
+  const recurringHeroPriceHtml = quoteRequired ? `
+      <div class="big-price" data-mode-only="recurring">
+        <span class="num" style="font-size:42px">Quote Required</span>
+      </div>
+      <div class="day-price" data-mode-only="recurring">Inspection required before final pricing.</div>
+    ` : (servicePriceCardsHtml ? `
+      <div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>
+    ` : `
+      <div class="big-price" data-mode-only="recurring">
+        ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
+        <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
+        <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
+        <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
+      </div>
+      ${savingsPerMo > 0 ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
+      <div class="day-price" data-mode-only="recurring">That\u2019s just ${fmtMoney(dayPrice)}/day for complete home protection.</div>
+    `);
 
   const realOneTimeRows = oneTimeItems.map((it) => {
     const label = String(it.name || it.label || '').toLowerCase();
@@ -845,10 +872,18 @@ function renderPage(token, estimate, estData) {
   .hero{padding:10px 0 28px;max-width:900px}
   .hero .addr{color:#3F4A65;font-size:17px;margin-top:8px}
   .hero .prop-meta{color:#6B7280;font-size:16px;margin-top:4px}
+  .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
+  .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
+  .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
+  .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
+  .service-big-price{margin-top:14px;gap:8px 12px}
   .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#9CA3AF;text-decoration:line-through}
   .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(62px,8vw,84px);line-height:.92;color:#1B2C5B}
+  .service-big-price .anchor{font-size:22px;flex-basis:100%}
+  .service-big-price .num{font-size:clamp(44px,5vw,58px)}
   .big-price .per{font-size:24px;color:#6B7280}
+  .service-big-price .per{font-size:18px}
   .big-price .tier-lbl{display:inline-block;padding:4px 10px;border-radius:6px;background:#EEF2FF;color:#1B2C5B;font-weight:600;font-size:12px;letter-spacing:.04em}
   .save-row{margin-top:10px}
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
@@ -873,6 +908,7 @@ function renderPage(token, estimate, estData) {
   .mode-btn.is-active{background:#009CDE;color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
+  @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}}
   .card{background:#fff;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #E7E2D7}
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
@@ -1054,25 +1090,7 @@ ${shellTopBar()}
       <button type="button" class="mode-btn is-active" data-mode-set="recurring" aria-pressed="true">${escapeHtml(pestTierCadence || 'Recurring')} Pest Control</button>
       <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">One-Time Pest Control</button>
     </div>` : ''}
-    <div class="big-price" data-mode-only="recurring">
-      ${quoteRequired ? `
-      <span class="num" id="monthly-display" style="font-size:42px">Quote Required</span>
-      ` : `
-      ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
-      <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
-      <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
-      <span class="tier-lbl" id="tier-display">WaveGuard ${escapeHtml(tier)}</span>
-      `}
-    </div>
-    <div class="save-row" data-mode-only="recurring"${!quoteRequired && savingsPerMo > 0 ? '' : ' style="display:none"'}>
-      <span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard <span id="savings-tier">${escapeHtml(tier)}</span></span>
-    </div>
-    ${quoteRequired ? `
-    <div class="day-price" data-mode-only="recurring">Inspection required before final pricing.</div>
-    ` : `
-    <div class="day-price" data-mode-only="recurring">That\u2019s just <span id="day-price">${fmtMoney(dayPrice)}</span>/day for complete home protection.</div>
-    ${perTreatmentHtml}
-    `}
+    ${recurringHeroPriceHtml}
     ${canChooseOneTime ? `
     <div class="big-price" data-mode-only="one_time" hidden>
       <span class="num" id="onetime-display">${fmtMoney(oneTimeChoicePrice)}</span>
@@ -1219,6 +1237,37 @@ ${shellQuestionsBar()}
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
       el.innerHTML = fmt(adjusted) + ' <span>/ application</span>';
     });
+    document.querySelectorAll('[data-service-card-price]').forEach((el) => {
+      const base = Number(el.dataset.serviceBasePrice || 0);
+      const visits = Number(el.dataset.serviceVisits || 0);
+      if (!(base > 0)) return;
+      const discount = el.dataset.serviceKind === 'pest' && visits > 0
+        ? (prefOff * 12) / visits
+        : 0;
+      const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
+      el.textContent = fmt(adjusted);
+    });
+    document.querySelectorAll('[data-service-card-savings]').forEach((el) => {
+      const base = Number(el.dataset.serviceBasePrice || 0);
+      const anchor = Number(el.dataset.serviceAnchorPrice || 0);
+      const visits = Number(el.dataset.serviceVisits || 0);
+      if (!(base > 0) || !(anchor > 0)) return;
+      const discount = el.dataset.serviceKind === 'pest' && visits > 0
+        ? (prefOff * 12) / visits
+        : 0;
+      const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
+      el.textContent = fmt(Math.max(0, Math.round((anchor - adjusted) * 100) / 100));
+    });
+    document.querySelectorAll('[data-service-card-day]').forEach((el) => {
+      const base = Number(el.dataset.serviceBasePrice || 0);
+      const visits = Number(el.dataset.serviceVisits || 0);
+      if (!(base > 0) || !(visits > 0)) return;
+      const discount = el.dataset.serviceKind === 'pest'
+        ? (prefOff * 12) / visits
+        : 0;
+      const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
+      el.textContent = fmt(Math.round(((adjusted * visits / 12) / 30) * 100) / 100);
+    });
   };
 
   document.querySelectorAll('.ai-satellite').forEach((img) => {
@@ -1240,7 +1289,8 @@ ${shellQuestionsBar()}
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || 'Failed');
-        document.getElementById('monthly-display').textContent = fmt(intervalPrice(data.monthlyTotal));
+        const monthlyDisplay = document.getElementById('monthly-display');
+        if (monthlyDisplay) monthlyDisplay.textContent = fmt(intervalPrice(data.monthlyTotal));
         refreshBillingAmounts(data.monthlyTotal, data.annualTotal, data.prefMonthlyOff);
         document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(intervalPrice(data.monthlyTotal)));
         if (data.onetimeTotal != null) {
@@ -1256,14 +1306,16 @@ ${shellQuestionsBar()}
           });
         }
         const anchor = document.getElementById('anchor-display');
-        const saveRow = document.querySelector('.save-row');
+        const saveRow = document.querySelector('[data-aggregate-save-row]');
         const savingsEl = document.getElementById('savings-display');
-        if (data.savingsPerMo > 0) {
-          if (saveRow) saveRow.style.display = '';
-          if (savingsEl) savingsEl.textContent = fmt(intervalPrice(data.savingsPerMo));
-          if (anchor) anchor.textContent = fmt(intervalPrice(data.baseMonthly)) + ' / ' + PRICE_PERIOD_WORD;
-        } else if (saveRow) {
-          saveRow.style.display = 'none';
+        if (anchor || saveRow || savingsEl) {
+          if (data.savingsPerMo > 0) {
+            if (saveRow) saveRow.style.display = '';
+            if (savingsEl) savingsEl.textContent = fmt(intervalPrice(data.savingsPerMo));
+            if (anchor) anchor.textContent = fmt(intervalPrice(data.baseMonthly)) + ' / ' + PRICE_PERIOD_WORD;
+          } else if (saveRow) {
+            saveRow.style.display = 'none';
+          }
         }
         const row = ev.target.closest('[data-pref-row]');
         if (row) {
