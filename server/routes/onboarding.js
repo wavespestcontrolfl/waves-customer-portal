@@ -7,8 +7,41 @@ const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const {
+  parseEstimateData,
+  resolveBillingCadence,
+} = require('../services/billing-cadence');
+const { customerOnAutopay } = require('../services/autopay-eligibility');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
+
+function fmtMoney(value) {
+  const n = Number(value || 0);
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function findSessionEstimate(session) {
+  if (!session?.id) return null;
+  const bySession = await db('estimates').where({ onboarding_session_id: session.id }).first();
+  if (bySession) return bySession;
+  if (session.quote_reference) {
+    return db('estimates')
+      .where({ token: session.quote_reference })
+      .orWhere({ estimate_slug: session.quote_reference })
+      .first();
+  }
+  return null;
+}
+
+function billingCadenceForSession(session, estimate) {
+  const estimateData = parseEstimateData(estimate?.estimate_data);
+  return resolveBillingCadence({
+    monthlyRate: parseFloat(session?.monthly_rate || 0),
+    frequencyKey: estimateData.customerSelection?.frequency,
+    estimateData,
+    fallbackFrequencyKey: estimate ? 'quarterly' : 'monthly',
+  });
+}
 
 async function sendOnboardingSms(customer, body, metadata = {}) {
   if (!customer?.phone || !customer?.id) {
@@ -103,6 +136,21 @@ router.get('/:token', loadSession, async (req, res, next) => {
       .first();
 
     const card = await db('payment_methods').where({ customer_id: c.id, is_default: true }).first();
+    const estimate = await findSessionEstimate(s);
+    const billing = billingCadenceForSession(s, estimate);
+    if (
+      scheduled
+      && estimate
+      && billing.amount > 0
+      && scheduled.payment_method_preference !== 'prepay_annual'
+      && (!scheduled.estimated_price || Number(scheduled.estimated_price) <= 0)
+    ) {
+      await db('scheduled_services')
+        .where({ id: scheduled.id })
+        .where((q) => q.whereNull('estimated_price').orWhere('estimated_price', '<=', 0))
+        .update({ estimated_price: billing.amount, updated_at: db.fn.now() });
+      scheduled.estimated_price = billing.amount;
+    }
 
     res.json({
       customer: {
@@ -119,6 +167,7 @@ router.get('/:token', loadSession, async (req, res, next) => {
         serviceType: s.service_type,
         tier: s.waveguard_tier,
         monthlyRate: parseFloat(s.monthly_rate || 0),
+        billing,
         depositAmount: parseFloat(s.deposit_amount || 0),
         quoteReference: s.quote_reference,
       },
@@ -137,6 +186,7 @@ router.get('/:token', loadSession, async (req, res, next) => {
         serviceType: scheduled.service_type,
         techName: scheduled.tech_name,
         confirmed: scheduled.customer_confirmed,
+        estimatedPrice: scheduled.estimated_price != null ? Number(scheduled.estimated_price) : null,
         // Carries the card_on_file / pay_at_visit choice the customer made
         // during inline accept so the onboarding UI can skip the Stripe
         // screen when they opted to pay at the visit.
@@ -191,7 +241,17 @@ router.post('/:token/save-card', loadSession, async (req, res, next) => {
 
     const StripeService = require('../services/stripe');
     const ConsentService = require('../services/payment-method-consents');
-    const card = await StripeService.savePaymentMethod(req.customer.id, paymentMethodId);
+    const hadActiveAutopay = await customerOnAutopay({
+      id: req.customer.id,
+      autopay_enabled: req.customer.autopay_enabled,
+      autopay_paused_until: req.customer.autopay_paused_until,
+      autopay_payment_method_id: req.customer.autopay_payment_method_id,
+      ach_status: req.customer.ach_status,
+    });
+    const card = await StripeService.savePaymentMethod(req.customer.id, paymentMethodId, {
+      enableAutopay: false,
+      makeDefault: !hadActiveAutopay,
+    });
 
     // Record consent — the onboarding flow shows SaveCardConsent as
     // locked + checked because saving is a precondition of finishing
@@ -443,6 +503,8 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
   try {
     const c = req.customer;
     const s = req.session;
+    const estimate = await findSessionEstimate(s);
+    const billing = billingCadenceForSession(s, estimate);
 
     // Mark complete
     await db('onboarding_sessions')
@@ -500,9 +562,12 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
     try {
       const hasGate = prefs?.neighborhood_gate_code || prefs?.property_gate_code;
       const hasPets = prefs?.pet_count > 0;
+      const billingLine = billing.amount > 0
+        ? `$${fmtMoney(billing.amount)}${billing.displaySuffix}`
+        : `$${fmtMoney(s.monthly_rate)}/mo`;
       await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
         `✅ New customer onboarded: ${c.first_name} ${c.last_name} at ${c.address_line1}, ${c.city}.\n` +
-        `${s.waveguard_tier || ''} WaveGuard, $${s.monthly_rate}/mo. Card ✅.\n` +
+        `${s.waveguard_tier || ''} WaveGuard, ${billingLine}. Card ✅.\n` +
         `First service: ${svcDate}. Gate: ${hasGate ? 'yes' : 'no'}. Pets: ${hasPets ? `yes (${prefs.pet_count})` : 'no'}.\n` +
         `Referral: ${c.referral_source || 'N/A'}.`
       );

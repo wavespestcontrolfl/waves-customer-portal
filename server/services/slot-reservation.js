@@ -11,7 +11,7 @@
  *      reservation_expires_at = NOW() + 15min, customer_id still null.
  *   2. Customer taps Reserve + payment pref → PUT /:token/accept
  *      → commitReservation() sets customer_id, payment_method_preference,
- *      clears reservation_expires_at.
+ *      first-visit estimated_price, clears reservation_expires_at.
  *   3. Abandoned reservations get reclaimed by releaseExpiredReservations()
  *      Wired to a 15-min cron in services/scheduler.js.
  *
@@ -182,13 +182,14 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
 
 /**
  * Commit a reservation. Sets customer_id + payment_method_preference,
- * clears reservation_expires_at. Intended to run inside the accept
+ * optionally stamps estimated_price, and clears reservation_expires_at.
+ * Intended to run inside the accept
  * handler's existing transaction — pass trx explicitly when doing so.
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, trx? }
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, trx? }
  * returns: updated scheduled_services row
  */
-async function commitReservation({ scheduledServiceId, customerId, paymentMethodPreference, trx }) {
+async function commitReservation({ scheduledServiceId, customerId, paymentMethodPreference, estimatedPrice, trx }) {
   // Body is shared between the "caller already has a txn" path (use it) and
   // the "no caller txn" path (open our own). Either way the SELECT runs
   // FOR UPDATE so a concurrent commit/release/expiry-cleanup can't race
@@ -224,6 +225,10 @@ async function commitReservation({ scheduledServiceId, customerId, paymentMethod
     if (paymentMethodPreference) {
       updates.payment_method_preference = paymentMethodPreference;
     }
+    const price = Number(estimatedPrice);
+    if (Number.isFinite(price) && price > 0) {
+      updates.estimated_price = Math.round(price * 100) / 100;
+    }
 
     const [updated] = await client('scheduled_services')
       .where({ id: scheduledServiceId })
@@ -231,7 +236,10 @@ async function commitReservation({ scheduledServiceId, customerId, paymentMethod
       .returning('*');
 
     logger.info('[slot-reservation] committed', {
-      scheduledServiceId, customerId, paymentMethodPreference: paymentMethodPreference || null,
+      scheduledServiceId,
+      customerId,
+      paymentMethodPreference: paymentMethodPreference || null,
+      estimatedPrice: updates.estimated_price || null,
     });
 
     return updated;

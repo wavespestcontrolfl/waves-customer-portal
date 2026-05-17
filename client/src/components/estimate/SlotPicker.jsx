@@ -113,7 +113,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
   }
 
   // Merge primary (route-optimal, top 3) + expander (rest) into a single
-  // ordered list. Always show the first 3 by default; rest hide behind
+  // ordered list. Always show the first 3 by default; next 3 hide behind
   // a "See more" toggle. Keeps the card compact and avoids overwhelming
   // the customer on wide windows with lots of availability.
   const primary = data?.primary || [];
@@ -131,7 +131,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
   }
 
   const initial = allSlots.slice(0, INITIAL_VISIBLE);
-  const more = allSlots.slice(INITIAL_VISIBLE);
+  const more = allSlots.slice(INITIAL_VISIBLE, INITIAL_VISIBLE + 3);
 
   return (
     <div style={{ background: W.white, borderRadius: 14, padding: 32, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
