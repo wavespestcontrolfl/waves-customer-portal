@@ -95,6 +95,49 @@ function formatReadyTime(value, timezone = SERVICE_REPORT_TIME_ZONE) {
   });
 }
 
+function formatClockTime(value, timezone = SERVICE_REPORT_TIME_ZONE) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString('en-US', {
+    timeZone: timezone || SERVICE_REPORT_TIME_ZONE,
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function serviceDisplayName(data = {}) {
+  return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
+}
+
+function visitTimeRange(data = {}) {
+  const arrived = formatClockTime(data.visitTiming?.arrivedAt);
+  const exited = formatClockTime(data.visitTiming?.exitedAt);
+  if (arrived && exited) return `Arrived ${arrived} | Finished ${exited}`;
+  if (arrived) return `Arrived ${arrived}`;
+  if (exited) return `Finished ${exited}`;
+  return '';
+}
+
+function positiveNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function advisoryDisplayRows(advisory = {}) {
+  return [
+    positiveNumber(advisory.exterior_reentry_min) != null
+      ? ['Exterior re-entry', `${Math.round(positiveNumber(advisory.exterior_reentry_min))} min`]
+      : null,
+    positiveNumber(advisory.interior_reentry_min) != null
+      ? ['Interior re-entry', `${Math.round(positiveNumber(advisory.interior_reentry_min))} min`]
+      : null,
+    positiveNumber(advisory.irrigation_hold_hr) != null
+      ? ['Irrigation hold', `${Math.round(positiveNumber(advisory.irrigation_hold_hr))} hr`]
+      : null,
+  ].filter(Boolean);
+}
+
 function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
   const key = `${token}:${eventName}:${JSON.stringify(metadata)}`;
@@ -641,6 +684,7 @@ function TechnicianVisitLine({ data }) {
   const technician = data.technician || {};
   const name = technician.name || data.technicianName || 'Waves team';
   const initials = technician.initials || name.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'W';
+  const timing = visitTimeRange(data);
 
   return (
     <div className="tech-visit-line">
@@ -652,6 +696,7 @@ function TechnicianVisitLine({ data }) {
       <div>
         <div className="tech-name">{name}</div>
         <div className="tech-role">Your Waves technician</div>
+        {timing && <div className="tech-visit-times">{timing}</div>}
       </div>
     </div>
   );
@@ -1014,14 +1059,6 @@ function WhyActivityCard({ context, embedded = false }) {
   );
 }
 
-function ReportReadingTime() {
-  return (
-    <nav className="report-reading-time" aria-label="Report sections">
-      <span className="report-reading-time-label">Report reading time: 90 seconds</span>
-    </nav>
-  );
-}
-
 function ReportViewModeToggle({ value, onChange }) {
   return (
     <div className="view-mode-toggle" aria-label="Report view mode">
@@ -1093,7 +1130,7 @@ function ExecutiveStatusGrid({ data, pressureTrend, reentry, mode }) {
       </div>
       <div className="executive-status-cell">
         <div className="sr-cell-label">Today's service</div>
-        <div className="executive-status-value">{data.serviceLineDisplay || data.serviceType}</div>
+        <div className="executive-status-value">{serviceDisplayName(data)}</div>
         <div className="sr-row-detail">{formatDate(data.serviceDate)}</div>
       </div>
     </section>
@@ -1639,6 +1676,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const serviceNotes = String(data.legacy?.notes || '').trim();
   const visitSummary = String(data.summary || '').trim();
   const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas.filter(Boolean) : [];
+  const visitTimingRows = [
+    ['Arrival', formatClockTime(data.visitTiming?.arrivedAt)],
+    ['Exit', formatClockTime(data.visitTiming?.exitedAt)],
+  ].filter(([, value]) => value);
   const measurements = data.measurements || data.legacy?.measurements || {};
   const measurementRows = [
     ['Soil temp', measurements.soilTemp, '°F'],
@@ -1650,6 +1691,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     visitSummary ||
     data.customerInteraction ||
     serviceAreas.length ||
+    visitTimingRows.length ||
     measurementRows.length,
   );
   const dynamicContext = data.dynamicContext || {};
@@ -1672,6 +1714,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const effectiveViewMode = mode === 'live' ? reportViewMode : 'detailed';
   const showDetails = effectiveViewMode !== 'clean';
   const showNerd = effectiveViewMode === 'nerd';
+  const advisoryRows = advisoryDisplayRows(data.advisory || {});
   const updateReportViewMode = (nextMode) => {
     setReportViewMode(nextMode);
     window.localStorage.setItem('waves.report.viewMode', nextMode);
@@ -1808,6 +1851,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--muted);
           font-size: 14px;
           line-height: 1.35;
+        }
+        .tech-visit-times {
+          margin-top: 3px;
+          color: var(--text);
+          font-size: 13px;
+          line-height: 1.35;
+          font-weight: 650;
         }
         .hero-conditions {
           margin-top: 12px;
@@ -2212,6 +2262,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
           background: #fff;
+          white-space: pre-line;
         }
         .applied-products-header {
           display: flex;
@@ -2719,27 +2770,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 700;
         }
         .report-premium-toolbar {
-          display: grid;
-          grid-template-columns: 1fr auto 1fr;
-          align-items: center;
-          gap: 12px;
-          margin-bottom: 14px;
-        }
-        .report-reading-time {
-          grid-column: 2;
           display: flex;
           align-items: center;
-          justify-content: center;
-          flex-wrap: wrap;
-          gap: 10px;
-          color: var(--muted);
-          font-size: 13px;
-          line-height: 1.3;
-          text-align: center;
-        }
-        .report-reading-time-label {
-          color: var(--text);
-          font-weight: 800;
+          justify-content: flex-end;
+          margin-bottom: 14px;
         }
         .view-mode-toggle,
         .summary-mode-tabs {
@@ -2751,7 +2785,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           flex: 0 0 auto;
         }
         .report-premium-toolbar > .view-mode-toggle {
-          grid-column: 3;
           justify-self: end;
         }
         .view-mode-toggle button,
@@ -2928,7 +2961,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-actions a, .sr-actions button { flex: 1; }
           .sr-shell { padding: 14px 14px 36px; }
           .report-premium-toolbar { display: flex; align-items: stretch; flex-direction: column; }
-          .report-reading-time { justify-content: center; }
           .report-premium-toolbar > .view-mode-toggle { justify-self: auto; }
           .view-mode-toggle, .summary-mode-tabs { width: 100%; }
           .view-mode-toggle button, .summary-mode-tabs button { flex: 1; }
@@ -2999,7 +3031,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {mode === 'live' && (
           <div className="report-premium-toolbar">
-            <ReportReadingTime />
             <ReportViewModeToggle value={effectiveViewMode} onChange={updateReportViewMode} />
           </div>
         )}
@@ -3008,7 +3039,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <div>
             <h1 className="sr-title">Service report</h1>
             <div className="sr-meta">
-              {data.serviceLineDisplay || data.serviceType} | {formatDate(data.serviceDate)}
+              {serviceDisplayName(data)} | {formatDate(data.serviceDate)}
             </div>
             {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
             <TechnicianVisitLine data={data} />
@@ -3066,6 +3097,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                   <div className="sr-cell-value">{serviceAreas.join(', ')}</div>
                 </div>
               )}
+              {visitTimingRows.map(([label, value]) => (
+                <div className="sr-cell" key={label}>
+                  <div className="sr-cell-label">{label}</div>
+                  <div className="sr-cell-value">{value}</div>
+                </div>
+              ))}
               {measurementRows.map(([label, value, suffix]) => (
                 <div className="sr-cell" key={label}>
                   <div className="sr-cell-label">{label}</div>
@@ -3192,22 +3229,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        {showDetails && (
+        {showDetails && (advisoryRows.length > 0 || data.advisory?.pet_advisory) && (
         <section className="sr-section">
           <h2>Customer advisory</h2>
           <div className="sr-advisory">
-            <div>
-              <strong>{valueOrDash(data.advisory?.exterior_reentry_min, ' min')}</strong>
-              <span>Exterior re-entry</span>
-            </div>
-            <div>
-              <strong>{valueOrDash(data.advisory?.interior_reentry_min, ' min')}</strong>
-              <span>Interior re-entry</span>
-            </div>
-            <div>
-              <strong>{valueOrDash(data.advisory?.irrigation_hold_hr, ' hr')}</strong>
-              <span>Irrigation hold</span>
-            </div>
+            {advisoryRows.map(([label, value]) => (
+              <div key={label}>
+                <strong>{value}</strong>
+                <span>{label}</span>
+              </div>
+            ))}
           </div>
           {data.advisory?.pet_advisory && <p style={{ margin: '16px 0 0', color: '#525252', lineHeight: 1.55 }}>{data.advisory.pet_advisory}</p>}
         </section>

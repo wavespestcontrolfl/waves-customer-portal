@@ -12,6 +12,10 @@ const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
+const {
+  answerServiceReportQuestion,
+  loadReportAssistantProductContext,
+} = require('../services/service-report/report-assistant');
 
 // Rate-limit public report access to deter token brute-forcing.
 function isReportEventRequest(req) {
@@ -113,121 +117,6 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live' 
     mode,
   });
   return { ...data, dynamicContext };
-}
-
-function serviceDateText(value) {
-  if (!value) return '';
-  const raw = String(value);
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
-  const date = dateOnly
-    ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12))
-    : new Date(raw);
-  if (Number.isNaN(date.getTime())) return raw;
-  return date.toLocaleDateString('en-US', {
-    timeZone: 'America/New_York',
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  });
-}
-
-function serviceTimeText(value) {
-  const text = String(value || '').trim();
-  const match = text.match(/^(\d{1,2}):(\d{2})/);
-  if (!match) return text;
-  const hour = Number(match[1]);
-  const minute = match[2];
-  const suffix = hour >= 12 ? 'PM' : 'AM';
-  const displayHour = hour % 12 || 12;
-  return `${displayHour}:${minute} ${suffix}`;
-}
-
-function pickRecommendedFinding(findings = []) {
-  const rank = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
-  return [...findings]
-    .sort((a, b) => (rank[String(b.severity || '').toLowerCase()] || 0) - (rank[String(a.severity || '').toLowerCase()] || 0))
-    .find((finding) => String(finding.recommendation || '').trim()) || null;
-}
-
-function reportEnumLabel(value) {
-  const key = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  const labels = {
-    ghost_ant: 'ghost ants',
-    american_roach: 'American roaches',
-    spider: 'spiders',
-    perimeter_spray: 'Perimeter spray',
-    bait_placement: 'Bait placement',
-  };
-  return labels[key] || key.replace(/_/g, ' ');
-}
-
-function answerServiceReportQuestion({ question, data, nextAppointment } = {}) {
-  const q = String(question || '').toLowerCase();
-  const dynamic = data?.dynamicContext || {};
-  const lawnAssessment = data?.lawnAssessment || null;
-  const findings = Array.isArray(data?.findings) ? data.findings : [];
-  const applications = Array.isArray(data?.applications) ? data.applications : [];
-  const recommendation = dynamic.aiSummary?.recommendedNextStep?.text
-    || pickRecommendedFinding(findings)?.recommendation;
-
-  if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside|irrigation)\b/.test(q)) {
-    if (dynamic.reentry?.customerSummary) return dynamic.reentry.customerSummary;
-    const advisory = data?.advisory || {};
-    return `Re-entry guidance: ${advisory.exterior_reentry_min ?? 0} min outside, ${advisory.interior_reentry_min ?? 0} min inside.${advisory.pet_advisory ? ` ${advisory.pet_advisory}` : ''}`;
-  }
-
-  if (/\b(pressure|trend|better|worse|score|index|improving|lawn|turf|weed|fungus|thatch)\b/.test(q)) {
-    if (lawnAssessment?.scores) {
-      const scores = lawnAssessment.scores;
-      return [
-        lawnAssessment.customerSummary,
-        `Current lawn health is ${scores.overallScore}% overall.`,
-        `Turf density ${scores.turfDensity}%, weed suppression ${scores.weedSuppression}%, fungus control ${scores.fungusControl}%, thatch ${scores.thatchScore}%.`,
-      ].filter(Boolean).join(' ');
-    }
-    return dynamic.pressureTrend?.customerSummary
-      || `This visit's pressure index is ${Number(data?.pressureIndex || 0).toFixed(1)} on a 0-5 scale. Lower is better.`;
-  }
-
-  if (/\b(treat|treated|product|application|spray|bait|chemical|applied)\b/.test(q)) {
-    if (!applications.length) return 'No product applications were recorded on this report.';
-    return applications.slice(0, 3).map((app) => {
-      const product = app.product?.name || 'Treatment';
-      const purpose = app.methodLabel || String(app.method || 'application').replace(/_/g, ' ');
-      const targets = Array.isArray(app.targets) && app.targets.length ? ` for ${app.targets.map(reportEnumLabel).join(', ')}` : '';
-      return `${product}: ${purpose}${targets}.`;
-    }).join(' ');
-  }
-
-  if (/\b(do|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q)) {
-    return recommendation
-      ? `Recommended next step: ${recommendation}`
-      : 'No customer action was recommended on this report.';
-  }
-
-  if (/\b(next|upcoming|appointment|appt|schedule|scheduled|come back)\b/.test(q)) {
-    if (!nextAppointment) {
-      return 'I do not see another appointment scheduled yet. Reply to the text message or call Waves if you want us to set one up.';
-    }
-    const window = [nextAppointment.window_start, nextAppointment.window_end].filter(Boolean).map(serviceTimeText).join(' to ');
-    return `Your next appointment is ${serviceDateText(nextAppointment.scheduled_date)} for ${nextAppointment.service_type || 'service'}${window ? `, window ${window}` : ''}.`;
-  }
-
-  if (/\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q)) {
-    if (lawnAssessment?.observations) return lawnAssessment.observations;
-    if (!findings.length) return 'No issues were documented during this visit.';
-    return findings.slice(0, 3).map((finding) => {
-      const detail = finding.detail ? ` ${finding.detail}` : '';
-      return `${finding.title}.${detail}`;
-    }).join(' ');
-  }
-
-  const summary = dynamic.aiSummary;
-  if (summary?.headline || summary?.body) {
-    return [summary.headline, summary.body].filter(Boolean).join(' ');
-  }
-  return 'This service is complete. You can review the treatment map, applications, findings, and customer advisory on this report.';
 }
 
 async function findProjectByReportSegment(segment) {
@@ -423,7 +312,13 @@ router.post('/:token/ask', async (req, res, next) => {
         .catch(() => null),
     ]);
 
-    const answer = answerServiceReportQuestion({ question, data, nextAppointment });
+    const productContext = await loadReportAssistantProductContext(data).catch(() => ({ byApplicationId: {}, byProductName: {} }));
+    const answer = answerServiceReportQuestion({
+      question,
+      data,
+      nextAppointment,
+      productContext,
+    });
     await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
       question_length: question.length,
     });
@@ -547,6 +442,7 @@ router.get('/:token/map.svg', async (req, res, next) => {
       .select('service_records.*', 'customers.first_name', 'customers.last_name',
         'customers.address_line1', 'customers.address_line2',
         'customers.city', 'customers.state', 'customers.zip',
+        'customers.has_left_google_review',
         'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
@@ -581,6 +477,7 @@ router.get('/:token/data', async (req, res, next) => {
       .select('service_records.*', 'customers.first_name', 'customers.last_name',
         'customers.address_line1', 'customers.address_line2',
         'customers.city', 'customers.state', 'customers.zip',
+        'customers.has_left_google_review',
         'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',

@@ -26,7 +26,12 @@ function minutes(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
-  return `${Math.max(0, Math.round(n))} min`;
+  const rounded = Math.round(n);
+  return rounded > 0 ? `${rounded} min` : null;
+}
+
+function serviceDisplayName(data = {}) {
+  return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Waves service';
 }
 
 function readyAt(dynamicContext, key) {
@@ -43,7 +48,7 @@ function countLabel(count, singular, plural = `${singular}s`) {
 }
 
 function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}) {
-  const serviceLine = data?.serviceLineDisplay || data?.serviceType || 'Waves service';
+  const serviceLine = serviceDisplayName(data);
   const serviceDate = formatDate(data?.serviceDate);
   const first = data?.customerName ? data.customerName.split(/\s+/)[0] : 'there';
   const tech = data?.technicianName || 'your Waves technician';

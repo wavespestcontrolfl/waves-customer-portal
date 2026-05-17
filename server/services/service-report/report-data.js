@@ -105,6 +105,59 @@ function numberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function serviceDisplayName(service) {
+  const raw = String(service?.service_type || '').trim();
+  return raw || 'Waves service';
+}
+
+function scopeTextValues({ service = {}, applications = [], zones = [] } = {}) {
+  const structured = parseJsonObject(service.structured_notes);
+  const values = [
+    ...parseJsonArray(service.areas_serviced),
+    ...parseJsonArray(structured.areasServiced),
+    ...parseJsonArray(structured.areasTreated),
+  ];
+
+  for (const app of applications || []) {
+    values.push(
+      app.applicationArea,
+      app.application_area,
+      app.area,
+    );
+    values.push(...parseJsonArray(app.targets));
+  }
+
+  for (const zone of zones || []) {
+    values.push(zone.label, zone.category);
+  }
+
+  return uniqueStrings(values);
+}
+
+function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
+  const text = scopeTextValues({ service, applications, zones })
+    .join(' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ');
+  const hasInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet)\b/.test(text);
+  const hasExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn)\b/.test(text);
+  return { hasInterior, hasExterior, hasExplicitScope: text.trim().length > 0 };
+}
+
+function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [] } = {}) {
+  const normalized = { ...parseJsonObject(advisory) };
+  const scope = treatmentScope({ service, applications, zones });
+
+  if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
+    normalized.interior_reentry_min = 0;
+  }
+  if (normalized.exterior_reentry_min != null && scope.hasExplicitScope && scope.hasInterior && !scope.hasExterior) {
+    normalized.exterior_reentry_min = 0;
+  }
+
+  return normalized;
+}
+
 function compactAddress(record) {
   const street = [record.address_line1, record.address_line2]
     .map((part) => String(part || '').trim())
@@ -534,6 +587,7 @@ async function buildReportV1Data(service, token, knex = db) {
     return {
       id: product.id || `product-${index + 1}`,
       product: {
+        catalogId: product.product_id || null,
         name: product.product_name,
         epa_reg: product.epa_reg_number || product.epa_reg || '',
         active_ingredient: product.active_ingredient || '',
@@ -546,6 +600,7 @@ async function buildReportV1Data(service, token, knex = db) {
       rateUnit: product.rate_unit,
       totalAmount: product.total_amount,
       amountUnit: product.amount_unit,
+      applicationArea: product.application_area || product.area || null,
       areaValue: product.area_value,
       areaUnit: product.area_unit,
       targets: parseJsonArray(product.targets),
@@ -595,11 +650,11 @@ async function buildReportV1Data(service, token, knex = db) {
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
-  const advisory = {
+  const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
-  };
+  }, { service, applications });
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
   const metrics = buildMetrics(config, {
     onSiteMin,
@@ -632,6 +687,7 @@ async function buildReportV1Data(service, token, knex = db) {
     token,
     serviceRecordId: service.id,
     serviceType: service.service_type,
+    serviceDisplayName: serviceDisplayName(service),
     serviceLine,
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
@@ -647,6 +703,11 @@ async function buildReportV1Data(service, token, knex = db) {
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     serviceAddress: compactAddress(service),
     visitOutcome: protocol.visitOutcome || 'completed',
+    visitTiming: {
+      arrivedAt: service.started_at || null,
+      exitedAt: service.ended_at || null,
+      onSiteMinutes: onSiteMin,
+    },
     summary: structured.customerRecap || '',
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
@@ -710,6 +771,9 @@ module.exports = {
   taggedNoteLines,
   minutesFromElapsed,
   methodFromProduct,
+  normalizeAdvisoryForTreatmentScope,
+  serviceDisplayName,
+  treatmentScope,
   buildLawnAssessmentReportData,
   defaultGeometry,
   defaultZones,

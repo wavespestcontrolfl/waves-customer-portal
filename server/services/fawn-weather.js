@@ -10,12 +10,144 @@
 const logger = require('./logger');
 
 const FAWN_URL = 'https://fawn.ifas.ufl.edu/controller.php/lastObservation/summary/';
-const STATION_NAMES = ['manatee', 'myakka', 'sarasota', 'arcadia'];
+const STATION_HINTS = [
+  { key: 'myakka', names: ['myakka'], latitude: 27.35, longitude: -82.18 },
+  { key: 'manatee', names: ['manatee'], latitude: 27.48, longitude: -82.37 },
+  { key: 'sarasota', names: ['sarasota'], latitude: 27.34, longitude: -82.53 },
+  { key: 'arcadia', names: ['arcadia'], latitude: 27.22, longitude: -81.86 },
+];
+const STATION_NAMES = STATION_HINTS.flatMap((station) => station.names);
 
 // Cache for 15 minutes to avoid hammering FAWN
-let _cache = null;
-let _cacheTime = 0;
+let _stationCache = null;
+let _stationCacheTime = 0;
+let _lastSnapshot = null;
 const CACHE_TTL = 15 * 60 * 1000;
+
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
+function numberOrNull(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function stationName(station = {}) {
+  return firstDefined(station.StationName, station.station_name, station.name, station.NAME, station.station);
+}
+
+function stationLatitude(station = {}) {
+  return numberOrNull(firstDefined(
+    station.Latitude,
+    station.latitude,
+    station.LATITUDE,
+    station.lat,
+    station.Lat,
+    station.LAT,
+    station.StationLatitude,
+  ));
+}
+
+function stationLongitude(station = {}) {
+  return numberOrNull(firstDefined(
+    station.Longitude,
+    station.longitude,
+    station.LONGITUDE,
+    station.lon,
+    station.lng,
+    station.Lon,
+    station.LON,
+    station.StationLongitude,
+  ));
+}
+
+function hintForStation(name = '') {
+  const normalized = String(name).toLowerCase();
+  return STATION_HINTS.find((hint) => hint.names.some((candidate) => normalized.includes(candidate)));
+}
+
+function stationCoordinates(station = {}) {
+  const lat = stationLatitude(station);
+  const lon = stationLongitude(station);
+  if (lat != null && lon != null) return { latitude: lat, longitude: lon };
+  const hint = hintForStation(stationName(station));
+  return hint ? { latitude: hint.latitude, longitude: hint.longitude } : null;
+}
+
+function distanceMiles(from, to) {
+  if (!from || !to) return null;
+  if ([from.latitude, from.longitude, to.latitude, to.longitude].some((value) => !Number.isFinite(Number(value)))) return null;
+  const R = 3959;
+  const dLat = (Number(to.latitude) - Number(from.latitude)) * Math.PI / 180;
+  const dLon = (Number(to.longitude) - Number(from.longitude)) * Math.PI / 180;
+  const lat1 = Number(from.latitude) * Math.PI / 180;
+  const lat2 = Number(to.latitude) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function fetchStationRows() {
+  if (_stationCache && Date.now() - _stationCacheTime < CACHE_TTL) return _stationCache;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const res = await fetch(FAWN_URL, { signal: controller.signal });
+    if (!res.ok) throw new Error(`FAWN HTTP ${res.status}`);
+
+    const data = await res.json();
+    const rows = Array.isArray(data) ? data : [];
+    _stationCache = rows;
+    _stationCacheTime = Date.now();
+    return rows;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function selectStation(stations = [], { latitude, longitude } = {}) {
+  const swflStations = stations.filter((station) => {
+    const name = String(stationName(station) || '').toLowerCase();
+    return STATION_NAMES.some((candidate) => name.includes(candidate));
+  });
+  const candidates = swflStations.length ? swflStations : stations;
+  const target = Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))
+    ? { latitude: Number(latitude), longitude: Number(longitude) }
+    : null;
+
+  if (target) {
+    const nearest = candidates
+      .map((station) => ({
+        station,
+        distance: distanceMiles(target, stationCoordinates(station)),
+      }))
+      .filter((entry) => entry.distance != null)
+      .sort((a, b) => a.distance - b.distance)[0];
+    if (nearest) return nearest.station;
+  }
+
+  return candidates[0] || null;
+}
+
+function normalizeStationSnapshot(station) {
+  const name = stationName(station) || 'FAWN SWFL';
+  const coords = stationCoordinates(station);
+  return {
+    temp_f: numberOrNull(firstDefined(station.AirTemp_Avg, station.t2m_avg, station.air_temp, station.temp_f)),
+    humidity_pct: numberOrNull(firstDefined(station.RelHum_Avg, station.rh_avg, station.relative_humidity, station.humidity_pct)),
+    rainfall_in: numberOrNull(firstDefined(station.Rain_Tot, station.rain_sum, station.rainfall_in, station.precipitation)),
+    soil_temp_f: numberOrNull(firstDefined(station.SoilTemp4_Avg, station.ts4_avg, station.soil_temp_f)),
+    wind_mph: numberOrNull(firstDefined(station.Wind_Avg, station.ws_avg, station.wind_mph, station.wind_speed)),
+    station: name,
+    station_key: hintForStation(name)?.key || null,
+    observation_time: firstDefined(station.ObservationTime, station.observation_time, station.DateTime, station.datetime, station.timestamp),
+    timestamp: new Date().toISOString(),
+    latitude: coords?.latitude ?? null,
+    longitude: coords?.longitude ?? null,
+  };
+}
 
 const FawnWeather = {
 
@@ -23,37 +155,22 @@ const FawnWeather = {
    * Get current FAWN observation for nearest SWFL station.
    * Returns: { temp_f, humidity_pct, rainfall_in, soil_temp_f, station, timestamp }
    */
-  async getCurrent() {
-    if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
-
+  async getCurrent(options = {}) {
     try {
-      const res = await fetch(FAWN_URL);
-      if (!res.ok) throw new Error(`FAWN HTTP ${res.status}`);
-
-      const data = await res.json();
-      const station = (data || []).find(s =>
-        STATION_NAMES.some(n => (s.StationName || '').toLowerCase().includes(n))
-      ) || data?.[0];
+      const data = await fetchStationRows();
+      const station = selectStation(data, options);
 
       if (!station) throw new Error('No FAWN station found');
 
-      _cache = {
-        temp_f: parseFloat(station.AirTemp_Avg || station.t2m_avg) || null,
-        humidity_pct: parseFloat(station.RelHum_Avg || station.rh_avg) || null,
-        rainfall_in: parseFloat(station.Rain_Tot || station.rain_sum) || null,
-        soil_temp_f: parseFloat(station.SoilTemp4_Avg || station.ts4_avg) || null,
-        wind_mph: parseFloat(station.Wind_Avg || station.ws_avg) || null,
-        station: station.StationName || 'FAWN SWFL',
-        timestamp: new Date().toISOString(),
-      };
-      _cacheTime = Date.now();
+      const snapshot = normalizeStationSnapshot(station);
+      _lastSnapshot = snapshot;
 
-      return _cache;
+      return snapshot;
     } catch (err) {
       logger.error(`[fawn-weather] Fetch failed: ${err.message}`);
-      return _cache || {
+      return _lastSnapshot || {
         temp_f: null, humidity_pct: null, rainfall_in: null,
-        soil_temp_f: null, station: 'unavailable', timestamp: new Date().toISOString(),
+        soil_temp_f: null, wind_mph: null, station: 'unavailable', timestamp: new Date().toISOString(),
         error: err.message,
       };
     }

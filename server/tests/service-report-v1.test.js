@@ -7,6 +7,7 @@ const {
   locationAreaLabels,
   methodFromProduct,
   minutesFromElapsed,
+  normalizeAdvisoryForTreatmentScope,
 } = require('../services/service-report/report-data');
 const {
   hashPhotoChainPayload,
@@ -29,6 +30,13 @@ const {
   buildWeatherCallContext,
   validateCustomerCopy,
 } = require('../services/service-report/premium-experience');
+const {
+  normalizeFawnConditions,
+  weatherCodeLabel,
+} = require('../services/service-report/application-conditions');
+const {
+  answerServiceReportQuestion,
+} = require('../services/service-report/report-assistant');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
 const {
   enqueueServiceReportV1EmailDelivery,
@@ -110,6 +118,7 @@ describe('service report v1', () => {
       id: 'service-1',
       started_at: '2026-05-16T13:00:00.000Z',
       ended_at: '2026-05-16T13:20:00.000Z',
+      areas_serviced: JSON.stringify(['Exterior perimeter', 'Interior baseboards']),
       applications: [
         { appliedAt: '2026-05-16T13:10:00.000Z' },
         { appliedAt: '2026-05-16T13:30:00.000Z' },
@@ -129,6 +138,33 @@ describe('service report v1', () => {
     expect(context.petAdvisory).toBe('Keep pets off treated zones until dry.');
     expect(context.irrigationReadyAt).toBe('2026-05-17T13:30:00.000Z');
     expect(context.customerSummary).toContain('Exterior ready at');
+  });
+
+  test('re-entry and advisory only expose interior timing when interior was treated', () => {
+    const advisory = {
+      exterior_reentry_min: 30,
+      interior_reentry_min: 120,
+      irrigation_hold_hr: 24,
+    };
+    const unknownScope = normalizeAdvisoryForTreatmentScope(advisory, {
+      service: { areas_serviced: JSON.stringify([]) },
+      applications: [{ application_method: 'perimeter_spray' }],
+    });
+    const normalized = normalizeAdvisoryForTreatmentScope(advisory, {
+      service: { areas_serviced: JSON.stringify(['Exterior perimeter']) },
+      applications: [{ application_area: 'Exterior perimeter', application_method: 'perimeter_spray' }],
+    });
+    const context = buildReentryContextFromRecord({
+      id: 'service-exterior-only',
+      ended_at: '2026-05-16T13:20:00.000Z',
+      areas_serviced: JSON.stringify(['Exterior perimeter']),
+      applications: [{ appliedAt: '2026-05-16T13:20:00.000Z', application_area: 'Exterior perimeter' }],
+      advisory,
+    }, new Date('2026-05-16T13:25:00.000Z'));
+
+    expect(unknownScope).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 120 });
+    expect(normalized).toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 0 });
+    expect(context.targets.map((target) => target.key)).toEqual(['exterior']);
   });
 
   test('premium experience builds customer-facing modules from service facts', () => {
@@ -225,6 +261,146 @@ describe('service report v1', () => {
     expect(good.factsLine).toContain('82°F');
     expect(windy.headline).toBe('Wind was elevated.');
     expect(`${good.headline} ${good.body} ${windy.headline} ${windy.body}`).not.toMatch(/perfect|guaranteed|safe/i);
+  });
+
+  test('application conditions normalize FAWN snapshots for report storage', () => {
+    const conditions = normalizeFawnConditions({
+      temp_f: 84.6,
+      humidity_pct: 71.2,
+      wind_mph: 6.4,
+      rainfall_in: 0.034,
+      soil_temp_f: 78.4,
+      station: 'Myakka River',
+      station_key: 'myakka',
+      observation_time: '2026-05-17T10:00:00-04:00',
+      latitude: 27.35,
+      longitude: -82.18,
+    }, { capturedAt: new Date('2026-05-17T14:05:00.000Z') });
+
+    expect(conditions).toMatchObject({
+      temp_f: 85,
+      humidity_pct: 71,
+      wind_mph: 6,
+      rain_24h_in: 0.03,
+      soil_temp_f: 78,
+      source: 'FAWN - Myakka River',
+      provider: 'fawn',
+      station: 'Myakka River',
+      station_key: 'myakka',
+      observation_time: '2026-05-17T10:00:00-04:00',
+      captured_at: '2026-05-17T14:05:00.000Z',
+    });
+  });
+
+  test('application condition weather codes stay customer-readable for fallback source', () => {
+    expect(weatherCodeLabel(0)).toBe('Clear');
+    expect(weatherCodeLabel(63)).toBe('Rain');
+    expect(weatherCodeLabel(95)).toBe('Thunderstorms');
+  });
+
+  test('Ask Waves AI explains applications with technical context instead of product-only list', () => {
+    const data = {
+      serviceDisplayName: 'Quarterly Pest Control Service',
+      serviceAreas: ['Exterior perimeter'],
+      conditions: {
+        temp_f: 84,
+        humidity_pct: 70,
+        wind_mph: 6,
+        rain_24h_in: 0.02,
+        source: 'FAWN - Myakka River',
+      },
+      applications: [
+        {
+          id: 'app-taurus',
+          product: { name: 'Taurus SC', catalogId: 'cat-taurus' },
+          method: 'perimeter_spray',
+          methodLabel: 'Perimeter spray',
+          applicationArea: 'Exterior perimeter',
+          targets: ['ant', 'american_roach'],
+        },
+        {
+          id: 'app-bifen',
+          product: { name: 'Bifen XTS' },
+          method: 'perimeter_spray',
+          methodLabel: 'Perimeter spray',
+          applicationArea: 'Exterior perimeter',
+          targets: ['american_roach'],
+        },
+        {
+          id: 'app-surfactant',
+          product: { name: 'LESCO 90/10 Nonionic Surfactant' },
+          method: 'perimeter_spray',
+          methodLabel: 'Perimeter spray',
+          applicationArea: 'Exterior perimeter',
+        },
+      ],
+    };
+    const productContext = {
+      byApplicationId: {
+        'app-taurus': {
+          active_ingredient: 'Fipronil 9.1%',
+          epa_reg_number: '53883-279',
+        },
+        'app-bifen': {
+          active_ingredient: 'Bifenthrin 25.1%',
+          rainfast_minutes: 60,
+        },
+      },
+      byProductName: {},
+    };
+
+    const answer = answerServiceReportQuestion({
+      question: 'What was applied today?',
+      data,
+      productContext,
+    });
+
+    expect(answer).toContain('Quarterly Pest Control Service');
+    expect(answer).toContain('FAWN - Myakka River');
+    expect(answer).toContain('active ingredient: Fipronil 9.1%');
+    expect(answer).toContain('active ingredient: Bifenthrin 25.1%');
+    expect(answer).toContain('spray adjuvant');
+    expect(answer).toContain('Sources used: this service report');
+    expect(answer).not.toBe('Taurus SC: Perimeter spray. Bifen XTS: Perimeter spray. LESCO 90/10 Nonionic Surfactant: Perimeter spray.');
+  });
+
+  test('Ask Waves AI gives useful next steps even when no recommendation is recorded', () => {
+    const answer = answerServiceReportQuestion({
+      question: 'What should I do next?',
+      data: {
+        serviceDisplayName: 'Quarterly Pest Control Service',
+        serviceAreas: ['Exterior perimeter'],
+        recommendations: [],
+        findings: [],
+        applications: [
+          {
+            id: 'app-1',
+            product: { name: 'Taurus SC' },
+            method: 'perimeter_spray',
+            methodLabel: 'Perimeter spray',
+            applicationArea: 'Exterior perimeter',
+            targets: ['ant'],
+          },
+        ],
+        dynamicContext: {
+          reentry: {
+            customerSummary: 'Exterior ready at 10:45 AM.',
+          },
+          premiumExperience: {
+            weatherCall: {
+              headline: 'Good treatment window.',
+              body: 'Low rainfall and moderate wind supported exterior application.',
+            },
+          },
+        },
+      },
+    });
+
+    expect(answer).toContain('No special repair or prep was flagged');
+    expect(answer).toContain('Exterior ready at 10:45 AM');
+    expect(answer).toContain('Avoid rinsing');
+    expect(answer).toContain('Watch for ants');
+    expect(answer).not.toContain('No customer action was recommended on this report.');
   });
 
   test('treatment map is deterministic and exposes interactive layer data', () => {
@@ -368,6 +544,8 @@ describe('service report v1', () => {
       service_line: 'pest',
       service_type: 'Residential Pest Control',
       service_date: '2026-05-15',
+      started_at: '2026-05-15T13:00:00.000Z',
+      ended_at: '2026-05-15T13:42:00.000Z',
       first_name: 'Van',
       last_name: 'Lee',
       areas_serviced: JSON.stringify(['Perimeter', 'Garage']),
@@ -443,6 +621,8 @@ describe('service report v1', () => {
       service_line: 'pest',
       service_type: 'Residential Pest Control',
       service_date: '2026-05-15',
+      started_at: '2026-05-15T13:00:00.000Z',
+      ended_at: '2026-05-15T13:42:00.000Z',
       first_name: 'Van',
       last_name: 'Lee',
       areas_serviced: JSON.stringify(['Perimeter', 'Customer spoke with tech']),
@@ -464,7 +644,13 @@ describe('service report v1', () => {
     }, 'token-complete', knex);
 
     expect(data.summary).toBe('Treated the front entry and garage, then reviewed the concern with the customer.');
+    expect(data.serviceDisplayName).toBe('Residential Pest Control');
     expect(data.customerInteraction).toBe('spoke');
+    expect(data.visitTiming).toMatchObject({
+      arrivedAt: '2026-05-15T13:00:00.000Z',
+      exitedAt: '2026-05-15T13:42:00.000Z',
+      onSiteMinutes: 42,
+    });
     expect(data.serviceAreas).toEqual(['Perimeter', 'Garage']);
     expect(data.measurements).toMatchObject({
       soilTemp: 78,
@@ -876,7 +1062,7 @@ describe('service report v1', () => {
       },
     });
 
-    expect(email.subject).toContain('Your Waves service report - WaveGuard pest control');
+    expect(email.subject).toContain('Your Waves service report - Residential Pest Control');
     expect(email.html).toContain('https://portal.wavespestcontrol.com/report/token-1');
     expect(email.html).toContain('Exterior re-entry');
     expect(email.html).toContain('30 min');
