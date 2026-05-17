@@ -450,7 +450,11 @@ function renderPage(token, estimate, estData) {
   const showOneTimeOption = !!est.showOneTimeOption;
   const oneTimeChoicePrice = Number(est.oneTimeChoicePrice || 0);
   const canChooseOneTime = showOneTimeOption && oneTimeChoicePrice > 0;
+  const isOneTimeOnly = !recurring.length && (oneTimeItems.length > 0 || Number(est.onetimeTotal || 0) > 0);
   const displayPestOnly = canChooseOneTime && Number(pestRecurring?.monthlyBase || 0) > 0;
+  const billingRecurring = displayPestOnly
+    ? recurring.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))
+    : recurring;
   const baseMonthly = displayPestOnly ? Number(pestRecurring.monthlyBase || 0) : storedBaseMonthly;
   const recurringMonthlyBeforePrefs = displayPestOnly
     ? Math.round(baseMonthly * (1 - tierDiscount(tier)) * 100) / 100
@@ -624,7 +628,7 @@ function renderPage(token, estimate, estData) {
     if (n.includes('lawn')) return 1;
     return 2;
   };
-  const billingServiceRows = recurring
+  const billingServiceRows = billingRecurring
     .slice()
     .sort((a, b) => servicePriority(a) - servicePriority(b))
     .map((svc) => {
@@ -664,7 +668,7 @@ function renderPage(token, estimate, estData) {
   const recurringBillCadenceWord = selectedRecurringFrequencyKey === 'quarterly'
     ? 'quarterly'
     : (selectedRecurringFrequencyKey === 'bi_monthly' ? 'bi-monthly' : 'monthly');
-  const billingCardHtml = (!quoteRequired && !locked && recurring.length) ? `
+  const billingCardHtml = (!quoteRequired && !locked && billingRecurring.length) ? `
   <section class="card billing-card"${billingModeAttr}>
     <h2>Choose how you want to pay</h2>
     <p class="billing-lede">${escapeHtml(billingLede)}</p>
@@ -1171,6 +1175,7 @@ ${shellQuestionsBar()}
   const TOKEN = ${JSON.stringify(token)};
   const API = '/api/estimates/' + TOKEN;
   const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
+  const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
   const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedRecurringFrequencyKey))};
   const PRICE_PERIOD_WORD = ${JSON.stringify(recurringPricePeriodWord)};
   const REVIEW_FALLBACKS = ${JSON.stringify(reviewFallbacks)};
@@ -1278,7 +1283,7 @@ ${shellQuestionsBar()}
     pickedPref: null,
     reservation: null,
     countdownTimer: null,
-    serviceMode: 'recurring',
+    serviceMode: INITIAL_SERVICE_MODE,
   };
 
   // Recurring/one-time inline toggle. Swaps visibility of [data-mode-only]
