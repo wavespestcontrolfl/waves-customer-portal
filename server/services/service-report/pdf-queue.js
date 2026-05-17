@@ -226,7 +226,7 @@ async function markPdfRenderJobFailed(job, err, knex = db) {
   const maxAttempts = Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS);
   const exhausted = attempts >= maxAttempts;
   const errorMessage = err?.message || String(err || 'PDF render failed');
-  const nextAttemptAt = exhausted ? job.next_attempt_at : nextPdfRenderAttemptAt(now, attempts);
+  const nextAttemptAt = exhausted ? job.next_attempt_at : nextPdfRenderAttemptAt(now, attempts - 1);
   await knex('service_report_pdf_jobs').where({ id: job.id }).update({
     status: exhausted ? 'failed' : 'queued',
     next_attempt_at: nextAttemptAt,

@@ -4501,6 +4501,10 @@ function requiresLinearFt(method) {
   return ["perimeter_spray", "broadcast_spray"].includes(method);
 }
 
+function effectiveApplicationMethod(method) {
+  return method || "perimeter_spray";
+}
+
 export function CompletionPanel({
   service,
   products,
@@ -5406,8 +5410,13 @@ export function CompletionPanel({
       prev.map((p) => {
         if (p.productId !== productId) return p;
         const next = { ...p, [field]: value };
-        if (field === "applicationMethod" && requiresLinearFt(value)) {
-          next.areaUnit = "linear_ft";
+        if (field === "applicationMethod") {
+          if (requiresLinearFt(value)) {
+            next.areaUnit = "linear_ft";
+          } else {
+            next.areaUnit = "";
+            next.areaValue = "";
+          }
         }
         return next;
       }),
@@ -5508,7 +5517,7 @@ export function CompletionPanel({
       }
     }
     const missingLinearFtProduct = selectedProducts.find((p) => {
-      if (!requiresLinearFt(p.applicationMethod)) return false;
+      if (!requiresLinearFt(effectiveApplicationMethod(p.applicationMethod))) return false;
       const feet = Number(p.areaValue);
       return !Number.isFinite(feet) || feet <= 0 || p.areaUnit !== "linear_ft";
     });
@@ -6913,7 +6922,7 @@ export function CompletionPanel({
                         <option value="station_check">Station check</option>
                         <option value="fog_ulv">Fog/ULV</option>
                       </select>
-                      {requiresLinearFt(sp.applicationMethod) && (
+                      {requiresLinearFt(effectiveApplicationMethod(sp.applicationMethod)) && (
                         <input
                           type="number"
                           min="1"
@@ -8461,7 +8470,7 @@ export function CompletionPanel({
                     <option value="station_check">Station check</option>
                     <option value="fog_ulv">Fog/ULV</option>
                   </select>
-                  {requiresLinearFt(sp.applicationMethod) && (
+                  {requiresLinearFt(effectiveApplicationMethod(sp.applicationMethod)) && (
                     <input
                       type="number"
                       min="1"

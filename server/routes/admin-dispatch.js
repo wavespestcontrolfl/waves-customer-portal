@@ -1715,6 +1715,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const areaValue = p.areaValue != null && p.areaValue !== '' ? Number(p.areaValue) : null;
             const areaUnit = p.areaUnit || null;
             if (
+              !isIncompleteVisit
+              &&
               ['perimeter_spray', 'broadcast_spray'].includes(applicationMethod)
               && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'linear_ft')
             ) {

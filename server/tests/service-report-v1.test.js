@@ -44,6 +44,11 @@ const {
 } = require('../services/service-report/delivery-queue');
 
 describe('service report v1', () => {
+  function restoreEnv(name, value) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+
   test('pressure index uses weighted current findings and prior smoothing', () => {
     const currentOnly = pressureFromFindings([
       { severity: 'low' },
@@ -991,8 +996,8 @@ describe('service report v1', () => {
       expect(calls[0].body.pdf).toBeUndefined();
     } finally {
       global.fetch = originalFetch;
-      process.env.CF_ACCOUNT_ID = originalAccountId;
-      process.env.CF_BROWSER_RENDERING_TOKEN = originalToken;
+      restoreEnv('CF_ACCOUNT_ID', originalAccountId);
+      restoreEnv('CF_BROWSER_RENDERING_TOKEN', originalToken);
     }
   });
 
