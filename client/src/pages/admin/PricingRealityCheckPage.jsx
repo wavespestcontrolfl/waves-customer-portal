@@ -146,7 +146,7 @@ async function loadPricingReality({ lookbackDays, groupBy, filters }) {
   const response = await adminFetch(`/admin/pricing-reality-check?${query}`);
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error || `Pricing reality check failed (${response.status})`);
+    throw new Error(body.error || `Pricing audit failed (${response.status})`);
   }
   return response.json();
 }
@@ -376,7 +376,7 @@ export default function PricingRealityCheckPage() {
       const payload = await loadPricingReality({ lookbackDays, groupBy, filters });
       setData(payload);
     } catch (err) {
-      setError(err.message || "Failed to load Pricing Reality Check");
+      setError(err.message || "Failed to load pricing audit");
       setData(null);
     } finally {
       setLoading(false);
@@ -398,7 +398,7 @@ export default function PricingRealityCheckPage() {
     <div style={{ maxWidth: 1320, margin: "0 auto", color: D.text }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 18, flexWrap: "wrap" }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 28, color: D.heading, fontWeight: 760 }}>Pricing Reality Check</h1>
+          <h1 style={{ margin: 0, fontSize: 28, color: D.heading, fontWeight: 760 }}>Audit</h1>
           <div style={{ marginTop: 5, color: D.muted, fontSize: 13 }}>
             Read-only comparison of quoted pricing minutes vs Bouncie actual on-site minutes.
           </div>

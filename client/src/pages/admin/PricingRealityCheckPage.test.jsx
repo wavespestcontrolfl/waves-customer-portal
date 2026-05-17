@@ -138,7 +138,7 @@ describe("PricingRealityCheckPage", () => {
   it("renders the admin page and read-only badge", async () => {
     renderPage();
 
-    expect(screen.getByText("Pricing Reality Check")).toBeInTheDocument();
+    expect(screen.getByText("Audit")).toBeInTheDocument();
     expect(screen.getByText("Read-only. No pricing engine writes.")).toBeInTheDocument();
     expect(await screen.findByText("Included services")).toBeInTheDocument();
   });

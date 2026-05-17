@@ -5,10 +5,12 @@ import {
   ClipboardList,
   Gauge,
   Percent,
+  Scale,
   SlidersHorizontal,
 } from "lucide-react";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import PricingRealityCheckPage from "./PricingRealityCheckPage";
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
 
@@ -35,7 +37,29 @@ const PRICING_SECTIONS = [
   { key: "calibration", label: "Calibration", Icon: Gauge },
   { key: "specs", label: "Service Specs", Icon: ClipboardList },
   { key: "logic", label: "Logic Rules", Icon: SlidersHorizontal },
+  { key: "reality", label: "Audit", Icon: Scale },
 ];
+
+function sectionFromSearchParams(searchParams) {
+  const section = searchParams.get("section");
+  return PRICING_SECTIONS.some((item) => item.key === section)
+    ? section
+    : "margins";
+}
+
+function scrollToPricingSection(key) {
+  const scroll = () => {
+    document
+      .getElementById(`pricing-${key}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(scroll);
+  } else {
+    scroll();
+  }
+}
+
 const af = (p, o = {}) =>
   fetch(`${API_BASE}${p}`, {
     ...o,
@@ -1329,16 +1353,25 @@ function CalibrationGroup({ title, rows }) {
 }
 
 export default function PricingLogicPage() {
-  const [searchParams] = useSearchParams();
-  const [activeSection, setActiveSection] = useState("margins");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedSection = sectionFromSearchParams(searchParams);
+  const [activeSection, setActiveSection] = useState(requestedSection);
   const focusedService = searchParams.get("service");
   const focus = searchParams.get("focus");
   const serviceLabel = focusedService ? focusedService.replace(/_/g, " ") : "";
+
+  useEffect(() => {
+    setActiveSection(requestedSection);
+    if (requestedSection === "margins") return;
+    scrollToPricingSection(requestedSection);
+  }, [requestedSection]);
+
   const handleSectionChange = (key) => {
     setActiveSection(key);
-    document
-      .getElementById(`pricing-${key}`)
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("section", key);
+    setSearchParams(nextParams, { replace: true });
+    scrollToPricingSection(key);
   };
 
   return (
@@ -1352,7 +1385,7 @@ export default function PricingLogicPage() {
           sections={PRICING_SECTIONS}
           activeKey={activeSection}
           onSectionChange={handleSectionChange}
-          navGridClassName="grid-cols-2 md:grid-cols-4"
+          navGridClassName="grid-cols-2 md:grid-cols-5"
         />
         {focus === "margin" && (
           <div
@@ -1385,6 +1418,10 @@ export default function PricingLogicPage() {
         <section id="pricing-logic">
           {" "}
           <PricingLogicPanel />{" "}
+        </section>{" "}
+        <section id="pricing-reality">
+          {" "}
+          {activeSection === "reality" && <PricingRealityCheckPage />}{" "}
         </section>{" "}
       </div>{" "}
     </div>

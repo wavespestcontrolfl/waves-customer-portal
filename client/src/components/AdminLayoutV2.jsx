@@ -39,7 +39,6 @@ import {
   Landmark,
   Receipt,
   Calculator,
-  Scale,
   Activity,
   Radio,
   Settings,
@@ -132,11 +131,6 @@ const NAV_SECTIONS = [
       { path: "/admin/banking", icon: Landmark, label: "Banking" },
       { path: "/admin/tax", icon: Receipt, label: "Taxes" },
       { path: "/admin/pricing-logic", icon: Calculator, label: "Pricing" },
-      {
-        path: "/admin/pricing-reality-check",
-        icon: Scale,
-        label: "Pricing Reality Check",
-      },
     ],
   },
   {
