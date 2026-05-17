@@ -650,6 +650,7 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const projectDocs = await Promise.all(projects.map(async (p) => {
       const isWdo = p.project_type === 'wdo_inspection';
+      const isCertificate = p.project_type === 'pre_treatment_termite_certificate';
       const typeLabels = {
         wdo_inspection: 'WDO Inspection',
         termite_inspection: 'Termite Inspection',
@@ -661,10 +662,19 @@ router.get('/', authenticate, async (req, res, next) => {
       };
       const label = typeLabels[p.project_type] || 'Inspection';
       const viewUrl = await projectReportPathForProject(db, p, p);
+      // Compliance certificates belong in the Compliance category, not
+      // Service Reports — they live in the permit folder and are referenced
+      // by lenders, building inspectors, and the property owner long after
+      // any single service visit.
+      const documentType = isWdo
+        ? 'wdo_inspection'
+        : isCertificate
+        ? 'compliance_certificate'
+        : 'service_report';
       return {
         id: `project_${p.id}`,
-        documentType: isWdo ? 'wdo_inspection' : 'service_report',
-        title: p.title || `${label} Report`,
+        documentType,
+        title: p.title || (isCertificate ? label : `${label} Report`),
         description: p.sent_at ? `Report sent ${formatDate(p.sent_at)}` : label,
         fileName: `${label.replace(/\s+/g, '_')}_${p.sent_at ? new Date(p.sent_at).toISOString().slice(0, 10) : 'report'}.pdf`,
         uploadedBy: 'auto_generated',

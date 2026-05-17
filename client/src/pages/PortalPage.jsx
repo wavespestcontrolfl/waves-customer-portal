@@ -7902,7 +7902,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     { id: 'wdo', keys: ['wdo_inspection'], label: 'Real Estate', icon: 'clipboard', empty: 'No WDO or real estate reports on file.' },
     { id: 'agreements', keys: ['service_agreement'], label: 'Agreements', icon: 'shield', empty: 'Your service agreement will appear here after enrollment.' },
     { id: 'insurance', keys: ['insurance_cert'], label: 'Insurance', icon: 'document', empty: 'Insurance certificates will be uploaded by Waves.' },
-    { id: 'compliance', keys: ['pesticide_record'], label: 'Compliance', icon: 'flask', empty: 'Compliance records will appear here when available.' },
+    { id: 'compliance', keys: ['pesticide_record', 'compliance_certificate'], label: 'Compliance', icon: 'flask', empty: 'Compliance records will appear here when available.' },
     { id: 'other', keys: ['proposal', 'annual_summary', 'other'], label: 'Other Paperwork', icon: 'paperclip', empty: 'No other paperwork is currently on file.' },
   ];
 
