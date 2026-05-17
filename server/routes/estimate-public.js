@@ -499,12 +499,18 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
 
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
   const tier = estimate.waveguard_tier || estimate.tier || opts.pricingBundle?.waveGuardTier || null;
+  const tierDiscountPct = tier ? tierDiscount(tier) : 0;
   const serviceLabel = sentenceList([...new Set(serviceNames)]);
+  const pricingSignal = tier
+    ? (tierDiscountPct > 0
+        ? `WaveGuard ${tier} pricing reflects the bundle discount shown on this estimate.`
+        : `WaveGuard ${tier} pricing is applied to the services shown on this estimate.`)
+    : null;
   const signals = [
     serviceLabel
       ? `${serviceLabel} cadence and visit counts are matched to this property profile.`
       : 'Service cadence and visit counts are matched to the property details available on this estimate.',
-    tier ? `WaveGuard ${tier} pricing reflects the bundle discount shown on this estimate.` : null,
+    pricingSignal,
     'Your technician verifies measurements and site conditions during the first visit.',
   ].filter(Boolean);
 

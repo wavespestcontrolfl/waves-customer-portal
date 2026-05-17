@@ -541,6 +541,21 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.signals.join(' ')).toContain('WaveGuard Silver pricing');
   });
 
+  test('WaveGuard Intelligence does not claim a Bronze bundle discount', () => {
+    const payload = buildWaveGuardIntelligencePayload({
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: {
+          services: [{ name: 'Pest Control' }],
+        },
+      },
+    });
+
+    expect(payload.signals.join(' ')).toContain('WaveGuard Bronze pricing is applied');
+    expect(payload.signals.join(' ')).not.toContain('bundle discount');
+  });
+
   test('server-rendered estimates show the WaveGuard Intelligence feature', () => {
     const html = renderPage('intelligence-token', {
       status: 'sent',
