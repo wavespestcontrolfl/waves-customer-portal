@@ -14,15 +14,28 @@ const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 
 // Rate-limit public report access to deter token brute-forcing.
+function isReportEventRequest(req) {
+  return req.method === 'POST' && /^\/[a-f0-9]{32}\/events$/i.test(req.path || '');
+}
+
 const reportLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isReportEventRequest,
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
 router.use(reportLimiter);
+
+const reportEventLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many report events. Please try again in a minute.' },
+});
 
 const ACTIVE_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const ALLOWED_REPORT_EVENTS = new Set([
@@ -338,7 +351,7 @@ router.get('/project/:token/data', async (req, res, next) => {
 });
 
 // POST /api/reports/:token/events — token-scoped report interaction events.
-router.post('/:token/events', async (req, res, next) => {
+router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }

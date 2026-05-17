@@ -23,6 +23,7 @@ const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispat
 const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
 const { computePressureIndex } = require('../services/service-report/pressure-index');
 const {
+  buildServiceReportV1DeliveryContext,
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
@@ -77,6 +78,10 @@ async function runtimeServiceReportFlag(req, flagKey, envKey, defaultValue = fal
   return isUserFeatureEnabled(req.technicianId, flagKey, defaultValue).catch(() => !!defaultValue);
 }
 
+function oneTapCompletionSubmitEnabled() {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env.ONE_TAP_COMPLETION_SUBMIT_ENABLED || '').trim().toLowerCase());
+}
+
 async function renderRequiredTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -87,6 +92,17 @@ async function renderRequiredTemplate(templateKey, vars) {
     throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
   }
   throw new Error(`SMS template ${templateKey} is missing or inactive`);
+}
+
+function ensureSmsContainsReportLink(body, reportLink) {
+  const text = String(body || '').trim();
+  const link = String(reportLink || '').trim();
+  if (!text || !link || text.includes(link)) return text;
+  const portalRootRe = /\b(?:https?:\/\/)?portal\.wavespestcontrol\.com(?:\/report\/[a-f0-9]{32})?/i;
+  if (portalRootRe.test(text)) {
+    return text.replace(portalRootRe, link);
+  }
+  return `${text}\n${link}`;
 }
 
 const MAX_REVIEW_DELAY_MINUTES = 60 * 24 * 30;
@@ -1062,14 +1078,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
 
 // GET /api/admin/dispatch/:serviceId/complete-preview
 //
-// Read-only preview for the one-tap "Complete — Protocol Performed"
+// Read-only preview for the one-tap "Complete - Protocol Performed"
 // flow. Resolves the standard protocol defaults for the service
 // without writing anything, and returns the bundle the tech would be
-// attesting to plus a stable snapshot hash. PR #3 will add the
-// submit-side handshake: the client sends back this hash as
-// expectedSnapshotHash, and the route returns 409 completion_preview_
-// stale if the resolver computes a different hash at submit time
-// (active protocol template changed between preview and submit).
+// attesting to plus a stable snapshot hash. It is intentionally gated
+// until the submit-side handshake/resume path is present; otherwise a
+// backend-only preview can advertise an action the UI cannot safely
+// complete.
 //
 // Response shape:
 //   200 { available: true, mode: 'one_tap_available',
@@ -1092,6 +1107,14 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
         error: 'Invalid customerInteraction value.',
         code: 'customer_interaction_invalid',
         validChoices: CUSTOMER_INTERACTION_CHOICES,
+      });
+    }
+
+    if (!oneTapCompletionSubmitEnabled()) {
+      return res.json({
+        available: false,
+        reason: 'one_tap_submit_not_enabled',
+        mode: 'detailed_form_required',
       });
     }
 
@@ -1503,6 +1526,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
           if (serviceRecordCols.advisory && useServiceReportV1) recordInsert.advisory = serializeJsonb(reportConfig.advisoryDefaults);
+          if (serviceRecordCols.completion_source) recordInsert.completion_source = 'detailed_form';
+          if (serviceRecordCols.protocol_defaults_used) recordInsert.protocol_defaults_used = false;
 
         // 1. service_record — the canonical "completion happened" audit.
         // scheduled_service_id is the FK back to the source row so
@@ -2259,7 +2284,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           || prepaidCovered
           || autopayCoversVisit
           || String(invoice?.status || '').toLowerCase() === 'paid';
-        if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
+        const serviceReportV1SmsContext = serviceReportV1Delivery
+          ? buildServiceReportV1DeliveryContext({
+            record,
+            service: svc,
+            reportUrl,
+            smsReportUrl: reportSmsUrl,
+            payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
+          })
+          : null;
+        if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
+          sentSmsType = serviceReportV1SmsContext.smsType;
+          sentSmsBody = `${serviceReportV1SmsContext.body}${reviewSuffix}`.trim();
+          completionSmsWasTruncated = false;
+        } else if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
           const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${reportSmsUrl || reportUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply here.`;
           const body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
@@ -2282,12 +2320,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sentSmsBody = `${body}${reviewSuffix}`.trim();
             completionSmsWasTruncated = false;
           } else {
-            const fallback = `Hello ${svc.first_name}! Your service report is ready: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.`;
+            const fallback = `Hello ${svc.first_name}! Your service report is ready: ${reportSmsUrl || reportUrl}\n\nQuestions or requests? Reply here.`;
             let body = await renderTemplate('service_complete', {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
             }, fallback);
+            body = ensureSmsContainsReportLink(body, reportSmsUrl || reportUrl);
             sentSmsType = 'service_complete';
             if (serviceReportV1Delivery) {
               sentSmsBody = `${body}${reviewSuffix}`.trim();

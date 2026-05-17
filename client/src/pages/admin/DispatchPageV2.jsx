@@ -1346,7 +1346,7 @@ export default function DispatchPageV2({
       });
       handleStatusChange(serviceId, "completed");
       const invoiceWasAlreadyBundled =
-        r?.completionSmsType === "service_complete_with_invoice" &&
+        ["service_complete_with_invoice", "service_report_v1_with_invoice"].includes(r?.completionSmsType) &&
         r?.completionSmsStatus === "sent";
       const invoiceWasAlreadyPaid = r?.invoiceStatus === "paid";
       const invoiceWasAlreadySent =

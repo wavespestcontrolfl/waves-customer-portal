@@ -28,6 +28,7 @@
  *   double-write the mileage record.
  */
 import { useEffect, useState, useRef, useCallback } from 'react';
+import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '';
 const POLL_MS = 10_000;
@@ -46,7 +47,7 @@ const COLORS = {
 };
 
 async function apiPost(path, body) {
-  const token = localStorage.getItem('waves_admin_token') || localStorage.getItem('adminToken');
+  const token = getAdminAuthToken();
   const res = await fetch(`${API}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -56,7 +57,7 @@ async function apiPost(path, body) {
 }
 
 async function apiGet(path) {
-  const token = localStorage.getItem('waves_admin_token') || localStorage.getItem('adminToken');
+  const token = getAdminAuthToken();
   const res = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } });
   return res.ok ? res.json() : { notifications: [] };
 }

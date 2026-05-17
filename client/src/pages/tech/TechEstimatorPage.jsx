@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const DARK = {
   bg: '#0f1923',
@@ -98,7 +99,7 @@ export default function TechEstimatorPage() {
     searchTimeout.current = setTimeout(async () => {
       setSearching(true);
       try {
-        const token = localStorage.getItem('adminToken');
+        const token = getAdminAuthToken();
         const res = await fetch(`${API}/api/admin/customers?search=${encodeURIComponent(searchQuery)}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -152,7 +153,7 @@ export default function TechEstimatorPage() {
     if (!selectedCustomer?.phone) return alert('Select a customer with a phone number first.');
     setSending(true);
     try {
-      const token = localStorage.getItem('adminToken');
+      const token = getAdminAuthToken();
       const lines = buildEstimateText();
       await fetch(`${API}/api/admin/communications/sms`, {
         method: 'POST',

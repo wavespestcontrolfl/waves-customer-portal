@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 
@@ -20,7 +21,7 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
     setSubmitting(true);
     setError('');
     try {
-      const token = localStorage.getItem('adminToken');
+      const token = getAdminAuthToken();
       const r = await fetch(`${API}/tech/field-lead`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
