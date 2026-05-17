@@ -10,6 +10,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const equipmentService = require('../services/equipment-maintenance');
 const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -125,20 +126,20 @@ router.post('/equipment/:id/maintenance', async (req, res, next) => {
       parts_used, performed_by, notes, service_date,
     } = req.body;
 
-    const [log] = await db('equipment_maintenance_log').insert({
-      equipment_id: req.params.id,
-      service_type: service_type || 'general',
-      hours_at_service: hours_at_service || equipment.current_hours,
-      cost: cost || 0,
-      parts_used: parts_used || null,
-      performed_by: performed_by || req.technician?.name || null,
-      notes: notes || null,
-      service_date: service_date || etDateString(),
-    }).returning('*');
+    const log = await equipmentService.recordMaintenance({
+      equipmentId: req.params.id,
+      maintenanceType: 'legacy',
+      taskName: service_type || 'General maintenance',
+      description: [notes, parts_used ? `Parts used: ${parts_used}` : null].filter(Boolean).join('\n') || null,
+      hoursAtService: hours_at_service || equipment.current_hours,
+      partsCost: cost || 0,
+      performedBy: performed_by || req.technician?.name || null,
+      performedAt: service_date || etDateString(),
+    });
 
     // Update equipment record
     const equipmentUpdates = {
-      last_service_date: log.service_date,
+      last_service_date: service_date || etDateString(),
       updated_at: db.fn.now(),
     };
     if (hours_at_service) equipmentUpdates.current_hours = hours_at_service;
@@ -170,15 +171,15 @@ router.post('/equipment/:id/calibration', async (req, res, next) => {
       pressure_psi ? `Pressure: ${pressure_psi} PSI` : '',
     ].filter(Boolean).join(' | ');
 
-    const [log] = await db('equipment_maintenance_log').insert({
-      equipment_id: req.params.id,
-      service_type: 'calibration',
-      hours_at_service: hours_at_service || equipment.current_hours,
-      cost: 0,
-      performed_by: performed_by || req.technician?.name || null,
-      notes: calibrationNotes,
-      service_date: service_date || etDateString(),
-    }).returning('*');
+    const log = await equipmentService.recordMaintenance({
+      equipmentId: req.params.id,
+      maintenanceType: 'calibration',
+      taskName: 'Calibration',
+      description: calibrationNotes || null,
+      hoursAtService: hours_at_service || equipment.current_hours,
+      performedBy: performed_by || req.technician?.name || null,
+      performedAt: service_date || etDateString(),
+    });
 
     logger.info(`Calibration logged for ${equipment.name}`);
     res.status(201).json({ calibration: log });
@@ -190,9 +191,13 @@ router.post('/equipment/:id/calibration', async (req, res, next) => {
 // GET /equipment/:id/calibration-history — calibration records
 router.get('/equipment/:id/calibration-history', async (req, res, next) => {
   try {
-    const records = await db('equipment_maintenance_log')
-      .where({ equipment_id: req.params.id, service_type: 'calibration' })
-      .orderBy('service_date', 'desc');
+    const records = await db('maintenance_records')
+      .where('equipment_id', req.params.id)
+      .where(function () {
+        this.where('maintenance_type', 'calibration')
+          .orWhereILike('task_name', '%calibration%');
+      })
+      .orderBy('performed_at', 'desc');
 
     res.json({ calibrations: records });
   } catch (err) {
@@ -213,7 +218,7 @@ router.get('/tank-mixes', async (req, res, next) => {
     if (active !== undefined) query = query.where('active', active === 'true');
 
     const mixes = await query;
-    res.json({ tank_mixes: mixes });
+    res.json({ tank_mixes: mixes, mixes });
   } catch (err) {
     next(err);
   }
@@ -385,7 +390,7 @@ router.get('/job-costs', async (req, res, next) => {
 
     const [{ count }] = await db('job_costs').count('* as count');
 
-    res.json({ job_costs: jobs, total: parseInt(count), page: parseInt(page) });
+    res.json({ job_costs: jobs, costs: jobs, total: parseInt(count), page: parseInt(page) });
   } catch (err) {
     next(err);
   }
@@ -469,15 +474,37 @@ router.get('/job-costs/summary', async (req, res, next) => {
       .avg('margin_pct as avg_margin')
       .first();
 
-    res.json({
-      by_service_type: byType.map(row => ({
+    const byServiceType = byType.map(row => ({
         ...row,
         avg_margin: row.avg_margin ? Math.round(parseFloat(row.avg_margin) * 100) / 100 : 0,
-      })),
-      overall: {
+      }));
+    const normalizedOverall = {
         ...overall,
         avg_margin: overall?.avg_margin ? Math.round(parseFloat(overall.avg_margin) * 100) / 100 : 0,
-      },
+      };
+    const totalJobs = parseInt(normalizedOverall.total_jobs) || 0;
+    const totalRevenue = parseFloat(normalizedOverall.total_revenue) || 0;
+    const totalCosts = parseFloat(normalizedOverall.total_costs) || 0;
+
+    res.json({
+      by_service_type: byServiceType,
+      overall: normalizedOverall,
+      byServiceType: Object.fromEntries(byServiceType.map(row => {
+        const count = parseInt(row.total_jobs) || 0;
+        return [
+          row.service_type || 'Unspecified',
+          {
+            count,
+            avgRevenue: count > 0 ? (parseFloat(row.total_revenue) || 0) / count : 0,
+            avgCost: count > 0 ? (parseFloat(row.total_costs) || 0) / count : 0,
+            avgMargin: parseFloat(row.avg_margin) || 0,
+          },
+        ];
+      })),
+      avgMargin: normalizedOverall.avg_margin,
+      avgRevenue: totalJobs > 0 ? totalRevenue / totalJobs : 0,
+      avgCost: totalJobs > 0 ? totalCosts / totalJobs : 0,
+      totalJobs,
     });
   } catch (err) {
     next(err);
@@ -585,13 +612,13 @@ router.get('/dashboard', async (req, res, next) => {
       .orderByRaw('"next_service_hours" - "current_hours" ASC');
 
     // Recent maintenance
-    const recentMaintenance = await db('equipment_maintenance_log')
-      .join('equipment', 'equipment_maintenance_log.equipment_id', 'equipment.id')
+    const recentMaintenance = await db('maintenance_records')
+      .join('equipment', 'maintenance_records.equipment_id', 'equipment.id')
       .select(
-        'equipment_maintenance_log.*',
+        'maintenance_records.*',
         'equipment.name as equipment_name'
       )
-      .orderBy('equipment_maintenance_log.service_date', 'desc')
+      .orderBy('maintenance_records.performed_at', 'desc')
       .limit(10);
 
     // Margin summary — last 30 days

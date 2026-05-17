@@ -1,10 +1,13 @@
-import { useState, useEffect, useCallback } from "react";
-import { Beaker, Calculator, Plus, Wrench } from "lucide-react";
+import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
+import { BarChart3, Beaker, Calculator, ClipboardCheck, Plus, Wrench } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import EquipmentMaintenancePage from "./EquipmentMaintenancePage";
+import EquipmentCalibrationPanel from "./EquipmentCalibrationPanel";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-// STATUS_COLORS folds cleanly — pending=zinc-900 stays distinct from green/amber/muted.
+// STATUS_COLORS folds cleanly while keeping semantic green/amber/red distinct.
 const D = {
   bg: "#F4F4F5",
   card: "#FFFFFF",
@@ -82,10 +85,62 @@ const fmt = (n) =>
       })
     : "—";
 
+function toNumber(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeJobCostSummary(summary) {
+  if (!summary) return null;
+
+  const overall = summary.overall || {};
+  const totalJobs = toNumber(summary.totalJobs ?? overall.total_jobs) || 0;
+  const totalRevenue = toNumber(overall.total_revenue);
+  const totalCost = toNumber(overall.total_costs);
+  const byServiceRows = summary.byServiceType
+    ? Object.entries(summary.byServiceType).map(([serviceType, stats]) => ({
+        serviceType,
+        stats,
+      }))
+    : (summary.by_service_type || []).map((row) => ({
+        serviceType: row.service_type || "Unspecified",
+        stats: {
+          count: toNumber(row.total_jobs) || 0,
+          avgRevenue:
+            toNumber(row.total_jobs) > 0
+              ? (toNumber(row.total_revenue) || 0) / toNumber(row.total_jobs)
+              : 0,
+          avgCost:
+            toNumber(row.total_jobs) > 0
+              ? (toNumber(row.total_costs) || 0) / toNumber(row.total_jobs)
+              : 0,
+          avgMargin: toNumber(row.avg_margin) || 0,
+        },
+      }));
+
+  return {
+    avgMargin: toNumber(summary.avgMargin ?? overall.avg_margin),
+    avgRevenue:
+      toNumber(summary.avgRevenue) ??
+      (totalJobs > 0 && totalRevenue != null ? totalRevenue / totalJobs : null),
+    avgCost:
+      toNumber(summary.avgCost) ??
+      (totalJobs > 0 && totalCost != null ? totalCost / totalJobs : null),
+    totalJobs,
+    byServiceType: Object.fromEntries(
+      byServiceRows.map(({ serviceType, stats }) => [serviceType, stats]),
+    ),
+  };
+}
+
 const STATUS_COLORS = {
   active: D.green,
   maintenance: D.amber,
   retired: D.muted,
+  sold: D.muted,
+  lost: D.red,
+  in_service: D.green,
   pending: D.purple,
 };
 const CAT_ICONS = {
@@ -101,20 +156,50 @@ const CAT_ICONS = {
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 const EQUIPMENT_SECTIONS = [
-  { key: "equipment", label: "Equipment", Icon: Wrench },
+  { key: "assets", label: "Assets", Icon: Wrench },
+  { key: "maintenance", label: "Maintenance", Icon: Wrench },
+  { key: "analytics", label: "Analytics", Icon: BarChart3 },
   { key: "tank-mixes", label: "Tank Mixes", Icon: Beaker },
   { key: "job-costs", label: "Job Costing", Icon: Calculator },
-  { key: "maintenance", label: "Maintenance", Icon: Wrench },
+  { key: "calibrations", label: "Calibrations", Icon: ClipboardCheck },
 ];
+const EQUIPMENT_TAB_ALIASES = {
+  equipment: "assets",
+  fleet: "maintenance",
+  vehicles: "maintenance",
+  mileage: "maintenance",
+};
+const EQUIPMENT_TAB_KEYS = new Set(EQUIPMENT_SECTIONS.map((s) => s.key));
+
+function normalizeEquipmentTab(value) {
+  const key = EQUIPMENT_TAB_ALIASES[value] || value;
+  return EQUIPMENT_TAB_KEYS.has(key) ? key : "assets";
+}
 
 export default function EquipmentPage() {
-  const [tab, setTab] = useState("equipment");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTab] = useState(() =>
+    normalizeEquipmentTab(searchParams.get("tab")),
+  );
   const [toast, setToast] = useState("");
   const [editing, setEditing] = useState(null);
   const showToast = (m) => {
     setToast(m);
     setTimeout(() => setToast(""), 3500);
   };
+  const handleSectionChange = (nextTab) => {
+    const normalized = normalizeEquipmentTab(nextTab);
+    const params = new URLSearchParams(searchParams);
+    if (normalized === "assets") params.delete("tab");
+    else params.set("tab", normalized);
+    setTab(normalized);
+    setSearchParams(params, { replace: true });
+  };
+
+  useEffect(() => {
+    const nextTab = normalizeEquipmentTab(searchParams.get("tab"));
+    setTab((current) => (current === nextTab ? current : nextTab));
+  }, [searchParams]);
 
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
@@ -129,11 +214,11 @@ export default function EquipmentPage() {
         icon={Wrench}
         sections={EQUIPMENT_SECTIONS}
         activeKey={tab}
-        onSectionChange={setTab}
+        onSectionChange={handleSectionChange}
         ariaLabel="Equipment section"
-        navGridClassName="grid-cols-2 lg:grid-cols-4"
+        navGridClassName="grid-cols-2 lg:grid-cols-6"
         action={
-          tab === "equipment"
+          tab === "assets"
             ? {
                 label: "Add Equipment",
                 icon: Plus,
@@ -142,16 +227,30 @@ export default function EquipmentPage() {
             : null
         }
       />
-      {tab === "equipment" && (
+      {tab === "assets" && (
         <EquipmentTab
           showToast={showToast}
           editing={editing}
           setEditing={setEditing}
         />
       )}
+      {tab === "maintenance" && (
+        <EquipmentMaintenancePage
+          key="maintenance"
+          embedded
+          initialTab="fleet"
+        />
+      )}
+      {tab === "analytics" && (
+        <EquipmentMaintenancePage
+          key="analytics"
+          embedded
+          initialTab="analytics"
+        />
+      )}
       {tab === "tank-mixes" && <TankMixTab showToast={showToast} />}
       {tab === "job-costs" && <JobCostTab />}
-      {tab === "maintenance" && <MaintenanceTab showToast={showToast} />}
+      {tab === "calibrations" && <EquipmentCalibrationPanel />}
       <div
         style={{
           position: "fixed",
@@ -192,7 +291,7 @@ const CATEGORIES = [
   "vehicle",
   "other",
 ];
-const STATUSES = ["active", "maintenance", "retired", "pending"];
+const STATUSES = ["active", "maintenance", "retired", "sold", "lost"];
 const EMPTY_EQUIP = {
   name: "",
   category: "other",
@@ -603,7 +702,7 @@ function TankMixTab({ showToast }) {
 
   useEffect(() => {
     adminFetch("/admin/equipment/tank-mixes")
-      .then((d) => setMixes(d.mixes || []))
+      .then((d) => setMixes(d.tank_mixes || d.mixes || []))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
@@ -615,7 +714,7 @@ function TankMixTab({ showToast }) {
       });
       showToast("Costs recalculated from current inventory prices");
       const d = await adminFetch("/admin/equipment/tank-mixes");
-      setMixes(d.mixes || []);
+      setMixes(d.tank_mixes || d.mixes || []);
     } catch (e) {
       showToast(`Failed: ${e.message}`);
     }
@@ -801,8 +900,8 @@ function JobCostTab() {
         costs: [],
       })),
     ]).then(([s, c]) => {
-      setSummary(s);
-      setCosts(c.costs || []);
+      setSummary(normalizeJobCostSummary(s));
+      setCosts(c.job_costs || c.costs || []);
       setLoading(false);
     });
   }, []);
@@ -828,10 +927,13 @@ function JobCostTab() {
           {[
             {
               label: "Avg Margin",
-              value: summary.avgMargin
+              value: summary.avgMargin != null
                 ? `${summary.avgMargin.toFixed(1)}%`
                 : "—",
-              color: summary.avgMargin >= 50 ? D.green : D.amber,
+              color:
+                summary.avgMargin == null || summary.avgMargin >= 50
+                  ? D.green
+                  : D.amber,
             },
             {
               label: "Avg Revenue/Job",

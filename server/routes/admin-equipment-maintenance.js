@@ -13,7 +13,8 @@ const equipmentService = require('../services/equipment-maintenance');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Auto-create maintenance tables if migration hasn't run
+// Last-resort table bootstrap for local/dev environments where migrations have
+// not run yet. Keep this schema aligned with 20260401000097_equipment_maintenance.
 let _maintTablesChecked = false;
 router.use(async (req, res, next) => {
   if (!_maintTablesChecked) {
@@ -55,19 +56,27 @@ router.use(async (req, res, next) => {
           operational_notes text, created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
         )`,
         `CREATE TABLE IF NOT EXISTS vehicle_mileage_log (
-          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          equipment_id uuid NOT NULL, logged_by uuid,
-          odometer_reading integer NOT NULL, trip_miles decimal(8,1),
-          log_date date NOT NULL DEFAULT CURRENT_DATE, source varchar(30) DEFAULT 'manual',
-          notes text, created_at timestamptz DEFAULT NOW()
+          id serial PRIMARY KEY,
+          vehicle_id uuid NOT NULL,
+          log_date date NOT NULL,
+          odometer_start integer, odometer_end integer,
+          total_miles decimal(8,1), source varchar(30) DEFAULT 'manual',
+          gps_data jsonb, business_miles decimal(8,1),
+          personal_miles decimal(8,1) DEFAULT 0, business_pct decimal(5,2),
+          fuel_gallons decimal(6,2), fuel_cost decimal(8,2),
+          fuel_price_per_gallon decimal(5,3), jobs_serviced integer,
+          job_ids jsonb, irs_standard_rate decimal(5,2) DEFAULT 0.70,
+          irs_deduction_amount decimal(10,2), logged_by varchar(200),
+          notes text, created_at timestamptz DEFAULT NOW(), updated_at timestamptz DEFAULT NOW(),
+          UNIQUE(vehicle_id, log_date)
         )`,
         `CREATE TABLE IF NOT EXISTS maintenance_alerts (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
           equipment_id uuid NOT NULL, schedule_id uuid,
           alert_type varchar(30) NOT NULL, severity varchar(10) DEFAULT 'info',
           title varchar(300) NOT NULL, description text,
-          status varchar(20) DEFAULT 'new', acknowledged_by varchar(200),
-          acknowledged_at timestamptz, resolved_at timestamptz,
+          status varchar(20) DEFAULT 'new',
+          resolved_by varchar(200), resolved_at timestamptz,
           created_at timestamptz NOT NULL DEFAULT NOW(), updated_at timestamptz NOT NULL DEFAULT NOW()
         )`,
       ];
@@ -94,11 +103,11 @@ router.get('/', async (req, res, next) => {
         'equipment.*',
         db.raw("COALESCE(technicians.name, 'Unassigned') as assigned_tech_name")
       )
-      .whereNot('equipment.status', 'retired')
       .orderBy('equipment.name');
 
     if (category) query = query.where('equipment.category', category);
     if (status) query = query.where('equipment.status', status);
+    else query = query.whereNotIn('equipment.status', ['retired', 'sold', 'lost']);
     if (assigned_to) query = query.where('equipment.assigned_to', assigned_to);
     if (search) {
       query = query.where(function () {
@@ -151,7 +160,7 @@ router.get('/', async (req, res, next) => {
 });
 
 // GET /:id — equipment detail with schedules, records, cost of ownership
-router.get('/:id', async (req, res, next) => {
+router.get('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
   try {
     const equipment = await db('equipment')
       .leftJoin('technicians', 'equipment.assigned_to', 'technicians.id')
@@ -202,7 +211,7 @@ router.post('/', async (req, res, next) => {
 });
 
 // PUT /:id — update equipment
-router.put('/:id', async (req, res, next) => {
+router.put('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
   try {
     const data = { ...req.body, updated_at: db.fn.now() };
     delete data.id;
@@ -223,7 +232,7 @@ router.put('/:id', async (req, res, next) => {
 });
 
 // DELETE /:id — soft delete (retire)
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id([0-9a-fA-F-]{36})', async (req, res, next) => {
   try {
     const [record] = await db('equipment')
       .where({ id: req.params.id })
@@ -243,7 +252,7 @@ router.delete('/:id', async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════
 
 // GET /:id/schedules — maintenance schedules for equipment
-router.get('/:id/schedules', async (req, res, next) => {
+router.get('/:id([0-9a-fA-F-]{36})/schedules', async (req, res, next) => {
   try {
     const schedules = await db('maintenance_schedules')
       .where('equipment_id', req.params.id)
@@ -257,7 +266,7 @@ router.get('/:id/schedules', async (req, res, next) => {
 });
 
 // POST /:id/schedules — create maintenance schedule
-router.post('/:id/schedules', async (req, res, next) => {
+router.post('/:id([0-9a-fA-F-]{36})/schedules', async (req, res, next) => {
   try {
     const data = { ...req.body };
     if (!data.task_name) return res.status(400).json({ error: 'Task name is required' });
@@ -326,7 +335,7 @@ router.get('/schedules/due', async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════
 
 // GET /:id/records — maintenance history for equipment
-router.get('/:id/records', async (req, res, next) => {
+router.get('/:id([0-9a-fA-F-]{36})/records', async (req, res, next) => {
   try {
     const { limit = 50, offset = 0 } = req.query;
     const records = await db('maintenance_records')
@@ -347,7 +356,7 @@ router.get('/:id/records', async (req, res, next) => {
 });
 
 // POST /:id/records — log maintenance
-router.post('/:id/records', async (req, res, next) => {
+router.post('/:id([0-9a-fA-F-]{36})/records', async (req, res, next) => {
   try {
     const record = await equipmentService.recordMaintenance({
       equipmentId: req.params.id,
@@ -385,7 +394,7 @@ router.get('/records/recent', async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════
 
 // GET /:id/mileage — vehicle mileage log
-router.get('/:id/mileage', async (req, res, next) => {
+router.get('/:id([0-9a-fA-F-]{36})/mileage', async (req, res, next) => {
   try {
     const { start_date, end_date, limit = 90 } = req.query;
 
@@ -436,7 +445,7 @@ router.get('/:id/mileage', async (req, res, next) => {
 });
 
 // POST /:id/mileage — log mileage
-router.post('/:id/mileage', async (req, res, next) => {
+router.post('/:id([0-9a-fA-F-]{36})/mileage', async (req, res, next) => {
   try {
     const result = await equipmentService.logMileage({
       vehicleId: req.params.id,
@@ -495,7 +504,7 @@ router.get('/mileage/summary', async (req, res, next) => {
 // ═══════════════════════════════════════════════════════════════════
 
 // POST /:id/downtime — log downtime
-router.post('/:id/downtime', async (req, res, next) => {
+router.post('/:id([0-9a-fA-F-]{36})/downtime', async (req, res, next) => {
   try {
     const data = {
       id: require('uuid').v4(),

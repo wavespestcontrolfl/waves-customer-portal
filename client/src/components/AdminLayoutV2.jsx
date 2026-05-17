@@ -31,7 +31,6 @@ import {
   Search,
   Share2,
   Wrench,
-  Truck,
   Package,
   ShieldCheck,
   BookMarked,
@@ -115,7 +114,6 @@ const NAV_SECTIONS = [
     section: "Field & Equipment",
     items: [
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
-      { path: "/admin/fleet", icon: Truck, label: "Fleet" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
       { path: "/admin/compliance", icon: ShieldCheck, label: "Compliance" },
     ],
