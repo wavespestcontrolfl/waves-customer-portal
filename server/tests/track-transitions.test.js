@@ -9,10 +9,14 @@ jest.mock('../services/tech-status', () => ({
 jest.mock('../services/job-status', () => ({
   transitionJobStatus: jest.fn().mockResolvedValue({}),
 }));
+jest.mock('../sockets', () => ({
+  getIo: jest.fn(() => null),
+}));
 
 const db = require('../models/db');
 const { setTechJobStatus, clearTechCurrentJob } = require('../services/tech-status');
 const { transitionJobStatus } = require('../services/job-status');
+const { getIo } = require('../sockets');
 const trackTransitions = require('../services/track-transitions');
 
 function query(result) {
@@ -24,9 +28,14 @@ function query(result) {
   };
 }
 
+function socketStub() {
+  return { to: jest.fn(() => ({ emit: jest.fn() })) };
+}
+
 describe('track-transitions lifecycle side effects', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    getIo.mockReturnValue(socketStub());
     jest.useRealTimers();
   });
 
@@ -128,5 +137,58 @@ describe('track-transitions lifecycle side effects', () => {
       current_job_id: 'job-3',
       status: 'idle',
     });
+  });
+
+  test('markComplete emits a customer refresh after the tracker state flips', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-05-15T14:45:00.000Z'));
+    const emit = jest.fn();
+    const to = jest.fn(() => ({ emit }));
+    getIo.mockReturnValue({ to });
+    const svc = {
+      id: 'job-4',
+      customer_id: 'cust-4',
+      technician_id: 'tech-4',
+      track_state: 'on_property',
+    };
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(query(1));
+
+    const result = await trackTransitions.markComplete('job-4');
+
+    expect(result.ok).toBe(true);
+    expect(to).toHaveBeenCalledWith('customer:cust-4');
+    expect(emit).toHaveBeenCalledWith('customer:job_update', {
+      job_id: 'job-4',
+      status: 'completed',
+      eta: null,
+      tech_id: 'tech-4',
+      tech_first_name: null,
+      updated_at: new Date('2026-05-15T14:45:00.000Z'),
+    });
+  });
+
+  test('markComplete re-emits refresh when already complete', async () => {
+    const completedAt = new Date('2026-05-15T14:30:00.000Z');
+    const emit = jest.fn();
+    const to = jest.fn(() => ({ emit }));
+    getIo.mockReturnValue({ to });
+    db.mockReturnValueOnce(query({
+      id: 'job-5',
+      customer_id: 'cust-5',
+      technician_id: 'tech-5',
+      track_state: 'complete',
+      completed_at: completedAt,
+    }));
+
+    const result = await trackTransitions.markComplete('job-5');
+
+    expect(result).toEqual({ ok: true, state: 'complete', completedAt });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith('customer:job_update', expect.objectContaining({
+      job_id: 'job-5',
+      status: 'completed',
+      updated_at: completedAt,
+    }));
   });
 });

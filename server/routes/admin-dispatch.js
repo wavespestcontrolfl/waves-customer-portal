@@ -1019,6 +1019,24 @@ router.put('/:serviceId/status', async (req, res, next) => {
           error: e,
         });
       }
+    } else if (toStatus === 'on_site') {
+      try {
+        const result = await trackTransitions.markOnProperty(svc.id);
+        await recordTrackTransitionResultFailure({
+          jobId: svc.id,
+          action: 'mark_on_property',
+          actorId: req.technicianId,
+          result,
+        });
+      } catch (e) {
+        logger.error(`[admin-dispatch] markOnProperty failed: ${e.message}`);
+        await recordTrackTransitionFailure({
+          jobId: svc.id,
+          action: 'mark_on_property',
+          actorId: req.technicianId,
+          error: e,
+        });
+      }
     } else if (toStatus === 'completed') {
       try {
         const result = await trackTransitions.markComplete(svc.id, {
@@ -1961,27 +1979,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // showing an active en-route/on-property visit after the office closes it.
     // Incomplete visits skip invoice/SMS/review below, but still need a
     // terminal public tracker state.
-    if (!resumingCommittedCompletion) {
-      try {
-        const result = await trackTransitions.markComplete(svc.id, {
-          actorType: 'admin',
-          actorId: req.technicianId,
-        });
-        await recordTrackTransitionResultFailure({
-          jobId: svc.id,
-          action: 'mark_complete',
-          actorId: req.technicianId,
-          result,
-        });
-      } catch (e) {
-        logger.error(`[admin-dispatch] markComplete failed: ${e.message}`);
-        await recordTrackTransitionFailure({
-          jobId: svc.id,
-          action: 'mark_complete',
-          actorId: req.technicianId,
-          error: e,
-        });
-      }
+    try {
+      const result = await trackTransitions.markComplete(svc.id, {
+        actorType: 'admin',
+        actorId: req.technicianId,
+      });
+      await recordTrackTransitionResultFailure({
+        jobId: svc.id,
+        action: 'mark_complete',
+        actorId: req.technicianId,
+        result,
+      });
+    } catch (e) {
+      logger.error(`[admin-dispatch] markComplete failed: ${e.message}`);
+      await recordTrackTransitionFailure({
+        jobId: svc.id,
+        action: 'mark_complete',
+        actorId: req.technicianId,
+        error: e,
+      });
     }
 
     if (isIncompleteVisit) {
@@ -2565,6 +2581,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             : completionReviewDelayMinutes,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
+    }
+
+    // The first complete transition wakes any already-open customer
+    // tracker. Re-emit once report/invoice/review artifacts are minted
+    // so the final card can render its links without requiring a manual
+    // refresh. markComplete is idempotent once track_state is complete.
+    try {
+      const result = await trackTransitions.markComplete(svc.id, {
+        actorType: 'admin',
+        actorId: req.technicianId,
+      });
+      await recordTrackTransitionResultFailure({
+        jobId: svc.id,
+        action: 'refresh_complete_tracker',
+        actorId: req.technicianId,
+        result,
+      });
+    } catch (e) {
+      logger.error(`[admin-dispatch] refresh complete tracker failed: ${e.message}`);
+      await recordTrackTransitionFailure({
+        jobId: svc.id,
+        action: 'refresh_complete_tracker',
+        actorId: req.technicianId,
+        error: e,
+      });
     }
 
     if (!resumingCommittedCompletion) {
