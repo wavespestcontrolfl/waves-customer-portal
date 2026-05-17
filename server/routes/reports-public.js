@@ -649,3 +649,4 @@ async function ensureReportToken(serviceRecordId) {
 
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
+module.exports.reportLimiter = reportLimiter;
