@@ -593,7 +593,7 @@ function renderPage(token, estimate, estData) {
     if (Number.isFinite(explicit) && explicit > 0) return explicit;
     return Number(visitsForService(svc?.name || svc?.label || svc?.service)) || null;
   };
-  const perTreatmentForRecurringService = (svc, visits) => {
+  const basePerTreatmentForRecurringService = (svc, visits) => {
     const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
     let base = null;
     if (n.includes('pest')) {
@@ -610,6 +610,14 @@ function renderPage(token, estimate, estData) {
     }
     return base == null ? null : Math.round(base * (1 - tierDiscount(tier)) * 100) / 100;
   };
+  const adjustedPerTreatmentForRecurringService = (svc, visits, basePrice) => {
+    const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
+    if (basePrice == null) return null;
+    const prefPerTreatmentOff = n.includes('pest') && visits > 0
+      ? (prefMonthlyOff * 12) / visits
+      : 0;
+    return Math.max(0, Math.round((basePrice - prefPerTreatmentOff) * 100) / 100);
+  };
   const servicePriority = (svc) => {
     const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
     if (n.includes('pest')) return 0;
@@ -622,8 +630,10 @@ function renderPage(token, estimate, estData) {
     .map((svc) => {
       const name = svc?.displayName || svc?.name || svc?.label || 'Service';
       const visits = visitsForRecurringService(svc);
-      const price = perTreatmentForRecurringService(svc, visits);
       const isPest = /pest/i.test(String(name));
+      const isLawn = /lawn/i.test(String(name));
+      const basePrice = basePerTreatmentForRecurringService(svc, visits);
+      const price = adjustedPerTreatmentForRecurringService(svc, visits, basePrice);
       const visitText = visits
         ? `${Math.round(visits).toLocaleString()} ${visits === 1 ? 'treatment' : 'treatments'}/year`
         : 'Service visits/year';
@@ -631,6 +641,9 @@ function renderPage(token, estimate, estData) {
       return {
         name,
         detailHtml: cadenceText ? `${escapeHtml(cadenceText)} &middot; ${escapeHtml(visitText)}` : escapeHtml(visitText),
+        kind: isPest ? 'pest' : (isLawn ? 'lawn' : 'other'),
+        visits,
+        basePrice,
         price,
       };
     });
@@ -640,17 +653,21 @@ function renderPage(token, estimate, estData) {
             <div class="billing-service-name">${escapeHtml(row.name)}</div>
             <div class="billing-service-detail">${row.detailHtml}</div>
           </div>
-          ${row.price != null ? `<div class="billing-service-price">${fmtMoney(row.price)} <span>/ treatment</span></div>` : ''}
+          ${row.price != null ? `<div class="billing-service-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span>/ treatment</span></div>` : ''}
         </div>`).join('');
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
+  const showAnnualPrepayOption = showMembershipFee;
+  const billingLede = showAnnualPrepayOption
+    ? 'Billed after each completed service visit through autopay unless you choose the 12-month prepay option at signup.'
+    : 'Billed after each completed service visit through autopay.';
   const recurringBillCadenceWord = selectedRecurringFrequencyKey === 'quarterly'
     ? 'quarterly'
     : (selectedRecurringFrequencyKey === 'bi_monthly' ? 'bi-monthly' : 'monthly');
   const billingCardHtml = (!quoteRequired && !locked && recurring.length) ? `
   <section class="card billing-card"${billingModeAttr}>
     <h2>Choose how you want to pay</h2>
-    <p class="billing-lede">Billed after each completed service visit through autopay unless you choose to pay the 12-month plan in full at signup.</p>
+    <p class="billing-lede">${escapeHtml(billingLede)}</p>
     <div class="waves-intelligence">
       <div class="eyebrow">Waves Intelligence</div>
       <p>Visit counts, service cadence, and pricing are matched to this property profile, local seasonality, and the bundle discount shown on this estimate.</p>
@@ -662,9 +679,10 @@ function renderPage(token, estimate, estData) {
         ${showMembershipFee ? `
         <div class="billing-line"><span>WaveGuard Membership Setup &mdash; ${fmtMoney(membershipFee)} one-time charge</span></div>
         <p class="billing-small">A setup invoice is prepared after approval. This one-time setup activates your WaveGuard membership benefits, service schedule, and protection plan.</p>` : ''}
-        <div class="billing-total-row"><span>Setup invoice</span><strong>${fmtMoney(setupDueToday)}</strong></div>
+        ${showMembershipFee ? `<div class="billing-total-row"><span>Setup invoice</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
         <p class="billing-small">No payment is charged on this page. Your first service visit will be billed after completion.</p>
       </div>
+      ${showAnnualPrepayOption ? `
       <div class="payment-choice">
         <h3>Pay the 12-month plan in full</h3>
         <p>Approve the 12-month plan up front and the setup is included at no charge.</p>
@@ -675,7 +693,7 @@ function renderPage(token, estimate, estData) {
         <p class="billing-small">The WaveGuard Membership Setup is included at no charge when the 12-month plan is paid in full.</p>` : ''}
         <div class="billing-total-row"><span>Prepay invoice</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
         ${showMembershipFee ? `<p class="billing-small">Net setup fee: $0</p>` : ''}
-      </div>
+      </div>` : ''}
     </div>
     ${billingServiceRowsHtml ? `
     <div class="billing-works">
@@ -1070,7 +1088,7 @@ ${shellTopBar()}
     <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
     <div id="pay-pref-area" style="display:none">
       <h3 id="pay-pref-heading" style="margin:20px 0 4px">Choose how you want to pay</h3>
-      <p class="card-sub" id="pay-pref-subhead" style="margin:0">Billed after each completed service visit through autopay unless you choose to pay the 12-month plan in full at signup.</p>
+      <p class="card-sub" id="pay-pref-subhead" style="margin:0">${escapeHtml(billingLede)}</p>
       <div class="pay-pref-grid options">
         <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">Pay after each visit</span><span class="pay-pref-sub">Billed after each completed service through autopay.</span></button>
         <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit hidden><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
@@ -1159,16 +1177,27 @@ ${shellQuestionsBar()}
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
-  const refreshBillingAmounts = (monthlyTotal, annualTotal) => {
+  const refreshBillingAmounts = (monthlyTotal, annualTotal, prefMonthlyOff) => {
     const monthly = Number(monthlyTotal || 0);
     const annual = Number.isFinite(Number(annualTotal))
       ? Number(annualTotal)
       : Math.round(monthly * 12 * 100) / 100;
+    const prefOff = Number(prefMonthlyOff || 0);
     document.querySelectorAll('[data-billing-period-total]').forEach((el) => {
       el.textContent = fmt(intervalPrice(monthly));
     });
     document.querySelectorAll('[data-annual-total]').forEach((el) => {
       el.textContent = fmt(annual);
+    });
+    document.querySelectorAll('[data-billing-service-price]').forEach((el) => {
+      const base = Number(el.dataset.serviceBasePrice || 0);
+      const visits = Number(el.dataset.serviceVisits || 0);
+      if (!(base > 0)) return;
+      const discount = el.dataset.serviceKind === 'pest' && visits > 0
+        ? (prefOff * 12) / visits
+        : 0;
+      const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
+      el.innerHTML = fmt(adjusted) + ' <span>/ treatment</span>';
     });
   };
 
@@ -1192,7 +1221,7 @@ ${shellQuestionsBar()}
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || 'Failed');
         document.getElementById('monthly-display').textContent = fmt(intervalPrice(data.monthlyTotal));
-        refreshBillingAmounts(data.monthlyTotal, data.annualTotal);
+        refreshBillingAmounts(data.monthlyTotal, data.annualTotal, data.prefMonthlyOff);
         document.querySelectorAll('[data-monthly-echo]').forEach(el => el.textContent = fmt(intervalPrice(data.monthlyTotal)));
         if (data.onetimeTotal != null) {
           const oneTimeDisplay = document.getElementById('onetime-display');
@@ -1304,7 +1333,7 @@ ${shellQuestionsBar()}
     if (subhead) {
       subhead.textContent = isOneTime
         ? 'This books a single visit. You will not be charged today.'
-        : 'Billed after each completed service visit through autopay unless you choose to pay the 12-month plan in full at signup.';
+        : ${JSON.stringify(billingLede)};
     }
     if (visitTitle) visitTitle.textContent = isOneTime ? 'Book + pay on service day' : 'Pay at the visit';
     if (visitSub) {
@@ -2584,6 +2613,7 @@ router.put('/:token/preferences', async (req, res, next) => {
       monthlyTotal,
       annualTotal,
       onetimeTotal,
+      prefMonthlyOff: monthlyOff,
       tierPrices,
       savingsPerMo,
       prefMeta,

@@ -160,6 +160,7 @@ const FIELD_LABELS = {
   gallons_applied: 'Gallons applied',
   applicator_name: "Applicator's printed name",
   applicator_fdacs_id: 'Applicator FDACS ID #',
+  applicator_attestation: 'Applicator attestation',
   warranty_type: 'Warranty / retreatment bond',
   renewal_due: 'Renewal due by',
 };
@@ -536,7 +537,7 @@ export default function ProjectReportViewPage() {
           {/* Recommendations — if the text is the three-section AI-drafted
                format, render each section with its own heading. Otherwise
                fall back to the single "Recommendations" block. */}
-          {data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
+          {!isCertificate && data.recommendations && <RecommendationsBlock text={data.recommendations} upcomingAppointment={data.upcomingAppointment} />}
         </div>
 
         {data.projectType === 'wdo_inspection' && (
@@ -725,7 +726,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
         <div style={{ flex: 1 }}>
           <div style={{
             fontFamily: FONTS.heading,
-            fontSize: 11,
+            fontSize: 14,
             fontWeight: 700,
             color: '#fff',
             opacity: 0.92,
@@ -747,7 +748,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
             Pre-Construction Termite Protection
           </div>
           <div style={{
-            fontSize: 11,
+            fontSize: 14,
             color: '#fff',
             opacity: 0.92,
             marginTop: 8,
@@ -762,7 +763,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
       {/* Property + customer header */}
       <div style={{ padding: '14px 20px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
         {customerName && (
-          <div style={{ fontSize: 12, fontWeight: 800, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.5 }}>
             Issued to: {customerName}
           </div>
         )}
@@ -792,7 +793,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
             </div>
             <div style={{
               fontFamily: FONTS.body,
-              fontSize: 11,
+              fontSize: 14,
               fontStyle: 'italic',
               color: B.grayMid,
               marginTop: 4,
@@ -806,7 +807,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
       {/* FBC required compliance statement (exact wording per 1816.1.7) */}
       <div style={{ padding: '14px 20px 4px' }}>
         <div style={{
-          fontSize: 13,
+          fontSize: 14,
           color: B.grayDark,
           lineHeight: 1.55,
           fontStyle: 'italic',
@@ -818,7 +819,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
           Agriculture and Consumer Services.
         </div>
         <div style={{
-          fontSize: 13,
+          fontSize: 14,
           color: B.red,
           fontWeight: 700,
           lineHeight: 1.5,
@@ -835,18 +836,66 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
             borderRadius: 8,
             background: B.blueSurface,
             border: `1px solid ${B.bluePale}`,
-            fontSize: 13,
+            fontSize: 14,
             color: B.grayDark,
             lineHeight: 1.55,
             whiteSpace: 'pre-wrap',
           }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
               Applicator notes
             </div>
             {f.comments}
           </div>
         )}
       </div>
+
+      {/* Electronic signature / attestation block — FBC 1816.1.7 requires
+          an authorized applicator signature. The typed attestation + printed
+          name + FDACS ID + treatment date together constitute an electronic
+          signature accepted by Florida building departments. */}
+      {f.applicator_attestation && (f.applicator_name || technicianName) && (
+        <div style={{
+          margin: '14px 20px 0',
+          padding: '12px 14px',
+          borderRadius: 10,
+          background: B.blueSurface,
+          border: `1px solid ${B.bluePale}`,
+        }}>
+          <div style={{
+            fontSize: 14,
+            fontWeight: 800,
+            color: B.navy,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            marginBottom: 6,
+          }}>
+            Signed electronically
+          </div>
+          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, fontStyle: 'italic' }}>
+            {f.applicator_attestation}
+          </div>
+          <div style={{
+            marginTop: 10,
+            paddingTop: 10,
+            borderTop: `1px solid ${B.bluePale}`,
+            fontSize: 14,
+            color: B.navy,
+            lineHeight: 1.5,
+          }}>
+            <span style={{ color: B.green, fontWeight: 800, marginRight: 6 }}>Signed by</span>
+            <span style={{ fontWeight: 700 }}>{f.applicator_name || technicianName}</span>
+            {f.applicator_fdacs_id ? ` · FDACS ID ${f.applicator_fdacs_id}` : ''}
+            {(f.treatment_date || projectDateLabel) ? (
+              <>
+                <br />
+                <span style={{ color: B.grayDark, fontSize: 14 }}>
+                  Attested on {f.treatment_date || projectDateLabel}
+                </span>
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {/* Blue footer band — Activate Your Termite Warranty (matches v10 sticker) */}
       <div style={{
@@ -866,7 +915,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
           Activate Your Termite Warranty
         </div>
         <div style={{
-          fontSize: 13,
+          fontSize: 14,
           color: '#fff',
           opacity: 0.95,
           marginTop: 4,

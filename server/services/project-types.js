@@ -145,6 +145,11 @@ const PROJECT_TYPES = {
       { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text' },
       { key: 'applicator_name', label: "Applicator's printed name", type: 'text' },
       { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text' },
+      // FBC 1816.1.7 requires an "authorized signature of the licensed
+      // applicator." A typed attestation paired with the printed name +
+      // FDACS ID + treatment date is the standard pattern for portal-
+      // generated certificates accepted by Florida building departments.
+      { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).'] },
       { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'No warranty'] },
       { key: 'renewal_due', label: 'Renewal due by', type: 'text', placeholder: 'YYYY-MM-DD' },
       { key: 'comments', label: 'Additional notes', type: 'textarea', placeholder: 'Pre-pour conditions, weather, retreatment triggers, etc.' },
