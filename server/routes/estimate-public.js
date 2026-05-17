@@ -948,8 +948,8 @@ ${shellTopBar()}
     <div id="review-area" style="display:none">
       <div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn" onclick="confirmBooking()"><span class="pay-pref-title" id="confirm-book-title">Confirm and save card</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
-        <button type="button" class="pay-pref-btn" onclick="cancelReservation()"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>
+        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">Confirm and save card</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
+        <button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>
       </div>
     </div>
   </section>
@@ -1291,6 +1291,8 @@ ${shellQuestionsBar()}
       document.getElementById('pay-pref-area').style.display = 'none';
       const reviewArea = document.getElementById('review-area');
       reviewArea.style.display = '';
+      const confirmBtn = document.getElementById('confirm-book-btn');
+      if (confirmBtn) confirmBtn.disabled = false;
       const title = document.getElementById('confirm-book-title');
       const sub = document.getElementById('confirm-book-sub');
       if (pref === 'card_on_file') {
@@ -1348,6 +1350,8 @@ ${shellQuestionsBar()}
     document.getElementById('review-area').style.display = 'none';
     document.getElementById('slot-area').style.display = '';
     const payArea = document.getElementById('pay-pref-area');
+    const confirmBtn = document.getElementById('confirm-book-btn');
+    if (confirmBtn) confirmBtn.disabled = false;
     if (payArea) {
       payArea.style.display = 'none';
       document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
@@ -1404,6 +1408,14 @@ ${shellQuestionsBar()}
   document.querySelectorAll('[data-pay-pref]').forEach((b) => {
     b.addEventListener('click', () => pickPaymentPref(b.dataset.payPref));
   });
+  const confirmBookBtn = document.getElementById('confirm-book-btn');
+  if (confirmBookBtn) {
+    confirmBookBtn.addEventListener('click', confirmBooking);
+  }
+  const changeBookingPickBtn = document.getElementById('change-booking-pick-btn');
+  if (changeBookingPickBtn) {
+    changeBookingPickBtn.addEventListener('click', cancelReservation);
+  }
 
   // Kick off the slot fetch if the booking card is on the page (i.e.,
   // estimate is not yet accepted/expired).

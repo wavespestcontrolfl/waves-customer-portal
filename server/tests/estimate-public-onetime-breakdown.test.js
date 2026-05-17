@@ -480,6 +480,32 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('id="booking-card"');
   });
 
+  test('server-rendered booking review buttons use explicit click listeners', () => {
+    const html = renderPage('booking-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+
+    expect(html).toContain('id="confirm-book-btn"');
+    expect(html).toContain('id="change-booking-pick-btn"');
+    expect(html).not.toContain('id="confirm-book-btn" onclick=');
+    expect(html).not.toContain('onclick="cancelReservation()"');
+    expect(html).toContain("confirmBookBtn.addEventListener('click', confirmBooking)");
+    expect(html).toContain("changeBookingPickBtn.addEventListener('click', cancelReservation)");
+  });
+
   test('accept success payload marks invoice payment as the next step', () => {
     expect(buildAcceptSuccessPayload({
       invoiceMode: true,
