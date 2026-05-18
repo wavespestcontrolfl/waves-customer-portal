@@ -61,12 +61,20 @@ const REVIEW_LOCATIONS = [
 ];
 const TREATMENT_OVERLAY_COLORS = ['#0f766e', '#b45309', '#2563eb', '#be123c', '#4d7c0f', '#7c2d12', '#4338ca', '#047857'];
 
-function formatDate(value) {
+function calendarDateFromDateOnlyValue(value) {
+  if (!value) return null;
+  const raw = String(value);
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})(?:T00:00:00(?:\.000)?(?:Z|\+00:00)?)?$/.exec(raw);
+  if (!dateOnly) return null;
+  return new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12));
+}
+
+export function formatDate(value) {
   if (!value) return '';
   const raw = String(value);
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  const dateOnly = calendarDateFromDateOnlyValue(value);
   const date = dateOnly
-    ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12))
+    ? dateOnly
     : new Date(raw);
   if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleDateString('en-US', {
@@ -224,6 +232,42 @@ function visitTimeRange(data = {}) {
   return '';
 }
 
+export function cleanVisitSummary(value) {
+  let text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  text = text.replace(/^Thanks for having us out today\.\s*/i, 'Your routine service is complete. ');
+  text = text.replace(/\band also knocked\b/i, 'and knocked');
+  text = text.replace(/\s*,?\s*and\s*-\s*Waves\.?$/i, '.');
+  text = text.replace(/\s+-\s*Waves\.?$/i, '.');
+  text = text.replace(/You should see activity ease over the next 1-2 weeks\.?/i, 'You may see activity ease over the next 1-2 weeks.');
+  text = text.replace(/\s+\./g, '.').replace(/\.{2,}/g, '.');
+  return text;
+}
+
+function visitSummaryCopy(data = {}) {
+  return cleanVisitSummary(data.summary) || 'Your routine service is complete.';
+}
+
+export function customerInteractionCopy(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const copy = {
+    tech_home_spoke_with_them: 'The technician spoke with someone at the home.',
+    tech_home_no_answer: 'The technician did not reach someone at the home.',
+    customer_home_spoke_with_them: 'The technician spoke with someone at the home.',
+    customer_home_no_answer: 'The technician did not reach someone at the home.',
+    spoke: 'The technician spoke with someone at the home.',
+    not_home_full_access: 'No one was home, and the technician had full access to complete service.',
+    not_home_partial_access: 'No one was home, and the technician completed the accessible areas.',
+    customer_specific_concern: 'The customer shared a specific concern with the technician.',
+    customer_not_home: 'No one was home during the visit.',
+    no_customer_contact: 'No customer interaction was recorded for this visit.',
+    gate_access_used: 'The technician used the recorded access instructions.',
+  };
+  return copy[key] || formatEnumLabel(raw);
+}
+
 function positiveNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : null;
@@ -282,14 +326,18 @@ function dynamicHeroSummary(data) {
 }
 
 function conditionRows(conditions = {}) {
-  return [
-    ['Air temp', valueOrDash(conditions.temp_f ?? conditions.temp, '°F')],
-    ['Humidity', valueOrDash(conditions.humidity_pct ?? conditions.humidity, '%')],
-    ['Wind', valueOrDash(conditions.wind_mph ?? conditions.wind, conditions.wind_mph ? ' mph' : '')],
-    ['Rain last 24 hr', valueOrDash(conditions.rain_24h_in, ' in')],
-    ['Sky', valueOrDash(conditions.sky ?? conditions.cloudCover)],
-    ['Source', valueOrDash(conditions.source)],
+  const rows = [
+    ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
+    ['Humidity', conditions.humidity_pct ?? conditions.humidity, '%'],
+    ['Wind', conditions.wind_mph ?? conditions.wind, conditions.wind_mph != null && conditions.wind_mph !== '' ? ' mph' : ''],
+    ['Rain last 24 hr', conditions.rain_24h_in, ' in'],
+    ['Sky', conditions.sky ?? conditions.cloudCover, ''],
+    ['Source', conditions.source, ''],
   ];
+  return rows.map(([label, value, suffix]) => [
+    label,
+    value == null || value === '' ? 'Not recorded' : `${value}${suffix}`,
+  ]);
 }
 
 function formatEnumLabel(value) {
@@ -481,17 +529,76 @@ function buildTreatmentOverlayRows(data = {}) {
   });
 }
 
+function applicationZoneText(app = {}, zoneById = new Map()) {
+  const zones = applicationZoneIds(app).map((id) => zoneById.get(String(id))).filter(Boolean);
+  const letters = zones.map((zone) => zone.letter).filter(Boolean);
+  const labels = zones.map((zone) => zone.label).filter(Boolean);
+  if (letters.length) return `Zones ${letters.join(', ')}`;
+  if (labels.length) return labels.join(', ');
+  return app.applicationArea || 'Treated zones recorded';
+}
+
+function applicationGroupPurposeCopy(purpose, serviceLine = 'pest') {
+  if (purpose === 'Perimeter protection') {
+    return 'These products were used along treated exterior zones to help maintain the protective band.';
+  }
+  if (purpose === 'Lawn nutrient application') {
+    return 'These products were applied as part of the lawn program to support turf density, color, and recovery.';
+  }
+  if (purpose === 'Targeted weed treatment') {
+    return 'These products were applied where visible weed pressure or service notes called for targeted control.';
+  }
+  if (purpose === 'Fungus control application') {
+    return 'These products were applied to support turf health where fungus pressure or seasonal conditions called for protection.';
+  }
+  if (purpose === 'Mosquito pressure reduction') {
+    return 'These products were applied to reduce mosquito pressure around target resting areas.';
+  }
+  return applicationPurposeCopy({ method: '', product: {} }, serviceLine).replace(/^Application recorded.*$/i, 'These products were documented for this service visit.');
+}
+
+function groupApplicationsByPurpose(applications = [], data = {}) {
+  const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
+  const groups = new Map();
+  for (const app of applications) {
+    const purpose = applicationPurpose(app, data.serviceLine);
+    const method = app.methodLabel || formatEnumLabel(app.method) || 'Application';
+    const zones = applicationZoneText(app, zoneById);
+    const key = [purpose, method, zones].join('|');
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        purpose,
+        method,
+        zones,
+        copy: applicationGroupPurposeCopy(purpose, data.serviceLine),
+        products: [],
+      });
+    }
+    groups.get(key).products.push(app);
+  }
+  return Array.from(groups.values());
+}
+
 function conditionInterpretation(conditions = {}) {
   const wind = Number(conditions.wind_mph ?? conditions.wind);
   const rain = Number(conditions.rain_24h_in);
+  const hasWind = Number.isFinite(wind);
+  const hasRain = Number.isFinite(rain);
+  if (!hasWind && !hasRain) {
+    return 'Weather was marked suitable for treatment.';
+  }
   if (Number.isFinite(wind) && wind > 10) {
     return 'Wind was elevated, so treatment was adjusted to match label and site conditions.';
   }
   if (Number.isFinite(rain) && rain > 0.25) {
     return 'Recent rainfall was noted. Treatment decisions were adjusted for site conditions.';
   }
-  if ((!Number.isFinite(rain) || rain <= 0.1) && (!Number.isFinite(wind) || wind <= 10)) {
+  if (hasRain && hasWind && rain <= 0.1 && wind <= 10) {
     return 'Weather was suitable for treatment. Low rainfall and moderate wind supported exterior application.';
+  }
+  if ((!hasRain || rain <= 0.1) && (!hasWind || wind <= 10)) {
+    return 'Weather was marked suitable for treatment.';
   }
   return 'Conditions were documented at application time for this service record.';
 }
@@ -887,6 +994,123 @@ function TechnicianVisitLine({ data }) {
   );
 }
 
+function readinessSummary(context, mode = 'live', nowMsOverride) {
+  const fallbackNowMs = mode === 'live' ? Date.now() : Date.parse(context?.generatedAt) || Date.now();
+  const nowMs = Number.isFinite(nowMsOverride) ? nowMsOverride : fallbackNowMs;
+  const targets = Array.isArray(context?.targets) ? context.targets : [];
+  const readyTargets = targets.filter((target) => {
+    const readyAtMs = Date.parse(target.readyAt);
+    return Number.isFinite(readyAtMs) && readyAtMs <= nowMs;
+  });
+  const allReady = targets.length > 0 && readyTargets.length === targets.length;
+  const areaTypes = targets.map((target) => target.label).filter(Boolean);
+  return {
+    allReady,
+    areaType: areaTypes.length ? areaTypes.join(', ') : 'Treatment areas',
+    status: targets.length ? (allReady ? 'Ready now' : 'Ready time pending') : 'See advisory',
+    badge: targets.length ? (allReady ? 'Ready now' : 'Re-entry timing') : 'Readiness noted',
+    headline: allReady ? `Treated ${areaTypes.join(', ').toLowerCase() || 'areas'} areas are ready now.` : (context?.customerSummary || 'Review the readiness details below.'),
+    precautions: context?.petAdvisory || 'None listed',
+  };
+}
+
+function useReadinessNow(context, mode) {
+  const generatedAtMs = Date.parse(context?.generatedAt) || Date.now();
+  const [nowMs, setNowMs] = useState(mode === 'live' ? Date.now() : generatedAtMs);
+
+  useEffect(() => {
+    if (mode !== 'live' || !context) return undefined;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [context, mode]);
+
+  return nowMs;
+}
+
+function ServiceStatusCard({ data, mode }) {
+  const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
+  const arrived = formatClockTime(data.visitTiming?.arrivedAt);
+  const completed = formatClockTime(data.visitTiming?.exitedAt);
+  const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
+  const readiness = readinessSummary(data.dynamicContext?.reentry, mode, nowMs);
+  const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
+  const completionStatus = completedEvent?.status === 'pending' ? 'In progress' : 'Completed';
+
+  return (
+    <section className="sr-hero service-status-card" id="service-status">
+      <div className="service-status-main">
+        <div>
+          <div className="section-eyebrow">Service status</div>
+          <h1 className="sr-title">Service report</h1>
+          <div className="sr-meta">{serviceDisplayName(data)} | {formatDate(data.serviceDate)}</div>
+          {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
+        </div>
+        <div className={`status-badge ${readiness.allReady ? 'status-ready' : 'status-pending'}`}>{readiness.badge}</div>
+      </div>
+      <div className="service-status-grid">
+        <div className="sr-cell">
+          <div className="sr-cell-label">Technician</div>
+          <div className="sr-cell-value">Technician: {technician}</div>
+        </div>
+        {arrived && (
+          <div className="sr-cell">
+            <div className="sr-cell-label">Recorded arrival</div>
+            <div className="sr-cell-value">{arrived}</div>
+          </div>
+        )}
+        {completed && (
+          <div className="sr-cell">
+            <div className="sr-cell-label">Recorded completion</div>
+            <div className="sr-cell-value">{completed}</div>
+          </div>
+        )}
+        <div className="sr-cell">
+          <div className="sr-cell-label">Completion status</div>
+          <div className="sr-cell-value">{completionStatus}</div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ReentryReadinessCard({ context, mode, token }) {
+  const nowMs = useReadinessNow(context, mode);
+  const readiness = readinessSummary(context, mode, nowMs);
+
+  useEffect(() => {
+    if (mode !== 'live' || !context) return;
+    trackReportEvent(token, 'reentry_timer_viewed');
+  }, [context, mode, token]);
+
+  if (!context) return null;
+  return (
+    <section className={`sr-section readiness-card ${readiness.allReady ? 'is-ready' : ''}`} id="re-entry">
+      <div className="readiness-card-header">
+        <div>
+          <div className="section-eyebrow">Re-entry / readiness</div>
+          <h2>Ready to Re-enter</h2>
+          <p>{readiness.headline}</p>
+        </div>
+        <div className="readiness-status-chip">{readiness.status}</div>
+      </div>
+      <div className="readiness-facts">
+        <div className="sr-cell">
+          <div className="sr-cell-label">Treatment area type</div>
+          <div className="sr-cell-value">{readiness.areaType}</div>
+        </div>
+        <div className="sr-cell">
+          <div className="sr-cell-label">Status</div>
+          <div className="sr-cell-value">{readiness.status}</div>
+        </div>
+        <div className="sr-cell">
+          <div className="sr-cell-label">Precautions</div>
+          <div className="sr-cell-value">{readiness.precautions}</div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function HeroConditions({ conditions, weatherCall }) {
   const rows = conditionRows(conditions);
   const copy = weatherCall
@@ -981,6 +1205,34 @@ function ReportAskBox({ mode, token, serviceLine }) {
       </div>
       {answer && <div className="report-ask-answer">{answer}</div>}
     </div>
+  );
+}
+
+function QuickNavigationAndAsk({ mode, token, serviceLine }) {
+  const links = [
+    ['#service-timeline', 'Timeline'],
+    ['#areas-serviced', 'Areas Serviced'],
+    ['#service-coverage-map', 'Coverage Map'],
+    ['#products-applied', 'Products Applied'],
+    ['#what-to-expect', 'What to Expect'],
+    ['#supporting-details', 'Details'],
+  ];
+
+  return (
+    <section className="sr-section quick-report-tools" id="quick-navigation">
+      <div className="coverage-section-header">
+        <div>
+          <h2>Need help with this report?</h2>
+          <p className="map-context-copy">Ask Waves AI or jump to the section you need.</p>
+        </div>
+      </div>
+      <nav className="quick-nav-row" aria-label="Service report sections">
+        {links.map(([href, label]) => (
+          <a href={href} key={href}>{label}</a>
+        ))}
+      </nav>
+      <ReportAskBox mode={mode} token={token} serviceLine={serviceLine} />
+    </section>
   );
 }
 
@@ -1244,6 +1496,41 @@ function WhyActivityCard({ context, embedded = false }) {
   );
 }
 
+function whatToExpectCopy(context = {}, serviceLine = 'pest') {
+  if (serviceLine === 'lawn') {
+    return context.body || 'Lawn treatments are evaluated over time. Conditions can continue changing between visits based on irrigation, mowing, rainfall, heat, and turf response.';
+  }
+  return 'Exterior treatments are applied to reduce activity around entry-prone areas. Some light outdoor activity can still appear while the treatment band is active. Activity should begin to ease over the expected treatment window.';
+}
+
+function WhatToExpectNextSection({ context, serviceLine }) {
+  return (
+    <section className="sr-section what-to-expect-section" id="what-to-expect">
+      <h2>What to Expect Next</h2>
+      <p>{whatToExpectCopy(context, serviceLine)}</p>
+    </section>
+  );
+}
+
+function WhenToContactUsSection() {
+  const items = [
+    'Activity increases',
+    'Activity moves inside',
+    'Activity continues after the expected treatment window',
+    'You have questions about treated areas',
+  ];
+  return (
+    <section className="sr-section contact-waves-section" id="when-to-contact">
+      <h2>When to Contact Us</h2>
+      <p>Text us if:</p>
+      <ul>
+        {items.map((item) => <li key={item}>{item}</li>)}
+      </ul>
+      <a href="sms:+19412975749" className="contact-waves-cta">Text Waves</a>
+    </section>
+  );
+}
+
 function ReportViewModeToggle({ value, onChange }) {
   return (
     <div className="view-mode-toggle" aria-label="Report view mode">
@@ -1346,10 +1633,10 @@ function SinceLastVisit({ context }) {
   );
 }
 
-function RecommendedActionCard({ findings = [], aiSummary }) {
+function RecommendedActionCard({ findings = [], aiSummary, primaryMove }) {
   const aiAction = aiSummary?.recommendedNextStep?.text;
   const finding = recommendedFinding(findings);
-  const text = aiAction || finding?.recommendation;
+  const text = primaryMove?.title || aiAction || finding?.recommendation;
   if (!text) return null;
   return (
     <section className="sr-section recommended-action-card">
@@ -1411,67 +1698,69 @@ function WhatHappenedWhere({ data, token, mode = 'live' }) {
   );
 }
 
-function AppliedProductsSection({ data, showTechnical = false, mode = 'live', whyActivity }) {
+function AppliedProductsSection({ data, showAll = false, showTechnical = false, mode = 'live' }) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
-  if (!applications.length && !whyActivity) return null;
-  const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
-  const serviceLine = data.serviceLine || 'pest';
-  const visibleApps = showTechnical ? applications : applications.slice(0, 4);
+  if (!applications.length) return null;
+  const groupedApplications = groupApplicationsByPurpose(applications, data);
+  const visibleGroups = showAll ? groupedApplications : groupedApplications.slice(0, 4);
 
   return (
-    <section className="sr-section applied-products-section">
+    <section className="sr-section applied-products-section" id="products-applied">
       <div className="applied-products-header">
         <div>
-          <h2>What we applied today</h2>
-          <p>Service is complete. These are the products and methods documented for this visit.</p>
+          <h2>Products Applied</h2>
+          <p>What was applied, where, and why.</p>
         </div>
       </div>
-      {visibleApps.length > 0 && (
+      {visibleGroups.length > 0 && (
         <div className="applied-products-grid">
-          {visibleApps.map((app) => {
-          const zones = (app.zone_ids || [])
-            .map((id) => zoneById.get(String(id)))
-            .filter(Boolean);
-          const targets = Array.isArray(app.targets) ? app.targets.map(formatEnumLabel).filter(Boolean) : [];
-          const technicalDetails = applicationTechnicalExplanation(app, serviceLine);
-          return (
-            <article className="applied-product-card" key={app.id}>
-              <div className="sr-cell-label">{applicationPurpose(app, serviceLine)}</div>
-              <h3>{app.product?.name || 'Product application'}</h3>
-              <details className="solution-detail report-accordion" open={mode !== 'live'}>
-                <summary>
-                  <span>{applicationPurposeCopy(app, serviceLine)}</span>
-                  <span className="accordion-action">How it works</span>
-                </summary>
-                <div className="accordion-body solution-detail-body">
-                  {technicalDetails.map((detail) => (
-                    <p key={detail}>{detail}</p>
+          {visibleGroups.map((group) => (
+            <article className="applied-product-card product-group-card" key={group.key}>
+              <div className="sr-cell-label">{group.purpose}</div>
+              <h3>{group.purpose}</h3>
+              <p>{group.copy}</p>
+              <div className="product-group-list" aria-label={`${group.purpose} products`}>
+                <div className="sr-cell-label">Products</div>
+                <ul>
+                  {group.products.map((app) => (
+                    <li key={app.id}>
+                      <strong>{app.product?.name || 'Product application'}</strong>
+                      {app.product?.active_ingredient && <span>{app.product.active_ingredient}</span>}
+                    </li>
                   ))}
-                  {showTechnical && (
-                    <p className="sr-nerd-note">
-                      {[
-                        app.product?.epa_reg ? `EPA reg. ${app.product.epa_reg}` : null,
-                        app.rate && app.rateUnit ? `Rate: ${app.rate} ${app.rateUnit}` : null,
-                        app.totalAmount && app.amountUnit ? `Total: ${app.totalAmount} ${app.amountUnit}` : null,
-                      ].filter(Boolean).join(' | ') || 'Technical application details were not recorded.'}
-                    </p>
-                  )}
-                </div>
-              </details>
-              <div className="applied-product-meta">
-                {(app.methodLabel || app.method) && <span>{app.methodLabel || formatEnumLabel(app.method)}</span>}
-                {targets.length > 0 && <span>{targets.join(', ')}</span>}
-                {zones.length > 0 && <span>Zones {zones.map((zone) => zone.letter).join(', ')}</span>}
+                </ul>
               </div>
+              <div className="applied-product-meta">
+                <span>Method: {group.method}</span>
+                <span>{group.zones}</span>
+              </div>
+              {showTechnical && (
+                <details className="solution-detail report-accordion" open={mode !== 'live'}>
+                  <summary>
+                    <span>Technical application details</span>
+                    <span className="accordion-action">Details</span>
+                  </summary>
+                  <div className="accordion-body solution-detail-body">
+                    {group.products.map((app) => (
+                      <p key={`${app.id}-tech`}>
+                        {[
+                          app.product?.name || 'Product application',
+                          app.product?.epa_reg ? `EPA reg. ${app.product.epa_reg}` : null,
+                          app.rate && app.rateUnit ? `Rate: ${app.rate} ${app.rateUnit}` : null,
+                          app.totalAmount && app.amountUnit ? `Total: ${app.totalAmount} ${app.amountUnit}` : null,
+                        ].filter(Boolean).join(' | ')}
+                      </p>
+                    ))}
+                  </div>
+                </details>
+              )}
             </article>
-          );
-          })}
+          ))}
         </div>
       )}
-      {!showTechnical && applications.length > visibleApps.length && (
-        <p className="sr-muted">{applications.length - visibleApps.length} more application{applications.length - visibleApps.length === 1 ? '' : 's'} shown in Detailed mode.</p>
+      {!showTechnical && groupedApplications.length > visibleGroups.length && (
+        <p className="sr-muted">{groupedApplications.length - visibleGroups.length} more application group{groupedApplications.length - visibleGroups.length === 1 ? '' : 's'} shown in Detailed mode.</p>
       )}
-      {whyActivity && <WhyActivityCard context={whyActivity} embedded />}
     </section>
   );
 }
@@ -1803,7 +2092,7 @@ function ServiceCoverageMapSection({
   if (loading) {
     return (
       <section className="sr-section service-coverage-section service-coverage-loading" id="service-coverage-map">
-        <h2>Service Coverage Map</h2>
+        <h2>Coverage Map</h2>
         <div className="coverage-skeleton-map" aria-label="Loading service coverage map" />
         <div className="coverage-skeleton-list">
           <span />
@@ -1818,7 +2107,7 @@ function ServiceCoverageMapSection({
     <section className="sr-section service-coverage-section" id="service-coverage-map">
       <div className="coverage-section-header">
         <div>
-          <h2>Service Coverage Map</h2>
+          <h2>Coverage Map</h2>
           <p className="map-context-copy">{subtitle}</p>
         </div>
         {(propertyAddress || serviceDate) && (
@@ -1883,25 +2172,6 @@ function ServiceCoverageMapSection({
             </div>
           )}
 
-          <div className="coverage-summary-list" aria-label="Service location summary">
-            {locations.map((location) => {
-              const config = coverageStatusConfig(location.status);
-              const Icon = config.Icon;
-              return (
-                <article className="coverage-summary-row" key={location.id || `${location.name}-${location.status}`}>
-                  <div>
-                    <h3>{location.name}</h3>
-                    <p>{coverageSummaryParts(location, normalizedServiceType).join(' · ')}</p>
-                  </div>
-                  <span className={`coverage-status-chip status-${config.tone}`}>
-                    <Icon size={14} strokeWidth={2} aria-hidden="true" />
-                    {config.label}
-                  </span>
-                </article>
-              );
-            })}
-          </div>
-
           {evidenceNote && <p className="coverage-evidence-note">{evidenceNote}</p>}
           <p className="map-footnote">Service coverage is based on technician-marked locations and available visit data. It is not a property survey.</p>
         </>
@@ -1913,20 +2183,60 @@ function ServiceCoverageMapSection({
 function workflowIconForType(type) {
   if (type === 'technician_en_route') return Route;
   if (type === 'arrived_on_site') return MapPin;
+  if (type === 'customer_interaction') return CheckCircle2;
   if (type === 'inspection_started') return Eye;
   if (type === 'service_completed') return CheckCircle2;
   if (type === 'report_published') return FileCheck2;
   return Clock;
 }
 
-function ServiceWorkflowSection({ serviceType, workflowEvents, loading = false }) {
-  const events = Array.isArray(workflowEvents) ? workflowEvents : [];
+function timelineEventsWithCustomerInteraction(workflowEvents = [], customerInteraction, visitTiming = {}) {
+  const events = Array.isArray(workflowEvents) ? [...workflowEvents] : [];
+  const interaction = customerInteractionCopy(customerInteraction);
+  if (!interaction) return events;
+  const arrived = events.find((event) => event.type === 'arrived_on_site');
+  const completed = events.find((event) => event.type === 'service_completed');
+  const timestamp = arrived?.timestamp || visitTiming.arrivedAt || completed?.timestamp || visitTiming.exitedAt || null;
+  const interactionEvent = {
+    id: 'customer_interaction',
+    type: 'customer_interaction',
+    label: 'Customer interaction',
+    timestamp,
+    status: 'completed',
+    customerVisibleDescription: interaction,
+  };
+  const insertAfter = events.findIndex((event) => event.type === 'arrived_on_site');
+  if (insertAfter >= 0) {
+    events.splice(insertAfter + 1, 0, interactionEvent);
+    return events;
+  }
+  const beforeCompleted = events.findIndex((event) => event.type === 'service_completed');
+  if (beforeCompleted >= 0) {
+    events.splice(beforeCompleted, 0, interactionEvent);
+    return events;
+  }
+  return [...events, interactionEvent];
+}
+
+function hasDuplicateDisplayedEventTimes(events = []) {
+  const counts = new Map();
+  for (const event of events) {
+    const label = formatClockTime(event.timestamp);
+    if (!label) continue;
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return Array.from(counts.values()).some((count) => count > 1);
+}
+
+function ServiceTimelineSection({ serviceType, workflowEvents, customerInteraction, visitTiming, loading = false }) {
+  const events = timelineEventsWithCustomerInteraction(workflowEvents, customerInteraction, visitTiming);
   const normalizedServiceType = normalizeCoverageServiceType(serviceType);
+  const showSameTimeNote = hasDuplicateDisplayedEventTimes(events);
 
   if (loading) {
     return (
-      <section className="sr-section service-workflow-section service-workflow-loading" id="service-workflow">
-        <h2>Service Workflow</h2>
+      <section className="sr-section service-workflow-section service-workflow-loading" id="service-timeline">
+        <h2>Service Timeline</h2>
         <div className="workflow-skeleton-list">
           <span />
           <span />
@@ -1937,10 +2247,10 @@ function ServiceWorkflowSection({ serviceType, workflowEvents, loading = false }
   }
 
   return (
-    <section className="sr-section service-workflow-section" id="service-workflow">
+    <section className="sr-section service-workflow-section" id="service-timeline">
       <div className="coverage-section-header">
         <div>
-          <h2>Service Workflow</h2>
+          <h2>Service Timeline</h2>
           <p className="map-context-copy">
             {normalizedServiceType === 'pest_control'
               ? 'Here’s how today’s pest control visit progressed.'
@@ -1950,27 +2260,70 @@ function ServiceWorkflowSection({ serviceType, workflowEvents, loading = false }
       </div>
 
       {!events.length ? (
-        <div className="coverage-empty-state">Service workflow details are not available for this visit.</div>
+        <div className="coverage-empty-state">Service timeline details are not available for this visit.</div>
       ) : (
-        <ol className="service-workflow-timeline">
-          {events.map((event) => {
-            const Icon = workflowIconForType(event.type);
-            return (
-              <li className={`workflow-event workflow-status-${event.status || 'completed'}`} key={event.id || `${event.type}-${event.timestamp}`}>
-                <span className="workflow-event-icon" aria-hidden="true">
-                  <Icon size={16} strokeWidth={2} />
-                </span>
-                <div className="workflow-event-body">
-                  <div className="workflow-event-heading">
-                    <h3>{event.label || formatEnumLabel(event.type)}</h3>
-                    {event.timestamp && <time dateTime={event.timestamp}>{formatClockTime(event.timestamp)}</time>}
+        <>
+          <ol className="service-workflow-timeline">
+            {events.map((event) => {
+              const Icon = workflowIconForType(event.type);
+              return (
+                <li className={`workflow-event workflow-status-${event.status || 'completed'}`} key={event.id || `${event.type}-${event.timestamp}`}>
+                  <span className="workflow-event-icon" aria-hidden="true">
+                    <Icon size={16} strokeWidth={2} />
+                  </span>
+                  <div className="workflow-event-body">
+                    <div className="workflow-event-heading">
+                      <h3>{event.label || formatEnumLabel(event.type)}</h3>
+                      {event.timestamp && <time dateTime={event.timestamp}>{formatClockTime(event.timestamp)}</time>}
+                    </div>
+                    {event.customerVisibleDescription && <p>{event.customerVisibleDescription}</p>}
                   </div>
-                  {event.customerVisibleDescription && <p>{event.customerVisibleDescription}</p>}
-                </div>
-              </li>
-            );
-          })}
-        </ol>
+                </li>
+              );
+            })}
+          </ol>
+          {showSameTimeNote && <p className="timeline-note">Some events were recorded at the same time and are shown in standard service order.</p>}
+        </>
+      )}
+    </section>
+  );
+}
+
+function AreasServicedSection({ serviceAreas = [], serviceLocations = [], serviceType }) {
+  const normalizedServiceType = normalizeCoverageServiceType(serviceType);
+  const locationRows = Array.isArray(serviceLocations) && serviceLocations.length
+    ? serviceLocations.map((location) => ({
+      key: location.id || `${location.name}-${location.status}`,
+      name: location.name,
+      status: coverageStatusConfig(location.status).label,
+      tone: coverageStatusConfig(location.status).tone,
+    }))
+    : serviceAreas.map((area) => ({
+      key: area,
+      name: area,
+      status: 'Serviced',
+      tone: 'green',
+    }));
+
+  return (
+    <section className="sr-section areas-serviced-section" id="areas-serviced">
+      <div className="coverage-section-header">
+        <div>
+          <h2>Areas Serviced</h2>
+          <p className="map-context-copy">{coverageSectionSubtitle(normalizedServiceType)}</p>
+        </div>
+      </div>
+      {!locationRows.length ? (
+        <div className="coverage-empty-state">Serviced areas were not recorded for this visit.</div>
+      ) : (
+        <div className="areas-serviced-list" aria-label="Areas serviced">
+          {locationRows.map((row) => (
+            <article className="coverage-summary-row" key={row.key}>
+              <h3>{row.name}</h3>
+              <span className={`coverage-status-chip status-${row.tone}`}>{row.status}</span>
+            </article>
+          ))}
+        </div>
       )}
     </section>
   );
@@ -1978,8 +2331,11 @@ function ServiceWorkflowSection({ serviceType, workflowEvents, loading = false }
 
 function ServiceReportCoverageAndWorkflow({
   serviceType,
+  serviceAreas,
   serviceLocations,
   workflowEvents,
+  customerInteraction,
+  visitTiming,
   propertyAddress,
   mapCenter,
   serviceDate,
@@ -1989,6 +2345,17 @@ function ServiceReportCoverageAndWorkflow({
 }) {
   return (
     <>
+      <ServiceTimelineSection
+        serviceType={serviceType}
+        workflowEvents={workflowEvents}
+        customerInteraction={customerInteraction}
+        visitTiming={visitTiming}
+      />
+      <AreasServicedSection
+        serviceType={serviceType}
+        serviceAreas={serviceAreas}
+        serviceLocations={serviceLocations}
+      />
       <ServiceCoverageMapSection
         serviceType={serviceType}
         serviceLocations={serviceLocations}
@@ -1999,8 +2366,191 @@ function ServiceReportCoverageAndWorkflow({
         mapBackgroundUrl={mapBackgroundUrl}
         mapAttribution={mapAttribution}
       />
-      <ServiceWorkflowSection serviceType={serviceType} workflowEvents={workflowEvents} />
     </>
+  );
+}
+
+function SupportingDetailsSection({
+  data,
+  token,
+  mode,
+  showDetails,
+  showNerd,
+  serviceNotes,
+  findings,
+  recommendations,
+  advisoryRows,
+}) {
+  const pressureTrend = data.dynamicContext?.pressureTrend;
+  const weatherRows = conditionRows(data.conditions || {});
+  const interaction = customerInteractionCopy(data.customerInteraction);
+  const arrival = formatClockTime(data.visitTiming?.arrivedAt);
+  const completion = formatClockTime(data.visitTiming?.exitedAt);
+  const reportPublished = (data.workflowEvents || []).find((event) => event.type === 'report_published');
+  const pressureOpen = mode !== 'live' || showDetails;
+
+  return (
+    <section className="sr-section supporting-details-section" id="supporting-details">
+      <h2>Supporting Details</h2>
+      <div className="supporting-details-list">
+        <details className="report-accordion" open={mode !== 'live'}>
+          <summary>
+            <span>Conditions at application</span>
+            <span className="accordion-action">Details</span>
+          </summary>
+          <div className="accordion-body">
+            <p className="supporting-detail-copy">{conditionInterpretation(data.conditions || {})}</p>
+            <div className="supporting-detail-grid">
+              {weatherRows.map(([label, value]) => (
+                <div className="sr-cell" key={label}>
+                  <div className="sr-cell-label">{label}</div>
+                  <div className="sr-cell-value">{value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </details>
+
+        {pressureTrend && (
+          <details className="report-accordion" open={pressureOpen}>
+            <summary>
+              <span>Pest Pressure</span>
+              <span className="accordion-action">Details</span>
+            </summary>
+            <div className="accordion-body">
+              <PressureTrendCard
+                context={pressureTrend}
+                neighborhood={data.dynamicContext?.neighborhoodPressure}
+                mode={mode}
+                token={token}
+                embedded
+              />
+              <PressureMethodologyDropdown />
+            </div>
+          </details>
+        )}
+
+        {(interaction || arrival || completion) && (
+          <details className="report-accordion" open={mode !== 'live'}>
+            <summary>
+              <span>Customer interaction and timing</span>
+              <span className="accordion-action">Details</span>
+            </summary>
+            <div className="accordion-body">
+              <div className="supporting-detail-grid">
+                {interaction && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Customer interaction</div>
+                    <div className="sr-cell-value">{interaction}</div>
+                  </div>
+                )}
+                {arrival && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Recorded arrival</div>
+                    <div className="sr-cell-value">{arrival}</div>
+                  </div>
+                )}
+                {completion && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Recorded completion</div>
+                    <div className="sr-cell-value">{completion}</div>
+                  </div>
+                )}
+              </div>
+              {showNerd && (
+                <p className="sr-nerd-note">
+                  Raw arrival: {data.visitTiming?.arrivedAt || 'not recorded'}
+                  {' | '}Raw completion: {data.visitTiming?.exitedAt || 'not recorded'}
+                </p>
+              )}
+            </div>
+          </details>
+        )}
+
+        {showDetails && (data.metrics || []).length > 0 && (
+          <details className="report-accordion">
+            <summary>
+              <span>Service metrics</span>
+              <span className="accordion-action">Details</span>
+            </summary>
+            <div className="accordion-body">
+              <div className="sr-band supporting-metrics" aria-label="Service metrics">
+                {(data.metrics || []).map((metric) => (
+                  <div className="sr-metric" key={metric.key} title={metricHelpText(metric)}>
+                    <div className="sr-metric-value">{formatMetric(metric)}</div>
+                    <div className="sr-metric-label">{metric.label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </details>
+        )}
+
+        {showDetails && ((data.applications || []).length > 0 || findings.length > 0 || recommendations.length > 0 || serviceNotes) && (
+          <details className="report-accordion">
+            <summary>
+              <span>Detailed report metadata</span>
+              <span className="accordion-action">Details</span>
+            </summary>
+            <div className="accordion-body supporting-metadata">
+              {reportPublished?.timestamp && <p>Report published: {formatDate(reportPublished.timestamp)} at {formatClockTime(reportPublished.timestamp)}</p>}
+              {data.serviceRecordId && <p>Service record: {data.serviceRecordId}</p>}
+              {serviceNotes && <p className="supporting-note">{serviceNotes}</p>}
+              {findings.length > 0 && (
+                <div className="sr-list">
+                  {findings.map((finding) => (
+                    <div className={`sr-row ${['high', 'critical'].includes(finding.severity) ? 'sr-finding-high' : ''}`} key={finding.id}>
+                      <div>
+                        <div className="sr-row-title">{finding.title}</div>
+                        {(finding.detail || finding.recommendation) && (
+                          <div className="sr-row-detail">
+                            {finding.detail}
+                            {finding.recommendation && (
+                              <>
+                                {finding.detail ? ' ' : ''}
+                                <strong>Recommended next step:</strong> {finding.recommendation}
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <div className="sr-pill">{formatEnumLabel(finding.severity)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {recommendations.map((rec) => (
+                <div className="sr-row" key={rec}>
+                  <div className="sr-row-title">{rec}</div>
+                  <div className="sr-pill">Recommended next step</div>
+                </div>
+              ))}
+              {!findings.length && !recommendations.length && <p>No activity was observed this visit. Routine protective service will continue on schedule.</p>}
+            </div>
+          </details>
+        )}
+
+        {showDetails && (advisoryRows.length > 0 || data.advisory?.pet_advisory) && (
+          <details className="report-accordion">
+            <summary>
+              <span>Advisory details</span>
+              <span className="accordion-action">Details</span>
+            </summary>
+            <div className="accordion-body">
+              <div className="sr-advisory">
+                {advisoryRows.map(([label, value]) => (
+                  <div key={label}>
+                    <strong>{value}</strong>
+                    <span>{label}</span>
+                  </div>
+                ))}
+              </div>
+              {data.advisory?.pet_advisory && <p className="supporting-detail-copy">{data.advisory.pet_advisory}</p>}
+            </div>
+          </details>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -2798,6 +3348,102 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 16px;
           line-height: 1.5;
           max-width: 620px;
+        }
+        .service-status-card {
+          margin-top: 0;
+        }
+        .service-status-main,
+        .readiness-card-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 16px;
+        }
+        .status-badge,
+        .readiness-status-chip {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 34px;
+          border: 1px solid #86efac;
+          border-radius: 999px;
+          background: #dcfce7;
+          color: #14532d;
+          font-size: 12px;
+          line-height: 1;
+          font-weight: 850;
+          white-space: nowrap;
+          padding: 8px 11px;
+        }
+        .status-badge.status-pending {
+          border-color: #cbd5e1;
+          background: #f8fafc;
+          color: #475569;
+        }
+        .service-status-grid,
+        .readiness-facts,
+        .supporting-detail-grid {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 1px;
+          margin-top: 16px;
+          overflow: hidden;
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          background: var(--line);
+        }
+        .readiness-facts,
+        .supporting-detail-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .readiness-card {
+          border-color: #bbf7d0;
+          background: #f0fdf4;
+        }
+        .readiness-card h2 {
+          margin-bottom: 8px;
+        }
+        .readiness-card p,
+        .visit-summary-section p,
+        .what-to-expect-section p,
+        .contact-waves-section p,
+        .supporting-detail-copy {
+          margin: 0;
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.55;
+        }
+        .quick-report-tools .report-ask-box {
+          max-width: none;
+        }
+        .quick-nav-row {
+          display: flex;
+          gap: 8px;
+          overflow-x: auto;
+          padding-bottom: 2px;
+          scrollbar-width: thin;
+        }
+        .quick-nav-row a {
+          flex: 0 0 auto;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--text);
+          font-size: 13px;
+          line-height: 1;
+          font-weight: 800;
+          text-decoration: none;
+          padding: 9px 11px;
+        }
+        .timeline-note {
+          margin: 12px 0 0;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
+        .areas-serviced-list {
+          display: grid;
+          gap: 8px;
         }
         .sr-pressure {
           justify-self: end;
@@ -3697,6 +4343,37 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.45;
         }
+        .product-group-card {
+          min-height: 0;
+        }
+        .product-group-list {
+          margin-top: 14px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 12px;
+        }
+        .product-group-list ul {
+          list-style: none;
+          margin: 8px 0 0;
+          padding: 0;
+          display: grid;
+          gap: 8px;
+        }
+        .product-group-list li {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 10px;
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.35;
+        }
+        .product-group-list li span {
+          color: var(--muted);
+          font-size: 12px;
+          text-align: right;
+        }
         .applied-product-meta {
           display: flex;
           flex-wrap: wrap;
@@ -4302,6 +4979,66 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
           padding: 12px;
         }
+        .what-to-expect-section,
+        .contact-waves-section {
+          background: #fff;
+        }
+        .contact-waves-section {
+          border-color: var(--soft-blue-border);
+          background: var(--soft-blue);
+        }
+        .contact-waves-section ul {
+          margin: 12px 0 0;
+          padding-left: 20px;
+          color: var(--text);
+          font-size: 15px;
+          line-height: 1.6;
+        }
+        .contact-waves-cta {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          margin-top: 14px;
+          min-height: 40px;
+          border: 1px solid ${B.blueDeeper};
+          border-radius: 8px;
+          background: ${B.blueDeeper};
+          color: #fff;
+          font-size: 13px;
+          line-height: 1;
+          font-weight: 850;
+          text-decoration: none;
+          padding: 10px 14px;
+        }
+        .supporting-details-list {
+          display: grid;
+          gap: 10px;
+        }
+        .supporting-details-section > h2 {
+          margin-bottom: 14px;
+        }
+        .supporting-detail-grid {
+          margin-top: 12px;
+        }
+        .supporting-details-section .pressure-trend-card-embedded {
+          margin-top: 0;
+          padding-top: 0;
+          border-top: 0;
+        }
+        .supporting-metadata {
+          display: grid;
+          gap: 10px;
+        }
+        .supporting-metadata p,
+        .supporting-note {
+          margin: 0;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1.5;
+        }
+        .supporting-metrics {
+          margin-top: 0;
+        }
         .receipt-grid {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4463,10 +5200,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .report-premium-toolbar > .view-mode-toggle { justify-self: auto; }
           .view-mode-toggle, .summary-mode-tabs { width: 100%; }
           .view-mode-toggle button, .summary-mode-tabs button { flex: 1; }
+          .service-status-main,
+          .readiness-card-header { flex-direction: column; }
           .sr-hero { grid-template-columns: 1fr; }
           .sr-pressure { justify-self: stretch; }
           .sr-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-          .sr-grid-2, .sr-grid-3, .sr-advisory, .executive-status-grid, .defense-status-grid, .receipt-grid, .one-thing-detail, .lawn-score-grid, .lawn-assessment-layout { grid-template-columns: 1fr; }
+          .sr-grid-2, .sr-grid-3, .sr-advisory, .service-status-grid, .readiness-facts, .supporting-detail-grid, .executive-status-grid, .defense-status-grid, .receipt-grid, .one-thing-detail, .lawn-score-grid, .lawn-assessment-layout { grid-template-columns: 1fr; }
           .lawn-trend-chart { justify-self: stretch; max-width: none; }
           .lawn-photo-strip { grid-template-columns: 1fr; }
           .premium-section-header { flex-direction: column; }
@@ -4534,7 +5273,24 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       </header>
 
       <main className="sr-shell">
-        <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />
+        <ServiceStatusCard data={data} mode={mode} />
+
+        <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
+
+        <section className="sr-section visit-summary-section" id="visit-summary">
+          <h2>Visit Summary</h2>
+          <p>{visitSummaryCopy(data)}</p>
+          {isLawnReport && (
+            <LawnAssessmentCard
+              assessment={data.lawnAssessment}
+              mode={mode}
+              token={token}
+              embedded
+            />
+          )}
+        </section>
+
+        <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} />
 
         {mode === 'live' && (
           <div className="report-premium-toolbar">
@@ -4542,89 +5298,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
-        <section className="sr-hero" id="summary">
-          <div>
-            <h1 className="sr-title">Service report</h1>
-            <div className="sr-meta">
-              {serviceDisplayName(data)} | {formatDate(data.serviceDate)}
-            </div>
-            {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
-            <TechnicianVisitLine data={data} />
-            {dynamicContext.reentry && (
-              <ReentryTimer context={dynamicContext.reentry} mode={mode} token={token} compact />
-            )}
-            <HeroConditions conditions={data.conditions} weatherCall={premium.weatherCall} />
-            <ReportAskBox mode={mode} token={token} serviceLine={data.serviceLine} />
-            {!premium.aiSummaryPersonality && !dynamicContext.aiSummary && heroSummary && <p className="sr-hero-summary">{heroSummary}</p>}
-          </div>
-        </section>
-
-        {isLawnReport ? (
-          <WavesAiSummary
-            context={dynamicContext.aiSummary || {}}
-            mode={mode}
-            token={token}
-            lawnAssessment={data.lawnAssessment}
-            serviceLine={data.serviceLine}
-          />
-        ) : premium.aiSummaryPersonality ? (
-          <WavesAiPersonalitySummary
-            context={premium.aiSummaryPersonality}
-            mode={mode}
-            token={token}
-            pressureTrend={dynamicContext.pressureTrend}
-            neighborhood={dynamicContext.neighborhoodPressure}
-          />
-        ) : dynamicContext.aiSummary ? (
-          <WavesAiSummary
-            context={dynamicContext.aiSummary}
-            mode={mode}
-            token={token}
-            pressureTrend={dynamicContext.pressureTrend}
-            neighborhood={dynamicContext.neighborhoodPressure}
-            lawnAssessment={data.lawnAssessment}
-            serviceLine={data.serviceLine}
-          />
-        ) : null}
-
-        {hasVisitSummary && (
-          <section className="sr-section" id="visit-summary">
-            <h2>Visit summary</h2>
-            {visitSummary && <p style={{ margin: '0 0 16px', color: '#404040', lineHeight: 1.6 }}>{visitSummary}</p>}
-            <div className="sr-grid-3">
-              {data.customerInteraction && (
-                <div className="sr-cell">
-                  <div className="sr-cell-label">Customer interaction</div>
-                  <div className="sr-cell-value">{formatEnumLabel(data.customerInteraction)}</div>
-                </div>
-              )}
-              {serviceAreas.length > 0 && (
-                <div className="sr-cell">
-                  <div className="sr-cell-label">Areas serviced</div>
-                  <div className="sr-cell-value">{serviceAreas.join(', ')}</div>
-                </div>
-              )}
-              {visitTimingRows.map(([label, value]) => (
-                <div className="sr-cell" key={label}>
-                  <div className="sr-cell-label">{label}</div>
-                  <div className="sr-cell-value">{value}</div>
-                </div>
-              ))}
-              {measurementRows.map(([label, value, suffix]) => (
-                <div className="sr-cell" key={label}>
-                  <div className="sr-cell-label">{label}</div>
-                  <div className="sr-cell-value">{valueOrDash(value, suffix)}</div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
         <div id="map">
           <ServiceReportCoverageAndWorkflow
             serviceType={data.coverageServiceType || data.serviceLine || data.serviceType}
+            serviceAreas={serviceAreas}
             serviceLocations={data.serviceLocations}
             workflowEvents={data.workflowEvents}
+            customerInteraction={data.customerInteraction}
+            visitTiming={data.visitTiming}
             propertyAddress={data.propertyAddress || data.serviceAddress}
             mapCenter={data.mapCenter}
             serviceDate={data.serviceDate}
@@ -4634,69 +5315,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         </div>
 
-        {showNerd && (
-          <div id="application-map">
-            <TreatmentMapSection data={data} mode={mode} token={token} showTapPrompt={mode === 'live'} />
-          </div>
-        )}
-
         <AppliedProductsSection
           data={data}
+          showAll={showDetails}
           showTechnical={showNerd}
           mode={mode}
-          whyActivity={!isLawnReport ? premium.whyActivity : null}
         />
 
-        {!premium.primaryMove && (
-          <RecommendedActionCard findings={findings} aiSummary={dynamicContext.aiSummary} />
-        )}
+        <RecommendedActionCard findings={findings} aiSummary={dynamicContext.aiSummary} primaryMove={premium.primaryMove} />
 
-        {showDetails && (
-          <section className="sr-band" aria-label="Service metrics">
-            {(data.metrics || []).map((metric) => (
-              <div className="sr-metric" key={metric.key} title={metricHelpText(metric)}>
-                <div className="sr-metric-value">{formatMetric(metric)}</div>
-                <div className="sr-metric-label">{metric.label}</div>
-              </div>
-            ))}
-          </section>
-        )}
+        <WhatToExpectNextSection context={premium.whyActivity} serviceLine={data.serviceLine} />
 
-        {showDetails && (
-        <section className="sr-section" id="details">
-          <h2>Applications</h2>
-          <div className="sr-list">
-            {(data.applications || []).length ? data.applications.map((app) => (
-              <div className="sr-row" key={app.id}>
-                <div>
-                  <div className="sr-row-title">{applicationPurpose(app, data.serviceLine)}</div>
-                  <div className="sr-row-detail">
-                    <strong>{app.product?.name || 'Product application'}</strong><br />
-                    {applicationPurposeCopy(app, data.serviceLine)}
-                  </div>
-                  <div className="sr-row-detail">
-                    {[
-                      app.product?.epa_reg ? `EPA reg. ${app.product.epa_reg}` : null,
-                      app.product?.active_ingredient,
-                      app.rate && app.rateUnit ? `${app.rate} ${app.rateUnit}` : null,
-                      app.totalAmount && app.amountUnit ? `${app.totalAmount} ${app.amountUnit}` : null,
-                      Array.isArray(app.targets) && app.targets.length ? `Targets: ${app.targets.map(formatEnumLabel).join(', ')}` : null,
-                    ].filter(Boolean).join(' | ') || 'Application recorded'}
-                  </div>
-                  {showNerd && (
-                    <div className="sr-nerd-note">
-                      Raw method: {app.method || 'not recorded'}
-                      {Array.isArray(app.targets) && app.targets.length ? ` | Raw targets: ${app.targets.join(', ')}` : ''}
-                      {app.appliedAt ? ` | Applied: ${app.appliedAt}` : ''}
-                    </div>
-                  )}
-                </div>
-                <div className="sr-pill">{app.methodLabel || formatEnumLabel(app.method) || 'Application'}</div>
-              </div>
-            )) : <div className="sr-row-detail">No product applications were recorded for this visit.</div>}
-          </div>
-        </section>
-        )}
+        <WhenToContactUsSection />
 
         {(data.photos || []).length > 0 && (
           <section className="sr-section" id="photos">
@@ -4712,62 +5342,25 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        {showDetails && (
-        <section className="sr-section">
-          <h2>Findings and recommendations</h2>
-          <div className="sr-list">
-            {findings.length ? findings.map((finding) => (
-              <div className={`sr-row ${['high', 'critical'].includes(finding.severity) ? 'sr-finding-high' : ''}`} key={finding.id}>
-                <div>
-                  <div className="sr-row-title">{finding.title}</div>
-                  {(finding.detail || finding.recommendation) && (
-                    <div className="sr-row-detail">
-                      {finding.detail}
-                      {finding.recommendation && (
-                        <>
-                          {finding.detail ? ' ' : ''}
-                          <strong>Recommended next step:</strong> {finding.recommendation}
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div className="sr-pill">{formatEnumLabel(finding.severity)}</div>
-              </div>
-            )) : (!recommendations.length && <div className="sr-row-detail">No activity was observed this visit. Routine protective service will continue on schedule.</div>)}
-            {recommendations.map((rec) => (
-              <div className="sr-row" key={rec}>
-                <div className="sr-row-title">{rec}</div>
-                <div className="sr-pill">Recommended next step</div>
-              </div>
-            ))}
+        {showNerd && (
+          <div id="application-map">
+            <TreatmentMapSection data={data} mode={mode} token={token} showTapPrompt={mode === 'live'} />
           </div>
-        </section>
-        )}
-
-        {showDetails && serviceNotes && (
-          <section className="sr-section">
-            <h2>Service notes</h2>
-            <p style={{ margin: 0, color: '#404040', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{serviceNotes}</p>
-          </section>
-        )}
-
-        {showDetails && (advisoryRows.length > 0 || data.advisory?.pet_advisory) && (
-        <section className="sr-section">
-          <h2>Customer advisory</h2>
-          <div className="sr-advisory">
-            {advisoryRows.map(([label, value]) => (
-              <div key={label}>
-                <strong>{value}</strong>
-                <span>{label}</span>
-              </div>
-            ))}
-          </div>
-          {data.advisory?.pet_advisory && <p style={{ margin: '16px 0 0', color: '#525252', lineHeight: 1.55 }}>{data.advisory.pet_advisory}</p>}
-        </section>
         )}
 
         <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />
+
+        <SupportingDetailsSection
+          data={data}
+          token={token}
+          mode={mode}
+          showDetails={showDetails}
+          showNerd={showNerd}
+          serviceNotes={serviceNotes}
+          findings={findings}
+          recommendations={recommendations}
+          advisoryRows={advisoryRows}
+        />
 
         <footer className="sr-footer">
           This report is provided for your records.
