@@ -4,6 +4,7 @@ const { buildSatelliteTreatmentMapContext } = require('../services/service-repor
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const {
   buildReportV1Data,
+  buildWorkflowEvents,
   locationAreaLabels,
   methodFromProduct,
   minutesFromElapsed,
@@ -32,6 +33,7 @@ const {
 } = require('../services/service-report/delivery');
 const { buildServiceReportV1Email } = require('../services/service-report/email-delivery');
 const { buildPressureTrendContextFromRows } = require('../services/service-report/pressure-trend');
+const { buildSinceLastVisitContext } = require('../services/service-report/since-last-visit');
 const {
   buildPremiumExperienceContextFromRows,
   buildWeatherCallContext,
@@ -86,6 +88,78 @@ describe('service report v1', () => {
     expect(pressureFromFindings([])).toBe(0.3);
   });
 
+  test('dynamic pressure trend floors persisted zero values at 0.3', () => {
+    const context = buildPressureTrendContextFromRows({
+      record: { id: 'service-current', service_date: '2026-05-16', pressure_index: 0 },
+      priorRows: [{ id: 'service-1', service_date: '2026-04-16', pressure_index: 0 }],
+      findings: [],
+    });
+
+    expect(context.points.map((point) => point.pressureIndex)).toEqual([0.3, 0.3]);
+    expect(context.baseline.pressureIndex).toBe(0.3);
+    expect(context.current.pressureIndex).toBe(0.3);
+    expect(context.customerSummary).toBe('Pest pressure remains low at 0.3.');
+  });
+
+  test('since-last-visit pressure copy uses the customer pressure floor', async () => {
+    const fixtures = {
+      service_records: [
+        {
+          id: 'service-prior',
+          customer_id: 'customer-1',
+          status: 'completed',
+          service_line: 'pest',
+          service_type: 'Quarterly Pest Control Service',
+          service_date: '2026-04-16',
+          pressure_index: 0,
+        },
+      ],
+      service_findings: [],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (typeof criteria === 'function') return query;
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        whereNot(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] !== value));
+          }
+          return query;
+        },
+        whereIn(column, values) {
+          rows = rows.filter((row) => values.includes(row[column]));
+          return query;
+        },
+        orderBy: () => query,
+        select: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+      };
+      return query;
+    };
+
+    const context = await buildSinceLastVisitContext({
+      record: {
+        id: 'service-current',
+        customer_id: 'customer-1',
+        service_line: 'pest',
+        service_type: 'Quarterly Pest Control Service',
+        pressure_index: 0,
+      },
+      knex,
+    });
+
+    expect(context.pressureLine).toBe('Pressure: 0.3 -> 0.3');
+  });
+
   test('dynamic pressure trend includes current override and customer ROI copy', () => {
     const context = buildPressureTrendContextFromRows({
       record: {
@@ -125,9 +199,9 @@ describe('service report v1', () => {
     });
 
     expect(lowBaseline.percentChange).toBeUndefined();
-    expect(lowBaseline.customerSummary).toBe('Pest pressure remains low.');
+    expect(lowBaseline.customerSummary).toBe('Pest pressure remains low at 0.4.');
     expect(firstVisit.direction).toBe('first_visit');
-    expect(firstVisit.customerSummary).toContain('first pressure reading');
+    expect(firstVisit.customerSummary).toContain('first pressure marker: 1.4');
   });
 
   test('dynamic re-entry context uses latest application and absolute ready times', () => {
@@ -420,6 +494,19 @@ describe('service report v1', () => {
     expect(answer).not.toContain('No customer action was recommended on this report.');
   });
 
+  test('Ask Waves AI does not call recommendations-only reports clean', () => {
+    const answer = answerServiceReportQuestion({
+      question: 'What did you find?',
+      data: {
+        findings: [],
+        recommendations: ['Seal the gap under the front threshold.'],
+      },
+    });
+
+    expect(answer).toContain('Recommended next step: Seal the gap under the front threshold.');
+    expect(answer).not.toContain('No activity was observed');
+  });
+
   test('treatment map is deterministic and exposes interactive layer data', () => {
     const input = {
       geometry: {
@@ -559,6 +646,128 @@ describe('service report v1', () => {
     expect(buildNoActivityFinding('lawn').detail).not.toMatch(/pest activity/);
     expect(buildNoActivityFinding('tree_shrub').detail).toMatch(/tree and shrub/i);
     expect(buildNoActivityFinding('palm').detail).toMatch(/palms/i);
+  });
+
+  test('v1 data auto-inserts a positive clean finding and pressure floor for clean visits', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-clean',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Quarterly Pest Control Service',
+      service_date: '2026-05-16',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Perimeter']),
+      structured_notes: '{}',
+      service_data: '{}',
+      pressure_index: 0,
+    }, 'token-clean', knex);
+
+    expect(data.pressureIndex).toBe(0.3);
+    expect(data.metrics.find((metric) => metric.key === 'pressure_index')).toMatchObject({ value: 0.3 });
+    expect(data.findings).toHaveLength(1);
+    expect(data.findings[0]).toMatchObject({
+      category: 'no_activity',
+      severity: 'info',
+      title: 'No activity observed this visit',
+    });
+  });
+
+  test('v1 data keeps synthetic clean findings out of finding metrics', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-clean-termite',
+      customer_id: 'customer-1',
+      service_line: 'termite',
+      service_type: 'Termite Service',
+      service_date: '2026-05-16',
+      status: 'completed',
+      first_name: 'Van',
+      last_name: 'Lee',
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-clean-termite', knex);
+
+    expect(data.findings).toHaveLength(1);
+    expect(data.findings[0]).toMatchObject({ category: 'no_activity' });
+    expect(data.metrics.find((metric) => metric.key === 'findings')).toMatchObject({ value: 0 });
+  });
+
+  test('v1 data does not label recommendations-only reports as no activity', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-recommendation-only',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Quarterly Pest Control Service',
+      service_date: '2026-05-16',
+      status: 'completed',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Perimeter']),
+      structured_notes: JSON.stringify({
+        recommendations: ['Seal the gap under the front threshold.'],
+      }),
+      service_data: '{}',
+    }, 'token-recommendation-only', knex);
+
+    expect(data.findings).toHaveLength(0);
+    expect(data.recommendations).toEqual(['Seal the gap under the front threshold.']);
   });
 
   test('elapsed time parser matches completion panel duration strings', () => {
@@ -801,6 +1010,40 @@ describe('service report v1', () => {
     expect(data.workflowEvents.map((event) => event.timestamp)).toEqual([
       '2026-05-15T18:05:00.000Z',
       '2026-05-15T18:46:30.000Z',
+    ]);
+  });
+
+  test('workflow preserves absolute DB event Dates', () => {
+    const events = buildWorkflowEvents({
+      service: {
+        en_route_at: new Date('2026-05-15T13:58:00.000Z'),
+        started_at: new Date('2026-05-15T14:05:00.000Z'),
+        ended_at: new Date('2026-05-15T14:46:00.000Z'),
+        report_generated_at: new Date('2026-05-15T18:52:00.000Z'),
+      },
+      serviceLine: 'pest',
+    });
+
+    expect(events.map((event) => [event.type, event.timestamp])).toEqual([
+      ['technician_en_route', '2026-05-15T13:58:00.000Z'],
+      ['arrived_on_site', '2026-05-15T14:05:00.000Z'],
+      ['service_completed', '2026-05-15T14:46:00.000Z'],
+      ['report_published', '2026-05-15T18:52:00.000Z'],
+    ]);
+
+    const scheduledFallbackEvents = buildWorkflowEvents({
+      service: {
+        scheduled_en_route_at: new Date('2026-05-15T13:58:00.000Z'),
+        scheduled_actual_start_time: new Date('2026-05-15T14:05:00.000Z'),
+        scheduled_actual_end_time: new Date('2026-05-15T14:46:00.000Z'),
+      },
+      serviceLine: 'pest',
+    });
+
+    expect(scheduledFallbackEvents.map((event) => [event.type, event.timestamp])).toEqual([
+      ['technician_en_route', '2026-05-15T13:58:00.000Z'],
+      ['arrived_on_site', '2026-05-15T14:05:00.000Z'],
+      ['service_completed', '2026-05-15T14:46:00.000Z'],
     ]);
   });
 
@@ -1102,12 +1345,79 @@ describe('service report v1', () => {
     expect(data.lawnAssessment.customerSummary).toBe('Lawn health is up 17 points since your first assessment.');
     expect(data.lawnAssessment.trend.map((point) => point.overallScore)).toEqual([66, 83]);
     expect(data.lawnAssessment.turfProfile).toMatchObject({ grassType: 'st_augustine', lawnSqft: 6200 });
+    expect(data.findings).toEqual([]);
     expect(data.metrics.find((metric) => metric.key === 'lawn_health')).toMatchObject({
       label: 'Lawn health',
       value: 83,
       unit: '%',
     });
     expect(data.metrics.some((metric) => metric.label === 'Pressure index')).toBe(false);
+  });
+
+  test('v1 data does not add clean lawn findings when an assessment has scores only', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+      lawn_assessments: [
+        {
+          id: 'assessment-low',
+          customer_id: 'customer-1',
+          service_record_id: 'service-lawn-low',
+          confirmed_by_tech: true,
+          service_date: '2026-05-16',
+          overall_score: 35,
+          turf_density: 35,
+          weed_suppression: 20,
+          color_health: 40,
+          fungus_control: 30,
+          thatch_level: 50,
+          observations: '',
+          recommendations: null,
+        },
+      ],
+      lawn_assessment_photos: [],
+      customer_turf_profiles: [],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy: () => query,
+        limit(count) {
+          rows = rows.slice(0, count);
+          return query;
+        },
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-lawn-low',
+      customer_id: 'customer-1',
+      service_line: 'lawn',
+      service_type: 'Lawn Care',
+      service_date: '2026-05-16',
+      status: 'completed',
+      first_name: 'Van',
+      last_name: 'Lee',
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-lawn-low', knex);
+
+    expect(data.lawnAssessment.scores.overallScore).toBe(35);
+    expect(data.findings).toEqual([]);
   });
 
   test('photo hash chain validates deterministic metadata and detects tampering', () => {
@@ -1408,6 +1718,29 @@ describe('service report v1', () => {
     expect(email.html).toContain('30 min');
     expect(email.html).toContain('Ghost ant trail at front entry threshold');
     expect(email.text).toContain('The PDF service report is attached.');
+  });
+
+  test('v1 email delivery does not count synthetic clean findings', () => {
+    const email = buildServiceReportV1Email({
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-clean',
+      data: {
+        serviceType: 'Residential Pest Control',
+        customerName: 'Van Lee',
+        applications: [],
+        findings: [{
+          category: 'no_activity',
+          severity: 'info',
+          title: 'No activity observed this visit',
+        }],
+        metrics: [{ label: 'Pressure index', value: 0.3 }],
+        advisory: {},
+      },
+    });
+
+    expect(email.text).toContain('Findings: 0 findings');
+    expect(email.text).toContain('No action-required findings were documented during this visit.');
+    expect(email.text).not.toContain('Top findings: No activity observed this visit');
+    expect(email.html).not.toContain('Top findings');
   });
 
   test('v1 delivery queue enqueue is idempotent per service record and channel', async () => {

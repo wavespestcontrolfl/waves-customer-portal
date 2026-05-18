@@ -13,10 +13,22 @@ const SEVERITY_WEIGHTS = {
 // only light findings on the return visit. Treat it like a medium operational
 // driver before the historical smoothing is applied.
 const CALLBACK_PRESSURE_WEIGHT = 1.5;
+const PRESSURE_INDEX_FLOOR = 0.3;
+
+function roundPressure(value) {
+  return Math.round(Number(value) * 10) / 10;
+}
+
+function customerVisiblePressureIndex(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return roundPressure(Math.max(n, PRESSURE_INDEX_FLOOR));
+}
 
 function normalizePressureScore(visitScore) {
   const normalized = 5 * (1 - Math.exp(-visitScore / 4));
-  return Math.round(normalized * 10) / 10;
+  return roundPressure(normalized);
 }
 
 function pressureFromFindings(findings, priorPressureIndex = null, options = {}) {
@@ -29,8 +41,7 @@ function pressureFromFindings(findings, priorPressureIndex = null, options = {})
   const blended = priorPressureIndex != null
     ? 0.75 * normalized + 0.25 * Number(priorPressureIndex)
     : normalized;
-  const floored = Math.max(blended, 0.3);
-  return Math.round(floored * 10) / 10;
+  return customerVisiblePressureIndex(blended);
 }
 
 function isCallbackSignal(record = {}, scheduledService = null) {
@@ -76,7 +87,9 @@ async function computePressureIndex(serviceRecordId, knex = db) {
 
 module.exports = {
   CALLBACK_PRESSURE_WEIGHT,
+  PRESSURE_INDEX_FLOOR,
   SEVERITY_WEIGHTS,
+  customerVisiblePressureIndex,
   isCallbackSignal,
   normalizePressureScore,
   pressureFromFindings,

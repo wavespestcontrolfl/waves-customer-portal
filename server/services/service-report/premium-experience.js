@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
+const { customerVisiblePressureIndex } = require('./pressure-index');
 
 const PROMPT_VERSION = 'service_report_premium_experience_v1';
 
@@ -356,7 +357,7 @@ function unfilteredBody(primaryMove, finding) {
 }
 
 function buildPropertyDefenseStatusContext({ record, findings = [], applications = [], zones = [], pressureTrend } = {}) {
-  const pressure = pressureTrend?.current?.pressureIndex ?? Number(record?.pressure_index);
+  const pressure = pressureTrend?.current?.pressureIndex ?? customerVisiblePressureIndex(record?.pressure_index);
   const activeMethods = new Set(applications.map((app) => app.method));
   const textByZone = new Map(zones.map((zone) => [zone.id, `${zone.letter} ${zone.label}`.toLowerCase()]));
   const findingText = findings.map((finding) => `${finding.title} ${finding.detail} ${textByZone.get(String(finding.zoneId)) || ''}`.toLowerCase());
