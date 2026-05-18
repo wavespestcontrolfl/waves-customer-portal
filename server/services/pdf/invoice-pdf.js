@@ -1,6 +1,7 @@
 const PDFDocument = require('pdfkit');
 const { getLogoBuffer } = require('./brand-logo');
 const { WAVES_FL_LICENSE_LINE } = require('../../config/business');
+const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
 
 // Brand palette — mirrors client/src/styles/brand-tokens.css + theme-brand.js
 const NAVY = '#1B2C5B';      // blueDeeper — headings, header bar
@@ -16,9 +17,11 @@ const SOFT = '#F1F5F9';
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
 
 function formatDate(d) {
-  if (!d) return '—';
-  const dt = new Date(typeof d === 'string' ? (d.length === 10 ? d + 'T12:00:00' : d) : d);
-  return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+  return formatDisplayDate(d, { fallback: '—' });
+}
+
+function formatInvoiceDateOnly(d) {
+  return formatDateOnly(d, { fallback: '—' });
 }
 
 function currency(n) {
@@ -87,7 +90,7 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
   y = sectionLabel(doc, mode === 'receipt' ? 'Receipt details' : 'Invoice details', x, y);
   const rows = [
     [mode === 'receipt' ? 'Receipt for' : 'Invoice number', invoice.invoice_number],
-    ['Issued', formatDate(invoice.created_at || invoice.sent_at)],
+    ['Issued', formatDate(invoice.sent_at || invoice.created_at)],
   ];
   if (mode === 'receipt') {
     rows.push(['Paid', formatDate(invoice.paid_at)]);
@@ -97,9 +100,9 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
       rows.push(['Method', `${invoice.card_brand.toUpperCase()} ···· ${invoice.card_last_four}`]);
     }
   } else {
-    rows.push(['Due', formatDate(invoice.due_date)]);
+    rows.push(['Due', formatInvoiceDateOnly(invoice.due_date)]);
   }
-  if (invoice.service_date) rows.push(['Service date', formatDate(invoice.service_date)]);
+  if (invoice.service_date) rows.push(['Service date', formatInvoiceDateOnly(invoice.service_date)]);
   if (invoice.service_type) rows.push(['Service', invoice.service_type]);
 
   doc.fontSize(10).font('Helvetica');

@@ -15,6 +15,7 @@ const { wrapEmail, ctaButton, currency, formatDate, plainText } = require('./ema
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
+const { formatDateOnly } = require('../utils/date-only');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -88,8 +89,8 @@ async function sendInvoiceEmail(invoiceId) {
   const lines = [
     ['Invoice', invoice.invoice_number],
     ['Service', invoice.service_type || '—'],
-    invoice.service_date ? ['Service date', formatDate(invoice.service_date)] : null,
-    invoice.due_date ? ['Due', formatDate(invoice.due_date)] : null,
+    invoice.service_date ? ['Service date', formatDateOnly(invoice.service_date)] : null,
+    invoice.due_date ? ['Due', formatDateOnly(invoice.due_date)] : null,
     ['Amount due', currency(invoice.total), true],
   ].filter(Boolean);
   const html = wrapEmail({
@@ -110,7 +111,7 @@ async function sendInvoiceEmail(invoiceId) {
     '',
     `Invoice: ${invoice.invoice_number}`,
     invoice.service_type ? `Service: ${invoice.service_type}` : null,
-    invoice.due_date ? `Due: ${formatDate(invoice.due_date)}` : null,
+    invoice.due_date ? `Due: ${formatDateOnly(invoice.due_date)}` : null,
     `Amount due: ${currency(invoice.total)}`,
     '',
     `Pay online: ${payUrl}`,
@@ -130,9 +131,9 @@ async function sendInvoiceEmail(invoiceId) {
           invoice_url: payUrl,
           invoice_number: invoice.invoice_number,
           amount_due: currency(invoice.total),
-          due_date: invoice.due_date ? formatDate(invoice.due_date) : '',
+          due_date: invoice.due_date ? formatDateOnly(invoice.due_date) : '',
           service_label: invoice.service_type || '',
-          service_date: invoice.service_date ? formatDate(invoice.service_date) : '',
+          service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
           attachment_note: extraAttachmentCount > 0
             ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
             : 'Your PDF invoice is attached.',

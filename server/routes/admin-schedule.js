@@ -2381,6 +2381,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       discountIds: scheduledInvoice.discountIds || [],
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
       trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
+      dueDate: etDateString(),
     });
 
     const applied = await applyPrepaidCredit(invoice);

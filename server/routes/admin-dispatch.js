@@ -1557,6 +1557,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           : null;
         await db.transaction(async (trx) => {
           const completionEndedAt = new Date();
+          const completionServiceDate = etDateString(completionEndedAt);
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionEndedAt, { elapsed: timeOnSite });
           const structuredNotes = {
             visitOutcome,
@@ -1607,7 +1608,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             scheduled_service_id: svc.id,
             customer_id: svc.customer_id,
             technician_id: svc.technician_id,
-            service_date: svc.scheduled_date,
+            service_date: completionServiceDate,
             service_type: svc.service_type,
             status: isIncompleteVisit ? 'incomplete' : 'completed',
             technician_notes: technicianNotes || '',
@@ -2355,6 +2356,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           description: svc.service_type,
           taxRate: svc.property_type === 'commercial' ? 0.07 : 0,
           useScheduledReplay: true,
+          dueDate: serviceDateOnly(record.service_date),
         });
         invoice = await applyPrepaidCreditToInvoice(invoice);
         invoiceCreated = true;
@@ -2605,6 +2607,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                   reason: sendingNotes.completionSmsMmsFallbackReason || null,
                 }),
               }).catch((eventErr) => logger.warn(`[dispatch] service report MMS fallback event insert failed: ${eventErr.message}`));
+            }
+            if (invoice?.id && invoiceCreated && payUrl && allowCompletionInvoiceLink) {
+              try {
+                const InvoiceService = require('../services/invoice');
+                invoice = await InvoiceService.markDeliverySent(invoice.id, {
+                  sms: true,
+                  source: sentSmsType || 'completion_sms_with_invoice',
+                  payUrl,
+                });
+              } catch (statusErr) {
+                logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id}: ${statusErr.message}`);
+              }
             }
             record.structured_notes = sentNotes;
           }

@@ -72,6 +72,7 @@ import {
 import { launchTapToPay } from "../../lib/tapToPay";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { computeCardTotal } from "../../lib/cardSurcharge";
+import { invoiceDateOnly } from "../../lib/invoiceDates";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -287,6 +288,25 @@ function datePeriodStart(period) {
   if (period === "month")
     return new Date(current.getFullYear(), current.getMonth(), 1);
   return null;
+}
+
+function dateOnlyAtNoon(dateOnly) {
+  return new Date(`${dateOnly}T12:00:00`);
+}
+
+function parseInvoiceCreatedAt(value) {
+  if (!value) return null;
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return dateOnlyAtNoon(value);
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function invoiceListRowDate(inv = {}) {
+  const serviceDate = invoiceDateOnly(inv.service_date);
+  if (serviceDate) return dateOnlyAtNoon(serviceDate);
+  return parseInvoiceCreatedAt(inv.created_at);
 }
 
 export default function AdminInvoicesPage() {
@@ -687,28 +707,25 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
     return { key: "sent", label: "Sent", color: D.text };
   };
 
-  const getRowDate = (inv) => {
-    const s = inv.service_date
-      ? inv.service_date + "T12:00:00"
-      : inv.created_at;
-    return new Date(s);
-  };
-
   const rows = invoices;
 
   // Group by day — date header matches "Saturday, April 18, 2026"
   const groups = [];
   const groupMap = new Map();
   for (const inv of rows) {
-    const d = getRowDate(inv);
-    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    const d = invoiceListRowDate(inv);
+    const key = d
+      ? `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+      : "unknown";
     if (!groupMap.has(key)) {
-      const label = d.toLocaleDateString("en-US", {
-        weekday: "long",
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-      });
+      const label = d
+        ? d.toLocaleDateString("en-US", {
+            weekday: "long",
+            month: "long",
+            day: "numeric",
+            year: "numeric",
+          })
+        : "Unknown date";
       const g = { key, label, items: [] };
       groupMap.set(key, g);
       groups.push(g);
