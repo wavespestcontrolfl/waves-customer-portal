@@ -11,7 +11,6 @@
  *   {
  *     homeSqFt, stories, lotSqFt, lawnSqFt, bedArea,
  *     propertyType, features: { treeCount, hasPool, ... },
- *     zone: 'A' | 'B' | ... ,
  *     paymentMethod: 'card' | 'us_bank_account',
  *     services: {
  *       pest:       { frequency, roachType, version },

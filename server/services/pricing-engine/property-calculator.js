@@ -282,7 +282,6 @@ function calculatePropertyProfile(input) {
     roofType: input.roofType || null,
     nearWater: input.nearWater || (input.features?.nearWater ? 'CLOSE' : 'NONE'),
     waterDistance: input.waterDistance || null,
-    serviceZone: input.serviceZone || input.zone || 'A',
     isHOA: !!input.isHOA,
     hoaFee: input.hoaFee || null,
     isRental: !!input.isRental,

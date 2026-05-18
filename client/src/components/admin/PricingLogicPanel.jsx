@@ -31,7 +31,6 @@ const af = (p, o = {}) =>
 // ── Category tabs ──
 const TABS = [
   { key: "global", label: "Global Constants" },
-  { key: "zone", label: "Zones" },
   { key: "lawn", label: "Lawn Care" },
   { key: "pest", label: "Pest Control" },
   { key: "tree_shrub", label: "Tree & Shrub" },

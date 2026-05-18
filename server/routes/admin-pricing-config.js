@@ -8,14 +8,6 @@ const { BED_BUG } = require('../services/pricing-engine/constants');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-const SERVICE_ZONE_NAMES = {
-  A: 'Manatee/Sarasota core',
-  B: 'Extended service area',
-  C: 'Charlotte outskirts',
-  D: 'Far reach',
-  UNKNOWN: 'Default',
-};
-
 const ESTIMATE_COST_FALLBACKS = {
   pest_control: {
     serviceTypes: ['Quarterly Pest Control', 'Pest Control'],
@@ -140,31 +132,13 @@ function parseConfigData(data) {
   }
 }
 
-function neutralizeZoneConfig(data = {}) {
-  return Object.fromEntries(
-    Object.entries(SERVICE_ZONE_NAMES).map(([key, defaultName]) => [
-      key,
-      {
-        name: data?.[key]?.name || defaultName,
-        multiplier: 1.00,
-      },
-    ])
-  );
-}
-
 function normalizePricingConfigRow(row) {
   const data = parseConfigData(row.data);
-  if (row.config_key !== 'zone_multipliers') return { ...row, data };
-  return {
-    ...row,
-    name: row.name === 'Service Zone Multipliers' ? 'Service Zones' : row.name,
-    data: neutralizeZoneConfig(data),
-  };
+  return { ...row, data };
 }
 
 function normalizeIncomingConfigData(configKey, data) {
-  if (configKey !== 'zone_multipliers') return data;
-  return neutralizeZoneConfig(data);
+  return data;
 }
 
 async function ensureTable() {
@@ -188,12 +162,10 @@ async function ensureTable() {
       { config_key: 'waveguard_tiers', name: 'WaveGuard Bundle Discounts', category: 'waveguard', sort_order: 10, data: JSON.stringify({ bronze:{min_services:1,discount:0},silver:{min_services:2,discount:0.10},gold:{min_services:3,discount:0.15},platinum:{min_services:4,discount:0.20} }) },
       { config_key: 'waveguard_membership', name: 'WaveGuard Membership Fee', category: 'waveguard', sort_order: 11, data: JSON.stringify({ fee:99, waived_with_prepay:true }) },
       { config_key: 'lawn_st_augustine', name: 'St. Augustine', category: 'lawn', sort_order: 20, data: JSON.stringify([[0,35,45,55,65],[3000,35,45,55,65],[3500,35,45,55,68],[4000,35,45,55,73],[5000,35,45,59,84],[6000,35,46,66,96],[7000,38,50,73,107],[8000,41,55,80,118],[10000,47,64,94,140],[12000,54,73,109,162],[15000,63,86,130,195],[20000,80,108,165,250]]) },
-      // Service zones — metadata only; no pricing multiplier.
-      { config_key: 'zone_multipliers', name: 'Service Zones', category: 'zone', sort_order: 1, data: JSON.stringify({ A: { name: 'Manatee/Sarasota core', multiplier: 1.00 }, B: { name: 'Extended service area', multiplier: 1.00 }, C: { name: 'Charlotte outskirts', multiplier: 1.00 }, D: { name: 'Far reach', multiplier: 1.00 }, UNKNOWN: { name: 'Default', multiplier: 1.00 } }) },
 
       // Global constants
       { config_key: 'global_labor_rate', name: 'Loaded Labor Rate', category: 'global', sort_order: 1, data: JSON.stringify({ value: 35, unit: '$/hr', description: 'Wages + benefits + WC + vehicle + insurance' }) },
-      { config_key: 'global_drive_time', name: 'Average Drive Time', category: 'global', sort_order: 2, data: JSON.stringify({ value: 20, unit: 'min', description: 'Average drive time per visit (Zone A)' }) },
+      { config_key: 'global_drive_time', name: 'Average Drive Time', category: 'global', sort_order: 2, data: JSON.stringify({ value: 20, unit: 'min', description: 'Average drive time per visit' }) },
       { config_key: 'global_admin_annual', name: 'Admin Cost Allocation', category: 'global', sort_order: 3, data: JSON.stringify({ value: 51, unit: '$/service/yr', description: 'Annual admin overhead per service line' }) },
       { config_key: 'global_margin_floor', name: 'Margin Floor', category: 'global', sort_order: 4, data: JSON.stringify({ value: 0.35, unit: 'ratio', description: 'Minimum acceptable contribution margin' }) },
       { config_key: 'global_margin_target_ts', name: 'T&S Direct Cost Ratio Target', category: 'global', sort_order: 5, data: JSON.stringify({ value: 0.43, unit: 'ratio', description: 'Tree & Shrub direct-cost ratio target' }) },

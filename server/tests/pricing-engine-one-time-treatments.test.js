@@ -239,8 +239,6 @@ describe('pricing engine one-time treatment rules', () => {
     const zoneA = generateEstimate(estimateInput({ zone: 'A', services }));
     const zoneD = generateEstimate(estimateInput({ zone: 'D', services }));
 
-    expect(zoneA.zone.multiplier).toBe(1);
-    expect(zoneD.zone.multiplier).toBe(1);
     expect(zoneA.summary.recurringAnnualBeforeDiscount).toBe(zoneD.summary.recurringAnnualBeforeDiscount);
     expect(zoneA.summary.recurringAnnualAfterDiscount).toBe(zoneD.summary.recurringAnnualAfterDiscount);
 

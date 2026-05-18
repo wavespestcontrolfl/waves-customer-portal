@@ -1054,7 +1054,6 @@ function EstimateToolView() {
         lines.push(
           `Built ${ep.yearBuilt} · ${ep.constructionMaterial} · ${ep.foundationType} foundation · ${ep.roofType} roof`,
         );
-      if (ep.serviceZone) lines.push(`Service Zone ${ep.serviceZone}`);
       if (ep.propertyDataQuality)
         lines.push(
           `Property data quality: ${String(ep.propertyDataQuality.level || "unknown").toUpperCase()} (${ep.propertyDataQuality.score || 0}/100)`,
@@ -3461,11 +3460,6 @@ function EstimateToolView() {
                               </>
                             ) : null}
                           </>
-                        )}
-                        {E.property?.serviceZone && (
-                          <span style={sTag("teal")}>
-                            Zone {E.property.serviceZone}
-                          </span>
                         )}
                         {E.urgency?.label && (
                           <>

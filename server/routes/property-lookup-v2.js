@@ -1518,7 +1518,6 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     storiesSource: p.storiesSource || null,
     lotSqFt,
     propertyType: normalizePropertyType(p.propertyType),
-    serviceZone: p.serviceZone,
     measuredTurfSf: p.measuredTurfSf,
     estimatedTurfSf: p.estimatedTurfSf,
     imperviousSurfacePercent: p.imperviousSurfacePercent,

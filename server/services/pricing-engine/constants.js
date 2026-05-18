@@ -17,17 +17,6 @@ const GLOBAL = {
   CONDITIONAL_CEILING: 60,    // $/property/yr max conditional material before reprice
 };
 
-// ── Service Zones ─────────────────────────────────────────────
-// Zones are retained as routing/metadata labels only. They do not affect
-// estimator pricing; all multipliers are intentionally neutral.
-const ZONES = {
-  A: { name: 'Manatee/Sarasota core', multiplier: 1.00 },
-  B: { name: 'Extended service area', multiplier: 1.00 },
-  C: { name: 'Charlotte outskirts',   multiplier: 1.00 },
-  D: { name: 'Far reach',              multiplier: 1.00 },
-  UNKNOWN: { name: 'Default',          multiplier: 1.00 },
-};
-
 // ── Urgency Multipliers ──────────────────────────────────────
 // TODO(v4.4): document rationale for multiplier values (why 1.25/1.50
 // standard, 1.50/2.00 afterHours — not 1.20/1.40 or 1.30/1.60). These
@@ -1156,7 +1145,7 @@ const ACH_DISCOUNT = {
 };
 
 module.exports = {
-  GLOBAL, ZONES, URGENCY, PROPERTY_TYPE_ADJ,
+  GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
   PEST, LAWN_TIERS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
