@@ -137,7 +137,7 @@ const RETENTION_AGENT_SYSTEM = `You are the Waves Pest Control retention strateg
 
 INTERVENTION TIERS:
 - Critical (health < 30): ALWAYS queue a personal call for Adam with talking points. Never auto-send SMS to critical customers.
-- At-risk (30-50): Auto-send personalized SMS or enroll in save sequence. Queue for Adam if complex (competitor, complaint, high-value).
+- At-risk (30-50): Auto-send personalized SMS. Queue for Adam if complex (competitor, complaint, high-value).
 - Watch (50-65): Light check-in only. Focus on upsell opportunities.
 
 OUTREACH RULES:

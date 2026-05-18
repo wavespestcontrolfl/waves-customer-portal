@@ -27,7 +27,6 @@ const ALERT_RULES = [
     actions: [
       { label: 'Call immediately', type: 'call' },
       { label: 'Send retention offer', type: 'sms', template: 'retention_offer' },
-      { label: 'Enroll in save sequence', type: 'sequence', sequenceType: 'churn_save' },
     ],
   },
   {
@@ -233,6 +232,13 @@ async function executeAction(alertId, actionIndex) {
   if (actionIndex < 0 || actionIndex >= actions.length) throw new Error('Invalid action index');
 
   const action = actions[actionIndex];
+  if (action.type === 'sequence') {
+    return {
+      success: false,
+      code: 'retired_action_type',
+      message: 'Save sequence actions are no longer available.',
+    };
+  }
   const customer = await db('customers').where('id', alert.customer_id).first();
   if (!customer) throw new Error('Customer not found');
 
@@ -346,14 +352,6 @@ async function executeAction(alertId, actionIndex) {
       result = { success: true, message: `Complimentary service scheduled for ${customer.first_name}` };
     } catch (err) {
       result = { success: false, message: `Free service scheduling failed: ${err.message}` };
-    }
-  } else if (action.type === 'sequence') {
-    try {
-      const saveSeq = require('./save-sequences');
-      await saveSeq.enrollCustomer(customer.id, action.sequenceType || 'churn_save', alertId);
-      result = { success: true, message: `Enrolled in ${action.sequenceType || 'churn_save'} sequence` };
-    } catch (err) {
-      result = { success: false, message: `Sequence enrollment failed: ${err.message}` };
     }
   }
 

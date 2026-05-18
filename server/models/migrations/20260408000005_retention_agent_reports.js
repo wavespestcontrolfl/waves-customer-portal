@@ -10,7 +10,6 @@ exports.up = async function (knex) {
     t.integer('at_risk_count').defaultTo(0);
     t.integer('calls_scheduled').defaultTo(0);
     t.integer('sms_sent').defaultTo(0);
-    t.integer('sequences_enrolled').defaultTo(0);
     t.integer('upsells_identified').defaultTo(0);
     t.decimal('revenue_at_risk', 10, 2).defaultTo(0);
     t.decimal('estimated_revenue_saved', 10, 2).defaultTo(0);

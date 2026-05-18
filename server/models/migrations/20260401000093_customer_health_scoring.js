@@ -50,22 +50,10 @@ exports.up = async function(knex) {
     });
   }
 
-  if (!(await knex.schema.hasTable('customer_save_sequences'))) {
-    await knex.schema.createTable('customer_save_sequences', t => {
-      t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
-      t.uuid('customer_id').notNullable(); t.uuid('trigger_alert_id');
-      t.string('sequence_type', 30).notNullable(); t.string('status', 20).defaultTo('active');
-      t.integer('current_step').defaultTo(1); t.integer('total_steps').notNullable();
-      t.jsonb('steps').notNullable(); t.timestamp('started_at').defaultTo(knex.fn.now());
-      t.timestamp('completed_at'); t.string('outcome', 20); t.text('outcome_notes');
-      t.timestamps(true, true); t.index('customer_id'); t.index('status');
-    });
-  }
 };
 
 exports.down = function(knex) {
   return knex.schema
-    .dropTableIfExists('customer_save_sequences')
     .dropTableIfExists('customer_health_alerts')
     .dropTableIfExists('customer_health_history')
     .dropTableIfExists('customer_health_scores');
