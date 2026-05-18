@@ -622,6 +622,25 @@ httpServer.listen(PORT, () => {
     // catch-up still runs in prod when GATE_CRON_JOBS is off. Real-time
     // updates arrive via the payout.* webhook in stripe-webhook.js.
 
+    // Service report PDF jobs are best-effort customer-document work. Keep
+    // the worker in-process so the single Railway web dyno drains retry jobs
+    // created by completion, email, or public PDF requests.
+    {
+      const runPdfQueue = async () => {
+        try {
+          const { processDuePdfRenderJobs } = require('./services/service-report/pdf-queue');
+          const summary = await processDuePdfRenderJobs();
+          if (summary.claimed || summary.recovered) {
+            logger.info(`[service-report-pdf-queue] processed ${summary.claimed} job(s): ${summary.succeeded} succeeded, ${summary.requeued} requeued, ${summary.failed} failed, ${summary.recovered} recovered`);
+          }
+        } catch (err) {
+          logger.error(`[service-report-pdf-queue] processor failed: ${err.message}`);
+        }
+      };
+      setTimeout(runPdfQueue, 30 * 1000).unref();
+      setInterval(runPdfQueue, 60 * 1000).unref();
+    }
+
     // Process unprocessed call recordings every 10 minutes (safety net)
     setInterval(async () => {
       try {

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { cleanVisitSummary, customerInteractionCopy, formatDate } from './ReportViewPage.jsx';
+import {
+  cleanVisitSummary,
+  formatDate,
+  quickNavigationLinks,
+  readinessStatusBadge,
+  reviewRequestCopy,
+  timelineEventsForDisplay,
+} from './ReportViewPage.jsx';
 
 describe('ReportViewPage date formatting', () => {
   it('keeps UTC-midnight service dates on their calendar day', () => {
@@ -12,15 +19,41 @@ describe('ReportViewPage date formatting', () => {
   });
 });
 
-describe('ReportViewPage customer copy cleanup', () => {
+describe('ReportViewPage summary copy cleanup', () => {
   it('removes broken Waves signature fragments from the visit summary', () => {
     expect(cleanVisitSummary(
       'Thanks for having us out today. We focused on the perimeter. You should see activity ease over the next 1-2 weeks, and - Waves',
     )).toBe('Your routine service is complete. We focused on the perimeter. You may see activity ease over the next 1-2 weeks.');
   });
+});
 
-  it('translates internal customer interaction values into readable copy', () => {
-    expect(customerInteractionCopy('tech_home_spoke_with_them')).toBe('The technician spoke with someone at the home.');
-    expect(customerInteractionCopy('not_home_full_access')).toBe('No one was home, and the technician had full access to complete service.');
+describe('ReportViewPage report chrome helpers', () => {
+  it('omits product quick navigation when no products were applied', () => {
+    const labels = quickNavigationLinks({ hasProducts: false }).map(([, label]) => label);
+    expect(labels).not.toContain('Products Applied');
+    expect(labels).toContain('Coverage Map');
+  });
+
+  it('does not show a readiness status badge without re-entry context', () => {
+    expect(readinessStatusBadge(null)).toBeNull();
+  });
+
+  it('keeps untracked customer interaction out of the timeline display', () => {
+    const events = timelineEventsForDisplay([
+      { type: 'arrived_on_site', label: 'Arrived' },
+      { type: 'customer_interaction', label: 'Customer interaction' },
+      { type: 'service_completed', label: 'Completed' },
+    ]);
+    expect(events.map((event) => event.type)).toEqual(['arrived_on_site', 'service_completed']);
+  });
+
+  it('uses distinct review request copy for top and bottom placements', () => {
+    const top = reviewRequestCopy('top');
+    const bottom = reviewRequestCopy('bottom');
+    expect(top.title).toBe("How did today's visit go?");
+    expect(bottom.title).toBe('Help the next neighbor choose faster');
+    expect(top.title).not.toBe(bottom.title);
+    expect(top.cta).toBe('Share feedback');
+    expect(bottom.cta).toBe('Share feedback');
   });
 });
