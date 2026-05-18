@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
-const { slackAlert } = require('../slack-alerts');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { buildReportV1Data } = require('./report-data');
 const { renderServiceReportV1Pdf } = require('./pdf');
@@ -273,22 +272,9 @@ async function markPdfRenderJobFailed(job, err, knex = db) {
       service_record_id: job.service_record_id,
       err: errorMessage.slice(0, 500),
     });
-    await slackAlert({
-      channel: '#waves-alerts',
-      text: `PDF render failed permanently for service record ${job.service_record_id}. Manual review required.`,
-      metadata: { service_record_id: job.service_record_id, attempts, error: errorMessage.slice(0, 500) },
-    });
+    logger.error(`[service-report-pdf-queue] PDF render failed permanently for ${job.service_record_id} after ${attempts} attempts: ${errorMessage}`);
   } else if (attempts === 1) {
-    await slackAlert({
-      channel: '#waves-alerts',
-      text: `PDF render failed for service record ${job.service_record_id}; retry queued.`,
-      metadata: {
-        service_record_id: job.service_record_id,
-        attempts,
-        next_attempt_at: nextAttemptAt,
-        error: errorMessage.slice(0, 500),
-      },
-    });
+    logger.warn(`[service-report-pdf-queue] PDF render failed for ${job.service_record_id}; retry queued for ${nextAttemptAt.toISOString()}: ${errorMessage}`);
   }
   return exhausted ? 'failed' : 'queued';
 }

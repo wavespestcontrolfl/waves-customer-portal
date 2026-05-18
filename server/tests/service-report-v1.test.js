@@ -16,6 +16,7 @@ const {
 const { formatTechnicianForCustomer } = require('../utils/technician-name');
 const { computeOnSiteMin } = require('../services/service-report/metrics-band');
 const {
+  cfBrowserRenderingTimeoutMs,
   renderReportPdfWithCloudflare,
   serviceReportViewerUrl,
 } = require('../services/service-report/pdf');
@@ -1006,6 +1007,8 @@ describe('service report v1', () => {
         'https://api.cloudflare.com/client/v4/accounts/account-1/browser-rendering/pdf',
       );
       expect(calls[0].options.headers.Authorization).toBe('Bearer token-1');
+      expect(calls[0].options.signal).toBeDefined();
+      expect(calls[0].options.signal.aborted).toBe(false);
       expect(calls[0].body).toMatchObject({
         url: 'https://example.test/report/token-1?mode=pdf',
         viewport: { width: 816, height: 1056 },
@@ -1023,6 +1026,20 @@ describe('service report v1', () => {
       global.fetch = originalFetch;
       restoreEnv('CF_ACCOUNT_ID', originalAccountId);
       restoreEnv('CF_BROWSER_RENDERING_TOKEN', originalToken);
+    }
+  });
+
+  test('Cloudflare PDF renderer timeout falls back to a bounded default', () => {
+    const originalTimeout = process.env.CF_BROWSER_RENDERING_TIMEOUT_MS;
+    try {
+      delete process.env.CF_BROWSER_RENDERING_TIMEOUT_MS;
+      expect(cfBrowserRenderingTimeoutMs()).toBe(45000);
+      process.env.CF_BROWSER_RENDERING_TIMEOUT_MS = '12000';
+      expect(cfBrowserRenderingTimeoutMs()).toBe(12000);
+      process.env.CF_BROWSER_RENDERING_TIMEOUT_MS = '0';
+      expect(cfBrowserRenderingTimeoutMs()).toBe(45000);
+    } finally {
+      restoreEnv('CF_BROWSER_RENDERING_TIMEOUT_MS', originalTimeout);
     }
   });
 
