@@ -21,6 +21,8 @@ const {
   resolveRecurringMonthlyParts,
   resolveEstimateDeclineGuard,
   resolveEstimateQuoteRequirement,
+  resolveRecurringFirstVisitAmount,
+  resolveRecurringFirstVisitAmountFromFrequency,
   shouldApplyFirstViewSideEffects,
   withSupplementedRecurringServices,
 } = require('../routes/estimate-public');
@@ -1161,6 +1163,41 @@ describe('public estimate one-time breakdown', () => {
     expect(included).toContain('The one-time estimate is $350.');
     expect(included).not.toContain('recurring estimate');
     expect(included).not.toContain('$300 / quarter');
+  });
+
+  test('recurring first-visit amount uses per-application service pricing', () => {
+    const amount = resolveRecurringFirstVisitAmount([
+      { name: 'Pest Control', mo: 128 },
+      { name: 'Lawn Care', mo: 87, perTreatment: 116, visitsPerYear: 9 },
+    ], {
+      tierDiscount: 0.1,
+      pestRecurring: { monthlyBase: 128, visitsPerYear: 4 },
+      estData: {
+        result: {
+          results: {
+            pest: { apps: 4 },
+            pestTiers: [{ label: 'Quarterly', mo: 128, pa: 128, apps: 4 }],
+          },
+        },
+      },
+    });
+
+    expect(amount).toBe(219.6);
+  });
+
+  test('recurring first-visit amount can come from the selected frequency', () => {
+    const frequency = {
+      key: 'monthly',
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 74.4, perTreatment: 95, visitsPerYear: 12 },
+        { service: 'lawn_care', displayPrice: 104.4, perTreatment: 116 },
+      ],
+    };
+    const amount = resolveRecurringFirstVisitAmountFromFrequency(frequency);
+    const amountWithPrefs = resolveRecurringFirstVisitAmountFromFrequency(frequency, { prefMonthlyOff: 20 });
+
+    expect(amount).toBe(178.8);
+    expect(amountWithPrefs).toBe(158.8);
   });
 
   test('server-rendered bundled estimate showcases per-application prices by service', () => {

@@ -254,6 +254,111 @@ function tierDiscountForEstimate(estData, tier, fallbackDiscount = null) {
   return tierDiscount(tier);
 }
 
+function recurringResultStats(estData = {}) {
+  const estResult = estData?.result || estData || {};
+  return estResult?.results || estData?.results || {};
+}
+
+function visitsForRecurringServiceName(name, resultStats = {}) {
+  const n = String(name || '').toLowerCase();
+  if (n.includes('pest')) return resultStats.pest?.apps;
+  if (n.includes('lawn') && Array.isArray(resultStats.lawn)) {
+    const sel = resultStats.lawn.find((t) => t.recommended) || resultStats.lawn[0];
+    return sel?.v;
+  }
+  if (n.includes('mosquito') && Array.isArray(resultStats.mq)) {
+    const sel = resultStats.mq.find((t) => t.recommended) || resultStats.mq[0];
+    return sel?.v;
+  }
+  if (n.includes('tree') && Array.isArray(resultStats.ts)) return resultStats.ts[0]?.v;
+  if (n.includes('termite') && n.includes('bait')) return 4;
+  return null;
+}
+
+function selectedPestTierForFirstVisit(estData = {}, pestRecurring = null) {
+  const resultStats = recurringResultStats(estData);
+  const pestTiers = Array.isArray(resultStats.pestTiers) ? resultStats.pestTiers : [];
+  return pestTiers.find((t) => Math.abs(Number(t?.mo || 0) - Number(pestRecurring?.monthlyBase || 0)) < 0.01)
+    || pestTiers[0]
+    || null;
+}
+
+function recurringServiceFirstVisitPrice(svc = {}, {
+  estData = {},
+  tierDiscount = 0,
+  prefMonthlyOff = 0,
+  pestRecurring = null,
+  selectedPestTier = null,
+} = {}) {
+  const resultStats = recurringResultStats(estData);
+  const pestTier = selectedPestTier || selectedPestTierForFirstVisit(estData, pestRecurring);
+  const name = svc?.name || svc?.label || svc?.service;
+  const n = String(name || '').toLowerCase();
+  const visits = (() => {
+    if (n.includes('pest')) {
+      return Number(pestTier?.apps || pestTier?.v || resultStats.pest?.apps || pestRecurring?.visitsPerYear || 4) || null;
+    }
+    const explicit = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.frequency);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    return Number(visitsForRecurringServiceName(name, resultStats)) || null;
+  })();
+  const anchorPrice = (() => {
+    let base = null;
+    if (n.includes('pest')) {
+      const pestPa = Number(pestTier?.pa || 0);
+      if (pestPa > 0) base = pestPa;
+    }
+    if (base == null) {
+      const explicit = Number(svc?.perTreatment ?? svc?.perApp ?? svc?.perVisit ?? svc?.pa);
+      if (Number.isFinite(explicit) && explicit > 0) base = explicit;
+    }
+    if (base == null && visits > 0) {
+      const monthly = Number(svc?.mo || svc?.monthly || 0);
+      if (monthly > 0) base = (monthly * 12) / visits;
+    }
+    return base == null ? null : Math.round(base * 100) / 100;
+  })();
+  const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? Number(tierDiscount || 0) : 0;
+  const basePrice = anchorPrice == null ? null : Math.round(anchorPrice * (1 - serviceDiscount) * 100) / 100;
+  const prefPerTreatmentOff = n.includes('pest') && visits > 0
+    ? (Number(prefMonthlyOff || 0) * 12) / visits
+    : 0;
+  const price = basePrice == null ? null : Math.max(0, Math.round((basePrice - prefPerTreatmentOff) * 100) / 100);
+  return { visits, anchorPrice, basePrice, price };
+}
+
+function resolveRecurringFirstVisitAmount(services = [], opts = {}) {
+  const total = (Array.isArray(services) ? services : []).reduce((sum, svc) => {
+    const { price } = recurringServiceFirstVisitPrice(svc, opts);
+    return Number.isFinite(price) && price > 0 ? Math.round((sum + price) * 100) / 100 : sum;
+  }, 0);
+  return total > 0 ? total : null;
+}
+
+function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMonthlyOff = 0 } = {}) {
+  const rows = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments
+    : [];
+  const total = rows.reduce((sum, row) => {
+    const amount = firstPositiveNumber(
+      row?.displayPrice,
+      row?.priceAfterDiscount,
+      row?.netPerTreatment,
+      row?.price,
+      row?.perTreatment,
+    );
+    if (!amount) return sum;
+    const serviceName = String(row?.service || row?.label || '').toLowerCase();
+    const visits = Number(row?.visitsPerYear ?? row?.visits ?? row?.frequency);
+    const discount = serviceName.includes('pest') && visits > 0
+      ? (Number(prefMonthlyOff || 0) * 12) / visits
+      : 0;
+    const adjusted = Math.max(0, Math.round((amount - discount) * 100) / 100);
+    return adjusted > 0 ? Math.round((sum + adjusted) * 100) / 100 : sum;
+  }, 0);
+  return total > 0 ? total : null;
+}
+
 // ── Service-preference pricing modifiers ──────────────────────
 // Customers can opt out of interior spraying or exterior (eave/cobweb)
 // sweeping on RECURRING pest only ($10/visit each). On one-time pest
@@ -1142,45 +1247,6 @@ function renderPage(token, estimate, estData) {
   const showMembershipFee = membershipFee > 0 && !locked;
 
   const tierDiscountPct = Math.round(estimateTierDiscount * 100);
-  const visitsForRecurringService = (svc) => {
-    const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
-    if (n.includes('pest')) {
-      return Number(selectedPestTier?.apps || selectedPestTier?.v || R.pest?.apps || pestRecurring?.visitsPerYear || 4) || null;
-    }
-    const explicit = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.frequency);
-    if (Number.isFinite(explicit) && explicit > 0) return explicit;
-    return Number(visitsForService(svc?.name || svc?.label || svc?.service)) || null;
-  };
-  const rawPerTreatmentForRecurringService = (svc, visits) => {
-    const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
-    let base = null;
-    if (n.includes('pest')) {
-      const pestPa = Number(selectedPestTier?.pa || 0);
-      if (pestPa > 0) base = pestPa;
-    }
-    if (base == null) {
-      const explicit = Number(svc?.perTreatment ?? svc?.perApp ?? svc?.perVisit ?? svc?.pa);
-      if (Number.isFinite(explicit) && explicit > 0) base = explicit;
-    }
-    if (base == null && visits > 0) {
-      const monthly = Number(svc?.mo || svc?.monthly || 0);
-      if (monthly > 0) base = (monthly * 12) / visits;
-    }
-    return base == null ? null : Math.round(base * 100) / 100;
-  };
-  const basePerTreatmentForRecurringService = (svc, visits) => {
-    const base = rawPerTreatmentForRecurringService(svc, visits);
-    const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? estimateTierDiscount : 0;
-    return base == null ? null : Math.round(base * (1 - serviceDiscount) * 100) / 100;
-  };
-  const adjustedPerTreatmentForRecurringService = (svc, visits, basePrice) => {
-    const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
-    if (basePrice == null) return null;
-    const prefPerTreatmentOff = n.includes('pest') && visits > 0
-      ? (prefMonthlyOff * 12) / visits
-      : 0;
-    return Math.max(0, Math.round((basePrice - prefPerTreatmentOff) * 100) / 100);
-  };
   const servicePriority = (svc) => {
     const key = recurringServiceKey(svc);
     if (key === 'pest_control') return 0;
@@ -1198,12 +1264,16 @@ function renderPage(token, estimate, estData) {
     .map((svc) => {
       const serviceKey = recurringServiceKey(svc);
       const name = svc?.displayName || recurringServiceDisplayName(serviceKey) || svc?.name || svc?.label || 'Service';
-      const visits = visitsForRecurringService(svc);
+      const firstVisitPricing = recurringServiceFirstVisitPrice(svc, {
+        estData,
+        tierDiscount: estimateTierDiscount,
+        prefMonthlyOff,
+        pestRecurring,
+        selectedPestTier,
+      });
+      const { visits, anchorPrice, basePrice, price } = firstVisitPricing;
       const isPest = /pest/i.test(String(name));
       const isLawn = /lawn/i.test(String(name));
-      const anchorPrice = rawPerTreatmentForRecurringService(svc, visits);
-      const basePrice = basePerTreatmentForRecurringService(svc, visits);
-      const price = adjustedPerTreatmentForRecurringService(svc, visits, basePrice);
       const visitText = visits
         ? `${Math.round(visits).toLocaleString()} ${visits === 1 ? 'application' : 'applications'}/year`
         : 'Service applications/year';
@@ -1233,10 +1303,13 @@ function renderPage(token, estimate, estData) {
           </div>
           ${row.price != null ? `<div class="billing-service-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span>/ application</span></div>` : ''}
         </div>`).join('');
-  const firstServiceVisitTotal = billingServiceRows.reduce((sum, row) => {
-    const price = Number(row.price);
-    return Number.isFinite(price) && price > 0 ? sum + price : sum;
-  }, 0);
+  const firstServiceVisitTotal = resolveRecurringFirstVisitAmount(billingRecurring, {
+    estData,
+    tierDiscount: estimateTierDiscount,
+    prefMonthlyOff,
+    pestRecurring,
+    selectedPestTier,
+  }) || 0;
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
   const showAnnualPrepayOption = showMembershipFee;
@@ -2923,9 +2996,32 @@ router.put('/:token/accept', async (req, res, next) => {
           fallbackFrequencyKey: 'quarterly',
         })
       : null;
+    const acceptPestRecurring = detectPestRecurring(recurringSvcList);
+    const acceptPrefs = normalizePrefs(estData?.preferences);
+    const { monthlyOff: acceptPrefMonthlyOff } = computePrefDiscount(acceptPrefs, acceptPestRecurring, false, 0);
+    const acceptTier = estimate.waveguard_tier || pricingBundle?.waveGuardTier || 'Bronze';
+    const acceptEstResult = estData?.result || estData || {};
+    const savedAcceptTierDiscount = Number(acceptEstResult?.recurring?.discount);
+    const acceptTierDiscount = tierDiscountForEstimate(
+      estData,
+      acceptTier,
+      Number.isFinite(savedAcceptTierDiscount) ? savedAcceptTierDiscount : null,
+    );
+    const selectedFrequencyFirstVisitAmount = resolveRecurringFirstVisitAmountFromFrequency(
+      selectedFrequency,
+      { prefMonthlyOff: acceptPrefMonthlyOff },
+    );
+    const recurringFirstVisitAmount = !treatAsOneTime
+      ? selectedFrequencyFirstVisitAmount || resolveRecurringFirstVisitAmount(recurringSvcList, {
+          estData,
+          tierDiscount: acceptTierDiscount,
+          prefMonthlyOff: acceptPrefMonthlyOff,
+          pestRecurring: acceptPestRecurring,
+        })
+      : null;
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
-      : (billingTerm === 'prepay_annual' ? null : effectiveBillingCadence?.amount);
+      : (billingTerm === 'prepay_annual' ? null : (recurringFirstVisitAmount || effectiveBillingCadence?.amount));
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
@@ -3291,14 +3387,14 @@ router.put('/:token/accept', async (req, res, next) => {
           notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode one-time).`;
         } else {
           const monthly = parseFloat(effectiveMonthlyTotal || estimate.monthly_total || 0);
-          const quarterAmount = Math.round(monthly * 3 * 100) / 100;
-          invoiceAmount = quarterAmount;
+          const cadenceAmount = effectiveBillingCadence?.amount || Math.round(monthly * 3 * 100) / 100;
+          invoiceAmount = cadenceAmount;
           const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
           title = `${svcType} — first quarterly visit`;
           lineItems = [{
             description: `${svcType} (quarterly recurring — first visit)`,
             quantity: 1,
-            unit_price: quarterAmount,
+            unit_price: cadenceAmount,
           }];
           notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`;
         }
@@ -4971,6 +5067,8 @@ module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
+module.exports.resolveRecurringFirstVisitAmount = resolveRecurringFirstVisitAmount;
+module.exports.resolveRecurringFirstVisitAmountFromFrequency = resolveRecurringFirstVisitAmountFromFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
