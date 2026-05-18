@@ -9,7 +9,6 @@
  *   - HealthScorer (calculate scores, identify upsells)
  *   - SignalDetector (detect behavioral signals, sentiment mining)
  *   - RetentionEngine (generate outreach, get metrics)
- *   - Save sequences (enroll in churn_save, win_back)
  *   - Workflow triggers (cancellation save, upsell, balance reminder, etc.)
  */
 
@@ -23,7 +22,7 @@ const RETENTION_AGENT_CONFIG = {
 
 INTERVENTION TIERS:
 - Critical (health < 30): ALWAYS queue a personal call for Adam with talking points. Never auto-send SMS to critical customers.
-- At-risk (30-50): Auto-send personalized SMS or enroll in save sequence. Queue for Adam if complex (competitor, complaint, high-value).
+- At-risk (30-50): Auto-send personalized SMS. Queue for Adam if complex (competitor, complaint, high-value).
 - Watch (50-65): Light check-in only. Focus on upsell opportunities.
 
 OUTREACH RULES:
@@ -86,7 +85,7 @@ Analyze top 20 by priority (critical first, then by LTV). Save a retention repor
     {
       type: 'custom',
       name: 'get_customer_health_detail',
-      description: `Get detailed health analysis for a single customer. Returns health score, all active signals (type, severity, when detected), risk factors, recent SMS history, last service details, billing status, active save sequences, retention outreach history, and upsell opportunities. Use this to deeply analyze each priority customer before deciding on an intervention.`,
+      description: `Get detailed health analysis for a single customer. Returns health score, all active signals (type, severity, when detected), risk factors, recent SMS history, last service details, billing status, retention outreach history, and upsell opportunities. Use this to deeply analyze each priority customer before deciding on an intervention.`,
       input_schema: {
         type: 'object',
         properties: {
@@ -153,20 +152,6 @@ Analyze top 20 by priority (critical first, then by LTV). Save a retention repor
       },
     },
 
-    {
-      type: 'custom',
-      name: 'enroll_save_sequence',
-      description: `Enroll a customer in an automated save sequence. Types: "churn_save" (3-step: check-in SMS → follow-up call → value reinforcement SMS), "win_back" (3-step reactivation for dormant customers). Checks for active sequences first — won't double-enroll. Returns the sequence ID and first step details.`,
-      input_schema: {
-        type: 'object',
-        properties: {
-          customer_id: { type: 'string', description: 'Customer UUID' },
-          sequence_type: { type: 'string', enum: ['churn_save', 'win_back'], description: 'Which sequence to enroll in' },
-        },
-        required: ['customer_id', 'sequence_type'],
-      },
-    },
-
     // ── Upsell ──────────────────────────────────────────────────
 
     {
@@ -212,7 +197,6 @@ Analyze top 20 by priority (critical first, then by LTV). Save a retention repor
           at_risk_count: { type: 'number' },
           calls_scheduled: { type: 'number' },
           sms_sent: { type: 'number' },
-          sequences_enrolled: { type: 'number' },
           upsells_identified: { type: 'number' },
           revenue_at_risk: { type: 'number', description: 'Monthly revenue from at-risk customers' },
           estimated_revenue_saved: { type: 'number', description: 'Monthly revenue from expected saves' },

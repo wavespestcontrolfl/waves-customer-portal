@@ -27,7 +27,6 @@ const ALERT_RULES = [
     actions: [
       { label: 'Call immediately', type: 'call' },
       { label: 'Send retention offer', type: 'sms', template: 'retention_offer' },
-      { label: 'Enroll in save sequence', type: 'sequence', sequenceType: 'churn_save' },
     ],
   },
   {
@@ -346,14 +345,6 @@ async function executeAction(alertId, actionIndex) {
       result = { success: true, message: `Complimentary service scheduled for ${customer.first_name}` };
     } catch (err) {
       result = { success: false, message: `Free service scheduling failed: ${err.message}` };
-    }
-  } else if (action.type === 'sequence') {
-    try {
-      const saveSeq = require('./save-sequences');
-      await saveSeq.enrollCustomer(customer.id, action.sequenceType || 'churn_save', alertId);
-      result = { success: true, message: `Enrolled in ${action.sequenceType || 'churn_save'} sequence` };
-    } catch (err) {
-      result = { success: false, message: `Sequence enrollment failed: ${err.message}` };
     }
   }
 

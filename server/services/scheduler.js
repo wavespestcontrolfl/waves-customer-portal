@@ -1147,21 +1147,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY — Process save sequences (churn_save, win_back step advancement)
-  // =========================================================================
-  cron.schedule('45 * * * *', async () => {
-    try {
-      const { processSequences } = require('./save-sequences');
-      const result = await processSequences();
-      if (result.processed > 0) {
-        logger.info(`Save sequences processed: ${result.processed} steps, ${result.errors} errors`);
-      }
-    } catch (err) {
-      logger.error(`Save sequence processing failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // WEEKLY SUNDAY 4AM — Cleanup health history older than 365 days
   // =========================================================================
   cron.schedule('0 4 * * 0', async () => {
