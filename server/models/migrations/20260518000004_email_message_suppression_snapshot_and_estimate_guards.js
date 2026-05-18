@@ -98,10 +98,9 @@ exports.down = async function down(knex) {
   const hasEmailMessages = await knex.schema.hasTable('email_messages');
   if (!hasEmailMessages) return;
 
-  const hasIdempotencyKey = await knex.schema.hasColumn('email_messages', 'idempotency_key');
-  if (hasIdempotencyKey) {
-    await knex.raw('ALTER TABLE email_messages ALTER COLUMN idempotency_key TYPE varchar(255)');
-  }
+  // Deliberately do not narrow idempotency_key back to varchar(255): valid
+  // post-migration sends may already have 256-260 character keys, which would
+  // make rollback fail or require destructive truncation.
 
   const hasSuppressionSnapshot = await knex.schema.hasColumn('email_messages', 'suppression_group_key_snapshot');
   if (hasSuppressionSnapshot) {
