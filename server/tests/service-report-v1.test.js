@@ -1354,6 +1354,72 @@ describe('service report v1', () => {
     expect(data.metrics.some((metric) => metric.label === 'Pressure index')).toBe(false);
   });
 
+  test('v1 data does not add clean lawn findings when an assessment has scores only', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+      lawn_assessments: [
+        {
+          id: 'assessment-low',
+          customer_id: 'customer-1',
+          service_record_id: 'service-lawn-low',
+          confirmed_by_tech: true,
+          service_date: '2026-05-16',
+          overall_score: 35,
+          turf_density: 35,
+          weed_suppression: 20,
+          color_health: 40,
+          fungus_control: 30,
+          thatch_level: 50,
+          observations: '',
+          recommendations: null,
+        },
+      ],
+      lawn_assessment_photos: [],
+      customer_turf_profiles: [],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy: () => query,
+        limit(count) {
+          rows = rows.slice(0, count);
+          return query;
+        },
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-lawn-low',
+      customer_id: 'customer-1',
+      service_line: 'lawn',
+      service_type: 'Lawn Care',
+      service_date: '2026-05-16',
+      status: 'completed',
+      first_name: 'Van',
+      last_name: 'Lee',
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-lawn-low', knex);
+
+    expect(data.lawnAssessment.scores.overallScore).toBe(35);
+    expect(data.findings).toEqual([]);
+  });
+
   test('photo hash chain validates deterministic metadata and detects tampering', () => {
     const first = {
       id: 'photo-1',

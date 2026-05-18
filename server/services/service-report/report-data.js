@@ -940,6 +940,10 @@ function lawnAssessmentSummary(current, initial, count) {
 
 function hasLawnAssessmentCustomerSignal(lawnAssessment) {
   if (!lawnAssessment) return false;
+  if (String(lawnAssessment.customerSummary || '').trim()) return true;
+  if (Array.isArray(lawnAssessment.photos) && lawnAssessment.photos.length) return true;
+  const scores = lawnAssessment.scores || {};
+  if (Object.values(scores).some((value) => value != null && value !== '')) return true;
   if (String(lawnAssessment.observations || '').trim()) return true;
   const recommendations = lawnAssessment.recommendations || {};
   return Object.values(recommendations).some((value) => String(value || '').trim());
