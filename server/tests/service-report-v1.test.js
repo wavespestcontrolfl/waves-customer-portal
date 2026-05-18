@@ -18,6 +18,9 @@ const {
   serviceReportViewerUrl,
 } = require('../services/service-report/pdf');
 const {
+  sanitizedPdfRenderMetadata,
+} = require('../services/service-report/pdf-events');
+const {
   buildServiceReportV1DeliveryContext,
   buildServiceReportV1Sms,
   serviceReportV1SmsType,
@@ -999,6 +1002,26 @@ describe('service report v1', () => {
       restoreEnv('CF_ACCOUNT_ID', originalAccountId);
       restoreEnv('CF_BROWSER_RENDERING_TOKEN', originalToken);
     }
+  });
+
+  test('PDF render telemetry redacts bearer report URLs', () => {
+    const metadata = sanitizedPdfRenderMetadata({
+      service_record_id: 'service-1',
+      provider: 'cloudflare_browser_rendering',
+      url: 'https://portal.wavespestcontrol.com/report/token-1?mode=pdf',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-2',
+      report_url: 'https://portal.wavespestcontrol.com/report/token-3',
+      viewerUrl: 'https://portal.wavespestcontrol.com/report/token-4',
+    });
+
+    expect(metadata).toMatchObject({
+      service_record_id: 'service-1',
+      provider: 'cloudflare_browser_rendering',
+      url: '[redacted]',
+      reportUrl: '[redacted]',
+      report_url: '[redacted]',
+      viewerUrl: '[redacted]',
+    });
   });
 
   test('v1 SMS delivery copy includes public report link and advisory re-entry', () => {

@@ -90,7 +90,6 @@ async function renderServiceReportV1Pdf(data, { token, req, logger: callLogger, 
       provider,
       elapsed_ms: elapsedMs,
       bytes: pdf.byteLength,
-      url,
     });
     return pdf;
   } catch (err) {
@@ -102,10 +101,9 @@ async function renderServiceReportV1Pdf(data, { token, req, logger: callLogger, 
       status: err.status || null,
       elapsed_ms: elapsedMs,
       err: String(errText).slice(0, 500),
-      url,
     });
     const log = callLogger || logger;
-    log.error(`[service-report-v1-pdf] ${provider} render failed for ${recordId || reportToken}: ${err.message}`);
+    log.error(`[service-report-v1-pdf] ${provider} render failed for ${recordId || 'unknown-record'}: ${err.message}`);
     throw err;
   }
 }

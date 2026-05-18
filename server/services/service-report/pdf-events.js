@@ -1,6 +1,16 @@
 const logger = require('../logger');
 const { recordToolEvent } = require('../intelligence-bar/tool-events');
 
+function sanitizedPdfRenderMetadata(payload = {}) {
+  const metadata = { ...payload };
+  for (const key of ['url', 'reportUrl', 'report_url', 'viewerUrl', 'viewer_url']) {
+    if (Object.prototype.hasOwnProperty.call(metadata, key)) {
+      metadata[key] = '[redacted]';
+    }
+  }
+  return metadata;
+}
+
 function emitPdfRenderEvent(eventName, payload = {}, success = true) {
   const errorText = payload.err || payload.error || null;
   recordToolEvent({
@@ -10,7 +20,7 @@ function emitPdfRenderEvent(eventName, payload = {}, success = true) {
     success,
     durationMs: payload.elapsed_ms ?? payload.elapsedMs ?? null,
     errorMessage: errorText ? String(errorText).slice(0, 1000) : null,
-    metadata: payload,
+    metadata: sanitizedPdfRenderMetadata(payload),
   });
 
   const message = `[service-report-pdf] ${eventName} ${payload.service_record_id || payload.serviceRecordId || ''}`.trim();
@@ -35,4 +45,5 @@ module.exports = {
   emitPdfRenderFailed,
   emitPdfRenderSuccess,
   emitPdfRenderTerminalFailure,
+  sanitizedPdfRenderMetadata,
 };

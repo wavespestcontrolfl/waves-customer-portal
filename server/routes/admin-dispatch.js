@@ -129,6 +129,15 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   return 'perimeter_spray';
 }
 
+function requiresLinearFtForReportApplication(method) {
+  return normalizeServiceReportApplicationMethod(method) === 'perimeter_spray';
+}
+
+function requiresSqftForReportApplication(method, serviceLine = 'pest') {
+  const normalized = normalizeServiceReportApplicationMethod(method);
+  return serviceLine === 'lawn' && ['broadcast_spray', 'granular_broadcast'].includes(normalized);
+}
+
 async function renderRequiredTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -1742,12 +1751,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             if (
               !isIncompleteVisit
               &&
-              ['perimeter_spray', 'broadcast_spray'].includes(applicationMethod)
+              requiresLinearFtForReportApplication(applicationMethod)
               && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'linear_ft')
             ) {
               const err = new Error(`Linear feet are required for ${product.name}`);
               err.isOperational = true; err.statusCode = 400;
               err.code = 'linear_ft_required';
+              throw err;
+            }
+            if (
+              !isIncompleteVisit
+              &&
+              requiresSqftForReportApplication(applicationMethod, reportServiceLine)
+              && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'sqft')
+            ) {
+              const err = new Error(`Square feet are required for ${product.name}`);
+              err.isOperational = true; err.statusCode = 400;
+              err.code = 'area_sqft_required';
               throw err;
             }
             const appliedAmount = p.totalAmount != null && p.totalAmount !== ''

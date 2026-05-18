@@ -4526,7 +4526,27 @@ function defaultApplicationMethod(product = {}, serviceType = "") {
 }
 
 function requiresLinearFt(method) {
-  return ["perimeter_spray", "broadcast_spray"].includes(normalizeApplicationMethod(method));
+  return normalizeApplicationMethod(method) === "perimeter_spray";
+}
+
+function requiresAreaSqft(method, serviceType = "") {
+  const serviceLine = serviceLineFromType(serviceType);
+  return (
+    serviceLine === "lawn" &&
+    ["broadcast_spray", "granular_broadcast"].includes(
+      normalizeApplicationMethod(method),
+    )
+  );
+}
+
+function requiredApplicationArea(method, serviceType = "") {
+  if (requiresLinearFt(method)) {
+    return { unit: "linear_ft", label: "Linear ft", alertLabel: "linear feet" };
+  }
+  if (requiresAreaSqft(method, serviceType)) {
+    return { unit: "sqft", label: "Sq ft", alertLabel: "square feet" };
+  }
+  return null;
 }
 
 function effectiveApplicationMethod(method) {
@@ -4617,6 +4637,7 @@ export function CompletionPanel({
   const draftReadyRef = useRef(false);
 
   const isLawn = detectServiceCategory(service.serviceType) === "lawn";
+  const serviceTypeForArea = service?.serviceType || service?.service_type || "";
   const calibrationRequired = isLawn && !!service.waveguardTier;
   const currentAdminUser = (() => {
     try {
@@ -5399,7 +5420,11 @@ export function CompletionPanel({
   }
   function addProduct(product) {
     if (selectedProducts.find((p) => p.productId === product.id)) return;
-    const applicationMethod = defaultApplicationMethod(product, service?.serviceType || service?.service_type);
+    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea);
+    const areaRequirement = requiredApplicationArea(
+      applicationMethod,
+      serviceTypeForArea,
+    );
     const defaultUnit =
       product.defaultUnit ||
       product.default_unit ||
@@ -5423,7 +5448,7 @@ export function CompletionPanel({
         applicationMethod,
         applicationArea: "",
         areaValue: "",
-        areaUnit: requiresLinearFt(applicationMethod) ? "linear_ft" : "sqft",
+        areaUnit: areaRequirement?.unit || "",
       },
     ]);
     setProductSearch("");
@@ -5439,8 +5464,12 @@ export function CompletionPanel({
         if (p.productId !== productId) return p;
         const next = { ...p, [field]: value };
         if (field === "applicationMethod") {
-          if (requiresLinearFt(value)) {
-            next.areaUnit = "linear_ft";
+          const areaRequirement = requiredApplicationArea(
+            value,
+            serviceTypeForArea,
+          );
+          if (areaRequirement) {
+            next.areaUnit = areaRequirement.unit;
           } else {
             next.areaUnit = "";
             next.areaValue = "";
@@ -5544,13 +5573,21 @@ export function CompletionPanel({
         return;
       }
     }
-    const missingLinearFtProduct = selectedProducts.find((p) => {
-      if (!requiresLinearFt(effectiveApplicationMethod(p.applicationMethod))) return false;
-      const feet = Number(p.areaValue);
-      return !Number.isFinite(feet) || feet <= 0 || p.areaUnit !== "linear_ft";
+    const missingRequiredAreaProduct = selectedProducts.find((p) => {
+      const areaRequirement = requiredApplicationArea(
+        effectiveApplicationMethod(p.applicationMethod),
+        serviceTypeForArea,
+      );
+      if (!areaRequirement) return false;
+      const value = Number(p.areaValue);
+      return !Number.isFinite(value) || value <= 0 || p.areaUnit !== areaRequirement.unit;
     });
-    if (!isIncompleteVisit && missingLinearFtProduct) {
-      alert(`Enter linear feet for ${missingLinearFtProduct.name}.`);
+    if (!isIncompleteVisit && missingRequiredAreaProduct) {
+      const areaRequirement = requiredApplicationArea(
+        effectiveApplicationMethod(missingRequiredAreaProduct.applicationMethod),
+        serviceTypeForArea,
+      );
+      alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
       return;
     }
     setSubmitting(true);
@@ -6950,27 +6987,34 @@ export function CompletionPanel({
                         <option value="station_check">Station check</option>
                         <option value="fog_ulv">Fog/ULV</option>
                       </select>
-                      {requiresLinearFt(effectiveApplicationMethod(sp.applicationMethod)) && (
-                        <input
-                          type="number"
-                          min="1"
-                          placeholder="Linear ft"
-                          value={sp.areaValue || ""}
-                          onChange={(e) =>
-                            updateProduct(
-                              sp.productId,
-                              "areaValue",
-                              e.target.value,
-                            )
-                          }
-                          style={{
-                            ...mInput,
-                            width: 112,
-                            height: 40,
-                            padding: "0 12px",
-                          }}
-                        />
-                      )}
+                      {(() => {
+                        const areaRequirement = requiredApplicationArea(
+                          effectiveApplicationMethod(sp.applicationMethod),
+                          serviceTypeForArea,
+                        );
+                        if (!areaRequirement) return null;
+                        return (
+                          <input
+                            type="number"
+                            min="1"
+                            placeholder={areaRequirement.label}
+                            value={sp.areaValue || ""}
+                            onChange={(e) =>
+                              updateProduct(
+                                sp.productId,
+                                "areaValue",
+                                e.target.value,
+                              )
+                            }
+                            style={{
+                              ...mInput,
+                              width: areaRequirement.unit === "linear_ft" ? 112 : 98,
+                              height: 40,
+                              padding: "0 12px",
+                            }}
+                          />
+                        );
+                      })()}
                       <button
                         type="button"
                         onClick={() => removeProduct(sp.productId)}
@@ -8498,22 +8542,29 @@ export function CompletionPanel({
                     <option value="station_check">Station check</option>
                     <option value="fog_ulv">Fog/ULV</option>
                   </select>
-                  {requiresLinearFt(effectiveApplicationMethod(sp.applicationMethod)) && (
-                    <input
-                      type="number"
-                      min="1"
-                      placeholder="Linear ft"
-                      value={sp.areaValue || ""}
-                      onChange={(e) =>
-                        updateProduct(
-                          sp.productId,
-                          "areaValue",
-                          e.target.value,
-                        )
-                      }
-                      style={{ ...inputStyle, width: 98, marginBottom: 0 }}
-                    />
-                  )}
+                  {(() => {
+                    const areaRequirement = requiredApplicationArea(
+                      effectiveApplicationMethod(sp.applicationMethod),
+                      serviceTypeForArea,
+                    );
+                    if (!areaRequirement) return null;
+                    return (
+                      <input
+                        type="number"
+                        min="1"
+                        placeholder={areaRequirement.label}
+                        value={sp.areaValue || ""}
+                        onChange={(e) =>
+                          updateProduct(
+                            sp.productId,
+                            "areaValue",
+                            e.target.value,
+                          )
+                        }
+                        style={{ ...inputStyle, width: 98, marginBottom: 0 }}
+                      />
+                    );
+                  })()}
                   <button
                     onClick={() => removeProduct(sp.productId)}
                     style={{
