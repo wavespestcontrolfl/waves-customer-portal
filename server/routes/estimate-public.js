@@ -990,9 +990,9 @@ function renderPage(token, estimate, estData) {
         cardConfirmTitle: 'Confirm and save card',
         cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
         perksHeading: 'What WaveGuard members get',
-        finalHeading: 'Go Waves!',
-        finalSubhead: 'Wave Goodbye to Pests!',
-        finalBody: 'No surprise increases, no hidden fees.',
+        finalHeading: 'Go Waves! Wave Goodbye to Pests!',
+        finalSubhead: '',
+        finalBody: '',
       };
 
   // One-time toggle — admin opted this estimate into letting the customer
@@ -1282,7 +1282,7 @@ function renderPage(token, estimate, estData) {
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(membershipFee)}</strong></div>
           ${annualPrepayWaivesMembership ? `<div class="payment-summary-row discount"><span>Annual Pay-in-Full Waiver</span><strong>-${fmtMoney(membershipFee)}</strong></div>` : ''}` : ''}
-          <div class="payment-summary-row total"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+          <div class="payment-summary-row"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">No payment is charged on this page. The annual prepay invoice is prepared after approval.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
@@ -1495,11 +1495,11 @@ function renderPage(token, estimate, estData) {
   .hero .addr{color:#3F4A65;font-size:17px;margin-top:8px}
   .hero .prop-meta{color:#6B7280;font-size:16px;margin-top:4px}
   .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
-  .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
+  .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04);display:flex;flex-direction:column;min-height:256px}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px;min-height:18px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
-  .service-big-price{margin-top:14px;gap:8px 12px}
+  .service-big-price{margin-top:14px;gap:8px 12px;min-height:132px;align-content:flex-start}
   .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#9CA3AF;text-decoration:line-through}
   .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(62px,8vw,84px);line-height:.92;color:#1B2C5B}
   .service-big-price .anchor{font-size:22px;flex-basis:100%}
@@ -1507,8 +1507,9 @@ function renderPage(token, estimate, estData) {
   .big-price .per{font-size:24px;color:#6B7280}
   .service-big-price .per{font-size:18px}
   .big-price .tier-lbl{display:inline-block;padding:4px 10px;border-radius:6px;background:#EEF2FF;color:#1B2C5B;font-weight:600;font-size:12px;letter-spacing:.04em}
-  .save-row{margin-top:10px}
+  .save-row{margin-top:10px;min-height:20px}
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
+  .service-price-card>.day-price{margin-top:auto;padding-top:8px}
   .day-price{margin-top:8px;font-size:14px;color:#6B7280}
   .setup-fee{margin-top:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;max-width:520px;padding:12px 14px;border:1px solid #D4CBB8;border-radius:10px;background:#fff}
   .setup-fee-title{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
@@ -1582,7 +1583,6 @@ function renderPage(token, estimate, estData) {
   .payment-summary-row span{font-size:12px;color:#6B7280;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
   .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}
   .payment-summary-row.discount strong,.payment-summary-row.discount span{color:${BRAND.green}}
-  .payment-summary-row.total strong{font-family:'Source Serif 4',Georgia,serif;font-size:22px;font-weight:600}
   .payment-choice-cta{margin-top:auto;width:100%;border:1px solid #1B2C5B;background:#fff;color:#1B2C5B;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
   .payment-choice-cta:hover:not([disabled]),.payment-choice-cta[aria-pressed="true"]{background:#1B2C5B;color:#fff}
   .payment-choice-cta.primary{background:${ESTIMATE_BUTTON_BLUE};border-color:${ESTIMATE_BUTTON_BLUE};color:#fff}
@@ -1846,9 +1846,9 @@ ${shellTopBar()}
   </div>` : `
   <div class="final">
     <h2 data-mode-only="recurring">${escapeHtml(pageCopy.finalHeading)}</h2>
-    <div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>
-    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves!</h2><div class="final-subhead" data-mode-only="one_time" hidden>Wave Goodbye to Pests!</div>` : ''}
-    <p>${escapeHtml(pageCopy.finalBody)}</p>
+    ${pageCopy.finalSubhead ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves! Wave Goodbye to Pests!</h2>` : ''}
+    ${pageCopy.finalBody ? `<p>${escapeHtml(pageCopy.finalBody)}</p>` : ''}
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>

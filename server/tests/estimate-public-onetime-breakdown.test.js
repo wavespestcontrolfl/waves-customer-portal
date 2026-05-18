@@ -545,6 +545,34 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("changeBookingPickBtn.addEventListener('click', cancelReservation)");
   });
 
+  test('server-rendered recurring estimates wait for payment setup before showing slots', () => {
+    const html = renderPage('booking-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+
+    expect(html).toContain('id="payment-setup-card"');
+    expect(html).toContain('Choose pay-after-visit setup');
+    expect(html).toContain('Choose annual prepay setup');
+    expect(html).toContain('<section class="card booking-card" id="booking-card" style="display:none">');
+    expect(html).toContain('const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = true;');
+    expect(html).toContain('function bookingRequiresPaymentSetup()');
+    expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
+    expect(html).toContain("toast('Choose a payment setup first.')");
+  });
+
   test('builds Waves AI payload from estimate property signals', () => {
     const payload = buildWaveGuardIntelligencePayload({
       satelliteUrl: 'https://maps.example/satellite.png',
@@ -629,8 +657,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('class="intelligence-badge"');
     expect(html).toContain('Satellite view of 123 Main St');
     expect(html).toContain('1,800 sq ft');
-    expect(html).toContain('Go Waves!');
-    expect(html).toContain('Wave Goodbye to Pests!');
+    expect(html).toContain('<h2 data-mode-only="recurring">Go Waves! Wave Goodbye to Pests!</h2>');
+    expect(html).not.toContain('No surprise increases, no hidden fees.');
     expect(html).not.toContain('cadence and visit counts');
     expect(html).not.toContain('Your technician verifies measurements');
     expect(html).not.toContain('class="waves-intelligence"');
@@ -1161,16 +1189,26 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('class="service-price-list"');
     expect(html).toContain('class="service-price-name">Pest Control</div>');
     expect(html).toContain('class="service-price-name">Lawn Care</div>');
-    expect(html).toContain('Quarterly service &middot; 4 applications/year');
+    expect(html).toContain('4 applications/year');
+    expect(html).not.toContain('Quarterly service &middot; 4 applications/year');
     expect(html).toContain('9 applications/year');
     expect(html).toContain('$128 / application</span>');
     expect(html).toContain('$116 / application</span>');
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
+    expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total>$219.60</strong></div>');
+    expect(html).toContain('let firstVisitTotal = 0;');
+    expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}');
+    expect(html).not.toContain('.payment-summary-row.total strong');
     expect(html).toContain('You save <span data-service-card-savings data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2" data-service-anchor-price="128">$12.80</span> / application with WaveGuard Silver');
     expect(html).toContain('You save <span data-service-card-savings data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4" data-service-anchor-price="116">$11.60</span> / application with WaveGuard Silver');
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2">$1.28</span>/day for pest control.');
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4">$2.61</span>/day for lawn care.');
+    expect(html).not.toContain('Exterior perimeter protection around entry-prone areas');
+    expect(html).not.toContain('Interior service support when activity is reported');
+    expect(html).not.toContain('Free re-service between recurring visits');
+    expect(html).not.toContain('90-day WaveGuard money-back guarantee');
+    expect(html).not.toContain('<ul class="service-inclusions">');
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('/ treatment</span>');
   });
