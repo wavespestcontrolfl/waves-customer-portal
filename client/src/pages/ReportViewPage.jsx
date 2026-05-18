@@ -662,7 +662,8 @@ function PressureTrendChart({ points = [], neighborhood, summary }) {
     return padding.left + (index * chartWidth) / (count - 1);
   };
   const yFor = (pressureIndex) => {
-    const clamped = Math.max(0, Math.min(5, pressureDisplayNumber(pressureIndex) ?? 0));
+    const n = Number(pressureIndex);
+    const clamped = Number.isFinite(n) ? Math.max(0, Math.min(5, n)) : 0;
     return padding.top + ((5 - clamped) * chartHeight) / 5;
   };
   const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index)} ${yFor(point.pressureIndex)}`).join(' ');
