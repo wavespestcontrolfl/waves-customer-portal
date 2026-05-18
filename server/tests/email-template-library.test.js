@@ -232,6 +232,44 @@ describe('email template library rendering', () => {
     )).resolves.toEqual(marketingSuppression);
   });
 
+  test('uses suppression overrides for transactional bypass checks', async () => {
+    const serviceSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [serviceSuppression] })],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'transactional_required', suppression_group_key: 'transactional_required' }),
+      'sam@example.com',
+      'service_operational',
+    )).resolves.toEqual(serviceSuppression);
+  });
+
+  test('allows transactional suppression overrides to bypass service suppressions', async () => {
+    const serviceSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [serviceSuppression] })],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+      'transactional_required',
+    )).resolves.toBeNull();
+  });
+
   test('falls back to the template suppression group when override is null', async () => {
     const serviceSuppression = {
       id: 'suppression-1',

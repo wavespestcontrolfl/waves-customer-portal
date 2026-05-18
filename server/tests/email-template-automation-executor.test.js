@@ -294,6 +294,17 @@ describe('email template automation executor', () => {
     )).toBeNull();
   });
 
+  test('treats viewed estimate status as viewed without viewed_at', () => {
+    expect(AutomationExecutor.conditionFailureFor(
+      { estimate_viewed: false, estimate_status: ['sent', 'viewed'] },
+      { estimate_status: 'viewed', estimate_id: 'est-1' },
+    )).toBe('estimate_viewed must be false');
+    expect(AutomationExecutor.exitReasonFor(
+      { stop_if: ['estimate.viewed'] },
+      { status: 'viewed', estimate_id: 'est-1' },
+    )).toBe('estimate already viewed');
+  });
+
   test('allows viewed estimate status during delayed follow-up rechecks', async () => {
     const queuedRun = run({
       automation_key: 'estimate.viewed_followup',

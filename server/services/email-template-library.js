@@ -257,8 +257,8 @@ function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
 
 async function activeSuppressionFor(template, email, suppressionGroupKey) {
   if (!email) return null;
-  if (String(template.send_stream || '').toLowerCase() === 'transactional_required') return null;
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
+  if (String(groupKey || '').toLowerCase() === 'transactional_required') return null;
   const rows = await db('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });

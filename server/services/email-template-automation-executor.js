@@ -165,6 +165,7 @@ function completionValue(payload = {}) {
 
 function estimateViewedValue(payload = {}) {
   if (payload.viewed_at) return true;
+  if (normalizeStatus(payload.estimate_status || payload.status) === 'viewed') return true;
   const value = boolValue(payload.estimate_viewed);
   return value == null ? false : value;
 }
