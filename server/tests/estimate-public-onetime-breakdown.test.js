@@ -516,6 +516,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('onclick="cancelReservation()"');
     expect(html).toContain("confirmBookBtn.addEventListener('click', confirmBooking)");
     expect(html).toContain("changeBookingPickBtn.addEventListener('click', cancelReservation)");
+    expect(html).toContain("if (mode === 'one_time' && bookingState.selectedSlotId)");
+    expect(html).toContain("pickPaymentPref('pay_at_visit')");
   });
 
   test('builds Waves AI payload from estimate property signals', () => {

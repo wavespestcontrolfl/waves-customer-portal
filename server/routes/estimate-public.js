@@ -1976,6 +1976,9 @@ ${shellQuestionsBar()}
     } else if (changed) {
       bookingState.pickedPref = null;
       document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
+      if (mode === 'one_time' && bookingState.selectedSlotId) {
+        pickPaymentPref('pay_at_visit');
+      }
     }
   }
   document.querySelectorAll('[data-mode-set]').forEach((btn) => {
