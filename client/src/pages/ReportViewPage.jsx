@@ -2360,76 +2360,29 @@ function SupportingDetailsSection({
   advisoryRows,
 }) {
   const pressureTrend = data.dynamicContext?.pressureTrend;
-  const weatherRows = conditionRows(data.conditions || {});
-  const arrival = formatClockTime(data.visitTiming?.arrivedAt);
-  const completion = formatClockTime(data.visitTiming?.exitedAt);
   const reportPublished = (data.workflowEvents || []).find((event) => event.type === 'report_published');
-  const pressureOpen = mode !== 'live' || showDetails;
+  const hasMetrics = showDetails && (data.metrics || []).length > 0;
+  const hasMetadata = showDetails && ((data.applications || []).length > 0 || findings.length > 0 || recommendations.length > 0 || serviceNotes);
+  const hasAdvisory = showDetails && (advisoryRows.length > 0 || data.advisory?.pet_advisory);
+
+  if (!pressureTrend && !hasMetrics && !hasMetadata && !hasAdvisory) return null;
 
   return (
     <section className="sr-section supporting-details-section" id="supporting-details">
       <h2>Supporting Details</h2>
       <div className="supporting-details-list">
-        <details className="report-accordion" open={mode !== 'live'}>
-          <summary>
-            <span>Conditions at application</span>
-            <span className="accordion-action">Details</span>
-          </summary>
-          <div className="accordion-body">
-            <p className="supporting-detail-copy">{conditionInterpretation(data.conditions || {})}</p>
-            <div className="supporting-detail-grid">
-              {weatherRows.map(([label, value]) => (
-                <div className="sr-cell" key={label}>
-                  <div className="sr-cell-label">{label}</div>
-                  <div className="sr-cell-value">{value}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </details>
-
         {pressureTrend && (
-          <details className="report-accordion" open={pressureOpen}>
-            <summary>
-              <span>Pest Pressure</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              <PressureTrendCard
-                context={pressureTrend}
-                neighborhood={data.dynamicContext?.neighborhoodPressure}
-                mode={mode}
-                token={token}
-                embedded
-              />
-              <PressureMethodologyDropdown />
-            </div>
-          </details>
-        )}
-
-        {(arrival || completion) && (
-          <details className="report-accordion" open={mode !== 'live'}>
-            <summary>
-              <span>Visit timing</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              <div className="supporting-detail-grid">
-                {arrival && (
-                  <div className="sr-cell">
-                    <div className="sr-cell-label">Recorded arrival</div>
-                    <div className="sr-cell-value">{arrival}</div>
-                  </div>
-                )}
-                {completion && (
-                  <div className="sr-cell">
-                    <div className="sr-cell-label">Recorded completion</div>
-                    <div className="sr-cell-value">{completion}</div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </details>
+          <div className="supporting-detail-block">
+            <h3 className="supporting-detail-heading">Pest Pressure</h3>
+            <PressureTrendCard
+              context={pressureTrend}
+              neighborhood={data.dynamicContext?.neighborhoodPressure}
+              mode={mode}
+              token={token}
+              embedded
+            />
+            <PressureMethodologyDropdown />
+          </div>
         )}
 
         {showDetails && (data.metrics || []).length > 0 && (
@@ -4959,6 +4912,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .supporting-detail-grid {
           margin-top: 12px;
+        }
+        .supporting-detail-block {
+          background: #fff;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          padding: 14px;
+        }
+        .supporting-detail-heading {
+          margin: 0 0 12px;
+          font-size: 16px;
+          line-height: 1.2;
+          color: var(--text);
         }
         .supporting-details-section .pressure-trend-card-embedded {
           margin-top: 0;
