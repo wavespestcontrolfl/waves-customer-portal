@@ -210,6 +210,15 @@ function sendStreamFor(template, suppressionGroupKey) {
   return String(suppressionGroupKey || template.send_stream || '').toLowerCase();
 }
 
+function isTransactionalRequiredGroupKey(value) {
+  return String(value || '').toLowerCase() === 'transactional_required';
+}
+
+function templateCanBypassSuppressions(template) {
+  return isTransactionalRequiredGroupKey(template?.send_stream)
+    || isTransactionalRequiredGroupKey(template?.suppression_group_key);
+}
+
 function asmGroupIdFor(template, suppressionGroupKey) {
   const stream = sendStreamFor(template, suppressionGroupKey);
   if (stream === 'transactional_required') return 0;
@@ -250,6 +259,9 @@ function redactedPayloadSnapshot(value) {
 function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
   if (suppressionGroupKey !== undefined && suppressionGroupKey !== null) {
     const override = String(suppressionGroupKey).trim();
+    if (isTransactionalRequiredGroupKey(override) && !templateCanBypassSuppressions(template)) {
+      return template.suppression_group_key || template.send_stream || null;
+    }
     return override || null;
   }
   return template.suppression_group_key || template.send_stream || null;
@@ -258,7 +270,7 @@ function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
 async function activeSuppressionFor(template, email, suppressionGroupKey) {
   if (!email) return null;
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
-  if (String(groupKey || '').toLowerCase() === 'transactional_required') return null;
+  if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) return null;
   const rows = await db('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });

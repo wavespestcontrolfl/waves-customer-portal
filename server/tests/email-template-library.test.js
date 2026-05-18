@@ -251,7 +251,15 @@ describe('email template library rendering', () => {
     )).resolves.toEqual(serviceSuppression);
   });
 
-  test('allows transactional suppression overrides to bypass service suppressions', async () => {
+  test('lets truly transactional templates bypass suppressions', async () => {
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'transactional_required', suppression_group_key: 'transactional_required' }),
+      'sam@example.com',
+    )).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalledWith('email_suppressions');
+  });
+
+  test('ignores transactional suppression overrides on non-transactional templates', async () => {
     const serviceSuppression = {
       id: 'suppression-1',
       email: 'sam@example.com',
@@ -267,7 +275,7 @@ describe('email template library rendering', () => {
       serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
       'sam@example.com',
       'transactional_required',
-    )).resolves.toBeNull();
+    )).resolves.toEqual(serviceSuppression);
   });
 
   test('falls back to the template suppression group when override is null', async () => {
@@ -440,6 +448,48 @@ describe('email template library rendering', () => {
       status: 'blocked',
       suppression_group_key_snapshot: 'marketing_nurture',
       error_message: 'Suppressed: manual (marketing_nurture)',
+    }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('does not let transactional overrides bypass non-transactional template suppressions', async () => {
+    const suppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    const blockedMessage = {
+      id: 'msg-blocked',
+      status: 'blocked',
+      error_message: 'Suppressed: manual (service_operational)',
+    };
+    const blockedInsert = chain({ returning: [blockedMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [suppression] })],
+      email_messages: [blockedInsert],
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      suppressionGroupKey: 'transactional_required',
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(blockedInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked',
+      suppression_group_key_snapshot: 'service_operational',
+      error_message: 'Suppressed: manual (service_operational)',
     }));
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
