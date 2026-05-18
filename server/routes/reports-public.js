@@ -22,6 +22,16 @@ const {
   answerServiceReportQuestion,
   loadReportAssistantProductContext,
 } = require('../services/service-report/report-assistant');
+const {
+  WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_FL_LICENSE_LINE,
+} = require('../constants/business');
+
+const PDF_NAVY = '#1B2C5B';
+const PDF_BLUE = '#009CDE';
+const PDF_BODY = '#3F4A65';
+const PDF_MUTED = '#6B7280';
+const PDF_RULE = '#E7E2D7';
 
 // Rate-limit public report access to deter token brute-forcing.
 function isReportEventRequest(req) {
@@ -585,17 +595,17 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   } else {
     doc.fontSize(20).font('Helvetica-Bold').text('WAVES PEST CONTROL', { align: 'center' });
   }
-  doc.fontSize(9).font('Helvetica').text('Licensed & Insured · FL Pest Control License', { align: 'center' });
-  doc.text('(941) 318-7612 · wavespestcontrol.com', { align: 'center' });
+  doc.fontSize(9).font('Helvetica').text(`Licensed & Insured · ${WAVES_FL_LICENSE_LINE}`, { align: 'center' });
+  doc.text(`${WAVES_SUPPORT_PHONE_DISPLAY} · wavespestcontrol.com`, { align: 'center' });
   doc.moveDown(0.5);
-  doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor('#2196F3').lineWidth(2).stroke();
+  doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(PDF_BLUE).lineWidth(2).stroke();
   doc.moveDown(1);
 
-  doc.fontSize(14).font('Helvetica-Bold').fillColor('#1E1E2B').text('SERVICE REPORT');
+  doc.fontSize(14).font('Helvetica-Bold').fillColor(PDF_NAVY).text('SERVICE REPORT');
   doc.moveDown(0.5);
 
   // Customer info
-  doc.fontSize(10).font('Helvetica-Bold').fillColor('#333').text('Customer:');
+  doc.fontSize(10).font('Helvetica-Bold').fillColor(PDF_BODY).text('Customer:');
   doc.font('Helvetica').text(`${service.first_name} ${service.last_name}`);
   doc.text(`${service.address_line1}, ${service.city}, ${service.state} ${service.zip}`);
   doc.moveDown(0.5);
@@ -609,9 +619,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
 
   // Weather conditions
   if (weather) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1E1E2B').text('CONDITIONS AT TIME OF SERVICE');
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('CONDITIONS AT TIME OF SERVICE');
     doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor('#333');
+    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY);
     doc.text(`Air Temp: ${weather.temp || '—'}°F  Humidity: ${weather.humidity || '—'}%  Wind: ${weather.wind || '—'}  Cloud Cover: ${weather.cloudCover || '—'}%`);
     if (service.soil_temp) doc.text(`Soil Temp: ${service.soil_temp}°F  Soil pH: ${service.soil_ph || '—'}  Thatch: ${service.thatch_measurement || '—'}"  Moisture: ${service.soil_moisture || '—'}`);
     doc.moveDown(1);
@@ -619,23 +629,23 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
 
   // Tech notes
   if (service.technician_notes) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1E1E2B').text('TECHNICIAN NOTES');
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
     doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor('#333').text(service.technician_notes, { width: 512, lineGap: 3 });
+    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(service.technician_notes, { width: 512, lineGap: 3 });
     doc.moveDown(1);
   }
 
   // Products
   if (products.length) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1E1E2B').text('PRODUCTS APPLIED');
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('PRODUCTS APPLIED');
     doc.moveDown(0.3);
     const tTop = doc.y;
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#666');
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(PDF_MUTED);
     doc.text('Product', 50, tTop); doc.text('Active Ingredient', 220, tTop);
     doc.text('MOA Group', 370, tTop); doc.text('Category', 470, tTop);
-    doc.moveTo(50, tTop + 14).lineTo(562, tTop + 14).strokeColor('#ccc').lineWidth(0.5).stroke();
+    doc.moveTo(50, tTop + 14).lineTo(562, tTop + 14).strokeColor(PDF_RULE).lineWidth(0.5).stroke();
     let rY = tTop + 20;
-    doc.font('Helvetica').fillColor('#333');
+    doc.font('Helvetica').fillColor(PDF_BODY);
     products.forEach(p => {
       if (rY > 700) { doc.addPage(); rY = 50; }
       doc.fontSize(9).text(p.product_name || '', 50, rY, { width: 165 });
@@ -650,9 +660,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
 
   // Dry times
   if (dryTimes) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1E1E2B').text('ESTIMATED DRY TIMES');
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('ESTIMATED DRY TIMES');
     doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor('#333');
+    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY);
     if (dryTimes.lawn) doc.text(`• Lawn treatment: ${dryTimes.lawn}`);
     if (dryTimes.foundation) doc.text(`• Foundation perimeter: ${dryTimes.foundation}`);
     if (dryTimes.interior) doc.text(`• Interior application: ${dryTimes.interior}`);
@@ -662,9 +672,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
 
   // Irrigation
   if (irrigation) {
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1E1E2B').text('IRRIGATION RECOMMENDATIONS');
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('IRRIGATION RECOMMENDATIONS');
     doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor('#333');
+    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY);
     if (irrigation.recommendation) doc.text(irrigation.recommendation, { width: 512, lineGap: 3 });
     if (irrigation.instructions?.length) {
       doc.moveDown(0.5);
@@ -675,10 +685,10 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
 
   // Footer
   doc.moveDown(2);
-  doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor('#ccc').lineWidth(0.5).stroke();
+  doc.moveTo(50, doc.y).lineTo(562, doc.y).strokeColor(PDF_RULE).lineWidth(0.5).stroke();
   doc.moveDown(0.5);
-  doc.fontSize(8).font('Helvetica').fillColor('#999');
-  doc.text('This report is provided for your records. For questions contact Waves Pest Control at (941) 318-7612.', { align: 'center' });
+  doc.fontSize(8).font('Helvetica').fillColor(PDF_MUTED);
+  doc.text(`This report is provided for your records. For questions contact Waves Pest Control at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, { align: 'center' });
   doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`, { align: 'center' });
 
   doc.end();

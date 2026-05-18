@@ -1,6 +1,11 @@
 const PDFDocument = require('pdfkit');
 const { getLogoBuffer } = require('./brand-logo');
-const { WAVES_FL_LICENSE_LINE } = require('../../config/business');
+const {
+  WAVES_ADDRESS_LINE,
+  WAVES_WEBSITE_HOST,
+  WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_FL_LICENSE_LINE,
+} = require('../../constants/business');
 const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
 
 // Brand palette — mirrors client/src/styles/brand-tokens.css + theme-brand.js
@@ -8,11 +13,11 @@ const NAVY = '#1B2C5B';      // blueDeeper — headings, header bar
 const WAVES_BLUE = '#009CDE'; // primary brand accent
 const RED = '#C8102E';        // overdue / alert
 const GREEN = '#047857';      // paid badge
-const INK = '#0F172A';
-const BODY = '#334155';
-const MUTED = '#64748B';
-const RULE = '#E2E8F0';
-const SOFT = '#F1F5F9';
+const INK = NAVY;
+const BODY = '#3F4A65';
+const MUTED = '#6B7280';
+const RULE = '#E7E2D7';
+const SOFT = '#FAF8F3';
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
 
@@ -46,8 +51,8 @@ function headerBar(doc, title, statusLabel, statusColor) {
   }
   doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_FL_LICENSE_LINE, 108, 70);
 
-  doc.fontSize(10).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', 430, 22, { width: 142, align: 'right' });
-  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text('wavespestcontrol.com', 430, 38, { width: 142, align: 'right' });
+  doc.fontSize(10).font('Helvetica-Bold').fillColor('#fff').text(WAVES_SUPPORT_PHONE_DISPLAY, 430, 22, { width: 142, align: 'right' });
+  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_WEBSITE_HOST, 430, 38, { width: 142, align: 'right' });
   doc.text('13649 Luxe Ave #110', 430, 52, { width: 142, align: 'right' });
   doc.text('Bradenton, FL 34211', 430, 64, { width: 142, align: 'right' });
   doc.restore();
@@ -210,16 +215,19 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
 }
 
 function footerBar(doc, tagline) {
+  const previousBottomMargin = doc.page.margins.bottom;
   doc.save();
+  doc.page.margins.bottom = 0;
   doc.rect(0, 742, 612, 50).fill(NAVY);
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(
     tagline || 'Thank you for choosing Waves',
     0, 752, { width: 612, align: 'center' },
   );
   doc.fontSize(7).font('Helvetica').fillColor('#B8D4EA').text(
-    'Waves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211 · (941) 318-7612 · wavespestcontrol.com',
+    `Waves Pest Control, LLC · ${WAVES_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY} · ${WAVES_WEBSITE_HOST}`,
     0, 768, { width: 612, align: 'center' },
   );
+  doc.page.margins.bottom = previousBottomMargin;
   doc.restore();
 }
 
@@ -298,7 +306,7 @@ function generateReceiptPDF(invoice, payment, res) {
   if (isCommercial) {
     y += 14;
     doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(
-      'Keep this receipt for your records. For questions, reply to your receipt email or call (941) 318-7612.',
+      `Keep this receipt for your records. For questions, reply to your receipt email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
       L, y, { width: W, lineGap: 3 },
     );
   }

@@ -70,20 +70,21 @@ export default function InstallPrompt() {
       <div style={{
         maxWidth: 480,
         margin: '0 auto',
-        background: B.blueDeeper,
-        border: `1px solid ${B.blueDark}`,
+        background: B.white,
+        border: '1px solid #E7E2D7',
         borderRadius: 14,
         padding: '14px 16px',
         display: 'flex',
         alignItems: 'center',
         gap: 12,
-        boxShadow: '0 -4px 24px rgba(0,0,0,0.4)',
+        boxShadow: '0 -4px 24px rgba(27,44,91,0.14)',
         pointerEvents: 'auto',
       }}>
         {/* Waves logo tile */}
         <div style={{
           width: 36, height: 36, borderRadius: 10, flexShrink: 0,
-          background: B.yellow,
+          background: '#F8FCFE',
+          border: '1px solid #CFE7F5',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 24, maxWidth: 28, objectFit: 'contain' }} />
@@ -92,22 +93,21 @@ export default function InstallPrompt() {
         {/* Text */}
         <div style={{ flex: 1 }}>
           <p style={{
-            margin: 0, fontSize: 14, fontWeight: 700, color: B.white,
+            margin: 0, fontSize: 14, fontWeight: 700, color: B.blueDeeper,
             fontFamily: FONTS.heading,
           }}>Add Waves to Home Screen</p>
           <p style={{
             margin: '2px 0 0', fontSize: 12, fontWeight: 500,
-            color: 'rgba(255,255,255,0.7)',
+            color: B.textCaption,
             fontFamily: FONTS.heading,
           }}>
             Quick access to your portal
           </p>
         </div>
 
-        {/* Install button — gold pill, navy text (matches LoginPage primary CTA) */}
         <button onClick={handleInstall} style={{
-          background: B.yellow,
-          color: B.blueDeeper,
+          background: B.blueDeeper,
+          color: B.white,
           border: 'none',
           borderRadius: 8,
           padding: '8px 14px',
@@ -115,7 +115,7 @@ export default function InstallPrompt() {
           fontWeight: 800,
           cursor: 'pointer',
           fontFamily: FONTS.heading,
-          letterSpacing: '0.02em',
+          letterSpacing: 0,
           whiteSpace: 'nowrap',
         }}>Install</button>
 
@@ -123,7 +123,7 @@ export default function InstallPrompt() {
         <button onClick={dismiss} style={{
           background: 'none',
           border: 'none',
-          color: 'rgba(255,255,255,0.6)',
+          color: B.textCaption,
           fontSize: 18,
           cursor: 'pointer',
           padding: '0 4px',

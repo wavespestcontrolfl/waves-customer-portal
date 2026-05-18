@@ -16,6 +16,7 @@ const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const logger = require("./logger");
 const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -327,7 +328,7 @@ const EstimateFollowUp = {
             email: {
               subject: "Any questions about your Waves estimate?",
               heading: `Hi ${firstName} — any questions?`,
-              body: `<p>Thanks for taking a look at your Waves estimate! If anything isn't clear or you'd like to talk through what's included, I'm happy to help.</p><p>Just reply to this email or call me directly at (941) 318-7612.</p><p>— Adam, Waves Pest Control</p>`,
+              body: `<p>Thanks for taking a look at your Waves estimate! If anything isn't clear or you'd like to talk through what's included, I'm happy to help.</p><p>Just reply to this email or call me directly at ${WAVES_SUPPORT_PHONE_DISPLAY}.</p><p>— Adam, Waves Pest Control</p>`,
               ctaUrl: url,
             },
           });
@@ -503,7 +504,7 @@ const EstimateFollowUp = {
             email: {
               subject: `Your Waves estimate expires ${expDate}`,
               heading: `Heads up, ${firstName} — your estimate expires ${expDate}`,
-              body: `<p>Your Waves Pest Control estimate is set to expire on <strong>${expDate}</strong>. If you'd like to move forward, just accept it from the link below.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
+              body: `<p>Your Waves Pest Control estimate is set to expire on <strong>${expDate}</strong>. If you'd like to move forward, just accept it from the link below.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
               ctaUrl: url,
             },
           });

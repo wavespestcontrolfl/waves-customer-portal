@@ -22,6 +22,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 async function renderTemplate(templateKey, vars) {
   try {
@@ -75,8 +76,7 @@ async function onboardUrl(ob) {
 // Fire SMS (if phone) + email (if email). Returns true if at least one
 // attempt succeeded, so the caller knows whether to flip the stage flag.
 async function sendDualChannel(ob, { sms, email }) {
-  let delivered = false;
-  let emailSuppressed = false;
+  let attempted = false;
   if (ob.phone && sms) {
     try {
       const smsResult = await sendCustomerMessage({
@@ -94,7 +94,7 @@ async function sendDualChannel(ob, { sms, email }) {
         },
       });
       if (smsResult.sent) {
-        delivered = true;
+        attempted = true;
       } else {
         logger.warn(`[onboard-followup] SMS blocked/failed for session ${ob.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }
@@ -120,12 +120,8 @@ async function sendDualChannel(ob, { sms, email }) {
             categories: ['onboarding_followup', email.stage].filter(Boolean),
           });
           r = result.blocked
-            ? { ok: false, blocked: true, error: result.reason || 'Email suppressed' }
+            ? { ok: false, error: result.reason || 'Email suppressed' }
             : { ok: true, messageId: result.message?.provider_message_id || null };
-          if (result.blocked) {
-            emailSuppressed = true;
-            logger.warn(`[onboard-followup] Template email suppressed for session ${ob.id}: ${result.reason || 'suppressed'}`);
-          }
           sentWithTemplateLibrary = true;
         } catch (e) {
           if (!canFallbackFromTemplateEmailError(e)) throw e;
@@ -142,13 +138,12 @@ async function sendDualChannel(ob, { sms, email }) {
           ctaLabel: email.ctaLabel || 'Finish Setup',
         });
       }
-      if (r?.blocked) emailSuppressed = true;
-      if (r?.ok) delivered = true;
+      if (r.ok) attempted = true;
     } catch (e) {
       logger.error(`[onboard-followup] Email failed for session ${ob.id}: ${e.message}`);
     }
   }
-  return delivered || (!ob.phone && emailSuppressed);
+  return attempted;
 }
 
 const OnboardingFollowUp = {
@@ -262,7 +257,7 @@ const OnboardingFollowUp = {
               },
               subject: `Your Waves onboarding link expires ${expDate}`,
               heading: `Heads up — your link expires ${expDate}`,
-              body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
+              body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
               ctaUrl: url,
             },
           });

@@ -65,8 +65,8 @@ function fmtDate(d) {
 }
 
 const subtlePanel = {
-  background: '#F8FAFC',
-  border: '1px solid #E1E7EF',
+  background: '#FAF8F3',
+  border: '1px solid #E7E2D7',
   borderRadius: 8,
 };
 
@@ -93,7 +93,7 @@ function StatusPill({ tone = 'neutral', children }) {
     processing: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
     refunded: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
     partial: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    neutral: { bg: '#F8FAFC', color: 'var(--text)', border: '#E1E7EF' },
+    neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
   };
   const t = tones[tone] || tones.neutral;
   return (
@@ -380,7 +380,7 @@ export default function ReceiptPage() {
             <div>
               <div style={{ fontWeight: 850, color: 'var(--danger)', marginBottom: 3 }}>Save-on-file authorization not recorded</div>
               <div style={{ color: 'var(--text-muted)' }}>
-                Your payment went through, but we couldn't record your authorization to save this payment method on file. Waves will reach out to confirm before any future charge. Questions: call (941) 318-7612.
+                Your payment went through, but we couldn't record your authorization to save this payment method on file. Waves will reach out to confirm before any future charge. Questions: call <HelpPhoneLink tone="dark" inline />.
               </div>
             </div>
           </div>
@@ -558,8 +558,8 @@ export default function ReceiptPage() {
                   color: 'var(--text-muted)',
                   fontWeight: 850,
                   textTransform: 'uppercase',
-                  background: '#F8FAFC',
-                  borderBottom: '1px solid var(--border)',
+                  background: '#FAF8F3',
+                  borderBottom: '1px solid #E7E2D7',
                 }}>
                   <div>Description</div>
                   <div style={{ textAlign: 'right' }}>Qty</div>

@@ -1,9 +1,15 @@
 import Icon from '../components/Icon';
-import { COLORS, FONTS, GOLD_CTA } from '../theme-brand';
+import { COLORS, FONTS } from '../theme-brand';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
+import { WavesShell } from '../components/brand';
+import {
+  WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_SUPPORT_PHONE_TEL,
+  WAVES_SUPPORT_SMS_TEL,
+} from '../constants/business';
 
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
@@ -24,8 +30,33 @@ function socketOrigin() {
 }
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
-const WAVES_PHONE_DISPLAY = '(941) 297-5749';
-const WAVES_PHONE_TEL = '+19412975749';
+const TRACK_SURFACE = {
+  surface: '#FFFFFF',
+  page: '#FAF8F3',
+  border: '#E7E2D7',
+  soft: '#F8FCFE',
+  softBorder: '#CFE7F5',
+  text: '#1B2C5B',
+  body: '#3F4A65',
+  muted: '#6B7280',
+};
+
+const TRACK_PRIMARY_CTA = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minHeight: 48,
+  padding: '0 20px',
+  background: COLORS.blueDeeper,
+  color: COLORS.white,
+  border: `1px solid ${COLORS.blueDeeper}`,
+  borderRadius: 8,
+  fontFamily: FONTS.ui,
+  fontWeight: 800,
+  fontSize: 15,
+  letterSpacing: 0,
+  textDecoration: 'none',
+};
 
 function formatWindow(startIso, endIso) {
   if (!startIso) return '';
@@ -132,18 +163,11 @@ function useLastUpdated(iso) {
 // ── UI primitives ────────────────────────────────────────────────
 function Page({ children }) {
   return (
-    <div style={{
-      minHeight: '100vh',
-      background: COLORS.sand,
-      fontFamily: FONT_BODY,
-      color: COLORS.navy,
-      display: 'flex',
-      flexDirection: 'column',
-    }}>
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto' }}>
+    <WavesShell variant="customer" topBar="solid">
+      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
       </div>
-    </div>
+    </WavesShell>
   );
 }
 
@@ -152,7 +176,7 @@ function StatusPill({ label, color }) {
     <div style={{
       display: 'inline-block',
       fontSize: 12, fontWeight: 700,
-      letterSpacing: '0.1em', textTransform: 'uppercase',
+      letterSpacing: 0, textTransform: 'uppercase',
       color, background: `${color}1A`,
       padding: '6px 12px', borderRadius: 9999,
     }}>
@@ -171,26 +195,26 @@ function EtaHero({ minutes, techFirst, source }) {
   const showUnit = !isNow && minutes != null;
   return (
     <div style={{ marginTop: 16 }}>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginBottom: 4 }}>
         {techFirst} arrives in
       </div>
       <div style={{
-        fontFamily: FONTS.display,
-        fontSize: 'clamp(56px, 14vw, 88px)',
-        fontWeight: 700, color: COLORS.blueDeeper,
-        lineHeight: 1, letterSpacing: '0.02em',
+        fontFamily: FONTS.serif,
+        fontSize: 64,
+        fontWeight: 600, color: TRACK_SURFACE.text,
+        lineHeight: 1, letterSpacing: 0,
         display: 'flex', alignItems: 'baseline', gap: 12,
       }}>
         <span>{display}</span>
         {showUnit ? (
           <span style={{
-            fontSize: 22, color: COLORS.textCaption,
-            fontFamily: FONTS.body, fontWeight: 600, letterSpacing: '0.02em',
+            fontSize: 22, color: TRACK_SURFACE.muted,
+            fontFamily: FONTS.body, fontWeight: 600, letterSpacing: 0,
           }}>min</span>
         ) : null}
       </div>
       {source === 'haversine' ? (
-        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 6 }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 6 }}>
           Estimated based on distance
         </div>
       ) : null}
@@ -211,11 +235,11 @@ function TrackerMap({ tech, property }) {
   if (!MAPS_KEY || loadError) {
     return (
       <div style={{
-        marginTop: 20, height: 200, borderRadius: 16,
-        background: `linear-gradient(135deg, ${COLORS.blueSurface} 0%, ${COLORS.blueLight} 100%)`,
+        marginTop: 20, height: 200, borderRadius: 8,
+        background: TRACK_SURFACE.soft,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        border: `1px dashed ${COLORS.grayLight}`,
-        fontSize: 14, color: COLORS.textCaption,
+        border: `1px dashed ${TRACK_SURFACE.softBorder}`,
+        fontSize: 14, color: TRACK_SURFACE.muted,
         textAlign: 'center', padding: 24,
       }}>
         Live map unavailable.
@@ -224,12 +248,12 @@ function TrackerMap({ tech, property }) {
   }
 
   if (!isLoaded) {
-    return <div style={{ marginTop: 20, height: 320, borderRadius: 16, background: COLORS.offWhite }} />;
+    return <div style={{ marginTop: 20, height: 320, borderRadius: 8, background: TRACK_SURFACE.soft }} />;
   }
 
   return (
     <div style={{
-      borderRadius: 16, overflow: 'hidden', marginTop: 20,
+      borderRadius: 8, overflow: 'hidden', marginTop: 20,
       boxShadow: '0 2px 12px rgba(15, 23, 42, 0.08)',
     }}>
       <GoogleMap
@@ -279,11 +303,12 @@ function TrackerMap({ tech, property }) {
 function Card({ children, accent }) {
   return (
     <div style={{
-      background: COLORS.white,
-      borderRadius: 16,
+      background: TRACK_SURFACE.surface,
+      borderRadius: 8,
       padding: 24,
-      boxShadow: '0 2px 12px rgba(15, 23, 42, 0.06)',
-      borderTop: accent ? `4px solid ${accent}` : 'none',
+      boxShadow: 'none',
+      border: `1px solid ${TRACK_SURFACE.border}`,
+      borderTop: accent ? `3px solid ${accent}` : `1px solid ${TRACK_SURFACE.border}`,
       marginBottom: 16,
     }}>
       {children}
@@ -298,7 +323,7 @@ function TechBlock({ tech, size = 'md' }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         <div style={{
           width: px, height: px, borderRadius: '50%',
-          background: COLORS.blueLight,
+      background: TRACK_SURFACE.soft,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: px * 0.5, color: COLORS.wavesBlue,
         }}></div>
@@ -312,7 +337,7 @@ function TechBlock({ tech, size = 'md' }) {
         <img
           src={tech.photoUrl}
           alt={tech.firstName || ''}
-          style={{ width: px, height: px, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${COLORS.offWhite}` }}
+          style={{ width: px, height: px, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${TRACK_SURFACE.border}` }}
         />
       ) : (
         <div style={{
@@ -325,11 +350,11 @@ function TechBlock({ tech, size = 'md' }) {
         </div>
       )}
       <div>
-        <div style={{ fontSize: size === 'lg' ? 22 : 18, fontWeight: 600, color: COLORS.navy }}>
+        <div style={{ fontSize: size === 'lg' ? 22 : 18, fontWeight: 600, color: TRACK_SURFACE.text }}>
           {tech.firstName || 'Your technician'}
         </div>
         {tech.yearsWithWaves ? (
-          <div style={{ fontSize: 14, color: COLORS.textCaption }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted }}>
             {tech.yearsWithWaves}+ years with Waves
           </div>
         ) : null}
@@ -342,14 +367,14 @@ function ServiceMeta({ data }) {
   const window = formatWindow(data.window?.start, data.window?.end);
   const addrLines = fullAddressLines(data.property);
   return (
-    <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${COLORS.offWhite}` }}>
-      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 4 }}>Today's visit</div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.navy }}>{data.service?.type}</div>
+    <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${TRACK_SURFACE.border}` }}>
+      <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 4 }}>Today's visit</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{data.service?.type}</div>
       {window ? (
-        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10 }}>{window}</div>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 10 }}>{window}</div>
       ) : null}
       {addrLines.length > 0 ? (
-        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 4, lineHeight: 1.5 }}>
           {addrLines.map((line, i) => <div key={i}>{line}</div>)}
         </div>
       ) : null}
@@ -363,21 +388,21 @@ function ScheduledCard({ data }) {
   const window = formatWindow(data.window?.start, data.window?.end);
   return (
     <Card accent={COLORS.wavesBlue}>
-      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+      <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0 }}>
         Scheduled
       </div>
       <div style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3 }}>
         {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
         your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
       </div>
-      <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
       {(() => {
         const lines = fullAddressLines(data.property);
         if (lines.length === 0) return null;
         return (
-          <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 16, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 16, lineHeight: 1.5 }}>
             {lines.map((line, i) => <div key={i}>{line}</div>)}
           </div>
         );
@@ -409,7 +434,7 @@ function EnRouteCard({ data }) {
             <TrackerMap tech={techCoords} property={property} />
             {lastUpdated ? (
               <div style={{
-                fontSize: 14, color: COLORS.textCaption,
+                fontSize: 14, color: TRACK_SURFACE.muted,
                 marginTop: 10, textAlign: 'right',
               }}>
                 {lastUpdated}{v?.stale ? ' · GPS reconnecting' : ''}
@@ -418,8 +443,8 @@ function EnRouteCard({ data }) {
           </>
         ) : (
           <div style={{
-            marginTop: 20, padding: 14, background: COLORS.blueSurface,
-            borderRadius: 10, fontSize: 14, color: COLORS.textBody,
+            marginTop: 20, padding: 14, background: TRACK_SURFACE.soft,
+            borderRadius: 8, fontSize: 14, color: TRACK_SURFACE.body,
           }}>
             {techFirst} is on the way. We'll update once GPS reconnects.
           </div>
@@ -427,7 +452,7 @@ function EnRouteCard({ data }) {
 
         <div style={{
           marginTop: 24, paddingTop: 20,
-          borderTop: `1px solid ${COLORS.offWhite}`,
+          borderTop: `1px solid ${TRACK_SURFACE.border}`,
         }}>
           <TechBlock tech={data.tech} size="lg" />
         </div>
@@ -435,8 +460,8 @@ function EnRouteCard({ data }) {
         <ServiceMeta data={data} />
 
         <a
-          href={`sms:${WAVES_PHONE_TEL}`}
-          style={{ ...GOLD_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
+          href={WAVES_SUPPORT_SMS_TEL}
+          style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >
           TEXT {techFirst.toUpperCase()}
         </a>
@@ -450,7 +475,7 @@ function OnPropertyCard({ data }) {
   const elapsed = useElapsed(data.arrivedAt);
   return (
     <Card accent={COLORS.green}>
-      <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
+      <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
         On property
       </div>
       <TechBlock tech={data.tech} size="lg" />
@@ -458,7 +483,7 @@ function OnPropertyCard({ data }) {
         {techFirst} is servicing your property.
       </div>
       {elapsed ? (
-        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10 }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 10 }}>
           On site for {elapsed}.
         </div>
       ) : null}
@@ -473,7 +498,7 @@ function CompleteCard({ data }) {
   return (
     <>
       <Card accent={COLORS.green}>
-        <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
+        <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
           Service complete
         </div>
         <TechBlock tech={data.tech} size="lg" />
@@ -481,7 +506,7 @@ function CompleteCard({ data }) {
           Thanks for choosing Waves
           {data.customerFirstName ? `, ${data.customerFirstName}` : ''}.
         </div>
-        <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 8 }}>
+        <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 8 }}>
           {data.service?.type} completed{summary.completedAt ? ` on ${formatCompleteDate(summary.completedAt)}` : ''}.
         </div>
 
@@ -504,8 +529,8 @@ function CompleteCard({ data }) {
           <a
             href={`/report/${summary.serviceReportToken}`}
             style={{
-              display: 'block', padding: '16px 20px', background: COLORS.wavesBlue, color: COLORS.white,
-              textAlign: 'center', borderRadius: 12, fontWeight: 600, fontSize: 16,
+              display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
+              textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
           >View service report</a>
@@ -514,8 +539,8 @@ function CompleteCard({ data }) {
           <a
             href={summary.reviewUrl}
             style={{
-              display: 'block', padding: '16px 20px', background: COLORS.yellow, color: COLORS.navy,
-              textAlign: 'center', borderRadius: 12, fontWeight: 600, fontSize: 16,
+              display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
+              textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
           >Leave a 5-star review</a>
@@ -524,9 +549,9 @@ function CompleteCard({ data }) {
           <a
             href={`/pay/${summary.invoiceToken}`}
             style={{
-              display: 'block', padding: '14px 20px', background: COLORS.white, color: COLORS.blueDark,
-              textAlign: 'center', borderRadius: 12, fontWeight: 600, fontSize: 15,
-              textDecoration: 'none', border: `1px solid ${COLORS.grayLight}`,
+              display: 'block', padding: '14px 20px', background: TRACK_SURFACE.surface, color: TRACK_SURFACE.text,
+              textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
+              textDecoration: 'none', border: `1px solid ${TRACK_SURFACE.border}`,
             }}
           >View invoice</a>
         ) : null}
@@ -540,23 +565,23 @@ function CancelledCard({ data }) {
   const reason = data.cancellation?.reason || null;
   return (
     <Card accent={COLORS.red}>
-      <div style={{ fontSize: 14, color: COLORS.red, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
+      <div style={{ fontSize: 14, color: COLORS.red, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
         Cancelled
       </div>
       <div style={{ fontSize: 20, fontWeight: 600, lineHeight: 1.3 }}>
         Your {data.service?.type?.toLowerCase() || 'service'}{when ? ` on ${when}` : ''} was cancelled.
       </div>
       {reason ? (
-        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12 }}>
-          <span style={{ color: COLORS.textCaption }}>Reason: </span>{reason}
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 12 }}>
+          <span style={{ color: TRACK_SURFACE.muted }}>Reason: </span>{reason}
         </div>
       ) : null}
       <a
-        href={`tel:${WAVES_PHONE_TEL}`}
+        href={WAVES_SUPPORT_PHONE_TEL}
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
-          background: COLORS.wavesBlue, color: COLORS.white,
-          textAlign: 'center', borderRadius: 12, fontWeight: 600, fontSize: 15,
+          background: COLORS.blueDeeper, color: COLORS.white,
+          textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
           textDecoration: 'none',
         }}
       >Call to reschedule</a>
@@ -568,9 +593,9 @@ function CancelledCard({ data }) {
 function SkeletonCard() {
   return (
     <Card>
-      <div style={{ height: 12, width: 80, background: COLORS.offWhite, borderRadius: 4 }} />
-      <div style={{ height: 24, width: '80%', background: COLORS.offWhite, borderRadius: 4, marginTop: 16 }} />
-      <div style={{ height: 16, width: '60%', background: COLORS.offWhite, borderRadius: 4, marginTop: 12 }} />
+      <div style={{ height: 12, width: 80, background: TRACK_SURFACE.soft, borderRadius: 4 }} />
+      <div style={{ height: 24, width: '80%', background: TRACK_SURFACE.soft, borderRadius: 4, marginTop: 16 }} />
+      <div style={{ height: 16, width: '60%', background: TRACK_SURFACE.soft, borderRadius: 4, marginTop: 12 }} />
     </Card>
   );
 }
@@ -582,9 +607,9 @@ function NotFoundCard() {
       <div style={{ fontSize: 18, fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
         Tracking link unavailable
       </div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, textAlign: 'center', lineHeight: 1.5 }}>
         This tracking link has expired or isn't valid. Call us at{' '}
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
+        <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: TRACK_SURFACE.text }}>{WAVES_SUPPORT_PHONE_DISPLAY}</a>{' '}
         if you need help with your service.
       </div>
     </Card>

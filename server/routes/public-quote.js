@@ -17,6 +17,7 @@ const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
 } = require('../services/estimate-automation-duplicates');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
@@ -480,7 +481,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     });
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });
-    res.status(500).json({ error: 'Something went wrong. Please call (941) 318-7612 for a quote.' });
+    res.status(500).json({ error: `Something went wrong. Please call ${WAVES_SUPPORT_PHONE_DISPLAY} for a quote.` });
   }
 });
 

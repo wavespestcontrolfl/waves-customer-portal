@@ -20,7 +20,7 @@ function fmtDate(value) {
 
 function StatusPill({ tone = 'neutral', children }) {
   const tones = {
-    neutral: { bg: '#F8FAFC', color: 'var(--text)', border: '#E1E7EF' },
+    neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
     ready: { bg: 'var(--brand-soft)', color: 'var(--brand)', border: 'var(--brand-ring)' },
     signed: { bg: '#F0FDF4', color: '#047857', border: '#BBF7D0' },
   };

@@ -124,20 +124,26 @@ router.get('/unsubscribe/:token', async (req, res) => {
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <title>Unsubscribed — Waves Pest Control</title>
         <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 60px auto; padding: 0 20px; color: #111; }
-          h1 { font-size: 24px; margin-bottom: 8px; }
-          p { line-height: 1.5; color: #555; }
-          .box { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; margin-top: 24px; }
-          .email { font-family: monospace; color: #111; }
+          * { box-sizing: border-box; }
+          body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: clamp(40px, 8vw, 72px) 20px; color: #1B2C5B; background: #FAF8F3; min-height: 100vh; }
+          main { max-width: 520px; margin: 0 auto; }
+          h1 { font-family: 'Source Serif 4', Georgia, serif; font-size: 32px; line-height: 1.12; font-weight: 500; margin: 0 0 10px; color: #1B2C5B; letter-spacing: 0; }
+          p { line-height: 1.6; color: #3F4A65; }
+          a { color: #1B2C5B; }
+          .box { background: #fff; border: 1px solid #E7E2D7; border-radius: 14px; padding: 26px; margin-top: 24px; }
+          .email { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #1B2C5B; }
+          .footer { margin-top: 32px; font-size: 13px; color: #6B7280; text-align: center; }
         </style>
       </head>
       <body>
-        <h1>You're unsubscribed.</h1>
-        <div class="box">
-          <p>We won't send any more newsletters ${email ? `to <span class="email">${email}</span>` : 'to this address'}.</p>
-          <p style="margin-bottom:0">If this was a mistake, email us at <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we'll resubscribe you.</p>
-        </div>
-        <p style="margin-top:32px; font-size:13px; color:#999;">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
+        <main>
+          <h1>You're unsubscribed.</h1>
+          <div class="box">
+            <p>We won't send any more newsletters ${email ? `to <span class="email">${email}</span>` : 'to this address'}.</p>
+            <p style="margin-bottom:0">If this was a mistake, email us at <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we'll resubscribe you.</p>
+          </div>
+          <p class="footer">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
+        </main>
       </body>
       </html>
     `);
@@ -209,23 +215,28 @@ function renderConfirmPage(heading, bodyHtml) {
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <title>${heading} — Waves Pest Control</title>
         <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 60px auto; padding: 0 20px; color: #111; }
-          h1 { font-size: 24px; margin-bottom: 8px; }
-          p { line-height: 1.5; color: #555; }
-          .box { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; margin-top: 24px; }
-          .email { font-family: monospace; color: #111; }
+          * { box-sizing: border-box; }
+          body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: clamp(40px, 8vw, 72px) 20px; color: #1B2C5B; background: #FAF8F3; min-height: 100vh; }
+          main { max-width: 520px; margin: 0 auto; }
+          h1 { font-family: 'Source Serif 4', Georgia, serif; font-size: 32px; line-height: 1.12; font-weight: 500; margin: 0 0 10px; color: #1B2C5B; letter-spacing: 0; }
+          p { line-height: 1.6; color: #3F4A65; }
+          .box { background: #fff; border: 1px solid #E7E2D7; border-radius: 14px; padding: 26px; margin-top: 24px; }
+          .email { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #1B2C5B; }
           a { color: #1B2C5B; }
-          .btn { display:inline-block; background:#FFD700; color:#1B2C5B; border:2px solid #1B2C5B; border-radius:10px; padding:12px 22px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; cursor:pointer; font-size:14px; }
-          .btn:hover { box-shadow: 4px 4px 0 #1B2C5B; transform: translate(-2px, -2px); }
+          .btn { display:inline-block; background:#1B2C5B; color:#fff; border:1px solid #1B2C5B; border-radius:8px; padding:12px 22px; font-weight:800; letter-spacing:0; cursor:pointer; font-size:14px; }
+          .btn:hover { background:#142144; }
           form { margin: 0; padding: 0; }
+          .footer { margin-top: 32px; font-size: 13px; color: #6B7280; text-align: center; }
         </style>
       </head>
       <body>
-        <h1>${heading}</h1>
-        <div class="box">
-          ${bodyHtml}
-        </div>
-        <p style="margin-top:32px; font-size:13px; color:#999;">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
+        <main>
+          <h1>${heading}</h1>
+          <div class="box">
+            ${bodyHtml}
+          </div>
+          <p class="footer">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
+        </main>
       </body>
       </html>
     `;
