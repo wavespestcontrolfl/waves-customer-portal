@@ -560,18 +560,18 @@ describe('service report v1', () => {
     expect(first).toContain('Ant trail');
   });
 
-  test('satellite treatment map is opt-in and keeps Google imagery out of PDF and SMS export', async () => {
+  test('satellite treatment map is on by default, disablable via env, and keeps Google imagery out of PDF and SMS export', async () => {
     const previousEnabled = process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED;
     const previousKey = process.env.GOOGLE_STATIC_MAPS_API_KEY;
     try {
-      delete process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED;
-      delete process.env.GOOGLE_STATIC_MAPS_API_KEY;
+      process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED = 'false';
+      process.env.GOOGLE_STATIC_MAPS_API_KEY = 'test-key';
       const disabled = await buildSatelliteTreatmentMapContext({
         service: { customer_latitude: 27.39, customer_longitude: -82.43 },
       });
       expect(disabled).toMatchObject({ available: false, fallbackReason: 'disabled' });
 
-      process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED = 'true';
+      delete process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED;
       process.env.GOOGLE_STATIC_MAPS_API_KEY = 'test-key';
       const enabled = await buildSatelliteTreatmentMapContext({
         service: { customer_latitude: 27.39, customer_longitude: -82.43 },
