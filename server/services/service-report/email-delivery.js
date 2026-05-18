@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const sendgrid = require('../sendgrid-mail');
 const { wrapEmail, formatDate, plainText } = require('../email-template');
+const EmailTemplateLibrary = require('../email-template-library');
 const { buildReportV1Data } = require('./report-data');
 const {
   enqueuePdfRenderRetry,
@@ -49,6 +50,19 @@ function hasActionRequiredFinding(findings = []) {
 
 function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function canFallbackFromTemplateEmailError(err) {
+  return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
+}
+
+function pdfAttachment(filename, buffer) {
+  return {
+    content: buffer.toString('base64'),
+    filename,
+    type: 'application/pdf',
+    disposition: 'attachment',
+  };
 }
 
 function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}) {
@@ -221,6 +235,38 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     disposition: 'attachment',
   }] : undefined;
 
+  try {
+    const serviceLabel = serviceDisplayName(data);
+    const templateResult = await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'service.report_ready',
+      to: service.customer_email,
+      payload: {
+        first_name: data?.customerName ? data.customerName.split(/\s+/)[0] : 'there',
+        report_url: fullReportUrl,
+        service_label: serviceLabel,
+        service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
+        technician_name: data?.technicianName || '',
+      },
+      recipientType: 'customer',
+      recipientId: service.customer_id || null,
+      triggerEventId: `service_report_ready:${recordId}`,
+      categories: ['service_report_v1'],
+      attachments: pdf ? [pdfAttachment(`waves-service-report-${data.serviceDate || recordId}.pdf`, pdf)] : [],
+    });
+    if (templateResult.blocked) {
+      logger.warn(`[service-report-v1-email] Template service report ${recordId} blocked: ${templateResult.reason}`);
+      return { ok: false, skipped: true, error: templateResult.reason || 'Email suppressed', attachedPdf: !!pdf };
+    }
+    logger.info(`[service-report-v1-email] Sent template service report ${recordId} to customer ${service.customer_id || 'unknown'}`);
+    return { ok: true, messageId: templateResult.message?.provider_message_id || null, attachedPdf: !!pdf };
+  } catch (err) {
+    if (!canFallbackFromTemplateEmailError(err)) {
+      logger.error(`[service-report-v1-email] Template send failed for ${recordId}: ${err.message}`);
+      return { ok: false, error: err.message, attachedPdf: !!pdf };
+    }
+    logger.warn(`[service-report-v1-email] Template unavailable for ${recordId}; falling back to legacy renderer: ${err.message}`);
+  }
+
   const result = await sendgrid.sendOne({
     to: service.customer_email,
     subject: email.subject,
@@ -231,7 +277,7 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     attachments,
   });
 
-  logger.info(`[service-report-v1-email] Sent service report ${recordId} to ${service.customer_email}`);
+  logger.info(`[service-report-v1-email] Sent service report ${recordId} to customer ${service.customer_id || 'unknown'}`);
   return { ok: true, messageId: result.messageId || null, attachedPdf: !!pdf };
 }
 

@@ -14,10 +14,14 @@
 
 const db = require('../models/db');
 const EmailService = require('./email');
+const EmailTemplateLibrary = require('./email-template-library');
+const EmailTemplateAutomationExecutor = require('./email-template-automation-executor');
+const sendgrid = require('./sendgrid-mail');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isEnabled } = require('../config/feature-gates');
 
 const RENEWAL_DAYS = 7;
 
@@ -29,6 +33,14 @@ async function renderTemplate(templateKey, vars, fallback) {
     }
   } catch { /* fall through */ }
   return fallback;
+}
+
+function canFallbackFromTemplateEmailError(err) {
+  return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
+}
+
+function canFallbackFromAutomationEmailError(err) {
+  return /relation .*email_template_automation|automation .*not found|does not define an idempotency key|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
 const EstimateAutoRenew = {
@@ -84,14 +96,72 @@ const EstimateAutoRenew = {
           }
           if (est.customer_email) {
             try {
-              await EmailService.send({
-                to: est.customer_email,
-                subject: 'Your Waves estimate was extended',
-                heading: `Hey ${firstName} — we extended your estimate`,
-                body: `<p>Your Waves Pest Control estimate was about to expire, so we went ahead and extended it by another few days. It's still good — take another look whenever you're ready.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
-                ctaUrl: url,
-                ctaLabel: 'View Your Estimate',
-              });
+              let sentWithTemplateLibrary = false;
+              const formattedExpiry = newExpiry.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+              const extensionPayload = {
+                estimate_id: est.id,
+                customer_id: est.customer_id || '',
+                customer_email: est.customer_email,
+                first_name: firstName,
+                estimate_url: url,
+                new_expires_at: formattedExpiry,
+                estimate_status: est.status,
+                status: est.status,
+                renewal_count: Number(est.renewal_count || 0) + 1,
+              };
+              if (sendgrid.isConfigured()) {
+                try {
+                  if (isEnabled('emailTemplateAutomations')) {
+                    const result = await EmailTemplateAutomationExecutor.processTrigger({
+                      triggerEventKey: 'estimate.auto_renewed',
+                      triggerEventId: `estimate_auto_renew:${est.id}`,
+                      entityType: 'estimate',
+                      entityId: est.id,
+                      recipient: {
+                        email: est.customer_email,
+                        type: est.customer_id ? 'customer' : 'lead',
+                        id: est.customer_id || '',
+                      },
+                      payload: extensionPayload,
+                      executeImmediately: true,
+                    });
+                    if (result.automation_count > 0) {
+                      const statuses = result.results.map((r) => r.run?.status).filter(Boolean).join(', ') || 'queued';
+                      logger.info(`[est-auto-renew] Email automation handled estimate ${est.id}: ${statuses}`);
+                      sentWithTemplateLibrary = true;
+                    }
+                  }
+
+                  if (!sentWithTemplateLibrary) {
+                    const result = await EmailTemplateLibrary.sendTemplate({
+                      templateKey: 'estimate.extension_notice',
+                      to: est.customer_email,
+                      payload: extensionPayload,
+                      recipientType: est.customer_id ? 'customer' : 'lead',
+                      recipientId: est.customer_id || null,
+                      triggerEventId: `estimate_auto_renew:${est.id}`,
+                      categories: ['estimate_auto_renew'],
+                    });
+                    if (result.blocked) {
+                      logger.warn(`[est-auto-renew] Email suppressed for estimate ${est.id}: ${result.reason || 'suppressed'}`);
+                    }
+                    sentWithTemplateLibrary = true;
+                  }
+                } catch (e) {
+                  if (!canFallbackFromTemplateEmailError(e) && !canFallbackFromAutomationEmailError(e)) throw e;
+                  logger.warn(`[est-auto-renew] Template unavailable for estimate ${est.id}; falling back to SMTP: ${e.message}`);
+                }
+              }
+              if (!sentWithTemplateLibrary) {
+                await EmailService.send({
+                  to: est.customer_email,
+                  subject: 'Your Waves estimate was extended',
+                  heading: `Hey ${firstName} — we extended your estimate`,
+                  body: `<p>Your Waves Pest Control estimate was about to expire, so we went ahead and extended it by another few days. It's still good — take another look whenever you're ready.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
+                  ctaUrl: url,
+                  ctaLabel: 'View Your Estimate',
+                });
+              }
             } catch (e) { logger.error(`[est-auto-renew] Email failed: ${e.message}`); }
           }
 

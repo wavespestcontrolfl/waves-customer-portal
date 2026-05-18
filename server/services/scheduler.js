@@ -4,6 +4,7 @@ const TwilioService = require('./twilio');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isEnabled } = require('../config/feature-gates');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -264,6 +265,20 @@ function initScheduledJobs() {
       await AutomationRunner.processDueSteps();
     } catch (err) {
       logger.error(`Automation runner tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY MIN — Email template automation executor. Sends due delayed/retry
+  // runs created by trigger-mapped email template automations.
+  // =========================================================================
+  cron.schedule('* * * * *', async () => {
+    try {
+      if (!isEnabled('emailTemplateAutomations')) return;
+      const EmailTemplateAutomationExecutor = require('./email-template-automation-executor');
+      await EmailTemplateAutomationExecutor.processDueRuns();
+    } catch (err) {
+      logger.error(`Email template automation tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
