@@ -50,10 +50,12 @@ function fmtMoney(value) {
 function normalizeServiceName(value) {
   const raw = cleanText(value);
   const key = raw.toLowerCase().replace(/[_-]+/g, ' ');
+  if (/\bpalms?\b|\bpalm injection\b/.test(key)) return 'Palm Injection';
+  if (/rodent/.test(key) && /bait|station|monitor/.test(key)) return 'Rodent Bait Stations';
   if (/lawn|turf|weed|fung/.test(key)) return 'Lawn Care';
   if (/mosquito/.test(key)) return 'Mosquito Control';
   if (/termite/.test(key)) return 'Termite Service';
-  if (/tree|shrub|ornamental|palm/.test(key)) return 'Tree & Shrub Service';
+  if (/tree|shrub|ornamental/.test(key)) return 'Tree & Shrub Service';
   if (/rodent|rat|mouse/.test(key)) return 'Rodent Control';
   if (/pest|roach|ant|spider|perimeter/.test(key)) return 'Pest Control';
   return raw || 'Service';
@@ -116,7 +118,10 @@ function waveGuardDiscountForTier(value) {
 
 function waveGuardDiscountAppliesToService(service = {}) {
   const key = cleanText(service.service || service.key).toLowerCase();
+  if (key === 'palm_injection' || key === 'rodent_bait' || service.waveGuardDiscountEligible === false) return false;
   if (key && WAVEGUARD.qualifyingServices.includes(key)) return true;
+  const rawLabel = cleanText(service.label || service.name || service.service).toLowerCase();
+  if ((/\bpalms?\b|\bpalm injection\b/.test(rawLabel)) || (rawLabel.includes('rodent') && rawLabel.includes('bait'))) return false;
   const label = normalizeServiceName(service.label || service.name || service.service);
   return ['Pest Control', 'Lawn Care', 'Mosquito Control', 'Termite Service', 'Tree & Shrub Service'].includes(label);
 }
@@ -127,22 +132,40 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
   const perTreatments = Array.isArray(frequency?.perServiceTreatments) ? frequency.perServiceTreatments : [];
   const byLabel = new Map();
   const waveGuardDiscount = waveGuardDiscountForTier(pricingBundle.waveGuardTier);
-  const enginePricedRows = ['v1_engine_shape', 'engine_invocation'].includes(cleanText(pricingBundle.source));
   const targetAnnual = Number(frequency?.annual)
     || (Number.isFinite(Number(frequency?.monthly)) ? Number(frequency.monthly) * 12 : null);
-  const perTreatmentAnnual = perTreatments.reduce((sum, service) => {
+  const treatmentAnnualFor = (service) => {
     const amount = Number(service.perTreatment);
     const visits = Number(service.visitsPerYear);
-    return sum + (Number.isFinite(amount) && amount > 0 && Number.isFinite(visits) && visits > 0
+    return Number.isFinite(amount) && amount > 0 && Number.isFinite(visits) && visits > 0
       ? amount * visits
-      : 0);
+      : 0;
+  };
+  const rawTreatmentAnnual = perTreatments.reduce((sum, service) => sum + treatmentAnnualFor(service), 0);
+  const enginePricedRows = ['v1_engine_shape', 'engine_invocation'].includes(cleanText(pricingBundle.source));
+  const shouldApplyTierDiscount = waveGuardDiscount > 0
+    && (enginePricedRows || (
+      Number.isFinite(targetAnnual)
+      && targetAnnual > 0
+      && rawTreatmentAnnual > targetAnnual + 0.5
+    ));
+  const afterTierAnnual = perTreatments.reduce((sum, service) => {
+    const annual = treatmentAnnualFor(service);
+    const multiplier = shouldApplyTierDiscount && waveGuardDiscountAppliesToService(service)
+      ? (1 - waveGuardDiscount)
+      : 1;
+    return sum + annual * multiplier;
   }, 0);
-  const treatmentMultiplier = Number.isFinite(targetAnnual)
+  const nonDiscountedAnnual = perTreatments.reduce((sum, service) => {
+    return sum + (waveGuardDiscountAppliesToService(service) ? 0 : treatmentAnnualFor(service));
+  }, 0);
+  const discountableAfterTierAnnual = Math.max(0, afterTierAnnual - nonDiscountedAnnual);
+  const discountableAdjustment = Number.isFinite(targetAnnual)
     && targetAnnual > 0
-    && perTreatmentAnnual > targetAnnual + 0.5
-    ? targetAnnual / perTreatmentAnnual
+    && afterTierAnnual > targetAnnual + 0.5
+    && discountableAfterTierAnnual > 0
+    ? Math.max(0, (targetAnnual - nonDiscountedAnnual) / discountableAfterTierAnnual)
     : 1;
-  const useTierDiscount = enginePricedRows && waveGuardDiscount > 0 && treatmentMultiplier === 1;
 
   included.forEach((service) => {
     const label = normalizeServiceName(service.label || service.service || service.key);
@@ -156,9 +179,9 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
     const label = normalizeServiceName(service.label || service.service);
     const current = byLabel.get(label) || { label };
     const rawPerTreatment = Number(service.perTreatment);
-    const rowMultiplier = useTierDiscount && waveGuardDiscountAppliesToService(service)
-      ? (1 - waveGuardDiscount)
-      : treatmentMultiplier;
+    const rowMultiplier = waveGuardDiscountAppliesToService(service)
+      ? (shouldApplyTierDiscount ? (1 - waveGuardDiscount) : 1) * discountableAdjustment
+      : 1;
     const perApplication = Number.isFinite(rawPerTreatment) && rawPerTreatment > 0
       ? Math.round(rawPerTreatment * rowMultiplier * 100) / 100
       : null;

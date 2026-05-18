@@ -53,7 +53,9 @@ async function pickFirstServiceDate(customer, estimateId) {
 }
 
 /**
- * Determine WaveGuard tier based on number of recurring services selected.
+ * Determine WaveGuard tier based on the number of tier-qualifying recurring
+ * services selected. Excluded recurring rows such as Palm Injection and Rodent
+ * Bait Stations still schedule, but they do not move the customer into Silver+.
  *
  * Discount values + min-service thresholds are sourced from
  * `pricing-engine/constants.WAVEGUARD.tiers` — the single source of truth
@@ -66,13 +68,54 @@ async function pickFirstServiceDate(customer, estimateId) {
  * less than they were quoted. Now derived live so any future tier change
  * lands in one place.
  */
-function determineTier(serviceCount) {
+function determineTier(serviceCount, hasRecurringServices = false) {
   const t = WAVEGUARD.tiers;
   if (serviceCount >= t.platinum.minServices) return { tier: 'Platinum', discount: t.platinum.discount };
   if (serviceCount >= t.gold.minServices)     return { tier: 'Gold',     discount: t.gold.discount };
   if (serviceCount >= t.silver.minServices)   return { tier: 'Silver',   discount: t.silver.discount };
   if (serviceCount >= t.bronze.minServices)   return { tier: 'Bronze',   discount: t.bronze.discount };
+  if (hasRecurringServices)                   return { tier: 'Bronze',   discount: t.bronze.discount };
   return { tier: 'none', discount: 0 };
+}
+
+function recurringServiceKey(svc = {}) {
+  const raw = String(svc.service || svc.key || svc.name || svc.label || svc.displayName || '').toLowerCase();
+  const words = raw.replace(/[_-]+/g, ' ');
+  if (
+    raw.includes('palm_injection')
+    || raw.includes('palm_treatment')
+    || /\bpalm injection\b|\bpalm tree\b|\bpalms?\b/.test(words)
+  ) return 'palm_injection';
+  if (
+    raw.includes('rodent_bait')
+    || raw.includes('rodent_monitoring')
+    || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
+  ) return 'rodent_bait';
+  if (raw.includes('pest')) return 'pest_control';
+  if (raw.includes('lawn')) return 'lawn_care';
+  if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
+  if (raw.includes('mosquito')) return 'mosquito';
+  if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
+  return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function serviceCountsTowardWaveGuardTier(svc = {}) {
+  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
+  return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
+}
+
+function countTierQualifyingRecurringServices(services = []) {
+  const seen = new Set();
+  for (const svc of services) {
+    if (!serviceCountsTowardWaveGuardTier(svc)) continue;
+    const key = recurringServiceKey(svc);
+    if (key) seen.add(key);
+  }
+  return seen.size;
+}
+
+function hasWaveGuardSetupService(services = []) {
+  return services.some((svc) => recurringServiceKey(svc) === 'pest_control');
 }
 
 function calculateAnnualPrepayAmount(monthlyRate) {
@@ -116,7 +159,10 @@ const EstimateConverter = {
     }
     estimateData = estimateData || {};
 
-    // Count recurring services.
+    // Count recurring services for scheduling, but only tier-qualifying rows
+    // for WaveGuard tier activation. Palm Injection and Rodent Bait Stations
+    // are recurring services, but they are excluded from WaveGuard tier count
+    // and percentage discounts in the pricing engine.
     // V2 pricing-engine estimates store services at estimate_data.result.recurring.services,
     // while older shapes use estimate_data.recurring.services or a flat estimate_data.services.
     // Without the result.* fallback, V2 estimates resolved to 0 services → tier='none' →
@@ -126,10 +172,11 @@ const EstimateConverter = {
       || estimateData.result?.recurring?.services
       || estimateData.services?.filter(s => s.recurring || s.frequency)
       || [];
-    const serviceCount = recurringServices.length;
+    const serviceCount = countTierQualifyingRecurringServices(recurringServices);
+    const shouldCreateSetupInvoice = hasWaveGuardSetupService(recurringServices);
 
     // Determine tier
-    const { tier, discount } = determineTier(serviceCount);
+    const { tier, discount } = determineTier(serviceCount, recurringServices.length > 0);
 
     // Calculate monthly rate from estimate
     const monthlyRate = parseFloat(estimate.monthly_total || 0);
@@ -233,12 +280,13 @@ const EstimateConverter = {
 
     // 4. Create draft setup/prepay invoice so Virginia sees it in
     //    /admin/invoices and can review + send. Nothing auto-charges.
-    //    Scoped to estimates with recurring pest (monthlyRate > 0) — other
-    //    paths (lawn-only, mosquito-only) are left alone for this PR.
+    //    Scoped to estimates with recurring pest — other recurring services,
+    //    including excluded rows such as palm/rodent bait, do not show this
+    //    setup charge on the public estimate and should not receive it here.
     let draftInvoiceId = null;
     let draftInvoiceAmount = null;
     try {
-      if (monthlyRate > 0 && !skipSetupInvoice) {
+      if (monthlyRate > 0 && !skipSetupInvoice && shouldCreateSetupInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
           const annualAmount = calculateAnnualPrepayAmount(monthlyRate);
@@ -298,3 +346,8 @@ const EstimateConverter = {
 
 module.exports = EstimateConverter;
 module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
+module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurringServices;
+module.exports.determineTier = determineTier;
+module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
+module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;

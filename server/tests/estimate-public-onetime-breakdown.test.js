@@ -6,19 +6,23 @@ const {
   buildAcceptNotificationPayload,
   buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
+  acceptanceServiceLists,
   buildEstimateAskQueryLog,
   buildPricingBundle,
   buildWaveGuardIntelligencePayload,
   isEstimateAcceptActive,
   isEstimateAskAnswerable,
   isStructuralOneTimeOnlyEstimate,
+  monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
   renderPage,
   resolveAcceptOneTimeTotal,
+  resolveRecurringMonthlyParts,
   resolveEstimateDeclineGuard,
   resolveEstimateQuoteRequirement,
   shouldApplyFirstViewSideEffects,
+  withSupplementedRecurringServices,
 } = require('../routes/estimate-public');
 const {
   answerEstimateQuestionFallback,
@@ -1142,6 +1146,467 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4">$2.61</span>/day for lawn care.');
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('/ treatment</span>');
+  });
+
+  test('server-rendered estimate promotes separate palm and rodent bait recurring services', () => {
+    const html = renderPage('separate-recurring-token', {
+      status: 'sent',
+      customerName: 'Rita Customer',
+      address: '123 Palm Row',
+      monthlyTotal: 149,
+      annualTotal: 1788,
+      onetimeTotal: 0,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          palmInjectionMo: 55,
+          palmInjectionAnn: 660,
+          rodentBaitMo: 49,
+          services: [
+            { name: 'Pest Control', mo: 50 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          pest: { apps: 4 },
+          pestTiers: [{ label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 }],
+          injection: {
+            treatmentLabel: 'Nutrition + Insecticide',
+            appsPerYear: 2,
+            annualAfterCredits: 660,
+            monthlyAfterCredits: 55,
+            detail: '2 palms x $165 x 2/yr',
+          },
+          rodBaitSize: 'Medium',
+        },
+      },
+    });
+
+    expect(html).toContain('class="service-price-list"');
+    expect(html).toContain('class="service-price-name">Pest Control</div>');
+    expect(html).toContain('class="service-price-name">Palm Injection</div>');
+    expect(html).toContain('class="service-price-name">Rodent Bait Stations</div>');
+    expect(html).toContain('Nutrition + Insecticide &middot; 2 applications/year');
+    expect(html).toContain('Quarterly monitoring &middot; 4 applications/year');
+    expect(html).toContain('$135</span>');
+    expect(html).toContain('$330</span>');
+    expect(html).toContain('$147</span>');
+    expect(html).toContain('<span class="tier-lbl">Recurring service</span>');
+    expect(html).toContain('Add Lawn Care and save more');
+    expect(html).toContain('Silver tier pricing (10% off qualifying services)');
+    expect(html).not.toContain('Add WaveGuard Mosquito and save more');
+    expect(html).not.toContain('Gold tier pricing (15% off qualifying services)');
+    expect(html).not.toContain('id="monthly-display"');
+    expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="palm_injection"');
+    expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="rodent_bait"');
+  });
+
+  test('v1 pricing bundle includes separate palm and rodent bait rows without tier discount', async () => {
+    const estimate = {
+      id: 'pricing-palm-rodent',
+      estimate_data: {
+        result: {
+          results: {
+            pestTiers: [{ label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 }],
+            injection: {
+              treatmentLabel: 'Nutrition + Insecticide',
+              appsPerYear: 2,
+              annualAfterCredits: 660,
+              monthlyAfterCredits: 55,
+            },
+            rodBaitSize: 'Medium',
+          },
+          recurring: {
+            discount: 0.10,
+            waveGuardTier: 'Silver',
+            monthlyTotal: 45,
+            annualAfterDiscount: 540,
+            grandTotal: 149,
+            palmInjectionMo: 55,
+            palmInjectionAnn: 660,
+            rodentBaitMo: 49,
+            services: [{ name: 'Pest Control', mo: 50 }],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 149,
+      annual_total: 1788,
+      onetime_total: 0,
+      waveguard_tier: 'Silver',
+    };
+    const pricing = await buildPricingBundle(estimate);
+
+    expect(pricing.frequencies[0].monthly).toBe(149);
+    expect(pricing.frequencies[0].perServiceTreatments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service: 'palm_injection',
+        label: 'Palm Injection',
+        perTreatment: 330,
+        visitsPerYear: 2,
+        waveGuardDiscountEligible: false,
+      }),
+      expect.objectContaining({
+        service: 'rodent_bait',
+        label: 'Rodent Bait Stations',
+        perTreatment: 147,
+        visitsPerYear: 4,
+        waveGuardDiscountEligible: false,
+      }),
+    ]));
+
+    const context = buildEstimateAssistantContext({
+      estimate,
+      estData: estimate.estimate_data,
+      pricingBundle: pricing,
+    });
+    const included = answerEstimateQuestionFallback('What is included?', context);
+    expect(included).toContain('Palm Injection - 2 applications/year - $330 per application');
+    expect(included).toContain('Rodent Bait Stations - 4 applications/year - $147 per application');
+    expect(included).not.toContain('$319.29 per application');
+    expect(included).not.toContain('$142.23 per application');
+  });
+
+  test('supplemental palm and rodent details enrich sparse legacy recurring rows', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          pestTiers: [{ label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 }],
+          injection: {
+            treatmentLabel: 'Nutrition + Insecticide',
+            appsPerYear: 2,
+            annualAfterCredits: 660,
+            monthlyAfterCredits: 55,
+            detail: '2 palms x $165 x 2/yr',
+          },
+          rodBaitSize: 'Medium',
+          rodBaitVisitsPerYear: 4,
+        },
+        recurring: {
+          discount: 0.10,
+          waveGuardTier: 'Silver',
+          monthlyTotal: 45,
+          annualAfterDiscount: 540,
+          grandTotal: 149,
+          palmInjectionMo: 55,
+          palmInjectionAnn: 660,
+          rodentBaitMo: 49,
+          services: [
+            { name: 'Pest Control', mo: 50 },
+            { service: 'palm_treatment', name: 'Legacy Palm Treatment', mo: 60 },
+            { service: 'rodent_monitoring', name: 'Legacy Rodent Monitoring', mo: 51 },
+          ],
+        },
+        oneTime: { total: 0, items: [], specItems: [] },
+        specItems: [],
+      },
+    };
+    const estimate = {
+      id: 'pricing-legacy-sparse-palm-rodent',
+      estimate_data: estimateData,
+      customerName: 'Test Customer',
+      address: '1 Test Way',
+      monthly_total: 149,
+      annual_total: 1788,
+      onetime_total: 0,
+      waveguard_tier: 'Silver',
+      status: 'sent',
+    };
+
+    const supplemented = withSupplementedRecurringServices(estimateData);
+    const services = supplemented.result.recurring.services;
+    expect(services).toHaveLength(3);
+    expect(services).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service: 'palm_injection',
+        displayName: 'Palm Injection',
+        mo: 55,
+        monthly: 55,
+        perTreatment: 330,
+        visitsPerYear: 2,
+        cadenceLabel: 'Nutrition + Insecticide',
+        waveGuardDiscountEligible: false,
+      }),
+      expect.objectContaining({
+        service: 'rodent_bait',
+        displayName: 'Rodent Bait Stations',
+        mo: 49,
+        monthly: 49,
+        perTreatment: 147,
+        visitsPerYear: 4,
+        cadenceLabel: 'Quarterly monitoring',
+        waveGuardDiscountEligible: false,
+      }),
+    ]));
+
+    const parts = resolveRecurringMonthlyParts(estimate, estimateData);
+    expect(parts).toEqual(expect.objectContaining({
+      baseMonthly: 154,
+      discountableBaseMonthly: 50,
+      nonDiscountableMonthly: 104,
+      source: 'summed',
+    }));
+
+    const html = renderPage('legacy-sparse-token', estimate, estimateData);
+    expect(html).toContain('Palm Injection');
+    expect(html).toContain('Nutrition + Insecticide &middot; 2 applications/year');
+    expect(html).toContain('Rodent Bait Stations');
+    expect(html).toContain('Quarterly monitoring &middot; 4 applications/year');
+
+    const pricing = await buildPricingBundle(estimate);
+    expect(pricing.frequencies[0].perServiceTreatments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service: 'palm_injection',
+        label: 'Palm Injection',
+        perTreatment: 330,
+        visitsPerYear: 2,
+        waveGuardDiscountEligible: false,
+      }),
+      expect.objectContaining({
+        service: 'rodent_bait',
+        label: 'Rodent Bait Stations',
+        perTreatment: 147,
+        visitsPerYear: 4,
+        waveGuardDiscountEligible: false,
+      }),
+    ]));
+  });
+
+  test('preference recalculation preserves separate palm and rodent bait recurring charges', () => {
+    const estData = {
+      result: {
+        results: {
+          injection: {
+            appsPerYear: 2,
+            annualAfterCredits: 660,
+            monthlyAfterCredits: 55,
+          },
+        },
+        recurring: {
+          palmInjectionMo: 55,
+          palmInjectionAnn: 660,
+          rodentBaitMo: 49,
+          services: [
+            { name: 'Pest Control', mo: 50 },
+            { service: 'palm_treatment', name: 'Palm Tree Nutritional Treatment', mo: 55 },
+            { service: 'rodent_monitoring', name: 'Rodent Monitoring', mo: 49 },
+          ],
+        },
+      },
+    };
+    const parts = resolveRecurringMonthlyParts({ monthly_total: 149 }, estData);
+
+    expect(parts).toEqual(expect.objectContaining({
+      baseMonthly: 154,
+      discountableBaseMonthly: 50,
+      nonDiscountableMonthly: 104,
+      source: 'summed',
+    }));
+    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(149);
+    expect(monthlyForRecurringParts(parts, 'Silver', 6.67)).toBe(142.33);
+  });
+
+  test('interior and eave preferences only reduce pest control recurring pricing', () => {
+    const parts = resolveRecurringMonthlyParts({
+      monthly_total: 239,
+      waveguard_tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', mo: 50 },
+            { name: 'Lawn Care', mo: 100 },
+            { service: 'palm_injection', name: 'Palm Injection', mo: 55 },
+            { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49 },
+          ],
+        },
+      },
+    });
+
+    expect(parts).toEqual(expect.objectContaining({
+      baseMonthly: 254,
+      discountableBaseMonthly: 150,
+      nonDiscountableMonthly: 104,
+      source: 'summed',
+    }));
+    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(239);
+    expect(monthlyForRecurringParts(parts, 'Silver', 6.67)).toBe(232.33);
+    expect(monthlyForRecurringParts(parts, 'Silver', 13.34)).toBe(225.66);
+  });
+
+  test('preference recalculation combines supplemented services with saved base when service rows are missing', () => {
+    const engineParts = resolveRecurringMonthlyParts({
+      monthly_total: 145,
+      waveguard_tier: 'Silver',
+    }, {
+      result: {
+        results: {
+          injection: {
+            appsPerYear: 2,
+            monthlyAfterCredits: 55,
+            annualAfterCredits: 660,
+          },
+        },
+        recurring: {
+          annualBeforeDiscount: 1200,
+          palmInjectionMo: 55,
+          palmInjectionAnn: 660,
+          services: [],
+        },
+      },
+    });
+
+    expect(engineParts).toEqual(expect.objectContaining({
+      baseMonthly: 155,
+      discountableBaseMonthly: 100,
+      nonDiscountableMonthly: 55,
+      source: 'summed',
+    }));
+    expect(monthlyForRecurringParts(engineParts, 'Silver')).toBe(145);
+
+    const selfHealedParts = resolveRecurringMonthlyParts({
+      monthly_total: 149,
+      waveguard_tier: 'Silver',
+    }, {
+      baseMonthly: 154,
+      result: {
+        results: {
+          injection: {
+            appsPerYear: 2,
+            monthlyAfterCredits: 55,
+            annualAfterCredits: 660,
+          },
+        },
+        recurring: {
+          palmInjectionMo: 55,
+          palmInjectionAnn: 660,
+          rodentBaitMo: 49,
+          services: [],
+        },
+      },
+    });
+
+    expect(selfHealedParts).toEqual(expect.objectContaining({
+      baseMonthly: 154,
+      discountableBaseMonthly: 50,
+      nonDiscountableMonthly: 104,
+      source: 'summed',
+    }));
+    expect(monthlyForRecurringParts(selfHealedParts, 'Silver')).toBe(149);
+  });
+
+  test('preference recalculation uses positive monthly aliases when mo is a placeholder', () => {
+    const parts = resolveRecurringMonthlyParts({
+      monthly_total: 100,
+      waveguard_tier: 'Silver',
+    }, {
+      result: {
+        results: {
+          injection: {
+            appsPerYear: 2,
+            monthlyAfterCredits: 55,
+            annualAfterCredits: 660,
+          },
+        },
+        recurring: {
+          palmInjectionMo: 55,
+          palmInjectionAnn: 660,
+          services: [
+            { name: 'Pest Control', mo: 0, monthly: 50 },
+          ],
+        },
+      },
+    });
+
+    expect(parts).toEqual(expect.objectContaining({
+      baseMonthly: 105,
+      discountableBaseMonthly: 50,
+      nonDiscountableMonthly: 55,
+      source: 'summed',
+    }));
+    expect(monthlyForRecurringParts(parts, 'Silver')).toBe(100);
+  });
+
+  test('acceptance helpers carry supplemented palm and rodent services into persisted data', () => {
+    const estData = {
+      recurring: {
+        services: [{ name: 'Pest Control', mo: 50 }],
+      },
+      result: {
+        results: {
+          injection: {
+            appsPerYear: 2,
+            annualAfterCredits: 660,
+            monthlyAfterCredits: 55,
+          },
+          rodBaitSize: 'Medium',
+        },
+        recurring: {
+          palmInjectionMo: 55,
+          palmInjectionAnn: 660,
+          rodentBaitMo: 49,
+          services: [{ name: 'Pest Control', mo: 50 }],
+        },
+      },
+    };
+
+    const supplemented = withSupplementedRecurringServices(estData);
+    const expectedServices = expect.arrayContaining([
+      expect.objectContaining({ name: 'Pest Control' }),
+      expect.objectContaining({ service: 'palm_injection', name: 'Palm Injection' }),
+      expect.objectContaining({ service: 'rodent_bait', name: 'Rodent Bait Stations' }),
+    ]);
+
+    expect(supplemented.result.recurring.services).toEqual(expectedServices);
+    expect(supplemented.recurring.services).toEqual(expectedServices);
+
+    const { recurringSvcList } = acceptanceServiceLists(supplemented);
+    expect(recurringSvcList).toEqual(expectedServices);
+    expect(recurringSvcList.map((svc) => svc.name)).toEqual([
+      'Pest Control',
+      'Palm Injection',
+      'Rodent Bait Stations',
+    ]);
+  });
+
+  test('engine pricing bundle uses net palm price after Gold flat credits', async () => {
+    const pricing = await buildPricingBundle({
+      id: 'engine-palm-credit',
+      estimate_data: {
+        engineInputs: {
+          homeSqFt: 2000,
+          stories: 1,
+          lotSqFt: 10000,
+          propertyType: 'single_family',
+          zone: 'A',
+          features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+          paymentMethod: 'card',
+          services: {
+            pest: { frequency: 'quarterly' },
+            lawn: { track: 'st_augustine', tier: 'enhanced' },
+            mosquito: { tier: 'seasonal9' },
+            palm: { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' },
+          },
+        },
+      },
+      monthly_total: 187.58,
+      annual_total: 2250.9,
+      onetime_total: 0,
+      waveguard_tier: 'Gold',
+    });
+
+    expect(pricing.frequencies[0].perServiceTreatments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service: 'palm_injection',
+        label: 'Palm Injection',
+        perTreatment: 210,
+        visitsPerYear: 2,
+        waveGuardDiscountEligible: false,
+      }),
+    ]));
   });
 
   test('server-rendered estimate keeps aggregate hero when service cards do not cover the full total', () => {
