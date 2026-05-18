@@ -2167,7 +2167,8 @@ ${shellQuestionsBar()}
       if (!r.ok) throw new Error('reserve failed');
       const body = await r.json();
       bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
-      document.getElementById('toast')?.classList.remove('show');
+      const toastEl = document.getElementById('toast');
+      if (toastEl) toastEl.classList.remove('show');
       // Swap UI: hide slot list, show review
       document.getElementById('slot-area').style.display = 'none';
       const reviewArea = document.getElementById('review-area');
