@@ -2,6 +2,7 @@ const FawnWeather = require('../fawn-weather');
 const logger = require('../logger');
 
 function finiteNumber(value) {
+  if (value == null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -38,6 +39,7 @@ function weatherCodeLabel(code) {
 }
 
 function normalizeFawnConditions(snapshot = {}, { capturedAt = new Date() } = {}) {
+  if (snapshot.station === 'unavailable' || snapshot.error) return null;
   const station = snapshot.station && snapshot.station !== 'unavailable' ? String(snapshot.station) : null;
   const conditions = {
     temp_f: roundedNumber(snapshot.temp_f),
