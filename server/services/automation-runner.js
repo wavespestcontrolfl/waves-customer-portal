@@ -16,7 +16,9 @@
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
+const { wrapNewsletter, wrapServiceEmail, ensureLegalTextFooter } = require('./email-template');
+
+const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 
 function substitute(text, customer) {
   if (!text) return text;
@@ -47,6 +49,25 @@ function automationAsmGroupId(template) {
   if (group === 'newsletter') return parseInt(process.env.SENDGRID_ASM_GROUP_NEWSLETTER) || null;
   if (group === 'service') return parseInt(process.env.SENDGRID_ASM_GROUP_SERVICE) || null;
   throw new Error(`invalid automation asm_group: ${template.asm_group}`);
+}
+
+function isNewsletterAutomation(template) {
+  return String(template?.asm_group || 'service').trim().toLowerCase() === 'newsletter';
+}
+
+function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId }) {
+  const rawHtml = substitute(htmlBody || '', customer);
+  const rawText = substitute(textBody || '', customer);
+  const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
+  const html = rawHtml
+    ? isNewsletterAutomation(template)
+      ? wrapNewsletter({ body: rawHtml, unsubscribeUrl })
+      : wrapServiceEmail({ body: rawHtml })
+    : '';
+  const text = isNewsletterAutomation(template)
+    ? ensureLegalTextFooter(rawText, { unsubscribeUrl })
+    : rawText;
+  return { html, text };
 }
 
 /**
@@ -184,25 +205,15 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
   };
 
   const subject = substitute(step.subject || `(${template.name})`, personal);
-  const rawHtml = substitute(step.html_body || '', personal);
   const asmGroupId = automationAsmGroupId(template);
-  const text = ensureLegalTextFooter(substitute(step.text_body || '', personal), {
-    unsubscribeUrl: asmGroupId ? '<%asm_group_unsubscribe_raw_url%>' : null,
-  });
-
   const fromEmail = normalizeAutomationFromEmail(step.from_email);
-
-  // Wrap operator-written body in branded chrome (same template the
-  // newsletter campaigns use). For the unsubscribe URL we pass
-  // SendGrid's per-send ASM substitution token — SendGrid replaces it
-  // with a per-recipient suppression-group unsubscribe URL when
-  // asm.group_id is set on the send.
-  const html = rawHtml
-    ? wrapNewsletter({
-        body: rawHtml,
-        unsubscribeUrl: asmGroupId ? '<%asm_group_unsubscribe_raw_url%>' : null,
-      })
-    : '';
+  const { html, text } = renderAutomationStepContent({
+    template,
+    htmlBody: step.html_body,
+    textBody: step.text_body,
+    customer: personal,
+    asmGroupId,
+  });
 
   const recipient = testRecipient || enrollment.email;
 
@@ -327,16 +338,21 @@ async function testSequence({ templateKey, toEmail }) {
   for (const step of steps) {
     if (!step.html_body && !step.text_body) { results.push({ step: step.step_order, skipped: 'empty' }); continue; }
     try {
+      const rendered = renderAutomationStepContent({
+        template,
+        htmlBody: step.html_body,
+        textBody: step.text_body,
+        customer: fake,
+        asmGroupId,
+      });
       const res = await sendgrid.sendOne({
         to: toEmail,
         fromEmail: normalizeAutomationFromEmail(step.from_email),
         fromName: step.from_name,
         replyTo: step.reply_to,
         subject: `[TEST step ${step.step_order}] ${substitute(step.subject || template.name, fake)}`,
-        html: substitute(step.html_body || '', fake) || undefined,
-        text: ensureLegalTextFooter(substitute(step.text_body || '', fake), {
-          unsubscribeUrl: asmGroupId ? '<%asm_group_unsubscribe_raw_url%>' : null,
-        }) || undefined,
+        html: rendered.html || undefined,
+        text: rendered.text || undefined,
         categories: ['automation_test', `template_${template.key}`],
         asmGroupId,
       });
@@ -357,4 +373,5 @@ module.exports = {
   substitute,
   normalizeAutomationFromEmail,
   automationAsmGroupId,
+  renderAutomationStepContent,
 };

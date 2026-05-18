@@ -2546,7 +2546,13 @@ export default function EstimateToolViewV2({
       const r = await fetch(`/api/admin/estimates/${useId}/send`, {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ sendMethod, scheduledAt: scheduled }),
+        body: JSON.stringify({
+          sendMethod,
+          scheduledAt: scheduled,
+          idempotencyKey:
+            globalThis.crypto?.randomUUID?.() ||
+            `estimate-send-${Date.now()}-${Math.random()}`,
+        }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok)

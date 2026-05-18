@@ -23,7 +23,7 @@ const GROUPS = [
     name: 'Service and scheduling notices',
     description: 'Estimates, appointment prep, reports, onboarding, and service relationship emails.',
     send_stream: 'service_operational',
-    user_can_unsubscribe: true,
+    user_can_unsubscribe: false,
     sort_order: 20,
   },
   {

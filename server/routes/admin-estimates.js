@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -73,6 +74,30 @@ function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
+function estimateEmailKeyPart(value) {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isNaN(date.getTime())) return date.toISOString();
+  return String(value);
+}
+
+function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
+  const normalizedEmail = String(estimate.customer_email || '').trim().toLowerCase();
+  const explicit = String(explicitAttemptKey || '').trim().replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 120);
+  const scheduledAt = estimateEmailKeyPart(estimate.scheduled_at);
+  const status = String(estimate.status || '').toLowerCase();
+  const scheduledGeneration = estimateEmailKeyPart(estimate.sent_at)
+    || estimateEmailKeyPart(estimate.created_at)
+    || 'initial';
+  const scope = explicit
+    ? `attempt:${explicit}`
+    : scheduledAt && ['scheduled', 'sending'].includes(status)
+    ? `scheduled:${scheduledGeneration}`
+    : 'manual:legacy';
+  const rawKey = `estimate.delivery:${estimate.id}:${normalizedEmail}:${scope}`;
+  return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
+}
+
 function assertEstimateSendable(estimate) {
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
@@ -115,7 +140,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey }) {
   if (sendgrid.isConfigured()) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
@@ -129,7 +154,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine }) {
         recipientType: estimate.customer_id ? 'customer' : 'lead',
         recipientId: estimate.customer_id || null,
         triggerEventId: `estimate_delivery:${estimate.id}`,
-        idempotencyKey: `estimate.delivery:${estimate.id}:${String(estimate.customer_email || '').trim().toLowerCase()}`,
+        idempotencyKey: estimateEmailIdempotencyKey(estimate, idempotencyKey),
         categories: ['estimate_delivery'],
       });
       if (result.blocked) {
@@ -218,6 +243,7 @@ router.post('/:id/send', async (req, res, next) => {
 
     const sendMethod = req.body?.sendMethod || 'both';
     const scheduledAt = req.body?.scheduledAt || null;
+    const idempotencyKey = req.body?.idempotencyKey || req.body?.idempotency_key || req.body?.sendAttemptId || null;
 
     if (!['sms', 'email', 'both'].includes(sendMethod)) {
       return res.status(400).json({ error: 'Invalid sendMethod' });
@@ -245,7 +271,7 @@ router.post('/:id/send', async (req, res, next) => {
     }
 
     // Send immediately
-    const result = await sendEstimateNow(estimate, sendMethod);
+    const result = await sendEstimateNow(estimate, sendMethod, { idempotencyKey });
     if (!result.sent) {
       return res.status(422).json({
         success: false,
@@ -341,6 +367,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
           firstName,
           viewUrl,
           priceLine,
+          idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
         });
         channels.email = result.ok
           ? { ok: true, provider: result.template || result.provider || 'email' }
@@ -1042,6 +1069,7 @@ router.post('/cleanup-demo', async (req, res, next) => {
 
 router._internals = {
   sendEstimateEmail,
+  estimateEmailIdempotencyKey,
 };
 
 module.exports = router;

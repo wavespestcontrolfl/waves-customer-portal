@@ -1543,7 +1543,13 @@ function EstimateToolView() {
       const r = await fetch(`/api/admin/estimates/${useId}/send`, {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ sendMethod, scheduledAt: scheduled }),
+        body: JSON.stringify({
+          sendMethod,
+          scheduledAt: scheduled,
+          idempotencyKey:
+            globalThis.crypto?.randomUUID?.() ||
+            `estimate-send-${Date.now()}-${Math.random()}`,
+        }),
       });
       if (!r.ok) throw new Error("Send failed: " + r.status);
       const d = await r.json();
@@ -5443,6 +5449,11 @@ function EstimatePipelineView() {
                       onClick={async () => {
                         await adminFetch(`/admin/estimates/${e.id}/send`, {
                           method: "POST",
+                          body: JSON.stringify({
+                            idempotencyKey:
+                              globalThis.crypto?.randomUUID?.() ||
+                              `estimate-send-${Date.now()}-${Math.random()}`,
+                          }),
                         }).catch(() => {});
                         refreshEstimates();
                       }}
@@ -5494,7 +5505,12 @@ function EstimatePipelineView() {
                           return;
                         await adminFetch(`/admin/estimates/${e.id}/send`, {
                           method: "POST",
-                          body: JSON.stringify({ sendMethod: "both" }),
+                          body: JSON.stringify({
+                            sendMethod: "both",
+                            idempotencyKey:
+                              globalThis.crypto?.randomUUID?.() ||
+                              `estimate-send-${Date.now()}-${Math.random()}`,
+                          }),
                         }).catch(() => {});
                         refreshEstimates();
                       }}
