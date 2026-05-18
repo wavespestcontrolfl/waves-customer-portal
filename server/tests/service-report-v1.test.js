@@ -13,10 +13,17 @@ const {
   hashPhotoChainPayload,
   validatePhotoChainRows,
 } = require('../services/service-report/photo-chain');
+const { formatTechnicianForCustomer } = require('../utils/technician-name');
+const { computeOnSiteMin } = require('../services/service-report/metrics-band');
 const {
-  renderFallbackPdf,
+  cfBrowserRenderingTimeoutMs,
+  renderReportPdfWithCloudflare,
   serviceReportViewerUrl,
 } = require('../services/service-report/pdf');
+const {
+  safePdfRenderError,
+  sanitizedPdfRenderMetadata,
+} = require('../services/service-report/pdf-events');
 const {
   buildServiceReportV1DeliveryContext,
   buildServiceReportV1Sms,
@@ -42,8 +49,14 @@ const {
   enqueueServiceReportV1EmailDelivery,
   nextServiceReportDeliveryAttemptAt,
 } = require('../services/service-report/delivery-queue');
+const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 
 describe('service report v1', () => {
+  function restoreEnv(name, value) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+
   test('pressure index uses weighted current findings and prior smoothing', () => {
     const currentOnly = pressureFromFindings([
       { severity: 'low' },
@@ -67,6 +80,10 @@ describe('service report v1', () => {
     expect(routine).toBe(0.6);
     expect(callback).toBeGreaterThan(routine);
     expect(callback).toBe(2.0);
+  });
+
+  test('pressure index floors clean first visits at 0.3', () => {
+    expect(pressureFromFindings([])).toBe(0.3);
   });
 
   test('dynamic pressure trend includes current override and customer ROI copy', () => {
@@ -526,6 +543,22 @@ describe('service report v1', () => {
     expect(detectServiceLine('Every 6 Weeks Tree & Shrub Care Service')).toBe('tree_shrub');
     expect(methodFromProduct({ product_category: 'bait' }, 'pest')).toBe('bait_placement');
     expect(methodFromProduct({ product_category: 'bait' }, 'rodent')).toBe('bait_placement');
+    expect(methodFromProduct({ product_category: 'insecticide' }, 'tree_shrub')).toBe('foliar_spray');
+    expect(methodFromProduct({ product_category: 'insecticide' }, 'palm')).toBe('foliar_spray');
+  });
+
+  test('customer technician formatter preserves generic fallbacks', () => {
+    expect(formatTechnicianForCustomer({ name: 'Adam Benetti' })).toBe('Adam B.');
+    expect(formatTechnicianForCustomer({ name: 'Your Waves technician' })).toBe('Your Waves technician');
+    expect(formatTechnicianForCustomer({ name: 'Your tech' })).toBe('Your tech');
+  });
+
+  test('clean-visit finding copy matches service line', () => {
+    expect(buildNoActivityFinding('pest').detail).toMatch(/pest activity/);
+    expect(buildNoActivityFinding('lawn').detail).toMatch(/Turf areas/);
+    expect(buildNoActivityFinding('lawn').detail).not.toMatch(/pest activity/);
+    expect(buildNoActivityFinding('tree_shrub').detail).toMatch(/tree and shrub/i);
+    expect(buildNoActivityFinding('palm').detail).toMatch(/palms/i);
   });
 
   test('elapsed time parser matches completion panel duration strings', () => {
@@ -533,6 +566,15 @@ describe('service report v1', () => {
     expect(minutesFromElapsed('10:35')).toBe(11);
     expect(minutesFromElapsed('1:02:30')).toBe(63);
     expect(minutesFromElapsed('25')).toBe(25);
+  });
+
+  test('on-site minutes ignore default zero elapsed and fall back to timestamps', () => {
+    expect(computeOnSiteMin({
+      timeOnSite: '0:00',
+      started_at: '2026-05-18T14:00:00.000Z',
+      ended_at: '2026-05-18T14:42:00.000Z',
+    })).toBe(42);
+    expect(computeOnSiteMin({ timeOnSite: '10:05' })).toBe(10);
   });
 
   test('fallback map zones only use actual location labels', () => {
@@ -941,32 +983,125 @@ describe('service report v1', () => {
     });
   });
 
-  test('v1 PDF fallback is a real PDF and viewer URL points to the report page', async () => {
+  test('v1 PDF renderer has no compact fallback and viewer URL points to the report page', () => {
     expect(serviceReportViewerUrl('token-1')).toBe('http://localhost:5173/report/token-1?mode=pdf');
+    expect(require('../services/service-report/pdf').renderFallbackPdf).toBeUndefined();
+  });
 
-    const pdf = await renderFallbackPdf({
-      serviceLineDisplay: 'WaveGuard pest control',
-      serviceType: 'Residential Pest Control',
-      serviceDate: '2026-05-15',
-      technicianName: 'Waves team',
-      cityState: 'Lakewood Ranch, FL',
-      metrics: [
-        { label: 'On-site', value: 12, unit: 'min' },
-        { label: 'Zones', value: '4/4' },
-        { label: 'Linear ft', value: 180 },
-        { label: 'Pressure index', value: 1.2 },
-      ],
-      advisory: {
-        exterior_reentry_min: 30,
-        interior_reentry_min: 120,
-        irrigation_hold_hr: 24,
-        pet_advisory: 'Keep pets off treated zones until dry.',
-      },
-      applications: [],
-      findings: [],
+  test('Cloudflare PDF renderer sends the Browser Run pdfOptions payload', async () => {
+    const originalFetch = global.fetch;
+    const originalAccountId = process.env.CF_ACCOUNT_ID;
+    const originalToken = process.env.CF_BROWSER_RENDERING_TOKEN;
+    const calls = [];
+
+    process.env.CF_ACCOUNT_ID = 'account-1';
+    process.env.CF_BROWSER_RENDERING_TOKEN = 'token-1';
+    global.fetch = jest.fn(async (endpoint, options) => {
+      const body = Buffer.from('%PDF-1.4\n');
+      calls.push({ endpoint, options, body: JSON.parse(options.body) });
+      return {
+        ok: true,
+        arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+      };
     });
 
-    expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
+    try {
+      const pdf = await renderReportPdfWithCloudflare('https://example.test/report/token-1?mode=pdf', {
+        serviceRecordId: 'service-1',
+      });
+
+      expect(Buffer.isBuffer(pdf)).toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].endpoint).toBe(
+        'https://api.cloudflare.com/client/v4/accounts/account-1/browser-rendering/pdf',
+      );
+      expect(calls[0].options.headers.Authorization).toBe('Bearer token-1');
+      expect(calls[0].options.signal).toBeDefined();
+      expect(calls[0].options.signal.aborted).toBe(false);
+      expect(calls[0].body).toMatchObject({
+        url: 'https://example.test/report/token-1?mode=pdf',
+        viewport: { width: 816, height: 1056 },
+        gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
+        waitForSelector: { selector: '.service-report-v1', visible: true, timeout: 10000 },
+        emulateMediaType: 'print',
+        pdfOptions: {
+          format: 'letter',
+          printBackground: true,
+          displayHeaderFooter: true,
+        },
+      });
+      expect(calls[0].body.pdf).toBeUndefined();
+    } finally {
+      global.fetch = originalFetch;
+      restoreEnv('CF_ACCOUNT_ID', originalAccountId);
+      restoreEnv('CF_BROWSER_RENDERING_TOKEN', originalToken);
+    }
+  });
+
+  test('Cloudflare PDF renderer timeout falls back to a bounded default', () => {
+    const originalTimeout = process.env.CF_BROWSER_RENDERING_TIMEOUT_MS;
+    try {
+      delete process.env.CF_BROWSER_RENDERING_TIMEOUT_MS;
+      expect(cfBrowserRenderingTimeoutMs()).toBe(45000);
+      process.env.CF_BROWSER_RENDERING_TIMEOUT_MS = '12000';
+      expect(cfBrowserRenderingTimeoutMs()).toBe(12000);
+      process.env.CF_BROWSER_RENDERING_TIMEOUT_MS = '0';
+      expect(cfBrowserRenderingTimeoutMs()).toBe(45000);
+    } finally {
+      restoreEnv('CF_BROWSER_RENDERING_TIMEOUT_MS', originalTimeout);
+    }
+  });
+
+  test('Cloudflare PDF renderer rejects non-PDF 2xx responses', async () => {
+    const originalFetch = global.fetch;
+    const originalAccountId = process.env.CF_ACCOUNT_ID;
+    const originalToken = process.env.CF_BROWSER_RENDERING_TOKEN;
+    const body = Buffer.from('<html>Not a PDF</html>');
+
+    process.env.CF_ACCOUNT_ID = 'account-1';
+    process.env.CF_BROWSER_RENDERING_TOKEN = 'token-1';
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+    }));
+
+    try {
+      await expect(renderReportPdfWithCloudflare('https://example.test/report/token-1?mode=pdf', {
+        serviceRecordId: 'service-1',
+      })).rejects.toMatchObject({ code: 'invalid_pdf_response' });
+    } finally {
+      global.fetch = originalFetch;
+      restoreEnv('CF_ACCOUNT_ID', originalAccountId);
+      restoreEnv('CF_BROWSER_RENDERING_TOKEN', originalToken);
+    }
+  });
+
+  test('PDF render telemetry redacts bearer report URLs', () => {
+    const metadata = sanitizedPdfRenderMetadata({
+      service_record_id: 'service-1',
+      provider: 'cloudflare_browser_rendering',
+      url: 'https://portal.wavespestcontrol.com/report/token-1?mode=pdf',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-2',
+      report_url: 'https://portal.wavespestcontrol.com/report/token-3',
+      viewerUrl: 'https://portal.wavespestcontrol.com/report/token-4',
+      err: 'Navigation failed at https://portal.wavespestcontrol.com/report/token-5?mode=pdf',
+      responseText: 'third-party body',
+    });
+
+    expect(metadata).toMatchObject({
+      service_record_id: 'service-1',
+      provider: 'cloudflare_browser_rendering',
+      url: '[redacted]',
+      reportUrl: '[redacted]',
+      report_url: '[redacted]',
+      viewerUrl: '[redacted]',
+      err: 'Navigation failed at https://portal.wavespestcontrol.com/report/[redacted]',
+      responseText: '[redacted]',
+    });
+    expect(safePdfRenderError({
+      status: 500,
+      message: 'Failed at https://portal.wavespestcontrol.com/report/token-6?mode=pdf',
+    })).toBe('status=500 Failed at https://portal.wavespestcontrol.com/report/[redacted]');
   });
 
   test('v1 SMS delivery copy includes public report link and advisory re-entry', () => {

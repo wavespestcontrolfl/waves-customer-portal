@@ -4,6 +4,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const { shortenOrPassthrough } = require("./short-url");
+const { formatTechnicianForCustomer } = require("../utils/technician-name");
 
 // Owner-SMS kill switch.
 //
@@ -441,6 +442,7 @@ const TwilioService = {
       : null;
 
     const trackClause = trackUrl ? `Track live: ${trackUrl}\n\n` : "";
+    const customerTechName = formatTechnicianForCustomer({ name: techName });
 
     const results = [];
     const {
@@ -452,7 +454,7 @@ const TwilioService = {
       if (typeof smsTemplatesRouter.getTemplate === "function") {
         body = await smsTemplatesRouter.getTemplate("tech_en_route", {
           first_name: firstName,
-          tech_name: techName,
+          tech_name: customerTechName,
           eta_line: etaLine,
           track_clause: trackClause,
           track_url: trackUrl || "",
@@ -506,13 +508,14 @@ const TwilioService = {
     const {
       sendCustomerMessage,
     } = require("./messaging/send-customer-message");
+    const customerTechName = formatTechnicianForCustomer({ name: techName });
     for (const contact of contacts) {
       const firstName = contact.name || customer.first_name || "";
       let body = null;
       if (typeof smsTemplatesRouter.getTemplate === "function") {
         body = await smsTemplatesRouter.getTemplate("tech_arrived", {
           first_name: firstName,
-          tech_name: techName || "Your Waves technician",
+          tech_name: customerTechName,
         });
       }
       if (!body) {

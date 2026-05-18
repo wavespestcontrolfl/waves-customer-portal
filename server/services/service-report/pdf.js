@@ -1,203 +1,160 @@
-const PDFDocument = require('pdfkit');
-const config = require('../../config');
+const { Buffer } = require('node:buffer');
+const logger = require('../logger');
+const {
+  launchBrowser,
+  renderReportPdfWithBrowser,
+  serviceReportViewerUrl,
+} = require('./pdf-puppeteer');
+const {
+  emitPdfRenderFailed,
+  emitPdfRenderSuccess,
+  safePdfRenderError,
+} = require('./pdf-events');
 
-let chromium = null;
-try {
-  ({ chromium } = require('playwright'));
-} catch {
-  chromium = null;
+const CF_ENDPOINT = (accountId) =>
+  `https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/pdf`;
+const DEFAULT_CF_BROWSER_RENDERING_TIMEOUT_MS = 45000;
+
+function cfBrowserRenderingTimeoutMs() {
+  const parsed = Number(process.env.CF_BROWSER_RENDERING_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_CF_BROWSER_RENDERING_TIMEOUT_MS;
 }
 
-function serviceReportPublicBase(req) {
-  const explicit = process.env.SERVICE_REPORT_PDF_BASE_URL || process.env.CLIENT_URL || config.clientUrl;
-  if (explicit) return explicit;
-  if (!req) return 'http://localhost:5173';
-  return `${req.protocol}://${req.get('host')}`;
+function selectedPdfRenderer() {
+  return String(process.env.PDF_RENDERER || 'puppeteer').trim().toLowerCase() === 'cloudflare'
+    ? 'cloudflare_browser_rendering'
+    : 'puppeteer';
 }
 
-function serviceReportViewerUrl(token, req, mode = 'pdf') {
-  const base = serviceReportPublicBase(req).replace(/\/+$/, '');
-  const modeParam = mode ? `?mode=${encodeURIComponent(mode)}` : '';
-  return `${base}/report/${encodeURIComponent(token)}${modeParam}`;
+function isPdfBuffer(buf) {
+  return Buffer.isBuffer(buf) && buf.byteLength >= 5 && buf.subarray(0, 5).toString('ascii') === '%PDF-';
 }
 
-async function renderReportPdfWithBrowser(url) {
-  if (!chromium) throw new Error('Playwright is not installed');
-  const browser = await launchBrowser();
-  let page = null;
+function assertPdfBuffer(buf, provider) {
+  if (isPdfBuffer(buf)) return buf;
+  const err = new Error(`${provider} returned a non-PDF response`);
+  err.code = 'invalid_pdf_response';
+  throw err;
+}
+
+async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
+  const accountId = process.env.CF_ACCOUNT_ID;
+  const token = process.env.CF_BROWSER_RENDERING_TOKEN;
+
+  if (!accountId || !token) {
+    throw new Error('Cloudflare Browser Rendering credentials missing');
+  }
+
+  const timeoutMs = cfBrowserRenderingTimeoutMs();
   try {
-    page = await browser.newPage({ viewport: { width: 1120, height: 1440 } });
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForSelector('.service-report-v1', { timeout: 10000 });
-    await page.emulateMedia({ media: 'print', colorScheme: 'light' });
-    return await page.pdf({
-      format: 'Letter',
-      printBackground: true,
-      margin: { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
-      displayHeaderFooter: true,
-      headerTemplate: '<div></div>',
-      footerTemplate: '<div style="font-size:8px; width:100%; text-align:center; color:#999;">Waves Pest Control &middot; Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
+    const res = await fetch(CF_ENDPOINT(accountId), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+      body: JSON.stringify({
+        url,
+        viewport: { width: 816, height: 1056 },
+        gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
+        waitForSelector: { selector: '.service-report-v1', visible: true, timeout: 10000 },
+        emulateMediaType: 'print',
+        pdfOptions: {
+          format: 'letter',
+          printBackground: true,
+          margin: {
+            top: '0.5in',
+            right: '0.5in',
+            bottom: '0.5in',
+            left: '0.5in',
+          },
+          displayHeaderFooter: true,
+          footerTemplate:
+            '<div style="font-size:8px;width:100%;text-align:center;color:#999;">Waves Pest Control &middot; Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
+          headerTemplate: '<div></div>',
+        },
+      }),
     });
-  } finally {
-    if (page) await page.close().catch(() => {});
-    await browser.close().catch(() => {});
-  }
-}
 
-async function launchBrowser() {
-  if (!chromium) throw new Error('Playwright is not installed');
-  const baseOptions = {
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  };
-  const requestedChannel = process.env.SERVICE_REPORT_PDF_BROWSER_CHANNEL;
-  if (requestedChannel) {
-    return chromium.launch({ ...baseOptions, channel: requestedChannel });
-  }
-
-  try {
-    return await chromium.launch(baseOptions);
-  } catch (err) {
-    const canTrySystemChrome = /Executable doesn't exist|playwright install/i.test(err.message || '');
-    if (!canTrySystemChrome) throw err;
-    try {
-      return await chromium.launch({ ...baseOptions, channel: 'chrome' });
-    } catch {
+    if (!res.ok) {
+      await res.text().catch(() => '');
+      const err = new Error(`Cloudflare Browser Rendering failed`);
+      err.status = res.status;
+      err.serviceRecordId = serviceRecordId || null;
       throw err;
     }
+
+    return assertPdfBuffer(
+      Buffer.from(await res.arrayBuffer()),
+      'Cloudflare Browser Rendering',
+    );
+  } catch (err) {
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      const timeoutErr = new Error(`Cloudflare Browser Rendering timed out after ${timeoutMs}ms`);
+      timeoutErr.code = 'pdf_render_timeout';
+      timeoutErr.serviceRecordId = serviceRecordId || null;
+      throw timeoutErr;
+    }
+    throw err;
   }
 }
 
-function writeKeyValue(doc, label, value, x, y, width = 150) {
-  doc.font('Helvetica').fontSize(8).fillColor('#666666').text(label, x, y, { width });
-  doc.font('Helvetica').fontSize(13).fillColor('#171717').text(value || '-', x, y + 12, { width });
+async function renderReportPdf(url, { serviceRecordId } = {}) {
+  const provider = selectedPdfRenderer();
+  if (provider === 'cloudflare_browser_rendering') {
+    return renderReportPdfWithCloudflare(url, { serviceRecordId });
+  }
+  return renderReportPdfWithBrowser(url);
 }
 
-function serviceDisplayName(data = {}) {
-  return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service report';
-}
+async function renderServiceReportV1Pdf(data, { token, req, logger: callLogger, serviceRecordId } = {}) {
+  const reportToken = token || data.token;
+  const recordId = serviceRecordId || data.serviceRecordId || data.id || null;
+  const url = serviceReportViewerUrl(reportToken, req);
+  const provider = selectedPdfRenderer();
+  const started = Date.now();
 
-function positiveNumber(value) {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-function advisoryRows(advisory = {}) {
-  return [
-    positiveNumber(advisory.exterior_reentry_min) != null
-      ? ['Exterior re-entry', `${Math.round(positiveNumber(advisory.exterior_reentry_min))} min`]
-      : null,
-    positiveNumber(advisory.interior_reentry_min) != null
-      ? ['Interior re-entry', `${Math.round(positiveNumber(advisory.interior_reentry_min))} min`]
-      : null,
-    positiveNumber(advisory.irrigation_hold_hr) != null
-      ? ['Irrigation hold', `${Math.round(positiveNumber(advisory.irrigation_hold_hr))} hr`]
-      : null,
-  ].filter(Boolean);
-}
-
-function renderFallbackPdf(data) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'LETTER', margin: 42 });
-    const chunks = [];
-    doc.on('data', (chunk) => chunks.push(chunk));
-    doc.on('error', reject);
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-
-    const left = 42;
-    const width = 528;
-    doc.font('Helvetica').fontSize(10).fillColor('#525252').text('Waves service report', left, 42);
-    doc.font('Helvetica').fontSize(28).fillColor('#171717').text(serviceDisplayName(data), left, 64, {
-      width,
-      lineGap: 2,
-    });
-    doc.fontSize(11).fillColor('#525252').text([
-      data.serviceDate,
-      data.technicianName,
-      data.cityState,
-    ].filter(Boolean).join(' | '), left, doc.y + 8);
-
-    const bandTop = doc.y + 22;
-    doc.rect(left, bandTop, width, 70).strokeColor('#d4d4d4').lineWidth(0.5).stroke();
-    const metricWidth = width / 4;
-    (data.metrics || []).slice(0, 4).forEach((metric, index) => {
-      const x = left + metricWidth * index + 12;
-      const raw = metric.value == null || metric.value === '' ? '-' : `${metric.value}${metric.unit ? ` ${metric.unit}` : ''}`;
-      writeKeyValue(doc, metric.label, raw, x, bandTop + 16, metricWidth - 24);
-      if (index > 0) doc.moveTo(left + metricWidth * index, bandTop).lineTo(left + metricWidth * index, bandTop + 70).stroke();
-    });
-
-    let y = bandTop + 96;
-    doc.font('Helvetica').fontSize(16).fillColor('#171717').text('Customer advisory', left, y);
-    y += 26;
-    const advisory = data.advisory || {};
-    advisoryRows(advisory).forEach(([label, value], index) => {
-      writeKeyValue(doc, label, value, left + (index * 180), y, 160);
-    });
-    y += 58;
-    if (advisory.pet_advisory) {
-      doc.font('Helvetica').fontSize(10).fillColor('#525252').text(advisory.pet_advisory, left, y, { width });
-      y = doc.y + 20;
-    }
-
-    doc.font('Helvetica').fontSize(16).fillColor('#171717').text('Application log', left, y);
-    y = doc.y + 12;
-    const applications = data.applications || [];
-    if (!applications.length) {
-      doc.fontSize(10).fillColor('#525252').text('No product applications were recorded for this visit.', left, y, { width });
-      y = doc.y + 20;
-    } else {
-      for (const app of applications.slice(0, 12)) {
-        if (y > 700) { doc.addPage(); y = 42; }
-        const detail = [
-          app.product?.epa_reg ? `EPA reg. ${app.product.epa_reg}` : null,
-          app.product?.active_ingredient,
-          app.rate && app.rateUnit ? `${app.rate} ${app.rateUnit}` : null,
-          app.totalAmount && app.amountUnit ? `${app.totalAmount} ${app.amountUnit}` : null,
-        ].filter(Boolean).join(' | ');
-        doc.font('Helvetica').fontSize(11).fillColor('#171717').text(app.product?.name || 'Product application', left, y, { width });
-        doc.font('Helvetica').fontSize(9).fillColor('#525252').text(detail || app.methodLabel || 'Application recorded', left, doc.y + 3, { width });
-        y = doc.y + 12;
-      }
-    }
-
-    doc.font('Helvetica').fontSize(16).fillColor('#171717').text('Findings and recommendations', left, y);
-    y = doc.y + 12;
-    const findings = data.findings || [];
-    if (!findings.length) {
-      doc.fontSize(10).fillColor('#525252').text('No issues were documented during this visit.', left, y, { width });
-      y = doc.y + 20;
-    } else {
-      for (const finding of findings.slice(0, 12)) {
-        if (y > 700) { doc.addPage(); y = 42; }
-        doc.font('Helvetica').fontSize(11).fillColor('#171717').text(finding.title || 'Finding', left, y, { width });
-        const body = [finding.detail, finding.recommendation].filter(Boolean).join(' ');
-        if (body) doc.font('Helvetica').fontSize(9).fillColor('#525252').text(body, left, doc.y + 3, { width });
-        y = doc.y + 12;
-      }
-    }
-
-    doc.moveTo(left, 742).lineTo(left + width, 742).strokeColor('#d4d4d4').lineWidth(0.5).stroke();
-    doc.font('Helvetica').fontSize(8).fillColor('#999999')
-      .text('Browser PDF rendering was unavailable, so this compact service report fallback was generated from the same v1 report data.', left, 752, { width, align: 'center' });
-    doc.end();
-  });
-}
-
-async function renderServiceReportV1Pdf(data, { token, req, logger } = {}) {
-  const url = serviceReportViewerUrl(token || data.token, req);
   try {
-    return await renderReportPdfWithBrowser(url);
+    const pdf = assertPdfBuffer(
+      await renderReportPdf(url, { serviceRecordId: recordId }),
+      provider,
+    );
+    const elapsedMs = Date.now() - started;
+    emitPdfRenderSuccess({
+      service_record_id: recordId,
+      provider,
+      elapsed_ms: elapsedMs,
+      bytes: pdf.byteLength,
+    });
+    return pdf;
   } catch (err) {
-    if (logger) logger.warn(`[service-report-v1-pdf] browser render failed: ${err.message}`);
-    return renderFallbackPdf(data);
+    const elapsedMs = Date.now() - started;
+    const errText = safePdfRenderError(err);
+    emitPdfRenderFailed({
+      service_record_id: recordId,
+      provider,
+      status: err.status || null,
+      elapsed_ms: elapsedMs,
+      err: String(errText).slice(0, 500),
+    });
+    const log = callLogger || logger;
+    log.error(`[service-report-v1-pdf] ${provider} render failed for ${recordId || 'unknown-record'}: ${errText}`);
+    throw err;
   }
 }
 
 module.exports = {
   launchBrowser,
-  renderFallbackPdf,
+  assertPdfBuffer,
+  cfBrowserRenderingTimeoutMs,
+  isPdfBuffer,
+  renderReportPdf,
   renderReportPdfWithBrowser,
+  renderReportPdfWithCloudflare,
   renderServiceReportV1Pdf,
+  selectedPdfRenderer,
   serviceReportViewerUrl,
 };

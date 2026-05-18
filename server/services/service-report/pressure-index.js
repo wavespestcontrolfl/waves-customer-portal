@@ -29,7 +29,8 @@ function pressureFromFindings(findings, priorPressureIndex = null, options = {})
   const blended = priorPressureIndex != null
     ? 0.75 * normalized + 0.25 * Number(priorPressureIndex)
     : normalized;
-  return Math.round(blended * 10) / 10;
+  const floored = Math.max(blended, 0.3);
+  return Math.round(floored * 10) / 10;
 }
 
 function isCallbackSignal(record = {}, scheduledService = null) {

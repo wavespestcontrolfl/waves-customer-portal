@@ -65,9 +65,16 @@ function formatDate(value) {
 }
 
 function formatMetric(metric) {
-  if (metric.value == null || metric.value === '') return '-';
+  if (metric.value == null || metric.value === '') return '—';
   if (metric.format === 'decimal_1') return Number(metric.value).toFixed(1);
   return `${metric.value}${metric.unit ? ` ${metric.unit}` : ''}`;
+}
+
+function metricHelpText(metric) {
+  if (metric?.key === 'on_site_min' && (metric.value == null || metric.value === '')) {
+    return 'On-site duration unavailable — service may have been completed offline.';
+  }
+  return undefined;
 }
 
 function valueOrDash(value, suffix = '') {
@@ -819,7 +826,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
 
 function TechnicianVisitLine({ data }) {
   const technician = data.technician || {};
-  const name = technician.name || data.technicianName || 'Waves team';
+  const name = technician.name || data.technicianName || 'Your Waves technician';
   const initials = technician.initials || name.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'W';
   const timing = visitTimeRange(data);
 
@@ -3514,7 +3521,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {showDetails && (
           <section className="sr-band" aria-label="Service metrics">
             {(data.metrics || []).map((metric) => (
-              <div className="sr-metric" key={metric.key}>
+              <div className="sr-metric" key={metric.key} title={metricHelpText(metric)}>
                 <div className="sr-metric-value">{formatMetric(metric)}</div>
                 <div className="sr-metric-label">{metric.label}</div>
               </div>
@@ -3594,7 +3601,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 </div>
                 <div className="sr-pill">{formatEnumLabel(finding.severity)}</div>
               </div>
-            )) : <div className="sr-row-detail">No issues were documented during this visit.</div>}
+            )) : <div className="sr-row-detail">No activity was observed this visit. Routine protective service will continue on schedule.</div>}
             {(data.recommendations || []).map((rec) => (
               <div className="sr-row" key={rec}>
                 <div className="sr-row-title">{rec}</div>
@@ -3653,7 +3660,8 @@ export default function ReportViewPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetch(`${API_BASE}/reports/${token}/data`, { cache: 'no-store' })
+    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`;
+    fetch(dataUrl, { cache: 'no-store' })
       .then((r) => r.json())
       .then((d) => {
         if (!cancelled) setData(d);
@@ -3667,7 +3675,7 @@ export default function ReportViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, mode]);
 
   useEffect(() => {
     if (!data || data.error) return;

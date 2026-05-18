@@ -4475,6 +4475,110 @@ const scoreButtonStyle = {
   cursor: "pointer",
 };
 
+function serviceLineFromType(serviceType = "") {
+  const text = String(serviceType || "").toLowerCase();
+  if (/\bpalmetto\b/.test(text)) return "pest";
+  if (/\bpalm(s)?\b/.test(text)) return "palm";
+  const category = detectServiceCategory(serviceType);
+  if (category === "lawn") return "lawn";
+  if (category === "tree_shrub") return "tree_shrub";
+  if (text.includes("mosquito")) return "mosquito";
+  if (/\b(termite|wdo|bora|trelona)\b/.test(text)) return "termite";
+  if (/\b(rodent|rat|rats|mouse|mice|mole)\b/.test(text)) return "rodent";
+  return "pest";
+}
+
+function normalizeApplicationMethod(value = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!normalized) return "";
+  if (
+    [
+      "perimeter_spray",
+      "broadcast_spray",
+      "spot_treatment",
+      "granular_broadcast",
+      "bait_placement",
+      "station_check",
+      "fog_ulv",
+      "foliar_spray",
+      "trunk_injection",
+      "pin_stream",
+    ].includes(normalized)
+  ) return normalized;
+  if (normalized.includes("trunk") || normalized.includes("inject")) return "trunk_injection";
+  if (normalized.includes("foliar")) return "foliar_spray";
+  if (normalized.includes("pin")) return "pin_stream";
+  if (normalized.includes("granular")) return "granular_broadcast";
+  if (normalized.includes("bait") || normalized.includes("gel") || normalized.includes("glue")) return "bait_placement";
+  if (normalized.includes("station")) return "station_check";
+  if (normalized.includes("fog") || normalized.includes("ulv")) return "fog_ulv";
+  if (normalized.includes("spot")) return "spot_treatment";
+  if (normalized.includes("broadcast")) return "broadcast_spray";
+  if (normalized.includes("perimeter") || normalized.includes("band")) return "perimeter_spray";
+  return normalized;
+}
+
+function defaultApplicationMethod(product = {}, serviceType = "") {
+  const category = String(product.category || product.product_category || "").toLowerCase();
+  const explicit = product.application_method || product.method;
+  if (explicit) return normalizeApplicationMethod(explicit);
+  if (category.includes("bait") || category.includes("gel") || category.includes("glue")) return "bait_placement";
+  if (category.includes("fert") || category.includes("granular")) return "granular_broadcast";
+  const serviceLine = serviceLineFromType(serviceType);
+  if (serviceLine === "mosquito") return "fog_ulv";
+  if (serviceLine === "lawn") return category.includes("herb") ? "spot_treatment" : "broadcast_spray";
+  if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
+  if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
+  return "perimeter_spray";
+}
+
+function requiresLinearFt(method) {
+  return normalizeApplicationMethod(method) === "perimeter_spray";
+}
+
+function requiresAreaSqft(method, serviceType = "") {
+  const serviceLine = serviceLineFromType(serviceType);
+  return (
+    serviceLine === "lawn" &&
+    ["broadcast_spray", "granular_broadcast"].includes(
+      normalizeApplicationMethod(method),
+    )
+  );
+}
+
+function requiredApplicationArea(method, serviceType = "") {
+  if (requiresLinearFt(method)) {
+    return { unit: "linear_ft", label: "Linear ft", alertLabel: "linear feet" };
+  }
+  if (requiresAreaSqft(method, serviceType)) {
+    return { unit: "sqft", label: "Sq ft", alertLabel: "square feet" };
+  }
+  return null;
+}
+
+function effectiveApplicationMethod(method) {
+  return normalizeApplicationMethod(method) || "perimeter_spray";
+}
+
+function productApplicationMethod(product = {}, serviceType = "") {
+  return normalizeApplicationMethod(product.applicationMethod) ||
+    defaultApplicationMethod(product, serviceType);
+}
+
+function normalizeProductArea(product = {}, serviceType = "") {
+  const applicationMethod = productApplicationMethod(product, serviceType);
+  const areaRequirement = requiredApplicationArea(applicationMethod, serviceType);
+  return {
+    ...product,
+    applicationMethod,
+    areaUnit: areaRequirement?.unit || product.areaUnit || "",
+  };
+}
+
 export function CompletionPanel({
   service,
   products,
@@ -4559,6 +4663,7 @@ export function CompletionPanel({
   const draftReadyRef = useRef(false);
 
   const isLawn = detectServiceCategory(service.serviceType) === "lawn";
+  const serviceTypeForArea = service?.serviceType || service?.service_type || "";
   const calibrationRequired = isLawn && !!service.waveguardTier;
   const currentAdminUser = (() => {
     try {
@@ -5122,7 +5227,9 @@ export function CompletionPanel({
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
-        ? savedDraft.selectedProducts
+        ? savedDraft.selectedProducts.map((product) =>
+            normalizeProductArea(product, serviceTypeForArea),
+          )
         : [],
     );
     setSoilTemp(savedDraft.soilTemp || "");
@@ -5341,6 +5448,11 @@ export function CompletionPanel({
   }
   function addProduct(product) {
     if (selectedProducts.find((p) => p.productId === product.id)) return;
+    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea);
+    const areaRequirement = requiredApplicationArea(
+      applicationMethod,
+      serviceTypeForArea,
+    );
     const defaultUnit =
       product.defaultUnit ||
       product.default_unit ||
@@ -5361,9 +5473,10 @@ export function CompletionPanel({
           null,
         totalAmount: "",
         amountUnit: defaultUnit,
+        applicationMethod,
         applicationArea: "",
         areaValue: "",
-        areaUnit: "sqft",
+        areaUnit: areaRequirement?.unit || "",
       },
     ]);
     setProductSearch("");
@@ -5375,9 +5488,32 @@ export function CompletionPanel({
   }
   function updateProduct(productId, field, value) {
     setSelectedProducts((prev) =>
-      prev.map((p) =>
-        p.productId === productId ? { ...p, [field]: value } : p,
-      ),
+      prev.map((p) => {
+        if (p.productId !== productId) return p;
+        const next = { ...p, [field]: value };
+        if (field === "applicationMethod") {
+          const areaRequirement = requiredApplicationArea(
+            value,
+            serviceTypeForArea,
+          );
+          if (areaRequirement) {
+            if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
+              next.areaValue = "";
+            }
+            next.areaUnit = areaRequirement.unit;
+          } else {
+            next.areaUnit = "";
+            next.areaValue = "";
+          }
+        } else if (field === "areaValue") {
+          const areaRequirement = requiredApplicationArea(
+            productApplicationMethod(next, serviceTypeForArea),
+            serviceTypeForArea,
+          );
+          if (areaRequirement) next.areaUnit = areaRequirement.unit;
+        }
+        return next;
+      }),
     );
   }
   function toggleArea(area) {
@@ -5474,6 +5610,23 @@ export function CompletionPanel({
         return;
       }
     }
+      const missingRequiredAreaProduct = selectedProducts.find((p) => {
+        const areaRequirement = requiredApplicationArea(
+          productApplicationMethod(p, serviceTypeForArea),
+          serviceTypeForArea,
+        );
+      if (!areaRequirement) return false;
+      const value = Number(p.areaValue);
+      return !Number.isFinite(value) || value <= 0 || p.areaUnit !== areaRequirement.unit;
+    });
+    if (!isIncompleteVisit && missingRequiredAreaProduct) {
+        const areaRequirement = requiredApplicationArea(
+          productApplicationMethod(missingRequiredAreaProduct, serviceTypeForArea),
+          serviceTypeForArea,
+        );
+      alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
+      return;
+    }
     setSubmitting(true);
     try {
       if (!completionIdempotencyKeyRef.current) {
@@ -5530,8 +5683,9 @@ export function CompletionPanel({
           productId: p.productId,
           rate: p.rate,
           rateUnit: p.rateUnit,
-          totalAmount: p.totalAmount,
-          amountUnit: p.amountUnit,
+            totalAmount: p.totalAmount,
+            amountUnit: p.amountUnit,
+            applicationMethod: productApplicationMethod(p, serviceTypeForArea),
           applicationArea:
             p.applicationArea ||
             (areasServiced.length === 1 ? areasServiced[0] : null),
@@ -6845,6 +6999,62 @@ export function CompletionPanel({
                           ))}
                         </select>
                       )}
+                      <select
+                        value={productApplicationMethod(sp, serviceTypeForArea)}
+                        onChange={(e) =>
+                          updateProduct(
+                            sp.productId,
+                            "applicationMethod",
+                            e.target.value,
+                          )
+                        }
+                        style={{
+                          ...mInput,
+                          minWidth: 150,
+                          flex: "1 1 150px",
+                          height: 40,
+                          padding: "0 12px",
+                        }}
+                      >
+                        <option value="perimeter_spray">Perimeter spray</option>
+                        <option value="broadcast_spray">Broadcast spray</option>
+                        <option value="spot_treatment">Spot treatment</option>
+                        <option value="granular_broadcast">Granular</option>
+                        <option value="bait_placement">Bait</option>
+                        <option value="station_check">Station check</option>
+                        <option value="fog_ulv">Fog/ULV</option>
+                        <option value="foliar_spray">Foliar spray</option>
+                        <option value="trunk_injection">Trunk injection</option>
+                        <option value="pin_stream">Pin stream</option>
+                      </select>
+                      {(() => {
+                        const areaRequirement = requiredApplicationArea(
+                          productApplicationMethod(sp, serviceTypeForArea),
+                          serviceTypeForArea,
+                        );
+                        if (!areaRequirement) return null;
+                        return (
+                          <input
+                            type="number"
+                            min="1"
+                            placeholder={areaRequirement.label}
+                            value={sp.areaValue || ""}
+                            onChange={(e) =>
+                              updateProduct(
+                                sp.productId,
+                                "areaValue",
+                                e.target.value,
+                              )
+                            }
+                            style={{
+                              ...mInput,
+                              width: areaRequirement.unit === "linear_ft" ? 112 : 98,
+                              height: 40,
+                              padding: "0 12px",
+                            }}
+                          />
+                        );
+                      })()}
                       <button
                         type="button"
                         onClick={() => removeProduct(sp.productId)}
@@ -8348,6 +8558,56 @@ export function CompletionPanel({
                       ))}
                     </select>
                   )}
+                  <select
+                    value={productApplicationMethod(sp, serviceTypeForArea)}
+                    onChange={(e) =>
+                      updateProduct(
+                        sp.productId,
+                        "applicationMethod",
+                        e.target.value,
+                      )
+                    }
+                    style={{
+                      ...inputStyle,
+                      minWidth: 150,
+                      flex: "1 1 150px",
+                      marginBottom: 0,
+                    }}
+                  >
+                    <option value="perimeter_spray">Perimeter spray</option>
+                    <option value="broadcast_spray">Broadcast spray</option>
+                    <option value="spot_treatment">Spot treatment</option>
+                    <option value="granular_broadcast">Granular</option>
+                    <option value="bait_placement">Bait</option>
+                    <option value="station_check">Station check</option>
+                    <option value="fog_ulv">Fog/ULV</option>
+                    <option value="foliar_spray">Foliar spray</option>
+                    <option value="trunk_injection">Trunk injection</option>
+                    <option value="pin_stream">Pin stream</option>
+                  </select>
+                  {(() => {
+                    const areaRequirement = requiredApplicationArea(
+                      productApplicationMethod(sp, serviceTypeForArea),
+                      serviceTypeForArea,
+                    );
+                    if (!areaRequirement) return null;
+                    return (
+                      <input
+                        type="number"
+                        min="1"
+                        placeholder={areaRequirement.label}
+                        value={sp.areaValue || ""}
+                        onChange={(e) =>
+                          updateProduct(
+                            sp.productId,
+                            "areaValue",
+                            e.target.value,
+                          )
+                        }
+                        style={{ ...inputStyle, width: 98, marginBottom: 0 }}
+                      />
+                    );
+                  })()}
                   <button
                     onClick={() => removeProduct(sp.productId)}
                     style={{

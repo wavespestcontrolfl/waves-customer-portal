@@ -11,6 +11,12 @@ const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const {
+  getHealthyStoredReportPdf,
+  putReportPdf,
+} = require('../services/service-report/pdf-storage');
+const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
+const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
   answerServiceReportQuestion,
@@ -397,11 +403,48 @@ router.get('/:token', async (req, res, next) => {
 
     // Track first view
     await trackServiceReportView(service);
-    await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
 
     if (service.report_template_version === 'service_report_v1') {
+      const storedPdf = await getHealthyStoredReportPdf(service.pdf_storage_key);
+      if (storedPdf) {
+        await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+        res.setHeader('Cache-Control', 'no-store');
+        return res.send(storedPdf);
+      }
+
       const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf' });
-      const pdf = await renderServiceReportV1Pdf(data, { token: req.params.token, req, logger });
+      let pdf;
+      try {
+        pdf = await renderServiceReportV1Pdf(data, {
+          token: req.params.token,
+          req,
+          logger,
+          serviceRecordId: service.id,
+        });
+      } catch (renderErr) {
+        const errorMessage = safePdfRenderError(renderErr);
+        logger.warn(`[reports-public] PDF render not ready for ${service.id}: ${errorMessage}`);
+        await enqueuePdfRenderRetry({
+          serviceRecordId: service.id,
+          payload: { source: 'public_pdf_route' },
+        }).catch((queueErr) => {
+          logger.warn(`[reports-public] PDF retry queue failed for ${service.id}: ${queueErr.message}`);
+        });
+        res.setHeader('Retry-After', '300');
+        return res.status(503).json({
+          error: 'PDF is being generated. Please try again shortly.',
+          code: 'pdf_not_ready',
+        });
+      }
+      try {
+        const key = await putReportPdf(service.id, pdf);
+        await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
+      } catch (storageErr) {
+        logger.warn(`[reports-public] PDF storage skipped for ${service.id}: ${storageErr.message}`);
+      }
+      await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
       res.setHeader('Cache-Control', 'no-store');
@@ -412,6 +455,7 @@ router.get('/:token', async (req, res, next) => {
     if (service.report_pdf_path) {
       const fullPath = path.join(__dirname, '..', '..', service.report_pdf_path);
       if (fs.existsSync(fullPath)) {
+        await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
         return fs.createReadStream(fullPath).pipe(res);
@@ -424,6 +468,7 @@ router.get('/:token', async (req, res, next) => {
     const dryTimes = service.dry_time_data ? (typeof service.dry_time_data === 'string' ? JSON.parse(service.dry_time_data) : service.dry_time_data) : null;
     const irrigation = service.irrigation_recommendation ? (typeof service.irrigation_recommendation === 'string' ? JSON.parse(service.irrigation_recommendation) : service.irrigation_recommendation) : null;
 
+    await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
     generateReportPDF(service, products, weather, dryTimes, irrigation, res);
   } catch (err) { next(err); }
 });
@@ -467,6 +512,9 @@ router.get('/:token/data', async (req, res, next) => {
   }
   res.setHeader('Cache-Control', 'no-store');
   try {
+    const mode = ['pdf', 'static', 'sms_preview'].includes(req.query.mode)
+      ? req.query.mode
+      : 'live';
     // This is the customer-facing document view. The token gates the report,
     // and the document should mirror other customer documents by showing the
     // service address.
@@ -487,12 +535,14 @@ router.get('/:token/data', async (req, res, next) => {
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
 
-    await trackServiceReportView(service);
+    if (mode === 'live') {
+      await trackServiceReportView(service);
+    }
 
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'live' }));
+      return res.json(await buildServiceReportV1ResponseData(service, req.params.token, { mode }));
     }
 
     res.json({

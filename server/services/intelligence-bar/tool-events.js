@@ -6,9 +6,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 
-function recordToolEvent({ source, context, toolName, success, durationMs, circuitOpen, errorMessage }) {
-  // Never await at the call site — this must not slow down tool loops.
-  db('tool_health_events').insert({
+function recordToolEvent({ source, context, toolName, success, durationMs, circuitOpen, errorMessage, metadata }) {
+  const row = {
     source: source || 'unknown',
     context: context || null,
     tool_name: toolName,
@@ -17,7 +16,21 @@ function recordToolEvent({ source, context, toolName, success, durationMs, circu
     circuit_open: !!circuitOpen,
     error_message: errorMessage ? String(errorMessage).slice(0, 1000) : null,
     created_at: new Date(),
-  }).catch(err => {
+  };
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    row.metadata = JSON.stringify(metadata);
+  }
+
+  // Never await at the call site — this must not slow down tool loops.
+  db('tool_health_events').insert(row).catch(err => {
+    if (row.metadata && err?.code === '42703') {
+      const fallback = { ...row };
+      delete fallback.metadata;
+      db('tool_health_events').insert(fallback).catch(retryErr => {
+        logger.warn(`[tool-events] record failed: ${retryErr.message}`);
+      });
+      return;
+    }
     logger.warn(`[tool-events] record failed: ${err.message}`);
   });
 }

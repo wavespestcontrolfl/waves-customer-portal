@@ -3,9 +3,13 @@ const logger = require('../logger');
 const sendgrid = require('../sendgrid-mail');
 const { wrapEmail, formatDate, plainText } = require('../email-template');
 const { buildReportV1Data } = require('./report-data');
-const { renderServiceReportV1Pdf } = require('./pdf');
+const {
+  enqueuePdfRenderRetry,
+  getOrRenderServiceReportPdf,
+} = require('./pdf-queue');
 const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
+const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
 
 function escapeHtml(value) {
@@ -111,7 +115,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
     ctaLabel: 'View full report',
     footerNote: pdfAttached
       ? 'Your PDF service report is attached. Reply to this email or call (941) 297-5749 with any questions.'
-      : 'You can download the PDF from the report page. Reply to this email or call (941) 297-5749 with any questions.',
+      : 'Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call (941) 297-5749 with any questions.',
   });
   const text = plainText([
     `Hi ${first},`,
@@ -129,7 +133,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
     '',
     topFindings.length ? `Top findings: ${topFindings.map((finding) => finding.title || 'Finding documented').join('; ')}` : 'No action-required findings were documented during this visit.',
     '',
-    pdfAttached ? 'The PDF service report is attached.' : 'You can download the PDF from the report page.',
+    pdfAttached ? 'The PDF service report is attached.' : 'A downloadable PDF will be available shortly.',
     '',
     'Questions? Reply to this email or call (941) 297-5749.',
     'Waves Pest Control',
@@ -181,9 +185,28 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
 
   let pdf = null;
   try {
-    pdf = await renderServiceReportV1Pdf(data, { token: reportToken, logger });
+    const result = await getOrRenderServiceReportPdf(recordId, { token: reportToken });
+    pdf = result.pdf;
+    if (result.storageFailed) {
+      await enqueuePdfRenderRetry({
+        serviceRecordId: recordId,
+        payload: {
+          source: 'service_report_v1_email_storage_failed',
+        },
+      }).catch((queueErr) => {
+        logger.warn(`[service-report-v1-email] PDF storage retry queue failed for ${recordId}: ${queueErr.message}`);
+      });
+    }
   } catch (err) {
-    logger.warn(`[service-report-v1-email] PDF attachment skipped for ${recordId}: ${err.message}`);
+    logger.warn(`[service-report-v1-email] PDF attachment skipped for ${recordId}: ${safePdfRenderError(err)}`);
+    await enqueuePdfRenderRetry({
+      serviceRecordId: recordId,
+      payload: {
+        source: 'service_report_v1_email',
+      },
+    }).catch((queueErr) => {
+      logger.warn(`[service-report-v1-email] PDF retry queue failed for ${recordId}: ${queueErr.message}`);
+    });
   }
 
   const email = buildServiceReportV1Email({

@@ -802,6 +802,8 @@ router.post('/', async (req, res, next) => {
       category,
       subcategory,
       activeIngredient,
+      epaRegNumber,
+      formulation,
       moaGroup,
       defaultUnit,
       unitSize,
@@ -819,10 +821,12 @@ router.post('/', async (req, res, next) => {
     const product = await db.transaction(async (trx) => {
       const [inserted] = await trx('products_catalog').insert({
         name, category: category || null, subcategory: subcategory || null,
-        active_ingredient: activeIngredient || null, moa_group: moaGroup || null,
+        active_ingredient: activeIngredient || 'Unknown - pending SDS',
+        epa_reg_number: epaRegNumber || 'N/A',
+        moa_group: moaGroup || null,
         default_unit: defaultUnit || 'oz',
         container_size: unitSize || null,
-        formulation: req.body.formulation || null,
+        formulation: formulation || 'unspecified',
         inventory_on_hand: initialStock,
         inventory_unit: inventoryUnit || null,
         low_stock_threshold: lowStock,

@@ -25,7 +25,8 @@ router.get('/', async (req, res, next) => {
     const hours = Math.min(parseInt(req.query.hours || '24', 10) || 24, 24 * 30);
     const since = new Date(Date.now() - hours * 3600 * 1000);
 
-    const [summary, bySource, byContext, byTool, recentErrors] = await Promise.all([
+    const pdfSince = new Date(Date.now() - 3600 * 1000);
+    const [summary, bySource, byContext, byTool, recentErrors, pdfRenderer] = await Promise.all([
       db('tool_health_events')
         .where('created_at', '>=', since)
         .select(
@@ -69,6 +70,17 @@ router.get('/', async (req, res, next) => {
         .orderBy('created_at', 'desc')
         .limit(30)
         .select('id', 'source', 'context', 'tool_name', 'circuit_open', 'error_message', 'created_at'),
+
+      db('tool_health_events')
+        .where('created_at', '>=', pdfSince)
+        .whereIn('tool_name', ['pdf_render_success', 'pdf_render_failed', 'pdf_render_terminal_failure'])
+        .select(
+          db.raw("SUM(CASE WHEN tool_name = 'pdf_render_success' THEN 1 ELSE 0 END)::int as succeeded"),
+          db.raw("SUM(CASE WHEN tool_name = 'pdf_render_terminal_failure' THEN 1 ELSE 0 END)::int as terminal_failed"),
+          db.raw("SUM(CASE WHEN tool_name = 'pdf_render_failed' THEN 1 ELSE 0 END)::int as failed_attempts"),
+          db.raw("percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms) FILTER (WHERE tool_name = 'pdf_render_success' AND duration_ms IS NOT NULL)::int as p95_latency_ms"),
+        )
+        .first(),
     ]);
 
     // Normalize agent cards
@@ -153,6 +165,17 @@ router.get('/', async (req, res, next) => {
         }
       }
     }
+    const pdfSucceeded = parseInt(pdfRenderer?.succeeded || 0);
+    const pdfTerminalFailed = parseInt(pdfRenderer?.terminal_failed || 0);
+    const pdfDenominator = pdfSucceeded + pdfTerminalFailed;
+    const pdfSuccessRate = pdfDenominator > 0 ? pdfSucceeded / pdfDenominator : null;
+    if (pdfDenominator >= 5 && pdfSuccessRate < 0.95) {
+      alerts.push({
+        severity: 'critical',
+        title: 'PDF render success rate below threshold',
+        detail: `${pdfSucceeded}/${pdfDenominator} terminal PDF renders succeeded (${Math.round(pdfSuccessRate * 100)}%) in the last hour.`,
+      });
+    }
 
     res.json({
       windowHours: hours,
@@ -168,6 +191,15 @@ router.get('/', async (req, res, next) => {
       },
       agents,
       contexts,
+      pdfRenderer: {
+        windowHours: 1,
+        succeeded: pdfSucceeded,
+        failedAttempts: parseInt(pdfRenderer?.failed_attempts || 0),
+        terminalFailed: pdfTerminalFailed,
+        successRate: pdfSuccessRate,
+        p95LatencyMs: pdfRenderer?.p95_latency_ms ? parseInt(pdfRenderer.p95_latency_ms) : null,
+        status: pdfDenominator === 0 ? 'idle' : (pdfSuccessRate < 0.95 ? 'critical' : 'ok'),
+      },
       recentErrors: recentErrors.map(e => ({
         id: e.id,
         source: e.source,
