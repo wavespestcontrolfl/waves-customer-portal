@@ -6927,48 +6927,6 @@ export function CompletionPanel({
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
                       </select>{" "}
-                      <input
-                        type="number"
-                        placeholder="Total"
-                        value={sp.totalAmount || ""}
-                        onChange={(e) =>
-                          updateProduct(
-                            sp.productId,
-                            "totalAmount",
-                            e.target.value,
-                          )
-                        }
-                        style={{
-                          ...mInput,
-                          width: 84,
-                          height: 40,
-                          padding: "0 12px",
-                        }}
-                      />{" "}
-                      <select
-                        value={sp.amountUnit || sp.rateUnit}
-                        onChange={(e) =>
-                          updateProduct(
-                            sp.productId,
-                            "amountUnit",
-                            e.target.value,
-                          )
-                        }
-                        style={{
-                          ...mInput,
-                          width: 78,
-                          height: 40,
-                          padding: "0 12px",
-                        }}
-                      >
-                        {" "}
-                        <option value="oz">oz</option>{" "}
-                        <option value="fl_oz">fl oz</option>{" "}
-                        <option value="ml">ml</option>{" "}
-                        <option value="g">g</option>{" "}
-                        <option value="lb">lb</option>{" "}
-                        <option value="gal">gal</option>{" "}
-                      </select>{" "}
                       {areasServiced.length > 0 && (
                         <select
                           value={sp.applicationArea || ""}
@@ -8496,29 +8454,6 @@ export function CompletionPanel({
                     value={sp.rateUnit}
                     onChange={(e) =>
                       updateProduct(sp.productId, "rateUnit", e.target.value)
-                    }
-                    style={{ ...inputStyle, width: 70, marginBottom: 0 }}
-                  >
-                    {" "}
-                    <option value="oz">oz</option>{" "}
-                    <option value="fl_oz">fl oz</option>{" "}
-                    <option value="ml">ml</option> <option value="g">g</option>{" "}
-                    <option value="lb">lb</option>{" "}
-                    <option value="gal">gal</option>{" "}
-                  </select>{" "}
-                  <input
-                    type="number"
-                    placeholder="Total"
-                    value={sp.totalAmount || ""}
-                    onChange={(e) =>
-                      updateProduct(sp.productId, "totalAmount", e.target.value)
-                    }
-                    style={{ ...inputStyle, width: 70, marginBottom: 0 }}
-                  />{" "}
-                  <select
-                    value={sp.amountUnit || sp.rateUnit}
-                    onChange={(e) =>
-                      updateProduct(sp.productId, "amountUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
