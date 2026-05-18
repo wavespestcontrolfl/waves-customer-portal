@@ -10,6 +10,7 @@ const {
 const {
   renderAndStoreServiceReportPdf,
 } = require('../services/service-report/pdf-queue');
+const { safePdfRenderError } = require('../services/service-report/pdf-events');
 
 const THROTTLE_MS = Number(process.env.PDF_BACKFILL_THROTTLE_MS || 1000);
 
@@ -62,7 +63,7 @@ async function main() {
       console.log(`ok ${record.id} (${rerendered}/${processed})`);
     } catch (err) {
       failed += 1;
-      console.error(`fail ${record.id}: ${err.message}`);
+      console.error(`fail ${record.id}: ${safePdfRenderError(err)}`);
     }
 
     await sleep(THROTTLE_MS);
