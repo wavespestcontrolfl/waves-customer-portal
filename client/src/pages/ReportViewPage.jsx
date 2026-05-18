@@ -5194,6 +5194,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       <main className="sr-shell">
         <ServiceStatusCard data={data} mode={mode} />
 
+        <HeroConditions conditions={data.conditions} weatherCall={premium.weatherCall} />
+
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 
         <section className="sr-section visit-summary-section" id="visit-summary">
