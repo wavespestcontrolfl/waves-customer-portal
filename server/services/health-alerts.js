@@ -232,6 +232,13 @@ async function executeAction(alertId, actionIndex) {
   if (actionIndex < 0 || actionIndex >= actions.length) throw new Error('Invalid action index');
 
   const action = actions[actionIndex];
+  if (action.type === 'sequence') {
+    return {
+      success: false,
+      code: 'retired_action_type',
+      message: 'Save sequence actions are no longer available.',
+    };
+  }
   const customer = await db('customers').where('id', alert.customer_id).first();
   if (!customer) throw new Error('Customer not found');
 
