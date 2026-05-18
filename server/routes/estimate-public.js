@@ -1095,6 +1095,7 @@ function renderPage(token, estimate, estData) {
     : (selectedRecurringFrequencyKey === 'bi_monthly' ? 'bi-monthly' : 'monthly');
   const setupFeeAmount = showMembershipFee ? membershipFee : setupDueToday;
   const setupFeeText = fmtMoney(setupFeeAmount);
+  const setupFeeLineText = setupFeeAmount > 0 ? `${setupFeeText} setup` : 'No setup fee';
   const wholeNumber = (n) => Number.isFinite(Number(n)) ? Number(n).toLocaleString('en-US', { maximumFractionDigits: 1 }) : '';
   const lawnBillingRow = billingServiceRows.find((row) => row.kind === 'lawn');
   const pestBillingRow = billingServiceRows.find((row) => row.kind === 'pest');
@@ -1105,14 +1106,22 @@ function renderPage(token, estimate, estData) {
   const totalScheduledServicesText = totalScheduledServices > 0
     ? `${wholeNumber(totalScheduledServices)} scheduled services`
     : 'scheduled services';
-  const paymentVisitRows = [
-    lawnBillingRow ? { label: 'Lawn Care', row: lawnBillingRow } : null,
-    pestBillingRow ? { label: 'Pest Control', row: pestBillingRow } : null,
-  ].filter((item) => item?.row?.price != null);
-  const fallbackPaymentVisitRows = paymentVisitRows.length ? paymentVisitRows : billingServiceRows
+  const paymentVisitRows = billingServiceRows
     .filter((row) => row.price != null)
-    .map((row) => ({ label: row.name, row }));
-  const visitPricingHtml = fallbackPaymentVisitRows.map(({ label, row }) => `
+    .slice()
+    .sort((a, b) => {
+      const rank = (row) => {
+        if (row.kind === 'lawn') return 0;
+        if (row.kind === 'pest') return 1;
+        return 2;
+      };
+      return rank(a) - rank(b);
+    })
+    .map((row) => ({
+      label: row.kind === 'lawn' ? 'Lawn Care' : (row.kind === 'pest' ? 'Pest Control' : row.name),
+      row,
+    }));
+  const visitPricingHtml = paymentVisitRows.map(({ label, row }) => `
           <div class="visit-price-row">
             <span>${escapeHtml(label)}:</span>
             <strong><span data-payment-visit-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)}</span> / visit</strong>
@@ -1128,6 +1137,10 @@ function renderPage(token, estimate, estData) {
     'Text-your-tech access',
   ];
   const paymentBenefitsHtml = paymentBenefits.map((p) => `<li>${escapeHtml(p)}</li>`).join('');
+  const paymentBenefitsHeading = showAnnualPrepayOption ? 'Included with both options' : 'Included with your plan';
+  const billingFaqCopy = showAnnualPrepayOption
+    ? `With Pay After Each Visit, you are billed only after completed service visits. This plan may be shown as a ${escapeHtml(recurringBillCadenceWord)} equivalent, but you are not charged a flat ${escapeHtml(recurringBillCadenceWord)} bill. With Pay for the Year, you make one annual payment and the ${escapeHtml(setupFeeText)} setup fee is waived.`
+    : `With Pay After Each Visit, you are billed only after completed service visits. This plan may be shown as a ${escapeHtml(recurringBillCadenceWord)} equivalent, but you are not charged a flat ${escapeHtml(recurringBillCadenceWord)} bill.`;
   const billingCardHtml = (!quoteRequired && !locked && billingRecurring.length) ? `
   <section class="card billing-card" id="payment-options-card"${billingModeAttr}>
     <h2>Choose Your WaveGuard Payment Option</h2>
@@ -1139,7 +1152,7 @@ function renderPage(token, estimate, estData) {
           <span class="payment-choice-label">Most Flexible</span>
         </div>
         <div class="payment-main">
-          <strong>${escapeHtml(setupFeeText)} setup</strong>
+          <strong>${escapeHtml(setupFeeLineText)}</strong>
           <span>then pay after each completed service visit</span>
         </div>
         ${visitPricingHtml ? `<div class="visit-pricing">${visitPricingHtml}</div>` : ''}
@@ -1165,12 +1178,12 @@ function renderPage(token, estimate, estData) {
       </button>` : ''}
     </div>
     <div class="billing-benefits">
-      <h3>Included with both options</h3>
+      <h3>${escapeHtml(paymentBenefitsHeading)}</h3>
       <ul class="perks-list payment-benefits-list">${paymentBenefitsHtml}</ul>
     </div>
     <details class="billing-faq">
       <summary>How does billing work?</summary>
-      <p>With Pay After Each Visit, you are billed only after completed service visits. This plan may be shown as a ${escapeHtml(recurringBillCadenceWord)} equivalent, but you are not charged a flat ${escapeHtml(recurringBillCadenceWord)} bill. With Pay for the Year, you make one annual payment and the ${escapeHtml(setupFeeText)} setup fee is waived.</p>
+      <p>${billingFaqCopy}</p>
       ${billingServiceRowsHtml ? `<div class="billing-service-list">${billingServiceRowsHtml}</div>` : ''}
       ${tierDiscountPct > 0 ? `<p class="billing-small">WaveGuard ${escapeHtml(tier)} prices shown after the ${tierDiscountPct}% bundle discount.</p>` : ''}
     </details>

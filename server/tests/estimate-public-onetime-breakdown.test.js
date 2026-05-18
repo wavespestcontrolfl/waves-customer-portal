@@ -1157,6 +1157,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('<span data-payment-visit-price data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4">$104.40</span> / visit');
     expect(html).toContain('Pest Control:</span>');
     expect(html).toContain('<span data-payment-visit-price data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2">$115.20</span> / visit');
+    expect(html.indexOf('Lawn Care:</span>')).toBeLessThan(html.indexOf('Pest Control:</span>'));
     expect(html).toContain('Pay for the Year');
     expect(html).toContain('Best Value &mdash; Save $99');
     expect(html).toContain('$1,400.40');
@@ -1215,6 +1216,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$135</span>');
     expect(html).toContain('$330</span>');
     expect(html).toContain('$147</span>');
+    expect(html).toContain('Pest Control:</span>');
+    expect(html).toContain('$135</span> / visit');
+    expect(html).toContain('Palm Injection:</span>');
+    expect(html).toContain('$330</span> / visit');
+    expect(html).toContain('Rodent Bait Stations:</span>');
+    expect(html).toContain('$147</span> / visit');
     expect(html).toContain('<span class="tier-lbl">Recurring service</span>');
     expect(html).toContain('Add Lawn Care and save more');
     expect(html).toContain('Silver tier pricing (10% off qualifying services)');
@@ -1223,6 +1230,42 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="palm_injection"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="rodent_bait"');
+  });
+
+  test('server-rendered estimate hides annual prepay language when setup waiver is unavailable', () => {
+    const html = renderPage('lawn-only-token', {
+      status: 'sent',
+      customerName: 'Lena Customer',
+      address: '25 Lawn Way',
+      monthlyTotal: 87,
+      annualTotal: 1044,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { name: 'Lawn Care', mo: 87, perTreatment: 116, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {},
+      },
+    });
+
+    expect(html).toContain('Choose Your WaveGuard Payment Option');
+    expect(html).toContain('Pay After Each Visit');
+    expect(html).toContain('No setup fee');
+    expect(html).toContain('Lawn Care:</span>');
+    expect(html).toContain('$116</span> / visit');
+    expect(html).toContain('Included with your plan');
+    expect(html).toContain('<summary>How does billing work?</summary>');
+    expect(html).not.toContain('<button type="button" class="payment-choice payment-option-card" data-pay-pref="prepay_annual"');
+    expect(html).not.toContain('Pay for the Year');
+    expect(html).not.toContain('Best Value');
+    expect(html).not.toContain('Included with both options');
+    expect(html).not.toContain('setup fee is waived');
   });
 
   test('v1 pricing bundle includes separate palm and rodent bait rows without tier discount', async () => {
