@@ -48,8 +48,17 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      let detail = "";
+      try {
+        const body = await r.json();
+        if (body?.error) detail = String(body.error);
+      } catch {
+        /* response body was not JSON — fall through to HTTP status */
+      }
+      throw new Error(detail || `HTTP ${r.status}`);
+    }
     return r.json();
   });
 }
@@ -1213,6 +1222,7 @@ function ExportsTab() {
 // ═══════════════════════════════════════════════════════════════
 function PayoutModal({
   available,
+  instantAvailable,
   initialMethod = "standard",
   onClose,
   onSuccess,
@@ -1228,6 +1238,12 @@ function PayoutModal({
   const isInstant = method === "instant";
   const fee = isInstant ? parsedAmount * INSTANT_PAYOUT_FEE_RATE : 0;
   const net = parsedAmount - fee;
+  // Stripe enforces a separate `instant_available` bucket for instant payouts —
+  // typically smaller than `available`. Clamp the local guard to whichever
+  // bucket applies so we surface the limit before hitting Stripe's 400.
+  const methodLimit = isInstant
+    ? (instantAvailable != null ? instantAvailable : (available || 0))
+    : (available || 0);
 
   const selectMethod = (nextMethod) => {
     setMethod(nextMethod);
@@ -1236,8 +1252,12 @@ function PayoutModal({
 
   const handleSubmit = async () => {
     if (!amount || parsedAmount <= 0) return;
-    if (parsedAmount > (available || 0)) {
-      alert("Payout amount exceeds available balance.");
+    if (parsedAmount > methodLimit) {
+      alert(
+        isInstant
+          ? `Payout amount exceeds instant-available balance ($${methodLimit.toFixed(2)}). Instant payouts draw from a smaller Stripe balance than standard payouts.`
+          : "Payout amount exceeds available balance.",
+      );
       return;
     }
     setSubmitting(true);
@@ -1376,7 +1396,7 @@ function PayoutModal({
             type="number"
             step="0.01"
             min="0"
-            max={available || 0}
+            max={methodLimit}
             value={amount}
             onChange={(e) => {
               setAmount(e.target.value);
@@ -1392,9 +1412,9 @@ function PayoutModal({
             }}
           />{" "}
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
-            Available:{" "}
+            {isInstant ? "Instant available" : "Available"}:{" "}
             <span style={{ fontFamily: MONO, color: D.green }}>
-              {fmtM(available)}
+              {fmtM(methodLimit)}
             </span>
           </div>{" "}
         </div>{" "}
@@ -1540,6 +1560,7 @@ export default function BankingPage() {
 
   const available = balance?.total_available ?? 0;
   const pending = balance?.total_pending ?? 0;
+  const instantAvailable = balance?.total_instant_available ?? null;
 
   const handlePayoutSuccess = () => {
     setPayoutModalMethod(null);
@@ -1759,6 +1780,7 @@ export default function BankingPage() {
       {payoutModalMethod && (
         <PayoutModal
           available={available}
+          instantAvailable={instantAvailable}
           initialMethod={payoutModalMethod}
           onClose={() => setPayoutModalMethod(null)}
           onSuccess={handlePayoutSuccess}

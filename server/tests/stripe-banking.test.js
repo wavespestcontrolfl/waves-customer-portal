@@ -132,7 +132,10 @@ describe('stripe banking service', () => {
         }),
       };
     });
-    stripeClient.balance.retrieve.mockResolvedValue({ available: [{ currency: 'usd', amount: 10000 }] });
+    stripeClient.balance.retrieve.mockResolvedValue({
+      available: [{ currency: 'usd', amount: 10000 }],
+      instant_available: [{ currency: 'usd', amount: 10000 }],
+    });
     stripeClient.payouts.create.mockResolvedValue({
       id: 'po_new',
       amount: 5000,
@@ -302,10 +305,32 @@ describe('stripe banking service', () => {
     expect(stripeClient.payouts.create).not.toHaveBeenCalled();
   });
 
-  test('createInstantPayout rejects amounts over available Stripe balance', async () => {
-    stripeClient.balance.retrieve.mockResolvedValue({ available: [{ currency: 'usd', amount: 2500 }] });
+  test('createInstantPayout rejects amounts over instant-available Stripe balance', async () => {
+    // instant_available is the bucket Stripe enforces for instant payouts, and is
+    // separate from (and typically smaller than) `available`. Guarding against
+    // the wrong bucket lets requests slip through to Stripe and return as 400s.
+    stripeClient.balance.retrieve.mockResolvedValue({
+      available: [{ currency: 'usd', amount: 10000 }],
+      instant_available: [{ currency: 'usd', amount: 2500 }],
+    });
 
-    await expect(service.createInstantPayout(50)).rejects.toThrow('exceeds available Stripe balance');
+    await expect(service.createInstantPayout(50)).rejects.toThrow('exceeds instant-available Stripe balance');
     expect(stripeClient.payouts.create).not.toHaveBeenCalled();
+  });
+
+  test('createInstantPayout propagates Stripe error statusCode onto err.status', async () => {
+    stripeClient.balance.retrieve.mockResolvedValue({
+      available: [{ currency: 'usd', amount: 10000 }],
+      instant_available: [{ currency: 'usd', amount: 10000 }],
+    });
+    const stripeErr = Object.assign(new Error('Insufficient instant available balance'), {
+      statusCode: 400,
+      type: 'StripeInvalidRequestError',
+      code: 'balance_insufficient',
+    });
+    stripeClient.payouts.create.mockRejectedValue(stripeErr);
+
+    await expect(service.createInstantPayout(50, { idempotencyKey: 'ipo_propagate_status' }))
+      .rejects.toMatchObject({ message: 'Insufficient instant available balance', status: 400 });
   });
 });
