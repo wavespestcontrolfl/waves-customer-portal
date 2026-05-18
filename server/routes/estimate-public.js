@@ -205,18 +205,8 @@ const ESTIMATE_SERVICE_INCLUSIONS = {
     'Free re-service between recurring visits',
     '90-day WaveGuard money-back guarantee',
   ],
-  lawn: [
-    'Seasonal turf treatments matched to the lawn program',
-    'Weed, fungus, chinch, and turf-stress observations',
-    'Treatment timing adjusted for Southwest Florida conditions',
-    'Lawn notes carried forward for future visits',
-  ],
-  lawn_care: [
-    'Seasonal turf treatments matched to the lawn program',
-    'Weed, fungus, chinch, and turf-stress observations',
-    'Treatment timing adjusted for Southwest Florida conditions',
-    'Lawn notes carried forward for future visits',
-  ],
+  lawn: [],
+  lawn_care: [],
   mosquito: [
     'Targeted barrier application in mosquito resting zones',
     'Standing-water and breeding-pressure observations',
@@ -599,10 +589,6 @@ const PERKS = [
 ];
 
 const LAWN_CARE_PERKS = [
-  'Seasonal lawn applications scheduled for your program',
-  'Weed, fungus, chinch, and turf-stress observations',
-  'Treatment timing adjusted for Southwest Florida conditions',
-  'Visit notes saved to your customer portal',
   'Locked-in pricing for 12 months',
   'Text your tech directly for quick questions',
   'Billing after completed lawn care visits',
@@ -1327,6 +1313,12 @@ function renderPage(token, estimate, estData) {
       const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
       const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
       const inclusions = serviceInclusionsForEstimateCard(row);
+      const dayPriceHtml = day != null
+        ? `<span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>`
+        : '';
+      const dayPriceCopy = hasOnlyLawnCareServices
+        ? `That\u2019s just ${dayPriceHtml}/day to stop lawn pests before they turn green grass brown.`
+        : `That\u2019s just ${dayPriceHtml}/day for ${escapeHtml(row.name.toLowerCase())}.`;
       return `
         <section class="service-price-card">
           <div class="service-price-name">${escapeHtml(row.name)}</div>
@@ -1338,10 +1330,10 @@ function renderPage(token, estimate, estData) {
             <span class="tier-lbl">${escapeHtml(row.tierLabel)}</span>
           </div>
           ${savings > 0 ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
-          ${day != null ? `<div class="day-price">That\u2019s just <span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
-          <ul class="service-inclusions">
+          ${day != null ? `<div class="day-price">${dayPriceCopy}</div>` : ''}
+          ${inclusions.length ? `<ul class="service-inclusions">
             ${inclusions.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
-          </ul>
+          </ul>` : ''}
         </section>`;
     })
     .join('');
@@ -1370,7 +1362,7 @@ function renderPage(token, estimate, estData) {
         <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
       </div>
       ${savingsPerMo > 0 ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
-      <div class="day-price" data-mode-only="recurring">That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.</div>
+      <div class="day-price" data-mode-only="recurring">${hasOnlyLawnCareServices ? `That\u2019s just ${fmtMoney(dayPrice)}/day to stop lawn pests before they turn green grass brown.` : `That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.`}</div>
     `);
 
   const realOneTimeRows = oneTimeItems.map((it) => {
