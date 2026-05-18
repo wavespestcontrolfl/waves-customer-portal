@@ -1175,6 +1175,64 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('/ treatment</span>');
   });
 
+  test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
+    const html = renderPage('lawn-only-token', {
+      status: 'sent',
+      customerName: 'Jane Customer',
+      address: '6539 Field Sparrow Gln',
+      monthlyTotal: 55,
+      annualTotal: 660,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/lawn.png',
+    }, {
+      inputs: {
+        homeSqFt: 2070,
+        lotSqFt: 7326,
+        lawnSqFt: 3200,
+        landscapeComplexity: 'SIMPLE',
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Lawn Care', mo: 55, perTreatment: 73.33, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          lawn: [{ recommended: true, v: 9 }],
+        },
+      },
+    });
+
+    expect(html).toContain('your lawn care estimate');
+    expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
+    expect(html).toContain('Choose how to start your lawn care plan');
+    expect(html).toContain('Pick your first lawn care visit');
+    expect(html).toContain('What your lawn care plan includes');
+    expect(html).toContain('Ready to start lawn care?');
+    expect(html).toContain('Let&#39;s get your lawn on the schedule.');
+    expect(html).toContain('Confirm and set up billing');
+    expect(html).toContain('next step saves your card for pay-after-visit billing');
+    expect(html).toContain('/day to stop lawn pests before they turn green grass brown.');
+    expect(html).not.toContain('/day for lawn care.');
+    expect(html).not.toContain('Seasonal turf treatments matched to the lawn program');
+    expect(html).not.toContain('Weed, fungus, chinch, and turf-stress observations');
+    expect(html).not.toContain('Treatment timing adjusted for Southwest Florida conditions');
+    expect(html).not.toContain('Lawn notes carried forward for future visits');
+    expect(html.match(/WaveGuard Membership Setup/g)).toHaveLength(2);
+    expect(html).toContain('Pay the 12-month plan in full');
+    expect(html).toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
+    expect(html).toContain('data-prepay-membership-due="99">$759</strong>');
+    expect(html).not.toContain('Annual Pay-in-Full Waiver');
+    expect(html).toContain('.q-bar{display:none}');
+    expect(html).not.toContain('Wave Goodbye to Pests!');
+    expect(html).not.toContain('90-day money-back guarantee');
+    expect(html).not.toContain('Free annual termite inspection');
+    expect(html).not.toContain('What WaveGuard members get');
+  });
+
   test('server-rendered estimate promotes separate palm and rodent bait recurring services', () => {
     const html = renderPage('separate-recurring-token', {
       status: 'sent',
