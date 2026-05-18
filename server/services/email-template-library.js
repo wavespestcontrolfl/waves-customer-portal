@@ -236,7 +236,7 @@ async function activeSuppressionFor(template, email) {
   const rows = await db('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });
-  const globalTypes = new Set(['bounce', 'spam_complaint', 'manual', 'do_not_email']);
+  const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
   return rows.find((row) => (
     !row.group_key ||
     (groupKey && row.group_key === groupKey) ||
@@ -277,9 +277,12 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
+  const textBody = version.text_body
+    ? renderInline(version.text_body, payload, { html: false })
+    : bodyText;
   const text = mode === 'marketing'
-    ? ensureLegalTextFooter(version.text_body || bodyText, { unsubscribeUrl: unsubscribeUrl || null }) || bodyText
-    : (version.text_body || bodyText);
+    ? ensureLegalTextFooter(textBody, { unsubscribeUrl: unsubscribeUrl || null }) || bodyText
+    : textBody;
 
   return {
     subject,

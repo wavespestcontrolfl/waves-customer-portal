@@ -766,6 +766,10 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     err.status = 404;
     throw err;
   }
+  const automationStatus = normalizeStatus(resolvedAutomation.status || 'active');
+  if (automationStatus !== 'active') {
+    return markRunSkipped(run, `automation status is ${automationStatus}`, { guard: 'automation_status' });
+  }
 
   const retryPolicy = retryPolicyFor(resolvedAutomation);
   const attemptNumber = Number(run.attempts || 0) + 1;

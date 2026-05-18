@@ -135,7 +135,6 @@ function rateText(value) {
 
 function automationStatusTone(status) {
   if (status === "active") return "strong";
-  if (status === "archived") return "alert";
   return "neutral";
 }
 

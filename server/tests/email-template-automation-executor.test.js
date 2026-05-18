@@ -305,6 +305,27 @@ describe('email template automation executor', () => {
     }));
   });
 
+  test('skips queued runs when the automation has been paused', async () => {
+    const queuedRun = run({ attempts: 0 });
+    const skipUpdateQuery = chain({ returning: [{ ...queuedRun, status: 'skipped', exit_reason: 'automation status is paused' }] });
+    setDbQueues({
+      email_template_automation_runs: [skipUpdateQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    const result = await AutomationExecutor.executeRun(queuedRun, {
+      automation: automation({ status: 'paused' }),
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(skipUpdateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'skipped',
+      exit_reason: 'automation status is paused',
+    }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('does not send a due run if another worker already claimed it', async () => {
     const queuedRun = run({ attempts: 0 });
     const runningRun = run({ status: 'running', attempts: 1 });

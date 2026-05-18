@@ -120,6 +120,22 @@ describe('email template library rendering', () => {
     expect(rendered.missingPayload).toEqual(['expires_at']);
   });
 
+  test('renders variables inside custom text bodies', () => {
+    const rendered = EmailTemplates.renderTemplate({
+      template: serviceTemplate(),
+      version: version({
+        text_body: 'Hi {{first_name}}, view {{estimate_url}} before {{expires_at}}.',
+      }),
+      payload: {
+        first_name: 'Taylor',
+        expires_at: 'June 12',
+        estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample',
+      },
+    });
+
+    expect(rendered.text).toBe('Hi Taylor, view https://portal.wavespestcontrol.com/estimate/sample before June 12.');
+  });
+
   test('adds the SendGrid ASM unsubscribe placeholder to marketing sends', async () => {
     const queuedMessage = {
       id: 'msg-1',
@@ -165,6 +181,36 @@ describe('email template library rendering', () => {
       html: expect.stringContaining('<%asm_group_unsubscribe_raw_url%>'),
       text: expect.stringContaining('Unsubscribe: <%asm_group_unsubscribe_raw_url%>'),
     }));
+  });
+
+  test('keeps manual suppressions scoped to their selected preference group', async () => {
+    const marketingSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'marketing_newsletter',
+      status: 'active',
+    };
+    const serviceSuppression = {
+      ...marketingSuppression,
+      id: 'suppression-2',
+      group_key: 'service_operational',
+    };
+    setDbQueues({
+      email_suppressions: [
+        chain({ result: [marketingSuppression] }),
+        chain({ result: [serviceSuppression] }),
+      ],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+    )).resolves.toBeNull();
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+    )).resolves.toEqual(serviceSuppression);
   });
 
   test('flags disallowed and missing required variables before publish', () => {
