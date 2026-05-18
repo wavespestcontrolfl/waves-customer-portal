@@ -20,6 +20,17 @@ function selectedPdfRenderer() {
     : 'puppeteer';
 }
 
+function isPdfBuffer(buf) {
+  return Buffer.isBuffer(buf) && buf.byteLength >= 5 && buf.subarray(0, 5).toString('ascii') === '%PDF-';
+}
+
+function assertPdfBuffer(buf, provider) {
+  if (isPdfBuffer(buf)) return buf;
+  const err = new Error(`${provider} returned a non-PDF response`);
+  err.code = 'invalid_pdf_response';
+  throw err;
+}
+
 async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
   const accountId = process.env.CF_ACCOUNT_ID;
   const token = process.env.CF_BROWSER_RENDERING_TOKEN;
@@ -38,6 +49,7 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
       url,
       viewport: { width: 816, height: 1056 },
       gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
+      waitForSelector: { selector: '.service-report-v1', visible: true, timeout: 10000 },
       emulateMediaType: 'print',
       pdfOptions: {
         format: 'letter',
@@ -64,7 +76,10 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
     throw err;
   }
 
-  return Buffer.from(await res.arrayBuffer());
+  return assertPdfBuffer(
+    Buffer.from(await res.arrayBuffer()),
+    'Cloudflare Browser Rendering',
+  );
 }
 
 async function renderReportPdf(url, { serviceRecordId } = {}) {
@@ -83,7 +98,10 @@ async function renderServiceReportV1Pdf(data, { token, req, logger: callLogger, 
   const started = Date.now();
 
   try {
-    const pdf = await renderReportPdf(url, { serviceRecordId: recordId });
+    const pdf = assertPdfBuffer(
+      await renderReportPdf(url, { serviceRecordId: recordId }),
+      provider,
+    );
     const elapsedMs = Date.now() - started;
     emitPdfRenderSuccess({
       service_record_id: recordId,
@@ -110,6 +128,8 @@ async function renderServiceReportV1Pdf(data, { token, req, logger: callLogger, 
 
 module.exports = {
   launchBrowser,
+  assertPdfBuffer,
+  isPdfBuffer,
   renderReportPdf,
   renderReportPdfWithBrowser,
   renderReportPdfWithCloudflare,

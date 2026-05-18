@@ -13,6 +13,7 @@ const {
   hashPhotoChainPayload,
   validatePhotoChainRows,
 } = require('../services/service-report/photo-chain');
+const { computeOnSiteMin } = require('../services/service-report/metrics-band');
 const {
   renderReportPdfWithCloudflare,
   serviceReportViewerUrl,
@@ -548,6 +549,15 @@ describe('service report v1', () => {
     expect(minutesFromElapsed('25')).toBe(25);
   });
 
+  test('on-site minutes ignore default zero elapsed and fall back to timestamps', () => {
+    expect(computeOnSiteMin({
+      timeOnSite: '0:00',
+      started_at: '2026-05-18T14:00:00.000Z',
+      ended_at: '2026-05-18T14:42:00.000Z',
+    })).toBe(42);
+    expect(computeOnSiteMin({ timeOnSite: '10:05' })).toBe(10);
+  });
+
   test('fallback map zones only use actual location labels', () => {
     expect(locationAreaLabels([
       'Perimeter',
@@ -968,10 +978,11 @@ describe('service report v1', () => {
     process.env.CF_ACCOUNT_ID = 'account-1';
     process.env.CF_BROWSER_RENDERING_TOKEN = 'token-1';
     global.fetch = jest.fn(async (endpoint, options) => {
+      const body = Buffer.from('%PDF-1.4\n');
       calls.push({ endpoint, options, body: JSON.parse(options.body) });
       return {
         ok: true,
-        arrayBuffer: async () => Buffer.from('%PDF-1.4\n').buffer,
+        arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
       };
     });
 
@@ -990,6 +1001,7 @@ describe('service report v1', () => {
         url: 'https://example.test/report/token-1?mode=pdf',
         viewport: { width: 816, height: 1056 },
         gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
+        waitForSelector: { selector: '.service-report-v1', visible: true, timeout: 10000 },
         emulateMediaType: 'print',
         pdfOptions: {
           format: 'letter',
@@ -998,6 +1010,30 @@ describe('service report v1', () => {
         },
       });
       expect(calls[0].body.pdf).toBeUndefined();
+    } finally {
+      global.fetch = originalFetch;
+      restoreEnv('CF_ACCOUNT_ID', originalAccountId);
+      restoreEnv('CF_BROWSER_RENDERING_TOKEN', originalToken);
+    }
+  });
+
+  test('Cloudflare PDF renderer rejects non-PDF 2xx responses', async () => {
+    const originalFetch = global.fetch;
+    const originalAccountId = process.env.CF_ACCOUNT_ID;
+    const originalToken = process.env.CF_BROWSER_RENDERING_TOKEN;
+    const body = Buffer.from('<html>Not a PDF</html>');
+
+    process.env.CF_ACCOUNT_ID = 'account-1';
+    process.env.CF_BROWSER_RENDERING_TOKEN = 'token-1';
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+    }));
+
+    try {
+      await expect(renderReportPdfWithCloudflare('https://example.test/report/token-1?mode=pdf', {
+        serviceRecordId: 'service-1',
+      })).rejects.toMatchObject({ code: 'invalid_pdf_response' });
     } finally {
       global.fetch = originalFetch;
       restoreEnv('CF_ACCOUNT_ID', originalAccountId);

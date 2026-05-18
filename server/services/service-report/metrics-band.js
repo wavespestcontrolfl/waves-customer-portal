@@ -3,7 +3,7 @@ const { minutesFromElapsed } = require('../../utils/duration-minutes');
 
 function computeOnSiteMin(record = {}) {
   const explicit = minutesFromElapsed(record.timeOnSite);
-  if (explicit != null) return explicit;
+  if (explicit > 0) return explicit;
   if (!record.started_at || !record.ended_at) return null;
   const started = new Date(record.started_at).getTime();
   const ended = new Date(record.ended_at).getTime();
