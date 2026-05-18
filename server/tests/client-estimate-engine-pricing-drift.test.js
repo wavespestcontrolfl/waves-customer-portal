@@ -1,16 +1,107 @@
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
+
+const { priceTopDressing } = require('../services/pricing-engine/service-pricing');
 
 const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
 const legacyAdminEstimatePagePath = path.resolve(__dirname, '../../client/src/pages/admin/EstimatePage.jsx');
 
+const TOP_DRESSING_LAWN_SQFT_CASES = [3000, 5000, 7500, 10000, 15000, 20000];
+const TOP_DRESSING_EXPECTED = {
+  eighth: {
+    standalone: {
+      3000: 250,
+      5000: 250,
+      7500: 250,
+      10000: 250,
+      15000: 321,
+      20000: 413,
+    },
+    recurring: {
+      3000: 250,
+      5000: 250,
+      7500: 257,
+      10000: 328,
+      15000: 470,
+      20000: 612,
+    },
+  },
+  quarter: {
+    standalone: {
+      3000: 450,
+      5000: 450,
+      7500: 450,
+      10000: 455,
+      15000: 645,
+      20000: 836,
+    },
+    recurring: {
+      3000: 450,
+      5000: 450,
+      7500: 514,
+      10000: 660,
+      15000: 953,
+      20000: 1245,
+    },
+  },
+};
+
+function loadClientEstimator(source) {
+  const transformed = source.replace(/\bexport\s+function\s+/g, 'function ');
+  const module = { exports: {} };
+  const sandbox = {
+    module,
+    exports: module.exports,
+    console,
+  };
+  vm.createContext(sandbox);
+  const script = new vm.Script(
+    `${transformed}\nmodule.exports = { calculateEstimate, interpolate, fmt, fmtInt };`,
+    { filename: clientEstimatorPath }
+  );
+  script.runInContext(sandbox);
+  return module.exports;
+}
+
+function buildClientTopDressingEstimate(calculateEstimate, { lawnSqFt, hasRecurringLawn }) {
+  const estimate = calculateEstimate({
+    homeSqFt: 2000,
+    stories: 1,
+    lotSqFt: Math.max(lawnSqFt, 10000),
+    propertyType: 'single_family',
+    measuredTurfSf: lawnSqFt,
+    svcTopdress: true,
+    svcLawn: hasRecurringLawn,
+    lawnFreq: 9,
+    grassType: 'st_augustine',
+    urgency: 'NONE',
+    isAfterHours: false,
+    isRecurringCustomer: false,
+  });
+  expect(estimate.error).toBeUndefined();
+  expect(estimate.results.tdTiers).toHaveLength(2);
+  return estimate;
+}
+
+function clientTopDressingPrice(calculateEstimate, { lawnSqFt, depth, hasRecurringLawn }) {
+  const estimate = buildClientTopDressingEstimate(calculateEstimate, { lawnSqFt, hasRecurringLawn });
+  const tierName = depth === 'eighth' ? '1/8" Depth' : '1/4" Depth';
+  const tier = estimate.results.tdTiers.find(t => t.name === tierName);
+  expect(tier).toBeDefined();
+  if (depth === 'eighth') expect(estimate.results.td).toBe(tier.price);
+  return tier.price;
+}
+
 describe('deprecated client estimator pricing drift guards', () => {
   let source;
   let legacyAdminSource;
+  let calculateEstimate;
 
   beforeAll(() => {
     source = fs.readFileSync(clientEstimatorPath, 'utf8');
     legacyAdminSource = fs.readFileSync(legacyAdminEstimatePagePath, 'utf8');
+    calculateEstimate = loadClientEstimator(source).calculateEstimate;
   });
 
   test('mirrors conservative pest pool cage adjustments', () => {
@@ -50,5 +141,37 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(legacyAdminSource).toContain('Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.');
     expect(legacyAdminSource).toContain('form.svcBedbug && !canUseServerForBedBug');
     expect(legacyAdminSource).toContain('Enter home sq ft or run Property Lookup before generating a mixed bed bug estimate.');
+  });
+
+  test('matches server Top Dressing pricing for supported depths and recurring lawn states', () => {
+    for (const depth of ['eighth', 'quarter']) {
+      for (const hasRecurringLawn of [false, true]) {
+        const lawnState = hasRecurringLawn ? 'recurring' : 'standalone';
+        for (const lawnSqFt of TOP_DRESSING_LAWN_SQFT_CASES) {
+          const expected = TOP_DRESSING_EXPECTED[depth][lawnState][lawnSqFt];
+          const server = priceTopDressing(lawnSqFt, depth, hasRecurringLawn);
+          const clientPrice = clientTopDressingPrice(calculateEstimate, {
+            lawnSqFt,
+            depth,
+            hasRecurringLawn,
+          });
+
+          expect(server.price).toBe(expected);
+          expect(clientPrice).toBe(expected);
+          expect(clientPrice).toBe(server.price);
+        }
+      }
+    }
+  });
+
+  test('keeps Top Dressing tier labels stable for the admin estimate UI', () => {
+    const estimate = buildClientTopDressingEstimate(calculateEstimate, {
+      lawnSqFt: 7500,
+      hasRecurringLawn: true,
+    });
+    expect(estimate.results.tdTiers.map(t => `${t.name} — ${t.detail}`)).toEqual([
+      '1/8" Depth — St. Augustine standard',
+      '1/4" Depth — Bermuda / leveling — 2x material',
+    ]);
   });
 });

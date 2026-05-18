@@ -859,8 +859,11 @@ export function calculateEstimate(inputs) {
   if (svcTopdress && topDressingLawnEst > 0) {
     hasOT = true;
     const lk = topDressingLawnEst / 1000;
+    // Server pricing is authoritative; keep these constants synced with
+    // server/services/pricing-engine/constants.js. Divisor 0.35 means cost is
+    // 35% of price, a 65% target gross margin.
     const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (topDressingLawnEst / 130 + 30) / 60) / 0.40)));
-    const e4 = otP(Math.max(350, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (topDressingLawnEst / 130 * 1.5 + 45) / 60) / 0.40)));
+    const e4 = otP(Math.max(450, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (topDressingLawnEst / 130 * 1.5 + 45) / 60) / 0.35)));
     R.td = e8;
     otItems.push({ name: 'Top Dressing', price: e8, detail: 'St. Augustine standard', depth: '1/8"' });
     R.tdTiers = [
