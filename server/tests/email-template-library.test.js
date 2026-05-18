@@ -440,9 +440,13 @@ describe('email template library rendering', () => {
 
     expect(queueInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
       suppression_group_key_snapshot: 'marketing_nurture',
+      html_snapshot: expect.stringContaining('<%asm_group_unsubscribe_raw_url%>'),
+      text_snapshot: expect.stringContaining('Unsubscribe: <%asm_group_unsubscribe_raw_url%>'),
     }));
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
       asmGroupId: 101,
+      html: expect.stringContaining('<%asm_group_unsubscribe_raw_url%>'),
+      text: expect.stringContaining('Unsubscribe: <%asm_group_unsubscribe_raw_url%>'),
     }));
   });
 

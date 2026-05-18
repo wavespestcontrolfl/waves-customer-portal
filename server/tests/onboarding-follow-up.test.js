@@ -106,4 +106,49 @@ describe('onboarding follow-up emails', () => {
     expect(EmailService.send).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
+
+  test('does not mark dual-channel follow-ups sent when SMS fails and email is suppressed', async () => {
+    const session = {
+      id: 'onboarding-2',
+      token: 'token-2',
+      customer_id: 'customer-2',
+      status: 'started',
+      started_at: new Date('2026-05-17T12:00:00.000Z'),
+      expires_at: new Date('2026-05-25T12:00:00.000Z'),
+      waveguard_tier: 'Gold',
+      first_name: 'Sam',
+      phone: '+15555550100',
+      email: 'sam@example.com',
+    };
+    const updateOrNextQuery = chain();
+    setDbQueues({
+      onboarding_sessions: [
+        chain({ result: [session] }),
+        updateOrNextQuery,
+        chain({ result: [] }),
+        chain({ result: [] }),
+      ],
+    });
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      reason: 'temporary carrier failure',
+    });
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({
+      sent: false,
+      blocked: true,
+      reason: 'Suppressed: manual (service_operational)',
+      message: { id: 'msg-blocked', status: 'blocked' },
+    });
+
+    const result = await OnboardingFollowUp.checkAll();
+
+    expect(result.sent).toBe(0);
+    expect(updateOrNextQuery.update).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'onboarding.24h_reminder',
+      to: 'sam@example.com',
+    }));
+    expect(EmailService.send).not.toHaveBeenCalled();
+  });
 });

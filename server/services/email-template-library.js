@@ -290,13 +290,13 @@ async function loadVersion(versionId) {
   return version;
 }
 
-function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null } = {}) {
+function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null, modeOverride = null } = {}) {
   if (!template || !version) throw new Error('template and version required');
   const missingPayload = requiredPayloadMissing(template, payload);
   const subject = renderInline(version.subject || template.name, payload, { html: false }).trim();
   const previewText = renderInline(version.preview_text || '', payload, { html: false }).trim();
   const { bodyHtml, bodyText } = renderBlocks(version.blocks, payload);
-  const mode = String(template.mode || 'service').toLowerCase();
+  const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   const footerNote = mode === 'marketing'
     ? null
     : 'Questions? Reply to this email or call <a href="tel:+19412975749" style="color:#009CDE;text-decoration:none;">(941) 297-5749</a>.';
@@ -471,6 +471,7 @@ async function sendTemplate({
     version,
     payload,
     unsubscribeUrl: effectiveUnsubscribeUrl,
+    modeOverride: isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null,
   });
   if (rendered.missingPayload.length) {
     const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
