@@ -13,6 +13,7 @@ const {
   hashPhotoChainPayload,
   validatePhotoChainRows,
 } = require('../services/service-report/photo-chain');
+const { formatTechnicianForCustomer } = require('../utils/technician-name');
 const { computeOnSiteMin } = require('../services/service-report/metrics-band');
 const {
   renderReportPdfWithCloudflare,
@@ -542,6 +543,12 @@ describe('service report v1', () => {
     expect(methodFromProduct({ product_category: 'bait' }, 'rodent')).toBe('bait_placement');
     expect(methodFromProduct({ product_category: 'insecticide' }, 'tree_shrub')).toBe('foliar_spray');
     expect(methodFromProduct({ product_category: 'insecticide' }, 'palm')).toBe('foliar_spray');
+  });
+
+  test('customer technician formatter preserves generic fallbacks', () => {
+    expect(formatTechnicianForCustomer({ name: 'Adam Benetti' })).toBe('Adam B.');
+    expect(formatTechnicianForCustomer({ name: 'Your Waves technician' })).toBe('Your Waves technician');
+    expect(formatTechnicianForCustomer({ name: 'Your tech' })).toBe('Your tech');
   });
 
   test('elapsed time parser matches completion panel duration strings', () => {

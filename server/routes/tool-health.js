@@ -11,6 +11,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate } = require('../middleware/admin-auth');
+const logger = require('../services/logger');
 const { slackAlert } = require('../services/slack-alerts');
 
 router.use(adminAuthenticate);
@@ -171,27 +172,31 @@ router.get('/', async (req, res, next) => {
     const pdfSucceeded = parseInt(pdfRenderer?.succeeded || 0);
     const pdfTerminalFailed = parseInt(pdfRenderer?.terminal_failed || 0);
     const pdfDenominator = pdfSucceeded + pdfTerminalFailed;
-    const pdfSuccessRate = pdfDenominator > 0 ? pdfSucceeded / pdfDenominator : null;
-    if (pdfDenominator >= 5 && pdfSuccessRate < 0.95) {
-      alerts.push({
-        severity: 'critical',
-        title: 'PDF render success rate below threshold',
-        detail: `${pdfSucceeded}/${pdfDenominator} terminal PDF renders succeeded (${Math.round(pdfSuccessRate * 100)}%) in the last hour.`,
-      });
-      if (Date.now() - lastPdfHealthSlackAlertAt > 30 * 60 * 1000) {
-        lastPdfHealthSlackAlertAt = Date.now();
-        slackAlert({
-          channel: '#waves-alerts',
-          text: `PDF render success rate below 95%: ${pdfSucceeded}/${pdfDenominator} succeeded in the last hour.`,
-          metadata: {
-            succeeded: pdfSucceeded,
-            terminal_failed: pdfTerminalFailed,
-            failed_attempts: parseInt(pdfRenderer?.failed_attempts || 0),
-            p95_latency_ms: pdfRenderer?.p95_latency_ms ? parseInt(pdfRenderer.p95_latency_ms) : null,
-          },
-        }).catch(() => {});
+      const pdfSuccessRate = pdfDenominator > 0 ? pdfSucceeded / pdfDenominator : null;
+      if (pdfDenominator >= 5 && pdfSuccessRate < 0.95) {
+        alerts.push({
+          severity: 'critical',
+          title: 'PDF render success rate below threshold',
+          detail: `${pdfSucceeded}/${pdfDenominator} terminal PDF renders succeeded (${Math.round(pdfSuccessRate * 100)}%) in the last hour.`,
+        });
+        if (Date.now() - lastPdfHealthSlackAlertAt > 30 * 60 * 1000) {
+          try {
+            await slackAlert({
+              channel: '#waves-alerts',
+              text: `PDF render success rate below 95%: ${pdfSucceeded}/${pdfDenominator} succeeded in the last hour.`,
+              metadata: {
+                succeeded: pdfSucceeded,
+                terminal_failed: pdfTerminalFailed,
+                failed_attempts: parseInt(pdfRenderer?.failed_attempts || 0),
+                p95_latency_ms: pdfRenderer?.p95_latency_ms ? parseInt(pdfRenderer.p95_latency_ms) : null,
+              },
+            });
+            lastPdfHealthSlackAlertAt = Date.now();
+          } catch (err) {
+            logger.warn(`[tool-health] PDF Slack alert failed: ${err.message}`);
+          }
+        }
       }
-    }
 
     res.json({
       windowHours: hours,
