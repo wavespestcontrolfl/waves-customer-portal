@@ -120,7 +120,12 @@ async function sendEstimateFromPipeline(id, sendMethod = "both") {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ sendMethod }),
+    body: JSON.stringify({
+      sendMethod,
+      idempotencyKey:
+        globalThis.crypto?.randomUUID?.() ||
+        `estimate-send-${Date.now()}-${Math.random()}`,
+    }),
   });
   const data = await r.json().catch(() => ({}));
   const summary = summarizeEstimateSend(data);

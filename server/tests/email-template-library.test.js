@@ -106,6 +106,57 @@ describe('email template library rendering', () => {
     expect(rendered.text).toContain('Company: Waves & Co.');
   });
 
+  test('renders default CTA settings when a version has no CTA block', () => {
+    const rendered = EmailTemplates.renderTemplate({
+      template: serviceTemplate({
+        allowed_variables: ['first_name', 'account_url'],
+        required_variables: ['first_name', 'account_url'],
+        default_cta_label: 'Open portal',
+        default_cta_url_variable: 'account_url',
+      }),
+      version: version({
+        subject: 'Welcome {{first_name}}',
+        preview_text: '',
+        blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}, your account is ready.' }],
+      }),
+      payload: {
+        first_name: 'Taylor',
+        account_url: 'https://portal.wavespestcontrol.com',
+      },
+    });
+
+    expect(rendered.html).toContain('Open portal');
+    expect(rendered.html).toContain('https://portal.wavespestcontrol.com');
+    expect(rendered.text).toContain('Open portal: https://portal.wavespestcontrol.com');
+    expect(rendered.validation.ok).toBe(true);
+    expect(rendered.validation.referenced_variables).toContain('account_url');
+  });
+
+  test('appends default CTA settings to custom text bodies', () => {
+    const rendered = EmailTemplates.renderTemplate({
+      template: serviceTemplate({
+        allowed_variables: ['first_name', 'account_url'],
+        required_variables: ['first_name', 'account_url'],
+        default_cta_label: 'Open portal',
+        default_cta_url_variable: 'account_url',
+      }),
+      version: version({
+        subject: 'Welcome {{first_name}}',
+        preview_text: '',
+        text_body: 'Hi {{first_name}}, your account is ready.',
+        blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}, your account is ready.' }],
+      }),
+      payload: {
+        first_name: 'Taylor',
+        account_url: 'https://portal.wavespestcontrol.com',
+      },
+    });
+
+    expect(rendered.html).toContain('Open portal');
+    expect(rendered.text).toContain('Hi Taylor, your account is ready.');
+    expect(rendered.text).toContain('Open portal: https://portal.wavespestcontrol.com');
+  });
+
   test('reports missing payload values separately from template validation', () => {
     const rendered = EmailTemplates.renderTemplate({
       template: serviceTemplate(),
@@ -251,12 +302,54 @@ describe('email template library rendering', () => {
     )).resolves.toEqual(serviceSuppression);
   });
 
-  test('lets truly transactional templates bypass suppressions', async () => {
+  test('lets truly transactional templates bypass preference suppressions', async () => {
+    const unsubscribeSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'unsubscribe',
+      group_key: 'transactional_required',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [unsubscribeSuppression] })],
+    });
+
     await expect(EmailTemplates.activeSuppressionFor(
       serviceTemplate({ send_stream: 'transactional_required', suppression_group_key: 'transactional_required' }),
       'sam@example.com',
     )).resolves.toBeNull();
-    expect(db).not.toHaveBeenCalledWith('email_suppressions');
+  });
+
+  test('transactional required emails still honor global bounce and do-not-email suppressions', async () => {
+    const unsubscribeSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'unsubscribe',
+      group_key: 'transactional_required',
+      status: 'active',
+    };
+    const bounceSuppression = {
+      id: 'suppression-2',
+      email: 'sam@example.com',
+      suppression_type: 'bounce',
+      group_key: null,
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [
+        chain({ result: [unsubscribeSuppression] }),
+        chain({ result: [bounceSuppression] }),
+      ],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'transactional_required', suppression_group_key: 'transactional_required' }),
+      'sam@example.com',
+    )).resolves.toBeNull();
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'transactional_required', suppression_group_key: 'transactional_required' }),
+      'sam@example.com',
+    )).resolves.toEqual(bounceSuppression);
   });
 
   test('ignores transactional suppression overrides on non-transactional templates', async () => {

@@ -98,6 +98,11 @@ function validationFor(template, version) {
   extractVariables(version.preview_text, referencedSet);
   extractVariables(version.text_body, referencedSet);
   for (const v of blockVariables(version.blocks)) referencedSet.add(v);
+  if (!hasCtaBlock(version.blocks)) {
+    const defaultCtaUrlVariable = String(template.default_cta_url_variable || '').trim();
+    if (defaultCtaUrlVariable) referencedSet.add(defaultCtaUrlVariable);
+    extractVariables(template.default_cta_label, referencedSet);
+  }
 
   const referenced = [...referencedSet].sort();
   const disallowed = referenced.filter((v) => allowed.size && !allowed.has(v));
@@ -206,6 +211,23 @@ function renderBlocks(blocks, payload) {
   return { bodyHtml: htmlParts.join('\n'), bodyText: textParts.filter(Boolean).join('\n\n') };
 }
 
+function hasCtaBlock(blocks) {
+  return normalizeBlocks(blocks).some((block) => block.type === 'cta');
+}
+
+function renderDefaultCta(template, payload) {
+  const labelTemplate = String(template?.default_cta_label || '').trim();
+  const urlVariable = String(template?.default_cta_url_variable || '').trim();
+  if (!labelTemplate || !urlVariable) return { bodyHtml: '', bodyText: '' };
+  const href = textFor(payload, urlVariable);
+  if (!href) return { bodyHtml: '', bodyText: '' };
+  const label = renderInline(labelTemplate, payload, { html: false }) || 'Open';
+  return {
+    bodyHtml: `<div style="margin:24px 0;text-align:center;">${ctaButton(escapeHtml(href), escapeHtml(label))}</div>`,
+    bodyText: `${label}: ${href}`,
+  };
+}
+
 function sendStreamFor(template, suppressionGroupKey) {
   return String(suppressionGroupKey || template.send_stream || '').toLowerCase();
 }
@@ -270,11 +292,13 @@ function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
 async function activeSuppressionFor(template, email, suppressionGroupKey) {
   if (!email) return null;
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
-  if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) return null;
   const rows = await db('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });
   const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
+  if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
+    return rows.find((row) => globalTypes.has(String(row.suppression_type || '').toLowerCase())) || null;
+  }
   return rows.find((row) => (
     !row.group_key ||
     (groupKey && row.group_key === groupKey) ||
@@ -307,7 +331,13 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const missingPayload = requiredPayloadMissing(template, payload);
   const subject = renderInline(version.subject || template.name, payload, { html: false }).trim();
   const previewText = renderInline(version.preview_text || '', payload, { html: false }).trim();
-  const { bodyHtml, bodyText } = renderBlocks(version.blocks, payload);
+  let { bodyHtml, bodyText } = renderBlocks(version.blocks, payload);
+  let defaultCta = { bodyHtml: '', bodyText: '' };
+  if (!hasCtaBlock(version.blocks)) {
+    defaultCta = renderDefaultCta(template, payload);
+    bodyHtml = [bodyHtml, defaultCta.bodyHtml].filter(Boolean).join('\n');
+    bodyText = [bodyText, defaultCta.bodyText].filter(Boolean).join('\n\n');
+  }
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   const footerNote = mode === 'marketing'
     ? null
@@ -316,7 +346,7 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
   const textBody = version.text_body
-    ? renderInline(version.text_body, payload, { html: false })
+    ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText].filter(Boolean).join('\n\n')
     : bodyText;
   const text = mode === 'marketing'
     ? ensureLegalTextFooter(textBody, { unsubscribeUrl: unsubscribeUrl || null }) || bodyText
