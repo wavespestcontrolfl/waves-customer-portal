@@ -23,6 +23,7 @@ const {
 const {
   answerEstimateQuestionFallback,
   buildEstimateAssistantContext,
+  cleanAssistantAnswer,
 } = require('../services/estimate-assistant');
 
 function savedAdminEstimateData() {
@@ -665,6 +666,78 @@ describe('public estimate one-time breakdown', () => {
     expect(answer).toContain('Pest Control');
     expect(answer).toContain('Lawn Care');
     expect(answer).toContain('$350.10 / quarter');
+  });
+
+  test('estimate assistant uses customer-facing discounted per-application prices', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 116.7,
+        annual_total: 1400.4,
+      },
+      pricingBundle: {
+        waveGuardTier: 'Silver',
+        frequencies: [{
+          key: 'quarterly',
+          label: 'Quarterly',
+          monthly: 116.7,
+          annual: 1400.4,
+          included: [{ label: 'Pest Control' }, { label: 'Lawn Care' }],
+          perServiceTreatments: [
+            { service: 'pest_control', label: 'Pest Control', perTreatment: 128, visitsPerYear: 4 },
+            { service: 'lawn_care', label: 'Lawn Care', perTreatment: 116, visitsPerYear: 9 },
+          ],
+        }],
+      },
+    });
+
+    const included = answerEstimateQuestionFallback('What is included?', context);
+
+    expect(included).toContain('Pest Control - 4 applications/year - $115.20 per application');
+    expect(included).toContain('Lawn Care - 9 applications/year - $104.40 per application');
+    expect(included).not.toContain('$128 per application');
+    expect(included).not.toContain('$116 per application');
+  });
+
+  test('estimate assistant discounts treatment rows when another recurring service lacks treatment detail', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Gold',
+        monthly_total: 139.97,
+        annual_total: 1679.6,
+      },
+      pricingBundle: {
+        source: 'v1_engine_shape',
+        waveGuardTier: 'Gold',
+        frequencies: [{
+          key: 'quarterly',
+          label: 'Quarterly',
+          monthly: 139.97,
+          annual: 1679.6,
+          included: [{ label: 'Pest Control' }, { label: 'Lawn Care' }, { label: 'Termite Bait' }],
+          perServiceTreatments: [
+            { service: 'pest_control', label: 'Pest Control', perTreatment: 128, visitsPerYear: 4 },
+            { service: 'lawn_care', label: 'Lawn Care', perTreatment: 116, visitsPerYear: 9 },
+            { service: 'termite_bait', label: 'Termite Bait', perTreatment: null, visitsPerYear: null },
+          ],
+        }],
+      },
+    });
+
+    const included = answerEstimateQuestionFallback('What is included?', context);
+
+    expect(included).toContain('Pest Control - 4 applications/year - $108.80 per application');
+    expect(included).toContain('Lawn Care - 9 applications/year - $98.60 per application');
+    expect(included).toContain('Termite Service');
+    expect(included).not.toContain('$128 per application');
+    expect(included).not.toContain('$116 per application');
+  });
+
+  test('estimate assistant strips markdown from AI answers before rendering', () => {
+    expect(cleanAssistantAnswer('Your **WaveGuard Silver** plan includes:\n- **Lawn Care** at `$104.40` per app.'))
+      .toBe('Your WaveGuard Silver plan includes: Lawn Care at $104.40 per app.');
   });
 
   test('estimate assistant uses selected cadence and all first-visit fees', () => {

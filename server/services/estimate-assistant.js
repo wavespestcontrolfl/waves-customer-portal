@@ -1,5 +1,6 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { WAVEGUARD } = require('./pricing-engine/constants');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -21,10 +22,20 @@ Rules:
 - If the context does not contain a specific fact, say you do not see it on this estimate and suggest calling or texting Waves.
 - Do not make appointments, accept estimates, cancel service, reschedule service, promise arrival times, diagnose medical risk, or guarantee chemical safety.
 - Keep answers concise: 2-4 short sentences.
+- Plain text only. Do not use Markdown, bold markers, headings, or bullet lists.
 - Be clear, friendly, and practical.`;
 
 function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function cleanAssistantAnswer(value) {
+  return cleanText(String(value || '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^\s*[-*]\s+/gm, ''));
 }
 
 function fmtMoney(value) {
@@ -96,11 +107,42 @@ function serviceRowsFromEstimateData(estData = {}) {
   }));
 }
 
+function waveGuardDiscountForTier(value) {
+  const key = cleanText(value)
+    .toLowerCase()
+    .replace(/^waveguard\s+/, '');
+  return WAVEGUARD.tiers[key]?.discount || 0;
+}
+
+function waveGuardDiscountAppliesToService(service = {}) {
+  const key = cleanText(service.service || service.key).toLowerCase();
+  if (key && WAVEGUARD.qualifyingServices.includes(key)) return true;
+  const label = normalizeServiceName(service.label || service.name || service.service);
+  return ['Pest Control', 'Lawn Care', 'Mosquito Control', 'Termite Service', 'Tree & Shrub Service'].includes(label);
+}
+
 function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
   const frequency = selectedFrequency || (Array.isArray(pricingBundle.frequencies) ? pricingBundle.frequencies[0] : null);
   const included = Array.isArray(frequency?.included) ? frequency.included : [];
   const perTreatments = Array.isArray(frequency?.perServiceTreatments) ? frequency.perServiceTreatments : [];
   const byLabel = new Map();
+  const waveGuardDiscount = waveGuardDiscountForTier(pricingBundle.waveGuardTier);
+  const enginePricedRows = ['v1_engine_shape', 'engine_invocation'].includes(cleanText(pricingBundle.source));
+  const targetAnnual = Number(frequency?.annual)
+    || (Number.isFinite(Number(frequency?.monthly)) ? Number(frequency.monthly) * 12 : null);
+  const perTreatmentAnnual = perTreatments.reduce((sum, service) => {
+    const amount = Number(service.perTreatment);
+    const visits = Number(service.visitsPerYear);
+    return sum + (Number.isFinite(amount) && amount > 0 && Number.isFinite(visits) && visits > 0
+      ? amount * visits
+      : 0);
+  }, 0);
+  const treatmentMultiplier = Number.isFinite(targetAnnual)
+    && targetAnnual > 0
+    && perTreatmentAnnual > targetAnnual + 0.5
+    ? targetAnnual / perTreatmentAnnual
+    : 1;
+  const useTierDiscount = enginePricedRows && waveGuardDiscount > 0 && treatmentMultiplier === 1;
 
   included.forEach((service) => {
     const label = normalizeServiceName(service.label || service.service || service.key);
@@ -113,9 +155,16 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
   perTreatments.forEach((service) => {
     const label = normalizeServiceName(service.label || service.service);
     const current = byLabel.get(label) || { label };
+    const rawPerTreatment = Number(service.perTreatment);
+    const rowMultiplier = useTierDiscount && waveGuardDiscountAppliesToService(service)
+      ? (1 - waveGuardDiscount)
+      : treatmentMultiplier;
+    const perApplication = Number.isFinite(rawPerTreatment) && rawPerTreatment > 0
+      ? Math.round(rawPerTreatment * rowMultiplier * 100) / 100
+      : null;
     byLabel.set(label, {
       ...current,
-      perApplication: Number(service.perTreatment),
+      perApplication,
       visitsPerYear: Number(service.visitsPerYear),
     });
   });
@@ -575,7 +624,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
 function extractAnthropicText(response = {}) {
   return (Array.isArray(response.content) ? response.content : [])
     .filter((part) => part.type === 'text')
-    .map((part) => cleanText(part.text))
+    .map((part) => cleanAssistantAnswer(part.text))
     .filter(Boolean)
     .join('\n')
     .trim();
@@ -637,5 +686,6 @@ module.exports = {
   answerEstimateQuestion,
   answerEstimateQuestionFallback,
   buildEstimateAssistantContext,
+  cleanAssistantAnswer,
   selectPricingFrequency,
 };
