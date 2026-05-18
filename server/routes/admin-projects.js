@@ -402,23 +402,18 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
   };
 }
 
-function evaluateProjectSendReadiness({ project, customer, photoCount = 0 }) {
+function evaluateProjectSendReadiness({ project, customer }) {
   const typeCfg = getProjectType(project?.project_type);
   const findings = normalizeFindings(project?.findings);
-  // Certificate of Compliance is structured-findings + photos only — there is
-  // no narrative "Recommendations" section on the rendered document, so the
-  // shared recommendations check would force techs to type unrelated copy
-  // (or override) just to satisfy a field that never reaches the customer.
+  // Recommendations are optional. Some report types render cleanly from
+  // structured findings alone, and admins can still add narrative notes when
+  // a customer-facing next step is useful.
   const isCertificate = project?.project_type === 'pre_treatment_termite_certificate';
   const required = [
     { key: 'project_date', label: isCertificate ? 'Treatment date' : 'Inspection date', ok: hasMeaningfulValue(project?.project_date) },
     { key: 'customer', label: 'Customer', ok: Boolean(customer?.id || project?.customer_id) },
     { key: 'project_type', label: 'Report title or type', ok: hasMeaningfulValue(project?.title) || Boolean(typeCfg) },
     { key: 'findings', label: 'Findings captured', ok: Object.values(findings).some(hasMeaningfulValue) },
-    ...(isCertificate ? [] : [
-      { key: 'recommendations', label: 'Recommendation / notes', ok: hasMeaningfulValue(project?.recommendations) },
-    ]),
-    { key: 'photos', label: 'Photos attached', ok: Number(photoCount) > 0 },
   ];
 
   if (project?.project_type === 'wdo_inspection') {
@@ -468,11 +463,6 @@ function evaluateProjectSendReadiness({ project, customer, photoCount = 0 }) {
     required,
     missing: required.filter(item => !item.ok).map(({ key, label }) => ({ key, label })),
   };
-}
-
-async function countProjectPhotos(projectId) {
-  const row = await db('project_photos').where({ project_id: projectId }).count('* as count').first();
-  return Number(row?.count || row?.n || 0);
 }
 
 async function validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id }) {
@@ -1251,8 +1241,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
 
-    const photoCount = await countProjectPhotos(project.id);
-    const readiness = evaluateProjectSendReadiness({ project, customer, photoCount });
+    const readiness = evaluateProjectSendReadiness({ project, customer });
     const overrideReason = String(req.body?.override_reason || '').trim();
     const hasReadinessOverride = readiness.missing.length > 0 && overrideReason.length > 0;
     if (readiness.missing.length > 0 && !hasReadinessOverride) {
@@ -1667,6 +1656,7 @@ router._private = {
   validateUploadedImage,
   isMissingS3ObjectError,
   logProjectActivity,
+  evaluateProjectSendReadiness,
 };
 
 module.exports = router;

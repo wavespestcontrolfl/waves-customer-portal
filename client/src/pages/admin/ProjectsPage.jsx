@@ -4,12 +4,14 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
+import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from "../../components/tech/ProjectFindingFieldInput";
+import { COLORS, FONTS } from "../../theme-brand";
 
 /**
  * Projects — post-service inspection / documentation reports.
  *
  * Tier 2 light zinc palette. Techs create drafts from /tech; admin reviews,
- * edits findings, manages photos, and presses Send to generate the
+ * edits findings, manages optional photos, and presses Send to generate the
  * customer-facing /report/project/:token link.
  */
 
@@ -30,6 +32,12 @@ const D = {
 };
 
 const MONO = "'JetBrains Mono', monospace";
+const ESTIMATE_BG = "#FAF8F3";
+const ESTIMATE_BORDER = "#E7E2D7";
+const ESTIMATE_INPUT_BORDER = "#CFE7F5";
+const ESTIMATE_INPUT_BG = "#F8FCFE";
+const ESTIMATE_TEXT = COLORS.blueDeeper;
+const ESTIMATE_MUTED = "#6B7280";
 
 const STATUS_STYLES = {
   draft: { bg: "#FEF3C7", fg: "#92400E", label: "Draft" },
@@ -239,7 +247,6 @@ function evaluateProjectReadiness({
   findings,
   recommendations,
   projectDate,
-  photos,
 }) {
   const isCertificate = project?.project_type === CERTIFICATE_TYPE;
   const required = [
@@ -255,13 +262,6 @@ function evaluateProjectReadiness({
       label: "Findings captured",
       ok: Object.values(findings || {}).some(hasMeaningfulValue),
     },
-    ...(isCertificate
-      ? []
-      : [{
-        label: "Recommendation / notes",
-        ok: hasMeaningfulValue(recommendations),
-      }]),
-    { label: "Photos attached", ok: (photos || []).length > 0 },
   ];
   if (project?.project_type === WDO_TYPE) {
     required.push(
@@ -353,11 +353,6 @@ function evaluateProjectReadiness({
     .join(" ")
     .toLowerCase();
   const quality = [];
-  if (!isCertificate && recommendations && recommendations.length < 80) {
-    quality.push(
-      "Recommendation is short; add what was found, why it matters, and the next step.",
-    );
-  }
   if (
     /\b(termite|roach|ant|rodent|mouse|rat|bed bug|wdo)\b/.test(text) &&
     !/\b(kitchen|bath|attic|garage|eave|exterior|interior|bedroom|crawlspace|foundation|wall|ceiling|floor|window|door)\b/.test(
@@ -365,17 +360,6 @@ function evaluateProjectReadiness({
     )
   ) {
     quality.push("Pest or WDO activity is mentioned without a clear location.");
-  }
-  if (
-    /\b(treat|treatment|apply|application|boracare|bora care|bait|exclusion|follow[-\s]?up)\b/.test(
-      text,
-    ) &&
-    !isCertificate &&
-    !recommendations
-  ) {
-    quality.push(
-      "Treatment language appears in findings but the recommendation field is empty.",
-    );
   }
   if (
     /\b(eliminate|eradicate|guarantee|100%|pest-free|impenetrable)\b/.test(text)
@@ -761,33 +745,6 @@ function CustomerProjectReportPreview({
               ))}
             </div>
           )}
-
-          <div
-            style={{
-              padding: "10px 12px",
-              borderRadius: 9,
-              background: "#FFF9DB",
-              border: "1px solid #FFD700",
-              marginBottom: 12,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 900,
-                color: "#1B2C5B",
-                textTransform: "uppercase",
-                letterSpacing: 0.5,
-              }}
-            >
-              Next step
-            </div>
-            <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.55, marginTop: 4 }}>
-              {recommendations
-                ? "Review the findings and follow the recommendation below."
-                : "Add recommendations before sending so the customer sees a clear next step."}
-            </div>
-          </div>
 
           {findingsEntries.length > 0 && (
             <div style={{ marginTop: 12 }}>
@@ -1350,6 +1307,7 @@ function ProjectDetail({
   const [delivery, setDelivery] = useState(null);
   const [aiUseComms, setAiUseComms] = useState(true);
   const [aiUsePhotos, setAiUsePhotos] = useState(true);
+  const [productCatalog, setProductCatalog] = useState([]);
 
   async function load(options = {}) {
     const { preserveEdits = false } = options;
@@ -1400,6 +1358,27 @@ function ProjectDetail({
   const typeCfg =
     project && typesRegistry ? typesRegistry[project.project_type] : null;
 
+  useEffect(() => {
+    if (!typeCfg?.findingsFields || !hasCatalogBackedProjectFields(typeCfg.findingsFields) || productCatalog.length) return;
+    adminFetch("/admin/dispatch/products/catalog")
+      .then((r) => r.json())
+      .then((d) => setProductCatalog(d.products || []))
+      .catch(() => { /* product fields can still accept free text */ });
+  }, [typeCfg, productCatalog.length]);
+
+  function handleProductSelect(fieldKey, product) {
+    const productName = product?.name || product?.product_name || "";
+    const epaRegistration = product?.epa_reg_number || product?.epaRegNumber || "";
+    const activeIngredient = product?.active_ingredient || product?.activeIngredient || "";
+    setEditFindings((f) => ({
+      ...f,
+      [fieldKey]: productName || f[fieldKey] || "",
+      ...(fieldKey === "product_name" && epaRegistration ? { epa_registration: epaRegistration } : {}),
+      ...(fieldKey === "product_name" && activeIngredient ? { active_ingredient: activeIngredient } : {}),
+    }));
+    setDirty(true);
+  }
+
   async function saveEdits() {
     setSaving(true);
     setError("");
@@ -1437,7 +1416,6 @@ function ProjectDetail({
       findings: editFindings,
       recommendations: editRecs,
       projectDate: editProjectDate,
-      photos: data?.photos || [],
     });
     if (readiness.missing.length || readiness.quality.length) {
       const lines = [
@@ -1729,17 +1707,18 @@ function ProjectDetail({
     findings: editFindings,
     recommendations: editRecs,
     projectDate: editProjectDate,
-    photos: data?.photos || [],
   });
 
   return (
     <div
       style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 10,
+        background: ESTIMATE_BG,
+        border: `1px solid ${ESTIMATE_BORDER}`,
+        borderRadius: 16,
         display: "flex",
         flexDirection: "column",
+        overflow: "hidden",
+        boxShadow: "0 10px 30px rgba(27, 44, 91, 0.08)",
       }}
     >
       {/* Header */}
@@ -1748,8 +1727,9 @@ function ProjectDetail({
           display: "flex",
           alignItems: "flex-start",
           justifyContent: "space-between",
-          padding: "14px 16px",
-          borderBottom: `1px solid ${D.border}`,
+          padding: "20px 24px",
+          borderBottom: `1px solid ${ESTIMATE_BORDER}`,
+          background: COLORS.white,
         }}
       >
         {" "}
@@ -1758,20 +1738,22 @@ function ProjectDetail({
           <div
             style={{
               fontSize: 12,
-              color: D.muted,
+              color: ESTIMATE_MUTED,
               textTransform: "uppercase",
-              letterSpacing: 1,
-              fontWeight: 700,
+              letterSpacing: "0.12em",
+              fontWeight: 800,
             }}
           >
             {typeCfg?.label || project.project_type} · {project.customer_name}
           </div>{" "}
           <div
             style={{
-              fontSize: 18,
-              fontWeight: 800,
-              color: D.heading,
+              fontFamily: FONTS.serif,
+              fontSize: 32,
+              fontWeight: 500,
+              color: ESTIMATE_TEXT,
               marginTop: 4,
+              lineHeight: 1.1,
             }}
           >
             {project.title || typeCfg?.label || "Project"}
@@ -1830,7 +1812,7 @@ function ProjectDetail({
       {/* Body */}
       <div
         style={{
-          padding: 16,
+          padding: 24,
           display: "flex",
           flexDirection: "column",
           gap: 18,
@@ -2025,59 +2007,22 @@ function ProjectDetail({
                   </button>
                 )}
             </div>
-            {field.type === "select" ? (
-              <select
-                id={fieldInputId(field.key)}
-                name={`findings.${field.key}`}
-                value={editFindings[field.key] || ""}
-                onChange={(e) => {
-                  setEditFindings((f) => ({
-                    ...f,
-                    [field.key]: e.target.value,
-                  }));
-                  setDirty(true);
-                }}
-                style={inputStyle}
-              >
-                {" "}
-                <option value="">Select…</option>
-                {field.options.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt}
-                  </option>
-                ))}
-              </select>
-            ) : field.type === "textarea" ? (
-              <textarea
-                id={fieldInputId(field.key)}
-                name={`findings.${field.key}`}
-                value={editFindings[field.key] || ""}
-                onChange={(e) => {
-                  setEditFindings((f) => ({
-                    ...f,
-                    [field.key]: e.target.value,
-                  }));
-                  setDirty(true);
-                }}
-                rows={3}
-                style={{ ...inputStyle, resize: "vertical", minHeight: 72 }}
-              />
-            ) : (
-              <input
-                id={fieldInputId(field.key)}
-                name={`findings.${field.key}`}
-                type="text"
-                value={editFindings[field.key] || ""}
-                onChange={(e) => {
-                  setEditFindings((f) => ({
-                    ...f,
-                    [field.key]: e.target.value,
-                  }));
-                  setDirty(true);
-                }}
-                style={inputStyle}
-              />
-            )}
+            <ProjectFindingFieldInput
+              field={field}
+              id={fieldInputId(field.key)}
+              name={`findings.${field.key}`}
+              value={editFindings[field.key] || ""}
+              onChange={(value) => {
+                setEditFindings((f) => ({
+                  ...f,
+                  [field.key]: value,
+                }));
+                setDirty(true);
+              }}
+              inputStyle={inputStyle}
+              products={productCatalog}
+              onProductSelect={(product) => handleProductSelect(field.key, product)}
+            />
           </div>
         ))}
         {/* Recommendations */}
@@ -2218,7 +2163,7 @@ function ProjectDetail({
           >
             {" "}
             <Label style={{ margin: 0 }}>
-              Photos ({data.photos?.length || 0})
+              Photos (optional) ({data.photos?.length || 0})
             </Label>{" "}
             <label
               style={{
@@ -2730,12 +2675,12 @@ function Label({ children, style, htmlFor }) {
     <label
       htmlFor={htmlFor}
       style={{
-        fontSize: 11,
-        fontWeight: 700,
-        color: D.muted,
+        fontSize: 12,
+        fontWeight: 800,
+        color: ESTIMATE_MUTED,
         textTransform: "uppercase",
-        letterSpacing: 1,
-        marginBottom: 6,
+        letterSpacing: "0.12em",
+        marginBottom: 8,
         display: "block",
         ...(style || {}),
       }}
@@ -2747,33 +2692,38 @@ function Label({ children, style, htmlFor }) {
 
 const inputStyle = {
   width: "100%",
-  background: D.card,
-  color: D.text,
-  border: `1px solid ${D.inputBorder}`,
-  borderRadius: 8,
-  padding: "9px 12px",
-  fontSize: 13,
+  minHeight: 48,
+  background: ESTIMATE_INPUT_BG,
+  color: ESTIMATE_TEXT,
+  border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
+  borderRadius: 10,
+  padding: "12px 14px",
+  fontSize: 15,
+  fontWeight: 500,
   boxSizing: "border-box",
-  fontFamily: "'Roboto', Arial, sans-serif",
+  fontFamily: FONTS.body,
+  outline: "none",
 };
 
 const btnPrimary = {
-  padding: "9px 16px",
-  borderRadius: 8,
-  fontSize: 13,
+  minHeight: 48,
+  padding: "0 18px",
+  borderRadius: 10,
+  fontSize: 14,
   fontWeight: 700,
-  background: D.accent,
+  background: ESTIMATE_TEXT,
   color: "#fff",
   border: "none",
   cursor: "pointer",
 };
 const btnSecondary = {
-  padding: "9px 14px",
-  borderRadius: 8,
-  fontSize: 13,
+  minHeight: 48,
+  padding: "0 16px",
+  borderRadius: 10,
+  fontSize: 14,
   fontWeight: 600,
-  background: D.card,
-  color: D.text,
-  border: `1px solid ${D.inputBorder}`,
+  background: COLORS.white,
+  color: ESTIMATE_TEXT,
+  border: `1px solid ${ESTIMATE_BORDER}`,
   cursor: "pointer",
 };

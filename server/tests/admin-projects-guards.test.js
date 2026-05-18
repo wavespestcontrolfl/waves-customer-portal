@@ -18,6 +18,7 @@ const {
   hasProjectAccess,
   detectedImageMime,
   validateUploadedImage,
+  evaluateProjectSendReadiness,
 } = projectsRouter._private;
 
 describe('admin project route guards', () => {
@@ -97,5 +98,69 @@ describe('admin project route guards', () => {
       mimetype: 'image/png',
       buffer: Buffer.from('<svg></svg>'),
     })).toThrow(/not a supported image/);
+  });
+
+  test('send readiness does not require photos or recommendations for project report types', () => {
+    const cases = [
+      {
+        project_type: 'wdo_inspection',
+        findings: {
+          property_address: '123 Main St, Bradenton, FL 34202',
+          wdo_finding: 'No visible signs of WDO observed',
+          inspection_scope: 'Interior, garage, attic access, and exterior perimeter.',
+        },
+      },
+      {
+        project_type: 'termite_inspection',
+        findings: { areas_inspected: 'Garage, foundation, attic access, and exterior perimeter.' },
+      },
+      {
+        project_type: 'pest_inspection',
+        findings: { areas_inspected: 'Kitchen, bathrooms, garage, and exterior entry points.' },
+      },
+      {
+        project_type: 'flea',
+        findings: { areas_inspected: 'Pet resting areas, living room rug, bedrooms, and shaded yard areas.' },
+      },
+      {
+        project_type: 'rodent_exclusion',
+        findings: { entry_points_found: 'Gap at garage door seal and pipe penetration on north wall.' },
+      },
+      {
+        project_type: 'bed_bug',
+        findings: { rooms_treated: 'Master bedroom and living room couch.' },
+      },
+      {
+        project_type: 'pre_treatment_termite_certificate',
+        findings: {
+          treatment_address: '123 Main St, Bradenton, FL 34202',
+          treatment_method: 'Soil barrier (chemical)',
+          product_name: 'Termidor SC',
+          active_ingredient: 'fipronil',
+          concentration_pct: '0.060',
+          square_footage: '1800',
+          gallons_applied: '90',
+          applicator_name: 'Adam Benetti',
+          applicator_fdacs_id: 'JF123456',
+          applicator_attestation: 'I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).',
+        },
+      },
+    ];
+
+    for (const report of cases) {
+      const readiness = evaluateProjectSendReadiness({
+        project: {
+          id: `project-${report.project_type}`,
+          customer_id: 'customer-1',
+          project_date: '2026-05-18',
+          ...report,
+        },
+        customer: { id: 'customer-1' },
+      });
+
+      expect(readiness.missing).toEqual([]);
+      expect(readiness.required.map((item) => item.key)).not.toContain('photos');
+      expect(readiness.required.map((item) => item.key)).not.toContain('recommendations');
+    }
   });
 });
