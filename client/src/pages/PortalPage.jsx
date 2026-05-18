@@ -5497,15 +5497,6 @@ const SERVICE_CATALOG = [
   },
 ];
 
-const ADD_ONS = [
-  { id: 'lawn_health_boost', name: 'Lawn Health Boost', icon: 'sprout', price: 75, unit: '/visit', min: 'Targeted turf recovery follow-up', desc: 'Focused weed, fungus, chinch bug, or turf-stress visit with notes added to your lawn profile.' },
-  { id: 'fungicide_protection', name: 'Fungicide Protection', icon: 'shield', price: 65, unit: '/visit', min: 'High-humidity months', desc: 'Preventive or corrective fungicide application for brown patch, dollar spot, and seasonal lawn disease pressure.' },
-  { id: 'mosquito_event_spray', name: 'Mosquito Event Spray', icon: 'bug', price: 75, unit: '/event', min: 'Before outdoor gatherings', desc: 'Extra mosquito barrier treatment timed before pool days, parties, and holiday weekends.' },
-  { id: 'mosquito_source_reduction', name: 'Mosquito Source Reduction', icon: 'droplet', price: 45, unit: '/visit', min: 'Breeding-site inspection', desc: 'Drainage, container, and shaded-area inspection with larvicide treatment where appropriate.' },
-  { id: 'tree_shrub', name: 'Tree & Shrub Care', icon: 'tree', price: 50, unit: '/month', min: 'Ornamentals, hedges, and palms', desc: 'Seasonal insect, disease, and nutrition care for landscape plants around the home.' },
-  { id: 'palm_injection', name: 'Palm Injection', icon: 'palm', price: 35, unit: '/palm', min: '$75/visit minimum', desc: 'Trunk-injected nutrients and pest protection for coconut, queen, and royal palms.' },
-];
-
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
 const TIER_SERVICES = { Bronze: 1, Silver: 2, Gold: 3, Platinum: 4 };
 const TIER_DISCOUNTS = { Bronze: 0, Silver: 0.10, Gold: 0.15, Platinum: 0.20 };
@@ -5540,18 +5531,299 @@ const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
 // Hidden badge types (engagement-tracking ones we don't show)
 const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer', 'feedback_champion'];
 
+function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secondaryButton }) {
+  const [prompt, setPrompt] = useState("I'm interested in adding lawn care");
+  const [result, setResult] = useState(null);
+  const [selectedId, setSelectedId] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [requesting, setRequesting] = useState(false);
+  const [requested, setRequested] = useState(false);
+
+  const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  const options = result?.options || [];
+  const selected = options.find((option) => option.id === selectedId) || options[0] || null;
+
+  const runPricing = async (nextPrompt = prompt) => {
+    const cleanPrompt = String(nextPrompt || '').trim();
+    setPrompt(cleanPrompt);
+    setLoading(true);
+    setError('');
+    setRequested(false);
+    try {
+      const data = await api.queryCustomerPricing(cleanPrompt);
+      setResult(data);
+      setSelectedId(data?.options?.[0]?.id || '');
+    } catch (err) {
+      setError(err.message || 'Pricing unavailable.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitRequest = async () => {
+    if (requesting) return;
+    setRequesting(true);
+    try {
+      const subject = selected?.requestSubject || 'Service pricing review requested';
+      const description = selected?.requestDescription || `Customer asked WAVES AI: "${prompt}". ${result?.message || ''}`;
+      await api.createRequest?.({ category: 'add_service', subject, description });
+      setRequested(true);
+    } catch (err) {
+      alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+    } finally {
+      setRequesting(false);
+    }
+  };
+
+  const promptChips = [
+    { icon: 'sprout', label: 'Lawn care', prompt: "I'm interested in adding lawn care" },
+    { icon: 'bug', label: 'Mosquito', prompt: "I'm interested in adding mosquito service" },
+    { icon: 'tree', label: 'Tree & shrub', prompt: "I'm interested in adding tree and shrub care" },
+    { icon: 'shield', label: 'Termite', prompt: "I'm interested in termite bait monitoring" },
+  ];
+
+  return (
+    <section style={{ ...card, padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={sectionTitle}>WAVES AI</div>
+          <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>Property-aware pricing</div>
+          <div style={{ marginTop: 4, color: '#64748B', fontSize: 14, lineHeight: 1.5 }}>
+            Pricing is calculated from this property profile and your current Waves services.
+          </div>
+        </div>
+        {result?.currentServices?.length ? (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: compact ? 'flex-start' : 'flex-end', maxWidth: compact ? '100%' : 360 }}>
+            {result.currentServices.slice(0, 4).map((service) => (
+              <span key={service} style={{
+                padding: '5px 8px',
+                borderRadius: 8,
+                border: '1px solid #CDEAFE',
+                background: '#EEF6FF',
+                color: B.blueDeeper,
+                fontSize: 12,
+                fontWeight: 800,
+              }}>
+                {service}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          runPricing();
+        }}
+        style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1fr) auto', gap: 10, marginTop: 16 }}
+      >
+        <div style={{ position: 'relative' }}>
+          <Icon name="sparkles" size={16} strokeWidth={2} style={{ position: 'absolute', left: 12, top: 13, color: B.wavesBlue }} />
+          <input
+            id="portal-waves-ai-pricing"
+            name="wavesAiPricing"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="I'm interested in adding lawn care"
+            style={{
+              width: '100%',
+              minHeight: 42,
+              borderRadius: 8,
+              border: '1px solid #CBD5E1',
+              padding: '10px 12px 10px 38px',
+              fontSize: 14,
+              color: B.blueDeeper,
+              fontFamily: FONTS.body,
+              outline: 'none',
+              boxSizing: 'border-box',
+            }}
+          />
+        </div>
+        <button type="submit" disabled={loading} style={{
+          ...primaryButton,
+          minHeight: 42,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 8,
+          opacity: loading ? 0.65 : 1,
+          cursor: loading ? 'wait' : 'pointer',
+        }}>
+          <Icon name="brain" size={15} strokeWidth={2} />
+          {loading ? 'Pricing...' : 'Get Pricing'}
+        </button>
+      </form>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+        {promptChips.map((chip) => (
+          <button
+            key={chip.label}
+            type="button"
+            onClick={() => runPricing(chip.prompt)}
+            style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <Icon name={chip.icon} size={14} strokeWidth={1.8} />
+            {chip.label}
+          </button>
+        ))}
+      </div>
+
+      {error && (
+        <div style={{ marginTop: 14 }}>
+          <PortalInlineState icon="warning" tone="danger" title="Pricing unavailable" message={error} />
+        </div>
+      )}
+
+      {result && !error && (
+        <div style={{ marginTop: 16, display: 'grid', gap: 12 }}>
+          <div style={{
+            border: `1px solid ${result.ok ? '#BFDBFE' : '#FED7AA'}`,
+            borderRadius: 8,
+            background: result.ok ? '#F8FBFF' : '#FFF7ED',
+            padding: 12,
+            color: B.grayDark,
+            fontSize: 14,
+            lineHeight: 1.5,
+          }}>
+            <strong style={{ color: B.blueDeeper }}>{result.ok ? 'WAVES AI:' : 'Review needed:'}</strong> {result.message}
+            {result.property?.homeSqFt || result.property?.lotSqFt ? (
+              <div style={{ marginTop: 6, color: '#64748B', fontSize: 12 }}>
+                Property basis: {[
+                  result.property.homeSqFt ? `${Number(result.property.homeSqFt).toLocaleString()} sq ft home` : null,
+                  result.property.lotSqFt ? `${Number(result.property.lotSqFt).toLocaleString()} sq ft lot` : null,
+                  result.property.lawnSqFt ? `${Number(result.property.lawnSqFt).toLocaleString()} sq ft turf` : null,
+                ].filter(Boolean).join(' - ')}
+              </div>
+            ) : null}
+          </div>
+
+          {options.length > 0 && (
+            <>
+              <label style={{ display: 'grid', gap: 6 }}>
+                <span style={{ fontSize: 12, color: '#64748B', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
+                <select
+                  value={selected?.id || ''}
+                  onChange={(e) => {
+                    setSelectedId(e.target.value);
+                    setRequested(false);
+                  }}
+                  style={{
+                    width: '100%',
+                    minHeight: 42,
+                    borderRadius: 8,
+                    border: '1px solid #CBD5E1',
+                    background: '#fff',
+                    color: B.blueDeeper,
+                    padding: '9px 12px',
+                    fontSize: 14,
+                    fontFamily: FONTS.body,
+                  }}
+                >
+                  {options.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label} - {option.monthly ? `${money(option.monthly, 0)}/mo` : money(option.oneTime || option.dueAtStart, 0)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {selected && (
+                <div style={{
+                  border: '1px solid #E1E7EF',
+                  borderRadius: 8,
+                  background: '#fff',
+                  padding: 14,
+                  display: 'grid',
+                  gap: 12,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                    <div>
+                      <div style={{ fontSize: 16, color: B.blueDeeper, fontWeight: 850 }}>{selected.label}</div>
+                      <div style={{ marginTop: 3, color: '#64748B', fontSize: 14 }}>{selected.cadence}</div>
+                    </div>
+                    <div style={{ textAlign: compact ? 'left' : 'right' }}>
+                      <div style={{ fontSize: 24, color: B.blueDeeper, fontWeight: 850, lineHeight: 1 }}>
+                        {selected.monthly ? `${money(selected.monthly, 0)}/mo` : money(selected.oneTime || selected.dueAtStart, 0)}
+                      </div>
+                      <div style={{ marginTop: 4, color: '#64748B', fontSize: 12 }}>
+                        {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+                    {[
+                      selected.estimatedAdditionalMonthly != null && selected.monthly ? { label: 'Added monthly', value: money(selected.estimatedAdditionalMonthly, 0) } : null,
+                      selected.estimatedPlanMonthly ? { label: 'Plan after add', value: `${money(selected.estimatedPlanMonthly, 0)}/mo` } : null,
+                      selected.dueAtStart ? { label: 'Setup', value: money(selected.dueAtStart, 0) } : null,
+                      selected.oneTime ? { label: 'One-time', value: money(selected.oneTime, 0) } : null,
+                      selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
+                    ].filter(Boolean).slice(0, 3).map((item) => (
+                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#F8FAFC', border: '1px solid #E1E7EF' }}>
+                        <div style={{ color: '#64748B', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
+                        <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {selected.notes?.length ? (
+                    <div style={{ color: B.orange, fontSize: 14, lineHeight: 1.45 }}>
+                      {selected.notes[0]}
+                    </div>
+                  ) : null}
+
+                  {requested ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.green, fontSize: 14, fontWeight: 850 }}>
+                      <Icon name="check" size={15} strokeWidth={2} /> Request sent
+                    </span>
+                  ) : (
+                    <button type="button" onClick={submitRequest} disabled={requesting} style={{
+                      ...primaryButton,
+                      width: compact ? '100%' : 'fit-content',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      opacity: requesting ? 0.65 : 1,
+                      cursor: requesting ? 'wait' : 'pointer',
+                    }}>
+                      <Icon name="plus" size={15} strokeWidth={2} />
+                      {requesting ? 'Sending...' : 'Request This'}
+                    </button>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {options.length === 0 && result && (
+            <button type="button" onClick={submitRequest} disabled={requesting || requested} style={{
+              ...secondaryButton,
+              width: compact ? '100%' : 'fit-content',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+            }}>
+              <Icon name={requested ? 'check' : 'message'} size={15} strokeWidth={2} />
+              {requested ? 'Review request sent' : 'Request Manual Review'}
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // =========================================================================
 // MY PLAN TAB
 // =========================================================================
 function MyPlanTab({ customer }) {
   const [expandedService, setExpandedService] = useState(null);
-  const [expandedAddon, setExpandedAddon] = useState(null);
   const [hoveredCalendarItem, setHoveredCalendarItem] = useState(null);
   const [nextService, setNextService] = useState(null);
   const [upcomingServices, setUpcomingServices] = useState([]);
   const [serviceHistory, setServiceHistory] = useState([]);
-  const [addonRequested, setAddonRequested] = useState({});
-  const [addonSubmitting, setAddonSubmitting] = useState({});
   const [showPauseForm, setShowPauseForm] = useState(false);
   const [showCancelForm, setShowCancelForm] = useState(false);
   const [pauseDuration, setPauseDuration] = useState('1');
@@ -5735,15 +6007,6 @@ function MyPlanTab({ customer }) {
       status: event.source === 'completed' ? 'Completed' : event.status || statusLabel,
     };
   };
-
-  // Included service IDs for filtering add-ons
-  const includedServiceIds = includedServices.map(s => s.id);
-
-  // Filter add-ons that are NOT already included in the plan
-  const availableAddOns = ADD_ONS.filter(addon => {
-    // Don't filter based on overlap; just exclude exact matches.
-    return !includedServiceIds.includes(addon.id);
-  });
 
   const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const nextDate = nextService ? parseDate(nextService.date) : null;
@@ -6008,95 +6271,13 @@ function MyPlanTab({ customer }) {
             </div>
           </section>
 
-          <section style={{ ...card, padding: 20 }}>
-            <div style={sectionTitle}>Add To Plan</div>
-            <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>Common upgrades</div>
-            <div style={{ marginTop: 4, color: muted, fontSize: 14 }}>
-              {Math.round(discount * 100)}% {tierName} discount applies where eligible.
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, marginTop: 16 }}>
-              {availableAddOns.map((addon) => {
-                const eligibleDiscount = discount > 0 && addon.id !== 'wdo_inspection';
-                const planPrice = eligibleDiscount ? addon.price * (1 - discount) : addon.price;
-                const expanded = expandedAddon === addon.id;
-                return (
-                  <div key={addon.id} style={{ border: '1px solid #E1E7EF', borderRadius: 8, padding: 14, background: subtle }}>
-                    <div style={{ display: 'flex', gap: 10, minWidth: 0, alignItems: 'flex-start' }}>
-                      <span style={{ color: B.blueDeeper, display: 'inline-flex', marginTop: 1, flexShrink: 0 }}>
-                        <Icon name={iconName(addon.icon)} size={18} strokeWidth={1.8} />
-                      </span>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.25 }}>{addon.name}</div>
-                        <div style={{ marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{addon.min}</div>
-                        <div style={{ marginTop: 8, color: B.blueDeeper, fontSize: 14, fontWeight: 850, lineHeight: 1.25 }}>
-                          {money(planPrice)}{addon.unit}
-                        </div>
-                      </div>
-                    </div>
-                    {expanded && (
-                      <div style={{ marginTop: 10, color: B.grayDark, fontSize: 14, lineHeight: 1.5 }}>
-                        {addon.desc}
-                        {eligibleDiscount && (
-                          <div style={{ color: B.green, fontWeight: 800, marginTop: 6 }}>
-                            Was {money(addon.price)}{addon.unit}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                      <button
-                        type="button"
-                        onClick={() => setExpandedAddon(expanded ? null : addon.id)}
-                        style={{ ...secondaryButton, padding: '8px 11px', fontSize: 12 }}
-                      >
-                        {expanded ? 'Hide' : 'Details'}
-                      </button>
-                      {addonRequested[addon.id] ? (
-                        <span style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          minHeight: 34,
-                          padding: '0 10px',
-                          color: B.green,
-                          fontSize: 12,
-                          fontWeight: 850,
-                        }}>
-                          <Icon name="check" size={14} strokeWidth={2} /> Request sent
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={addonSubmitting[addon.id]}
-                          onClick={async () => {
-                            if (addonSubmitting[addon.id]) return;
-                            setAddonSubmitting(prev => ({ ...prev, [addon.id]: true }));
-                            try {
-                              await api.createRequest?.({ category: 'add_service', subject: `Add ${addon.name} to my plan`, description: `Customer requested to add ${addon.name} via portal.` });
-                              setAddonRequested(prev => ({ ...prev, [addon.id]: true }));
-                            } catch (err) {
-                              alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                            } finally {
-                              setAddonSubmitting(prev => ({ ...prev, [addon.id]: false }));
-                            }
-                          }}
-                          style={{
-                            ...primaryButton,
-                            padding: '8px 11px',
-                            fontSize: 12,
-                            opacity: addonSubmitting[addon.id] ? 0.65 : 1,
-                            cursor: addonSubmitting[addon.id] ? 'wait' : 'pointer',
-                          }}
-                        >
-                          {addonSubmitting[addon.id] ? 'Sending...' : 'Request'}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
+          <WavesAiPricingPanel
+            compact={compact}
+            card={card}
+            sectionTitle={sectionTitle}
+            primaryButton={primaryButton}
+            secondaryButton={secondaryButton}
+          />
 
           <section style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Compare Plans</div>

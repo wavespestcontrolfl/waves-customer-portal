@@ -282,6 +282,13 @@ class ApiClient {
     return this.request('/requests');
   }
 
+  queryCustomerPricing(prompt) {
+    return this.request('/customer-pricing/query', {
+      method: 'POST',
+      body: JSON.stringify({ prompt }),
+    });
+  }
+
   // ---- Lawn Health ----
   getLawnHealth(customerId) {
     return this.request(`/lawn-health/${customerId}`);
