@@ -232,7 +232,7 @@ async function executeAction(alertId, actionIndex) {
   if (actionIndex < 0 || actionIndex >= actions.length) throw new Error('Invalid action index');
 
   const action = actions[actionIndex];
-  if (action.type === 'sequence') {
+  if (action?.type === 'sequence' || action?.sequenceType) {
     return {
       success: false,
       code: 'retired_action_type',
