@@ -18,6 +18,7 @@ const pricingLimiter = rateLimit({
 
 const querySchema = Joi.object({
   prompt: Joi.string().trim().allow('').max(240).default(''),
+  targetTier: Joi.string().trim().valid('Bronze', 'Silver', 'Gold', 'Platinum').optional(),
 });
 
 router.use(authenticate);
@@ -30,6 +31,7 @@ router.post('/query', pricingLimiter, async (req, res, next) => {
     const result = await buildCustomerPricingResponse({
       customer: req.customer,
       prompt: value.prompt,
+      targetTier: value.targetTier,
       db,
     });
 

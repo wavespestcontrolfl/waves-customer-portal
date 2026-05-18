@@ -282,10 +282,10 @@ class ApiClient {
     return this.request('/requests');
   }
 
-  queryCustomerPricing(prompt) {
+  queryCustomerPricing(prompt, targetTier) {
     return this.request('/customer-pricing/query', {
       method: 'POST',
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, targetTier }),
     });
   }
 
