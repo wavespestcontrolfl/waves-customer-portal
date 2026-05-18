@@ -367,18 +367,52 @@ function mapPipelineCustomer(c, stage = c.pipeline_stage) {
   };
 }
 
+function customerSearchTerms(value) {
+  return String(value || '')
+    .trim()
+    .match(/[a-z0-9]+/gi) || [];
+}
+
 function applyCustomerListFilters(query, filters) {
   const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited } = filters;
   if (search) {
     const s = `%${search}%`;
     const isPhoneLike = /^[\d\s().+\-]+$/.test(search);
     const phoneDigits = isPhoneLike ? String(search).replace(/\D/g, '') : '';
+    const terms = customerSearchTerms(search);
+    const searchableTextSql = `
+      CONCAT_WS(' ',
+        first_name,
+        last_name,
+        company_name,
+        phone,
+        email,
+        address_line1,
+        address_line2,
+        city,
+        state,
+        zip,
+        account_id,
+        profile_label
+      )
+    `;
     query = query.where(function () {
       this.whereILike('first_name', s).orWhereILike('last_name', s)
         .orWhereILike('phone', s).orWhereILike('email', s)
         .orWhereILike('address_line1', s).orWhereILike('city', s)
         .orWhereILike('company_name', s)
-        .orWhereRaw("(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ?", [s]);
+        .orWhereILike('state', s).orWhereILike('zip', s)
+        .orWhereILike('profile_label', s)
+        .orWhereRaw('account_id::text ILIKE ?', [s])
+        .orWhereRaw("(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
+        .orWhereRaw(`${searchableTextSql} ILIKE ?`, [s]);
+      if (terms.length > 1) {
+        this.orWhere(function () {
+          terms.forEach((term) => {
+            this.whereRaw(`${searchableTextSql} ILIKE ?`, [`%${term}%`]);
+          });
+        });
+      }
       if (phoneDigits.length >= 3) {
         this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}%`]);
       }
@@ -1910,6 +1944,7 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
 router._private = {
   CUSTOMER_STAGES,
   cadenceFromEstimateLine,
+  customerSearchTerms,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapPipelineCustomer,
