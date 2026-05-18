@@ -64,8 +64,8 @@ async function hasLocalContent(templateKey) {
 }
 
 /**
- * Enroll a customer into a template's sequence. Idempotent on
- * (template_key, customer_id) — existing active enrollment is a no-op.
+ * Enroll a customer into a template's sequence. Idempotent on customer id
+ * when present, otherwise on normalized lead email for lead-only estimates.
  * If there are no enabled steps, returns { enrolled: false }.
  */
 async function enrollCustomer({ templateKey, customer }) {
@@ -73,42 +73,76 @@ async function enrollCustomer({ templateKey, customer }) {
   if (!template) throw new Error(`Unknown automation template: ${templateKey}`);
   if (!template.enabled) return { enrolled: false, reason: 'template disabled' };
   if (!customer?.email) return { enrolled: false, reason: 'no email' };
+  const normalizedEmail = String(customer.email || '').trim().toLowerCase();
+  if (!normalizedEmail) return { enrolled: false, reason: 'no email' };
 
   const steps = await db('automation_steps')
     .where({ template_key: templateKey, enabled: true })
     .orderBy('step_order', 'asc');
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
-  // Dedupe: already-enrolled customer on this template is a no-op.
+  const existingQuery = db('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
-    const existing = await db('automation_enrollments')
-      .where({ template_key: templateKey, customer_id: customer.id })
-      .first();
-    if (existing && existing.status === 'active') {
-      return { enrolled: false, reason: 'already enrolled', enrollmentId: existing.id };
-    }
+    existingQuery.where({ customer_id: customer.id });
+  } else {
+    existingQuery.whereNull('customer_id').whereRaw('lower(email) = ?', [normalizedEmail]);
+  }
+  const existing = await existingQuery
+    .orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
+    .orderBy('updated_at', 'desc')
+    .first();
+  if (existing && existing.status === 'active') {
+    return { enrolled: false, reason: 'already enrolled', enrollmentId: existing.id };
   }
 
   const firstStep = steps[0];
   const nextSendAt = new Date(Date.now() + (firstStep.delay_hours || 0) * 3600 * 1000);
-
-  const [row] = await db('automation_enrollments').insert({
-    template_key: templateKey,
-    customer_id: customer.id || null,
-    email: customer.email,
-    first_name: customer.first_name || null,
-    last_name: customer.last_name || null,
-    status: 'active',
-    current_step: 0,
-    next_send_at: nextSendAt,
-  }).returning('*').onConflict(['template_key', 'customer_id']).merge({
-    // If a completed/cancelled row exists, re-activate it.
+  const reactivatePayload = {
     status: 'active',
     current_step: 0,
     next_send_at: nextSendAt,
     enrolled_at: new Date(),
     updated_at: new Date(),
-  });
+  };
+  if (existing) {
+    const [reactivated] = await db('automation_enrollments')
+      .where({ id: existing.id })
+      .update(reactivatePayload)
+      .returning('*');
+    return { enrolled: true, enrollmentId: reactivated.id };
+  }
+
+  const payload = {
+    template_key: templateKey,
+    customer_id: customer.id || null,
+    email: normalizedEmail,
+    first_name: customer.first_name || null,
+    last_name: customer.last_name || null,
+    status: 'active',
+    current_step: 0,
+    next_send_at: nextSendAt,
+  };
+
+  let row;
+  if (customer.id) {
+    [row] = await db('automation_enrollments')
+      .insert(payload)
+      .returning('*')
+      .onConflict(['template_key', 'customer_id'])
+      .merge(reactivatePayload);
+  } else {
+    try {
+      [row] = await db('automation_enrollments').insert(payload).returning('*');
+    } catch (err) {
+      if (err.code !== '23505') throw err;
+      [row] = await db('automation_enrollments')
+        .where({ template_key: templateKey })
+        .whereNull('customer_id')
+        .whereRaw('lower(email) = ?', [normalizedEmail])
+        .update(reactivatePayload)
+        .returning('*');
+    }
+  }
 
   return { enrolled: true, enrollmentId: row.id };
 }

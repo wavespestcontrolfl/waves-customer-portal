@@ -257,10 +257,38 @@ function validateDeliveryOptions(form, estimate) {
   if (form.showOneTimeOption && oneTimeAmount <= 0) {
     return "Offer one-time option requires a one-time total on the generated estimate.";
   }
+  if (form.showOneTimeOption) {
+    const nonPestRecurring = nonPestRecurringServicesForDelivery(estimate);
+    if (nonPestRecurring.length > 0) {
+      return `Offer one-time option is only supported for pest-only recurring estimates. Remove ${nonPestRecurring.join(", ")} or turn off the one-time choice.`;
+    }
+  }
   if (form.billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
     return "Bill by invoice requires a billable recurring or one-time total.";
   }
   return null;
+}
+
+function nonPestRecurringServicesForDelivery(estimate) {
+  const rows = Array.isArray(estimate?.recurring?.services)
+    ? estimate.recurring.services
+    : [];
+  const seen = new Set();
+  return rows
+    .filter((service) => {
+      const label = String(
+        service?.displayName || service?.name || service?.label || service?.service || "",
+      );
+      const key = String(service?.service || "").toLowerCase();
+      return label && !label.toLowerCase().includes("pest") && !key.includes("pest");
+    })
+    .map((service) => service.displayName || service.name || service.label || service.service)
+    .filter((label) => {
+      const key = String(label || "").toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 function formatDatetimeLocal(date) {
@@ -4221,9 +4249,9 @@ export default function EstimateToolViewV2({
                         Offer one-time option
                       </span>{" "}
                       <span className="block text-11 text-ink-secondary">
-                        Customer sees a Recurring / One-time toggle and can
-                        select either. Mosquito adds the matching option
-                        automatically.
+                        Customer sees a Recurring / One-time toggle for
+                        pest-only recurring estimates. Mixed service bundles
+                        should be sent without this option.
                       </span>{" "}
                     </span>{" "}
                   </label>{" "}

@@ -9,6 +9,10 @@ const { isEnabled } = require('../config/feature-gates');
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_SMS_MAX_ATTEMPTS = 3;
+const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
+const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
+const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
+const SCHEDULED_ESTIMATE_RETRY_DELAY_MS = 5 * 60 * 1000;
 
 function purposeForScheduledMessageType(messageType) {
   const type = String(messageType || '').toLowerCase();
@@ -89,6 +93,68 @@ async function claimDueScheduledSms(now) {
   `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now]);
 
   return result.rows || [];
+}
+
+async function recoverStaleScheduledEstimateClaims(now) {
+  const staleBefore = new Date(now.getTime() - SCHEDULED_ESTIMATE_STALE_CLAIM_MS);
+  const result = await db.raw(`
+    UPDATE estimates
+    SET status = CASE
+          WHEN COALESCE(scheduled_send_attempts, 0) >= ? THEN 'send_failed'
+          ELSE 'scheduled'
+        END,
+        last_send_error = COALESCE(last_send_error, 'Scheduled estimate send claim timed out'),
+        updated_at = ?
+    WHERE status = 'sending'
+      AND scheduled_at IS NOT NULL
+      AND updated_at <= ?
+    RETURNING status
+  `, [SCHEDULED_ESTIMATE_MAX_ATTEMPTS, now, staleBefore]);
+
+  const recovered = result.rows || [];
+  if (recovered.length > 0) {
+    const retryCount = recovered.filter(row => row.status === 'scheduled').length;
+    const failedCount = recovered.filter(row => row.status === 'send_failed').length;
+    logger.warn(`[scheduled-estimates] Recovered ${recovered.length} stale claim(s): ${retryCount} retried, ${failedCount} failed`);
+  }
+}
+
+async function claimDueScheduledEstimates(now) {
+  const result = await db.raw(`
+    WITH due AS (
+      SELECT id
+      FROM estimates
+      WHERE status = 'scheduled'
+        AND scheduled_at IS NOT NULL
+        AND scheduled_at <= ?
+      ORDER BY scheduled_at ASC, created_at ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT ?
+    )
+    UPDATE estimates AS e
+    SET status = 'sending',
+        scheduled_send_attempts = COALESCE(e.scheduled_send_attempts, 0) + 1,
+        last_send_error = NULL,
+        updated_at = ?
+    FROM due
+    WHERE e.id = due.id
+    RETURNING e.*
+  `, [now, SCHEDULED_ESTIMATE_CLAIM_LIMIT, now]);
+
+  return result.rows || [];
+}
+
+async function markScheduledEstimateSendFailure(est, errorMessage, { retry = false, now = new Date() } = {}) {
+  const attempts = Number(est.scheduled_send_attempts || 0);
+  const shouldRetry = retry && attempts < SCHEDULED_ESTIMATE_MAX_ATTEMPTS;
+  await db('estimates')
+    .where({ id: est.id, status: 'sending' })
+    .update({
+      status: shouldRetry ? 'scheduled' : 'send_failed',
+      scheduled_at: shouldRetry ? new Date(now.getTime() + SCHEDULED_ESTIMATE_RETRY_DELAY_MS) : null,
+      last_send_error: String(errorMessage || 'Scheduled estimate send failed').slice(0, 1000),
+      updated_at: db.fn.now(),
+    });
 }
 
 function initScheduledJobs() {
@@ -441,10 +507,9 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const scheduled = await db('estimates')
-        .where({ status: 'scheduled' })
-        .where('scheduled_at', '<=', new Date())
-        .whereNotNull('scheduled_at');
+      const now = new Date();
+      await recoverStaleScheduledEstimateClaims(now);
+      const scheduled = await claimDueScheduledEstimates(now);
 
       if (scheduled.length === 0) return;
 
@@ -457,12 +522,14 @@ function initScheduledJobs() {
             logger.info(`Scheduled estimate ${est.id} sent${suffix}`);
           } else {
             logger.warn(`Scheduled estimate ${est.id} was not sent on any channel`);
+            await markScheduledEstimateSendFailure(est, 'Estimate was not sent on any requested channel', { retry: false, now });
           }
         } catch (e) {
           logger.error(`Scheduled estimate ${est.id} failed: ${e.message}`);
+          await markScheduledEstimateSendFailure(est, e.message, { retry: true, now });
         }
       }
-      logger.info(`Scheduled estimates: ${scheduled.length} sent`);
+      logger.info(`Scheduled estimates processed: ${scheduled.length}`);
     } catch (err) {
       logger.error(`Scheduled estimate cron failed: ${err.message}`);
     }
@@ -1487,4 +1554,11 @@ function initBankingSync() {
   logger.info('[stripe-banking] Twice-daily payout sync scheduled (8 AM / 8 PM ET)');
 }
 
-module.exports = { initScheduledJobs, initBankingSync, purposeForScheduledMessageType };
+module.exports = {
+  initScheduledJobs,
+  initBankingSync,
+  purposeForScheduledMessageType,
+  claimDueScheduledEstimates,
+  recoverStaleScheduledEstimateClaims,
+  markScheduledEstimateSendFailure,
+};

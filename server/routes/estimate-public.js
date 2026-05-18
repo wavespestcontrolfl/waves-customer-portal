@@ -121,7 +121,8 @@ function verifyEstimateAskToken(req, estimate) {
 
 function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
   if (!estimate) return false;
-  if (['accepted', 'declined', 'expired'].includes(estimate.status)) return false;
+  if (estimate.archived_at) return false;
+  if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
 }
@@ -293,6 +294,24 @@ function shellQuestionsBar() {
 function tierDiscount(tier) {
   const key = String(tier || '').toLowerCase();
   return PRICING_WAVEGUARD.tiers[key]?.discount ?? 0;
+}
+
+function snapshotTierDiscount(estData, tier) {
+  const discounts = estData?.sendSnapshot?.tierDiscounts || estData?.pricingContext?.tierDiscounts || {};
+  const direct = discounts?.[tier];
+  const lower = discounts?.[String(tier || '').toLowerCase()];
+  const value = Number(direct ?? lower);
+  return Number.isFinite(value) ? value : null;
+}
+
+function tierDiscountForEstimate(estData, tier, fallbackDiscount = null) {
+  const snapshotted = snapshotTierDiscount(estData, tier);
+  if (snapshotted != null) return snapshotted;
+  if (fallbackDiscount !== null && fallbackDiscount !== undefined) {
+    const fallback = Number(fallbackDiscount);
+    if (Number.isFinite(fallback)) return fallback;
+  }
+  return tierDiscount(tier);
 }
 
 // ── Service-preference pricing modifiers ──────────────────────
@@ -518,11 +537,11 @@ function resolveRecurringMonthlyParts(estimate, parsedData) {
   };
 }
 
-function monthlyForRecurringParts(parts = {}, tier, monthlyOff = 0) {
+function monthlyForRecurringParts(parts = {}, tier, monthlyOff = 0, discountResolver = tierDiscount) {
   const discountable = Number(parts.discountableBaseMonthly || 0);
   const nonDiscountable = Number(parts.nonDiscountableMonthly || 0);
   const off = Number(monthlyOff || 0);
-  const total = discountable * (1 - tierDiscount(tier)) + nonDiscountable - off;
+  const total = discountable * (1 - discountResolver(tier)) + nonDiscountable - off;
   return Math.max(0, Math.round(total * 100) / 100);
 }
 
@@ -917,6 +936,12 @@ function renderPage(token, estimate, estData) {
   const address = escapeHtml(est.address || '');
 
   const estResult = estData?.result || estData || {};
+  const savedEstimateTierDiscount = Number(estResult?.recurring?.discount);
+  const estimateTierDiscount = tierDiscountForEstimate(
+    estData,
+    tier,
+    Number.isFinite(savedEstimateTierDiscount) ? savedEstimateTierDiscount : null,
+  );
   const recurring = recurringServicesWithSupplements(estResult);
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
@@ -942,14 +967,15 @@ function renderPage(token, estimate, estData) {
     : recurring;
   const baseMonthly = displayPestOnly ? Number(pestRecurring.monthlyBase || 0) : storedBaseMonthly;
   const recurringMonthlyBeforePrefs = displayPestOnly
-    ? Math.round(baseMonthly * (1 - tierDiscount(tier)) * 100) / 100
+    ? Math.round(baseMonthly * (1 - estimateTierDiscount) * 100) / 100
     : Number(est.monthlyTotal || 0);
 
   const tierPrices = {};
+  const discountResolver = (t) => tierDiscountForEstimate(estData, t);
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
     tierPrices[t] = displayPestOnly
-      ? Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - prefMonthlyOff) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, t, prefMonthlyOff);
+      ? Math.max(0, Math.round((baseMonthly * (1 - discountResolver(t)) - prefMonthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, t, prefMonthlyOff, discountResolver);
   });
 
   const monthlyTotal = Math.max(0, recurringMonthlyBeforePrefs - prefMonthlyOff);
@@ -1001,7 +1027,7 @@ function renderPage(token, estimate, estData) {
 
   const recurringRows = recurring.map((s) => {
     const mo = Number(s.mo || s.monthly || 0);
-    const discounted = Math.round(mo * (1 - tierDiscount(tier)) * 100) / 100;
+    const discounted = Math.round(mo * (1 - estimateTierDiscount) * 100) / 100;
     return `<tr><td>${escapeHtml(s.name)}</td><td style="text-align:right">${fmtMoney(discounted)}/mo</td></tr>`;
   }).join('');
 
@@ -1074,7 +1100,7 @@ function renderPage(token, estimate, estData) {
     : 0;
   const showMembershipFee = membershipFee > 0 && !locked;
 
-  const tierDiscountPct = Math.round(tierDiscount(tier) * 100);
+  const tierDiscountPct = Math.round(estimateTierDiscount * 100);
   const visitsForRecurringService = (svc) => {
     const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
     if (n.includes('pest')) {
@@ -1103,7 +1129,7 @@ function renderPage(token, estimate, estData) {
   };
   const basePerTreatmentForRecurringService = (svc, visits) => {
     const base = rawPerTreatmentForRecurringService(svc, visits);
-    const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? tierDiscount(tier) : 0;
+    const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? estimateTierDiscount : 0;
     return base == null ? null : Math.round(base * (1 - serviceDiscount) * 100) / 100;
   };
   const adjustedPerTreatmentForRecurringService = (svc, visits, basePrice) => {
@@ -3135,7 +3161,7 @@ router.put('/:token/select-tier', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
 
     const { selectedTier } = req.body;
     const ALLOWED_TIERS = ['Bronze', 'Silver', 'Gold', 'Platinum'];
@@ -3158,7 +3184,12 @@ router.put('/:token/select-tier', async (req, res, next) => {
     // below so the next tier flip on this row is a no-op for resolution.
     const recurringMonthlyParts = resolveRecurringMonthlyParts(estimate, parsedData);
     const { baseMonthly, source: baseSource } = recurringMonthlyParts;
-    const monthlyTotal = monthlyForRecurringParts(recurringMonthlyParts, selectedTier);
+    const monthlyTotal = monthlyForRecurringParts(
+      recurringMonthlyParts,
+      selectedTier,
+      0,
+      (tierName) => tierDiscountForEstimate(parsedData, tierName),
+    );
     const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
 
     // Self-heal estimate_data.baseMonthly when we resolved it from the
@@ -3202,7 +3233,7 @@ router.put('/:token/preferences', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
 
     // Only accept known pref keys; coerce to boolean.
     const patch = {};
@@ -3236,20 +3267,26 @@ router.put('/:token/preferences', async (req, res, next) => {
       : resolvedBaseMonthly;
 
     const currentTier = estimate.waveguard_tier || 'Bronze';
-    const currentDiscount = tierDiscount(currentTier);
+    const savedDiscount = Number(parsedData?.result?.recurring?.discount);
+    const preferenceDiscountResolver = (tierName) => tierDiscountForEstimate(
+      parsedData,
+      tierName,
+      tierName === currentTier && Number.isFinite(savedDiscount) ? savedDiscount : null,
+    );
+    const currentDiscount = preferenceDiscountResolver(currentTier);
 
     const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
     const monthlyTotal = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
       ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - monthlyOff) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, monthlyOff);
+      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, monthlyOff, preferenceDiscountResolver);
     const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
     const onetimeBase = Number(parsedData.onetimeTotalBase || estimate.onetime_total || 0);
     const onetimeTotal = Math.max(0, Math.round((onetimeBase - oneTimeOff) * 100) / 100);
     const tierPrices = {};
     ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
       tierPrices[t] = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-        ? Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - monthlyOff) * 100) / 100)
-        : monthlyForRecurringParts(recurringMonthlyParts, t, monthlyOff);
+        ? Math.max(0, Math.round((baseMonthly * (1 - preferenceDiscountResolver(t)) - monthlyOff) * 100) / 100)
+        : monthlyForRecurringParts(recurringMonthlyParts, t, monthlyOff, preferenceDiscountResolver);
     });
 
     // Persist — merge new prefs + self-healed baseMonthly back onto the blob.
@@ -3985,7 +4022,8 @@ function normalizeAcceptPaymentMethodPreference(raw) {
 }
 
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
-  if (['accepted', 'declined', 'expired'].includes(estimate.status)) return false;
+  if (estimate.archived_at) return false;
+  if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
 }
@@ -4318,14 +4356,23 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
 
 async function buildPricingBundle(estimate) {
   cleanupEstimatePricingCache();
+  const estData = typeof estimate.estimate_data === 'string'
+    ? JSON.parse(estimate.estimate_data)
+    : estimate.estimate_data;
+  const snapshotBundle = estData?.sendSnapshot?.pricingBundle;
+  if (snapshotBundle && Array.isArray(snapshotBundle.frequencies)) {
+    return {
+      ...snapshotBundle,
+      source: snapshotBundle.source || 'send_snapshot',
+      snapshotHit: true,
+    };
+  }
+
   const cached = getEstimatePricingCache(estimate);
   if (cached) {
     return { ...cached, cacheHit: true };
   }
 
-  const estData = typeof estimate.estimate_data === 'string'
-    ? JSON.parse(estimate.estimate_data)
-    : estimate.estimate_data;
   const prefs = normalizePrefs(estData?.preferences);
   const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
 
