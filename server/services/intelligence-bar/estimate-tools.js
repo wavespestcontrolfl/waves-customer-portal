@@ -587,6 +587,7 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
       onetimeTotal: estimate.onetime_total,
       monthlyTotal: estimate.monthly_total,
       annualTotal: estimate.annual_total,
+      estimateData: estimate.estimate_data,
     });
     if (deliveryError) return { error: deliveryError };
   }

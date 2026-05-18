@@ -162,6 +162,41 @@ describe('admin estimate persistence', () => {
     expect(inserts).toEqual([]);
   });
 
+  test('rejects a one-time choice on a mixed recurring-service estimate', async () => {
+    const { database, updates, inserts } = makeDatabase({
+      lead: {
+        id: 'lead-1',
+        status: 'new',
+        phone: '9415550101',
+        estimate_id: null,
+      },
+    });
+
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        showOneTimeOption: true,
+        onetimeTotal: 250,
+        estimateData: {
+          result: {
+            recurring: {
+              services: [
+                { name: 'Pest Control', mo: 89 },
+                { name: 'Lawn Care', mo: 80 },
+              ],
+            },
+          },
+        },
+      },
+      technicianId: 'tech-1',
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+    })).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
   test('does not overwrite a draft that changed status during reuse', async () => {
     const { database, updates } = makeDatabase({
       emptyEstimateUpdate: true,

@@ -8,27 +8,34 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
+const EmailTemplateLibrary = require('../services/email-template-library');
+const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
+const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
 const {
   buildEstimatePricingAudit,
   buildEstimatePricingRiskBatch,
   getLatestEstimatePricingAuditSnapshot,
   saveEstimatePricingAuditSnapshot,
 } = require('../services/estimate-pricing-audit');
+const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const {
   markLinkedLeadEstimateSent,
 } = require('../services/lead-estimate-link');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
 const {
   createOrReuseAdminEstimate,
+  estimateExpiresAt,
   estimateViewUrl,
 } = require('../services/admin-estimate-persistence');
 const {
   acceptanceServiceLists,
+  buildPricingBundle,
   bookingServiceFor,
 } = require('./estimate-public');
 
 const ESTIMATE_LIST_LIMIT = 500;
+const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
 
 async function renderTemplate(templateKey, vars, fallback) {
   try {
@@ -38,6 +45,148 @@ async function renderTemplate(templateKey, vars, fallback) {
     }
   } catch { /* fall through */ }
   return fallback;
+}
+
+function parseEstimateData(estimateData) {
+  if (!estimateData) return null;
+  if (typeof estimateData === 'string') {
+    try {
+      return JSON.parse(estimateData);
+    } catch {
+      return null;
+    }
+  }
+  return typeof estimateData === 'object' ? estimateData : null;
+}
+
+function currentTierDiscounts() {
+  const tiers = PRICING_WAVEGUARD.tiers || {};
+  return Object.fromEntries(
+    Object.entries(tiers).map(([key, value]) => [
+      key.charAt(0).toUpperCase() + key.slice(1),
+      Number(value?.discount || 0),
+    ]),
+  );
+}
+
+function canFallbackFromTemplateEmailError(err) {
+  return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
+}
+
+function assertEstimateSendable(estimate) {
+  if (estimate.archived_at) {
+    const err = new Error('Estimate is archived. Unarchive first.');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!SENDABLE_ESTIMATE_STATUSES.has(String(estimate.status || 'draft'))) {
+    const err = new Error(`Estimate status ${estimate.status || 'unknown'} cannot be sent.`);
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
+  const estimateData = parseEstimateData(estimate.estimate_data) || {};
+  const estimateDataForBundle = { ...estimateData };
+  delete estimateDataForBundle.sendSnapshot;
+  const snapshotAt = now().toISOString();
+  const sendSnapshot = {
+    ...(estimateData.sendSnapshot || {}),
+    renderedAt: snapshotAt,
+    tierDiscounts: currentTierDiscounts(),
+  };
+
+  try {
+    clearEstimatePricingCache(estimate.id);
+    sendSnapshot.pricingBundle = await buildPricingBundle({
+      ...estimate,
+      estimate_data: estimateDataForBundle,
+    });
+    clearEstimatePricingCache(estimate.id);
+  } catch (err) {
+    logger.warn(`[admin-estimates] send pricing snapshot failed for estimate ${estimate.id}: ${err.message}`);
+    sendSnapshot.pricingBundleError = err.message;
+  }
+
+  return {
+    ...estimateData,
+    sendSnapshot,
+  };
+}
+
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine }) {
+  if (sendgrid.isConfigured()) {
+    try {
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: 'estimate.delivery',
+        to: estimate.customer_email,
+        payload: {
+          first_name: firstName,
+          estimate_url: viewUrl,
+          price_summary: priceLine,
+        },
+        recipientType: estimate.customer_id ? 'customer' : 'lead',
+        recipientId: estimate.customer_id || null,
+        triggerEventId: `estimate_delivery:${estimate.id}`,
+        idempotencyKey: `estimate.delivery:${estimate.id}:${String(estimate.customer_email || '').trim().toLowerCase()}`,
+        categories: ['estimate_delivery'],
+      });
+      if (result.blocked) {
+        return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: 'estimate.delivery' };
+      }
+      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: 'estimate.delivery' };
+    } catch (err) {
+      if (!canFallbackFromTemplateEmailError(err)) {
+        throw err;
+      }
+      logger.warn(`[admin-estimates] estimate.delivery template unavailable; falling back to SMTP for estimate ${estimate.id}: ${err.message}`);
+    }
+  }
+
+  if (!process.env.GOOGLE_SMTP_PASSWORD) {
+    return { ok: false, error: 'Email not configured (SENDGRID_API_KEY or GOOGLE_SMTP_PASSWORD missing)' };
+  }
+
+  const nodemailer = require('nodemailer');
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    auth: {
+      user: 'contact@wavespestcontrol.com',
+      pass: process.env.GOOGLE_SMTP_PASSWORD,
+    },
+  });
+  const heading = 'Your Waves estimate is ready';
+  const intro = `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
+  const html = wrapEmail({
+    preheader: priceLine
+      ? `Your Waves estimate is ready - ${priceLine}.`
+      : 'Your Waves estimate is ready to review.',
+    heading,
+    intro,
+    ctaHref: viewUrl,
+    ctaLabel: 'View Your Estimate',
+  });
+  const text = plainText([
+    `Hi ${firstName},`,
+    '',
+    'Your customized service estimate is ready for review.',
+    '',
+    `View your estimate: ${viewUrl}`,
+    '',
+    'Questions? Reply to this email or call (941) 297-5749.',
+    '- Waves Pest Control',
+  ]);
+  await transporter.sendMail({
+    from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
+    to: estimate.customer_email,
+    subject: 'Your Waves Pest Control Estimate is Ready',
+    html,
+    text,
+  });
+  return { ok: true, provider: 'smtp_fallback' };
 }
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -70,6 +219,11 @@ router.post('/:id/send', async (req, res, next) => {
     const sendMethod = req.body?.sendMethod || 'both';
     const scheduledAt = req.body?.scheduledAt || null;
 
+    if (!['sms', 'email', 'both'].includes(sendMethod)) {
+      return res.status(400).json({ error: 'Invalid sendMethod' });
+    }
+    assertEstimateSendable(estimate);
+
     if (scheduledAt) {
       const scheduledTime = new Date(scheduledAt);
       if (isNaN(scheduledTime.getTime())) {
@@ -82,6 +236,10 @@ router.post('/:id/send', async (req, res, next) => {
         status: 'scheduled',
         scheduled_at: scheduledTime,
         send_method: sendMethod,
+        expires_at: estimateExpiresAt(() => scheduledTime),
+        scheduled_send_attempts: 0,
+        last_send_error: null,
+        updated_at: db.fn.now(),
       });
       return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
     }
@@ -103,13 +261,16 @@ router.post('/:id/send', async (req, res, next) => {
 });
 
 // Shared send logic — used by both immediate send and scheduled cron
-async function sendEstimateNow(estimate, sendMethod) {
+async function sendEstimateNow(estimate, sendMethod, options = {}) {
   if (!['sms', 'email', 'both'].includes(sendMethod)) {
     const err = new Error('Invalid sendMethod');
     err.statusCode = 400;
     throw err;
   }
+  assertEstimateSendable(estimate);
 
+  const now = typeof options.now === 'function' ? options.now : () => new Date();
+  const nextExpiresAt = estimateExpiresAt(now);
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   const viewUrl = await shortenOrPassthrough(longUrl, {
@@ -168,58 +329,22 @@ async function sendEstimateNow(estimate, sendMethod) {
     }
   }
 
-  // Send Email via Google Workspace SMTP
+  // Send email through the template library when SendGrid is configured,
+  // with the existing Workspace SMTP path kept only as an environment fallback.
   if (sendMethod === 'email' || sendMethod === 'both') {
     if (!estimate.customer_email) {
       channels.email = { ok: false, error: 'No email on file' };
-    } else if (!process.env.GOOGLE_SMTP_PASSWORD) {
-      channels.email = { ok: false, error: 'Email not configured (GOOGLE_SMTP_PASSWORD missing)' };
     } else {
       try {
-        const nodemailer = require('nodemailer');
-        const transporter = nodemailer.createTransport({
-          host: 'smtp.gmail.com',
-          port: 587,
-          secure: false,
-          auth: {
-            user: 'contact@wavespestcontrol.com',
-            pass: process.env.GOOGLE_SMTP_PASSWORD,
-          },
+        const result = await sendEstimateEmail({
+          estimate,
+          firstName,
+          viewUrl,
+          priceLine,
         });
-        // Branded template — shared with invoice + receipt emails. Matches
-        // the Waves logo / navy / gold CTA identity instead of the old
-        // hand-rolled inline HTML.
-        const heading = 'Your Waves estimate is ready';
-        const intro = `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
-        // Intentionally no lines block — the full pricing breakdown lives
-        // on the estimate page itself, not in the email preview.
-        const html = wrapEmail({
-          preheader: priceLine
-            ? `Your Waves estimate is ready — ${priceLine}.`
-            : 'Your Waves estimate is ready to review.',
-          heading,
-          intro,
-          ctaHref: viewUrl,
-          ctaLabel: 'View Your Estimate',
-        });
-        const text = plainText([
-          `Hi ${firstName},`,
-          '',
-          'Your customized service estimate is ready for review.',
-          '',
-          `View your estimate: ${viewUrl}`,
-          '',
-          'Questions? Reply to this email or call (941) 297-5749.',
-          '— Waves Pest Control',
-        ]);
-        await transporter.sendMail({
-          from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
-          to: estimate.customer_email,
-          subject: 'Your Waves Pest Control Estimate is Ready',
-          html,
-          text,
-        });
-        channels.email = { ok: true };
+        channels.email = result.ok
+          ? { ok: true, provider: result.template || result.provider || 'email' }
+          : { ok: false, error: result.error || 'Email send failed' };
       } catch (e) {
         logger.error(`Estimate email failed: ${e.message}`);
         channels.email = { ok: false, error: e.message };
@@ -240,7 +365,26 @@ async function sendEstimateNow(estimate, sendMethod) {
     };
   }
 
-  await db('estimates').where({ id: estimate.id }).update({ status: 'sent', sent_at: db.fn.now(), scheduled_at: null, send_method: null });
+  const updatePayload = {
+    status: 'sent',
+    sent_at: db.fn.now(),
+    scheduled_at: null,
+    send_method: null,
+    expires_at: nextExpiresAt,
+    scheduled_send_attempts: 0,
+    last_send_error: null,
+    updated_at: db.fn.now(),
+  };
+  const estimateForSnapshot = {
+    ...estimate,
+    expires_at: nextExpiresAt,
+  };
+  try {
+    updatePayload.estimate_data = JSON.stringify(await buildEstimateSendSnapshot(estimateForSnapshot, now));
+  } catch (e) {
+    logger.warn(`[admin-estimates] estimate_data snapshot update failed for estimate ${estimate.id}: ${e.message}`);
+  }
+  await db('estimates').where({ id: estimate.id }).update(updatePayload);
 
   try {
     await markLinkedLeadEstimateSent({ estimateId: estimate.id, sendMethod });
@@ -260,8 +404,8 @@ async function sendEstimateNow(estimate, sendMethod) {
 
   // Fire-and-forget: enroll the customer in the estimate_sent follow-up
   // automation (lands ~2h later with a neighborly "any questions?" note).
-  // Enrollment is deduped per (template_key, customer_id) inside the
-  // runner — re-sends of the same estimate won't spam.
+  // Enrollment is deduped by customer id when present, otherwise by lead
+  // email, so re-sends of the same lead estimate won't spam.
   if (estimate.customer_email) {
     try {
       const AutomationRunner = require('../services/automation-runner');
@@ -835,6 +979,7 @@ router.patch('/:id', async (req, res, next) => {
         onetimeTotal: estimate.onetime_total,
         monthlyTotal: estimate.monthly_total,
         annualTotal: estimate.annual_total,
+        estimateData: estimate.estimate_data,
       }) : null;
       if (deliveryError) return res.status(400).json({ error: deliveryError });
       updates.show_one_time_option = nextShowOneTimeOption;
@@ -847,6 +992,7 @@ router.patch('/:id', async (req, res, next) => {
         onetimeTotal: estimate.onetime_total,
         monthlyTotal: estimate.monthly_total,
         annualTotal: estimate.annual_total,
+        estimateData: estimate.estimate_data,
       }) : null;
       if (deliveryError) return res.status(400).json({ error: deliveryError });
       updates.bill_by_invoice = nextBillByInvoice;
@@ -893,5 +1039,9 @@ router.post('/cleanup-demo', async (req, res, next) => {
     res.json({ success: true, deleted });
   } catch (err) { next(err); }
 });
+
+router._internals = {
+  sendEstimateEmail,
+};
 
 module.exports = router;

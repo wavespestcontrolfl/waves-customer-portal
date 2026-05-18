@@ -72,6 +72,33 @@ function savedAdminEstimateData() {
 }
 
 describe('public estimate one-time breakdown', () => {
+  test('public pricing bundle prefers the send snapshot when present', async () => {
+    const bundle = await buildPricingBundle({
+      id: 'estimate-snapshot',
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 88, annual: 1056 }],
+            waveGuardTier: 'Silver',
+            anchorOneTimePrice: 250,
+            source: 'send_snapshot_fixture',
+          },
+        },
+        result: {
+          recurring: {
+            services: [{ name: 'Pest Control', mo: 100 }],
+          },
+        },
+      },
+    });
+
+    expect(bundle).toMatchObject({
+      snapshotHit: true,
+      source: 'send_snapshot_fixture',
+      frequencies: [{ key: 'quarterly', monthly: 88 }],
+    });
+  });
+
   test('normalizes saved one-time and specialty rows including first-visit roach fees', () => {
     const breakdown = normalizeOneTimeBreakdown(savedAdminEstimateData());
 
@@ -1671,6 +1698,8 @@ describe('public estimate one-time breakdown', () => {
     expect(isEstimateAcceptActive({ status: 'viewed', expires_at: null }, now)).toBe(true);
     expect(isEstimateAcceptActive({ status: 'declined', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAcceptActive({ status: 'expired', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAcceptActive({ status: 'send_failed', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAcceptActive({ status: 'sent', archived_at: '2026-05-05T12:00:00Z', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: '2026-05-06T11:59:59Z' }, now)).toBe(false);
   });
 
@@ -1682,6 +1711,8 @@ describe('public estimate one-time breakdown', () => {
     expect(isEstimateAskAnswerable({ status: 'accepted', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAskAnswerable({ status: 'declined', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAskAnswerable({ status: 'expired', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAskAnswerable({ status: 'send_failed', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAskAnswerable({ status: 'sent', archived_at: '2026-05-05T12:00:00Z', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAskAnswerable({ status: 'sent', expires_at: '2026-05-06T11:59:59Z' }, now)).toBe(false);
   });
 

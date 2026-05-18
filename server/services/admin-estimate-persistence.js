@@ -66,6 +66,7 @@ async function createOrReuseAdminEstimate({
     onetimeTotal,
     monthlyTotal,
     annualTotal,
+    estimateData,
   } = body;
   const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
@@ -74,6 +75,7 @@ async function createOrReuseAdminEstimate({
     onetimeTotal,
     monthlyTotal,
     annualTotal,
+    estimateData,
   });
   if (deliveryError) throw errorWithStatus(deliveryError, 400);
 
@@ -142,5 +144,6 @@ async function createOrReuseAdminEstimate({
 module.exports = {
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
+  estimateExpiresAt,
   estimateViewUrl,
 };
