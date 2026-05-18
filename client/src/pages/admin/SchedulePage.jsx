@@ -5497,6 +5497,9 @@ export function CompletionPanel({
             serviceTypeForArea,
           );
           if (areaRequirement) {
+            if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
+              next.areaValue = "";
+            }
             next.areaUnit = areaRequirement.unit;
           } else {
             next.areaUnit = "";
