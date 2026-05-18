@@ -953,7 +953,7 @@ describe('service report v1', () => {
     ]);
   });
 
-  test('workflow preserves absolute event Dates while normalizing DB wall-clock Dates', () => {
+  test('workflow preserves absolute DB event Dates', () => {
     const events = buildWorkflowEvents({
       service: {
         en_route_at: new Date('2026-05-15T13:58:00.000Z'),
@@ -966,8 +966,8 @@ describe('service report v1', () => {
 
     expect(events.map((event) => [event.type, event.timestamp])).toEqual([
       ['technician_en_route', '2026-05-15T13:58:00.000Z'],
-      ['arrived_on_site', '2026-05-15T18:05:00.000Z'],
-      ['service_completed', '2026-05-15T18:46:00.000Z'],
+      ['arrived_on_site', '2026-05-15T14:05:00.000Z'],
+      ['service_completed', '2026-05-15T14:46:00.000Z'],
       ['report_published', '2026-05-15T18:52:00.000Z'],
     ]);
 
@@ -982,8 +982,8 @@ describe('service report v1', () => {
 
     expect(scheduledFallbackEvents.map((event) => [event.type, event.timestamp])).toEqual([
       ['technician_en_route', '2026-05-15T13:58:00.000Z'],
-      ['arrived_on_site', '2026-05-15T18:05:00.000Z'],
-      ['service_completed', '2026-05-15T18:46:00.000Z'],
+      ['arrived_on_site', '2026-05-15T14:05:00.000Z'],
+      ['service_completed', '2026-05-15T14:46:00.000Z'],
     ]);
   });
 

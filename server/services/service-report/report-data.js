@@ -339,28 +339,10 @@ function normalizeWorkflowType(value) {
   return WORKFLOW_EVENT_TYPES.has(key) ? key : 'service_completed';
 }
 
-function utcWallClockString(date) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return [
-    date.getUTCFullYear(),
-    '-',
-    pad(date.getUTCMonth() + 1),
-    '-',
-    pad(date.getUTCDate()),
-    'T',
-    pad(date.getUTCHours()),
-    ':',
-    pad(date.getUTCMinutes()),
-    ':',
-    pad(date.getUTCSeconds()),
-  ].join('');
-}
-
-function validTimestamp(value, { dbWallClock = false } = {}) {
+function validTimestamp(value) {
   if (!value) return '';
   if (value instanceof Date) {
-    const date = dbWallClock ? parseETDateTime(utcWallClockString(value)) : value;
-    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+    return Number.isNaN(value.getTime()) ? '' : value.toISOString();
   }
   const raw = String(value).trim();
   const naiveWallClock = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?$/.test(raw);
@@ -806,7 +788,7 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
   const add = (type, candidates, description) => {
     const list = Array.isArray(candidates) ? candidates : [{ value: candidates }];
     const candidate = list.find((entry) => entry?.value);
-    const normalizedTimestamp = validTimestamp(candidate?.value, { dbWallClock: !!candidate?.dbWallClock });
+    const normalizedTimestamp = validTimestamp(candidate?.value);
     if (!normalizedTimestamp) return;
     if (events.some((event) => event.type === type && event.timestamp === normalizedTimestamp)) return;
     events.push({
@@ -830,14 +812,14 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
     { value: service.scheduled_arrived_at },
     { value: structured.arrivedAt },
     { value: serviceData.arrivedAt },
-    { value: service.started_at, dbWallClock: true },
-    { value: service.scheduled_actual_start_time, dbWallClock: true },
+    { value: service.started_at },
+    { value: service.scheduled_actual_start_time },
   ]);
   add('inspection_started', structured.inspectionStartedAt || structured.inspection_started_at || serviceData.inspectionStartedAt || serviceData.inspection_started_at);
   add('service_started', structured.serviceStartedAt || structured.service_started_at || serviceData.serviceStartedAt || serviceData.service_started_at);
   add('service_completed', [
-    { value: service.ended_at, dbWallClock: true },
-    { value: service.scheduled_actual_end_time, dbWallClock: true },
+    { value: service.ended_at },
+    { value: service.scheduled_actual_end_time },
     { value: structured.serviceCompletedAt },
     { value: structured.service_completed_at },
     { value: serviceData.serviceCompletedAt },
