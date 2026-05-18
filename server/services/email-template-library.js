@@ -9,7 +9,20 @@ const {
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
-const DEDUPE_STATUSES = new Set(['sent', 'delivered', 'opened', 'clicked', 'blocked']);
+const DEDUPE_STATUSES = new Set([
+  'sent',
+  'delivered',
+  'opened',
+  'clicked',
+  'blocked',
+  'dropped',
+  'bounced',
+  'bounce',
+  'spam_report',
+  'spamreport',
+  'unsubscribed',
+  'complained',
+]);
 
 function asArray(value) {
   if (!value) return [];

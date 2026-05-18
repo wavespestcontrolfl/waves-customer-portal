@@ -252,6 +252,9 @@ describe('email template library rendering', () => {
     expect(EmailTemplates.shouldRetryExistingMessage({ status: 'sending' })).toBe(true);
     expect(EmailTemplates.shouldRetryExistingMessage({ status: 'sent' })).toBe(false);
     expect(EmailTemplates.shouldRetryExistingMessage({ status: 'blocked' })).toBe(false);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'dropped' })).toBe(false);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'bounced' })).toBe(false);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'spam_report' })).toBe(false);
 
     expect(EmailTemplates.dedupedResultForExistingMessage({
       id: 'msg-blocked',

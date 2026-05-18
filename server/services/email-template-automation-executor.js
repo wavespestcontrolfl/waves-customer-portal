@@ -155,6 +155,14 @@ function boolValue(value) {
   return null;
 }
 
+function completionValue(payload = {}) {
+  if (payload.completed_at) return true;
+  const status = normalizeStatus(payload.onboarding_status || payload.status);
+  if (status === 'complete' || status === 'completed') return true;
+  const value = boolValue(payload.completed);
+  return value == null ? false : value;
+}
+
 function eventSeen(payload, eventKey) {
   const events = asArray(payload.events || payload.event_keys || payload.stop_events);
   return events.includes(eventKey);
@@ -174,7 +182,7 @@ function exitReasonFor(exitConditions, payload = {}) {
   if (stopIf.includes('estimate.expired') && estimateStatus === 'expired') return 'estimate already expired';
   if (stopIf.includes('estimate.viewed') && (payload.viewed_at || boolValue(payload.estimate_viewed) === true)) return 'estimate already viewed';
 
-  const onboardingCompleted = boolValue(payload.completed) === true || !!payload.completed_at;
+  const onboardingCompleted = completionValue(payload);
   if (stopIf.includes('onboarding.completed') && onboardingCompleted) return 'onboarding already completed';
   if (stopIf.includes('onboarding.expired') && normalizeStatus(payload.onboarding_status || payload.status) === 'expired') return 'onboarding already expired';
 
@@ -217,7 +225,7 @@ function conditionFailureFor(conditions, payload = {}, now = new Date()) {
   }
 
   if (conditions.completed !== undefined) {
-    const actual = payload.completed_at ? true : boolValue(payload.completed);
+    const actual = completionValue(payload);
     if (actual !== !!conditions.completed) return `completed must be ${!!conditions.completed}`;
   }
 

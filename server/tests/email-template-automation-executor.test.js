@@ -232,6 +232,60 @@ describe('email template automation executor', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('schedules false-completed reminders when trigger payload omits the flag', async () => {
+    const scheduledRun = run({
+      automation_key: 'onboarding.24h_reminder',
+      trigger_event_key: 'onboarding.created',
+      entity_type: 'onboarding',
+      entity_id: 'onboarding-1',
+      template_key: 'onboarding.24h_reminder',
+      recipient_type: 'customer',
+      recipient_id: 'cust-1',
+      idempotency_key: 'onboarding.24h_reminder:onboarding-1',
+      status: 'scheduled',
+      exit_reason: null,
+    });
+    const insertRunQuery = chain({ returning: [scheduledRun] });
+    setDbQueues({
+      'email_template_automations as a': [chain({
+        result: [automation({
+          automation_key: 'onboarding.24h_reminder',
+          trigger_event_key: 'onboarding.created',
+          template_key: 'onboarding.24h_reminder',
+          delay_minutes: 1440,
+          audience: 'customer',
+          idempotency_key_template: 'onboarding.24h_reminder:{onboarding_id}',
+          conditions: JSON.stringify({ completed: false }),
+          exit_conditions: JSON.stringify({ stop_if: ['onboarding.completed'] }),
+        })],
+      })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        insertRunQuery,
+      ],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'onboarding.created',
+      payload: {
+        onboarding_id: 'onboarding-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    expect(result.results[0].run.status).toBe('scheduled');
+    expect(insertRunQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'scheduled',
+      exit_reason: null,
+      completed_at: null,
+    }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('schedules retries using the automation retry policy', async () => {
     const queuedRun = run({ attempts: 0 });
     const retryRun = {
