@@ -300,7 +300,7 @@ function contextFor({ triggerEventKey, triggerEventId, entityType, entityId, pay
     trigger_event_id: triggerEventId || '',
     automation_key: automation.automation_key,
     template_key: automation.template_key,
-    template_version_id: automation.active_version_id || automation.template_version_id || '',
+    // Do NOT add template_version_id here — it would reset dedup on every template publish. Version stays in the run row + send snapshot.
     recipient_email: recipient.email,
     recipient_type: recipient.type || automation.audience || '',
     recipient_id: recipient.id || '',

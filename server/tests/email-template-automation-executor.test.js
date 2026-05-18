@@ -52,7 +52,7 @@ function automation(overrides = {}) {
     audience: 'lead',
     status: 'active',
     active_version_id: 'version-1',
-    idempotency_key_template: 'estimate.extension_notice:{estimate_id}:{new_expires_at}:{template_version_id}',
+    idempotency_key_template: 'estimate.extension_notice:{estimate_id}:{new_expires_at}',
     conditions: JSON.stringify({ renewal_count_gt: 0 }),
     exit_conditions: JSON.stringify({ stop_if: ['estimate.accepted', 'estimate.archived'] }),
     retry_policy: JSON.stringify({ max_attempts: 2, backoff_minutes: [15, 60] }),
@@ -74,7 +74,7 @@ function run(overrides = {}) {
     recipient_type: 'lead',
     recipient_id: 'cust-1',
     recipient_email: 'sam@example.com',
-    idempotency_key: 'estimate.extension_notice:est-1:2026-06-01:version-1',
+    idempotency_key: 'estimate.extension_notice:est-1:2026-06-01',
     status: 'queued',
     attempts: 0,
     max_attempts: 2,
@@ -151,7 +151,7 @@ describe('email template automation executor', () => {
       entity_type: 'estimate',
       entity_id: 'est-1',
       recipient_email: 'sam@example.com',
-      idempotency_key: 'estimate.extension_notice:est-1:2026-06-01:version-1',
+      idempotency_key: 'estimate.extension_notice:est-1:2026-06-01',
     }));
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'estimate.extension_notice',
@@ -161,7 +161,7 @@ describe('email template automation executor', () => {
       recipientId: 'cust-1',
       automationRunId: 'run-1',
       triggerEventId: 'estimate_auto_renew:est-1',
-      idempotencyKey: 'estimate.extension_notice:est-1:2026-06-01:version-1',
+      idempotencyKey: 'estimate.extension_notice:est-1:2026-06-01',
     }));
     expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'sent',
@@ -400,8 +400,41 @@ describe('email template automation executor', () => {
 
   test('rejects idempotency templates with missing variables', () => {
     expect(() => AutomationExecutor.renderIdempotencyKey(
-      'estimate.delivery:{estimate_id}:{template_version_id}',
+      'estimate.delivery:{estimate_id}:{trigger_event_id}',
       { estimate_id: 'est-1' },
-    )).toThrow(/template_version_id/);
+    )).toThrow(/trigger_event_id/);
+  });
+
+  test('idempotency key is stable across template republishes', async () => {
+    const automationV1 = automation({ active_version_id: 'version-1' });
+    const automationV2 = automation({ active_version_id: 'version-2' });
+    const insertRunV1 = chain({ returning: [run({ template_version_id: 'version-1' })] });
+    const insertRunV2 = chain({ returning: [run({ template_version_id: 'version-2' })] });
+    setDbQueues({
+      'email_template_automations as a': [
+        chain({ result: [automationV1] }),
+        chain({ result: [automationV2] }),
+      ],
+      email_template_automation_runs: [
+        chain({ first: null }), insertRunV1, chain({ returning: [run()] }), chain({ returning: [run()] }),
+        chain({ first: null }), insertRunV2, chain({ returning: [run()] }), chain({ returning: [run()] }),
+      ],
+      email_template_automation_run_events: Array.from({ length: 6 }, () => chain({ returning: [{ id: 'evt' }] })),
+      estimates: [chain({ first: null }), chain({ first: null })],
+    });
+    EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, message: { id: 'm', provider_message_id: 'sg' } });
+
+    const payload = {
+      estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+      first_name: 'Sam', estimate_url: 'https://example.com/e/est-1',
+      new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+    };
+    await AutomationExecutor.processTrigger({ triggerEventKey: 'estimate.auto_renewed', payload });
+    await AutomationExecutor.processTrigger({ triggerEventKey: 'estimate.auto_renewed', payload });
+
+    const keyV1 = insertRunV1.insert.mock.calls[0][0].idempotency_key;
+    const keyV2 = insertRunV2.insert.mock.calls[0][0].idempotency_key;
+    expect(keyV1).toBe(keyV2);
+    expect(keyV1).not.toMatch(/version-/);
   });
 });
