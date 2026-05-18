@@ -938,6 +938,13 @@ function lawnAssessmentSummary(current, initial, count) {
   return 'Lawn health is holding steady since your first assessment.';
 }
 
+function hasLawnAssessmentCustomerSignal(lawnAssessment) {
+  if (!lawnAssessment) return false;
+  if (String(lawnAssessment.observations || '').trim()) return true;
+  const recommendations = lawnAssessment.recommendations || {};
+  return Object.values(recommendations).some((value) => String(value || '').trim());
+}
+
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
@@ -1158,7 +1165,10 @@ async function buildReportV1Data(service, token, knex = db) {
     });
   }
 
-  if (!findings.length && shouldAddNoActivityFinding({ service, structured, protocol })) {
+  const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
+
+  if (!findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
     findings.push({
       id: `no-activity-${service.id}`,
       zoneId: null,
@@ -1274,7 +1284,6 @@ async function buildReportV1Data(service, token, knex = db) {
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
   }, { service, applications });
-  const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
   const metrics = buildMetrics(config, {
     onSiteMin,
     treatedZoneIds,

@@ -1,8 +1,9 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
+const { customerVisiblePressureIndex } = require('./pressure-index');
 
 function pressureValue(value) {
-  const n = Number(value);
+  const n = customerVisiblePressureIndex(value);
   return Number.isFinite(n) ? n.toFixed(1) : null;
 }
 

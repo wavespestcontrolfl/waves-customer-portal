@@ -33,6 +33,7 @@ const {
 } = require('../services/service-report/delivery');
 const { buildServiceReportV1Email } = require('../services/service-report/email-delivery');
 const { buildPressureTrendContextFromRows } = require('../services/service-report/pressure-trend');
+const { buildSinceLastVisitContext } = require('../services/service-report/since-last-visit');
 const {
   buildPremiumExperienceContextFromRows,
   buildWeatherCallContext,
@@ -98,6 +99,65 @@ describe('service report v1', () => {
     expect(context.baseline.pressureIndex).toBe(0.3);
     expect(context.current.pressureIndex).toBe(0.3);
     expect(context.customerSummary).toBe('Pest pressure remains low at 0.3.');
+  });
+
+  test('since-last-visit pressure copy uses the customer pressure floor', async () => {
+    const fixtures = {
+      service_records: [
+        {
+          id: 'service-prior',
+          customer_id: 'customer-1',
+          status: 'completed',
+          service_line: 'pest',
+          service_type: 'Quarterly Pest Control Service',
+          service_date: '2026-04-16',
+          pressure_index: 0,
+        },
+      ],
+      service_findings: [],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (typeof criteria === 'function') return query;
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        whereNot(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] !== value));
+          }
+          return query;
+        },
+        whereIn(column, values) {
+          rows = rows.filter((row) => values.includes(row[column]));
+          return query;
+        },
+        orderBy: () => query,
+        select: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+      };
+      return query;
+    };
+
+    const context = await buildSinceLastVisitContext({
+      record: {
+        id: 'service-current',
+        customer_id: 'customer-1',
+        service_line: 'pest',
+        service_type: 'Quarterly Pest Control Service',
+        pressure_index: 0,
+      },
+      knex,
+    });
+
+    expect(context.pressureLine).toBe('Pressure: 0.3 -> 0.3');
   });
 
   test('dynamic pressure trend includes current override and customer ROI copy', () => {
@@ -1285,6 +1345,7 @@ describe('service report v1', () => {
     expect(data.lawnAssessment.customerSummary).toBe('Lawn health is up 17 points since your first assessment.');
     expect(data.lawnAssessment.trend.map((point) => point.overallScore)).toEqual([66, 83]);
     expect(data.lawnAssessment.turfProfile).toMatchObject({ grassType: 'st_augustine', lawnSqft: 6200 });
+    expect(data.findings).toEqual([]);
     expect(data.metrics.find((metric) => metric.key === 'lawn_health')).toMatchObject({
       label: 'Lawn health',
       value: 83,
