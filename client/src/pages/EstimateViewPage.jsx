@@ -292,6 +292,178 @@ function WaveGuardIntelligenceCard({ intelligence, address }) {
   );
 }
 
+const ESTIMATE_ASK_PROMPTS = [
+  'What is included?',
+  'How does billing work?',
+  'Why this price?',
+  'Who is Waves?',
+];
+
+function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring' }) {
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [asking, setAsking] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const ask = useCallback(async (prompt) => {
+    const q = String(prompt ?? question).trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setFailed(false);
+    setAnswer('Checking...');
+    try {
+      const response = await fetch(`${API_BASE}/public/estimates/${token}/ask`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(askToken ? { 'X-Estimate-Ask-Token': askToken } : {}),
+        },
+        body: JSON.stringify({
+          question: q,
+          selectedFrequency,
+          serviceMode,
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'question_failed');
+      setAnswer(body.answer || 'I could not answer that from this estimate.');
+      setQuestion('');
+    } catch {
+      setFailed(true);
+      setAnswer(`I could not answer that right now. Call or text Waves at ${WAVES_PHONE_DISPLAY}.`);
+    } finally {
+      setAsking(false);
+    }
+  }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
+
+  return (
+    <section style={{
+      background: COLORS.white,
+      border: '1px solid #CFE7F5',
+      borderRadius: 12,
+      padding: 24,
+      marginBottom: 16,
+      display: 'grid',
+      gap: 12,
+    }}>
+      <div>
+        <div style={{
+          fontSize: 12,
+          color: ESTIMATE_MUTED,
+          letterSpacing: '0.12em',
+          textTransform: 'uppercase',
+          fontWeight: 700,
+          marginBottom: 6,
+        }}>
+          Waves AI
+        </div>
+        <h2 style={{
+          fontFamily: FONTS.serif,
+          fontSize: 28,
+          fontWeight: 500,
+          lineHeight: 1.18,
+          color: ESTIMATE_TEXT,
+          margin: 0,
+          letterSpacing: 0,
+        }}>
+          Ask Waves AI
+        </h2>
+      </div>
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          ask();
+        }}
+        style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 10, alignItems: 'center' }}
+      >
+        <input
+          value={question}
+          onChange={(event) => setQuestion(event.target.value)}
+          placeholder="Ask about services, pricing, scheduling, or Waves"
+          aria-label="Ask Waves AI about this estimate"
+          maxLength={500}
+          style={{
+            width: '100%',
+            minHeight: 48,
+            border: '1px solid #CFE7F5',
+            borderRadius: 10,
+            padding: '12px 14px',
+            font: `500 15px/1.35 ${FONT_BODY}`,
+            color: ESTIMATE_TEXT,
+            background: '#F8FCFE',
+            outline: 'none',
+            boxSizing: 'border-box',
+          }}
+        />
+        <button
+          type="submit"
+          disabled={asking || !question.trim()}
+          style={{
+            minHeight: 48,
+            border: 0,
+            borderRadius: 10,
+            padding: '0 18px',
+            background: COLORS.wavesBlue,
+            color: COLORS.white,
+            fontSize: 14,
+            fontWeight: 700,
+            cursor: asking || !question.trim() ? 'not-allowed' : 'pointer',
+            opacity: asking || !question.trim() ? 0.65 : 1,
+          }}
+        >
+          {asking ? 'Asking...' : 'Ask'}
+        </button>
+      </form>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }} aria-label="Example questions">
+        {ESTIMATE_ASK_PROMPTS.map((prompt) => (
+          <button
+            key={prompt}
+            type="button"
+            onClick={() => {
+              setQuestion(prompt);
+              ask(prompt);
+            }}
+            disabled={asking}
+            style={{
+              border: `1px solid ${ESTIMATE_BORDER}`,
+              background: '#F7F5EE',
+              color: ESTIMATE_TEXT,
+              borderRadius: 999,
+              padding: '8px 12px',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: asking ? 'not-allowed' : 'pointer',
+              opacity: asking ? 0.65 : 1,
+            }}
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
+
+      {answer ? (
+        <div
+          aria-live="polite"
+          style={{
+            borderLeft: `4px solid ${failed ? COLORS.red : COLORS.wavesBlue}`,
+            background: failed ? '#FFF5F5' : '#F8FCFE',
+            borderRadius: 10,
+            padding: '12px 14px',
+            color: ESTIMATE_TEXT,
+            fontSize: 14,
+            lineHeight: 1.55,
+            whiteSpace: 'pre-line',
+          }}
+        >
+          {answer}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function getServiceLabel(frequency, estimate, pricing) {
   if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
     return `${frequency?.label || 'Quarterly'} Pest Control or One-Time Pest Control`;
@@ -863,12 +1035,21 @@ export default function EstimateViewPage() {
 
   const { estimate, pricing, cta } = data;
   const canAccept = cta?.canAccept === true;
+  const showAskBar = !['accepted', 'declined', 'expired'].includes(cta?.terminalState);
 
   if (!canAccept) {
     return (
       <Page>
         <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
         <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} />
+        {showAskBar ? (
+          <EstimateAskBar
+            token={token}
+            askToken={estimate.askToken}
+            selectedFrequency={selectedFrequency}
+            serviceMode={serviceMode}
+          />
+        ) : null}
         <TerminalStateCard
           state={cta.terminalState}
           customerFirstName={estimate.customerFirstName}
@@ -899,6 +1080,13 @@ export default function EstimateViewPage() {
       />
 
       <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} />
+
+      <EstimateAskBar
+        token={token}
+        askToken={estimate.askToken}
+        selectedFrequency={selectedFrequency}
+        serviceMode={serviceMode}
+      />
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner

@@ -12,6 +12,11 @@
  *   at 10/min (tighter than GET — actual writes). Subsequent accept call
  *   commits the reservation; abandoned reservations get reclaimed.
  *
+ * POST /api/public/estimates/:token/ask
+ *   Body: { question, selectedFrequency?, serviceMode?, askToken? }.
+ *   Answers questions for the public estimate ask bar. Token link + askToken
+ *   are the public gate; rate-limited at 20/min.
+ *
  * Query params on GET:
  *   ?windowDays=14    override lookahead window
  *   ?expand=true      include full expander list (default true anyway)
@@ -29,6 +34,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { getAvailableSlots } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
+const { handleEstimateAsk } = require('./estimate-public');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
@@ -88,6 +94,22 @@ const reserveLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many reservation attempts. Please try again in a minute.' },
+});
+
+const askLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many questions. Please try again in a minute.' },
+});
+
+router.post('/:token/ask', askLimiter, (req, res, next) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return handleEstimateAsk(req, res, next);
 });
 
 // POST /:token/reserve — create a 15-min hold on a slot

@@ -6,9 +6,11 @@ const {
   buildAcceptNotificationPayload,
   buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
+  buildEstimateAskQueryLog,
   buildPricingBundle,
   buildWaveGuardIntelligencePayload,
   isEstimateAcceptActive,
+  isEstimateAskAnswerable,
   isStructuralOneTimeOnlyEstimate,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
@@ -18,6 +20,10 @@ const {
   resolveEstimateQuoteRequirement,
   shouldApplyFirstViewSideEffects,
 } = require('../routes/estimate-public');
+const {
+  answerEstimateQuestionFallback,
+  buildEstimateAssistantContext,
+} = require('../services/estimate-assistant');
 
 function savedAdminEstimateData() {
   return {
@@ -557,6 +563,7 @@ describe('public estimate one-time breakdown', () => {
 
   test('server-rendered estimates show the Waves AI feature', () => {
     const html = renderPage('intelligence-token', {
+      id: 'estimate-waves-ai-test',
       status: 'sent',
       customerName: 'Pat Customer',
       address: '123 Main St',
@@ -581,6 +588,12 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('Waves AI');
     expect(html).toContain('Waves AI reviewed your property before pricing this estimate');
+    expect(html).toContain('id="estimate-ask-form"');
+    expect(html).toContain('Ask Waves AI');
+    expect(html).toContain('/api/public/estimates/');
+    expect(html).toContain('/ask');
+    expect(html).toContain('ESTIMATE_ASK_TOKEN');
+    expect(html).toContain('X-Estimate-Ask-Token');
     expect(html).not.toContain('class="intelligence-badge"');
     expect(html).toContain('Satellite view of 123 Main St');
     expect(html).toContain('1,800 sq ft');
@@ -589,6 +602,430 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('cadence and visit counts');
     expect(html).not.toContain('Your technician verifies measurements');
     expect(html).not.toContain('class="waves-intelligence"');
+
+    const acceptedHtml = renderPage('accepted-intelligence-token', {
+      id: 'accepted-estimate-waves-ai-test',
+      status: 'accepted',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+    expect(acceptedHtml).not.toContain('id="estimate-ask-form"');
+    expect(acceptedHtml).not.toContain('Ask Waves AI');
+  });
+
+  test('estimate assistant fallback answers included service questions from estimate context', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        address: '4407 Lake Fox Pl',
+        waveguard_tier: 'Silver',
+      },
+      estData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Pest Control', mo: 128 },
+              { name: 'Lawn Care', mo: 87, perTreatment: 116, visitsPerYear: 9 },
+            ],
+          },
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Silver',
+        frequencies: [{
+          key: 'quarterly',
+          label: 'Quarterly',
+          monthly: 116.7,
+          annual: 1400.4,
+          included: [
+            { label: 'Pest Control' },
+            { label: 'Lawn Care' },
+          ],
+          perServiceTreatments: [
+            { service: 'pest_control', label: 'Pest Control', perTreatment: 115.2, visitsPerYear: 4 },
+            { service: 'lawn_care', label: 'Lawn Care', perTreatment: 104.4, visitsPerYear: 9 },
+          ],
+        }],
+      },
+    });
+    const answer = answerEstimateQuestionFallback('What is included?', context);
+
+    expect(answer).toContain('Silver');
+    expect(answer).toContain('Pest Control');
+    expect(answer).toContain('Lawn Care');
+    expect(answer).toContain('$350.10 / quarter');
+  });
+
+  test('estimate assistant uses selected cadence and all first-visit fees', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        address: '4407 Lake Fox Pl',
+        waveguard_tier: 'Silver',
+        monthly_total: 122,
+        annual_total: 1464,
+      },
+      estData: {
+        result: {
+          recurring: {
+            services: [{ name: 'Pest Control', mo: 122 }],
+          },
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Silver',
+        frequencies: [
+          { key: 'quarterly', label: 'Quarterly', monthly: 116.7, annual: 1400.4 },
+          { key: 'bi_monthly', label: 'Bi-monthly', monthly: 122, annual: 1464 },
+          { key: 'monthly', label: 'Monthly', monthly: 130, annual: 1560 },
+        ],
+        firstVisitFees: [
+          { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, waivedWithPrepay: true },
+          { service: 'pest_initial_roach', label: 'Initial Roach Knockdown', amount: 119 },
+        ],
+      },
+    });
+    const answer = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.billing.amountText).toBe('$244 / bi-monthly visit');
+    expect(context.firstVisitFees).toHaveLength(2);
+    expect(answer).toContain('$244 / bi-monthly visit');
+    expect(answer).toContain('WaveGuard setup is $99');
+    expect(answer).toContain('Initial Roach Knockdown is $119');
+  });
+
+  test('estimate assistant honors the currently selected pricing state', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 116.7,
+        annual_total: 1400.4,
+      },
+      pricingBundle: {
+        waveGuardTier: 'Silver',
+        frequencies: [
+          { key: 'quarterly', label: 'Quarterly', monthly: 116.7, annual: 1400.4 },
+          { key: 'monthly', label: 'Monthly', monthly: 130, annual: 1560 },
+        ],
+      },
+      selectedFrequency: 'monthly',
+      serviceMode: 'recurring',
+    });
+
+    expect(context.billing.amountText).toBe('$130 / month');
+  });
+
+  test('estimate assistant includes one-time service line items', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Bronze',
+        onetime_total: 350,
+      },
+      estData: {
+        result: {
+          oneTime: {
+            items: [{ service: 'termite', name: 'Termite Inspection', price: 350 }],
+          },
+        },
+      },
+      pricingBundle: {
+        anchorOneTimePrice: 350,
+        firstVisitFees: [
+          { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, waivedWithPrepay: true },
+        ],
+        oneTimeBreakdown: {
+          total: 350,
+          items: [{ service: 'termite', label: 'Termite Inspection', amount: 350 }],
+        },
+        frequencies: [],
+      },
+      serviceMode: 'one_time',
+    });
+    const included = answerEstimateQuestionFallback('What is included?', context);
+    const billing = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(included).toContain('Termite Inspection');
+    expect(included).not.toContain('I do not see a detailed service list');
+    expect(billing).toContain('The one-time estimate is $350.');
+    expect(billing).not.toContain('WaveGuard setup');
+    expect(billing).not.toContain('12-month');
+
+    const guarantee = answerEstimateQuestionFallback('Is there a callback guarantee?', context);
+    expect(guarantee).toContain('one-time service');
+    expect(guarantee).toContain('30-day callback');
+    expect(guarantee).not.toContain('90-day');
+  });
+
+  test('estimate assistant uses invoice-mode billing copy', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 116.7,
+        annual_total: 1400.4,
+        bill_by_invoice: true,
+      },
+      pricingBundle: {
+        waveGuardTier: 'Silver',
+        frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 116.7, annual: 1400.4 }],
+      },
+    });
+    const billing = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.billing.invoiceMode).toBe(true);
+    expect(context.billing.billedAfterVisit).toBe(false);
+    expect(billing).toContain('invoice due immediately for $350.10');
+    expect(billing).toContain('payment link');
+    expect(billing).not.toContain('billed after completed service visits');
+    expect(billing).not.toContain('12-month');
+  });
+
+  test('estimate assistant suppresses normal billing for quote-required estimates', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 116.7,
+        annual_total: 1400.4,
+      },
+      pricingBundle: {
+        quoteRequired: true,
+        waveGuardTier: 'Silver',
+        anchorOneTimePrice: 350,
+        oneTimeBreakdown: {
+          total: 350,
+          quoteRequired: true,
+          items: [{ service: 'bed_bug', label: 'Bed Bug Treatment', quoteRequired: true }],
+        },
+        frequencies: [{
+          key: 'quarterly',
+          label: 'Quarterly',
+          monthly: 116.7,
+          annual: 1400.4,
+          included: [{ label: 'Pest Control' }],
+          perServiceTreatments: [
+            { service: 'pest_control', label: 'Pest Control', perTreatment: 115.2, visitsPerYear: 4 },
+          ],
+        }],
+      },
+    });
+    const billing = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.billing.quoteRequired).toBe(true);
+    expect(context.billing.amount).toBeNull();
+    expect(context.billing.amountText).toBeNull();
+    expect(context.billing.period).toBeNull();
+    expect(context.billing.billedAfterVisit).toBe(false);
+    expect(context.services[0].perApplication).toBeNull();
+    expect(context.services[0].summary).not.toContain('$115.20');
+    expect(context.oneTime).toBeNull();
+    expect(billing).toContain('needs an inspection');
+    expect(billing).not.toContain('$350.10 / quarter');
+    expect(billing).not.toContain('billed after completed service visits');
+  });
+
+  test('estimate assistant hides one-time context when the estimate does not offer it', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 100,
+        annual_total: 1200,
+        onetime_total: 350,
+        show_one_time_option: false,
+      },
+      estData: {
+        result: {
+          recurring: { services: [{ name: 'Pest Control', mo: 100 }] },
+          oneTime: { items: [{ service: 'termite', name: 'Termite Inspection', price: 350 }] },
+        },
+      },
+      pricingBundle: {
+        anchorOneTimePrice: 350,
+        oneTimeBreakdown: {
+          total: 350,
+          items: [{ service: 'termite', label: 'Termite Inspection', amount: 350 }],
+        },
+        frequencies: [{ key: 'monthly', label: 'Monthly', monthly: 100, annual: 1200 }],
+      },
+      serviceMode: 'one_time',
+    });
+    const included = answerEstimateQuestionFallback('What is included?', context);
+    const billing = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.serviceMode).toBe('recurring');
+    expect(context.oneTime).toBeNull();
+    expect(included).toContain('Pest Control');
+    expect(included).not.toContain('Termite Inspection');
+    expect(billing).not.toContain('one-time estimate');
+    expect(billing).not.toContain('$350');
+  });
+
+  test('estimate assistant treats placeholder recurring frequencies as one-time-only', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Bronze',
+        monthly_total: 0,
+        annual_total: 0,
+        onetime_total: 650,
+        show_one_time_option: false,
+      },
+      estData: {
+        result: {
+          specItems: [{ service: 'rodent_sanitation', name: 'Rodent Sanitation', price: 650 }],
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Bronze',
+        anchorOneTimePrice: 650,
+        frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: null, annual: null, included: [] }],
+        oneTimeBreakdown: {
+          total: 650,
+          items: [{ service: 'rodent_sanitation', label: 'Rodent Sanitation', amount: 650 }],
+        },
+      },
+      serviceMode: 'recurring',
+    });
+    const billing = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.serviceMode).toBe('one_time');
+    expect(context.billing.amountText).toBe('$650');
+    expect(context.billing.period).toBe('one-time');
+    expect(billing).toContain('The one-time estimate is $650.');
+    expect(billing).not.toContain('billed after completed service visits');
+  });
+
+  test('estimate assistant filters discount rows from fallback one-time services', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Bronze',
+        onetime_total: 300,
+      },
+      estData: {
+        result: {
+          oneTime: {
+            items: [{ service: 'one_time_pest', name: 'One-Time Pest', price: 400 }],
+          },
+          specItems: [{ service: 'rodent_bundle_discount', name: 'Rodent Bundle Discount', price: -100, det: 'bundle savings' }],
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Bronze',
+        anchorOneTimePrice: 300,
+        frequencies: [],
+      },
+      serviceMode: 'one_time',
+    });
+    const included = answerEstimateQuestionFallback('What is included?', context);
+
+    expect(context.serviceMode).toBe('one_time');
+    expect(included).toContain('One-Time Pest');
+    expect(included).toContain('The one-time estimate is $300.');
+    expect(included).not.toContain('Rodent Bundle Discount');
+    expect(included).not.toContain('bundle savings');
+  });
+
+  test('estimate assistant does not re-add services filtered out of the pricing bundle', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        show_one_time_option: true,
+      },
+      estData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Pest Control', mo: 100 },
+              { name: 'Lawn Care', mo: 80 },
+            ],
+          },
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Silver',
+        anchorOneTimePrice: 200,
+        frequencies: [{
+          key: 'quarterly',
+          label: 'Quarterly',
+          monthly: 90,
+          annual: 1080,
+          included: [{ label: 'Pest Control' }],
+          perServiceTreatments: [
+            { service: 'pest_control', label: 'Pest Control', perTreatment: 90, visitsPerYear: 4 },
+          ],
+        }],
+      },
+    });
+    const included = answerEstimateQuestionFallback('What is included?', context);
+
+    expect(included).toContain('Pest Control');
+    expect(included).not.toContain('Lawn Care');
+  });
+
+  test('estimate assistant routes booking-service fallback questions to scheduling guidance', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 116.7,
+        annual_total: 1400.4,
+      },
+      pricingBundle: {
+        waveGuardTier: 'Silver',
+        frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 116.7, annual: 1400.4 }],
+      },
+    });
+    const answer = answerEstimateQuestionFallback('Can I book service?', context);
+
+    expect(answer).toContain('Pick one of the available times');
+    expect(answer).not.toContain('This WaveGuard Silver estimate includes');
+  });
+
+  test('estimate assistant one-time mode suppresses recurring billing copy', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Bronze',
+        show_one_time_option: true,
+        onetime_total: 350,
+      },
+      pricingBundle: {
+        anchorOneTimePrice: 350,
+        frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 100, annual: 1200 }],
+        oneTimeBreakdown: {
+          total: 350,
+          items: [{ service: 'pest_control', label: 'One-Time Pest Control', amount: 350 }],
+        },
+      },
+      serviceMode: 'one_time',
+    });
+    const included = answerEstimateQuestionFallback('What is included?', context);
+
+    expect(context.serviceMode).toBe('one_time');
+    expect(context.billing.amountText).toBe('$350');
+    expect(context.billing.period).toBe('one-time');
+    expect(context.billing.monthlyText).toBeNull();
+    expect(context.billing.annualText).toBeNull();
+    expect(included).toContain('One-Time Pest Control');
+    expect(included).toContain('The one-time estimate is $350.');
+    expect(included).not.toContain('recurring estimate');
+    expect(included).not.toContain('$300 / quarter');
   });
 
   test('server-rendered bundled estimate showcases per-application prices by service', () => {
@@ -697,6 +1134,38 @@ describe('public estimate one-time breakdown', () => {
     expect(isEstimateAcceptActive({ status: 'declined', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAcceptActive({ status: 'expired', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: '2026-05-06T11:59:59Z' }, now)).toBe(false);
+  });
+
+  test('estimate ask guard rejects terminal or expired estimate links', () => {
+    const now = new Date('2026-05-06T12:00:00Z');
+
+    expect(isEstimateAskAnswerable({ status: 'sent', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(true);
+    expect(isEstimateAskAnswerable({ status: 'quote_required', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(true);
+    expect(isEstimateAskAnswerable({ status: 'accepted', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAskAnswerable({ status: 'declined', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAskAnswerable({ status: 'expired', expires_at: '2026-05-06T12:01:00Z' }, now)).toBe(false);
+    expect(isEstimateAskAnswerable({ status: 'sent', expires_at: '2026-05-06T11:59:59Z' }, now)).toBe(false);
+  });
+
+  test('estimate ask query log stores metadata instead of raw customer text', () => {
+    const question = 'My phone is (941) 555-1212 and email is pat@example.com';
+    const answer = 'Pat Customer at 123 Main St can call (941) 555-1212.';
+    const entry = buildEstimateAskQueryLog({
+      estimateId: 'estimate-123',
+      question,
+      result: {
+        answer,
+        source: 'fallback',
+      },
+    });
+
+    expect(entry.prompt).toBe(`[public_estimate:estimate-123] question_chars=${question.length}`);
+    expect(entry.response).toBe(`[redacted] source=fallback answer_chars=${answer.length}`);
+    expect(entry.prompt).not.toContain('941');
+    expect(entry.prompt).not.toContain('pat@example.com');
+    expect(entry.response).not.toContain('Pat Customer');
+    expect(entry.response).not.toContain('123 Main');
+    expect(entry.response).not.toContain('941');
   });
 
   test('decline guard rejects missing, accepted, and expired estimates', () => {

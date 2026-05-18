@@ -248,10 +248,15 @@ finding and warns on P1. Reviewers must return JSON matching
   is `config.jwt.secret` (env: `JWT_SECRET`).
 - **Public-by-token routes (no auth, by design).** `/api/pay/:token`,
   `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
-  `/api/stripe/webhook`, `/api/twilio/*-webhook`, `/api/bouncie-webhook`,
-  `/api/sendgrid-webhook`, `/api/lead-webhook`. New public routes outside
-  this list are P0. Contract links are short-lived bearer tokens for
-  customer e-signature and must burn the token when signed.
+  `/api/public/estimates/:token/ask`, `/api/stripe/webhook`,
+  `/api/twilio/*-webhook`, `/api/bouncie-webhook`, `/api/sendgrid-webhook`,
+  `/api/lead-webhook`. New public routes outside this list are P0.
+  The public estimate ask route must keep the estimate token format gate,
+  a short-lived signed `askToken` bound to estimate id + estimate-token hash,
+  terminal/expired-estimate rejection, public-route rate limits, no raw
+  customer question/answer logging, and estimate-context-only answers.
+  Contract links are short-lived bearer tokens for customer e-signature and
+  must burn the token when signed.
 - **Receipt token permanence.** `/api/receipt/:token` reuses
   `invoices.token` and never expires or burns — customers share receipt
   links with bookkeepers months later.

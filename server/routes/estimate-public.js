@@ -28,8 +28,13 @@ const {
   getEstimatePricingCache,
   setEstimatePricingCache,
 } = require('../services/estimate-pricing-cache');
+const { answerEstimateQuestion } = require('../services/estimate-assistant');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
+const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
+  || config.jwt.secret
+  || crypto.randomBytes(32).toString('hex');
+const ESTIMATE_ASK_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 
 // View-count hygiene. We surface view_count + last_viewed_at on the admin
 // estimates dashboard, so the count needs to mean "the customer opened it"
@@ -82,6 +87,55 @@ function shouldCountView(req) {
 
 function shouldApplyFirstViewSideEffects(req, ip) {
   return !hasAdminMarker(req) && !isAdminIp(ip);
+}
+
+function hashEstimateToken(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+function signEstimateAskToken(estimate = {}, tokenOverride) {
+  const token = tokenOverride || estimate.token;
+  return jwt.sign({
+    kind: 'estimate_ask',
+    estimateId: String(estimate.id || ''),
+    tokenHash: hashEstimateToken(token),
+  }, ESTIMATE_ASK_TOKEN_SECRET, { expiresIn: ESTIMATE_ASK_TOKEN_TTL_SECONDS });
+}
+
+function verifyEstimateAskToken(req, estimate) {
+  const supplied = req.get('x-estimate-ask-token') || req.body?.askToken;
+  if (!supplied) return false;
+  try {
+    const payload = jwt.verify(String(supplied), ESTIMATE_ASK_TOKEN_SECRET);
+    return payload?.kind === 'estimate_ask'
+      && String(payload.estimateId || '') === String(estimate.id || '')
+      && payload.tokenHash === hashEstimateToken(estimate.token || req.params.token);
+  } catch {
+    return false;
+  }
+}
+
+function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
+  if (!estimate) return false;
+  if (['accepted', 'declined', 'expired'].includes(estimate.status)) return false;
+  if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
+  return true;
+}
+
+function buildEstimateAskQueryLog({ estimateId, question, result = {} }) {
+  const questionChars = String(question || '').length;
+  const answerChars = String(result.answer || '').length;
+  const source = String(result.source || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'unknown';
+  return {
+    prompt: `[public_estimate:${estimateId}] question_chars=${questionChars}`,
+    response: `[redacted] source=${source} answer_chars=${answerChars}`,
+    tool_calls: JSON.stringify([{
+      name: 'public_estimate_ask',
+      input: { questionChars },
+      result: { source, answerChars },
+    }]),
+    operator_id: null,
+  };
 }
 
 // Map a one-time service name to the booking page's service id (matches PublicBookingPage SERVICES)
@@ -539,6 +593,7 @@ ${shellTopBar()}
 
 function renderPage(token, estimate, estData) {
   const est = estimate;
+  const estimateAskToken = signEstimateAskToken(est, token);
   const tier = est.tier || 'Bronze';
   const firstName = escapeHtml((est.customerName || '').split(' ')[0] || 'there');
   const fullName = escapeHtml(est.customerName || '');
@@ -912,6 +967,33 @@ function renderPage(token, estimate, estData) {
       ${intelligence.signals.map((signal) => `<div class="intelligence-signal">${escapeHtml(signal)}</div>`).join('')}
     </div>` : ''}
   </section>` : '';
+  const askPrompts = [
+    'What is included?',
+    'How does billing work?',
+    'Why this price?',
+    'Who is Waves?',
+  ];
+  const estimateAskEnabled = isEstimateAskAnswerable({
+    status: est.status,
+    expires_at: est.expiresAt || est.expires_at,
+  });
+  const estimateAskBlockHtml = estimateAskEnabled ? `
+  <section class="card estimate-ask-card" aria-labelledby="estimate-ask-title">
+    <div class="estimate-ask-heading">
+      <div>
+        <div class="eyebrow">Waves AI</div>
+        <h2 id="estimate-ask-title">Ask Waves AI</h2>
+      </div>
+    </div>
+    <form class="estimate-ask-form" id="estimate-ask-form">
+      <input id="estimate-ask-input" name="estimate_question" type="text" maxlength="500" autocomplete="off" placeholder="Ask about services, pricing, scheduling, or Waves" aria-label="Ask Waves AI about this estimate">
+      <button type="submit" id="estimate-ask-submit">Ask</button>
+    </form>
+    <div class="estimate-ask-prompts" aria-label="Example questions">
+      ${askPrompts.map((prompt) => `<button type="button" data-estimate-ask-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join('')}
+    </div>
+    <div class="estimate-ask-answer" id="estimate-ask-answer" aria-live="polite" hidden></div>
+  </section>` : '';
 
   // ── Service-prefs toggle card (only when estimate has a pest line) ────
   function renderPrefRow(key) {
@@ -1038,6 +1120,19 @@ function renderPage(token, estimate, estData) {
   .intelligence-signals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2px}
   @media(max-width:760px){.intelligence-header{display:grid}.intelligence-signals{grid-template-columns:1fr}}
   .intelligence-signal{border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;background:#fff;padding:10px 12px;color:#3F4A65;font-size:16px;line-height:1.45}
+  .estimate-ask-card{display:grid;gap:12px;border-color:#CFE7F5;background:#fff}
+  .estimate-ask-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+  .estimate-ask-form{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
+  .estimate-ask-form input{width:100%;min-height:48px;border:1px solid #CFE7F5;border-radius:10px;padding:12px 14px;font:500 15px/1.35 Inter,system-ui,sans-serif;color:#1B2C5B;background:#F8FCFE;outline:none}
+  .estimate-ask-form input:focus{border-color:#009CDE;box-shadow:0 0 0 3px rgba(0,156,222,.12);background:#fff}
+  .estimate-ask-form button{min-height:48px;border:0;border-radius:10px;padding:0 18px;background:#009CDE;color:#fff;font:700 14px/1 Inter,system-ui,sans-serif;cursor:pointer}
+  .estimate-ask-form button:disabled{opacity:.65;cursor:not-allowed}
+  .estimate-ask-prompts{display:flex;flex-wrap:wrap;gap:8px}
+  .estimate-ask-prompts button{appearance:none;border:1px solid #E7E2D7;background:#F7F5EE;color:#1B2C5B;border-radius:999px;padding:8px 12px;font:700 12px/1 Inter,system-ui,sans-serif;cursor:pointer}
+  .estimate-ask-prompts button:hover{background:#E3F5FD;border-color:#B8E1F5}
+  .estimate-ask-answer{border-left:4px solid #009CDE;background:#F8FCFE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:14px;line-height:1.55;white-space:pre-line}
+  .estimate-ask-answer[data-state="error"]{border-left-color:#C8102E;background:#FFF5F5}
+  @media(max-width:640px){.estimate-ask-form{grid-template-columns:1fr}.estimate-ask-form button{width:100%}}
   .billing-card{display:grid;gap:16px}
   .billing-card h2{margin-bottom:0}
   .billing-lede{margin:0;color:#3F4A65;font-size:15px;line-height:1.6}
@@ -1220,6 +1315,8 @@ ${shellTopBar()}
 
   ${aiBlockHtml}
 
+  ${estimateAskBlockHtml}
+
   ${billingCardHtml}
 
   ${prefsBlockHtml}
@@ -1323,6 +1420,7 @@ ${shellQuestionsBar()}
 <script>
   const TOKEN = ${JSON.stringify(token)};
   const API = '/api/estimates/' + TOKEN;
+  const ESTIMATE_ASK_TOKEN = ${JSON.stringify(estimateAskToken)};
   const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
   const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
   const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedRecurringFrequencyKey))};
@@ -1390,6 +1488,56 @@ ${shellQuestionsBar()}
     const hideIfBroken = () => { if (!img.naturalWidth) img.hidden = true; };
     img.addEventListener('error', hideIfBroken);
     setTimeout(hideIfBroken, 1200);
+  });
+
+  const estimateAskForm = document.getElementById('estimate-ask-form');
+  const estimateAskInput = document.getElementById('estimate-ask-input');
+  const estimateAskSubmit = document.getElementById('estimate-ask-submit');
+  const estimateAskAnswer = document.getElementById('estimate-ask-answer');
+  async function submitEstimateQuestion(promptText) {
+    if (!estimateAskInput || !estimateAskSubmit || !estimateAskAnswer) return;
+    const q = String(promptText || estimateAskInput.value || '').trim();
+    if (!q) return;
+    estimateAskSubmit.disabled = true;
+    estimateAskSubmit.textContent = 'Asking...';
+    estimateAskAnswer.hidden = false;
+    estimateAskAnswer.dataset.state = 'loading';
+    estimateAskAnswer.textContent = 'Checking...';
+    try {
+      const r = await fetch('/api/public/estimates/' + TOKEN + '/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Estimate-Ask-Token': ESTIMATE_ASK_TOKEN },
+        body: JSON.stringify({
+          question: q,
+          selectedFrequency: DEFAULT_RECURRING_FREQUENCY,
+          serviceMode: bookingState.serviceMode || INITIAL_SERVICE_MODE,
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'question_failed');
+      estimateAskAnswer.dataset.state = 'ready';
+      estimateAskAnswer.textContent = data.answer || 'I could not answer that from this estimate.';
+      estimateAskInput.value = '';
+    } catch (e) {
+      estimateAskAnswer.dataset.state = 'error';
+      estimateAskAnswer.textContent = 'I could not answer that right now. Call or text Waves at (941) 297-5749.';
+    } finally {
+      estimateAskSubmit.disabled = false;
+      estimateAskSubmit.textContent = 'Ask';
+    }
+  }
+  if (estimateAskForm) {
+    estimateAskForm.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      submitEstimateQuestion();
+    });
+  }
+  document.querySelectorAll('[data-estimate-ask-prompt]').forEach((btn) => {
+    btn.addEventListener('click', function () {
+      const prompt = btn.dataset.estimateAskPrompt || btn.textContent || '';
+      if (estimateAskInput) estimateAskInput.value = prompt;
+      submitEstimateQuestion(prompt);
+    });
   });
 
   // Service-preferences toggles — PUT /:token/preferences and refresh totals.
@@ -4014,6 +4162,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         customerPhone: estimate.customer_phone || null,
         customerEmail: estimate.customer_email || null,
         address: estimate.address || null,
+        askToken: signEstimateAskToken(estimate),
         category: estimate.category || 'RESIDENTIAL',
         createdAt: estimate.created_at,
         expiresAt: estimate.expires_at,
@@ -4041,7 +4190,67 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+async function handleEstimateAsk(req, res, next) {
+  try {
+    const question = String(req.body?.question || '').trim();
+    if (!question) return res.status(400).json({ error: 'question_required' });
+    if (question.length > 500) return res.status(400).json({ error: 'question_too_long' });
+    const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
+      ? req.body.selectedFrequency.trim()
+      : '';
+    const serviceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
+
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!verifyEstimateAskToken(req, estimate)) {
+      return res.status(403).json({ error: 'estimate_ask_forbidden' });
+    }
+    if (!isEstimateAskAnswerable(estimate)) {
+      return res.status(409).json({ error: 'estimate_expired' });
+    }
+
+    let estData = {};
+    try {
+      estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : (estimate.estimate_data || {});
+    } catch {
+      estData = {};
+    }
+
+    let pricingBundle = {};
+    try {
+      pricingBundle = await buildPricingBundle(estimate);
+    } catch (err) {
+      logger.warn(`[estimate-ask] pricing bundle failed: ${err.message}`);
+    }
+
+    const result = await answerEstimateQuestion({
+      question,
+      estimate,
+      estData,
+      pricingBundle,
+      selectedFrequency,
+      serviceMode,
+    });
+
+    await db('intelligence_bar_queries').insert(buildEstimateAskQueryLog({
+      estimateId: estimate.id,
+      question,
+      result,
+    })).catch((err) => {
+      logger.warn(`[estimate-ask] query log skipped: ${err.message}`);
+    });
+
+    return res.json({
+      answer: result.answer,
+      source: result.source,
+    });
+  } catch (err) { next(err); }
+}
+
 module.exports = router;
+module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
@@ -4053,6 +4262,8 @@ module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
+module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
+module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.bookingServiceFor = bookingServiceFor;
