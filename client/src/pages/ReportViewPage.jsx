@@ -1068,6 +1068,8 @@ function ServiceStatusCard({ data, mode }) {
 function ReentryReadinessCard({ context, mode, token }) {
   const nowMs = useReadinessNow(context, mode);
   const readiness = readinessSummary(context, mode, nowMs);
+  const timezone = context?.displayTimezone || SERVICE_REPORT_TIME_ZONE;
+  const targets = Array.isArray(context?.targets) ? context.targets : [];
 
   useEffect(() => {
     if (mode !== 'live' || !context) return;
@@ -1099,6 +1101,19 @@ function ReentryReadinessCard({ context, mode, token }) {
           <div className="sr-cell-value">{readiness.precautions}</div>
         </div>
       </div>
+      {targets.length > 0 && (
+        <div className="reentry-target-grid" style={{ marginTop: 16 }}>
+          {targets.map((target) => (
+            <ReentryTargetTile
+              key={target.key}
+              target={target}
+              nowMs={nowMs}
+              mode={mode}
+              timezone={timezone}
+            />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
