@@ -556,8 +556,11 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
         term_end: formatDateLabel(claimedTerm.term_end),
         last_service_sentence: lastServiceSentence,
       },
-      `Hello ${customer.first_name || 'there'}! Your annual prepaid Waves plan is coming up for renewal on ${formatDateLabel(claimedTerm.term_end)}.${lastServiceSentence}\n\nReply RENEW, LAPSE, or CHANGE and our team will help with the next step. Questions or requests? Reply to this message.`
     );
+    if (!body) {
+      logger.warn(`[annual-prepay] annual_prepay_renewal_reminder template missing/disabled for customer ${customer.id}`);
+      return { sent: false, reason: 'missing_sms_template' };
+    }
 
     const smsResult = await sendCustomerMessage({
       to: customer.phone,

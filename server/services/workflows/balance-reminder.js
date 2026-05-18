@@ -135,15 +135,21 @@ class BalanceReminder {
       customerId: service.cust_id,
     });
 
-    const messages = {
-      gentle: `Hello ${service.first_name}! Waves here. We're scheduled to see you on ${datePretty}.\n\nOur records show an outstanding balance on your account. To avoid any interruption in service, please take care of it before your appointment: ${link}`,
-      firm: `Hi ${service.first_name}, quick reminder from Waves - your ${service.service_type || "service"} is ${daysUntil === 1 ? "tomorrow" : `in ${daysUntil} days`} and there's an outstanding balance.\n\nPlease take care of it so we can keep you on schedule: ${link}\n\nIf there's an issue, just reply. - Waves`,
-      urgent: `${service.first_name}, your Waves service is ${daysUntil === 0 ? "today" : "tomorrow"} and your account has an outstanding balance.\n\nPay now to keep your appointment: ${link}\n\nAlready paid? Disregard - it may take a few hours to process. - Waves`,
-    };
+    const serviceTiming = daysUntil === 0 ? "today" : daysUntil === 1 ? "tomorrow" : `in ${daysUntil} days`;
+    const message = await renderSmsTemplate(`balance_reminder_${tier}`, {
+      first_name: service.first_name || "there",
+      service_date: datePretty,
+      service_type: service.service_type || "service",
+      service_timing: serviceTiming,
+      pay_url: link,
+    });
+    if (!message) {
+      throw new Error(`balance_reminder_${tier} template missing/disabled`);
+    }
 
     const sendResult = await sendCustomerMessage({
       to: service.phone,
-      body: messages[tier],
+      body: message,
       channel: "sms",
       audience: "customer",
       purpose: "payment_link",
@@ -340,20 +346,29 @@ class BalanceReminder {
       .first();
 
     if (recentReminder) {
-      const sendResult = await sendCustomerMessage({
-        to: customer.phone,
-        body: `${customer.first_name}, got it - thank you for the payment! Your account is all caught up. See you at your next service. - Waves`,
-        channel: "sms",
-        audience: "customer",
-        purpose: "payment_receipt",
-        customerId,
-        entryPoint: "balance_reminder_payment_received",
-        metadata: { original_message_type: "confirmation" },
+      const body = await renderSmsTemplate("balance_payment_received", {
+        first_name: customer.first_name || "there",
       });
-      if (sendResult.blocked || sendResult.sent === false) {
+      if (!body) {
         logger.warn(
-          `[balance-reminder] payment thank-you SMS blocked for customer ${customerId}: ${sendResult.code || "unknown"} ${sendResult.reason || ""}`,
+          `[balance-reminder] balance_payment_received template missing/disabled — skipping customer ${customerId}`,
         );
+      } else {
+        const sendResult = await sendCustomerMessage({
+          to: customer.phone,
+          body,
+          channel: "sms",
+          audience: "customer",
+          purpose: "payment_receipt",
+          customerId,
+          entryPoint: "balance_reminder_payment_received",
+          metadata: { original_message_type: "confirmation" },
+        });
+        if (sendResult.blocked || sendResult.sent === false) {
+          logger.warn(
+            `[balance-reminder] payment thank-you SMS blocked for customer ${customerId}: ${sendResult.code || "unknown"} ${sendResult.reason || ""}`,
+          );
+        }
       }
     }
 

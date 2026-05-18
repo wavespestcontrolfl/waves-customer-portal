@@ -25,6 +25,7 @@ const { PROJECT_TYPES, PROJECT_TYPE_KEYS, isValidProjectType, getProjectType } =
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const serviceLibrary = require('../services/service-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { wrapEmail, formatDate, plainText } = require('../services/email-template');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
@@ -1276,7 +1277,11 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         if (!normalized) {
           channels.sms = { ok: false, error: `Invalid phone format: ${customer.phone}` };
         } else {
-          const smsBody = `Hi ${firstName}! Your Waves ${typeLabel} report is ready: ${reportUrl}\n\nQuestions? Reply here.`;
+          const smsBody = await renderRequiredSmsTemplate('project_report_ready', {
+            first_name: firstName,
+            project_type: typeLabel,
+            report_url: reportUrl,
+          });
           const result = await sendCustomerMessage({
             to: normalized,
             body: smsBody,

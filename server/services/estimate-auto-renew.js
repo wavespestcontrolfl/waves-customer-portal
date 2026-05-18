@@ -25,14 +25,16 @@ const { isEnabled } = require('../config/feature-gates');
 
 const RENEWAL_DAYS = 7;
 
-async function renderTemplate(templateKey, vars, fallback) {
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body && !body.includes('{first_name}')) return body;
     }
-  } catch { /* fall through */ }
-  return fallback;
+  } catch (err) {
+    throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
+  }
+  throw new Error(`SMS template ${templateKey} is missing or inactive`);
 }
 
 function canFallbackFromTemplateEmailError(err) {
@@ -67,7 +69,6 @@ const EstimateAutoRenew = {
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           const smsBody = await renderTemplate('estimate_auto_renewed',
             { first_name: firstName, estimate_url: url },
-            `Hey ${firstName}! Your Waves estimate was about to expire, so we extended it a few more days. Take another look whenever you're ready: ${url} Questions? (941) 318-7612`
           );
 
           if (est.customer_phone) {

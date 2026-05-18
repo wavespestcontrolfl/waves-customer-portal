@@ -215,25 +215,27 @@ class AvailabilityEngine {
           time: timeLabel,
           address: addressLabel,
           confirmation_code: confCode,
-        },
-        `Hello ${customer.first_name || 'there'}! Your Waves appointment is confirmed for ${dateLabel}, ${timeLabel} at ${addressLabel}. Confirmation: ${confCode}.\n\nNeed to change it? Reply RESCHEDULE. Questions or requests? Reply to this message.`
+        }
       );
-
-      // Customer confirmation
-      const smsResult = await sendCustomerMessage({
-        to: customer.phone,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'appointment',
-        customerId: customer.id,
-        appointmentId: scheduled.id,
-        identityTrustLevel: 'phone_matches_customer',
-        entryPoint: 'availability_self_book',
-        metadata: { original_message_type: 'booking_confirmation' },
-      });
-      if (!smsResult.sent) {
-        logger.warn(`Booking confirmation SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      if (!body) {
+        logger.warn(`[availability] self_booking_confirmation template missing/disabled for customer ${customerId}`);
+      } else {
+        // Customer confirmation
+        const smsResult = await sendCustomerMessage({
+          to: customer.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'appointment',
+          customerId: customer.id,
+          appointmentId: scheduled.id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'availability_self_book',
+          metadata: { original_message_type: 'booking_confirmation' },
+        });
+        if (!smsResult.sent) {
+          logger.warn(`Booking confirmation SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       }
 
       // Adam notification

@@ -29,6 +29,7 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+const { renderSmsTemplate } = require('./sms-template-renderer');
 
 const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam B.';
 
@@ -1266,24 +1267,13 @@ const CallRecordingProcessor = {
             }
           } catch { parsedDate = extracted.preferred_date_time; }
 
-          try {
-            const tpl = await db('sms_templates').where({ template_key: 'appointment_call_confirmed' }).first();
-            if (tpl?.body) {
-              smsBody = tpl.body
-                .replace(/\{first_name\}/g, firstName)
-                .replace(/\{service_type\}/g, serviceType)
-                .replace(/\{date_time\}/g, extracted.preferred_date_time)
-                .replace(/\{date\}/g, parsedDate)
-                .replace(/\{time\}/g, parsedTime);
-            }
-          } catch { /* template table may not exist */ }
-
-          if (!smsBody) {
-            smsBody = `Hello ${firstName}! Your ${serviceType} appointment has been scheduled.\n\n` +
-              `Date/Time: ${extracted.preferred_date_time}\n\n` +
-              `We'll send you a reminder before your appointment. Reply to this text or call (941) 318-7612 with any questions.\n\n` +
-              `- Waves Pest Control`;
-          }
+          smsBody = await renderSmsTemplate('appointment_call_confirmed', {
+            first_name: firstName,
+            service_type: serviceType,
+            date_time: extracted.preferred_date_time,
+            date: parsedDate,
+            time: parsedTime,
+          });
 
           // Content-level dedup: even if the concurrent-run guard above
           // misses (e.g., admin reprocess inside the same minute), don't
@@ -1448,6 +1438,17 @@ const CallRecordingProcessor = {
                 smsSent: false,
                 smsSkippedReason: 'existing_schedule',
                 scheduleReused: true,
+                scheduledServiceId,
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduledDate: scheduledDateForLog,
+                windowStart: windowStartForLog,
+              };
+            } else if (!smsBody) {
+              logger.warn(`[call-proc] appointment_call_confirmed template missing/disabled; appointment SMS skipped for customer ${customerId}`);
+              appointmentResult = {
+                smsSent: false,
+                smsSkippedReason: 'missing_sms_template',
                 scheduledServiceId,
                 service: serviceType,
                 dateTime: extracted.preferred_date_time,

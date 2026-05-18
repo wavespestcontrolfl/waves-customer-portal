@@ -24,6 +24,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { etDateString } = require('../utils/datetime-et');
+const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -397,7 +398,13 @@ If no contradictions, return: { "contradictions": [] }`
       } catch {}
 
       const deltaStr = delta != null && delta !== 0 ? `, ${delta > 0 ? 'up' : 'down'} ${Math.abs(delta)} from last visit` : '';
-      const smsMessage = `Hi ${customer.first_name}! Your lawn health report is ready — you scored ${overall}/100${deltaStr}.${tip}\n\nView full report: portal.wavespestcontrol.com\nThank you for choosing Waves!`;
+      const smsMessage = await renderRequiredSmsTemplate('lawn_health_report_ready', {
+        first_name: customer.first_name || 'there',
+        overall_score: String(overall),
+        delta_line: deltaStr,
+        tip_line: tip,
+        portal_url: 'portal.wavespestcontrol.com',
+      });
 
       const NotificationDispatcher = require('./notification-dispatcher');
       const result = await NotificationDispatcher.notify(customer.id, 'service_complete', {

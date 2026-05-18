@@ -9,6 +9,7 @@ const {
 } = require("../utils/datetime-et");
 const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
+const { renderSmsTemplate } = require("./sms-template-renderer");
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -893,26 +894,18 @@ const ReviewService = {
       const googleReviewUrl =
         REVIEW_LINKS[location] || REVIEW_LINKS["lakewood-ranch"];
 
-      const fallback = `No pressure at all, ${contact.name || customer.first_name}, but if you get a sec, your review helps other SWFL families find a pest company they can trust: ${googleReviewUrl}`;
-      let body = fallback;
-      try {
-        const templates = require("../routes/admin-sms-templates");
-        const rendered = await templates.getTemplate(
-          "review_request_followup",
-          {
-            first_name: contact.name || customer.first_name || "",
-            google_review_url: googleReviewUrl,
-          },
+      const body = await renderSmsTemplate(
+        "review_request_followup",
+        {
+          first_name: contact.name || customer.first_name || "",
+          google_review_url: googleReviewUrl,
+        },
+      );
+      if (!body) {
+        logger.warn(
+          `[review] review_request_followup template missing/disabled (customerId=${customer.id} requestId=${request.id})`,
         );
-        if (
-          rendered &&
-          !rendered.includes("{first_name}") &&
-          !rendered.includes("{google_review_url}")
-        ) {
-          body = rendered;
-        }
-      } catch {
-        /* use fallback */
+        continue;
       }
 
       try {

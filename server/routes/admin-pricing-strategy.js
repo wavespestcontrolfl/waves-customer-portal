@@ -17,6 +17,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const PricingIntelligence = require('../services/pricing-intelligence');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 router.use(adminAuthenticate);
 
@@ -233,9 +234,15 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
     // Build personalized message
     let message;
     if (upsell.type === 'tier_upgrade') {
-      message = `Hey ${firstName}! Adam here from Waves. Quick question: did you know upgrading to WaveGuard ${upsell.nextTier} can add more coverage and service savings? Want me to run the numbers for you? Reply YES and I'll send a breakdown. - Waves`;
+      message = await renderRequiredSmsTemplate('upsell_tier_upgrade', {
+        first_name: firstName,
+        next_tier: upsell.nextTier,
+      });
     } else {
-      message = `Hey ${firstName}! Adam here from Waves. Since you're already a WaveGuard member, I wanted to let you know we can add ${upsell.service} to your plan with bundled service savings. Want details? Reply YES. - Waves`;
+      message = await renderRequiredSmsTemplate('upsell_add_service', {
+        first_name: firstName,
+        service_name: upsell.service,
+      });
     }
 
     // Allow custom message override

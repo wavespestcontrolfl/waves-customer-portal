@@ -21,14 +21,14 @@ const {
 const WAVES_ADMIN_PHONE = '+19413187612';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
 
-async function renderTemplate(templateKey, vars, fallback) {
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
-  } catch { /* fall through to fallback */ }
-  return fallback;
+  } catch { /* fall through */ }
+  return null;
 }
 
 const quoteLimiter = rateLimit({
@@ -375,26 +375,29 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const customerBody = await renderTemplate(
           'estimate_accepted_onetime',
           { first_name: firstName, service_label: serviceLabel, booking_url: bookingUrl },
-          `Hey ${firstName}! Thanks for booking your ${serviceLabel} with Waves. Pick your time here and we'll show slots when a tech will already be in your neighborhood: ${bookingUrl}. Questions? Just reply. - Waves`
         );
-        const smsResult = await sendCustomerMessage({
-          to: normalizedPhone,
-          body: customerBody,
-          channel: 'sms',
-          audience: 'lead',
-          purpose: 'conversational',
-          leadId: lead.id,
-          identityTrustLevel: 'phone_provided_unverified',
-          entryPoint: 'public_quote_booking_sms',
-          metadata: {
-            original_message_type: 'auto_reply',
-            mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
-          },
-        });
-        if (!smsResult.sent) {
-          logger.warn(`[public-quote] Customer SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        if (!customerBody) {
+          logger.warn(`[public-quote] estimate_accepted_onetime template missing/disabled; booking SMS skipped for lead ${lead.id}`);
         } else {
-          logger.info(`[public-quote] Customer SMS sent for lead ${lead.id}`);
+          const smsResult = await sendCustomerMessage({
+            to: normalizedPhone,
+            body: customerBody,
+            channel: 'sms',
+            audience: 'lead',
+            purpose: 'conversational',
+            leadId: lead.id,
+            identityTrustLevel: 'phone_provided_unverified',
+            entryPoint: 'public_quote_booking_sms',
+            metadata: {
+              original_message_type: 'auto_reply',
+              mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
+            },
+          });
+          if (!smsResult.sent) {
+            logger.warn(`[public-quote] Customer SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          } else {
+            logger.info(`[public-quote] Customer SMS sent for lead ${lead.id}`);
+          }
         }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }

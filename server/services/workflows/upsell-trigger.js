@@ -62,8 +62,11 @@ class UpsellTrigger {
     const body = await renderSmsTemplate(
       'waveguard_upsell',
       { first_name: customer.first_name || 'there', tier_label: tier.label },
-      `Hello ${customer.first_name || 'there'}! Based on your recent services, our ${tier.label} WaveGuard plan may be a better fit with unlimited coverage and predictable billing.\n\nReply INFO to learn more. Questions or requests? Reply to this message.`
     );
+    if (!body) {
+      logger.warn(`[upsell-trigger] waveguard_upsell template missing/disabled for customer ${customerId}`);
+      return { sent: false, reason: 'missing_sms_template' };
+    }
 
     const smsResult = await sendCustomerMessage({
       to: customer.phone,

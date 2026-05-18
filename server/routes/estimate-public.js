@@ -166,13 +166,18 @@ function hhmm(value) {
 }
 
 async function renderTemplate(templateKey, vars, fallback) {
+  const body = await renderEditableSmsTemplate(templateKey, vars);
+  return body || fallback;
+}
+
+async function renderEditableSmsTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch { /* fall through */ }
-  return fallback;
+  return null;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -269,10 +274,9 @@ function shellTopBar() {
   </header>`;
 }
 
-// Sticky "Questions?" bar pinned to the bottom of the customer estimate
-// page. Two equal-width buttons (Call / Text) using tel: + sms: schemes
-// so mobile users land in their dialer / messages app, and desktop users
-// see the same affordance via the platform handler.
+// Mobile sticky "Questions?" bar pinned to the bottom of the customer
+// estimate page. Desktop keeps the top phone link and footer CTA visible
+// without covering long-form estimate content.
 function shellQuestionsBar() {
   return `<div class="q-bar" role="region" aria-label="Questions for Waves">
     <a href="tel:+19412975749" class="q-btn q-call" aria-label="Call Waves at (941) 297-5749">
@@ -594,6 +598,17 @@ const PERKS = [
   'Owner-operator accountability on every visit',
 ];
 
+const LAWN_CARE_PERKS = [
+  'Seasonal lawn applications scheduled for your program',
+  'Weed, fungus, chinch, and turf-stress observations',
+  'Treatment timing adjusted for Southwest Florida conditions',
+  'Visit notes saved to your customer portal',
+  'Locked-in pricing for 12 months',
+  'Text your tech directly for quick questions',
+  'Billing after completed lawn care visits',
+  'Owner-operator accountability on every visit',
+];
+
 // Canonical SWFL stores — name, physical address, ZIPs, spoke page slug
 // on wavespestcontrol.com, and Google Place ID for map links. Mirrors
 // server/config/locations.js but kept inline so the SSR estimate page
@@ -845,6 +860,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     || !!inputServices.lawn
     || !!inputServices.lawnCare
     || inputs.svcLawn === true;
+  const isLawnOnly = serviceNames.length > 0
+    && serviceNames.every((name) => /lawn/i.test(String(name)));
   const hasTermiteBait = serviceNames.some((name) => isTermiteBaitServiceName(name))
     || !!inputServices.termiteBait
     || !!inputServices.termite;
@@ -891,10 +908,16 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
   return {
     eyebrow: 'Waves AI',
-    title: 'Waves AI reviewed your property before pricing this estimate',
-    body: satelliteUrl || metrics.length
-      ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
-      : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.',
+    title: isLawnOnly
+      ? 'Waves AI reviewed your lawn before pricing this estimate'
+      : 'Waves AI reviewed your property before pricing this estimate',
+    body: isLawnOnly
+      ? (satelliteUrl || metrics.length
+        ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
+        : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your lawn care plan.')
+      : (satelliteUrl || metrics.length
+        ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
+        : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.'),
     satelliteUrl,
     metrics,
     signals: [],
@@ -954,6 +977,66 @@ function renderPage(token, estimate, estData) {
   const showPrefs = !!(pestRecurring || hasPestOneTime);
   const prefs = normalizePrefs(estData?.preferences);
   const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
+  const isLawnCareOneTimeItem = (item = {}) => {
+    const raw = String(item.service || item.name || item.label || '').toLowerCase();
+    if (!raw || raw.includes('waveguard setup') || raw.includes('membership')) return true;
+    return /\blawn|turf|weed|fertili[sz]|chinch|fung/.test(raw);
+  };
+  const hasOnlyLawnCareServices = recurring.length > 0
+    && recurring.every((svc) => recurringServiceKey(svc) === 'lawn_care')
+    && !hasPestOneTime
+    && oneTimeItems.every(isLawnCareOneTimeItem);
+  const pageCopy = hasOnlyLawnCareServices
+    ? {
+        heroSuffix: "here's your lawn care estimate.",
+        recurringAssurance: 'Your plan includes scheduled turf applications, visit notes, and treatment timing matched to Southwest Florida conditions.',
+        aggregateDayLabel: 'lawn care',
+        billingHeading: 'Choose how to start your lawn care plan',
+        billingLede: 'No payment is charged on this page. After each completed lawn care visit, billing is handled through the payment method you choose.',
+        payAfterTitle: 'Pay after each visit',
+        payAfterBody: 'Billed after each completed lawn care visit.',
+        noPaymentCopy: 'No payment is charged on this page. We will confirm details before your first lawn care visit.',
+        billingWorksIntro: 'Your lawn care plan is shown as',
+        bookingTitle: 'Pick your first lawn care visit',
+        bookingSubhead: 'Choose a window to get your lawn care plan started.',
+        payPrefHeading: 'Choose how you want to pay',
+        payPrefCardTitle: 'Pay after lawn care visits',
+        payPrefCardSub: 'Billed after each completed lawn care visit.',
+        prepayTitle: 'Pay the 12-month plan in full',
+        prepayBody: 'Approve the 12-month lawn care plan up front. The WaveGuard Membership is included on the prepay invoice.',
+        prepayButtonSub: 'Annual prepay includes the WaveGuard Membership.',
+        cardConfirmTitle: 'Confirm and set up billing',
+        cardConfirmSub: 'next step saves your card for pay-after-visit billing. Lawn care visits are billed after completion.',
+        perksHeading: 'What your lawn care plan includes',
+        finalHeading: 'Ready to start lawn care?',
+        finalSubhead: "Let's get your lawn on the schedule.",
+        finalBody: 'No payment today. No surprise increases.',
+      }
+    : {
+        heroSuffix: "here's your custom quote.",
+        recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
+        aggregateDayLabel: 'complete home protection',
+        billingHeading: 'Choose how you want to pay',
+        billingLede: null,
+        payAfterTitle: 'Pay after each visit',
+        payAfterBody: 'Billed after each completed service through autopay.',
+        noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
+        billingWorksIntro: 'This plan is shown as',
+        bookingTitle: 'Find a date & time that works for you',
+        bookingSubhead: 'These are the windows when we’ll already be working in your neighborhood — pick whichever fits.',
+        payPrefHeading: 'Choose how you want to pay',
+        payPrefCardTitle: 'Pay after each visit',
+        payPrefCardSub: 'Billed after each completed service through autopay.',
+        prepayTitle: 'Pay the 12-month plan in full',
+        prepayBody: 'Approve the 12-month plan up front and the setup is included at no charge.',
+        prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
+        cardConfirmTitle: 'Confirm and save card',
+        cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+        perksHeading: 'What WaveGuard members get',
+        finalHeading: 'Go Waves!',
+        finalSubhead: 'Wave Goodbye to Pests!',
+        finalBody: 'No surprise increases, no hidden fees.',
+      };
 
   // One-time toggle — admin opted this estimate into letting the customer
   // pick "single visit" instead of a recurring plan. Only renders when the
@@ -1090,13 +1173,13 @@ function renderPage(token, estimate, estData) {
   const recurringDisplayBase = intervalPriceFromMonthly(baseMonthly, selectedRecurringFrequencyKey);
   const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedRecurringFrequencyKey);
 
-  // WaveGuard Membership — strictly recurring-pest-only. Lawn-only, T&S-only,
-  // mosquito-only, or termite-bait-only estimates never show the $99 setup
-  // line, even if a stale `oneTime.membershipFee` exists in cached data.
+  // WaveGuard Membership. Recurring pest and lawn-care-only estimates include
+  // the $99 membership; one-off and non-WaveGuard recurring add-ons do not.
   // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
-  // to the pricing constant when a recurring pest line is present.
+  // to the pricing constant when a qualifying recurring line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  const membershipFee = pestRecurring
+  const hasWaveGuardMembership = !!pestRecurring || hasOnlyLawnCareServices;
+  const membershipFee = hasWaveGuardMembership
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
   const showMembershipFee = membershipFee > 0 && !locked;
@@ -1193,43 +1276,46 @@ function renderPage(token, estimate, estData) {
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
   const showAnnualPrepayOption = showMembershipFee;
-  const billingLede = showAnnualPrepayOption
+  const annualPrepayWaivesMembership = showMembershipFee && !hasOnlyLawnCareServices;
+  const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
+  const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal + prepayMembershipDue) * 100) / 100);
+  const billingLede = pageCopy.billingLede || (showAnnualPrepayOption
     ? 'Billed after each completed service visit through autopay unless you choose to pay the 12-month plan in full at signup.'
-    : 'Billed after each completed service visit through autopay.';
+    : 'Billed after each completed service visit through autopay.');
   const recurringBillCadenceWord = selectedRecurringFrequencyKey === 'quarterly'
     ? 'quarterly'
     : (selectedRecurringFrequencyKey === 'bi_monthly' ? 'bi-monthly' : 'monthly');
   const billingCardHtml = (!quoteRequired && !locked && billingRecurring.length) ? `
   <section class="card billing-card"${billingModeAttr}>
-    <h2>Choose how you want to pay</h2>
+    <h2>${escapeHtml(pageCopy.billingHeading)}</h2>
     <p class="billing-lede">${escapeHtml(billingLede)}</p>
     <div class="payment-choice-grid">
       <div class="payment-choice">
-        <h3>Pay after each visit</h3>
-        <p>Billed after each completed service through autopay.</p>
+        <h3>${escapeHtml(pageCopy.payAfterTitle)}</h3>
+        <p>${escapeHtml(pageCopy.payAfterBody)}</p>
         ${showMembershipFee ? `
         <div class="billing-line"><span>WaveGuard Membership Setup &mdash; ${fmtMoney(membershipFee)} one-time charge</span></div>
         <p class="billing-small">A setup invoice is prepared after approval. This one-time setup activates your WaveGuard membership benefits, service schedule, and protection plan.</p>` : ''}
         ${showMembershipFee ? `<div class="billing-total-row"><span>Setup invoice</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
-        <p class="billing-small">No payment is charged on this page. Your first service visit will be billed after completion.</p>
+        <p class="billing-small">${escapeHtml(pageCopy.noPaymentCopy)}</p>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
-        <h3>Pay the 12-month plan in full</h3>
-        <p>Approve the 12-month plan up front and the setup is included at no charge.</p>
+        <h3>${escapeHtml(pageCopy.prepayTitle)}</h3>
+        <p>${escapeHtml(pageCopy.prepayBody)}</p>
         <div class="billing-total-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
         ${showMembershipFee ? `
         <div class="billing-line"><span>WaveGuard Membership Setup &mdash; ${fmtMoney(membershipFee)} one-time charge</span></div>
-        <div class="billing-line discount"><span>Annual Pay-in-Full Waiver &mdash; -${fmtMoney(membershipFee)}</span></div>
-        <p class="billing-small">The WaveGuard Membership Setup is included at no charge when the 12-month plan is paid in full.</p>` : ''}
-        <div class="billing-total-row"><span>Prepay invoice</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
-        ${showMembershipFee ? `<p class="billing-small">Net setup fee: $0</p>` : ''}
+        ${annualPrepayWaivesMembership ? `<div class="billing-line discount"><span>Annual Pay-in-Full Waiver &mdash; -${fmtMoney(membershipFee)}</span></div>
+        <p class="billing-small">The WaveGuard Membership Setup is included at no charge when the 12-month plan is paid in full.</p>` : `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>`}` : ''}
+        <div class="billing-total-row"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+        ${annualPrepayWaivesMembership ? `<p class="billing-small">Net setup fee: $0</p>` : ''}
       </div>` : ''}
     </div>
     ${billingServiceRowsHtml ? `
     <div class="billing-works">
       <h3>How billing works</h3>
-      <p>This plan is shown as <span data-billing-period-total>${fmtMoney(recurringDisplayTotal)}</span> / ${escapeHtml(recurringPricePeriodWord)}, but you are not charged a flat ${escapeHtml(recurringBillCadenceWord)} bill. You are billed after each completed service visit.</p>
+      <p>${escapeHtml(pageCopy.billingWorksIntro)} <span data-billing-period-total>${fmtMoney(recurringDisplayTotal)}</span> / ${escapeHtml(recurringPricePeriodWord)}, but you are not charged a flat ${escapeHtml(recurringBillCadenceWord)} bill. You are billed after each completed service visit.</p>
       <div class="billing-service-list">${billingServiceRowsHtml}</div>
       ${tierDiscountPct > 0 ? `<p class="billing-small">WaveGuard ${escapeHtml(tier)} prices shown after the ${tierDiscountPct}% bundle discount.</p>` : ''}
     </div>` : ''}
@@ -1284,7 +1370,7 @@ function renderPage(token, estimate, estData) {
         <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
       </div>
       ${savingsPerMo > 0 ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
-      <div class="day-price" data-mode-only="recurring">That\u2019s just ${fmtMoney(dayPrice)}/day for complete home protection.</div>
+      <div class="day-price" data-mode-only="recurring">That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.</div>
     `);
 
   const realOneTimeRows = oneTimeItems.map((it) => {
@@ -1298,7 +1384,9 @@ function renderPage(token, estimate, estData) {
   const hasRealOneTime = realOneTimeRows.length > 0;
   const oneTimeRows = realOneTimeRows;
 
-  const perksHtml = PERKS.map((p) => `<li>${escapeHtml(p)}</li>`).join('');
+  const perksHtml = (hasOnlyLawnCareServices ? LAWN_CARE_PERKS : PERKS)
+    .map((p) => `<li>${escapeHtml(p)}</li>`)
+    .join('');
   const reviewFallbacks = LOCATIONS.slice(0, 3).map((l) => ({
     reviewerName: `Waves ${l.name}`,
     text: `Read current Google reviews for our ${l.name} location.`,
@@ -1634,17 +1722,21 @@ function renderPage(token, estimate, estData) {
   .site-footer-contact a:hover{text-decoration:underline}
   .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
   .site-footer-legal{font-size:11px;color:#6B7280}
-  #toast{position:fixed;bottom:calc(80px + env(safe-area-inset-bottom,0));left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
   #toast.show{opacity:1}
-  .q-bar{position:fixed;left:0;right:0;bottom:0;z-index:90;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0));background:rgba(255,255,255,.96);backdrop-filter:saturate(140%) blur(8px);-webkit-backdrop-filter:saturate(140%) blur(8px);border-top:1px solid #E7E2D7;box-shadow:0 -2px 12px rgba(15,23,42,.06)}
+  .q-bar{display:none}
   .q-bar .q-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding:10px 14px;border-radius:10px;font-size:14px;font-weight:600;text-decoration:none;line-height:1.2;transition:background .15s,color .15s}
   .q-bar .q-btn svg{flex-shrink:0}
   .q-bar .q-call{background:#1B2C5B;color:#fff}
   .q-bar .q-call:hover{background:#121E3D}
   .q-bar .q-text{background:#F7F5EE;color:#1B2C5B;border:1px solid #E7E2D7}
   .q-bar .q-text:hover{background:#EDE8D8}
+  @media(max-width:760px){
+    #toast{bottom:calc(80px + env(safe-area-inset-bottom,0))}
+    .q-bar{position:fixed;left:0;right:0;bottom:0;z-index:90;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0));background:rgba(255,255,255,.96);backdrop-filter:saturate(140%) blur(8px);-webkit-backdrop-filter:saturate(140%) blur(8px);border-top:1px solid #E7E2D7;box-shadow:0 -2px 12px rgba(15,23,42,.06)}
+    body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0))}
+  }
   @media(max-width:480px){.q-bar .q-btn{font-size:13px;padding:10px}}
-  body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0))}
 </style>
 </head><body>
 
@@ -1657,7 +1749,7 @@ ${shellTopBar()}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : "here's your custom quote."}</h1>
+    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : escapeHtml(pageCopy.heroSuffix)}</h1>
     <div class="addr">${address}</div>
     ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
     ${canChooseOneTime ? `
@@ -1674,7 +1766,7 @@ ${shellTopBar()}
     <div class="onetime-note" data-mode-only="one_time" hidden>
       One visit, pay on service day. No recurring schedule, no tier discount.
     </div>` : ''}
-    ${quoteRequired ? '' : `<div class="mini-guarantee" data-mode-only="recurring">Try us risk-free \u2014 90-day money-back guarantee.</div>`}
+    ${quoteRequired ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
   </div>
 
@@ -1689,30 +1781,32 @@ ${shellTopBar()}
   ${showUpsell ? `
 	  <button type="button" class="upsell"${recurringOnlyAttr} onclick="inquireBundle('${escapeHtml(upsellService)}')" aria-label="Get a bundle quote for ${escapeHtml(upsellService)}">
 	    <span class="txt">
-	      <h3>Add ${escapeHtml(upsellService)} and save more</h3>
-	      <div style="font-size:14px">Bundling unlocks ${escapeHtml(nextTierName)} tier pricing (${nextTierPct}% off qualifying services). Curious what that looks like?</div>
+	      <h3>${escapeHtml(hasOnlyLawnCareServices && upsellService === 'Pest Control' ? 'Add Pest Control for bundled pricing' : `Add ${upsellService} and save more`)}</h3>
+	      <div style="font-size:14px">${escapeHtml(hasOnlyLawnCareServices && upsellService === 'Pest Control'
+          ? `Want the home perimeter covered too? Bundling unlocks ${nextTierName} tier pricing (${nextTierPct}% off qualifying services).`
+          : `Bundling unlocks ${nextTierName} tier pricing (${nextTierPct}% off qualifying services). Curious what that looks like?`)}</div>
 	    </span>
     <span class="upsell-btn">Get a bundle quote</span>
   </button>` : ''}
 
   ${locked ? '' : `
   <section class="card booking-card" id="booking-card">
-    <h2 id="booking-title">Find a date &amp; time that works for you</h2>
-    <p class="card-sub">These are the windows when we\u2019ll already be working in your neighborhood \u2014 pick whichever fits.</p>
+    <h2 id="booking-title">${escapeHtml(pageCopy.bookingTitle)}</h2>
+    <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
     <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
     <div id="pay-pref-area" style="display:none">
-      <h3 id="pay-pref-heading" style="margin:20px 0 4px">Choose how you want to pay</h3>
+      <h3 id="pay-pref-heading" style="margin:20px 0 4px">${escapeHtml(pageCopy.payPrefHeading)}</h3>
       <p class="card-sub" id="pay-pref-subhead" style="margin:0">${escapeHtml(billingLede)}</p>
       <div class="pay-pref-grid options">
-        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">Pay after each visit</span><span class="pay-pref-sub">Billed after each completed service through autopay.</span></button>
+        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">${escapeHtml(pageCopy.payPrefCardTitle)}</span><span class="pay-pref-sub">${escapeHtml(pageCopy.payPrefCardSub)}</span></button>
         <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit hidden><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
-        ${showMembershipFee ? `<button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">Pay the 12-month plan in full</span><span class="pay-pref-sub">Approve annual prepay and the setup is included at no charge.</span></button>` : ''}
+        ${showMembershipFee ? `<button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">${escapeHtml(pageCopy.prepayTitle)}</span><span class="pay-pref-sub">${escapeHtml(pageCopy.prepayButtonSub)}</span></button>` : ''}
       </div>
     </div>
     <div id="review-area" style="display:none">
       <div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">Confirm and save card</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
+        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
         <button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>
       </div>
     </div>
@@ -1729,7 +1823,7 @@ ${shellTopBar()}
   </div>` : ''}
 
   ${quoteRequired ? '' : `<div class="card" data-mode-only="recurring">
-    <h2>What WaveGuard members get</h2>
+    <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
 
@@ -1757,10 +1851,10 @@ ${shellTopBar()}
     </div>
   </div>` : `
   <div class="final">
-    <h2 data-mode-only="recurring">Go Waves!</h2>
-    <div class="final-subhead" data-mode-only="recurring">Wave Goodbye to Pests!</div>
+    <h2 data-mode-only="recurring">${escapeHtml(pageCopy.finalHeading)}</h2>
+    <div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>
     ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves!</h2><div class="final-subhead" data-mode-only="one_time" hidden>Wave Goodbye to Pests!</div>` : ''}
-    <p>No surprise increases, no hidden fees.</p>
+    <p>${escapeHtml(pageCopy.finalBody)}</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -1791,6 +1885,9 @@ ${shellQuestionsBar()}
   const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedRecurringFrequencyKey))};
   const PRICE_PERIOD_WORD = ${JSON.stringify(recurringPricePeriodWord)};
   const REVIEW_FALLBACKS = ${JSON.stringify(reviewFallbacks)};
+  const RECURRING_PAY_PREF_HEADING = ${JSON.stringify(pageCopy.payPrefHeading)};
+  const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
+  const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
@@ -1805,6 +1902,10 @@ ${shellQuestionsBar()}
     });
     document.querySelectorAll('[data-annual-total]').forEach((el) => {
       el.textContent = fmt(annual);
+    });
+    document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
+      const membershipDue = Number(el.dataset.prepayMembershipDue || 0);
+      el.textContent = fmt(Math.max(0, Math.round((annual + membershipDue) * 100) / 100));
     });
     document.querySelectorAll('[data-billing-service-price]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);
@@ -2030,7 +2131,7 @@ ${shellQuestionsBar()}
     if (prepayBtn) {
       prepayBtn.hidden = isOneTime;
     }
-    if (heading) heading.textContent = isOneTime ? 'Book your visit' : 'Choose how you want to pay';
+    if (heading) heading.textContent = isOneTime ? 'Book your visit' : RECURRING_PAY_PREF_HEADING;
     if (subhead) {
       subhead.textContent = isOneTime
         ? 'This books a single visit. You will not be charged today.'
@@ -2173,8 +2274,8 @@ ${shellQuestionsBar()}
       const title = document.getElementById('confirm-book-title');
       const sub = document.getElementById('confirm-book-sub');
       if (pref === 'card_on_file') {
-        if (title) title.textContent = 'Confirm and save card';
-        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · next step saves your card for autopay. Service visits are billed after completion.';
+        if (title) title.textContent = CARD_CONFIRM_TITLE;
+        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · ' + CARD_CONFIRM_SUB;
       } else if (pref === 'prepay_annual') {
         if (title) title.textContent = 'Confirm annual prepay';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · annual prepay invoice will be reviewed and sent after approval.';
@@ -2932,27 +3033,30 @@ router.put('/:token/accept', async (req, res, next) => {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
               { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
-              `Hey ${firstName}! Thanks for booking your ${primarySvc.label} with Waves. Pick your time here - we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`
             );
-            const sendResult = await sendCustomerMessage({
-              to: estimate.customer_phone,
-              body: customerBody,
-              channel: 'sms',
-              audience: customerId ? 'customer' : 'lead',
-              purpose: 'estimate_followup',
-              customerId: customerId || undefined,
-              estimateId: estimate.id,
-              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-              consentBasis: customerId ? undefined : {
-                status: 'transactional_allowed',
-                source: 'estimate_token_acceptance',
-                capturedAt: new Date().toISOString(),
-              },
-              entryPoint: 'estimate_accept_onetime_booking',
-              metadata: { original_message_type: 'estimate_accepted_onetime' },
-            });
-            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+            if (!customerBody) {
+              logger.warn(`[estimate-accept] estimate_accepted_onetime template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
+            } else {
+              const sendResult = await sendCustomerMessage({
+                to: estimate.customer_phone,
+                body: customerBody,
+                channel: 'sms',
+                audience: customerId ? 'customer' : 'lead',
+                purpose: 'estimate_followup',
+                customerId: customerId || undefined,
+                estimateId: estimate.id,
+                identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+                consentBasis: customerId ? undefined : {
+                  status: 'transactional_allowed',
+                  source: 'estimate_token_acceptance',
+                  capturedAt: new Date().toISOString(),
+                },
+                entryPoint: 'estimate_accept_onetime_booking',
+                metadata: { original_message_type: 'estimate_accepted_onetime' },
+              });
+              if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+              logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+            }
           } else {
             const scheduledDate = dateOnly(reservationRow?.scheduled_date);
             const serviceDate = scheduledDate
@@ -2969,23 +3073,26 @@ router.put('/:token/accept', async (req, res, next) => {
                 date: serviceDate,
                 time: timeWindow,
               },
-              `Hi ${firstName}! Your ${primarySvc.label} with Waves is confirmed for ${serviceDate} between ${timeWindow}. Reply to reschedule.`
             );
-            const sendResult = await sendCustomerMessage({
-              to: estimate.customer_phone,
-              body: customerBody,
-              channel: 'sms',
-              audience: 'customer',
-              purpose: 'appointment_confirmation',
-              customerId: customerId || undefined,
-              appointmentId: reservationRow?.id,
-              estimateId: estimate.id,
-              identityTrustLevel: 'service_contact_authorized',
-              entryPoint: 'estimate_accept_onetime_confirmed',
-              metadata: { original_message_type: 'appointment_confirmation' },
-            });
-            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+            if (!customerBody) {
+              logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
+            } else {
+              const sendResult = await sendCustomerMessage({
+                to: estimate.customer_phone,
+                body: customerBody,
+                channel: 'sms',
+                audience: 'customer',
+                purpose: 'appointment_confirmation',
+                customerId: customerId || undefined,
+                appointmentId: reservationRow?.id,
+                estimateId: estimate.id,
+                identityTrustLevel: 'service_contact_authorized',
+                entryPoint: 'estimate_accept_onetime_confirmed',
+                metadata: { original_message_type: 'appointment_confirmation' },
+              });
+              if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+              logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+            }
           }
         } else {
           const longObUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
@@ -2997,30 +3104,33 @@ router.put('/:token/accept', async (req, res, next) => {
                 customerId,
               })
             : '';
-          const customerBody = await renderTemplate(
+          const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_customer',
             { first_name: firstName, onboarding_url: obUrl },
-            `Hello ${firstName}! Thanks for approving your estimate. Complete your setup here so we can get you on the schedule: ${obUrl}`
           );
-          const sendResult = await sendCustomerMessage({
-            to: estimate.customer_phone,
-            body: customerBody,
-            channel: 'sms',
-            audience: customerId ? 'customer' : 'lead',
-            purpose: 'estimate_followup',
-            customerId: customerId || undefined,
-            estimateId: estimate.id,
-            identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-            consentBasis: customerId ? undefined : {
-              status: 'transactional_allowed',
-              source: 'estimate_token_acceptance',
-              capturedAt: new Date().toISOString(),
-            },
-            entryPoint: 'estimate_accept_onboarding',
-            metadata: { original_message_type: 'estimate_accepted_customer' },
-          });
-          if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-          logger.info(`[estimate-accept] Acceptance SMS sent for estimate ${estimate.id}`);
+          if (!customerBody) {
+            logger.warn(`[estimate-accept] estimate_accepted_customer SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
+          } else {
+            const sendResult = await sendCustomerMessage({
+              to: estimate.customer_phone,
+              body: customerBody,
+              channel: 'sms',
+              audience: customerId ? 'customer' : 'lead',
+              purpose: 'estimate_followup',
+              customerId: customerId || undefined,
+              estimateId: estimate.id,
+              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+              consentBasis: customerId ? undefined : {
+                status: 'transactional_allowed',
+                source: 'estimate_token_acceptance',
+                capturedAt: new Date().toISOString(),
+              },
+              entryPoint: 'estimate_accept_onboarding',
+              metadata: { original_message_type: 'estimate_accepted_customer' },
+            });
+            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            logger.info(`[estimate-accept] Acceptance SMS sent for estimate ${estimate.id}`);
+          }
         }
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
@@ -4755,3 +4865,4 @@ module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;
+module.exports.renderEditableSmsTemplate = renderEditableSmsTemplate;

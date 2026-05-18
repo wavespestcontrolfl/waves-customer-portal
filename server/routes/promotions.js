@@ -5,6 +5,7 @@ const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 router.use(authenticate);
 
@@ -350,9 +351,14 @@ router.post('/:id/interest', async (req, res, next) => {
 
     // SMS to customer
     try {
+      const body = await renderRequiredSmsTemplate('upsell_interest_confirmation', {
+        first_name: customer.first_name || 'there',
+        service_name: serviceName || serviceType,
+        new_tier: newTier,
+      });
       const smsResult = await sendCustomerMessage({
         to: customer.phone,
-        body: `Thanks for your interest in ${serviceName || serviceType}, ${customer.first_name}! Waves will follow up within 24 hours to get you set up. Your ${newTier} WaveGuard discount will apply automatically. Questions? Call us: (941) 318-7612`,
+        body,
         channel: 'sms',
         audience: 'customer',
         purpose: 'support_resolution',

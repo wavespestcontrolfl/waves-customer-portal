@@ -23,6 +23,7 @@ const db = require('../models/db');
 const { executeLeadTool } = require('./lead-response-tools');
 const { getBreaker } = require('./intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('./intelligence-bar/tool-events');
+const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
 
@@ -209,7 +210,9 @@ const LeadResponseAgent = {
           // generic acknowledgment and queue the draft for human review.
           if (toolName === 'send_lead_response' && criticalFailures.length > 0) {
             logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Falling back to safe generic response.`);
-            const safeMessage = `Hi ${lead.name?.split(' ')[0] || 'there'} — this is Waves Pest Control. Thanks for reaching out! Someone from our team will follow up with you shortly.`;
+            const safeMessage = await renderRequiredSmsTemplate('lead_safe_ack', {
+              first_name: lead.name?.split(' ')[0] || 'there',
+            });
             try {
               await executeLeadTool('queue_for_adam', {
                 lead_id: lead.leadId,
