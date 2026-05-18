@@ -1,4 +1,5 @@
 const db = require('../../models/db');
+const { customerVisiblePressureIndex } = require('./pressure-index');
 
 const PRODUCT_INSIGHTS = [
   {
@@ -343,13 +344,17 @@ function answerTrend({ data = {} } = {}) {
     ].filter(Boolean).join(' ');
   }
   return dynamic.pressureTrend?.customerSummary
-    || `This visit's pressure index is ${Number(data.pressureIndex || 0).toFixed(1)} on a 0-5 scale. Lower is better.`;
+    || `This visit's pressure index is ${customerVisiblePressureIndex(data.pressureIndex)?.toFixed(1) || '0.3'} on a 0-5 scale. Lower is better.`;
 }
 
 function answerFindings({ data = {} } = {}) {
   const lawnAssessment = data.lawnAssessment || null;
   const findings = Array.isArray(data.findings) ? data.findings : [];
+  const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
   if (lawnAssessment?.observations) return lawnAssessment.observations;
+  if (!findings.length && recommendations.length) {
+    return recommendations.slice(0, 3).map((rec) => `Recommended next step: ${rec}`).join('\n');
+  }
   if (!findings.length) return 'No activity was observed this visit. Routine protective service will continue on schedule.';
   return findings.slice(0, 3).map((finding) => {
     const detail = finding.detail ? ` ${finding.detail}` : '';

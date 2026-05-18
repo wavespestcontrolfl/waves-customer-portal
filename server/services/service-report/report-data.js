@@ -1,7 +1,8 @@
 const db = require('../../models/db');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig } = require('./service-line-configs');
-const { pressureFromFindings } = require('./pressure-index');
+const { customerVisiblePressureIndex, pressureFromFindings } = require('./pressure-index');
+const { buildNoActivityFinding } = require('./no-activity-finding');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -191,7 +192,9 @@ function metricValue(metric, context) {
   if (metric.key === 'on_site_min') return context.onSiteMin;
   if (metric.aggregate === 'count_zones') return `${context.treatedZoneIds.size}/${context.zones.length}`;
   if (metric.aggregate === 'count_applications') return context.applications.length;
-  if (metric.aggregate === 'count_findings') return context.findings.length;
+  if (metric.aggregate === 'count_findings') {
+    return context.findings.filter((finding) => finding?.category !== 'no_activity').length;
+  }
   if (metric.aggregate === 'pressure_index') return context.pressureIndex;
   if (metric.key === 'linear_ft') {
     if (context.linearFt != null) return context.linearFt;
@@ -884,6 +887,21 @@ function buildProtocolPayload(record) {
   };
 }
 
+function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
+  const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
+  const concernText = String(
+    structured.customerConcernText
+    || structured.customer_concern_text
+    || structured.customerConcern
+    || structured.customer_concern
+    || '',
+  ).trim();
+  return visitOutcome === 'completed'
+    && !(protocol.observations || []).length
+    && !(protocol.recommendations || []).length
+    && !concernText;
+}
+
 function findingSeverityForObservation(text) {
   const lower = String(text || '').toLowerCase();
   if (lower.includes('customer concern') || lower.includes('access')) return 'medium';
@@ -1158,8 +1176,16 @@ async function buildReportV1Data(service, token, knex = db) {
     });
   }
 
+  if (!findings.length && shouldAddNoActivityFinding({ service, structured, protocol })) {
+    findings.push({
+      id: `no-activity-${service.id}`,
+      zoneId: null,
+      ...buildNoActivityFinding(serviceLine),
+    });
+  }
+
   const pressureIndex = service.pressure_index != null
-    ? Number(service.pressure_index)
+    ? customerVisiblePressureIndex(service.pressure_index)
     : pressureFromFindings(findings);
 
   const applications = products.map((product, index) => {

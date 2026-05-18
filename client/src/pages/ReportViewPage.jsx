@@ -21,15 +21,12 @@ import {
 import {
   COLORS as B,
   FONTS,
-  GOLD_CTA,
-  INFO_CTA,
-  HALFTONE_PATTERN,
-  HALFTONE_SIZE,
 } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
+const PRESSURE_INDEX_DISPLAY_FLOOR = 0.3;
 const DEFAULT_PORTAL_DESCRIPTION = 'Your Waves service reports, billing, and account — view past visits, track action items, and schedule the next service.';
 const sentReportEvents = new Set();
 const REVIEW_LOCATIONS = [
@@ -83,8 +80,21 @@ function formatDate(value) {
 
 function formatMetric(metric) {
   if (metric.value == null || metric.value === '') return '—';
+  if (metric.key === 'pressure_index') return formatPressureIndex(metric.value);
   if (metric.format === 'decimal_1') return Number(metric.value).toFixed(1);
   return `${metric.value}${metric.unit ? ` ${metric.unit}` : ''}`;
+}
+
+function pressureDisplayNumber(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(Math.max(n, PRESSURE_INDEX_DISPLAY_FLOOR) * 10) / 10;
+}
+
+function formatPressureIndex(value) {
+  const n = pressureDisplayNumber(value);
+  return n == null ? '—' : n.toFixed(1);
 }
 
 function metricHelpText(metric) {
@@ -542,15 +552,27 @@ function recommendedFinding(findings = []) {
 }
 
 function actionButtonStyle(kind = 'plain') {
-  const base = kind === 'primary' ? GOLD_CTA : INFO_CTA;
+  const isPrimary = kind === 'primary';
   return {
-    ...base,
+    minHeight: 38,
+    padding: '9px 12px',
+    borderRadius: 8,
+    border: `1px solid ${isPrimary ? B.blueDeeper : '#CBD5E1'}`,
+    background: isPrimary ? B.blueDeeper : '#FFFFFF',
+    color: isPrimary ? '#FFFFFF' : B.blueDeeper,
+    fontFamily: FONTS.heading,
+    fontWeight: 850,
+    fontSize: 14,
+    lineHeight: 1,
+    cursor: 'pointer',
+    textDecoration: 'none',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: 8,
-    minHeight: 40,
-    padding: '11px 14px',
-    fontSize: 12,
     boxShadow: 'none',
     textTransform: 'none',
+    whiteSpace: 'nowrap',
   };
 }
 
@@ -640,7 +662,7 @@ function PressureTrendChart({ points = [], neighborhood, summary }) {
     return padding.left + (index * chartWidth) / (count - 1);
   };
   const yFor = (pressureIndex) => {
-    const clamped = Math.max(0, Math.min(5, Number(pressureIndex) || 0));
+    const clamped = Math.max(0, Math.min(5, pressureDisplayNumber(pressureIndex) ?? 0));
     return padding.top + ((5 - clamped) * chartHeight) / 5;
   };
   const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index)} ${yFor(point.pressureIndex)}`).join(' ');
@@ -672,11 +694,12 @@ function PressureTrendChart({ points = [], neighborhood, summary }) {
           className="pressure-point-hit"
           tabIndex={0}
           role="img"
-          aria-label={`${point.label}: ${Number(point.pressureIndex).toFixed(1)} pressure index`}
+          aria-label={`${point.label}: ${formatPressureIndex(point.pressureIndex)} pressure index`}
         >
-          <title>{`${point.label}: ${Number(point.pressureIndex).toFixed(1)} pressure index${point.mainDriver ? ` · ${point.mainDriver}` : ''}`}</title>
+          <title>{`${point.label}: ${formatPressureIndex(point.pressureIndex)} pressure index${point.mainDriver ? ` · ${point.mainDriver}` : ''}`}</title>
           <circle cx={xFor(index)} cy={yFor(point.pressureIndex)} r="10" className="pressure-point-target" />
           <circle cx={xFor(index)} cy={yFor(point.pressureIndex)} r={index === points.length - 1 ? 4 : 3} className="pressure-point" />
+          <text x={xFor(index)} y={Math.max(12, yFor(point.pressureIndex) - 10)} textAnchor="middle" className="pressure-value-label">{formatPressureIndex(point.pressureIndex)}</text>
           <text x={xFor(index)} y={height - 6} textAnchor="middle" className="chart-label">{point.label}</text>
         </g>
       ))}
@@ -1282,7 +1305,7 @@ function ExecutiveStatusGrid({ data, pressureTrend, reentry, mode }) {
     <section className="executive-status-grid" aria-label="Executive summary">
       <div className="executive-status-cell">
         <div className="sr-cell-label">Pressure trend</div>
-        <div className="executive-status-value">{pressureTrend?.customerSummary || `${Number(pressureValue || 0).toFixed(1)} pressure index`}</div>
+        <div className="executive-status-value">{pressureTrend?.customerSummary || `${formatPressureIndex(pressureValue)} pressure index`}</div>
         <div className="sr-row-detail">Lower is better</div>
       </div>
       <div className="executive-status-cell">
@@ -1756,12 +1779,14 @@ function ServiceCoverageMapSection({
 }) {
   const normalizedServiceType = normalizeCoverageServiceType(serviceType);
   const locations = Array.isArray(serviceLocations) ? serviceLocations : [];
-  const schematicRenderableCount = locations.filter(hasRenderableCoverageGeometry).length;
   const imageLocations = locations.map(coverageImageDisplayLocation);
   const imageRenderableCount = imageLocations.filter(hasRenderableCoverageGeometry).length;
   const canUseImageMap = Boolean(mapBackgroundUrl)
     && imageRenderableCount > 0
-    && imageRenderableCount === schematicRenderableCount;
+    && locations.every((location) => (
+      !hasRenderableCoverageGeometry(location)
+      || hasRenderableCoverageGeometry(coverageImageDisplayLocation(location))
+    ));
   const activeMapBackgroundUrl = canUseImageMap ? mapBackgroundUrl : null;
   const displayLocations = useMemo(
     () => locations.map((location) => coverageDisplayLocation(location, canUseImageMap)),
@@ -2412,7 +2437,7 @@ function SmsReportPreview({ data }) {
             <strong>
               {isLawn
                 ? `${data.lawnAssessment.scores.overallScore ?? '-'}% overall`
-                : dynamicContext.pressureTrend?.customerSummary || `${Number(data.pressureIndex || 0).toFixed(1)} pressure index`}
+                : dynamicContext.pressureTrend?.customerSummary || `${formatPressureIndex(data.pressureIndex)} pressure index`}
             </strong>
             <span>{isLawn ? 'Higher is better' : 'Lower is better'}</span>
           </div>
@@ -2486,6 +2511,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const serviceNotes = String(data.legacy?.notes || '').trim();
   const visitSummary = String(data.summary || '').trim();
   const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas.filter(Boolean) : [];
+  const findings = Array.isArray(data.findings) ? data.findings : [];
+  const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
   const visitTimingRows = [
     ['Arrival', formatClockTime(data.visitTiming?.arrivedAt)],
     ['Exit', formatClockTime(data.visitTiming?.exitedAt)],
@@ -2547,65 +2574,95 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     <div className="service-report-v1">
       <style>{`
         .service-report-v1 {
-          --text: ${B.navy};
-          --muted: ${B.grayDark};
-          --soft: ${B.grayMid};
-          --line: ${B.bluePale};
+          --text: ${B.blueDeeper};
+          --muted: #64748B;
+          --soft: #64748B;
+          --line: #E1E7EF;
+          --line-strong: #CBD5E1;
           --paper: #ffffff;
-          --wash: ${B.blueSurface};
-          --page: ${B.offWhite};
+          --wash: #F8FAFC;
+          --soft-blue: #EEF6FF;
+          --soft-blue-border: #CDEAFE;
+          --page: #F8FAFC;
           --red: ${B.red};
           --report-text: var(--text);
           --report-muted: var(--muted);
           --report-border: var(--line);
           --report-action: var(--red);
           --report-surface: var(--paper);
+          --shadow-soft: 0 1px 2px rgba(15,23,42,0.04);
           min-height: 100vh;
           background: var(--page);
           color: var(--text);
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONTS.body};
         }
         .sr-top {
           position: relative;
           z-index: 2;
-          overflow: hidden;
-          background: ${B.blueDark};
-          background-image: ${HALFTONE_PATTERN};
-          background-size: ${HALFTONE_SIZE};
-          border-bottom: none;
-          color: #fff;
+          background: #fff;
+          border-bottom: 1px solid var(--line);
+          color: var(--text);
+          box-shadow: var(--shadow-soft);
         }
         .sr-top-inner {
-          max-width: 720px;
+          max-width: 1120px;
           margin: 0 auto;
-          min-height: 76px;
-          padding: 14px 20px;
+          min-height: 72px;
+          padding: 12px 20px;
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 16px;
           box-sizing: border-box;
         }
+        .sr-brand-lockup {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          min-width: 0;
+        }
+        .sr-brand-logo {
+          height: 30px;
+          flex: 0 0 auto;
+        }
+        .sr-brand-title {
+          font-family: ${FONTS.heading};
+          font-size: 16px;
+          font-weight: 850;
+          color: var(--text);
+          line-height: 1.1;
+          letter-spacing: 0;
+        }
+        .sr-brand-subtitle {
+          margin-top: 3px;
+          font-size: 12px;
+          color: var(--muted);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
         .sr-shell {
-          max-width: 720px;
+          max-width: 1040px;
           margin: 0 auto;
-          padding: 16px 16px 56px;
+          padding: 18px 20px 56px;
           box-sizing: border-box;
         }
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .sr-hero {
           display: block;
-          padding: 20px;
+          padding: 24px;
           background: var(--paper);
           border: 1px solid var(--line);
-          border-radius: 16px;
+          border-radius: 8px;
+          box-shadow: var(--shadow-soft);
         }
         .sr-title {
           margin: 0;
           color: var(--text);
-          font-size: clamp(32px, 5vw, 48px);
-          line-height: 1.08;
-          font-weight: 650;
+          font-family: ${FONTS.heading};
+          font-size: clamp(28px, 4vw, 34px);
+          line-height: 1.1;
+          font-weight: 850;
           letter-spacing: 0;
         }
         .sr-meta {
@@ -3933,6 +3990,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           fill: var(--report-muted);
           font-size: 10px;
         }
+        .pressure-value-label {
+          fill: ${B.blueDeeper};
+          font-size: 10px;
+          font-weight: 850;
+          pointer-events: none;
+        }
         .neighborhood-pressure-line {
           stroke: var(--report-muted);
           stroke-width: 1;
@@ -4272,6 +4335,124 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 12px;
           line-height: 1.45;
         }
+        .sr-section,
+        .report-card {
+          border-color: var(--line);
+          border-radius: 8px;
+          box-shadow: var(--shadow-soft);
+        }
+        .sr-section h2,
+        .report-card h2,
+        .applied-product-card h3,
+        .coverage-summary-row h3,
+        .workflow-event-heading h3 {
+          font-family: ${FONTS.heading};
+          font-weight: 850;
+          color: var(--text);
+          letter-spacing: 0;
+        }
+        .sr-section h2,
+        .report-card h2 {
+          font-size: 20px;
+        }
+        .sr-band,
+        .sr-grid-3,
+        .executive-status-grid,
+        .defense-status-grid,
+        .receipt-grid,
+        .lawn-score-grid,
+        .hero-condition-row,
+        .hero-reentry-status .reentry-target-grid {
+          border-radius: 8px;
+        }
+        .tech-visit-line,
+        .hero-conditions,
+        .hero-reentry-status,
+        .reentry-target-tile,
+        .report-ask-box,
+        .report-ask-form input,
+        .report-ask-form button,
+        .report-ask-actions button,
+        .report-ask-answer,
+        .service-coverage-map,
+        .coverage-empty-state,
+        .coverage-summary-row,
+        .workflow-event-body,
+        .map-toggle,
+        .satellite-treatment-map,
+        .treatment-overlay-row,
+        .treatment-overlay-detail,
+        .sr-map,
+        .sr-row,
+        .report-accordion,
+        .applied-product-card,
+        .when-to-text,
+        .one-thing-detail > div,
+        .lawn-overall-score,
+        .lawn-photo-strip figure,
+        .review-request-card .review-cta {
+          border-radius: 8px;
+        }
+        .sr-cell-label {
+          color: var(--muted);
+          font-family: ${FONTS.heading};
+          font-size: 11px;
+          font-weight: 850;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+        .section-eyebrow {
+          color: var(--muted);
+          font-family: ${FONTS.heading};
+          font-size: 11px;
+          font-weight: 850;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+        .view-mode-toggle,
+        .summary-mode-tabs,
+        .map-toggle {
+          border-color: var(--line-strong);
+          border-radius: 8px;
+        }
+        .view-mode-toggle button,
+        .summary-mode-tabs button,
+        .map-toggle button {
+          font-family: ${FONTS.heading};
+          font-weight: 850;
+        }
+        .view-mode-toggle button.is-active,
+        .summary-mode-tabs button.is-active,
+        .map-toggle button.is-active {
+          background: ${B.blueDeeper};
+          color: #fff;
+        }
+        .report-ask-box,
+        .tech-visit-line,
+        .hero-conditions,
+        .hero-reentry-status,
+        .why-activity-card,
+        .bug-file-card,
+        .the-one-thing {
+          background: var(--soft-blue);
+          border-color: var(--soft-blue-border);
+        }
+        .report-ask-form button {
+          background: ${B.blueDeeper};
+          border-color: ${B.blueDeeper};
+          color: #fff;
+        }
+        .review-request-card .review-cta {
+          background: ${B.blueDeeper};
+          border-color: ${B.blueDeeper};
+          color: #fff;
+          box-shadow: none;
+        }
+        .review-request-card .review-cta:hover,
+        .review-request-card .review-cta:focus-visible {
+          transform: none;
+          box-shadow: none;
+        }
         @media (max-width: 760px) {
           .sr-top-inner { align-items: flex-start; flex-direction: column; }
           .sr-actions { width: 100%; justify-content: stretch; }
@@ -4336,11 +4517,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
       <header className="sr-top">
         <div className="sr-top-inner">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-            <img src="/waves-logo.png" alt="Waves" style={{ height: 30 }} />
+          <div className="sr-brand-lockup">
+            <img src="/waves-logo.png" alt="Waves" className="sr-brand-logo" />
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontFamily: FONTS.display, fontSize: 20, fontWeight: 400, color: '#fff', lineHeight: 1, letterSpacing: '0.02em' }}>Service report</div>
-              <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{data.customerName}</div>
+              <div className="sr-brand-title">Customer Portal</div>
+              <div className="sr-brand-subtitle">Service report · {data.customerName}</div>
             </div>
           </div>
           <div className="sr-actions">
@@ -4466,7 +4647,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         />
 
         {!premium.primaryMove && (
-          <RecommendedActionCard findings={data.findings || []} aiSummary={dynamicContext.aiSummary} />
+          <RecommendedActionCard findings={findings} aiSummary={dynamicContext.aiSummary} />
         )}
 
         {showDetails && (
@@ -4534,7 +4715,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <section className="sr-section">
           <h2>Findings and recommendations</h2>
           <div className="sr-list">
-            {(data.findings || []).length ? data.findings.map((finding) => (
+            {findings.length ? findings.map((finding) => (
               <div className={`sr-row ${['high', 'critical'].includes(finding.severity) ? 'sr-finding-high' : ''}`} key={finding.id}>
                 <div>
                   <div className="sr-row-title">{finding.title}</div>
@@ -4552,8 +4733,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 </div>
                 <div className="sr-pill">{formatEnumLabel(finding.severity)}</div>
               </div>
-            )) : <div className="sr-row-detail">No activity was observed this visit. Routine protective service will continue on schedule.</div>}
-            {(data.recommendations || []).map((rec) => (
+            )) : (!recommendations.length && <div className="sr-row-detail">No activity was observed this visit. Routine protective service will continue on schedule.</div>)}
+            {recommendations.map((rec) => (
               <div className="sr-row" key={rec}>
                 <div className="sr-row-title">{rec}</div>
                 <div className="sr-pill">Recommended next step</div>
