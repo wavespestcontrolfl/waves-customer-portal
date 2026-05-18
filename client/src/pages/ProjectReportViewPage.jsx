@@ -531,7 +531,7 @@ export default function ProjectReportViewPage() {
             fontFamily: FONTS.serif,
             fontSize: 'clamp(34px, 5vw, 48px)',
             fontWeight: 500,
-            letterSpacing: '-0.01em',
+            letterSpacing: 0,
             lineHeight: 1.1,
             color: ESTIMATE_TEXT,
             margin: 0,
@@ -863,7 +863,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
             fontWeight: 500,
             color: ESTIMATE_TEXT,
             lineHeight: 1.15,
-            letterSpacing: '-0.01em',
+            letterSpacing: 0,
           }}>
             Pre-Construction Termite Protection
           </div>
