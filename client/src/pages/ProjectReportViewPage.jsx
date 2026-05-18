@@ -3,10 +3,6 @@ import { useParams } from 'react-router-dom';
 import {
   COLORS as B,
   FONTS,
-  GOLD_CTA,
-  INFO_CTA,
-  HALFTONE_PATTERN,
-  HALFTONE_SIZE,
 } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
@@ -20,6 +16,55 @@ import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
+const WAVES_PHONE_DISPLAY = '(941) 297-5749';
+const WAVES_PHONE_TEL = '+19412975749';
+const FONT_BODY = "'Inter', system-ui, sans-serif";
+const ESTIMATE_BG = '#FAF8F3';
+const ESTIMATE_BORDER = '#E7E2D7';
+const ESTIMATE_MUTED = '#6B7280';
+const ESTIMATE_TEXT = '#1B2C5B';
+const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_BUTTON_BG = B.blueDeeper;
+const ESTIMATE_INPUT_BORDER = '#CFE7F5';
+const ESTIMATE_INPUT_BG = '#F8FCFE';
+
+const cardStyle = {
+  background: B.white,
+  borderRadius: 16,
+  padding: 24,
+  border: `1px solid ${ESTIMATE_BORDER}`,
+};
+
+const eyebrowStyle = {
+  fontSize: 12,
+  color: ESTIMATE_MUTED,
+  letterSpacing: '0.12em',
+  textTransform: 'uppercase',
+  fontWeight: 700,
+};
+
+const primaryButtonStyle = {
+  minHeight: 48,
+  border: 0,
+  borderRadius: 10,
+  padding: '0 18px',
+  background: ESTIMATE_BUTTON_BG,
+  color: B.white,
+  fontSize: 14,
+  fontWeight: 700,
+  textDecoration: 'none',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 8,
+};
+
+const secondaryButtonStyle = {
+  ...primaryButtonStyle,
+  background: B.white,
+  color: ESTIMATE_TEXT,
+  border: `1px solid ${ESTIMATE_BORDER}`,
+};
 
 const TYPE_LABELS = {
   wdo_inspection: 'WDO Inspection',
@@ -68,6 +113,18 @@ function formatAppointmentWindow(appt) {
   const end = formatAppointmentTime(appt.windowEnd);
   const window = start && end ? `${start}-${end}` : start || end;
   return [date, window].filter(Boolean).join(' ');
+}
+
+function valueWithUnit(value, unitLabel, unitPattern) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  return unitPattern.test(raw) ? raw : `${raw} ${unitLabel}`;
+}
+
+function gallonsApplied(value) {
+  const raw = valueWithUnit(value, 'gal', /\b(gal|gallon|gallons)\b/i);
+  if (!raw) return '';
+  return /\bapplied\b/i.test(raw) ? raw : `${raw} applied`;
 }
 
 function dateOnly(value) {
@@ -377,19 +434,26 @@ export default function ProjectReportViewPage() {
   }, [token]);
 
   if (loading) return (
-    <div style={{ minHeight: '100vh', background: B.blueDark, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ color: '#fff', fontFamily: FONTS.body }}>Loading report…</div>
+    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: FONT_BODY }}>
+      <div style={{ ...cardStyle, width: 'min(420px, calc(100% - 40px))' }}>
+        <div style={{ height: 12, width: 120, background: B.offWhite, borderRadius: 4 }} />
+        <div style={{ height: 32, width: '70%', background: B.offWhite, borderRadius: 4, marginTop: 14 }} />
+        <div style={{ height: 14, width: '50%', background: B.offWhite, borderRadius: 4, marginTop: 10 }} />
+      </div>
     </div>
   );
 
   if (!data || data.error) return (
-    <div style={{ minHeight: '100vh', background: B.blueDark, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-      <div style={{ background: '#fff', borderRadius: 16, padding: 28, maxWidth: 400, textAlign: 'center' }}>
-        <div style={{ color: B.grayMid }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
-        <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, marginTop: 8 }}>Report not found</div>
-        <a href="tel:+19412975749" style={{
-          ...GOLD_CTA, marginTop: 16, fontSize: 14, minHeight: 44,
-        }}>Call Us</a>
+    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
+      <div style={{ ...cardStyle, maxWidth: 420, textAlign: 'center' }}>
+        <div style={{ color: ESTIMATE_MUTED }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
+        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, marginTop: 8 }}>Report unavailable</div>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
+          This link may have expired or is not valid.
+        </div>
+        <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+          ...primaryButtonStyle, marginTop: 18,
+        }}>Call Waves</a>
       </div>
     </div>
   );
@@ -403,7 +467,7 @@ export default function ProjectReportViewPage() {
   const projectDateLabel = formatReportDate(data.projectDate || data.sentAt);
   const sentDateLabel = data.sentAt ? formatReportDate(data.sentAt) : '';
   const showSentDate = sentDateLabel && reportDateKey(data.sentAt) !== reportDateKey(data.projectDate);
-  const reportMetaStyle = { fontSize: 14, color: B.grayDark, lineHeight: 1.45 };
+  const reportMetaStyle = { fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45 };
   const isCertificate = data.projectType === 'pre_treatment_termite_certificate';
   const contactDateLabel = isCertificate
     ? (projectDateLabel ? `Treatment date: ${projectDateLabel}${data.technicianName ? ` · Applicator: ${data.technicianName}` : ''}` : '')
@@ -421,39 +485,69 @@ export default function ProjectReportViewPage() {
     recommendations: data.recommendations,
   });
   const atAGlanceRows = buildAtAGlance({ data, reportTitle, clientSnapshot });
+  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const headline = isCertificate
+    ? `Hey ${firstName}, here's your Certificate of Compliance.`
+    : `Hey ${firstName}, here's your ${typeLabel.toLowerCase()} report.`;
+  const subhead = data.customerAddress || data.cityState || '';
 
   return (
-    <div style={{ minHeight: '100vh', background: B.offWhite, fontFamily: FONTS.body }}>
-      {/* Header */}
-      <div style={{
-        position: 'relative', overflow: 'hidden',
-        background: B.blueDark, padding: '14px 20px',
-        backgroundImage: HALFTONE_PATTERN, backgroundSize: HALFTONE_SIZE,
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      }}>
-        <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
-          aria-hidden="true">
-          <source src="/brand/waves-hero-service.mp4" type="video/mp4" />
-        </video>
-        <div style={{ position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', gap: 10 }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 28 }} />
-          <div>
-            <h1 style={{
-              fontFamily: FONTS.display, fontWeight: 400,
-              fontSize: 20, color: '#fff',
-              letterSpacing: '0.02em', lineHeight: 1, margin: 0,
-            }}>{reportTitle}</h1>
-            <div style={{ fontSize: 12, color: B.blueLight, marginTop: 4 }}>{data.customerName}</div>
-          </div>
+    <div style={{
+      minHeight: '100vh',
+      background: ESTIMATE_BG,
+      fontFamily: FONT_BODY,
+      color: ESTIMATE_TEXT,
+      display: 'flex',
+      flexDirection: 'column',
+    }}>
+      <header style={{ background: B.white, borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
+        <div style={{
+          maxWidth: 960,
+          margin: '0 auto',
+          padding: '16px 24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 16,
+        }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+            color: ESTIMATE_TEXT,
+            fontSize: 15,
+            fontWeight: 600,
+            textDecoration: 'none',
+          }}>
+            {WAVES_PHONE_DISPLAY}
+          </a>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />
         </div>
-      </div>
+      </header>
 
-      <div style={{ maxWidth: 720, margin: '16px auto', padding: '0 16px' }}>
+      <main style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+        <div style={{ padding: '8px 0 24px' }}>
+          <div style={{ ...eyebrowStyle, marginBottom: 6 }}>
+            Project report{typeLabel ? ` · ${typeLabel}` : ''}
+          </div>
+          <h1 style={{
+            fontFamily: FONTS.serif,
+            fontSize: 'clamp(34px, 5vw, 48px)',
+            fontWeight: 500,
+            letterSpacing: '-0.01em',
+            lineHeight: 1.1,
+            color: ESTIMATE_TEXT,
+            margin: 0,
+          }}>
+            {headline}
+          </h1>
+          {subhead ? (
+            <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{subhead}</div>
+          ) : null}
+        </div>
+
         {/* Summary card */}
-        <div style={{ background: '#fff', borderRadius: 16, padding: 20, border: `1px solid ${B.bluePale}` }}>
+        <div style={cardStyle}>
           {contactRows.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ ...eyebrowStyle, marginBottom: 4 }}>Report details</div>
               {contactRows.map(row => (
                 <div key={row} style={{ ...reportMetaStyle, whiteSpace: 'pre-wrap' }}>{row}</div>
               ))}
@@ -465,23 +559,23 @@ export default function ProjectReportViewPage() {
           {clientSnapshot && (
             <div style={{
               marginTop: 16,
-              padding: '12px 14px',
-              borderRadius: 10,
-              background: '#FFF9DB',
-              border: `1px solid ${B.yellow}`,
+              padding: 18,
+              borderRadius: 12,
+              background: 'linear-gradient(180deg, #F5F1E6 0%, #FFFFFF 100%)',
+              border: `1px solid ${ESTIMATE_BORDER}`,
             }}>
-              <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              <div style={{ ...eyebrowStyle, color: ESTIMATE_MUTED }}>
                 Next step: {clientSnapshot.priority}
               </div>
-              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 6 }}>
+              <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
                 {clientSnapshot.meaning}
               </div>
               {clientSnapshot.insight && (
-                <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>
+                <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 6 }}>
                   {clientSnapshot.insight}
                 </div>
               )}
-              <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5, marginTop: 6 }}>
+              <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 6 }}>
                 {clientSnapshot.next}
               </div>
             </div>
@@ -492,7 +586,7 @@ export default function ProjectReportViewPage() {
               branded, FBC-compliant document layout. */}
           {!isCertificate && findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
                 Findings
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -501,29 +595,29 @@ export default function ProjectReportViewPage() {
                   const showRoofRatPhoto = isRoofRatFinding(key, value);
                   const formattedValue = formatFindingValue(key, value);
                   return (
-                    <div key={key} style={{ padding: '10px 12px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
+                    <div key={key} style={{ padding: '12px 14px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
                       {key === 'species' ? (
-                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
-                          <strong style={{ color: B.navy }}>Species:</strong> {formattedValue}
+                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
+                          <strong style={{ color: ESTIMATE_TEXT }}>Species:</strong> {formattedValue}
                         </div>
                       ) : (
                         <>
-                          <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 3 }}>{humanizeKey(key)}</div>
-                          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{formattedValue}</div>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{humanizeKey(key)}</div>
+                          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{formattedValue}</div>
                         </>
                       )}
                       {showRoofRatPhoto && <RoofRatPhoto />}
                       {insight && (
-                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 8 }}>
+                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
                           {insight}
                         </div>
                       )}
                       {showRoofRatPhoto && (
                         <details style={{ marginTop: 8 }}>
-                          <summary style={{ fontSize: 14, fontWeight: 800, color: B.blueDeeper, cursor: 'pointer' }}>
+                          <summary style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT, cursor: 'pointer' }}>
                             Learn more about roof rats
                           </summary>
-                          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 6 }}>
+                          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 6 }}>
                             {ROOF_RAT_LEARN_MORE}
                           </div>
                         </details>
@@ -542,11 +636,11 @@ export default function ProjectReportViewPage() {
         </div>
 
         {data.projectType === 'wdo_inspection' && (
-          <div style={{ marginTop: 16, background: '#fff', borderRadius: 16, padding: 18, border: `1px solid ${B.bluePale}` }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          <div style={{ ...cardStyle, marginTop: 16 }}>
+            <div style={{ ...eyebrowStyle, marginBottom: 6 }}>
               Official WDO Form
             </div>
-            <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
               This inspection follows Florida FDACS-13645, Wood-Destroying Organisms Inspection Report.
             </div>
             <a
@@ -554,7 +648,7 @@ export default function ProjectReportViewPage() {
               target="_blank"
               rel="noreferrer"
               style={{
-                ...INFO_CTA, marginTop: 12, padding: '14px 20px', minHeight: 44, fontSize: 14,
+                ...secondaryButtonStyle, marginTop: 14,
               }}
             >
               <Icon name="document" size={15} strokeWidth={2} /> View FDACS-13645
@@ -579,21 +673,21 @@ export default function ProjectReportViewPage() {
 
         {/* Follow-up visit (bed bug) */}
         {(data.followupCompletedAt || data.followupFindings || followupPhotos.length > 0) && (
-          <div style={{ marginTop: 16, background: '#fff', borderRadius: 16, padding: 20, border: `1px solid ${B.bluePale}` }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading }}>
+          <div style={{ ...cardStyle, marginTop: 16 }}>
+            <div style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, color: ESTIMATE_TEXT }}>
               Follow-up visit
             </div>
             {data.followupCompletedAt && (
-              <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4 }}>
+              <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
                 {new Date(data.followupCompletedAt).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
               </div>
             )}
             {data.followupFindings && Object.keys(data.followupFindings).length > 0 && (
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {Object.entries(data.followupFindings).filter(([, v]) => v).map(([key, value]) => (
-                  <div key={key} style={{ padding: '8px 10px', borderRadius: 8, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: B.navy }}>{humanizeKey(key)}</div>
-                    <div style={{ fontSize: 14, color: B.grayDark, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                  <div key={key} style={{ padding: '10px 12px', borderRadius: 8, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT }}>{humanizeKey(key)}</div>
+                    <div style={{ fontSize: 14, color: ESTIMATE_BODY, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
                   </div>
                 ))}
               </div>
@@ -608,18 +702,50 @@ export default function ProjectReportViewPage() {
 
         {/* CTA */}
         <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
-          <div style={{ fontSize: 14, color: B.grayDark }}>Questions about this report?</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'center', marginTop: 8 }}>
-            <a href="sms:+19412975749" style={{
-              ...GOLD_CTA, padding: '14px 20px', minHeight: 44, fontSize: 14,
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY }}>Questions about this report?</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'center', marginTop: 10 }}>
+            <a href={`sms:${WAVES_PHONE_TEL}`} style={{
+              ...primaryButtonStyle,
             }}><Icon name="message" size={16} strokeWidth={2} /> Text Us</a>
-            <a href="tel:+19412975749" style={{
-              ...INFO_CTA, padding: '14px 20px', minHeight: 44, fontSize: 14,
+            <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+              ...secondaryButtonStyle,
             }}><Icon name="phone" size={16} strokeWidth={2} /> Call Us</a>
           </div>
         </div>
 
-        <BrandFooter />
+        <ReportTrustStrip />
+      </main>
+      <BrandFooter />
+    </div>
+  );
+}
+
+function ReportTrustStrip() {
+  const items = [
+    { label: 'Licensed & insured', detail: `FDACS LIC. ${WAVES_FDACS_LICENSE_NUMBER}` },
+    { label: 'Questions welcome', detail: 'call or text the Waves team' },
+    { label: 'Local service', detail: 'Southwest Florida pest specialists' },
+  ];
+
+  return (
+    <div style={{
+      marginTop: 32,
+      padding: '24px 16px',
+      background: B.offWhite,
+      borderTop: `1px solid ${ESTIMATE_BORDER}`,
+      borderRadius: 12,
+    }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+        gap: 16,
+      }}>
+        {items.map((item) => (
+          <div key={item.label} style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT }}>{item.label}</div>
+            <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2 }}>{item.detail}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -627,15 +753,15 @@ export default function ProjectReportViewPage() {
 
 function AtAGlance({ rows }) {
   return (
-    <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: '#fff', border: `1px solid ${B.bluePale}` }}>
-      <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+    <div style={{ marginTop: 16, padding: '14px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+      <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
         At a glance
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 0.45fr) 1fr', gap: '8px 12px' }}>
         {rows.map(([label, value]) => (
           <div key={label} style={{ display: 'contents' }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: B.navy }}>{label}</div>
-            <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.45 }}>{value}</div>
+            <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT }}>{label}</div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45 }}>{value}</div>
           </div>
         ))}
       </div>
@@ -645,10 +771,9 @@ function AtAGlance({ rows }) {
 
 /**
  * CertificateOfCompliance — Florida Building Code 1816.1.7 Certificate for
- * pre-construction subterranean termite soil treatment. Visual family matches
- * the v10 Permanent Notice sticker (wavesBlue header band, navy field labels,
- * red statutory line, blue footer band) so the permit-folder packet reads as
- * one coordinated document set. Stamp ID: WV-002 (sticker is WV-001).
+ * pre-construction subterranean termite soil treatment. The layout follows
+ * the customer estimate visual language while preserving required certificate
+ * fields and statutory language. Stamp ID: WV-002.
  *
  * Required content per FBC 1816.1.7: company name + phone, treatment address
  * or lot/block, method of treatment, the exact compliance statement, and an
@@ -672,13 +797,13 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
     f.concentration_pct ? `${String(f.concentration_pct).replace(/%$/, '')}%` : '',
   ].filter(Boolean).join(' — ');
   const coverageLine = [
-    f.square_footage ? `${f.square_footage} sq ft` : '',
-    f.linear_feet ? `${f.linear_feet} linear ft` : '',
-    f.gallons_applied ? `${f.gallons_applied} gal applied` : '',
+    valueWithUnit(f.square_footage, 'sq ft', /\b(sq\.?\s*ft|square\s*feet|sf)\b/i),
+    valueWithUnit(f.linear_feet, 'linear ft', /\b(linear\s*ft|lineal\s*ft|lf)\b/i),
+    gallonsApplied(f.gallons_applied),
   ].filter(Boolean).join(' · ');
   const treatmentDateValue = [
-    f.treatment_date || projectDateLabel || '',
-    f.treatment_time || '',
+    f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel || '',
+    formatAppointmentTime(f.treatment_time),
   ].filter(Boolean).join(' · ');
   const addressValue = f.treatment_address || customerAddress || '';
   const lotLine = [f.lot_block, f.subdivision].filter(Boolean).join(' · ');
@@ -709,70 +834,63 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
   return (
     <div style={{
       marginTop: 16,
-      background: '#fff',
+      background: B.white,
       borderRadius: 16,
-      border: `1px solid ${B.bluePale}`,
+      border: `1px solid ${ESTIMATE_BORDER}`,
       overflow: 'hidden',
       position: 'relative',
     }}>
-      {/* Blue header band — matches v10 sticker */}
       <div style={{
-        background: B.wavesBlue,
-        padding: '18px 20px 16px',
+        background: B.white,
+        borderBottom: `1px solid ${ESTIMATE_BORDER}`,
+        padding: '22px 24px 20px',
         position: 'relative',
         display: 'flex',
-        alignItems: 'center',
-        gap: 14,
+        alignItems: 'flex-start',
+        gap: 18,
       }}>
         <div style={{ flex: 1 }}>
           <div style={{
-            fontFamily: FONTS.heading,
-            fontSize: 14,
+            ...eyebrowStyle,
             fontWeight: 700,
-            color: '#fff',
-            opacity: 0.92,
-            textTransform: 'uppercase',
-            letterSpacing: 1,
             marginBottom: 4,
           }}>
             Florida Certificate of Compliance
           </div>
           <div style={{
-            fontFamily: FONTS.heading,
-            fontSize: 18,
-            fontWeight: 800,
-            color: '#fff',
+            fontFamily: FONTS.serif,
+            fontSize: 30,
+            fontWeight: 500,
+            color: ESTIMATE_TEXT,
             lineHeight: 1.15,
-            letterSpacing: 0.5,
-            textTransform: 'uppercase',
+            letterSpacing: '-0.01em',
           }}>
             Pre-Construction Termite Protection
           </div>
           <div style={{
             fontSize: 14,
-            color: '#fff',
-            opacity: 0.92,
+            color: ESTIMATE_BODY,
             marginTop: 8,
             lineHeight: 1.4,
           }}>
             Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
           </div>
         </div>
-        <img src="/waves-logo.png" alt="Waves" style={{ height: 36, flexShrink: 0 }} />
+        <img src="/waves-logo.png" alt="Waves" style={{ height: 32, flexShrink: 0 }} />
       </div>
 
       {/* Property + customer header */}
-      <div style={{ padding: '14px 20px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ padding: '18px 24px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
         {customerName && (
-          <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT }}>
             Issued to: {customerName}
           </div>
         )}
       </div>
 
-      {/* Field grid — value above italic label, sticker-style */}
+      {/* Field grid */}
       <div style={{
-        padding: '14px 20px 6px',
+        padding: '16px 24px 8px',
         display: 'grid',
         gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
         rowGap: 14,
@@ -781,39 +899,43 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
         {fields.map(([label, value]) => (
           <div key={label}>
             <div style={{
-              fontFamily: FONTS.body,
+              fontFamily: FONT_BODY,
+              fontSize: 12,
+              fontWeight: 700,
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+              color: ESTIMATE_MUTED,
+              marginBottom: 5,
+            }}>
+              {label}
+            </div>
+            <div style={{
+              fontFamily: FONT_BODY,
               fontSize: 14,
               fontWeight: 700,
-              color: B.navy,
+              color: ESTIMATE_TEXT,
               minHeight: 20,
-              borderBottom: `1px solid ${B.grayLight}`,
+              borderBottom: `1px solid ${ESTIMATE_BORDER}`,
               paddingBottom: 4,
               wordBreak: 'break-word',
             }}>
               {value || '—'}
-            </div>
-            <div style={{
-              fontFamily: FONTS.body,
-              fontSize: 14,
-              fontStyle: 'italic',
-              color: B.grayMid,
-              marginTop: 4,
-            }}>
-              {label}
             </div>
           </div>
         ))}
       </div>
 
       {/* FBC required compliance statement (exact wording per 1816.1.7) */}
-      <div style={{ padding: '14px 20px 4px' }}>
+      <div style={{ padding: '16px 24px 4px' }}>
         <div style={{
-          fontSize: 14,
-          color: B.grayDark,
+          fontSize: 15,
+          color: ESTIMATE_BODY,
           lineHeight: 1.55,
-          fontStyle: 'italic',
           textAlign: 'center',
-          padding: '0 8px',
+          padding: '14px 16px',
+          borderRadius: 12,
+          background: ESTIMATE_INPUT_BG,
+          border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
         }}>
           The building has received a complete treatment for the prevention of subterranean termites.
           Treatment is in accordance with rules and laws established by the Florida Department of
@@ -833,16 +955,16 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
         {f.comments && (
           <div style={{
             marginTop: 12,
-            padding: '10px 12px',
-            borderRadius: 8,
-            background: B.blueSurface,
-            border: `1px solid ${B.bluePale}`,
+            padding: '12px 14px',
+            borderRadius: 10,
+            background: ESTIMATE_INPUT_BG,
+            border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
             fontSize: 14,
-            color: B.grayDark,
+            color: ESTIMATE_BODY,
             lineHeight: 1.55,
             whiteSpace: 'pre-wrap',
           }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
+            <div style={{ ...eyebrowStyle, marginBottom: 4 }}>
               Applicator notes
             </div>
             {f.comments}
@@ -856,31 +978,27 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
           signature accepted by Florida building departments. */}
       {f.applicator_attestation && (f.applicator_name || technicianName) && (
         <div style={{
-          margin: '14px 20px 0',
-          padding: '12px 14px',
-          borderRadius: 10,
-          background: B.blueSurface,
-          border: `1px solid ${B.bluePale}`,
+          margin: '16px 24px 0',
+          padding: '14px 16px',
+          borderRadius: 12,
+          background: '#F5F1E6',
+          border: `1px solid ${ESTIMATE_BORDER}`,
         }}>
           <div style={{
-            fontSize: 14,
-            fontWeight: 800,
-            color: B.navy,
-            textTransform: 'uppercase',
-            letterSpacing: 0.5,
+            ...eyebrowStyle,
             marginBottom: 6,
           }}>
             Signed electronically
           </div>
-          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, fontStyle: 'italic' }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
             {f.applicator_attestation}
           </div>
           <div style={{
             marginTop: 10,
             paddingTop: 10,
-            borderTop: `1px solid ${B.bluePale}`,
+            borderTop: `1px solid ${ESTIMATE_BORDER}`,
             fontSize: 14,
-            color: B.navy,
+            color: ESTIMATE_TEXT,
             lineHeight: 1.5,
           }}>
             <span style={{ color: B.green, fontWeight: 800, marginRight: 6 }}>Signed by</span>
@@ -889,8 +1007,8 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
             {(f.treatment_date || projectDateLabel) ? (
               <>
                 <br />
-                <span style={{ color: B.grayDark, fontSize: 14 }}>
-                  Attested on {f.treatment_date || projectDateLabel}
+                <span style={{ color: ESTIMATE_BODY, fontSize: 14 }}>
+                  Attested on {f.treatment_date ? formatReportDate(f.treatment_date) : projectDateLabel}
                 </span>
               </>
             ) : null}
@@ -898,18 +1016,18 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
         </div>
       )}
 
-      {/* Blue footer band — Activate Your Termite Warranty (matches v10 sticker) */}
       <div style={{
-        marginTop: 14,
-        background: B.wavesBlue,
-        padding: '14px 20px 12px',
+        margin: '18px 24px 24px',
+        background: ESTIMATE_BUTTON_BG,
+        borderRadius: 12,
+        padding: '16px 18px',
         textAlign: 'center',
       }}>
         <div style={{
-          fontFamily: FONTS.heading,
+          fontFamily: FONT_BODY,
           fontSize: 15,
           fontWeight: 800,
-          color: '#fff',
+          color: B.white,
           textTransform: 'uppercase',
           letterSpacing: 0.5,
         }}>
@@ -917,16 +1035,16 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
         </div>
         <div style={{
           fontSize: 14,
-          color: '#fff',
-          opacity: 0.95,
+          color: B.white,
+          opacity: 0.94,
           marginTop: 4,
           letterSpacing: 0.3,
         }}>
-          (941) 297-5749 • wavespestcontrol.com/register
+          {WAVES_PHONE_DISPLAY} • wavespestcontrol.com/register
         </div>
         <div style={{
           fontSize: 10,
-          color: '#fff',
+          color: B.white,
           opacity: 0.85,
           marginTop: 6,
         }}>
@@ -937,11 +1055,11 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
       {/* Form-ID stamp — bottom right, matches v10 "WV-001" treatment */}
       <div style={{
         position: 'absolute',
-        bottom: 4,
-        right: 8,
+        bottom: 7,
+        right: 10,
         fontSize: 9,
-        color: '#fff',
-        opacity: 0.75,
+        color: ESTIMATE_MUTED,
+        opacity: 0.8,
         letterSpacing: 0.5,
         fontFamily: FONTS.mono,
       }}>
@@ -953,7 +1071,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
 
 function RoofRatPhoto() {
   return (
-    <figure style={{ margin: '10px 0 0', borderRadius: 8, overflow: 'hidden', border: `1px solid ${B.bluePale}`, background: '#fff' }}>
+    <figure style={{ margin: '10px 0 0', borderRadius: 10, overflow: 'hidden', border: `1px solid ${ESTIMATE_BORDER}`, background: B.white }}>
       <img
         src="/brand/roof-rat-report.png"
         alt="Roof rat"
@@ -971,7 +1089,7 @@ function PhotoGrid({ title, photos, noCard }) {
   const content = (
     <div>
       {title && (
-        <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+        <div style={{ ...eyebrowStyle, marginBottom: 10 }}>
           {title}
         </div>
       )}
@@ -980,7 +1098,7 @@ function PhotoGrid({ title, photos, noCard }) {
           const label = getPhotoLabel(ph);
           const tileStyle = {
             display: 'block', aspectRatio: '1/1', overflow: 'hidden',
-            borderBottom: `1px solid ${B.bluePale}`, background: B.offWhite,
+            borderBottom: `1px solid ${ESTIMATE_BORDER}`, background: ESTIMATE_BG,
           };
           const media = (
             <>
@@ -993,7 +1111,7 @@ function PhotoGrid({ title, photos, noCard }) {
             ) : (
               <div style={{
                 width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: 12, textAlign: 'center', color: B.grayMid, fontSize: 14, fontWeight: 700,
+                padding: 12, textAlign: 'center', color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 700,
               }}>
                 Photo unavailable
               </div>
@@ -1001,7 +1119,7 @@ function PhotoGrid({ title, photos, noCard }) {
             </>
           );
           return (
-            <div key={ph.id} style={{ borderRadius: 8, overflow: 'hidden', border: `1px solid ${B.bluePale}`, background: '#fff' }}>
+            <div key={ph.id} style={{ borderRadius: 10, overflow: 'hidden', border: `1px solid ${ESTIMATE_BORDER}`, background: B.white }}>
               {ph.url ? (
                 <a href={ph.url} target="_blank" rel="noreferrer" style={tileStyle}>
                   {media}
@@ -1012,7 +1130,7 @@ function PhotoGrid({ title, photos, noCard }) {
                 </div>
               )}
               <div style={{ padding: '8px 9px' }}>
-                <div style={{ fontSize: 14, fontWeight: 800, color: B.navy, lineHeight: 1.35, textTransform: 'capitalize' }}>
+                <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1.35, textTransform: 'capitalize' }}>
                   {label}
                 </div>
               </div>
@@ -1025,7 +1143,7 @@ function PhotoGrid({ title, photos, noCard }) {
 
   if (noCard) return content;
   return (
-    <div style={{ marginTop: 16, background: '#fff', borderRadius: 16, padding: 20, border: `1px solid ${B.bluePale}` }}>
+    <div style={{ ...cardStyle, marginTop: 16 }}>
       {content}
     </div>
   );
@@ -1064,13 +1182,13 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
   const sections = parseSections(text);
   if (sections) {
     return (
-      <div style={{ marginTop: 16, padding: '16px 18px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
+      <div style={{ marginTop: 16, padding: '18px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
         {sections.map((s, i) => (
           <div key={s.heading} style={{ marginTop: i === 0 ? 0 : 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            <div style={{ ...eyebrowStyle, marginBottom: 6 }}>
               {titleCase(s.heading)}
             </div>
-            <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
             {s.heading === 'WHAT WE RECOMMEND' && shouldShowBookingCta(s.body) && <BookingCta upcomingAppointment={upcomingAppointment} text={s.body} />}
           </div>
         ))}
@@ -1078,9 +1196,9 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
     );
   }
   return (
-    <div style={{ marginTop: 16, padding: '12px 14px', borderRadius: 10, background: B.blueSurface, border: `1px solid ${B.bluePale}` }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: B.navy, marginBottom: 4 }}>Recommendations</div>
-      <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
+    <div style={{ marginTop: 16, padding: '18px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+      <div style={{ ...eyebrowStyle, marginBottom: 6 }}>Recommendations</div>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
       {shouldShowBookingCta(text) && <BookingCta upcomingAppointment={upcomingAppointment} text={text} />}
     </div>
   );
@@ -1101,20 +1219,20 @@ function BookingCta({ upcomingAppointment, text }) {
     return (
       <div style={{
         marginTop: 14,
-        padding: '12px 14px',
-        borderRadius: 8,
-        background: '#fff',
-        border: `1px solid ${B.bluePale}`,
+        padding: '14px 16px',
+        borderRadius: 10,
+        background: B.white,
+        border: `1px solid ${ESTIMATE_BORDER}`,
         textAlign: 'center',
       }}>
-        <div style={{ fontSize: 12, fontWeight: 800, color: B.blueDeeper, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+        <div style={{ ...eyebrowStyle }}>
           Upcoming appointment
         </div>
-        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55, marginTop: 4 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 4 }}>
           {[appt.serviceType, formatAppointmentWindow(appt)].filter(Boolean).join(' - ')}
         </div>
         {appt.technicianName && (
-          <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.45 }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45 }}>
             Technician: {appt.technicianName}
           </div>
         )}
@@ -1128,10 +1246,7 @@ function BookingCta({ upcomingAppointment, text }) {
         target="_blank"
         rel="noreferrer"
         style={{
-          ...GOLD_CTA,
-          padding: '14px 20px',
-          minHeight: 44,
-          fontSize: 14,
+          ...primaryButtonStyle,
         }}
       >
         <Icon name="calendar" size={15} strokeWidth={2} /> {includesAny(text, ['rodent', 'exclusion', 'trap']) ? 'Request Exclusion Estimate' : 'Book an appointment'}
