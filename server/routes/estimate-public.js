@@ -1996,6 +1996,8 @@ ${shellQuestionsBar()}
       document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
       if (mode === 'one_time' && bookingState.selectedSlotId) {
         pickPaymentPref('pay_at_visit');
+      } else if (mode === 'recurring' && bookingState.selectedSlotId && !document.getElementById('payment-options-card')) {
+        pickPaymentPref('card_on_file');
       }
     }
   }
@@ -2113,6 +2115,8 @@ ${shellQuestionsBar()}
     if (paymentCard) {
       paymentCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       toast('Choose a payment option to continue.');
+    } else {
+      pickPaymentPref('card_on_file');
     }
   }
 

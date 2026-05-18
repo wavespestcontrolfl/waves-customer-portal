@@ -520,6 +520,31 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("pickPaymentPref('pay_at_visit')");
   });
 
+  test('server-rendered recurring fallback can reserve without payment option cards', () => {
+    const html = renderPage('recurring-fallback-token', {
+      status: 'sent',
+      customerName: 'Fallback Customer',
+      address: '10 Fallback Way',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {},
+      },
+    });
+
+    expect(html).toContain('id="booking-card"');
+    expect(html).not.toContain('<section class="card billing-card" id="payment-options-card"');
+    expect(html).not.toContain('data-pay-pref="card_on_file"');
+    expect(html).toContain("!document.getElementById('payment-options-card')");
+    expect(html).toContain("pickPaymentPref('card_on_file')");
+  });
+
   test('builds Waves AI payload from estimate property signals', () => {
     const payload = buildWaveGuardIntelligencePayload({
       satelliteUrl: 'https://maps.example/satellite.png',
