@@ -400,9 +400,9 @@ const AUTOMATIONS = [
     status: 'active',
     frequencyCap: 'once_per_estimate',
     idempotency: 'estimate.delivery:{estimate_id}',
-    conditions: { estimate_status: ['sent', 'viewed'] },
+    conditions: { estimate_status: ['sent', 'open'] },
     exit: { stop_if: ['estimate.accepted', 'estimate.archived'] },
-    dryRunNotes: 'Counts recent sent or viewed estimates that are not closed.',
+    dryRunNotes: 'Counts recent estimates that are still open or sent.',
   },
   {
     key: 'estimate.unviewed_followup',
@@ -415,9 +415,9 @@ const AUTOMATIONS = [
     status: 'draft',
     frequencyCap: 'once_per_estimate',
     idempotency: 'estimate.unviewed_followup:{estimate_id}',
-    conditions: { estimate_viewed: false, estimate_status: ['sent', 'viewed'] },
+    conditions: { estimate_viewed: false, estimate_status: ['sent', 'open'] },
     exit: { stop_if: ['estimate.viewed', 'estimate.accepted', 'estimate.expired'] },
-    dryRunNotes: 'Counts recent sent estimates where view tracking is not present.',
+    dryRunNotes: 'Counts recent open estimates where view tracking is not present.',
   },
   {
     key: 'estimate.viewed_followup',
@@ -430,9 +430,9 @@ const AUTOMATIONS = [
     status: 'draft',
     frequencyCap: 'once_per_estimate',
     idempotency: 'estimate.viewed_followup:{estimate_id}',
-    conditions: { estimate_viewed: true, estimate_status: ['sent', 'viewed'] },
+    conditions: { estimate_viewed: true, estimate_status: ['sent', 'open'] },
     exit: { stop_if: ['estimate.accepted', 'estimate.expired'] },
-    dryRunNotes: 'Counts recent viewed estimates that have a viewed timestamp when available.',
+    dryRunNotes: 'Counts recent open estimates that have a viewed timestamp when available.',
   },
   {
     key: 'estimate.expiring_notice',
@@ -445,9 +445,9 @@ const AUTOMATIONS = [
     status: 'draft',
     frequencyCap: 'once_per_estimate_expiration',
     idempotency: 'estimate.expiring_notice:{estimate_id}:{expires_at}',
-    conditions: { expires_within_days: 2, estimate_status: ['sent', 'viewed'] },
+    conditions: { expires_within_days: 2, estimate_status: ['sent', 'open'] },
     exit: { stop_if: ['estimate.accepted', 'estimate.expired', 'estimate.archived'] },
-    dryRunNotes: 'Counts sent or viewed estimates with an expiration date in the next two days when that column exists.',
+    dryRunNotes: 'Counts open estimates with an expiration date in the next two days when that column exists.',
   },
   {
     key: 'estimate.extension_notice',
@@ -763,7 +763,6 @@ exports.up = async function up(knex) {
     t.uuid('template_id').references('id').inTable('email_templates').onDelete('SET NULL');
     t.uuid('template_version_id').references('id').inTable('email_template_versions').onDelete('SET NULL');
     t.string('template_key', 120);
-    t.string('suppression_group_key_snapshot', 80);
     t.string('automation_run_id');
     t.string('trigger_event_id');
     t.string('recipient_type', 40);
@@ -778,7 +777,7 @@ exports.up = async function up(knex) {
     t.jsonb('payload_snapshot').defaultTo('{}');
     t.jsonb('categories').defaultTo('[]');
     t.string('status', 40).defaultTo('queued');
-    t.string('idempotency_key', 260);
+    t.string('idempotency_key');
     t.text('error_message');
     t.timestamp('queued_at').defaultTo(knex.fn.now());
     t.timestamp('sent_at');

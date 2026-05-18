@@ -426,6 +426,7 @@ describe('email template automation executor', () => {
         status: 'sent',
       }),
     }));
+    expect(EmailTemplates.sendTemplate.mock.calls[0][0].suppressionGroupKey).toBeUndefined();
     expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'sent',
     }));

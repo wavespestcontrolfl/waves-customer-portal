@@ -232,6 +232,25 @@ describe('email template library rendering', () => {
     )).resolves.toEqual(marketingSuppression);
   });
 
+  test('falls back to the template suppression group when override is null', async () => {
+    const serviceSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [serviceSuppression] })],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+      null,
+    )).resolves.toEqual(serviceSuppression);
+  });
+
   test('flags disallowed and missing required variables before publish', () => {
     const validation = EmailTemplates.validationFor(
       serviceTemplate({ allowed_variables: ['first_name'], required_variables: ['first_name', 'estimate_url'] }),

@@ -243,8 +243,8 @@ function redactedPayloadSnapshot(value) {
 }
 
 function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
-  if (suppressionGroupKey !== undefined) {
-    const override = String(suppressionGroupKey || '').trim();
+  if (suppressionGroupKey !== undefined && suppressionGroupKey !== null) {
+    const override = String(suppressionGroupKey).trim();
     return override || null;
   }
   return template.suppression_group_key || template.send_stream || null;

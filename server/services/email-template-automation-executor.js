@@ -838,7 +838,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
       automationRunId: claimedRun.id,
       idempotencyKey: claimedRun.idempotency_key,
       categories: ['email_template_automation', `automation_${claimedRun.automation_key}`],
-      suppressionGroupKey: resolvedAutomation.suppression_group_key || null,
+      suppressionGroupKey: resolvedAutomation.suppression_group_key || undefined,
     });
     const status = result.blocked ? 'blocked' : 'sent';
     const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
