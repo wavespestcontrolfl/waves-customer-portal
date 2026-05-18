@@ -321,6 +321,95 @@ function computeBoosterDates(initialDateStr, boosterMonths, monthsAhead = 12) {
   return dates;
 }
 
+function normalizeBoosterMonths(value) {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      raw = raw.split(',');
+    }
+  }
+  if (!Array.isArray(raw)) return [];
+  return Array.from(new Set(raw.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
+}
+
+function normalizeHHMM(value) {
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/);
+  if (!m) return null;
+  return `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`;
+}
+
+function normalizeDateOnly(value) {
+  return value ? String(value).split('T')[0] : null;
+}
+
+function normalizeNullableInt(value) {
+  const parsed = parseInt(value, 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function recurrenceUsesMonthAnchor(pattern) {
+  return pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
+}
+
+function recurringRewriteSignature(row) {
+  const pattern = row?.recurring_pattern || null;
+  const date = normalizeDateOnly(row?.scheduled_date);
+  const skipWeekendsValue = !!row?.skip_weekends;
+  const sig = {
+    date,
+    pattern,
+    nth: null,
+    weekday: null,
+    intervalDays: null,
+    skipWeekends: skipWeekendsValue,
+    weekendShift: skipWeekendsValue ? (row?.weekend_shift === 'back' ? 'back' : 'forward') : null,
+  };
+  if (recurrenceUsesMonthAnchor(pattern)) {
+    const inferred = recurrenceOrdinalOptions(date, {
+      nth: normalizeNullableInt(row?.recurring_nth),
+      weekday: normalizeNullableInt(row?.recurring_weekday),
+    });
+    sig.nth = normalizeNullableInt(inferred.nth);
+    sig.weekday = normalizeNullableInt(inferred.weekday);
+  }
+  if (pattern === 'custom') {
+    sig.intervalDays = normalizeNullableInt(row?.recurring_interval_days);
+  }
+  return sig;
+}
+
+function shouldRewritePendingRecurringRows(before, after) {
+  if (!before || !after) return false;
+  const prev = recurringRewriteSignature(before);
+  const next = recurringRewriteSignature(after);
+  return ['date', 'pattern', 'nth', 'weekday', 'intervalDays', 'skipWeekends', 'weekendShift']
+    .some((key) => prev[key] !== next[key]);
+}
+
+function appointmentReminderTime(dateStr, windowStart) {
+  const safeDate = String(dateStr || '').split('T')[0];
+  if (!safeDate) return null;
+  const apptTime = parseETDateTime(`${safeDate}T${normalizeHHMM(windowStart) || '08:00'}`);
+  return isNaN(apptTime.getTime()) ? null : apptTime;
+}
+
+async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceId, scheduledDate, windowStart) {
+  const apptTime = appointmentReminderTime(scheduledDate, windowStart);
+  if (!apptTime) return;
+  await trx('appointment_reminders')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .update({
+      appointment_time: apptTime,
+      reminder_72h_sent: false,
+      reminder_72h_sent_at: null,
+      reminder_24h_sent: false,
+      reminder_24h_sent_at: null,
+      updated_at: new Date(),
+    });
+}
+
 // Apply a discount to a price. Returns the discounted price (>= 0).
 function applyDiscount(price, type, amount) {
   if (price == null || !type || amount == null || amount === '' || isNaN(Number(amount))) return price;
@@ -866,6 +955,12 @@ router.get('/', async (req, res, next) => {
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
         recurringPattern: s.recurring_pattern || null,
+        recurringOngoing: s.recurring_ongoing ?? null,
+        recurringNth: s.recurring_nth ?? null,
+        recurringWeekday: s.recurring_weekday ?? null,
+        recurringIntervalDays: s.recurring_interval_days ?? null,
+        skipWeekends: !!s.skip_weekends,
+        weekendShift: s.weekend_shift || null,
       };
     }));
 
@@ -960,6 +1055,12 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.is_recurring',
           'scheduled_services.recurring_parent_id',
           'scheduled_services.recurring_pattern',
+          'scheduled_services.recurring_ongoing',
+          'scheduled_services.recurring_nth',
+          'scheduled_services.recurring_weekday',
+          'scheduled_services.recurring_interval_days',
+          'scheduled_services.skip_weekends',
+          'scheduled_services.weekend_shift',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
           'customers.autopay_payment_method_id',
@@ -1022,6 +1123,12 @@ router.get('/week', async (req, res, next) => {
           isRecurring: s.is_recurring,
           recurringParentId: s.recurring_parent_id || null,
           recurringPattern: s.recurring_pattern || null,
+          recurringOngoing: s.recurring_ongoing ?? null,
+          recurringNth: s.recurring_nth ?? null,
+          recurringWeekday: s.recurring_weekday ?? null,
+          recurringIntervalDays: s.recurring_interval_days ?? null,
+          skipWeekends: !!s.skip_weekends,
+          weekendShift: s.weekend_shift || null,
         };
       }));
 
@@ -1077,6 +1184,12 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.is_recurring',
         'scheduled_services.recurring_parent_id',
         'scheduled_services.recurring_pattern',
+        'scheduled_services.recurring_ongoing',
+        'scheduled_services.recurring_nth',
+        'scheduled_services.recurring_weekday',
+        'scheduled_services.recurring_interval_days',
+        'scheduled_services.skip_weekends',
+        'scheduled_services.weekend_shift',
         'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
         'customers.city', 'customers.zip',
         'technicians.name as tech_name'
@@ -1115,6 +1228,12 @@ router.get('/month', async (req, res, next) => {
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
         recurringPattern: s.recurring_pattern || null,
+        recurringOngoing: s.recurring_ongoing ?? null,
+        recurringNth: s.recurring_nth ?? null,
+        recurringWeekday: s.recurring_weekday ?? null,
+        recurringIntervalDays: s.recurring_interval_days ?? null,
+        skipWeekends: !!s.skip_weekends,
+        weekendShift: s.weekend_shift || null,
       });
     });
 
@@ -1545,6 +1664,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       assignmentScope,
       isRecurring, recurringPattern, recurringCount, recurringOngoing,
+      spawnRecurringChildren,
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
       discountType, discountAmount, estimatedPrice,
@@ -1685,8 +1805,13 @@ router.put('/:id/update-details', async (req, res, next) => {
     let assignmentChanged = false;
     let assignmentUpdatedJobIds = [];
     let recurringCreated = 0;
+    let recurringUpdatedJobIds = [];
 
     await db.transaction(async (trx) => {
+      const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
+        ? await trx('scheduled_services').where({ id: req.params.id }).first()
+        : null;
+
       if (assignmentShouldRun) {
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
@@ -1717,8 +1842,145 @@ router.put('/:id/update-details', async (req, res, next) => {
         }
       }
 
+      if (isRecurring && spawnRecurringChildren === false && recurringPattern) {
+        const parent = await trx('scheduled_services').where({ id: req.params.id }).first();
+        if (
+          parent?.is_recurring
+          && !parent.recurring_parent_id
+          && recurringParentBefore?.is_recurring
+          && !recurringParentBefore.recurring_parent_id
+          && shouldRewritePendingRecurringRows(recurringParentBefore, parent)
+        ) {
+          const baseDateStr = parent.scheduled_date
+            ? String(parent.scheduled_date).split('T')[0]
+            : etDateString();
+          const rOpts = {
+            nth: editMonthAnchorOpts.nth != null ? editMonthAnchorOpts.nth : parent.recurring_nth,
+            weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
+            intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
+          };
+          const skipChild = skipWeekends !== undefined ? !!skipWeekends : !!parent.skip_weekends;
+          const dirChild = (weekendShift !== undefined ? weekendShift : parent.weekend_shift) === 'back' ? 'back' : 'forward';
+          const pendingChildren = await trx('scheduled_services')
+            .where({ recurring_parent_id: parent.id, is_recurring: true })
+            .whereIn('status', ['pending', 'confirmed'])
+            .orderBy('scheduled_date')
+            .orderBy('created_at')
+            .select('id', 'scheduled_date', 'window_start');
+          const pendingBoosters = await trx('scheduled_services')
+            .where({ recurring_parent_id: parent.id, is_recurring: false })
+            .whereIn('status', ['pending', 'confirmed'])
+            .orderBy('scheduled_date')
+            .orderBy('created_at')
+            .select('id', 'scheduled_date', 'window_start');
+          const pendingRewriteIds = [
+            ...pendingChildren.map((row) => row.id),
+            ...pendingBoosters.map((row) => row.id),
+          ];
+          if (pendingRewriteIds.length > 0) {
+            const seriesCols = await trx('scheduled_services').columnInfo();
+            const reservedQuery = trx('scheduled_services')
+              .where(function () {
+                this.where({ id: parent.id }).orWhere({ recurring_parent_id: parent.id });
+              })
+              .whereNotIn('status', ['cancelled', 'rescheduled']);
+            if (pendingChildren.length > 0) {
+              reservedQuery.whereNotIn('id', pendingChildren.map((row) => row.id));
+            }
+            const reservedRows = await reservedQuery.select('scheduled_date');
+            const seenDates = new Set(
+              reservedRows
+                .map((row) => String(row.scheduled_date || '').split('T')[0])
+                .filter(Boolean),
+            );
+            const maxAttempts = pendingChildren.length * 4 + 30;
+            let attempt = 1;
+            for (const child of pendingChildren) {
+              let nextDateStr = null;
+              while (!nextDateStr && attempt < maxAttempts) {
+                const rawNext = nextRecurringDate(baseDateStr, recurringPattern, attempt, rOpts);
+                attempt++;
+                const candidate = shiftPastWeekend(rawNext, skipChild, dirChild);
+                if (seenDates.has(candidate)) continue;
+                seenDates.add(candidate);
+                nextDateStr = candidate;
+              }
+              if (!nextDateStr) break;
+              const childDateChanged = normalizeDateOnly(child.scheduled_date) !== nextDateStr;
+              const childUpdates = {
+                scheduled_date: nextDateStr,
+                recurring_pattern: recurringPattern,
+              };
+              if (seriesCols.recurring_ongoing) childUpdates.recurring_ongoing = !!recurringOngoing;
+              if (seriesCols.recurring_nth) childUpdates.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
+              if (seriesCols.recurring_weekday) childUpdates.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
+              if (seriesCols.recurring_interval_days) childUpdates.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
+              if (seriesCols.skip_weekends) childUpdates.skip_weekends = skipChild;
+              if (seriesCols.weekend_shift && skipChild) childUpdates.weekend_shift = dirChild;
+              await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
+              if (childDateChanged) {
+                await resetAppointmentReminderForScheduleRewrite(
+                  trx,
+                  child.id,
+                  nextDateStr,
+                  child.window_start || parent.window_start,
+                );
+              }
+              recurringUpdatedJobIds.push(child.id);
+            }
+            if (pendingBoosters.length > 0) {
+              const boosterMonths = normalizeBoosterMonths(parent.booster_months);
+              const boosterTargets = new Map();
+              let recomputedTargetIndex = 0;
+              if (boosterMonths.length > 0) {
+                for (const rawDate of computeBoosterDates(baseDateStr, boosterMonths, 12)) {
+                  const targetBooster = pendingBoosters[recomputedTargetIndex];
+                  if (!targetBooster) break;
+                  const candidate = shiftPastWeekend(rawDate, skipChild, dirChild);
+                  const targetCurrentDate = normalizeDateOnly(targetBooster.scheduled_date);
+                  if (seenDates.has(candidate) && candidate !== targetCurrentDate) continue;
+                  if (candidate !== targetCurrentDate) seenDates.add(candidate);
+                  boosterTargets.set(targetBooster.id, candidate);
+                  recomputedTargetIndex++;
+                  if (recomputedTargetIndex >= pendingBoosters.length) break;
+                }
+              }
+              for (const booster of pendingBoosters) {
+                if (boosterTargets.has(booster.id)) continue;
+                const rawDate = String(booster.scheduled_date || '').split('T')[0];
+                if (!rawDate) continue;
+                const candidate = shiftPastWeekend(rawDate, skipChild, dirChild);
+                const currentDate = normalizeDateOnly(booster.scheduled_date);
+                if (seenDates.has(candidate) && candidate !== currentDate) continue;
+                if (candidate !== currentDate) seenDates.add(candidate);
+                boosterTargets.set(booster.id, candidate);
+              }
+              for (const booster of pendingBoosters) {
+                const nextDateStr = boosterTargets.get(booster.id);
+                if (!nextDateStr) continue;
+                const boosterDateChanged = normalizeDateOnly(booster.scheduled_date) !== nextDateStr;
+                const boosterUpdates = { scheduled_date: nextDateStr };
+                if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChild;
+                if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
+                await trx('scheduled_services').where({ id: booster.id }).update(boosterUpdates);
+                if (boosterDateChanged) {
+                  await resetAppointmentReminderForScheduleRewrite(
+                    trx,
+                    booster.id,
+                    nextDateStr,
+                    booster.window_start || parent.window_start,
+                  );
+                }
+                recurringUpdatedJobIds.push(booster.id);
+              }
+            }
+          }
+        }
+      }
+
       // Spawn recurring children if requested (Ongoing seeds 4; Fixed uses recurringCount)
-      const spawnCount = isRecurring ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
+      const shouldSpawnRecurringChildren = isRecurring && spawnRecurringChildren !== false;
+      const spawnCount = shouldSpawnRecurringChildren ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
       if (isRecurring && recurringPattern && spawnCount > 1) {
         const parent = await trx('scheduled_services').where({ id: req.params.id }).first();
         if (parent) {
@@ -1819,6 +2081,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       try {
         const broadcastJobIds = new Set(detailsChanged ? [req.params.id] : []);
         for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
+        for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
         await Promise.all([...broadcastJobIds].map((jobId) =>
           emitDispatchJobUpdate({ jobId, actorId: req.technicianId })

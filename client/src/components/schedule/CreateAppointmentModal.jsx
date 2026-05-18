@@ -970,6 +970,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const mobileTopInset = 'max(8px, env(safe-area-inset-top, 0px))';
 
   const canSubmit = !!selectedCustomer && !!selectedService && !saving;
+  const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
+  const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
+  const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
+  const updateWeekendRule = (value) => {
+    if (value === 'allow') {
+      setSkipWeekends(false);
+      return;
+    }
+    setSkipWeekends(true);
+    setWeekendShift(value === 'back' ? 'back' : 'forward');
+  };
   const serviceLineColumns = isMobile
     ? 'minmax(0, 1fr) 112px'
     : 'minmax(260px, 1fr) 132px 170px 36px';
@@ -994,6 +1005,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       fontWeight: 500,
     }}>
       {label}
+    </div>
+  );
+  const weekendRuleControl = () => (
+    <div>
+      {serviceFieldLabel('Weekend rule')}
+      <select
+        value={weekendRuleValue}
+        onChange={(e) => updateWeekendRule(e.target.value)}
+        style={inputStyle}
+      >
+        <option value="allow">Allow weekends</option>
+        <option value="forward">Move Sat/Sun to Monday</option>
+        <option value="back">Move Sat/Sun to Friday</option>
+      </select>
     </div>
   );
 
@@ -1322,7 +1347,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 >x</button>
 
                 {svc.cadence === 'custom' && (
-                  <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '140px', gap: 8 }}>
+                  <div
+                    style={{
+                      gridColumn: '1 / -1',
+                      display: 'grid',
+                      gridTemplateColumns: isMobile || idx !== firstCustomRecurringIndex ? '1fr' : '140px minmax(220px, 1fr)',
+                      gap: 8,
+                    }}
+                  >
                     <div>
                       {serviceFieldLabel('Days')}
                       <input
@@ -1334,6 +1366,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         style={inputStyle}
                       />
                     </div>
+                    {idx === firstCustomRecurringIndex && weekendRuleControl()}
                   </div>
                 )}
 
@@ -1654,44 +1687,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           </div>
 
-          {/* Skip weekends — only meaningful when at least one service is
-              recurring. Applies to recurring spawns + the auto-extend
-              cron via skip_weekends/weekend_shift on scheduled_services. */}
-          {services.some((s) => s.cadence && s.cadence !== 'one_time') && (
+          {hasRecurringServices && firstCustomRecurringIndex < 0 && (
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minHeight: 36, marginBottom: skipWeekends ? 8 : 0 }}>
-                <input
-                  type="checkbox"
-                  checked={skipWeekends}
-                  onChange={(e) => setSkipWeekends(e.target.checked)}
-                  style={{ width: 18, height: 18, accentColor: D.teal }}
-                />
-                <span style={{ fontSize: 13, fontWeight: 500, color: '#18181B' }}>Skip weekends on recurring visits</span>
-              </label>
-              {skipWeekends && (
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button
-                    type="button"
-                    onClick={() => setWeekendShift('forward')}
-                    style={{
-                      flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                      background: weekendShift === 'forward' ? D.teal : 'transparent',
-                      color: weekendShift === 'forward' ? '#fff' : D.muted,
-                      border: `1px solid ${weekendShift === 'forward' ? D.teal : D.border}`,
-                    }}
-                  >Move to Monday</button>
-                  <button
-                    type="button"
-                    onClick={() => setWeekendShift('back')}
-                    style={{
-                      flex: 1, padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                      background: weekendShift === 'back' ? D.teal : 'transparent',
-                      color: weekendShift === 'back' ? '#fff' : D.muted,
-                      border: `1px solid ${weekendShift === 'back' ? D.teal : D.border}`,
-                    }}
-                  >Pull to Friday</button>
-                </div>
-              )}
+              {weekendRuleControl()}
             </div>
           )}
         </div>
