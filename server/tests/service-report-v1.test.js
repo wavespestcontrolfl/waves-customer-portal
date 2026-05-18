@@ -1720,6 +1720,29 @@ describe('service report v1', () => {
     expect(email.text).toContain('The PDF service report is attached.');
   });
 
+  test('v1 email delivery does not count synthetic clean findings', () => {
+    const email = buildServiceReportV1Email({
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-clean',
+      data: {
+        serviceType: 'Residential Pest Control',
+        customerName: 'Van Lee',
+        applications: [],
+        findings: [{
+          category: 'no_activity',
+          severity: 'info',
+          title: 'No activity observed this visit',
+        }],
+        metrics: [{ label: 'Pressure index', value: 0.3 }],
+        advisory: {},
+      },
+    });
+
+    expect(email.text).toContain('Findings: 0 findings');
+    expect(email.text).toContain('No action-required findings were documented during this visit.');
+    expect(email.text).not.toContain('Top findings: No activity observed this visit');
+    expect(email.html).not.toContain('Top findings');
+  });
+
   test('v1 delivery queue enqueue is idempotent per service record and channel', async () => {
     const rows = [];
     const knex = (table) => {

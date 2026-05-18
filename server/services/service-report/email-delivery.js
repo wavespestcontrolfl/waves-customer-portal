@@ -47,6 +47,10 @@ function hasActionRequiredFinding(findings = []) {
   return findings.some((finding) => ['critical', 'high'].includes(String(finding.severity || '').toLowerCase()));
 }
 
+function customerActionFindings(findings = []) {
+  return findings.filter((finding) => String(finding?.category || '').toLowerCase() !== 'no_activity');
+}
+
 function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
@@ -57,7 +61,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
   const first = data?.customerName ? data.customerName.split(/\s+/)[0] : 'there';
   const tech = data?.technicianName || 'your Waves technician';
   const location = data?.cityState ? ` at ${escapeHtml(data.cityState)}` : '';
-  const findings = Array.isArray(data?.findings) ? data.findings : [];
+  const findings = customerActionFindings(Array.isArray(data?.findings) ? data.findings : []);
   const applications = Array.isArray(data?.applications) ? data.applications : [];
   const advisory = data?.advisory || {};
   const dynamicContext = data?.dynamicContext || {};
