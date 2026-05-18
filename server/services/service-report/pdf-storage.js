@@ -9,6 +9,7 @@ const logger = require('../logger');
 
 const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
 const MIN_EXPECTED_REPORT_BYTES = 50000;
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'public-surface-20260518';
 
 const s3 = new S3Client({
   region: config.s3?.region,
@@ -23,7 +24,7 @@ function assertPdfStorageConfigured() {
 
 function reportPdfStorageKey(serviceRecordId) {
   if (!serviceRecordId) throw new Error('serviceRecordId is required');
-  return `reports/${serviceRecordId}/report.pdf`;
+  return `reports/${serviceRecordId}/report-${SERVICE_REPORT_PDF_STORAGE_VERSION}.pdf`;
 }
 
 async function streamToBuffer(stream) {
@@ -113,6 +114,7 @@ async function getHealthyStoredReportPdf(key) {
 module.exports = {
   FALLBACK_PDF_MARKER,
   MIN_EXPECTED_REPORT_BYTES,
+  SERVICE_REPORT_PDF_STORAGE_VERSION,
   getHealthyStoredReportPdf,
   getReportPdf,
   headReportPdf,

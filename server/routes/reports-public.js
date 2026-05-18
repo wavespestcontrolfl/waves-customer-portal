@@ -14,6 +14,7 @@ const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
+  reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
@@ -415,7 +416,10 @@ router.get('/:token', async (req, res, next) => {
     await trackServiceReportView(service);
 
     if (service.report_template_version === 'service_report_v1') {
-      const storedPdf = await getHealthyStoredReportPdf(service.pdf_storage_key);
+      const expectedPdfStorageKey = reportPdfStorageKey(service.id);
+      const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
+        ? await getHealthyStoredReportPdf(service.pdf_storage_key)
+        : null;
       if (storedPdf) {
         await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
         res.setHeader('Content-Type', 'application/pdf');
