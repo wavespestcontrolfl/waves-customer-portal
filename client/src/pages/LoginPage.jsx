@@ -10,20 +10,6 @@ const SUPPORT_LINKS = [
   { label: 'Estimate', href: '/estimate', icon: 'arrowRight' },
 ];
 
-const LOGIN_TOOLS = [
-  { icon: 'plan', label: 'Plan', text: 'Services and coverage' },
-  { icon: 'calendar', label: 'Visits', text: 'Upcoming and completed work' },
-  { icon: 'card', label: 'Billing', text: 'Cards, autopay, and history' },
-  { icon: 'document', label: 'Documents', text: 'Agreements and reports' },
-];
-
-const PORTAL_FOOTER_LOCATIONS = [
-  { label: 'Lakewood Ranch', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Lakewood%20Ranch&query_place_id=ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
-  { label: 'Parrish', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Parrish&query_place_id=ChIJM32aQRIlw4gRr7goqhbAVpw' },
-  { label: 'Sarasota', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Sarasota&query_place_id=ChIJeT_63_Y5w4gRGTNLozgSmdw' },
-  { label: 'Venice', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Venice&query_place_id=ChIJ81vmrblZw4gRREDmlDUpq0E' },
-];
-
 function normalizeAuthError(error) {
   if (!error) return '';
   if (error === 'No account found for this phone number') {
@@ -513,19 +499,6 @@ export default function LoginPage() {
           </div>
           <h1 id="portal-login-heading">Customer Portal</h1>
           <p>Sign in with the phone number on your Waves account to manage service, billing, documents, and property details.</p>
-          <div className="portal-login-tools" aria-label="Portal tools">
-            {LOGIN_TOOLS.map(item => (
-              <div className="portal-login-tool" key={item.label}>
-                <span className="portal-login-tool-icon">
-                  <Icon name={item.icon} size={17} strokeWidth={2} />
-                </span>
-                <span>
-                  <span className="portal-login-tool-title">{item.label}</span>
-                  <span className="portal-login-tool-text">{item.text}</span>
-                </span>
-              </div>
-            ))}
-          </div>
         </section>
 
         <section className="portal-login-panel" aria-label="Sign in">
@@ -656,22 +629,6 @@ export default function LoginPage() {
                 {link.label}
               </a>
             ))}
-          </div>
-
-          <div className="portal-login-footer">
-            <a className="portal-login-footer-brand" href="https://wavespestcontrol.com/" target="_blank" rel="noopener noreferrer">
-              Waves Customer Portal
-            </a>
-            <span className="portal-login-footer-cities">
-              {PORTAL_FOOTER_LOCATIONS.map((location, index) => (
-                <span className="portal-login-footer-city" key={location.label}>
-                  {index > 0 && <span aria-hidden="true">·</span>}
-                  <a href={location.href} target="_blank" rel="noopener noreferrer">
-                    {location.label}
-                  </a>
-                </span>
-              ))}
-            </span>
           </div>
         </section>
       </div>
