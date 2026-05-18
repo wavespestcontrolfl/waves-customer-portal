@@ -3660,7 +3660,8 @@ export default function ReportViewPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetch(`${API_BASE}/reports/${token}/data`, { cache: 'no-store' })
+    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`;
+    fetch(dataUrl, { cache: 'no-store' })
       .then((r) => r.json())
       .then((d) => {
         if (!cancelled) setData(d);
@@ -3674,7 +3675,7 @@ export default function ReportViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [token, mode]);
 
   useEffect(() => {
     if (!data || data.error) return;
