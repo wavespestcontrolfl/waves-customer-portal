@@ -101,6 +101,7 @@ function methodFromProduct(product, serviceLine) {
   if (category.includes('fert') || category.includes('granular')) return 'granular_broadcast';
   if (serviceLine === 'mosquito') return 'fog_ulv';
   if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : 'broadcast_spray';
+  if (serviceLine === 'palm' || serviceLine === 'tree_shrub') return 'foliar_spray';
   if (serviceLine === 'rodent' || serviceLine === 'termite') return 'station_check';
   return 'perimeter_spray';
 }

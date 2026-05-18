@@ -104,7 +104,13 @@ function normalizeServiceReportApplicationMethod(value = '') {
     'bait_placement',
     'station_check',
     'fog_ulv',
+    'foliar_spray',
+    'trunk_injection',
+    'pin_stream',
   ].includes(normalized)) return normalized;
+  if (normalized.includes('trunk') || normalized.includes('inject')) return 'trunk_injection';
+  if (normalized.includes('foliar')) return 'foliar_spray';
+  if (normalized.includes('pin')) return 'pin_stream';
   if (normalized.includes('granular')) return 'granular_broadcast';
   if (normalized.includes('bait') || normalized.includes('gel') || normalized.includes('glue')) return 'bait_placement';
   if (normalized.includes('station')) return 'station_check';
@@ -125,6 +131,7 @@ function inferServiceReportApplicationMethod(product = {}, productInput = {}, se
   if (category.includes('fert') || category.includes('granular')) return 'granular_broadcast';
   if (serviceLine === 'mosquito') return 'fog_ulv';
   if (serviceLine === 'lawn') return category.includes('herb') ? 'spot_treatment' : 'broadcast_spray';
+  if (serviceLine === 'palm' || serviceLine === 'tree_shrub') return 'foliar_spray';
   if (serviceLine === 'rodent' || serviceLine === 'termite') return 'station_check';
   return 'perimeter_spray';
 }

@@ -540,6 +540,8 @@ describe('service report v1', () => {
     expect(detectServiceLine('Every 6 Weeks Tree & Shrub Care Service')).toBe('tree_shrub');
     expect(methodFromProduct({ product_category: 'bait' }, 'pest')).toBe('bait_placement');
     expect(methodFromProduct({ product_category: 'bait' }, 'rodent')).toBe('bait_placement');
+    expect(methodFromProduct({ product_category: 'insecticide' }, 'tree_shrub')).toBe('foliar_spray');
+    expect(methodFromProduct({ product_category: 'insecticide' }, 'palm')).toBe('foliar_spray');
   });
 
   test('elapsed time parser matches completion panel duration strings', () => {

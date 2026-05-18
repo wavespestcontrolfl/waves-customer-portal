@@ -4504,8 +4504,14 @@ function normalizeApplicationMethod(value = "") {
       "bait_placement",
       "station_check",
       "fog_ulv",
+      "foliar_spray",
+      "trunk_injection",
+      "pin_stream",
     ].includes(normalized)
   ) return normalized;
+  if (normalized.includes("trunk") || normalized.includes("inject")) return "trunk_injection";
+  if (normalized.includes("foliar")) return "foliar_spray";
+  if (normalized.includes("pin")) return "pin_stream";
   if (normalized.includes("granular")) return "granular_broadcast";
   if (normalized.includes("bait") || normalized.includes("gel") || normalized.includes("glue")) return "bait_placement";
   if (normalized.includes("station")) return "station_check";
@@ -4525,6 +4531,7 @@ function defaultApplicationMethod(product = {}, serviceType = "") {
   const serviceLine = serviceLineFromType(serviceType);
   if (serviceLine === "mosquito") return "fog_ulv";
   if (serviceLine === "lawn") return category.includes("herb") ? "spot_treatment" : "broadcast_spray";
+  if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
   if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
   return "perimeter_spray";
 }
@@ -4555,6 +4562,21 @@ function requiredApplicationArea(method, serviceType = "") {
 
 function effectiveApplicationMethod(method) {
   return normalizeApplicationMethod(method) || "perimeter_spray";
+}
+
+function productApplicationMethod(product = {}, serviceType = "") {
+  return normalizeApplicationMethod(product.applicationMethod) ||
+    defaultApplicationMethod(product, serviceType);
+}
+
+function normalizeProductArea(product = {}, serviceType = "") {
+  const applicationMethod = productApplicationMethod(product, serviceType);
+  const areaRequirement = requiredApplicationArea(applicationMethod, serviceType);
+  return {
+    ...product,
+    applicationMethod,
+    areaUnit: areaRequirement?.unit || product.areaUnit || "",
+  };
 }
 
 export function CompletionPanel({
@@ -5205,7 +5227,9 @@ export function CompletionPanel({
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
-        ? savedDraft.selectedProducts
+        ? savedDraft.selectedProducts.map((product) =>
+            normalizeProductArea(product, serviceTypeForArea),
+          )
         : [],
     );
     setSoilTemp(savedDraft.soilTemp || "");
@@ -5478,6 +5502,12 @@ export function CompletionPanel({
             next.areaUnit = "";
             next.areaValue = "";
           }
+        } else if (field === "areaValue") {
+          const areaRequirement = requiredApplicationArea(
+            productApplicationMethod(next, serviceTypeForArea),
+            serviceTypeForArea,
+          );
+          if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
         return next;
       }),
@@ -5577,20 +5607,20 @@ export function CompletionPanel({
         return;
       }
     }
-    const missingRequiredAreaProduct = selectedProducts.find((p) => {
-      const areaRequirement = requiredApplicationArea(
-        effectiveApplicationMethod(p.applicationMethod),
-        serviceTypeForArea,
-      );
+      const missingRequiredAreaProduct = selectedProducts.find((p) => {
+        const areaRequirement = requiredApplicationArea(
+          productApplicationMethod(p, serviceTypeForArea),
+          serviceTypeForArea,
+        );
       if (!areaRequirement) return false;
       const value = Number(p.areaValue);
       return !Number.isFinite(value) || value <= 0 || p.areaUnit !== areaRequirement.unit;
     });
     if (!isIncompleteVisit && missingRequiredAreaProduct) {
-      const areaRequirement = requiredApplicationArea(
-        effectiveApplicationMethod(missingRequiredAreaProduct.applicationMethod),
-        serviceTypeForArea,
-      );
+        const areaRequirement = requiredApplicationArea(
+          productApplicationMethod(missingRequiredAreaProduct, serviceTypeForArea),
+          serviceTypeForArea,
+        );
       alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
       return;
     }
@@ -5650,9 +5680,9 @@ export function CompletionPanel({
           productId: p.productId,
           rate: p.rate,
           rateUnit: p.rateUnit,
-          totalAmount: p.totalAmount,
-          amountUnit: p.amountUnit,
-          applicationMethod: p.applicationMethod,
+            totalAmount: p.totalAmount,
+            amountUnit: p.amountUnit,
+            applicationMethod: productApplicationMethod(p, serviceTypeForArea),
           applicationArea:
             p.applicationArea ||
             (areasServiced.length === 1 ? areasServiced[0] : null),
@@ -6967,7 +6997,7 @@ export function CompletionPanel({
                         </select>
                       )}
                       <select
-                        value={sp.applicationMethod || "perimeter_spray"}
+                        value={productApplicationMethod(sp, serviceTypeForArea)}
                         onChange={(e) =>
                           updateProduct(
                             sp.productId,
@@ -6990,10 +7020,13 @@ export function CompletionPanel({
                         <option value="bait_placement">Bait</option>
                         <option value="station_check">Station check</option>
                         <option value="fog_ulv">Fog/ULV</option>
+                        <option value="foliar_spray">Foliar spray</option>
+                        <option value="trunk_injection">Trunk injection</option>
+                        <option value="pin_stream">Pin stream</option>
                       </select>
                       {(() => {
                         const areaRequirement = requiredApplicationArea(
-                          effectiveApplicationMethod(sp.applicationMethod),
+                          productApplicationMethod(sp, serviceTypeForArea),
                           serviceTypeForArea,
                         );
                         if (!areaRequirement) return null;
@@ -8523,7 +8556,7 @@ export function CompletionPanel({
                     </select>
                   )}
                   <select
-                    value={sp.applicationMethod || "perimeter_spray"}
+                    value={productApplicationMethod(sp, serviceTypeForArea)}
                     onChange={(e) =>
                       updateProduct(
                         sp.productId,
@@ -8545,10 +8578,13 @@ export function CompletionPanel({
                     <option value="bait_placement">Bait</option>
                     <option value="station_check">Station check</option>
                     <option value="fog_ulv">Fog/ULV</option>
+                    <option value="foliar_spray">Foliar spray</option>
+                    <option value="trunk_injection">Trunk injection</option>
+                    <option value="pin_stream">Pin stream</option>
                   </select>
                   {(() => {
                     const areaRequirement = requiredApplicationArea(
-                      effectiveApplicationMethod(sp.applicationMethod),
+                      productApplicationMethod(sp, serviceTypeForArea),
                       serviceTypeForArea,
                     );
                     if (!areaRequirement) return null;

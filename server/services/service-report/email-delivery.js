@@ -9,6 +9,7 @@ const {
 } = require('./pdf-queue');
 const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
+const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
 
 function escapeHtml(value) {
@@ -197,7 +198,7 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
       });
     }
   } catch (err) {
-    logger.warn(`[service-report-v1-email] PDF attachment skipped for ${recordId}: ${err.message}`);
+    logger.warn(`[service-report-v1-email] PDF attachment skipped for ${recordId}: ${safePdfRenderError(err)}`);
     await enqueuePdfRenderRetry({
       serviceRecordId: recordId,
       payload: {
