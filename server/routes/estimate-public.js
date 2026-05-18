@@ -1090,46 +1090,90 @@ function renderPage(token, estimate, estData) {
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
   const showAnnualPrepayOption = showMembershipFee;
-  const billingLede = showAnnualPrepayOption
-    ? 'Billed after each completed service visit through autopay unless you choose to pay the 12-month plan in full at signup.'
-    : 'Billed after each completed service visit through autopay.';
   const recurringBillCadenceWord = selectedRecurringFrequencyKey === 'quarterly'
     ? 'quarterly'
     : (selectedRecurringFrequencyKey === 'bi_monthly' ? 'bi-monthly' : 'monthly');
+  const setupFeeAmount = showMembershipFee ? membershipFee : setupDueToday;
+  const setupFeeText = fmtMoney(setupFeeAmount);
+  const wholeNumber = (n) => Number.isFinite(Number(n)) ? Number(n).toLocaleString('en-US', { maximumFractionDigits: 1 }) : '';
+  const lawnBillingRow = billingServiceRows.find((row) => row.kind === 'lawn');
+  const pestBillingRow = billingServiceRows.find((row) => row.kind === 'pest');
+  const totalScheduledServices = billingServiceRows.reduce((sum, row) => sum + (Number(row.visits || 0) || 0), 0);
+  const planVisitSummary = lawnBillingRow?.visits && pestBillingRow?.visits
+    ? `${wholeNumber(lawnBillingRow.visits)} lawn care visits + ${wholeNumber(pestBillingRow.visits)} pest control visits`
+    : (totalScheduledServices > 0 ? `${wholeNumber(totalScheduledServices)} scheduled services` : 'your scheduled WaveGuard services');
+  const totalScheduledServicesText = totalScheduledServices > 0
+    ? `${wholeNumber(totalScheduledServices)} scheduled services`
+    : 'scheduled services';
+  const paymentVisitRows = [
+    lawnBillingRow ? { label: 'Lawn Care', row: lawnBillingRow } : null,
+    pestBillingRow ? { label: 'Pest Control', row: pestBillingRow } : null,
+  ].filter((item) => item?.row?.price != null);
+  const fallbackPaymentVisitRows = paymentVisitRows.length ? paymentVisitRows : billingServiceRows
+    .filter((row) => row.price != null)
+    .map((row) => ({ label: row.name, row }));
+  const visitPricingHtml = fallbackPaymentVisitRows.map(({ label, row }) => `
+          <div class="visit-price-row">
+            <span>${escapeHtml(label)}:</span>
+            <strong><span data-payment-visit-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)}</span> / visit</strong>
+          </div>`).join('');
+  const paymentBenefits = [
+    '90-day money-back guarantee',
+    'Priority scheduling',
+    'Free re-service between visits',
+    'Locked-in pricing for 12 months',
+    'Free annual termite inspection',
+    '15% off one-time treatments',
+    'Customer portal',
+    'Text-your-tech access',
+  ];
+  const paymentBenefitsHtml = paymentBenefits.map((p) => `<li>${escapeHtml(p)}</li>`).join('');
   const billingCardHtml = (!quoteRequired && !locked && billingRecurring.length) ? `
-  <section class="card billing-card"${billingModeAttr}>
-    <h2>Choose how you want to pay</h2>
-    <p class="billing-lede">${escapeHtml(billingLede)}</p>
+  <section class="card billing-card" id="payment-options-card"${billingModeAttr}>
+    <h2>Choose Your WaveGuard Payment Option</h2>
+    <p class="billing-lede">Your custom plan includes ${escapeHtml(planVisitSummary)} for your property, with locked-in pricing for 12 months and a 90-day money-back guarantee.</p>
     <div class="payment-choice-grid">
-      <div class="payment-choice">
-        <h3>Pay after each visit</h3>
-        <p>Billed after each completed service through autopay.</p>
-        ${showMembershipFee ? `
-        <div class="billing-line"><span>WaveGuard Membership Setup &mdash; ${fmtMoney(membershipFee)} one-time charge</span></div>
-        <p class="billing-small">A setup invoice is prepared after approval. This one-time setup activates your WaveGuard membership benefits, service schedule, and protection plan.</p>` : ''}
-        ${showMembershipFee ? `<div class="billing-total-row"><span>Setup invoice</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
-        <p class="billing-small">No payment is charged on this page. Your first service visit will be billed after completion.</p>
-      </div>
+      <button type="button" class="payment-choice payment-option-card" data-pay-pref="card_on_file" data-pay-pref-card aria-pressed="false">
+        <div class="payment-choice-head">
+          <h3>Pay After Each Visit</h3>
+          <span class="payment-choice-label">Most Flexible</span>
+        </div>
+        <div class="payment-main">
+          <strong>${escapeHtml(setupFeeText)} setup</strong>
+          <span>then pay after each completed service visit</span>
+        </div>
+        ${visitPricingHtml ? `<div class="visit-pricing">${visitPricingHtml}</div>` : ''}
+        <p>Best if you want to start now and pay as service is completed.</p>
+        <span class="payment-cta-label" data-pay-pref-cta>Choose Pay After Each Visit</span>
+      </button>
       ${showAnnualPrepayOption ? `
-      <div class="payment-choice">
-        <h3>Pay the 12-month plan in full</h3>
-        <p>Approve the 12-month plan up front and the setup is included at no charge.</p>
-        <div class="billing-total-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
-        ${showMembershipFee ? `
-        <div class="billing-line"><span>WaveGuard Membership Setup &mdash; ${fmtMoney(membershipFee)} one-time charge</span></div>
-        <div class="billing-line discount"><span>Annual Pay-in-Full Waiver &mdash; -${fmtMoney(membershipFee)}</span></div>
-        <p class="billing-small">The WaveGuard Membership Setup is included at no charge when the 12-month plan is paid in full.</p>` : ''}
-        <div class="billing-total-row"><span>Prepay invoice</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
-        ${showMembershipFee ? `<p class="billing-small">Net setup fee: $0</p>` : ''}
-      </div>` : ''}
+      <button type="button" class="payment-choice payment-option-card" data-pay-pref="prepay_annual" data-pay-pref-prepay aria-pressed="false">
+        <div class="payment-choice-head">
+          <h3>Pay for the Year</h3>
+          <span class="save-pill">Best Value &mdash; Save ${escapeHtml(setupFeeText)}</span>
+        </div>
+        <div class="payment-main">
+          <strong data-annual-total>${fmtMoney(annualTotal)}</strong>
+          <span>for 12 months</span>
+        </div>
+        <p class="payment-setup-included">Setup included at no charge</p>
+        <ul class="payment-copy-list">
+          <li>Includes all ${escapeHtml(totalScheduledServicesText)} for the year.</li>
+          <li>One payment, no per-visit invoices, and your ${escapeHtml(setupFeeText)} setup fee is waived.</li>
+        </ul>
+        <span class="payment-cta-label" data-pay-pref-cta>Pay in Full &amp; Save ${escapeHtml(setupFeeText)}</span>
+      </button>` : ''}
     </div>
-    ${billingServiceRowsHtml ? `
-    <div class="billing-works">
-      <h3>How billing works</h3>
-      <p>This plan is shown as <span data-billing-period-total>${fmtMoney(recurringDisplayTotal)}</span> / ${escapeHtml(recurringPricePeriodWord)}, but you are not charged a flat ${escapeHtml(recurringBillCadenceWord)} bill. You are billed after each completed service visit.</p>
-      <div class="billing-service-list">${billingServiceRowsHtml}</div>
+    <div class="billing-benefits">
+      <h3>Included with both options</h3>
+      <ul class="perks-list payment-benefits-list">${paymentBenefitsHtml}</ul>
+    </div>
+    <details class="billing-faq">
+      <summary>How does billing work?</summary>
+      <p>With Pay After Each Visit, you are billed only after completed service visits. This plan may be shown as a ${escapeHtml(recurringBillCadenceWord)} equivalent, but you are not charged a flat ${escapeHtml(recurringBillCadenceWord)} bill. With Pay for the Year, you make one annual payment and the ${escapeHtml(setupFeeText)} setup fee is waived.</p>
+      ${billingServiceRowsHtml ? `<div class="billing-service-list">${billingServiceRowsHtml}</div>` : ''}
       ${tierDiscountPct > 0 ? `<p class="billing-small">WaveGuard ${escapeHtml(tier)} prices shown after the ${tierDiscountPct}% bundle discount.</p>` : ''}
-    </div>` : ''}
+    </details>
   </section>` : '';
 
   const servicePriceCardsHtml = billingServiceRows
@@ -1396,6 +1440,29 @@ function renderPage(token, estimate, estData) {
   .payment-choice{border:1px solid #E7E2D7;border-radius:10px;background:#fff;padding:18px;display:flex;flex-direction:column;gap:10px}
   .payment-choice h3{font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:1.25;font-weight:800;letter-spacing:0;margin:0;color:#1B2C5B}
   .payment-choice p{margin:0;color:#6B7280;font-size:13px;line-height:1.5}
+  .payment-option-card{appearance:none;width:100%;font:inherit;text-align:left;cursor:pointer;transition:border-color .15s,background .15s}
+  .payment-option-card:hover:not([disabled]){border-color:${BRAND.blueDark}}
+  .payment-option-card[disabled]{opacity:.55;cursor:not-allowed}
+  .payment-option-card.is-selected{border-color:${BRAND.blueDark};background:#F7F5EE}
+  .payment-choice-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .payment-choice-label{flex:none;color:#6B7280;font-size:12px;font-weight:800;line-height:1.2;text-transform:uppercase;letter-spacing:.08em}
+  .payment-main{display:grid;gap:2px;padding-top:4px}
+  .payment-main strong{font-family:'Source Serif 4',Georgia,serif;font-size:28px;font-weight:600;color:#1B2C5B;line-height:1.05}
+  .payment-main span{font-size:13px;color:#3F4A65;line-height:1.45}
+  .payment-setup-included{color:${BRAND.green}!important;font-weight:700!important}
+  .visit-pricing{display:grid;gap:6px;padding:10px 0;border-top:1px solid #F0ECE2;border-bottom:1px solid #F0ECE2}
+  .visit-price-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;font-size:13px;line-height:1.45;color:#3F4A65}
+  .visit-price-row strong{color:#1B2C5B;font-weight:800;white-space:nowrap}
+  .payment-copy-list{margin:0;padding-left:18px;color:#3F4A65;font-size:13px;line-height:1.5}
+  .payment-copy-list li+li{margin-top:4px}
+  .payment-cta-label{display:inline-flex;align-items:center;justify-content:center;min-height:42px;margin-top:auto;padding:10px 14px;background:#1B2C5B;color:#fff;border-radius:8px;font-size:13px;font-weight:800;line-height:1.2;text-align:center}
+  .payment-option-card[data-pay-pref="prepay_annual"] .payment-cta-label{background:${BRAND.green}}
+  .billing-benefits{border-top:1px solid #E7E2D7;padding-top:16px}
+  .billing-benefits h3{font-family:Inter,system-ui,sans-serif;font-size:16px;font-weight:800;letter-spacing:0;margin:0 0 8px}
+  .payment-benefits-list{margin-top:0}
+  .billing-faq{border-top:1px solid #E7E2D7;padding-top:12px}
+  .billing-faq summary{cursor:pointer;color:#1B2C5B;font-size:14px;font-weight:800;line-height:1.35}
+  .billing-faq p{margin:10px 0 0;color:#3F4A65;font-size:13px;line-height:1.55}
   .billing-line{padding-top:8px;border-top:1px solid #F0ECE2;color:#1B2C5B;font-size:13px;font-weight:700;line-height:1.45}
   .billing-line.discount{color:${BRAND.green}}
   .billing-total-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding-top:10px;border-top:1px solid #E7E2D7}
@@ -1590,15 +1657,6 @@ ${shellTopBar()}
     <h2 id="booking-title">Find a date &amp; time that works for you</h2>
     <p class="card-sub">These are the windows when we\u2019ll already be working in your neighborhood \u2014 pick whichever fits.</p>
     <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
-    <div id="pay-pref-area" style="display:none">
-      <h3 id="pay-pref-heading" style="margin:20px 0 4px">Choose how you want to pay</h3>
-      <p class="card-sub" id="pay-pref-subhead" style="margin:0">${escapeHtml(billingLede)}</p>
-      <div class="pay-pref-grid options">
-        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">Pay after each visit</span><span class="pay-pref-sub">Billed after each completed service through autopay.</span></button>
-        <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit hidden><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
-        ${showMembershipFee ? `<button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">Pay the 12-month plan in full</span><span class="pay-pref-sub">Approve annual prepay and the setup is included at no charge.</span></button>` : ''}
-      </div>
-    </div>
     <div id="review-area" style="display:none">
       <div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>
       <div class="pay-pref-grid">
@@ -1618,7 +1676,7 @@ ${shellTopBar()}
     ${hasRealOneTime ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
   </div>` : ''}
 
-  ${quoteRequired ? '' : `<div class="card" data-mode-only="recurring">
+  ${quoteRequired || billingCardHtml ? '' : `<div class="card" data-mode-only="recurring">
     <h2>What WaveGuard members get</h2>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
@@ -1680,6 +1738,7 @@ ${shellQuestionsBar()}
   const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
   const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedRecurringFrequencyKey))};
   const PRICE_PERIOD_WORD = ${JSON.stringify(recurringPricePeriodWord)};
+  const SETUP_FEE_TEXT = ${JSON.stringify(setupFeeText)};
   const REVIEW_FALLBACKS = ${JSON.stringify(reviewFallbacks)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
@@ -1705,6 +1764,16 @@ ${shellQuestionsBar()}
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
       el.innerHTML = fmt(adjusted) + ' <span>/ application</span>';
+    });
+    document.querySelectorAll('[data-payment-visit-price]').forEach((el) => {
+      const base = Number(el.dataset.serviceBasePrice || 0);
+      const visits = Number(el.dataset.serviceVisits || 0);
+      if (!(base > 0)) return;
+      const discount = el.dataset.serviceKind === 'pest' && visits > 0
+        ? (prefOff * 12) / visits
+        : 0;
+      const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
+      el.textContent = fmt(adjusted);
     });
     document.querySelectorAll('[data-service-card-price]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);
@@ -1902,35 +1971,23 @@ ${shellQuestionsBar()}
 
   function syncPaymentMode() {
     const isOneTime = bookingState.serviceMode === 'one_time';
+    const paymentCard = document.getElementById('payment-options-card');
     const cardBtn = document.querySelector('[data-pay-pref-card]');
-    const visitBtn = document.querySelector('[data-pay-pref-visit]');
     const prepayBtn = document.querySelector('[data-pay-pref-prepay]');
-    const heading = document.getElementById('pay-pref-heading');
-    const subhead = document.getElementById('pay-pref-subhead');
-    const visitTitle = document.querySelector('[data-pay-visit-title]');
-    const visitSub = document.querySelector('[data-pay-visit-sub]');
+    if (paymentCard) {
+      paymentCard.hidden = isOneTime;
+    }
     if (cardBtn) {
       cardBtn.hidden = isOneTime;
-      cardBtn.classList.toggle('primary', !isOneTime);
-    }
-    if (visitBtn) {
-      visitBtn.hidden = !isOneTime;
-      visitBtn.classList.toggle('primary', isOneTime);
     }
     if (prepayBtn) {
       prepayBtn.hidden = isOneTime;
     }
-    if (heading) heading.textContent = isOneTime ? 'Book your visit' : 'Choose how you want to pay';
-    if (subhead) {
-      subhead.textContent = isOneTime
-        ? 'This books a single visit. You will not be charged today.'
-        : ${JSON.stringify(billingLede)};
-    }
-    if (visitTitle) visitTitle.textContent = isOneTime ? 'Book + pay on service day' : 'Pay at the visit';
-    if (visitSub) {
-      visitSub.textContent = isOneTime
-        ? 'We will collect payment with the tech on-site. No card needed now.'
-        : 'We will collect payment with the tech on-site. No card needed now.';
+    if (isOneTime) {
+      document.querySelectorAll('[data-pay-pref]').forEach((b) => {
+        b.classList.remove('is-selected');
+        b.setAttribute('aria-pressed', 'false');
+      });
     }
   }
   syncPaymentMode();
@@ -2010,24 +2067,39 @@ ${shellQuestionsBar()}
     btn.classList.add('selected');
     bookingState.selectedSlotId = btn.dataset.slotId;
     bookingState.selectedSlotLabel = btn.dataset.slotLabel;
-    const payArea = document.getElementById('pay-pref-area');
-    if (payArea) {
-      payArea.style.display = '';
-      payArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (bookingState.serviceMode === 'one_time') {
+      pickPaymentPref('pay_at_visit');
+      return;
+    }
+    if (bookingState.pickedPref) {
+      pickPaymentPref(bookingState.pickedPref);
+      return;
+    }
+    const paymentCard = document.getElementById('payment-options-card');
+    if (paymentCard) {
+      paymentCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      toast('Choose a payment option to continue.');
     }
   }
 
   async function pickPaymentPref(pref) {
-    if (!bookingState.selectedSlotId) {
-      toast('Pick a time first.');
-      return;
-    }
     if (bookingState.serviceMode === 'one_time') {
       pref = 'pay_at_visit';
     }
+    bookingState.pickedPref = pref;
+    document.querySelectorAll('[data-pay-pref]').forEach((b) => {
+      const selected = b.dataset.payPref === pref;
+      b.classList.toggle('is-selected', selected);
+      b.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    });
+    if (!bookingState.selectedSlotId) {
+      const bookingCard = document.getElementById('booking-card');
+      if (bookingCard) bookingCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      toast('Pick a time to continue.');
+      return;
+    }
     const buttons = document.querySelectorAll('[data-pay-pref]');
     buttons.forEach((b) => { b.disabled = true; });
-    bookingState.pickedPref = pref;
     try {
       const r = await fetch('/api/public/estimates/' + TOKEN + '/reserve', {
         method: 'POST',
@@ -2048,14 +2120,18 @@ ${shellQuestionsBar()}
         }
         buttons.forEach((b) => { b.disabled = false; });
         bookingState.pickedPref = null;
+        document.querySelectorAll('[data-pay-pref]').forEach((b) => {
+          b.classList.remove('is-selected');
+          b.setAttribute('aria-pressed', 'false');
+        });
         return;
       }
       if (!r.ok) throw new Error('reserve failed');
       const body = await r.json();
       bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
-      // Swap UI: hide slot list + pay pref, show review
+      document.getElementById('toast')?.classList.remove('show');
+      // Swap UI: hide slot list, show review
       document.getElementById('slot-area').style.display = 'none';
-      document.getElementById('pay-pref-area').style.display = 'none';
       const reviewArea = document.getElementById('review-area');
       reviewArea.style.display = '';
       const confirmBtn = document.getElementById('confirm-book-btn');
@@ -2063,13 +2139,13 @@ ${shellQuestionsBar()}
       const title = document.getElementById('confirm-book-title');
       const sub = document.getElementById('confirm-book-sub');
       if (pref === 'card_on_file') {
-        if (title) title.textContent = 'Confirm and save card';
+        if (title) title.textContent = 'Confirm Time & Save Card';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · next step saves your card for autopay. Service visits are billed after completion.';
       } else if (pref === 'prepay_annual') {
-        if (title) title.textContent = 'Confirm annual prepay';
+        if (title) title.textContent = 'Pay in Full & Save ' + SETUP_FEE_TEXT;
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · annual prepay invoice will be reviewed and sent after approval.';
       } else {
-        if (title) title.textContent = 'Confirm and book';
+        if (title) title.textContent = 'Confirm Time — Pay at Visit';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · pay at the visit, no card needed now.';
       }
       startReservationCountdown(body.expiresAt);
@@ -2078,6 +2154,10 @@ ${shellQuestionsBar()}
       toast('Could not reserve. Try again or call ${COMPANY.phone}.');
       buttons.forEach((b) => { b.disabled = false; });
       bookingState.pickedPref = null;
+      document.querySelectorAll('[data-pay-pref]').forEach((b) => {
+        b.classList.remove('is-selected');
+        b.setAttribute('aria-pressed', 'false');
+      });
     }
   }
 
@@ -2114,15 +2194,18 @@ ${shellQuestionsBar()}
     }
     bookingState.reservation = null;
     bookingState.pickedPref = null;
+    bookingState.selectedSlotId = null;
+    bookingState.selectedSlotLabel = null;
     document.getElementById('review-area').style.display = 'none';
     document.getElementById('slot-area').style.display = '';
-    const payArea = document.getElementById('pay-pref-area');
+    document.querySelectorAll('.slot-btn').forEach((el) => el.classList.remove('selected'));
     const confirmBtn = document.getElementById('confirm-book-btn');
     if (confirmBtn) confirmBtn.disabled = false;
-    if (payArea) {
-      payArea.style.display = 'none';
-      document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
-    }
+    document.querySelectorAll('[data-pay-pref]').forEach((b) => {
+      b.disabled = false;
+      b.classList.remove('is-selected');
+      b.setAttribute('aria-pressed', 'false');
+    });
     // Reload slots to reflect any changes since the first fetch
     loadSlots();
   }
