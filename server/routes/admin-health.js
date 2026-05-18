@@ -5,7 +5,6 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const healthService = require('../services/customer-health');
 const alertService = require('../services/health-alerts');
-const saveSequences = require('../services/save-sequences');
 
 router.use(adminAuthenticate);
 
@@ -47,18 +46,6 @@ async function ensureHealthTables() {
       t.index('status'); t.index('severity'); t.index('customer_id');
     });
     console.log('[health] Auto-created customer_health_alerts table');
-  }
-  if (!(await db.schema.hasTable('customer_save_sequences'))) {
-    await db.schema.createTable('customer_save_sequences', t => {
-      t.uuid('id').primary().defaultTo(db.raw("gen_random_uuid()"));
-      t.uuid('customer_id').notNullable(); t.uuid('trigger_alert_id');
-      t.string('sequence_type', 30).notNullable(); t.string('status', 20).defaultTo('active');
-      t.integer('current_step').defaultTo(1); t.integer('total_steps').notNullable();
-      t.jsonb('steps').notNullable(); t.timestamp('started_at').defaultTo(db.fn.now());
-      t.timestamp('completed_at'); t.string('outcome', 20); t.text('outcome_notes');
-      t.timestamps(true, true); t.index('customer_id'); t.index('status');
-    });
-    console.log('[health] Auto-created customer_save_sequences table');
   }
   if (!(await db.schema.hasTable('customer_health_history'))) {
     await db.schema.createTable('customer_health_history', t => {
@@ -130,15 +117,6 @@ router.get('/dashboard', async (req, res) => {
       .first().catch(() => ({ count: 0 }));
     const healthyCount = parseInt(healthyResult?.count || 0);
 
-    // Active sequences
-    let activeSequences = 0;
-    try {
-      const seqResult = await db('customer_save_sequences')
-        .where('status', 'active')
-        .count('* as count').first();
-      activeSequences = parseInt(seqResult?.count || 0);
-    } catch { /* table may not exist */ }
-
     // 30-day churn forecast
     let predictedChurns = 0;
     try {
@@ -204,7 +182,6 @@ router.get('/dashboard', async (req, res) => {
       fleetHealthAvg,
       atRiskCount,
       healthyCount,
-      activeSequences,
       predictedChurns,
       gradeDistribution: gradeDistribution.map(g => ({
         grade: g.score_grade,
@@ -351,12 +328,6 @@ router.get('/scores/:customerId', async (req, res) => {
       .orderBy('created_at', 'desc')
       .limit(20);
 
-    // Active sequences
-    const sequences = await db('customer_save_sequences')
-      .where('customer_id', customerId)
-      .orderBy('created_at', 'desc')
-      .limit(5);
-
     res.json({
       score,
       history,
@@ -364,10 +335,6 @@ router.get('/scores/:customerId', async (req, res) => {
         ...a,
         trigger_data: typeof a.trigger_data === 'string' ? JSON.parse(a.trigger_data) : a.trigger_data,
         recommended_actions: typeof a.recommended_actions === 'string' ? JSON.parse(a.recommended_actions) : a.recommended_actions,
-      })),
-      sequences: sequences.map(s => ({
-        ...s,
-        steps: typeof s.steps === 'string' ? JSON.parse(s.steps) : s.steps,
       })),
     });
   } catch (err) {
@@ -454,65 +421,6 @@ router.post('/alerts/:id/action', async (req, res) => {
     res.json(result);
   } catch (err) {
     logger.error(`[health-api] Action execution error: ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// =========================================================================
-// GET /sequences — Active save sequences
-// =========================================================================
-router.get('/sequences', async (req, res) => {
-  try {
-    const { status = 'active', limit = 50, offset = 0 } = req.query;
-
-    let query = db('customer_save_sequences')
-      .join('customers', 'customer_save_sequences.customer_id', 'customers.id')
-      .select(
-        'customer_save_sequences.*',
-        'customers.first_name',
-        'customers.last_name',
-        'customers.waveguard_tier',
-        'customers.phone'
-      )
-      .orderBy('customer_save_sequences.created_at', 'desc');
-
-    if (status && status !== 'all') query = query.where('customer_save_sequences.status', status);
-
-    const total = await query.clone().clearSelect().clearOrder().count('* as count').first();
-    const sequences = await query.limit(parseInt(limit)).offset(parseInt(offset));
-
-    res.json({
-      sequences: sequences.map(s => ({
-        ...s,
-        steps: typeof s.steps === 'string' ? JSON.parse(s.steps) : s.steps,
-      })),
-      total: parseInt(total?.count || 0),
-    });
-  } catch (err) {
-    logger.error(`[health-api] Sequences error: ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// =========================================================================
-// PUT /sequences/:id — Update sequence (cancel, complete)
-// =========================================================================
-router.put('/sequences/:id', async (req, res) => {
-  try {
-    const { action, outcome, notes } = req.body;
-
-    if (action === 'cancel') {
-      await saveSequences.cancelSequence(req.params.id, notes || 'Admin cancelled');
-    } else if (action === 'complete') {
-      await saveSequences.completeSequence(req.params.id, outcome, notes);
-    } else {
-      return res.status(400).json({ error: 'Invalid action. Use "cancel" or "complete".' });
-    }
-
-    const updated = await db('customer_save_sequences').where('id', req.params.id).first();
-    res.json({ ...updated, steps: typeof updated.steps === 'string' ? JSON.parse(updated.steps) : updated.steps });
-  } catch (err) {
-    logger.error(`[health-api] Sequence update error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

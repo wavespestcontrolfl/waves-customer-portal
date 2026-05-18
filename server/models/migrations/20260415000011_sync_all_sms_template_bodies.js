@@ -173,16 +173,6 @@ exports.up = async function (knex) {
       sort_order: 31,
     },
 
-    // ── retention ───────────────────────────────────────────────
-    {
-      template_key: 'churn_save_step1',
-      name: 'Churn Save — Step 1',
-      category: 'retention',
-      body: 'Hello {first_name}, this is Adam from Waves. Just checking in — anything we can do better? Reply here.',
-      variables: ['first_name'],
-      sort_order: 40,
-    },
-
     // ── reviews ─────────────────────────────────────────────────
     {
       template_key: 'review_request',

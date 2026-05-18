@@ -5531,7 +5531,7 @@ const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
 // Hidden badge types (engagement-tracking ones we don't show)
 const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer', 'feedback_champion'];
 
-function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secondaryButton }) {
+function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secondaryButton, onExploreTiers }) {
   const [prompt, setPrompt] = useState("I'm interested in adding lawn care");
   const [result, setResult] = useState(null);
   const [selectedId, setSelectedId] = useState('');
@@ -5593,21 +5593,35 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
             Pricing is calculated from this property profile and your current Waves services.
           </div>
         </div>
-        {result?.currentServices?.length ? (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: compact ? 'flex-start' : 'flex-end', maxWidth: compact ? '100%' : 360 }}>
-            {result.currentServices.slice(0, 4).map((service) => (
-              <span key={service} style={{
-                padding: '5px 8px',
-                borderRadius: 8,
-                border: '1px solid #CDEAFE',
-                background: '#EEF6FF',
-                color: B.blueDeeper,
-                fontSize: 12,
-                fontWeight: 800,
-              }}>
-                {service}
-              </span>
-            ))}
+        {(onExploreTiers || result?.currentServices?.length) ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: compact ? 'stretch' : 'flex-end', maxWidth: compact ? '100%' : 380, minWidth: compact ? '100%' : 0 }}>
+            {onExploreTiers && (
+              <button
+                type="button"
+                onClick={onExploreTiers}
+                style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+              >
+                <Icon name="plan" size={14} strokeWidth={1.9} />
+                Explore WaveGuard tiers
+              </button>
+            )}
+            {result?.currentServices?.length ? (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: compact ? 'flex-start' : 'flex-end' }}>
+                {result.currentServices.slice(0, 4).map((service) => (
+                  <span key={service} style={{
+                    padding: '5px 8px',
+                    borderRadius: 8,
+                    border: '1px solid #CDEAFE',
+                    background: '#EEF6FF',
+                    color: B.blueDeeper,
+                    fontSize: 12,
+                    fontWeight: 800,
+                  }}>
+                    {service}
+                  </span>
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -5815,6 +5829,372 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   );
 }
 
+function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, secondaryButton, onClose }) {
+  const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : 'Bronze';
+  const currentIdx = Math.max(0, TIER_ORDER.indexOf(currentTier));
+  const nextTier = TIER_ORDER[Math.min(TIER_ORDER.length - 1, currentIdx + 1)] || currentTier;
+  const [selectedTier, setSelectedTier] = useState(nextTier);
+  const [result, setResult] = useState(null);
+  const [selectedId, setSelectedId] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [requesting, setRequesting] = useState(false);
+  const [requested, setRequested] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  const targetIdx = Math.max(0, TIER_ORDER.indexOf(selectedTier));
+  const canPriceTier = targetIdx > currentIdx;
+  const targetServices = TIER_SERVICE_NAMES[selectedTier] || [];
+  const currentServices = TIER_SERVICE_NAMES[currentTier] || [];
+  const addedServices = SERVICE_CATALOG
+    .slice(TIER_SERVICES[currentTier] || 1, TIER_SERVICES[selectedTier] || 1)
+    .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
+  const options = result?.options || [];
+  const selected = options.find(option => option.id === selectedId) || options[0] || null;
+
+  const formatList = (items) => {
+    if (items.length <= 1) return items[0] || '';
+    if (items.length === 2) return `${items[0]} and ${items[1]}`;
+    return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+  };
+
+  const promptForTier = () => {
+    const added = formatList(addedServices.map(name => name.toLowerCase()));
+    return added
+      ? `I'm interested in upgrading to WaveGuard ${selectedTier} by adding ${added}`
+      : `I want to review WaveGuard ${selectedTier} pricing`;
+  };
+
+  const runPricing = async () => {
+    if (!canPriceTier || loading) return;
+    setLoading(true);
+    setError('');
+    setRequested(false);
+    try {
+      const data = await api.queryCustomerPricing(promptForTier(), selectedTier);
+      setResult(data);
+      setSelectedId(data?.options?.[0]?.id || '');
+    } catch (err) {
+      setError(err.message || 'Tier pricing unavailable.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitRequest = async () => {
+    if (requesting) return;
+    setRequesting(true);
+    try {
+      const subject = selected?.requestSubject || `Review WaveGuard ${selectedTier} plan`;
+      const description = selected?.requestDescription || `Customer selected WaveGuard ${selectedTier} in the portal tier explorer.`;
+      await api.createRequest?.({ category: 'upgrade', subject, description });
+      setRequested(true);
+    } catch (err) {
+      alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+    } finally {
+      setRequesting(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 180,
+        background: 'rgba(15,23,42,0.48)',
+        backdropFilter: 'blur(5px)',
+        display: 'flex',
+        alignItems: compact ? 'flex-end' : 'center',
+        justifyContent: 'center',
+        padding: compact ? 0 : 20,
+      }}
+    >
+      <div role="dialog" aria-modal="true" aria-label="Explore WaveGuard tiers" style={{
+        width: '100%',
+        maxWidth: 860,
+        maxHeight: compact ? 'calc(100vh - 10px)' : 'calc(100vh - 40px)',
+        overflowY: 'auto',
+        background: PORTAL_SHELL.page,
+        border: `1px solid ${PORTAL_SHELL.border}`,
+        borderRadius: compact ? '8px 8px 0 0' : 8,
+        boxShadow: PORTAL_SHELL.shadow,
+        padding: compact ? 16 : 20,
+        boxSizing: 'border-box',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+              WaveGuard tiers
+            </div>
+            <div style={{ marginTop: 5, color: B.blueDeeper, fontSize: compact ? 22 : 26, fontWeight: 850, fontFamily: FONTS.heading, lineHeight: 1.15 }}>
+              Explore plan upgrades
+            </div>
+            <div style={{ marginTop: 5, color: B.grayDark, fontSize: 14, lineHeight: 1.5 }}>
+              Select a tier, then WAVES AI prices it from this property's profile and current services.
+            </div>
+          </div>
+          <ShellCloseButton onClick={onClose} label="Close tier explorer" />
+        </div>
+
+        <section style={{
+          marginTop: 16,
+          border: `1px solid ${PORTAL_SHELL.border}`,
+          borderRadius: 8,
+          background: PORTAL_SHELL.surface,
+          padding: 14,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current plan</div>
+              <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 18, fontWeight: 850 }}>WaveGuard {currentTier}</div>
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: compact ? 'flex-start' : 'flex-end' }}>
+              {currentServices.map(service => (
+                <span key={service} style={{
+                  padding: '5px 8px',
+                  borderRadius: 8,
+                  border: '1px solid #CDEAFE',
+                  background: '#EEF6FF',
+                  color: B.blueDeeper,
+                  fontSize: 12,
+                  fontWeight: 800,
+                }}>{service.replace(/ Program| Barrier Treatment/g, '')}</span>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: compact ? '1fr' : 'repeat(4, minmax(0, 1fr))',
+          gap: 10,
+          marginTop: 12,
+        }}>
+          {TIER_ORDER.map(tierName => {
+            const isCurrent = tierName === currentTier;
+            const isSelected = tierName === selectedTier;
+            const disc = TIER_DISCOUNTS[tierName] || 0;
+            return (
+              <button
+                key={tierName}
+                type="button"
+                onClick={() => {
+                  setSelectedTier(tierName);
+                  setResult(null);
+                  setSelectedId('');
+                  setError('');
+                  setRequested(false);
+                }}
+                aria-pressed={isSelected}
+                style={{
+                  textAlign: 'left',
+                  border: `1px solid ${isSelected ? B.wavesBlue : PORTAL_SHELL.border}`,
+                  borderRadius: 8,
+                  background: isSelected ? '#EEF6FF' : PORTAL_SHELL.surface,
+                  padding: 13,
+                  cursor: 'pointer',
+                  fontFamily: FONTS.body,
+                  minHeight: 142,
+                }}
+              >
+                <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                  <span style={{ fontSize: 15, color: B.blueDeeper, fontWeight: 850 }}>WaveGuard {tierName}</span>
+                  {isCurrent && <span style={{ color: B.green, fontSize: 10, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
+                </span>
+                <span style={{ display: 'block', marginTop: 6, color: disc > 0 ? B.green : PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850 }}>
+                  {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'Base plan'}
+                </span>
+                <span style={{ display: 'grid', gap: 5, marginTop: 10 }}>
+                  {(TIER_SERVICE_NAMES[tierName] || []).map(service => (
+                    <span key={service} style={{ display: 'flex', gap: 6, color: B.grayDark, fontSize: 12, lineHeight: 1.35 }}>
+                      <Icon name="check" size={13} strokeWidth={2} style={{ color: B.green, marginTop: 1 }} />
+                      <span>{service.replace(/ Program| Barrier Treatment/g, '')}</span>
+                    </span>
+                  ))}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <section style={{
+          marginTop: 12,
+          border: `1px solid ${PORTAL_SHELL.border}`,
+          borderRadius: 8,
+          background: PORTAL_SHELL.surface,
+          padding: 14,
+          display: 'grid',
+          gap: 12,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ color: B.blueDeeper, fontSize: 16, fontWeight: 850 }}>Selected: WaveGuard {selectedTier}</div>
+              <div style={{ marginTop: 3, color: PORTAL_SHELL.muted, fontSize: 14 }}>
+                {canPriceTier
+                  ? `Adds ${formatList(addedServices)}.`
+                  : selectedTier === currentTier
+                    ? 'This is your current tier.'
+                    : 'Lower-tier changes need a manual account review.'}
+              </div>
+            </div>
+            {canPriceTier ? (
+              <button type="button" onClick={runPricing} disabled={loading} style={{
+                ...primaryButton,
+                minHeight: 40,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                opacity: loading ? 0.65 : 1,
+                cursor: loading ? 'wait' : 'pointer',
+              }}>
+                <Icon name="brain" size={15} strokeWidth={2} />
+                {loading ? 'Pricing...' : 'Check My Price'}
+              </button>
+            ) : (
+              <button type="button" onClick={submitRequest} disabled={requesting || requested} style={{
+                ...secondaryButton,
+                minHeight: 40,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+              }}>
+                <Icon name={requested ? 'check' : 'message'} size={15} strokeWidth={2} />
+                {requested ? 'Review request sent' : 'Request Plan Review'}
+              </button>
+            )}
+          </div>
+
+          {error && <PortalInlineState icon="warning" tone="danger" title="Pricing unavailable" message={error} />}
+
+          {result && !error && (
+            <div style={{ display: 'grid', gap: 12 }}>
+              <div style={{
+                border: `1px solid ${result.ok ? '#BFDBFE' : '#FED7AA'}`,
+                borderRadius: 8,
+                background: result.ok ? '#F8FBFF' : '#FFF7ED',
+                padding: 12,
+                color: B.grayDark,
+                fontSize: 14,
+                lineHeight: 1.5,
+              }}>
+                <strong style={{ color: B.blueDeeper }}>{result.ok ? 'WAVES AI:' : 'Review needed:'}</strong> {result.message}
+              </div>
+
+              {options.length > 0 ? (
+                <>
+                  <label style={{ display: 'grid', gap: 6 }}>
+                    <span style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
+                    <select
+                      value={selected?.id || ''}
+                      onChange={(e) => {
+                        setSelectedId(e.target.value);
+                        setRequested(false);
+                      }}
+                      style={{
+                        width: '100%',
+                        minHeight: 42,
+                        borderRadius: 8,
+                        border: '1px solid #CBD5E1',
+                        background: '#fff',
+                        color: B.blueDeeper,
+                        padding: '9px 12px',
+                        fontSize: 14,
+                        fontFamily: FONTS.body,
+                      }}
+                    >
+                      {options.map(option => (
+                        <option key={option.id} value={option.id}>
+                          {option.label} - {option.monthly ? `${money(option.monthly, 0)}/mo` : money(option.oneTime || option.dueAtStart, 0)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {selected && (
+                    <div style={{ border: '1px solid #E1E7EF', borderRadius: 8, background: '#fff', padding: 14, display: 'grid', gap: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                        <div>
+                          <div style={{ fontSize: 16, color: B.blueDeeper, fontWeight: 850 }}>{selected.label}</div>
+                          <div style={{ marginTop: 3, color: PORTAL_SHELL.muted, fontSize: 14, lineHeight: 1.45 }}>{selected.cadence}</div>
+                        </div>
+                        <div style={{ textAlign: compact ? 'left' : 'right' }}>
+                          <div style={{ fontSize: 24, color: B.blueDeeper, fontWeight: 850, lineHeight: 1 }}>
+                            {selected.monthly ? `${money(selected.monthly, 0)}/mo` : money(selected.oneTime || selected.dueAtStart, 0)}
+                          </div>
+                          <div style={{ marginTop: 4, color: PORTAL_SHELL.muted, fontSize: 12 }}>
+                            {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+                        {[
+                          selected.estimatedAdditionalMonthly != null && selected.monthly ? { label: 'Added monthly', value: money(selected.estimatedAdditionalMonthly, 0) } : null,
+                          selected.estimatedPlanMonthly ? { label: 'Plan total', value: `${money(selected.estimatedPlanMonthly, 0)}/mo` } : null,
+                          selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
+                        ].filter(Boolean).map(item => (
+                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#F8FAFC', border: '1px solid #E1E7EF' }}>
+                            <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
+                            <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {selected.notes?.length ? (
+                        <div style={{ color: B.orange, fontSize: 14, lineHeight: 1.45 }}>{selected.notes[0]}</div>
+                      ) : null}
+
+                      {requested ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.green, fontSize: 14, fontWeight: 850 }}>
+                          <Icon name="check" size={15} strokeWidth={2} /> Request sent
+                        </span>
+                      ) : (
+                        <button type="button" onClick={submitRequest} disabled={requesting} style={{
+                          ...primaryButton,
+                          width: compact ? '100%' : 'fit-content',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          opacity: requesting ? 0.65 : 1,
+                          cursor: requesting ? 'wait' : 'pointer',
+                        }}>
+                          <Icon name="upgrade" size={15} strokeWidth={2} />
+                          {requesting ? 'Sending...' : 'Request This Tier'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <button type="button" onClick={submitRequest} disabled={requesting || requested} style={{
+                  ...secondaryButton,
+                  width: compact ? '100%' : 'fit-content',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}>
+                  <Icon name={requested ? 'check' : 'message'} size={15} strokeWidth={2} />
+                  {requested ? 'Review request sent' : 'Request Manual Review'}
+                </button>
+              )}
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 // =========================================================================
 // MY PLAN TAB
 // =========================================================================
@@ -5834,8 +6214,7 @@ function MyPlanTab({ customer }) {
   const [cancelSubmitted, setCancelSubmitted] = useState(false);
   const [pauseSubmitting, setPauseSubmitting] = useState(false);
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
-  const [upgradeRequested, setUpgradeRequested] = useState({});
-  const [upgradeSubmitting, setUpgradeSubmitting] = useState({});
+  const [showTierExplorer, setShowTierExplorer] = useState(false);
   const lawnHealth = useLawnHealth(customer.id);
   const compact = useIsMobile(760);
 
@@ -6277,106 +6656,8 @@ function MyPlanTab({ customer }) {
             sectionTitle={sectionTitle}
             primaryButton={primaryButton}
             secondaryButton={secondaryButton}
+            onExploreTiers={() => setShowTierExplorer(true)}
           />
-
-          <section style={{ ...card, padding: 20 }}>
-            <div style={sectionTitle}>Compare Plans</div>
-            <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>WaveGuard tiers</div>
-            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(155px, 1fr))', gap: 10, marginTop: 16 }}>
-              {TIER_ORDER.map((tn, i) => {
-                const t = TIER[tn];
-                const isCurrent = tn === tierName;
-                const isUpgrade = i > tierIdx;
-                const disc = TIER_DISCOUNTS[tn];
-                const services = TIER_SERVICE_NAMES[tn] || [];
-                const tierMonthly = SERVICE_CATALOG.slice(0, TIER_SERVICES[tn]).reduce((sum, s) => sum + s.basePrice * (1 - disc), 0);
-                return (
-                  <div key={tn} style={{
-                    border: `1px solid ${isCurrent ? B.wavesBlue : '#E1E7EF'}`,
-                    borderRadius: 8,
-                    background: isCurrent ? '#EEF6FF' : '#fff',
-                    padding: 14,
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
-                      <div style={{ fontSize: 15, color: B.blueDeeper, fontWeight: 850 }}>{tn}</div>
-                      {isCurrent && (
-                        <span style={{ fontSize: 10, color: B.green, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
-                          Current
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ marginTop: 8, fontSize: 22, color: B.blueDeeper, fontWeight: 850 }}>
-                      {money(tierMonthly, 0)}<span style={{ fontSize: 12, color: muted, fontWeight: 600 }}>/mo</span>
-                    </div>
-                    <div style={{ marginTop: 3, color: disc > 0 ? B.green : muted, fontSize: 12, fontWeight: 800 }}>
-                      {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'Base plan'}
-                    </div>
-                    <div style={{ display: 'grid', gap: 5, marginTop: 12 }}>
-                      {services.slice(0, 4).map((svcName) => (
-                        <div key={svcName} style={{ display: 'flex', gap: 6, fontSize: 12, color: B.grayDark, lineHeight: 1.35 }}>
-                          <Icon name="check" size={13} strokeWidth={2} style={{ color: B.green, marginTop: 1 }} />
-                          <span>{svcName.replace(/ Program| Barrier Treatment/g, '')}</span>
-                        </div>
-                      ))}
-                      <div style={{ display: 'flex', gap: 6, fontSize: 12, color: B.grayDark, lineHeight: 1.35 }}>
-                        <Icon name="check" size={13} strokeWidth={2} style={{ color: B.green, marginTop: 1 }} />
-                        <span>Unlimited callbacks</span>
-                      </div>
-                    </div>
-                    <div style={{ marginTop: 14 }}>
-                      {isCurrent ? (
-                        <span style={{ display: 'inline-flex', minHeight: 34, alignItems: 'center', color: B.green, fontSize: 12, fontWeight: 850 }}>
-                          Active
-                        </span>
-                      ) : isUpgrade ? (
-                        upgradeRequested[tn] ? (
-                          <span style={{ display: 'inline-flex', minHeight: 34, alignItems: 'center', color: B.green, fontSize: 12, fontWeight: 850 }}>
-                            Request sent
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled={upgradeSubmitting[tn]}
-                            onClick={async () => {
-                              if (upgradeSubmitting[tn]) return;
-                              setUpgradeSubmitting(prev => ({ ...prev, [tn]: true }));
-                              try {
-                                await api.createRequest?.({ category: 'upgrade', subject: `Upgrade to WaveGuard ${tn}`, description: `Customer requested tier upgrade from ${tierName} to ${tn}.` });
-                                setUpgradeRequested(prev => ({ ...prev, [tn]: true }));
-                              } catch (err) {
-                                alert(`Couldn't send upgrade request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                              } finally {
-                                setUpgradeSubmitting(prev => ({ ...prev, [tn]: false }));
-                              }
-                            }}
-                            style={{
-                              ...primaryButton,
-                              width: '100%',
-                              padding: '8px 10px',
-                              fontSize: 12,
-                              opacity: upgradeSubmitting[tn] ? 0.65 : 1,
-                              cursor: upgradeSubmitting[tn] ? 'wait' : 'pointer',
-                            }}
-                          >
-                            {upgradeSubmitting[tn] ? 'Sending...' : 'Upgrade'}
-                          </button>
-                        )
-                      ) : (
-                        <a href="sms:+19412975749?body=Hi Waves, I'd like to discuss adjusting my WaveGuard plan." style={{
-                          ...secondaryButton,
-                          minHeight: 34,
-                          padding: '8px 10px',
-                          fontSize: 12,
-                          textDecoration: 'none',
-                          width: '100%',
-                        }}>Contact</a>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
         </div>
 
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -6685,6 +6966,16 @@ function MyPlanTab({ customer }) {
           </section>
         </aside>
       </div>
+
+      {showTierExplorer && (
+        <WaveGuardTierExplorerModal
+          currentTierName={tierName}
+          compact={compact}
+          primaryButton={primaryButton}
+          secondaryButton={secondaryButton}
+          onClose={() => setShowTierExplorer(false)}
+        />
+      )}
     </div>
   );
 }
@@ -9547,13 +9838,6 @@ const TAB_TITLES = {
   learn: 'Learn and Stay Informed',
 };
 
-const PORTAL_FOOTER_LOCATIONS = [
-  { label: 'Lakewood Ranch', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Lakewood%20Ranch&query_place_id=ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
-  { label: 'Parrish', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Parrish&query_place_id=ChIJM32aQRIlw4gRr7goqhbAVpw' },
-  { label: 'Sarasota', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Sarasota&query_place_id=ChIJeT_63_Y5w4gRGTNLozgSmdw' },
-  { label: 'Venice', href: 'https://www.google.com/maps/search/?api=1&query=Waves%20Pest%20Control%20Venice&query_place_id=ChIJ81vmrblZw4gRREDmlDUpq0E' },
-];
-
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
 function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
@@ -10503,33 +10787,6 @@ export default function PortalPage() {
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
       </div>
-
-      <footer style={{
-        maxWidth: shellMaxWidth,
-        margin: '0 auto',
-        padding: `10px 20px ${isMobileShell ? 88 : 44}px`,
-        borderTop: '1px solid #D9E2EC',
-        color: B.grayMid,
-        fontSize: 12,
-        display: 'flex',
-        justifyContent: 'space-between',
-        gap: 12,
-        flexWrap: 'wrap',
-      }}>
-        <a href="https://wavespestcontrol.com/" target="_blank" rel="noopener noreferrer" style={{ color: B.blueDeeper, fontWeight: 850, textDecoration: 'none' }}>
-          Waves Customer Portal
-        </a>
-        <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-          {PORTAL_FOOTER_LOCATIONS.map((location, index) => (
-            <span key={location.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              {index > 0 && <span aria-hidden="true">·</span>}
-              <a href={location.href} target="_blank" rel="noopener noreferrer" style={{ color: B.grayMid, textDecoration: 'none', fontWeight: 800 }}>
-                {location.label}
-              </a>
-            </span>
-          ))}
-        </span>
-      </footer>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}
       {isMobileShell && (

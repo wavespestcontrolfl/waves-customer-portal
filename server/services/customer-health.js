@@ -706,16 +706,6 @@ async function scoreCustomer(customerId) {
       logger.error(`[health] Alert generation failed for ${customerId}: ${err.message}`);
     }
 
-    // Trigger save sequences for high/critical risk
-    if (churnRisk === 'critical' || churnRisk === 'high') {
-      try {
-        const saveSeq = require('./save-sequences');
-        await saveSeq.enrollCustomer(customerId, 'churn_save');
-      } catch (err) {
-        logger.error(`[health] Save sequence enrollment failed for ${customerId}: ${err.message}`);
-      }
-    }
-
     return {
       customerId,
       overall,

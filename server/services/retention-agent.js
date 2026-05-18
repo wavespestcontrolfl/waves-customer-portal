@@ -114,7 +114,6 @@ const RetentionAgent = {
     let toolsExecuted = [];
     let smsSent = 0;
     let callsQueued = 0;
-    let sequencesEnrolled = 0;
     let upsellsIdentified = 0;
     let maxIterations = 80; // retention agent analyzes many customers
 
@@ -149,7 +148,6 @@ const RetentionAgent = {
           generate_retention_outreach: 'drafting outreach',
           send_retention_sms: 'sending SMS',
           queue_call_for_adam: 'scheduling call',
-          enroll_save_sequence: 'enrolling sequence',
           identify_upsells: 'finding upsells',
           create_upsell_pitch: 'drafting upsell',
           save_retention_report: 'saving report',
@@ -163,7 +161,6 @@ const RetentionAgent = {
 
           if (toolName === 'send_retention_sms' && toolResult.sent) smsSent++;
           if (toolName === 'queue_call_for_adam' && toolResult.queued) callsQueued++;
-          if (toolName === 'enroll_save_sequence' && toolResult.enrolled) sequencesEnrolled++;
           if (toolName === 'identify_upsells') upsellsIdentified += (toolResult.opportunities?.length || 0);
         } catch (err) {
           toolResult = { error: `Tool failed: ${err.message}` };
@@ -187,11 +184,11 @@ const RetentionAgent = {
     notify('complete', `Finished in ${durationSeconds}s`);
 
     const result = {
-      sessionId, smsSent, callsQueued, sequencesEnrolled, upsellsIdentified,
+      sessionId, smsSent, callsQueued, upsellsIdentified,
       toolsExecuted, durationSeconds, report,
     };
 
-    logger.info(`[retention-agent] Complete: ${smsSent} SMS, ${callsQueued} calls, ${sequencesEnrolled} sequences, ${upsellsIdentified} upsells, ${durationSeconds}s`);
+    logger.info(`[retention-agent] Complete: ${smsSent} SMS, ${callsQueued} calls, ${upsellsIdentified} upsells, ${durationSeconds}s`);
     return result;
   },
 };

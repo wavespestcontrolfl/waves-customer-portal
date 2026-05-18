@@ -69,14 +69,13 @@ async function executeRetentionTool(toolName, input) {
     case 'get_customer_health_detail': {
       const customerId = input.customer_id;
 
-      const [customer, health, signals, smsHistory, lastService, billing, activeSequences, recentOutreach, upsells] = await Promise.all([
+      const [customer, health, signals, smsHistory, lastService, billing, recentOutreach, upsells] = await Promise.all([
         db('customers').where('id', customerId).first(),
         db('customer_health_scores').where('customer_id', customerId).orderBy('scored_at', 'desc').first(),
         db('customer_signals').where({ customer_id: customerId, resolved: false }).orderBy('detected_at', 'desc').limit(20),
         db('sms_log').where('customer_id', customerId).orderBy('created_at', 'desc').limit(10),
         db('service_records').where({ customer_id: customerId, status: 'completed' }).orderBy('service_date', 'desc').first(),
         db('payments').where('customer_id', customerId).orderBy('payment_date', 'desc').limit(5),
-        db('save_sequences').where({ customer_id: customerId, status: 'active' }),
         db('retention_outreach').where('customer_id', customerId).orderBy('created_at', 'desc').limit(5),
         db('upsell_opportunities').where({ customer_id: customerId, status: 'identified' }),
       ]);
@@ -117,9 +116,6 @@ async function executeRetentionTool(toolName, input) {
           outstandingBalance: overdue.reduce((s, p) => s + parseFloat(p.amount || 0), 0),
           recentPayments: billing.slice(0, 3).map(p => ({ date: p.payment_date, amount: parseFloat(p.amount), status: p.status })),
         },
-        activeSequences: activeSequences.map(s => ({
-          type: s.sequence_type, step: s.current_step, startedAt: s.created_at,
-        })),
         recentOutreach: recentOutreach.map(o => ({
           type: o.outreach_type, strategy: o.outreach_strategy, status: o.status,
           sentAt: o.sent_at, outcome: o.outcome, date: o.created_at,
@@ -131,7 +127,6 @@ async function executeRetentionTool(toolName, input) {
         hasRecentOutreach: recentOutreach.some(o =>
           o.created_at && (Date.now() - new Date(o.created_at).getTime()) < 14 * 86400000
         ),
-        hasActiveSequence: activeSequences.length > 0,
       };
     }
 
@@ -215,23 +210,6 @@ async function executeRetentionTool(toolName, input) {
       return { queued: true, urgency: input.urgency || 'this_week' };
     }
 
-    case 'enroll_save_sequence': {
-      const SaveSequences = require('../save-sequences');
-
-      // Check for active sequence
-      const active = await db('save_sequences')
-        .where({ customer_id: input.customer_id, status: 'active' })
-        .first();
-
-      if (active) {
-        return { enrolled: false, reason: `Already in active ${active.sequence_type} sequence (step ${active.current_step})` };
-      }
-
-      const result = await SaveSequences.enrollCustomer(input.customer_id, input.sequence_type);
-      logger.info(`[retention-agent] Enrolled ${input.customer_id} in ${input.sequence_type} sequence`);
-      return { enrolled: true, sequenceType: input.sequence_type, ...result };
-    }
-
     // ── Upsell ──────────────────────────────────────────────────
 
     case 'identify_upsells': {
@@ -277,7 +255,6 @@ async function executeRetentionTool(toolName, input) {
         at_risk_count: input.at_risk_count || 0,
         calls_scheduled: input.calls_scheduled || 0,
         sms_sent: input.sms_sent || 0,
-        sequences_enrolled: input.sequences_enrolled || 0,
         upsells_identified: input.upsells_identified || 0,
         revenue_at_risk: input.revenue_at_risk || 0,
         estimated_revenue_saved: input.estimated_revenue_saved || 0,

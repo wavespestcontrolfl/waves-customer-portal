@@ -145,4 +145,133 @@ describe('customer pricing AI helpers', () => {
     expect(option.estimatedPlanMonthly).toBeNull();
     expect(option.notes.some(note => note.includes('current billing differs'))).toBe(true);
   });
+
+  test('prices a target WaveGuard tier as one plan option', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: null,
+      prompt: 'Price WaveGuard Platinum',
+      targetTier: 'Platinum',
+      customer: {
+        id: 'cust-6',
+        waveguard_tier: 'Gold',
+        monthly_rate: 140,
+        property_sqft: 2200,
+        lot_sqft: 7000,
+        lawn_type: 'St. Augustine',
+      },
+    });
+
+    expect(result.mode).toBe('waveguard_tier');
+    expect(result.targetTier).toBe('Platinum');
+    expect(result.options).toHaveLength(1);
+    expect(result.options[0].label).toBe('WaveGuard Platinum');
+    expect(result.options[0].cadence).toContain('Tree & Shrub Care');
+  });
+
+  test('target tier pricing keeps existing non-tier recurring services', async () => {
+    const customer = {
+      id: 'cust-7',
+      waveguard_tier: 'Gold',
+      monthly_rate: 140,
+      property_sqft: 2200,
+      lot_sqft: 7000,
+      lawn_type: 'St. Augustine',
+    };
+    const base = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: null,
+      prompt: 'Price WaveGuard Platinum',
+      targetTier: 'Platinum',
+      customer,
+    });
+    const withTermite = await buildCustomerPricingResponse({
+      db: dbForTables({
+        scheduled_services: [
+          { service_type: 'Termite Bait Monitoring', status: 'pending', scheduled_date: dateOffset(14) },
+        ],
+      }),
+      propertyLookup: null,
+      prompt: 'Price WaveGuard Platinum',
+      targetTier: 'Platinum',
+      customer,
+    });
+
+    expect(withTermite.currentServices).toContain('Termite Bait Monitoring');
+    expect(withTermite.options[0].monthly).toBeGreaterThan(base.options[0].monthly);
+  });
+
+  test('target tier pricing promotes quotes when existing qualifiers derive a higher tier', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: dbForTables({
+        scheduled_services: [
+          { service_type: 'Termite Bait Monitoring', status: 'pending', scheduled_date: dateOffset(14) },
+        ],
+      }),
+      propertyLookup: null,
+      prompt: 'Price WaveGuard Gold',
+      targetTier: 'Gold',
+      customer: {
+        id: 'cust-8',
+        waveguard_tier: 'Silver',
+        monthly_rate: 108,
+        property_sqft: 2200,
+        lot_sqft: 7000,
+        lawn_type: 'St. Augustine',
+      },
+    });
+
+    expect(result.targetTier).toBe('Platinum');
+    expect(result.selectedTier).toBe('Gold');
+    expect(result.currentServices).toContain('Termite Bait Monitoring');
+    expect(result.options[0].label).toBe('WaveGuard Platinum');
+    expect(result.options[0].cadence).toContain('Tree & Shrub Care');
+    expect(result.options[0].waveguardTier).toBe('Platinum');
+  });
+
+  test('target tier pricing rejects same or lower tiers', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: null,
+      prompt: 'Price WaveGuard Silver',
+      targetTier: 'Silver',
+      customer: {
+        id: 'cust-9',
+        waveguard_tier: 'Gold',
+        monthly_rate: 140,
+        property_sqft: 2200,
+        lot_sqft: 7000,
+        lawn_type: 'St. Augustine',
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('TARGET_TIER_NOT_UPGRADE');
+    expect(result.currentTier).toBe('Gold');
+    expect(result.options).toEqual([]);
+  });
+
+  test('target tier pricing carries plan-level manual review warnings', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: null,
+      prompt: 'Price WaveGuard Platinum',
+      targetTier: 'Platinum',
+      customer: {
+        id: 'cust-10',
+        waveguard_tier: 'Gold',
+        monthly_rate: 140,
+        property_sqft: 2200,
+        lot_sqft: 12000,
+        tree_count: 20,
+        lawn_type: 'St. Augustine',
+      },
+    });
+    const option = result.options[0];
+
+    expect(result.ok).toBe(true);
+    expect(option.manualReview).toBe(true);
+    expect(option.confidence).toBe('low');
+    expect(option.notes.some(note => note.includes('High tree count'))).toBe(true);
+  });
 });

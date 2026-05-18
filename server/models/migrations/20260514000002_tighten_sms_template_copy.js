@@ -401,14 +401,6 @@ const TEMPLATES = [
 
   // retention
   {
-    template_key: 'churn_save_step1',
-    name: 'Churn Save — Step 1',
-    category: 'retention',
-    body: 'Hello {first_name}! Adam from Waves here. Checking in - is there anything we can do better? Reply here.',
-    variables: ['first_name'],
-    sort_order: 40,
-  },
-  {
     template_key: 'health_check_in',
     name: 'Health — Check In',
     category: 'retention',

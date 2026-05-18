@@ -128,8 +128,8 @@ const MSG_TYPE_TO_TEMPLATE = {
   review_followup: 'review_request_followup',
   referral_nudge: 'referral_nudge',
   referral_invite: 'referral_nudge',
-  retention: 'churn_save_step1',
-  retention_outreach: 'churn_save_step1',
+  retention: 'health_retention_offer',
+  retention_outreach: 'health_retention_offer',
   renewal: 'renewal_reminder',
   upsell: 'waveguard_upsell',
   autopay_pre_charge: 'autopay_pre_charge',
@@ -143,7 +143,7 @@ const MSG_TYPE_TO_TEMPLATE = {
   estimate_accepted_customer: 'estimate_accepted_customer',
   estimate_auto_renewed: 'estimate_auto_renewed',
   estimate_followup: 'estimate_followup_unviewed',
-  reactivation: 'churn_save_step1',
+  reactivation: 'seasonal_reactivation',
 };
 
 // ── Template helper for services — check if a template is enabled before sending ──

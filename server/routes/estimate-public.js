@@ -337,11 +337,12 @@ function normalizePrefs(raw) {
 // dragged to $0 via the toggles.
 // Resolve the pre-discount monthly base from an estimate row + parsed
 // estimate_data blob, in priority order:
-//   1. estimate_data.baseMonthly / preDiscountMonthly  (explicit, set by
+//   1. recurring.services plus supplemental palm/rodent recurring fields
+//      (lets customer-facing recalculation keep non-qualifiers separate)
+//   2. estimate_data.baseMonthly / preDiscountMonthly  (explicit, set by
 //      a prior /preferences self-heal or by the engine when it rendered
 //      the estimate)
-//   2. engine result's annualBeforeDiscount / 12
-//   3. sum of recurring.services[].mo (per-service pre-discount monthlies)
+//   3. engine result's annualBeforeDiscount / 12
 //   4. estimate.monthly_total — DISCOUNTED. Last-resort fallback. Stale
 //      after a tier change since it reflects the previous tier's discount;
 //      callers that need to recompute under a new tier should treat this
@@ -351,21 +352,107 @@ function normalizePrefs(raw) {
 // and decide whether to persist baseMonthly back to estimate_data
 // (self-heal). The source string is one of:
 //   'explicit' | 'engine' | 'summed' | 'fallback-discounted'
-function resolveBaseMonthly(estimate, parsedData) {
-  const explicit = Number(parsedData?.baseMonthly || parsedData?.preDiscountMonthly || 0);
-  if (explicit > 0) return { baseMonthly: explicit, source: 'explicit' };
+function monthlyValueForRecurringService(svc = {}) {
+  const monthly = firstPositiveNumber(svc.mo, svc.monthly, svc.monthlyTotal);
+  if (monthly) return monthly;
+  const annual = firstPositiveNumber(svc.annualAfterCredits, svc.annualAfterDiscount, svc.annual);
+  return annual ? annual / 12 : 0;
+}
 
-  const estResult = parsedData?.result || parsedData || {};
-  const engineDerived = Number(estResult?.recurring?.annualBeforeDiscount || 0) / 12;
-  if (engineDerived > 0) {
-    return { baseMonthly: Math.round(engineDerived * 100) / 100, source: 'engine' };
+function roundMonthly(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function resolveExplicitDiscountableMonthly(explicit, nonDiscountableMonthly, estimate = {}) {
+  if (!(explicit > 0)) return 0;
+  if (!(nonDiscountableMonthly > 0)) return explicit;
+
+  const currentMonthly = Number(estimate.monthly_total ?? estimate.monthlyTotal ?? 0);
+  if (currentMonthly > 0) {
+    const discount = tierDiscount(estimate.waveguard_tier || estimate.waveGuardTier || estimate.tier);
+    const asTotalDiscountable = Math.max(0, explicit - nonDiscountableMonthly);
+    const asTotalMonthly = roundMonthly((asTotalDiscountable * (1 - discount)) + nonDiscountableMonthly);
+    const asDiscountableMonthly = roundMonthly((explicit * (1 - discount)) + nonDiscountableMonthly);
+    if (Math.abs(asTotalMonthly - currentMonthly) + 0.5 < Math.abs(asDiscountableMonthly - currentMonthly)) {
+      return asTotalDiscountable;
+    }
   }
 
-  const recurring = estResult?.recurring?.services || [];
-  const summed = recurring.reduce((s, x) => s + Number(x.mo || x.monthly || 0), 0);
-  if (summed > 0) return { baseMonthly: Math.round(summed * 100) / 100, source: 'summed' };
+  return explicit;
+}
 
-  return { baseMonthly: Number(estimate.monthly_total || 0), source: 'fallback-discounted' };
+function resolveRecurringMonthlyParts(estimate, parsedData) {
+  const estResult = parsedData?.result || parsedData || {};
+  const recurringServices = recurringServicesWithSupplements(estResult);
+  const serviceParts = recurringServices.reduce((parts, svc) => {
+    const monthly = monthlyValueForRecurringService(svc);
+    if (!(monthly > 0)) return parts;
+    if (recurringServiceReceivesTierDiscount(svc)) {
+      parts.discountableBaseMonthly += monthly;
+    } else {
+      parts.nonDiscountableMonthly += monthly;
+    }
+    return parts;
+  }, { discountableBaseMonthly: 0, nonDiscountableMonthly: 0 });
+  const explicit = Number(parsedData?.baseMonthly || parsedData?.preDiscountMonthly || 0);
+  const engineDerived = Number(estResult?.recurring?.annualBeforeDiscount || 0) / 12;
+  const nonDiscountableMonthly = serviceParts.nonDiscountableMonthly;
+  const discountableFromServices = serviceParts.discountableBaseMonthly;
+  const discountableFromFallback = engineDerived > 0
+    ? engineDerived
+    : resolveExplicitDiscountableMonthly(explicit, nonDiscountableMonthly, estimate);
+  const discountableBaseMonthly = discountableFromServices > 0
+    ? discountableFromServices
+    : discountableFromFallback;
+  const serviceTotal = discountableBaseMonthly + nonDiscountableMonthly;
+  if (recurringServices.length > 0 && serviceTotal > 0) {
+    return {
+      baseMonthly: roundMonthly(serviceTotal),
+      discountableBaseMonthly: roundMonthly(discountableBaseMonthly),
+      nonDiscountableMonthly: roundMonthly(nonDiscountableMonthly),
+      source: 'summed',
+    };
+  }
+
+  if (explicit > 0) {
+    return {
+      baseMonthly: explicit,
+      discountableBaseMonthly: explicit,
+      nonDiscountableMonthly: 0,
+      source: 'explicit',
+    };
+  }
+
+  if (engineDerived > 0) {
+    const baseMonthly = roundMonthly(engineDerived);
+    return {
+      baseMonthly,
+      discountableBaseMonthly: baseMonthly,
+      nonDiscountableMonthly: 0,
+      source: 'engine',
+    };
+  }
+
+  const fallback = Number(estimate.monthly_total ?? estimate.monthlyTotal ?? 0);
+  return {
+    baseMonthly: fallback,
+    discountableBaseMonthly: fallback,
+    nonDiscountableMonthly: 0,
+    source: 'fallback-discounted',
+  };
+}
+
+function monthlyForRecurringParts(parts = {}, tier, monthlyOff = 0) {
+  const discountable = Number(parts.discountableBaseMonthly || 0);
+  const nonDiscountable = Number(parts.nonDiscountableMonthly || 0);
+  const off = Number(monthlyOff || 0);
+  const total = discountable * (1 - tierDiscount(tier)) + nonDiscountable - off;
+  return Math.max(0, Math.round(total * 100) / 100);
+}
+
+function resolveBaseMonthly(estimate, parsedData) {
+  const parts = resolveRecurringMonthlyParts(estimate, parsedData);
+  return { baseMonthly: parts.baseMonthly, source: parts.source };
 }
 
 function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal = 0) {
@@ -460,6 +547,158 @@ function firstPositiveNumber(...values) {
   return null;
 }
 
+function recurringServiceKey(svc = {}) {
+  const raw = String(svc.service || svc.key || svc.name || svc.label || svc.displayName || '').toLowerCase();
+  const words = raw.replace(/[_-]+/g, ' ');
+  if (
+    raw.includes('palm_injection')
+    || raw.includes('palm_treatment')
+    || /\bpalm injection\b|\bpalm tree\b|\bpalms?\b/.test(words)
+  ) return 'palm_injection';
+  if (
+    raw.includes('rodent_bait')
+    || raw.includes('rodent_monitoring')
+    || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
+  ) return 'rodent_bait';
+  if (raw.includes('pest')) return 'pest_control';
+  if (raw.includes('lawn')) return 'lawn_care';
+  if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
+  if (raw.includes('mosquito')) return 'mosquito';
+  if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
+  return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function recurringServiceReceivesTierDiscount(svc = {}) {
+  const key = recurringServiceKey(svc);
+  if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
+  if (key === 'palm_injection' || key === 'rodent_bait') return false;
+  return true;
+}
+
+function recurringServiceCountsTowardTier(svc = {}) {
+  const key = recurringServiceKey(svc);
+  return recurringServiceReceivesTierDiscount(svc)
+    && PRICING_WAVEGUARD.qualifyingServices.includes(key);
+}
+
+function recurringServiceDisplayName(key) {
+  switch (key) {
+    case 'pest_control': return 'Pest Control';
+    case 'lawn_care': return 'Lawn Care';
+    case 'tree_shrub': return 'Tree & Shrub';
+    case 'mosquito': return 'Mosquito';
+    case 'termite_bait': return 'Termite Bait';
+    case 'palm_injection': return 'Palm Injection';
+    case 'rodent_bait': return 'Rodent Bait Stations';
+    default: return null;
+  }
+}
+
+function mergeSupplementalRecurringRow(existing = {}, supplemental = {}) {
+  const merged = { ...existing };
+  Object.entries(supplemental).forEach(([key, value]) => {
+    if (value == null || value === '') return;
+    if (typeof value === 'number' && !Number.isFinite(value)) return;
+    const current = merged[key];
+    const currentMissing = current == null
+      || current === ''
+      || (typeof current === 'number' && current <= 0);
+    const shouldPreferSupplement = [
+      'service',
+      'name',
+      'displayName',
+      'mo',
+      'monthly',
+      'monthlyTotal',
+      'annual',
+      'perTreatment',
+      'visitsPerYear',
+      'cadenceLabel',
+      'detail',
+      'waveGuardDiscountEligible',
+      'tierLabel',
+    ].includes(key);
+    if (currentMissing || shouldPreferSupplement) {
+      merged[key] = value;
+    }
+  });
+  return merged;
+}
+
+function recurringServicesWithSupplements(estResult = {}) {
+  const recurring = estResult.recurring || {};
+  const resultStats = estResult.results || {};
+  const services = Array.isArray(recurring.services) ? recurring.services.slice() : [];
+  const indexByKey = new Map();
+  services.forEach((svc, index) => {
+    const key = recurringServiceKey(svc);
+    if (key && !indexByKey.has(key)) indexByKey.set(key, index);
+  });
+
+  const upsertSupplement = (key, row) => {
+    if (!row) return;
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex != null) {
+      services[existingIndex] = mergeSupplementalRecurringRow(services[existingIndex], row);
+      return;
+    }
+    services.push(row);
+    indexByKey.set(key, services.length - 1);
+  };
+
+  const palmMonthly = firstPositiveNumber(
+    recurring.palmInjectionMo,
+    resultStats.injection?.monthlyAfterCredits,
+    resultStats.injection?.mo,
+  );
+  if (palmMonthly) {
+    const appsPerYear = firstPositiveNumber(resultStats.injection?.appsPerYear) || 1;
+    const annual = firstPositiveNumber(
+      recurring.palmInjectionAnn,
+      resultStats.injection?.annualAfterCredits,
+      palmMonthly * 12,
+    ) || palmMonthly * 12;
+    const perTreatment = appsPerYear > 0 ? Math.round((annual / appsPerYear) * 100) / 100 : null;
+    upsertSupplement('palm_injection', {
+      service: 'palm_injection',
+      name: 'Palm Injection',
+      displayName: 'Palm Injection',
+      mo: palmMonthly,
+      monthly: palmMonthly,
+      annual,
+      perTreatment,
+      visitsPerYear: appsPerYear,
+      cadenceLabel: resultStats.injection?.treatmentLabel || 'Palm treatment',
+      detail: resultStats.injection?.detail || null,
+      waveGuardDiscountEligible: false,
+      tierLabel: 'Recurring service',
+    });
+  }
+
+  const rodentMonthly = firstPositiveNumber(recurring.rodentBaitMo, resultStats.rodBaitMo);
+  if (rodentMonthly) {
+    const visitsPerYear = firstPositiveNumber(resultStats.rodBaitVisitsPerYear, resultStats.rodentBait?.visitsPerYear) || 4;
+    const annual = Math.round(rodentMonthly * 12 * 100) / 100;
+    const size = resultStats.rodBaitSize || resultStats.rodentBait?.size || null;
+    upsertSupplement('rodent_bait', {
+      service: 'rodent_bait',
+      name: 'Rodent Bait Stations',
+      displayName: 'Rodent Bait Stations',
+      mo: rodentMonthly,
+      monthly: rodentMonthly,
+      annual,
+      perTreatment: visitsPerYear > 0 ? Math.round((annual / visitsPerYear) * 100) / 100 : null,
+      visitsPerYear,
+      cadenceLabel: 'Quarterly monitoring',
+      detail: size ? `${size} property · monitoring stations` : 'Monitoring stations',
+      waveGuardDiscountEligible: false,
+      tierLabel: 'Recurring service',
+    });
+  }
+
+  return services;
+}
+
 function prettySignalValue(value) {
   if (!value) return null;
   return String(value)
@@ -489,7 +728,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const resultStats = estResult.results || parsedData.results || {};
   const recurringServices = Array.isArray(opts.recurringServices)
     ? opts.recurringServices
-    : (estResult.recurring?.services || parsedData.recurring?.services || []);
+    : recurringServicesWithSupplements(estResult);
   const inputServices = inputs.services || {};
   const serviceNames = recurringServices
     .map((svc) => svc?.name || svc?.label || svc?.displayName || svc?.service)
@@ -501,6 +740,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
         case 'lawn_care': return 'Lawn Care';
         case 'tree_shrub': return 'Tree & Shrub';
         case 'termite_bait': return 'Termite Bait';
+        case 'palm_injection': return 'Palm Injection';
+        case 'rodent_bait': return 'Rodent Bait Stations';
         default: return raw;
       }
     });
@@ -600,9 +841,10 @@ function renderPage(token, estimate, estData) {
   const address = escapeHtml(est.address || '');
 
   const estResult = estData?.result || estData || {};
-  const recurring = estResult?.recurring?.services || [];
+  const recurring = recurringServicesWithSupplements(estResult);
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
-  const storedBaseMonthly = Number(estData?.baseMonthly || estData?.preDiscountMonthly || (recurring.reduce((s, x) => s + Number(x.mo || x.monthly || 0), 0)) || est.monthlyTotal || 0);
+  const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
+  const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
 
   const pestRecurring = detectPestRecurring(recurring);
   const hasPestOneTime = detectPestOneTime(oneTimeItems);
@@ -629,7 +871,9 @@ function renderPage(token, estimate, estData) {
 
   const tierPrices = {};
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
-    tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - prefMonthlyOff) * 100) / 100);
+    tierPrices[t] = displayPestOnly
+      ? Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - prefMonthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, t, prefMonthlyOff);
   });
 
   const monthlyTotal = Math.max(0, recurringMonthlyBeforePrefs - prefMonthlyOff);
@@ -664,18 +908,18 @@ function renderPage(token, estimate, estData) {
   //   3+ svc → no upsell                    → already Gold+/Platinum
   // Future-proof: the "next tier" copy comes from the service count
   // after adding, not a hardcoded string.
-  const recurringNames = recurring.map((s) => String(s.name || '').toLowerCase());
-  const hasName = (needle) => recurringNames.some((n) => n.includes(needle));
+  const qualifyingRecurring = recurring.filter(recurringServiceCountsTowardTier);
+  const qualifyingKeys = new Set(qualifyingRecurring.map(recurringServiceKey));
 
   let upsellService = null;
-  if (recurring.length === 1) {
-    upsellService = recurring[0].name === 'Pest Control' ? 'Lawn Care' : 'Pest Control';
-  } else if (recurring.length === 2 && !hasName('mosquito')) {
+  if (qualifyingRecurring.length === 1) {
+    upsellService = recurringServiceKey(qualifyingRecurring[0]) === 'pest_control' ? 'Lawn Care' : 'Pest Control';
+  } else if (qualifyingRecurring.length === 2 && !qualifyingKeys.has('mosquito')) {
     upsellService = 'WaveGuard Mosquito';
   }
   const showUpsell = !!upsellService && !canChooseOneTime;
 
-  const nextTierCount = recurring.length + 1;
+  const nextTierCount = qualifyingRecurring.length + 1;
   const nextTierName = nextTierCount >= 4 ? 'Platinum' : nextTierCount === 3 ? 'Gold' : 'Silver';
   const nextTierPct = nextTierCount >= 4 ? 20 : nextTierCount === 3 ? 15 : 10;
 
@@ -783,7 +1027,8 @@ function renderPage(token, estimate, estData) {
   };
   const basePerTreatmentForRecurringService = (svc, visits) => {
     const base = rawPerTreatmentForRecurringService(svc, visits);
-    return base == null ? null : Math.round(base * (1 - tierDiscount(tier)) * 100) / 100;
+    const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? tierDiscount(tier) : 0;
+    return base == null ? null : Math.round(base * (1 - serviceDiscount) * 100) / 100;
   };
   const adjustedPerTreatmentForRecurringService = (svc, visits, basePrice) => {
     const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
@@ -794,16 +1039,22 @@ function renderPage(token, estimate, estData) {
     return Math.max(0, Math.round((basePrice - prefPerTreatmentOff) * 100) / 100);
   };
   const servicePriority = (svc) => {
-    const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
-    if (n.includes('pest')) return 0;
-    if (n.includes('lawn')) return 1;
+    const key = recurringServiceKey(svc);
+    if (key === 'pest_control') return 0;
+    if (key === 'lawn_care') return 1;
+    if (key === 'tree_shrub') return 2;
+    if (key === 'mosquito') return 3;
+    if (key === 'termite_bait') return 4;
+    if (key === 'palm_injection') return 5;
+    if (key === 'rodent_bait') return 6;
     return 2;
   };
   const billingServiceRows = billingRecurring
     .slice()
     .sort((a, b) => servicePriority(a) - servicePriority(b))
     .map((svc) => {
-      const name = svc?.displayName || svc?.name || svc?.label || 'Service';
+      const serviceKey = recurringServiceKey(svc);
+      const name = svc?.displayName || recurringServiceDisplayName(serviceKey) || svc?.name || svc?.label || 'Service';
       const visits = visitsForRecurringService(svc);
       const isPest = /pest/i.test(String(name));
       const isLawn = /lawn/i.test(String(name));
@@ -813,15 +1064,19 @@ function renderPage(token, estimate, estData) {
       const visitText = visits
         ? `${Math.round(visits).toLocaleString()} ${visits === 1 ? 'application' : 'applications'}/year`
         : 'Service applications/year';
-      const cadenceText = isPest && pestTierCadence ? `${pestTierCadence} service` : '';
+      const cadenceText = svc?.cadenceLabel || (isPest && pestTierCadence ? `${pestTierCadence} service` : '');
+      const detailHtml = cadenceText || visits
+        ? [cadenceText ? escapeHtml(cadenceText) : null, escapeHtml(visitText)].filter(Boolean).join(' &middot; ')
+        : escapeHtml(svc?.detail || 'Service applications/year');
       return {
         name,
-        detailHtml: cadenceText ? `${escapeHtml(cadenceText)} &middot; ${escapeHtml(visitText)}` : escapeHtml(visitText),
-        kind: isPest ? 'pest' : (isLawn ? 'lawn' : 'other'),
+        detailHtml,
+        kind: isPest ? 'pest' : (isLawn ? 'lawn' : (serviceKey || 'other')),
         visits,
         anchorPrice,
         basePrice,
         price,
+        tierLabel: svc?.tierLabel || `WaveGuard ${tier}`,
       };
     });
   const billingServiceRowsHtml = billingServiceRows.map((row) => `
@@ -890,7 +1145,7 @@ function renderPage(token, estimate, estData) {
             ${savings > 0 ? `<span class="anchor">${fmtMoney(row.anchorPrice)} / application</span>` : ''}
             <span class="num" data-service-card-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)}</span>
             <span class="per">application</span>
-            <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
+            <span class="tier-lbl">${escapeHtml(row.tierLabel)}</span>
           </div>
           ${savings > 0 ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
           ${day != null ? `<div class="day-price">That\u2019s just <span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
@@ -1322,11 +1577,11 @@ ${shellTopBar()}
   ${prefsBlockHtml}
 
   ${showUpsell ? `
-  <button type="button" class="upsell"${recurringOnlyAttr} onclick="inquireBundle('${escapeHtml(upsellService)}')" aria-label="Get a bundle quote for ${escapeHtml(upsellService)}">
-    <span class="txt">
-      <h3>Add ${escapeHtml(upsellService)} and save more</h3>
-      <div style="font-size:14px">Bundling unlocks ${escapeHtml(nextTierName)} tier pricing (${nextTierPct}% off everything). Curious what that looks like?</div>
-    </span>
+	  <button type="button" class="upsell"${recurringOnlyAttr} onclick="inquireBundle('${escapeHtml(upsellService)}')" aria-label="Get a bundle quote for ${escapeHtml(upsellService)}">
+	    <span class="txt">
+	      <h3>Add ${escapeHtml(upsellService)} and save more</h3>
+	      <div style="font-size:14px">Bundling unlocks ${escapeHtml(nextTierName)} tier pricing (${nextTierPct}% off qualifying services). Curious what that looks like?</div>
+	    </span>
     <span class="upsell-btn">Get a bundle quote</span>
   </button>` : ''}
 
@@ -2294,8 +2549,10 @@ router.put('/:token/accept', async (req, res, next) => {
     }
 
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
-    const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
-    const pricingBundle = await buildPricingBundle(estimate);
+    const rawEstData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    const estData = withSupplementedRecurringServices(rawEstData) || rawEstData || {};
+    const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
+    const pricingBundle = await buildPricingBundle(estimateForPricing);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       return res.status(409).json({
@@ -2354,10 +2611,14 @@ router.put('/:token/accept', async (req, res, next) => {
         status: 'accepted',
         accepted_at: trx.fn.now(),
       };
+      let nextEstimateData = estData && typeof estData === 'object' ? { ...estData } : null;
+      if (nextEstimateData) {
+        acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
+      }
       if (selectedFrequency) {
         acceptedUpdates.monthly_total = effectiveMonthlyTotal;
         acceptedUpdates.annual_total = effectiveAnnualTotal;
-        let nextEstimateData = estData && typeof estData === 'object' ? { ...estData } : {};
+        nextEstimateData = nextEstimateData || {};
         nextEstimateData.customerSelection = {
           ...(nextEstimateData.customerSelection || {}),
           frequency: selectedFrequency.key,
@@ -2432,10 +2693,7 @@ router.put('/:token/accept', async (req, res, next) => {
       // Defensive: skip if the column hasn't been migrated yet (older envs).
       if (customerId) {
         try {
-          let parsedData = {};
-          try { parsedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); }
-          catch { parsedData = {}; }
-          const prefs = normalizePrefs(parsedData.preferences);
+          const prefs = normalizePrefs(estData?.preferences);
           if (await trx.schema.hasColumn('customers', 'service_preferences')) {
             await trx('customers').where({ id: customerId }).update({
               service_preferences: JSON.stringify(prefs),
@@ -2815,9 +3073,9 @@ router.put('/:token/select-tier', async (req, res, next) => {
     // base). The helper prefers explicit baseMonthly → engine-derived →
     // summed → discounted-fallback. We persist the derived value back
     // below so the next tier flip on this row is a no-op for resolution.
-    const { baseMonthly, source: baseSource } = resolveBaseMonthly(estimate, parsedData);
-    const discount = tierDiscount(selectedTier);
-    const monthlyTotal = Math.max(0, Math.round(baseMonthly * (1 - discount) * 100) / 100);
+    const recurringMonthlyParts = resolveRecurringMonthlyParts(estimate, parsedData);
+    const { baseMonthly, source: baseSource } = recurringMonthlyParts;
+    const monthlyTotal = monthlyForRecurringParts(recurringMonthlyParts, selectedTier);
     const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
 
     // Self-heal estimate_data.baseMonthly when we resolved it from the
@@ -2879,7 +3137,7 @@ router.put('/:token/preferences', async (req, res, next) => {
     const nextPrefs = normalizePrefs({ ...(parsedData.preferences || {}), ...patch });
 
     const estResult = parsedData.result || parsedData || {};
-    const recurring = estResult?.recurring?.services || [];
+    const recurring = recurringServicesWithSupplements(estResult);
     const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
     const pestRecurring = detectPestRecurring(recurring);
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
@@ -2888,7 +3146,8 @@ router.put('/:token/preferences', async (req, res, next) => {
     // baseMonthly resolution via shared helper (see resolveBaseMonthly).
     // Persisted back to estimate_data.baseMonthly below so subsequent
     // toggles + tier flips on this row are a no-op for resolution.
-    const { baseMonthly: resolvedBaseMonthly } = resolveBaseMonthly(estimate, parsedData);
+    const recurringMonthlyParts = resolveRecurringMonthlyParts(estimate, parsedData);
+    const { baseMonthly: resolvedBaseMonthly } = recurringMonthlyParts;
     const baseMonthly = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
       ? Number(pestRecurring.monthlyBase || 0)
       : resolvedBaseMonthly;
@@ -2897,13 +3156,17 @@ router.put('/:token/preferences', async (req, res, next) => {
     const currentDiscount = tierDiscount(currentTier);
 
     const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
-    const monthlyTotal = Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - monthlyOff) * 100) / 100);
+    const monthlyTotal = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
+      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - monthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, monthlyOff);
     const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
     const onetimeBase = Number(parsedData.onetimeTotalBase || estimate.onetime_total || 0);
     const onetimeTotal = Math.max(0, Math.round((onetimeBase - oneTimeOff) * 100) / 100);
     const tierPrices = {};
     ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
-      tierPrices[t] = Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - monthlyOff) * 100) / 100);
+      tierPrices[t] = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
+        ? Math.max(0, Math.round((baseMonthly * (1 - tierDiscount(t)) - monthlyOff) * 100) / 100)
+        : monthlyForRecurringParts(recurringMonthlyParts, t, monthlyOff);
     });
 
     // Persist — merge new prefs + self-healed baseMonthly back onto the blob.
@@ -3227,8 +3490,10 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   // Per-treatment breakdown — pull perApp/visitsPerYear off each recurring
   // line item the engine emitted. Labels match the displayed service name;
   // visitsPerYear may sit under several aliases depending on the line item
-  // (mosquito uses `visits`, T&S uses `frequency`).
-  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']);
+  // (mosquito uses `visits`, T&S uses `frequency`; palm and rodent bait
+  // are separate recurring lines that do not receive WaveGuard percentage
+  // discounts).
+  const RECURRING_LINE_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait', 'palm_injection', 'rodent_bait']);
   const labelForRecurring = (svc) => {
     switch (svc) {
       case 'pest_control': return 'Pest Control';
@@ -3236,19 +3501,29 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       case 'tree_shrub': return 'Tree & Shrub';
       case 'mosquito': return 'Mosquito';
       case 'termite_bait': return 'Termite Bait';
+      case 'palm_injection': return 'Palm Injection';
+      case 'rodent_bait': return 'Rodent Bait Stations';
       default: return svc;
     }
   };
   const perServiceTreatments = lineItems
     .filter((li) => li && RECURRING_LINE_SERVICES.has(li.service))
     .map((li) => {
-      const pa = Number(li.perApp ?? li.perVisit);
-      const visits = Number(li.visitsPerYear ?? li.visits ?? li.frequency);
+      const visits = Number(li.visitsPerYear ?? li.visits ?? li.frequency ?? li.appsPerYear);
+      const netAnnual = firstPositiveNumber(li.annualAfterCredits, li.annualAfterDiscount, li.annual);
+      const netPerTreatment = Number.isFinite(visits) && visits > 0 && netAnnual
+        ? netAnnual / visits
+        : null;
+      const netPriceFirst = !recurringServiceReceivesTierDiscount(li) && netPerTreatment;
+      const explicitPerTreatment = Number(li.perApp ?? li.perVisit);
+      const pa = netPriceFirst
+        || (Number.isFinite(explicitPerTreatment) && explicitPerTreatment > 0 ? explicitPerTreatment : netPerTreatment);
       return {
         service: li.service,
         label: li.displayName || labelForRecurring(li.service),
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
+        waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(li),
       };
     });
   const sameDayTreatmentTotal = perServiceTreatments.reduce(
@@ -3522,9 +3797,6 @@ function acceptanceServiceLists(estData) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData && typeof estData === 'object' ? estData : {});
-  const recurring = result.recurring && typeof result.recurring === 'object'
-    ? result.recurring
-    : {};
   const nestedRecurring = result.results?.recurring && typeof result.results.recurring === 'object'
     ? result.results.recurring
     : {};
@@ -3548,12 +3820,60 @@ function acceptanceServiceLists(estData) {
       }));
 
   return {
-    recurringSvcList: [
-      ...(Array.isArray(recurring.services) ? recurring.services : []),
+    recurringSvcList: uniqueRecurringServiceRows([
+      ...recurringServicesWithSupplements(result),
       ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
-    ],
+    ]),
     oneTimeList,
   };
+}
+
+function uniqueRecurringServiceRows(rows = []) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    if (!row) return false;
+    const key = recurringServiceKey(row) || String(row.name || row.label || row.service || '').toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function withSupplementedRecurringServices(estData) {
+  if (!estData || typeof estData !== 'object') return estData;
+  const hasResult = estData.result && typeof estData.result === 'object';
+  const result = hasResult ? estData.result : estData;
+  const rootRecurring = hasResult && estData.recurring && typeof estData.recurring === 'object'
+    ? estData.recurring
+    : null;
+  const rootResult = rootRecurring
+    ? {
+        ...estData,
+        recurring: rootRecurring,
+        results: estData.results || result.results,
+      }
+    : null;
+  const services = uniqueRecurringServiceRows([
+    ...recurringServicesWithSupplements(result),
+    ...(rootResult ? recurringServicesWithSupplements(rootResult) : []),
+  ]);
+  if (!services.length) return estData;
+  const nextResult = {
+    ...result,
+    recurring: {
+      ...(result.recurring || {}),
+      services,
+    },
+  };
+  if (!hasResult) return nextResult;
+  const nextData = { ...estData, result: nextResult };
+  if (rootRecurring) {
+    nextData.recurring = {
+      ...rootRecurring,
+      services,
+    };
+  }
+  return nextData;
 }
 
 function resolveAcceptOneTimeTotal(estimate = {}, pricingBundle = null) {
@@ -3742,7 +4062,7 @@ function readV1Shape(estData) {
     : (Array.isArray(result.pestTiers) ? result.pestTiers : []);
 
   const recurring = result.recurring || {};
-  const services = Array.isArray(recurring.services) ? recurring.services : [];
+  const services = recurringServicesWithSupplements(result);
   if (pestTiers.length === 0 && services.length === 0) return null;
   return {
     pestTiers,
@@ -3819,18 +4139,20 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const pestMoBefore = pestTier ? Number(pestTier.mo || 0) : 0;
   const pestAnnBefore = pestTier ? Number(pestTier.ann || 0) : 0;
   const nonPestServices = v1.services.filter((svc) => !isPestServiceName(svc?.name));
-  const nonPestMoBefore = nonPestServices.reduce((sum, svc) => {
-    return sum + (Number(svc?.mo || svc?.monthly || 0));
-  }, 0);
-
-  const totalMoBefore = pestMoBefore + (pestOnly ? 0 : nonPestMoBefore);
   const pestRecurring = pestTier
     ? { monthlyBase: pestMoBefore, visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4 }
     : null;
   const { monthlyOff } = computePrefDiscount(prefs, pestRecurring, false, 0);
-  // v1 applies the tier discount on the summed monthly (verified against
-  // the recurring.monthlyTotal = (pest + lawn) * (1 - discount) relation).
-  const totalMoAfter = Math.max(0, Math.round((totalMoBefore * (1 - v1.discount) - monthlyOff) * 100) / 100);
+  const discountMonthly = (monthly, svc) => {
+    const n = Number(monthly || 0);
+    const discount = recurringServiceReceivesTierDiscount(svc) ? v1.discount : 0;
+    return n * (1 - discount);
+  };
+  const pestMoAfter = pestTier ? discountMonthly(pestMoBefore, { service: 'pest_control' }) : 0;
+  const nonPestMoAfter = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
+    return sum + discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc);
+  }, 0);
+  const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - monthlyOff) * 100) / 100);
   const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
 
   // Included items: full recurring services list. These don't change with
@@ -3841,7 +4163,7 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     : v1.services;
   const included = includedServices.map((svc) => ({
     key: (svc?.name || '').toLowerCase().replace(/\s+/g, '_') || 'service',
-    label: svc?.displayName || svc?.name || 'Service',
+    label: svc?.displayName || recurringServiceDisplayName(recurringServiceKey(svc)) || svc?.name || 'Service',
     detail: isTermiteBaitServiceName(svc?.name || svc?.label || svc?.service)
       ? formatTermiteBaitDetail(v1.tmBait, svc?.detail)
       : (svc?.detail || null),
@@ -3864,6 +4186,7 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
       label: `Pest Control (${pestTier.label || 'Quarterly'})`,
       perTreatment: Number.isFinite(pestPa) && pestPa > 0 ? pestPa : null,
       visitsPerYear: Number(pestTier.apps || pestTier.v) || null,
+      waveGuardDiscountEligible: true,
     });
   }
   if (!pestOnly) {
@@ -3872,9 +4195,10 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
       const visits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.frequency);
       perServiceTreatments.push({
         service: svc?.service || (svc?.name || '').toLowerCase().replace(/\s+/g, '_'),
-        label: svc?.displayName || svc?.name || 'Service',
+        label: svc?.displayName || recurringServiceDisplayName(recurringServiceKey(svc)) || svc?.name || 'Service',
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
+        waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(svc),
       });
     });
   }
@@ -4255,6 +4579,8 @@ module.exports.handleEstimateView = handleEstimateView;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
+module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
+module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
@@ -4266,6 +4592,7 @@ module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
+module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
 module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
