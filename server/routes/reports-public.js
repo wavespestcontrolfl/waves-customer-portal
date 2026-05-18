@@ -15,6 +15,8 @@ const {
   getHealthyStoredReportPdf,
   putReportPdf,
 } = require('../services/service-report/pdf-storage');
+const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
+const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
   answerServiceReportQuestion,
@@ -413,12 +415,29 @@ router.get('/:token', async (req, res, next) => {
       }
 
       const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf' });
-      const pdf = await renderServiceReportV1Pdf(data, {
-        token: req.params.token,
-        req,
-        logger,
-        serviceRecordId: service.id,
-      });
+      let pdf;
+      try {
+        pdf = await renderServiceReportV1Pdf(data, {
+          token: req.params.token,
+          req,
+          logger,
+          serviceRecordId: service.id,
+        });
+      } catch (renderErr) {
+        const errorMessage = safePdfRenderError(renderErr);
+        logger.warn(`[reports-public] PDF render not ready for ${service.id}: ${errorMessage}`);
+        await enqueuePdfRenderRetry({
+          serviceRecordId: service.id,
+          payload: { source: 'public_pdf_route' },
+        }).catch((queueErr) => {
+          logger.warn(`[reports-public] PDF retry queue failed for ${service.id}: ${queueErr.message}`);
+        });
+        res.setHeader('Retry-After', '300');
+        return res.status(503).json({
+          error: 'PDF is being generated. Please try again shortly.',
+          code: 'pdf_not_ready',
+        });
+      }
       try {
         const key = await putReportPdf(service.id, pdf);
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
