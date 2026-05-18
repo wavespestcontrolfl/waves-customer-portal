@@ -68,14 +68,14 @@ function computeTechEta(techRow, jobCoords) {
   return Math.max(1, Math.round((distMi / 30) * 60));
 }
 
-async function renderTemplate(templateKey, vars, fallback) {
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch { /* fall through */ }
-  return fallback;
+  return null;
 }
 
 async function runtimeServiceReportFlag(req, flagKey, envKey, defaultValue = false) {
@@ -2456,44 +2456,49 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           : null;
         if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
           sentSmsType = serviceReportV1SmsContext.smsType;
-          sentSmsBody = `${serviceReportV1SmsContext.body}${reviewSuffix}`.trim();
+          const body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars);
+          if (!body) throw new Error(`SMS template ${sentSmsType} is missing or inactive`);
+          sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
         } else if (invoiceCreated && payUrl && allowCompletionInvoiceLink) {
-          const fallback = `Hello ${svc.first_name}! Your ${displayServiceType} service report is ready: ${reportSmsUrl || reportUrl}\n\nInvoice for today's visit: ${payUrl}\n\nQuestions or requests? Reply here.`;
           const body = await renderTemplate('service_complete_with_invoice', {
             first_name: svc.first_name || '',
             service_type: displayServiceType,
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
-          }, fallback);
+          });
+          if (!body) throw new Error('SMS template service_complete_with_invoice is missing or inactive');
           sentSmsType = 'service_complete_with_invoice';
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
         } else {
           if (usePaidCompletionTemplate) {
-            const fallback = `Hello ${svc.first_name}! Thanks for your payment today. Your ${displayServiceType} service report is ready: ${reportSmsUrl || reportUrl}\n\nQuestions or requests? Reply here.`;
             const body = await renderTemplate('service_complete_prepaid', {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
-            }, fallback);
+            });
+            if (!body) throw new Error('SMS template service_complete_prepaid is missing or inactive');
             sentSmsType = 'service_complete_prepaid';
             sentSmsBody = `${body}${reviewSuffix}`.trim();
             completionSmsWasTruncated = false;
           } else {
-            const fallback = `Hello ${svc.first_name}! Your service report is ready: ${reportSmsUrl || reportUrl}\n\nQuestions or requests? Reply here.`;
             let body = await renderTemplate('service_complete', {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
-            }, fallback);
+            });
+            if (!body) throw new Error('SMS template service_complete is missing or inactive');
             body = ensureSmsContainsReportLink(body, reportSmsUrl || reportUrl);
             sentSmsType = 'service_complete';
             if (serviceReportV1Delivery) {
               sentSmsBody = `${body}${reviewSuffix}`.trim();
               completionSmsWasTruncated = false;
             } else {
-              const concise = `Hello ${svc.first_name}! Report: ${reportUrl}\nReply with questions.`;
+              const concise = await renderRequiredTemplate('service_complete_concise', {
+                first_name: svc.first_name || '',
+                portal_url: reportUrl,
+              });
               ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
             }
           }
@@ -2936,9 +2941,14 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           const win = parseRescheduleWindow(newWindow);
           const windowText = win.start && win.end ? `, ${formatSmsTimeRange(`${win.start}-${win.end}`)}` : '';
           try {
+            const body = await renderRequiredTemplate('appointment_series_rescheduled', {
+              first_name: svc.first_name || 'there',
+              start_date: displayDate,
+              window_text: windowText,
+            });
             const msg = await sendCustomerMessage({
               to: svc.phone,
-              body: `Hi ${svc.first_name || 'there'}, your recurring Waves appointments have been rescheduled starting ${displayDate}${windowText}. We'll remind you before each visit. - Waves`,
+              body,
               channel: 'sms',
               audience: 'customer',
               purpose: 'appointment',

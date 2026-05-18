@@ -46,14 +46,14 @@ const SERVICE_TEMPLATE_KEY = {
   one_time: 'lead_service_one_time',
 };
 
-async function renderTemplate(templateKey, vars, fallback) {
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch { /* fall through */ }
-  return fallback;
+  return null;
 }
 
 // Heuristic address match: something that starts with a digit + space +
@@ -75,10 +75,11 @@ function looksLikeAddress(body) {
 async function sendBranchReply(customer, interest) {
   const templateKey = SERVICE_TEMPLATE_KEY[interest];
   const firstName = customer.first_name || 'there';
-  const fallback = interest === 'one_time'
-    ? `Got it, ${firstName} — one-time service it is. Send me the service address and a quick note on what needs attention, and I'll put a quote together.`
-    : `Great, ${firstName} — putting together a ${SERVICE_LABEL[interest].toLowerCase()} quote now.`;
-  const body = await renderTemplate(templateKey, { first_name: firstName }, fallback);
+  const body = await renderTemplate(templateKey, { first_name: firstName });
+  if (!body) {
+    logger.warn(`[lead-intake] ${templateKey} template missing/disabled; branch reply skipped for customer ${customer.id}`);
+    return;
+  }
   try {
     const result = await sendCustomerMessage({
       to: customer.phone,
@@ -104,8 +105,11 @@ async function sendBranchReply(customer, interest) {
 
 async function sendAddressNudge(customer) {
   const firstName = customer.first_name || 'there';
-  const fallback = `Just need the service address to finish your quote, ${firstName}.`;
-  const body = await renderTemplate('lead_address_needed', { first_name: firstName }, fallback);
+  const body = await renderTemplate('lead_address_needed', { first_name: firstName });
+  if (!body) {
+    logger.warn(`[lead-intake] lead_address_needed template missing/disabled; address nudge skipped for customer ${customer.id}`);
+    return;
+  }
   try {
     const result = await sendCustomerMessage({
       to: customer.phone,

@@ -38,14 +38,155 @@ const {
 const ESTIMATE_LIST_LIMIT = 500;
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
 
-async function renderTemplate(templateKey, vars, fallback) {
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch { /* fall through */ }
-  return fallback;
+  return null;
+}
+
+function parseEstimateData(estimateData) {
+  if (!estimateData) return null;
+  if (typeof estimateData === 'string') {
+    try {
+      return JSON.parse(estimateData);
+    } catch {
+      return null;
+    }
+  }
+  return typeof estimateData === 'object' ? estimateData : null;
+}
+
+function currentTierDiscounts() {
+  const tiers = PRICING_WAVEGUARD.tiers || {};
+  return Object.fromEntries(
+    Object.entries(tiers).map(([key, value]) => [
+      key.charAt(0).toUpperCase() + key.slice(1),
+      Number(value?.discount || 0),
+    ]),
+  );
+}
+
+function canFallbackFromTemplateEmailError(err) {
+  return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
+}
+
+function assertEstimateSendable(estimate) {
+  if (estimate.archived_at) {
+    const err = new Error('Estimate is archived. Unarchive first.');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!SENDABLE_ESTIMATE_STATUSES.has(String(estimate.status || 'draft'))) {
+    const err = new Error(`Estimate status ${estimate.status || 'unknown'} cannot be sent.`);
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+async function buildEstimateSendSnapshot(estimate, now = () => new Date()) {
+  const estimateData = parseEstimateData(estimate.estimate_data) || {};
+  const estimateDataForBundle = { ...estimateData };
+  delete estimateDataForBundle.sendSnapshot;
+  const snapshotAt = now().toISOString();
+  const sendSnapshot = {
+    ...(estimateData.sendSnapshot || {}),
+    renderedAt: snapshotAt,
+    tierDiscounts: currentTierDiscounts(),
+  };
+
+  try {
+    clearEstimatePricingCache(estimate.id);
+    sendSnapshot.pricingBundle = await buildPricingBundle({
+      ...estimate,
+      estimate_data: estimateDataForBundle,
+    });
+    clearEstimatePricingCache(estimate.id);
+  } catch (err) {
+    logger.warn(`[admin-estimates] send pricing snapshot failed for estimate ${estimate.id}: ${err.message}`);
+    sendSnapshot.pricingBundleError = err.message;
+  }
+
+  return {
+    ...estimateData,
+    sendSnapshot,
+  };
+}
+
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine }) {
+  if (sendgrid.isConfigured()) {
+    try {
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: 'estimate.delivery',
+        to: estimate.customer_email,
+        payload: {
+          first_name: firstName,
+          estimate_url: viewUrl,
+          price_summary: priceLine,
+        },
+        recipientType: estimate.customer_id ? 'customer' : 'lead',
+        recipientId: estimate.customer_id || null,
+        triggerEventId: `estimate_delivery:${estimate.id}`,
+        categories: ['estimate_delivery'],
+      });
+      if (result.blocked) {
+        return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: 'estimate.delivery' };
+      }
+      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: 'estimate.delivery' };
+    } catch (err) {
+      if (!canFallbackFromTemplateEmailError(err)) {
+        throw err;
+      }
+      logger.warn(`[admin-estimates] estimate.delivery template unavailable; falling back to SMTP for estimate ${estimate.id}: ${err.message}`);
+    }
+  }
+
+  if (!process.env.GOOGLE_SMTP_PASSWORD) {
+    return { ok: false, error: 'Email not configured (SENDGRID_API_KEY or GOOGLE_SMTP_PASSWORD missing)' };
+  }
+
+  const nodemailer = require('nodemailer');
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    auth: {
+      user: 'contact@wavespestcontrol.com',
+      pass: process.env.GOOGLE_SMTP_PASSWORD,
+    },
+  });
+  const heading = 'Your Waves estimate is ready';
+  const intro = `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`;
+  const html = wrapEmail({
+    preheader: priceLine
+      ? `Your Waves estimate is ready - ${priceLine}.`
+      : 'Your Waves estimate is ready to review.',
+    heading,
+    intro,
+    ctaHref: viewUrl,
+    ctaLabel: 'View Your Estimate',
+  });
+  const text = plainText([
+    `Hi ${firstName},`,
+    '',
+    'Your customized service estimate is ready for review.',
+    '',
+    `View your estimate: ${viewUrl}`,
+    '',
+    'Questions? Reply to this email or call (941) 297-5749.',
+    '- Waves Pest Control',
+  ]);
+  await transporter.sendMail({
+    from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
+    to: estimate.customer_email,
+    subject: 'Your Waves Pest Control Estimate is Ready',
+    html,
+    text,
+  });
+  return { ok: true, provider: 'smtp_fallback' };
 }
 
 function parseEstimateData(estimateData) {
@@ -250,6 +391,11 @@ router.post('/:id/send', async (req, res, next) => {
     }
     assertEstimateSendable(estimate);
 
+    if (!['sms', 'email', 'both'].includes(sendMethod)) {
+      return res.status(400).json({ error: 'Invalid sendMethod' });
+    }
+    assertEstimateSendable(estimate);
+
     if (scheduledAt) {
       const scheduledTime = new Date(scheduledAt);
       if (isNaN(scheduledTime.getTime())) {
@@ -322,8 +468,8 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
-          const fallback = `Hello ${firstName}! Your Waves estimate is ready: ${viewUrl}\n\nQuestions or requests? Reply to this message. Thank you for considering Waves!`;
-          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl }, fallback);
+          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl });
+          if (!smsBody) throw new Error('SMS template estimate_sent is missing or inactive');
           const result = await sendCustomerMessage({
             to: normalized,
             body: smsBody,
@@ -712,11 +858,11 @@ router.post('/:id/follow-up', async (req, res, next) => {
     });
     const firstName = estimate.customer_name?.split(' ')[0] || 'there';
 
-    const msg = req.body.message || (
-      `Hey ${firstName}! Just following up on your Waves Pest Control estimate.\n\n` +
-      `You can review it anytime here: ${viewUrl}\n\n` +
-      `We'd love to help protect your home. Reply here or call (941) 297-5749 with any questions!`
-    );
+    const msg = req.body.message || await renderTemplate('estimate_followup_unviewed', {
+      first_name: firstName,
+      estimate_url: viewUrl,
+    });
+    if (!msg) return res.status(422).json({ error: 'SMS template estimate_followup_unviewed is missing or inactive' });
 
     const smsResult = await sendCustomerMessage({
       to: estimate.customer_phone,
@@ -831,12 +977,11 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
 
     // Use the same template as the post-accept SMS so the customer sees a
     // consistent voice. Admin can still override via req.body.message.
-    const fallback = `Hey ${firstName}! Pick your time for your ${primarySvc.label} with Waves here — we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`;
     const msg = req.body?.message || (await renderTemplate(
       'estimate_accepted_onetime',
       { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
-      fallback,
     ));
+    if (!msg) return res.status(422).json({ error: 'SMS template estimate_accepted_onetime is missing or inactive' });
 
     const smsResult = await sendCustomerMessage({
       to: estimate.customer_phone,
@@ -933,14 +1078,11 @@ router.post('/:id/extend', async (req, res, next) => {
       const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
         month: 'long', day: 'numeric', timeZone: 'America/New_York',
       });
-      const fallback =
-        `Hey ${firstName}! Just a heads up — I kept your Waves Pest Control estimate live through ${newExpiryLabel} so you have more time to look it over. ` +
-        `No rush at all: ${viewUrl}\n\nReply here or call (941) 297-5749 if you have any questions. — Adam`;
       const body = await renderTemplate(
         'estimate_extended',
         { first_name: firstName, estimate_url: viewUrl, new_expiry: newExpiryLabel, days_added: String(days) },
-        fallback,
       );
+      if (!body) return res.status(422).json({ error: 'SMS template estimate_extended is missing or inactive' });
       smsResult = await sendCustomerMessage({
         to: estimate.customer_phone,
         body,

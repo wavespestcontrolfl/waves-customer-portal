@@ -53,8 +53,11 @@ async function sendPreChargeReminders() {
       const body = await renderSmsTemplate(
         'autopay_pre_charge',
         { first_name: c.first_name, charge_date: dateStr },
-        `Hello ${c.first_name}! This is a friendly reminder from Waves that your WaveGuard auto-pay will process on ${dateStr}.\n\nNeed to update your card or pause? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nQuestions or requests? Reply to this message.`
       );
+      if (!body) {
+        logger.warn(`[autopay-notifications] autopay_pre_charge template missing/disabled for customer ${c.id}`);
+        skipped++; continue;
+      }
       const sendResult = await sendCustomerMessage({
         to: c.phone,
         body,
@@ -132,10 +135,11 @@ async function sendCardExpiryWarnings() {
           last_four: r.last4,
           exp_date: expStr,
         },
-        expired
-          ? `Hello ${r.first_name}, your ${r.brand || 'card'} card ending in ${r.last4} on file with Waves has expired (${expStr}).\n\nPlease update it in your Waves Customer Portal at portal.wavespestcontrol.com to keep auto-pay active.\n\nQuestions or requests? Reply to this message.`
-          : `Hello ${r.first_name}! Your ${r.brand || 'card'} card ending in ${r.last4} on file with Waves expires ${expStr}.\n\nPlease update it in your Waves Customer Portal at portal.wavespestcontrol.com to avoid any auto-pay disruption.\n\nQuestions or requests? Reply to this message.`
       );
+      if (!body) {
+        logger.warn(`[autopay-notifications] ${templateKey} template missing/disabled for customer ${r.customer_id}`);
+        skipped++; continue;
+      }
 
       const sendResult = await sendCustomerMessage({
         to: r.phone,

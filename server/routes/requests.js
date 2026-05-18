@@ -7,6 +7,7 @@ const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -144,9 +145,14 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     // Send customer confirmation SMS
     try {
       const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
+      const body = await renderRequiredSmsTemplate('service_request_confirmation', {
+        first_name: req.customer.first_name || 'there',
+        category: categoryLabel,
+        response_time: responseTime,
+      });
       const smsResult = await sendCustomerMessage({
         to: req.customer.phone,
-        body: `Waves Pest Control: We received your ${categoryLabel} request. Our team will review it within ${responseTime}. We'll text you when it's been assigned to a technician. Track progress in your customer portal.`,
+        body,
         channel: 'sms',
         audience: 'customer',
         purpose: 'support_resolution',

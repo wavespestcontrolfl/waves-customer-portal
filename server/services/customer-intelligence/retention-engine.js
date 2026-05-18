@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -123,23 +124,27 @@ ${recentSMS || 'None'}`
     return saved;
   }
 
-  templateOutreach(customer, health, riskFactors) {
+  async templateOutreach(customer, health, riskFactors) {
     const topSignal = riskFactors[0]?.signal || '';
-    let message, strategy;
+    let strategy, templateKey;
 
     if (topSignal.includes('PAYMENT')) {
       strategy = 'service_recovery';
-      message = `Hi ${customer.first_name}, this is Adam from Waves. I noticed there may have been an issue with your recent payment. No worries — these things happen. Want to give us a call or reply here and we'll get it sorted out? Happy to help.`;
+      templateKey = 'health_payment_reminder';
     } else if (topSignal.includes('SERVICE_GAP')) {
       strategy = 'empathy_check_in';
-      message = `Hey ${customer.first_name}, it's Adam from Waves. Just checking in — it's been a while since your last service and I wanted to make sure everything's going well. Need us to get you back on the schedule?`;
+      templateKey = 'health_rebook';
     } else if (topSignal.includes('COMPETITOR') || topSignal.includes('DOWNGRADE')) {
       strategy = 'value_reminder';
-      message = `Hi ${customer.first_name}, Adam here from Waves. I wanted to reach out personally — if there's anything about your service we can improve, I'd love to hear it. Your ${customer.waveguard_tier} plan includes free callbacks between services, detailed reports, and our compliance guarantee. Let me know if you'd like to chat.`;
+      templateKey = 'health_retention_offer';
     } else {
       strategy = 'empathy_check_in';
-      message = `Hi ${customer.first_name}, it's Adam from Waves. Just wanted to check in and see how things are going. Is there anything we can do better? Reply anytime.`;
+      templateKey = 'health_check_in';
     }
+    const message = await renderRequiredSmsTemplate(templateKey, {
+      first_name: customer.first_name || 'there',
+      waveguard_tier: customer.waveguard_tier || '',
+    });
 
     // Save template outreach
     db('retention_outreach').insert({

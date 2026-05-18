@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -120,7 +121,10 @@ router.post('/enroll', async (req, res, next) => {
     try {
       const smsResult = await sendCustomerMessage({
         to: customerPhone,
-        body: `Hey ${firstName}! You're now enrolled in the Waves Referral Program. Share your link and earn a reward for every new customer: ${clickiLink}`,
+        body: await renderRequiredSmsTemplate('referral_enrollment', {
+          first_name: firstName,
+          referral_link: clickiLink,
+        }),
         channel: 'sms',
         audience: customerId ? 'customer' : 'lead',
         purpose: 'referral',

@@ -5,6 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const PaymentRouter = require('../services/payment-router');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { logAutopay } = require('../services/autopay-log');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -104,6 +105,10 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     if (customer.phone) {
       try {
         const receiptLine = receiptUrl ? ` View receipt: ${receiptUrl}` : '';
+        const body = await renderRequiredSmsTemplate('manual_payment_receipt', {
+          first_name: customer.first_name || 'there',
+          receipt_line: receiptLine,
+        });
         const result = await sendCustomerMessage({
           audience: 'customer',
           channel: 'sms',
@@ -111,7 +116,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           customerId,
           purpose: 'payment_receipt',
           identityTrustLevel: 'admin_operator',
-          body: `Hi ${customer.first_name}, your payment to Waves was successfully processed. Thank you!${receiptLine}`,
+          body,
           metadata: { source: 'admin_manual_charge', paymentId: payment?.id || null },
         });
         if (!result?.sent) logger.warn(`[admin-billing] receipt SMS blocked: ${result?.code || 'unknown'}`);

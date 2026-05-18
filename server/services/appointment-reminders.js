@@ -19,18 +19,18 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 
 /**
- * Render an SMS body from sms_templates, falling back to the provided default
- * if the template is missing/disabled. Keeps brand voice editable from the
- * Communications → SMS Templates admin page.
+ * Render an SMS body from sms_templates. If the template is missing/disabled,
+ * callers skip the SMS rather than sending hardcoded customer copy.
  */
-async function renderTemplate(templateKey, vars, fallback) {
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch { /* fall through */ }
-  return fallback;
+  logger.warn(`[appt-remind] SMS template ${templateKey} is missing or inactive`);
+  return null;
 }
 
 async function renderRequiredTemplate(templateKey, vars) {
@@ -181,6 +181,10 @@ async function isLandline(customerId, phone) {
 // ── Send SMS with landline guard ──
 
 async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer') {
+  if (!body) {
+    logger.warn(`[appt-remind] Empty SMS body for customer ${customerId}, skipping ${messageType}`);
+    return false;
+  }
   if (!phone) {
     logger.warn(`[appt-remind] No phone for customer ${customerId}, skipping SMS`);
     return false;
@@ -400,7 +404,6 @@ const AppointmentReminders = {
               return renderTemplate(
                 'appointment_confirmation',
                 { first_name: firstName, service_type: registration.serviceLabel, date, time, day },
-                `Hello ${firstName}! Your ${registration.serviceLabel} appointment has been successfully scheduled for ${date} at ${time}.\n\nPlease reply to this message if you need any assistance.`,
               );
             }, 'confirmation', 'appointment_confirmation');
 
@@ -498,7 +501,6 @@ const AppointmentReminders = {
               return renderTemplate(
                 'reminder_72h',
                 { first_name: firstName, service_type: serviceLabel, day, date, time },
-                `Hello ${firstName}! This is a reminder from Waves that your ${serviceLabel} appointment is scheduled for ${day} at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Need to reschedule? Log into your Waves Customer Portal at portal.wavespestcontrol.com.\n\nIf you have any questions or need assistance, simply reply to this message.`,
               );
             }, 'reminder_72h', 'appointment_reminder_72h');
 
@@ -556,7 +558,6 @@ const AppointmentReminders = {
               return renderTemplate(
                 'reminder_24h',
                 { first_name: firstName, service_type: serviceLabel, time },
-                `Hello ${firstName}! This is a reminder from Waves that your ${serviceLabel} appointment is scheduled for tomorrow at ${time}.\n\nExpect your technician to arrive within a two-hour window of your scheduled start time. Your tech will text you when they are 15 minutes out.\n\nIf you have any questions or need assistance, simply reply to this message.`,
               );
             }, 'appointment_reminder', 'appointment_reminder_24h');
 
@@ -750,8 +751,6 @@ const AppointmentReminders = {
           return renderTemplate(
             'appointment_series_cancelled',
             { first_name: firstName, service_type: serviceLabel, scope: scopeText },
-            `Hello ${firstName}! Your Waves ${scopeText} for ${serviceLabel} has been cancelled.\n\n` +
-              `Want to reschedule? Reply to this message and we'll get you back on the calendar.`,
           );
         }, 'appointment_series_cancelled', 'appointment_cancellation');
         logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);

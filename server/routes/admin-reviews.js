@@ -9,6 +9,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { getServiceContact } = require('../services/customer-contact');
 
 const PORTAL_DOMAIN = process.env.PORTAL_DOMAIN || 'portal.wavespestcontrol.com';
@@ -547,10 +548,15 @@ router.post('/send-request', async (req, res, next) => {
 
     const rateUrl = `https://${PORTAL_DOMAIN}/rate/${reviewReq.token}`;
     const svcLabel = reviewReq.service_type || 'pest control service';
+    const body = await renderRequiredSmsTemplate('review_request', {
+      first_name: firstName,
+      review_url: rateUrl,
+      service_type: svcLabel,
+    });
 
     const smsResult = await sendCustomerMessage({
       to: contact.phone,
-      body: `Hey ${firstName}! Thanks for choosing Waves. We'd love to hear how your ${svcLabel} went. It only takes 10 seconds: ${rateUrl} Thank you! - Waves Pest Control`,
+      body,
       channel: 'sms',
       audience: 'customer',
       purpose: 'review_request',
