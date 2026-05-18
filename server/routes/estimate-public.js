@@ -28,7 +28,11 @@ const {
   getEstimatePricingCache,
   setEstimatePricingCache,
 } = require('../services/estimate-pricing-cache');
-const { answerEstimateQuestion } = require('../services/estimate-assistant');
+const {
+  answerEstimateQuestion,
+  buildEstimateAssistantContext,
+} = require('../services/estimate-assistant');
+const { loadPublicEstimateSupportSources } = require('../services/estimate-ai-context');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
@@ -178,6 +182,78 @@ const BRAND = {
   yellow: '#FFD700', navy: '#0F172A', green: '#16A34A', red: '#C8102E',
   sand: '#FDF6EC', sandDark: '#F5EBD7',
 };
+
+const ESTIMATE_BUTTON_BLUE = BRAND.blueDeeper;
+
+const ESTIMATE_SERVICE_INCLUSIONS = {
+  pest: [
+    'Exterior perimeter protection around entry-prone areas',
+    'Interior service support when activity is reported',
+    'Free re-service between recurring visits',
+    '90-day WaveGuard money-back guarantee',
+  ],
+  pest_control: [
+    'Exterior perimeter protection around entry-prone areas',
+    'Interior service support when activity is reported',
+    'Free re-service between recurring visits',
+    '90-day WaveGuard money-back guarantee',
+  ],
+  lawn: [
+    'Seasonal turf treatments matched to the lawn program',
+    'Weed, fungus, chinch, and turf-stress observations',
+    'Treatment timing adjusted for Southwest Florida conditions',
+    'Lawn notes carried forward for future visits',
+  ],
+  lawn_care: [
+    'Seasonal turf treatments matched to the lawn program',
+    'Weed, fungus, chinch, and turf-stress observations',
+    'Treatment timing adjusted for Southwest Florida conditions',
+    'Lawn notes carried forward for future visits',
+  ],
+  mosquito: [
+    'Targeted barrier application in mosquito resting zones',
+    'Standing-water and breeding-pressure observations',
+    'Weather-aware treatment timing',
+    'Recurring pressure support during peak season',
+  ],
+  tree_shrub: [
+    'Ornamental inspection during service visits',
+    'Targeted insect, mite, and disease observations',
+    'Seasonal plant-health treatment support',
+    'Care notes documented for future visits',
+  ],
+  termite_bait: [
+    'Termite bait station monitoring',
+    'Activity documentation when stations are checked',
+    'Annual termite inspection support',
+    'Escalation if live activity or WDO concerns are found',
+  ],
+  palm_injection: [
+    'Palm health and canopy observations',
+    'Nutrition and pest-pressure support by palm count',
+    'Treatment timing matched to the selected palm program',
+    'Future visit notes for visible decline or recovery',
+  ],
+  rodent_bait: [
+    'Exterior bait station monitoring',
+    'Rodent activity documentation',
+    'Entry-point observations when visible',
+    'Recurring station service support',
+  ],
+};
+
+function serviceInclusionsForEstimateCard(row = {}) {
+  const key = String(row.kind || '').toLowerCase();
+  const name = String(row.name || '').toLowerCase();
+  if (ESTIMATE_SERVICE_INCLUSIONS[key]) return ESTIMATE_SERVICE_INCLUSIONS[key];
+  if (name.includes('lawn')) return ESTIMATE_SERVICE_INCLUSIONS.lawn;
+  if (name.includes('mosquito')) return ESTIMATE_SERVICE_INCLUSIONS.mosquito;
+  if (name.includes('tree') || name.includes('shrub')) return ESTIMATE_SERVICE_INCLUSIONS.tree_shrub;
+  if (name.includes('termite')) return ESTIMATE_SERVICE_INCLUSIONS.termite_bait;
+  if (name.includes('palm')) return ESTIMATE_SERVICE_INCLUSIONS.palm_injection;
+  if (name.includes('rodent') || name.includes('bait station')) return ESTIMATE_SERVICE_INCLUSIONS.rodent_bait;
+  return ESTIMATE_SERVICE_INCLUSIONS.pest;
+}
 
 // SSR top bar — phone on the LEFT, full Waves logo on the RIGHT. The
 // logo is /waves-logo.png served from client/public so the static and
@@ -1137,6 +1213,7 @@ function renderPage(token, estimate, estData) {
     .map((row) => {
       const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
       const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
+      const inclusions = serviceInclusionsForEstimateCard(row);
       return `
         <section class="service-price-card">
           <div class="service-price-name">${escapeHtml(row.name)}</div>
@@ -1149,6 +1226,9 @@ function renderPage(token, estimate, estData) {
           </div>
           ${savings > 0 ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
           ${day != null ? `<div class="day-price">That\u2019s just <span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
+          <ul class="service-inclusions">
+            ${inclusions.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
+          </ul>
         </section>`;
     })
     .join('');
@@ -1323,6 +1403,9 @@ function renderPage(token, estimate, estData) {
   .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
   .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .service-inclusions{list-style:none;margin:14px 0 0;padding:12px 0 0;border-top:1px solid #F0ECE2;display:grid;gap:7px}
+  .service-inclusions li{position:relative;padding-left:18px;color:#3F4A65;font:600 13px/1.4 Inter,system-ui,sans-serif}
+  .service-inclusions li::before{content:'';position:absolute;left:0;top:.58em;width:6px;height:6px;border-radius:50%;background:#1B2C5B}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
   .service-big-price{margin-top:14px;gap:8px 12px}
   .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#9CA3AF;text-decoration:line-through}
@@ -1352,7 +1435,7 @@ function renderPage(token, estimate, estData) {
   .mini-guarantee[data-mode-only="one_time"]{margin-top:4px;font-size:14px;line-height:1.55;color:#3F4A65}
   .mode-toggle{display:inline-flex;gap:4px;margin-top:18px;padding:4px;background:#F1F5F9;border-radius:999px;border:1px solid #E2E8F0}
   .mode-btn{appearance:none;border:0;background:transparent;color:#475569;font:600 13px/1 Inter,system-ui,sans-serif;padding:10px 18px;border-radius:999px;cursor:pointer;letter-spacing:.02em;transition:background .15s,color .15s}
-  .mode-btn.is-active{background:#009CDE;color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
+  .mode-btn.is-active{background:${ESTIMATE_BUTTON_BLUE};color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
   @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}}
@@ -1379,13 +1462,13 @@ function renderPage(token, estimate, estData) {
   .estimate-ask-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
   .estimate-ask-form{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
   .estimate-ask-form input{width:100%;min-height:48px;border:1px solid #CFE7F5;border-radius:10px;padding:12px 14px;font:500 15px/1.35 Inter,system-ui,sans-serif;color:#1B2C5B;background:#F8FCFE;outline:none}
-  .estimate-ask-form input:focus{border-color:#009CDE;box-shadow:0 0 0 3px rgba(0,156,222,.12);background:#fff}
-  .estimate-ask-form button{min-height:48px;border:0;border-radius:10px;padding:0 18px;background:#009CDE;color:#fff;font:700 14px/1 Inter,system-ui,sans-serif;cursor:pointer}
+  .estimate-ask-form input:focus{border-color:${ESTIMATE_BUTTON_BLUE};box-shadow:0 0 0 3px rgba(27,44,91,.14);background:#fff}
+  .estimate-ask-form button{min-height:48px;border:0;border-radius:10px;padding:0 18px;background:${ESTIMATE_BUTTON_BLUE};color:#fff;font:700 14px/1 Inter,system-ui,sans-serif;cursor:pointer}
   .estimate-ask-form button:disabled{opacity:.65;cursor:not-allowed}
   .estimate-ask-prompts{display:flex;flex-wrap:wrap;gap:8px}
-  .estimate-ask-prompts button{appearance:none;border:1px solid #E7E2D7;background:#F7F5EE;color:#1B2C5B;border-radius:999px;padding:8px 12px;font:700 12px/1 Inter,system-ui,sans-serif;cursor:pointer}
-  .estimate-ask-prompts button:hover{background:#E3F5FD;border-color:#B8E1F5}
-  .estimate-ask-answer{border-left:4px solid #009CDE;background:#F8FCFE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:14px;line-height:1.55;white-space:pre-line}
+  .estimate-ask-prompts button{appearance:none;border:1px solid ${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-radius:999px;padding:8px 12px;font:700 12px/1 Inter,system-ui,sans-serif;cursor:pointer}
+  .estimate-ask-prompts button:hover{background:#121E3D;border-color:#121E3D}
+  .estimate-ask-answer{border-left:4px solid ${ESTIMATE_BUTTON_BLUE};background:#F8FCFE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:14px;line-height:1.55;white-space:pre-line}
   .estimate-ask-answer[data-state="error"]{border-left-color:#C8102E;background:#FFF5F5}
   @media(max-width:640px){.estimate-ask-form{grid-template-columns:1fr}.estimate-ask-form button{width:100%}}
   .billing-card{display:grid;gap:16px}
@@ -1439,8 +1522,8 @@ function renderPage(token, estimate, estData) {
   .slot-more[open] summary::after{content:'–'}
   .slot-more-list{display:grid;gap:10px;padding:0 12px 12px}
   .slot-btn{width:100%;padding:14px 16px;border-radius:12px;cursor:pointer;background:#fff;color:#1B2C5B;border:1.5px solid #E2E8F0;text-align:left;transition:background-color .15s,border-color .15s,color .15s;font-family:Inter,system-ui,sans-serif}
-  .slot-btn:hover:not([disabled]){border-color:${BRAND.blue}}
-  .slot-btn.selected{border-color:${BRAND.blue};background:${BRAND.blue};color:#fff}
+  .slot-btn:hover:not([disabled]){border-color:${ESTIMATE_BUTTON_BLUE}}
+  .slot-btn.selected{border-color:${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff}
   .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#6B7280;margin-bottom:5px;line-height:1.25}
   .slot-btn .slot-time{display:block;font-size:20px;font-weight:700;margin-bottom:4px;line-height:1.2}
   .slot-btn .slot-reason{display:block;font-size:14px;color:#6B7280;line-height:1.35}
@@ -1457,7 +1540,7 @@ function renderPage(token, estimate, estData) {
   .pay-pref-btn.primary{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .pay-pref-btn.primary .pay-pref-title{color:#fff}
   .pay-pref-btn.primary .pay-pref-sub{color:rgba(255,255,255,.8)}
-  .pay-pref-btn.prepay{background:#16A34A;color:#fff;border-color:#16A34A}
+  .pay-pref-btn.prepay{background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-color:${ESTIMATE_BUTTON_BLUE}}
   .pay-pref-btn.prepay .pay-pref-title{color:#fff}
   .pay-pref-btn.prepay .pay-pref-sub{color:rgba(255,255,255,.85)}
   .reservation-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:#065F46;border-radius:10px;padding:12px 14px;font-size:13px;margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
@@ -3518,10 +3601,14 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       const explicitPerTreatment = Number(li.perApp ?? li.perVisit);
       const pa = netPriceFirst
         || (Number.isFinite(explicitPerTreatment) && explicitPerTreatment > 0 ? explicitPerTreatment : netPerTreatment);
+      const displayPrice = Number.isFinite(netPerTreatment) && netPerTreatment > 0
+        ? Math.round(netPerTreatment * 100) / 100
+        : (Number.isFinite(pa) && pa > 0 ? Math.round(pa * 100) / 100 : null);
       return {
         service: li.service,
         label: li.displayName || labelForRecurring(li.service),
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
+        displayPrice,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(li),
       };
@@ -4154,6 +4241,12 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   }, 0);
   const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - monthlyOff) * 100) / 100);
   const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
+  const treatmentDisplayPrice = (perTreatment, svc) => {
+    const amount = Number(perTreatment);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    const discount = recurringServiceReceivesTierDiscount(svc) ? v1.discount : 0;
+    return Math.round(amount * (1 - discount) * 100) / 100;
+  };
 
   // Included items: full recurring services list. These don't change with
   // pest frequency (changing quarterly → monthly doesn't add or remove
@@ -4185,6 +4278,7 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
       service: 'pest_control',
       label: `Pest Control (${pestTier.label || 'Quarterly'})`,
       perTreatment: Number.isFinite(pestPa) && pestPa > 0 ? pestPa : null,
+      displayPrice: treatmentDisplayPrice(pestPa, { service: 'pest_control' }),
       visitsPerYear: Number(pestTier.apps || pestTier.v) || null,
       waveGuardDiscountEligible: true,
     });
@@ -4197,6 +4291,7 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
         service: svc?.service || (svc?.name || '').toLowerCase().replace(/\s+/g, '_'),
         label: svc?.displayName || recurringServiceDisplayName(recurringServiceKey(svc)) || svc?.name || 'Service',
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
+        displayPrice: treatmentDisplayPrice(pa, svc),
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(svc),
       });
@@ -4468,6 +4563,21 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       estimateDataForIntelligence,
       { pricingBundle },
     );
+    try {
+      const assistantContext = buildEstimateAssistantContext({
+        estimate,
+        estData: estimateDataForIntelligence,
+        pricingBundle,
+        selectedFrequency: '',
+        serviceMode: 'recurring',
+      });
+      intelligence.supportSources = loadPublicEstimateSupportSources({
+        question: 'What is included in this WaveGuard estimate?',
+        context: assistantContext,
+      });
+    } catch (err) {
+      logger.warn(`[estimate-data] intelligence support context skipped: ${err.message}`);
+    }
 
     const terminalState = (() => {
       if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;

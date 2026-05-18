@@ -106,7 +106,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
     return (
       <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
         <div style={{ fontSize: 14, color: W.textBody }}>
-          Couldn't load times right now. <a href="tel:+19412975749" style={{ color: W.blue }}>Call (941) 297-5749</a> and we'll get you scheduled.
+          Couldn't load times right now. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call (941) 297-5749</a> and we'll get you scheduled.
         </div>
       </div>
     );
@@ -124,7 +124,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
     return (
       <div style={{ background: W.white, borderRadius: 14, padding: 24, border: `1px solid ${W.warmBorder}`, marginBottom: 16 }}>
         <div style={{ fontSize: 14, color: W.textBody }}>
-          No open slots in the next 14 days. <a href="tel:+19412975749" style={{ color: W.blue }}>Call us</a> and we'll fit you in.
+          No open slots in the next 14 days. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call us</a> and we'll fit you in.
         </div>
       </div>
     );
@@ -159,7 +159,7 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
             onClick={() => setShowMore((v) => !v)}
             style={{
               marginTop: 8, padding: '10px 16px', background: 'transparent',
-              color: W.blue, border: `1px solid ${W.border}`, borderRadius: 12,
+              color: W.blueDeeper, border: `1px solid ${W.blueDeeper}`, borderRadius: 12,
               cursor: 'pointer', fontSize: 14, fontWeight: 600, width: '100%',
             }}
           >

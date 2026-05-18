@@ -20,6 +20,8 @@ const W = {
   green: '#16A34A', greenDark: '#15803D',
 };
 
+const ACTION_BG = W.blueDeeper;
+
 export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMode, setupFee, invoiceMode = false }) {
   const isOneTime = serviceMode === 'one_time';
   const offerPrepay = !invoiceMode && !isOneTime && setupFee && setupFee.waivedWithPrepay;
@@ -57,7 +59,7 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
           type="button"
           disabled={disabled}
           onClick={() => onSelect('pay_at_visit')}
-          style={{ ...btnBase, background: W.blueBright, color: W.white }}
+          style={{ ...btnBase, background: ACTION_BG, color: W.white }}
         >
           {isOneTime ? 'Book + send invoice' : 'Accept + send invoice'}
         </button>
@@ -84,7 +86,7 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
           type="button"
           disabled={disabled}
           onClick={() => onSelect('pay_at_visit')}
-          style={{ ...btnBase, background: W.yellow, color: W.navy }}
+          style={{ ...btnBase, background: ACTION_BG, color: W.white }}
         >
           Book + pay on service day
         </button>
@@ -111,20 +113,20 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
           type="button"
           disabled={disabled}
           onClick={() => onSelect('card_on_file')}
-          style={{ ...btnBase, background: W.blueBright, color: W.white }}
+          style={{ ...btnBase, background: ACTION_BG, color: W.white }}
         >{cardOnFileLabel}</button>
         <button
           type="button"
           disabled={disabled}
           onClick={() => onSelect('pay_at_visit')}
-          style={{ ...btnBase, background: W.yellow, color: W.navy }}
+          style={{ ...btnBase, background: ACTION_BG, color: W.white }}
         >{payAtVisitLabel}</button>
         {offerPrepay && (
           <button
             type="button"
             disabled={disabled}
             onClick={() => onSelect('prepay_annual')}
-            style={{ ...btnBase, background: W.green, color: W.white, position: 'relative' }}
+            style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
           >
             Pay the year upfront
             <span style={{
