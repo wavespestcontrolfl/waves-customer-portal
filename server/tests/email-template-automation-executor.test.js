@@ -287,6 +287,77 @@ describe('email template automation executor', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('treats omitted estimate viewed state as unviewed', () => {
+    expect(AutomationExecutor.conditionFailureFor(
+      { estimate_viewed: false, estimate_status: ['sent', 'viewed'] },
+      { status: 'sent', estimate_id: 'est-1' },
+    )).toBeNull();
+  });
+
+  test('allows viewed estimate status during delayed follow-up rechecks', async () => {
+    const queuedRun = run({
+      automation_key: 'estimate.viewed_followup',
+      trigger_event_key: 'estimate.viewed',
+      template_key: 'estimate.viewed_followup',
+      idempotency_key: 'estimate.viewed_followup:est-1',
+      payload: JSON.stringify({
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        status: 'sent',
+        estimate_viewed: true,
+      }),
+    });
+    const sentRun = { ...queuedRun, status: 'sent', email_message_id: 'message-1' };
+    const sentRunQuery = chain({ returning: [sentRun] });
+    setDbQueues({
+      email_template_automation_runs: [
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        sentRunQuery,
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'event-1' }] }),
+        chain({ returning: [{ id: 'event-2' }] }),
+      ],
+      estimates: [chain({
+        first: {
+          id: 'est-1',
+          status: 'viewed',
+          viewed_at: new Date('2026-05-18T12:05:00.000Z'),
+        },
+      })],
+    });
+    EmailTemplates.sendTemplate.mockResolvedValue({
+      sent: true,
+      message: { id: 'message-1', provider_message_id: 'sg-message-1' },
+    });
+
+    const result = await AutomationExecutor.executeRun(queuedRun, {
+      automation: automation({
+        automation_key: 'estimate.viewed_followup',
+        trigger_event_key: 'estimate.viewed',
+        template_key: 'estimate.viewed_followup',
+        idempotency_key_template: 'estimate.viewed_followup:{estimate_id}',
+        conditions: JSON.stringify({ estimate_viewed: true, estimate_status: ['sent', 'viewed'] }),
+        exit_conditions: JSON.stringify({ stop_if: ['estimate.accepted', 'estimate.expired'] }),
+      }),
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    expect(result.status).toBe('sent');
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        estimate_status: 'viewed',
+        estimate_viewed: true,
+      }),
+    }));
+    expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'sent',
+    }));
+  });
+
   test('schedules retries using the automation retry policy', async () => {
     const queuedRun = run({ attempts: 0 });
     const retryRun = {
