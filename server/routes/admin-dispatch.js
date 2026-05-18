@@ -32,6 +32,7 @@ const { enqueueServiceReportV1EmailDelivery } = require('../services/service-rep
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
+const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 const { uploadServicePhotoDataUrls } = require('../services/service-photos');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
@@ -1679,11 +1680,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         ) {
           await trx('service_findings').insert({
             service_record_id: record.id,
-            category: 'no_activity',
-            severity: 'info',
-            title: 'No activity observed this visit',
-            detail: 'All inspected zones were clear of pest activity and conducive conditions. Continuing routine protective service per schedule.',
-            recommendation: null,
+            ...buildNoActivityFinding(reportServiceLine),
           });
         }
         if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index) {

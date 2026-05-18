@@ -49,6 +49,7 @@ const {
   enqueueServiceReportV1EmailDelivery,
   nextServiceReportDeliveryAttemptAt,
 } = require('../services/service-report/delivery-queue');
+const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 
 describe('service report v1', () => {
   function restoreEnv(name, value) {
@@ -550,6 +551,14 @@ describe('service report v1', () => {
     expect(formatTechnicianForCustomer({ name: 'Adam Benetti' })).toBe('Adam B.');
     expect(formatTechnicianForCustomer({ name: 'Your Waves technician' })).toBe('Your Waves technician');
     expect(formatTechnicianForCustomer({ name: 'Your tech' })).toBe('Your tech');
+  });
+
+  test('clean-visit finding copy matches service line', () => {
+    expect(buildNoActivityFinding('pest').detail).toMatch(/pest activity/);
+    expect(buildNoActivityFinding('lawn').detail).toMatch(/Turf areas/);
+    expect(buildNoActivityFinding('lawn').detail).not.toMatch(/pest activity/);
+    expect(buildNoActivityFinding('tree_shrub').detail).toMatch(/tree and shrub/i);
+    expect(buildNoActivityFinding('palm').detail).toMatch(/palms/i);
   });
 
   test('elapsed time parser matches completion panel duration strings', () => {
