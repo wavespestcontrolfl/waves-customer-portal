@@ -954,7 +954,7 @@ const InvoiceService = {
    */
   async createFromService(
     serviceRecordId,
-    { amount, description, taxRate, useScheduledReplay = false },
+    { amount, description, taxRate, useScheduledReplay = false, dueDate },
   ) {
     const sr = await db("service_records")
       .where({ id: serviceRecordId })
@@ -989,6 +989,7 @@ const InvoiceService = {
       lineItems,
       discountIds: scheduledInvoice?.discountIds || undefined,
       taxRate,
+      dueDate,
       trustedStoredDiscountSources: scheduledInvoice
         ? ["scheduled_service"]
         : [],
@@ -1293,6 +1294,60 @@ const InvoiceService = {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
     }
     return { ok, sms, email };
+  },
+
+  async markDeliverySent(
+    invoiceId,
+    { sms = false, email = false, source = "invoice_delivery", payUrl = null } = {},
+  ) {
+    const invoice = await db("invoices").where({ id: invoiceId }).first();
+    if (!invoice) return null;
+    if (!SEND_FINALIZABLE_STATUSES.includes(invoice.status)) return invoice;
+
+    const now = new Date();
+    const updates = {
+      status: db.raw(
+        "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+      ),
+      sent_at: db.raw("COALESCE(sent_at, ?)", [now]),
+      scheduled_send_at: null,
+      scheduled_send_error: null,
+      scheduled_request_review: false,
+      scheduled_review_delay_minutes: null,
+      updated_at: now,
+    };
+    if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [now]);
+
+    const [updated] = await db("invoices")
+      .where({ id: invoiceId })
+      .whereIn("status", SEND_FINALIZABLE_STATUSES)
+      .update(updates)
+      .returning("*");
+    const finalInvoice = updated || invoice;
+
+    try {
+      await require("./invoice-followups").scheduleForInvoice(invoiceId);
+    } catch (err) {
+      logger.error(
+        `[invoice-followups] scheduleForInvoice failed after ${source}: ${err.message}`,
+      );
+    }
+
+    await db("activity_log")
+      .insert({
+        customer_id: finalInvoice.customer_id,
+        action: "invoice_sent",
+        description: `Invoice ${finalInvoice.invoice_number} sent via ${[
+          sms && "SMS",
+          email && "email",
+        ].filter(Boolean).join(" + ") || "customer message"}`,
+        metadata: JSON.stringify({ invoiceId, source, payUrl }),
+      })
+      .catch((err) =>
+        logger.warn(`[invoice] activity_log insert failed: ${err.message}`),
+      );
+
+    return finalInvoice;
   },
 
   async processScheduledSends({ limit = 25 } = {}) {

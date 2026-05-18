@@ -12,6 +12,7 @@
  * from here instead of hand-rolling another <div style>.
  */
 const { WAVES_FL_LICENSE_LINE } = require('../config/business');
+const { formatDisplayDate } = require('../utils/date-only');
 
 // Brand colors — mirrors client/src/theme-brand.js
 const NAVY = '#1B2C5B';
@@ -30,9 +31,7 @@ function currency(n) {
 }
 
 function formatDate(d) {
-  if (!d) return '';
-  const dt = new Date(typeof d === 'string' ? (d.length === 10 ? d + 'T12:00:00' : d) : d);
-  return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+  return formatDisplayDate(d);
 }
 
 // Gold CTA with navy 3D-offset shadow — matches theme-brand.js GOLD_CTA identity.
