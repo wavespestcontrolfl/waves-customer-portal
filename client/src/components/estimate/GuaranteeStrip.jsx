@@ -1,8 +1,10 @@
 /**
  * Footer strip — cancel anytime, satisfaction guarantee, license number.
- * License falls back to a placeholder when WAVES_FDACS_LICENSE isn't set
- * in env; admin can swap it in without code changes.
+ * License falls back to the Waves FDACS number when no server-provided
+ * estimate license is present.
  */
+import { WAVES_FL_LICENSE_LINE, normalizeFdacsLicense } from '../../constants/business';
+
 const W = {
   blue: '#065A8C', blueDeeper: '#1B2C5B',
   navy: '#0F172A', textBody: '#334155', textCaption: '#64748B',
@@ -10,10 +12,13 @@ const W = {
 };
 
 export default function GuaranteeStrip({ licenseNumber }) {
+  const licenseDetail = licenseNumber
+    ? `FL License #${normalizeFdacsLicense(licenseNumber)}`
+    : WAVES_FL_LICENSE_LINE;
   const items = [
     { label: 'Cancel anytime', detail: 'no long-term contract' },
     { label: 'Satisfaction guaranteed', detail: 'we come back free' },
-    { label: 'Licensed & insured', detail: licenseNumber || 'FDACS license on file' },
+    { label: 'Licensed & insured', detail: licenseDetail },
   ];
 
   return (

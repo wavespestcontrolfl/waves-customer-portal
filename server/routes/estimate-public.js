@@ -3,6 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { WAVES_FDACS_LICENSE_NUMBER } = require('../config/business');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -4651,7 +4652,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         satelliteUrl: estimate.satellite_url || null,
         intelligence,
         notes: estimate.notes || null,
-        licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
+        licenseNumber: WAVES_FDACS_LICENSE_NUMBER,
         showOneTimeOption: !!estimate.show_one_time_option,
         billByInvoice: !!estimate.bill_by_invoice,
       },
