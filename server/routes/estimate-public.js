@@ -1160,7 +1160,8 @@ function renderPage(token, estimate, estData) {
   .loc .loc-phone:hover{text-decoration:underline}
   .loc .loc-hours{color:${BRAND.green};font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
   .final{background:#1B2C5B;color:#fff;text-align:center;padding:32px 24px;border-radius:14px;border:1px solid #1B2C5B}
-  .final h2{color:#fff;margin:0 0 8px}
+  .final h2{color:#fff;margin:0 0 6px}
+  .final-subhead{color:#fff;margin:0 0 10px;font-size:20px;font-weight:600}
   .final p{color:rgba(255,255,255,.8);font-size:14px}
   .accepted-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:${BRAND.green};text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
   .quote-required-banner{background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
@@ -1294,8 +1295,9 @@ ${shellTopBar()}
     </div>
   </div>` : `
   <div class="final">
-    <h2 data-mode-only="recurring">Wave Goodbye to Pests!</h2>
-    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Wave Goodbye to Pests!</h2>` : ''}
+    <h2 data-mode-only="recurring">Go Waves!</h2>
+    <div class="final-subhead" data-mode-only="recurring">Wave Goodbye to Pests!</div>
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves!</h2><div class="final-subhead" data-mode-only="one_time" hidden>Wave Goodbye to Pests!</div>` : ''}
     <p>No surprise increases, no hidden fees.</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">

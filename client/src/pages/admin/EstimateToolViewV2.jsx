@@ -1225,6 +1225,9 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq 
 
         <div className="bg-[#1B2C5B] text-white text-center rounded-[14px] border border-[#1B2C5B] p-6 mt-4">
           <div className="customer-preview-serif text-26 leading-tight">
+            Go Waves!
+          </div>
+          <div className="customer-preview-serif text-20 leading-tight text-white/90 mt-1">
             Wave Goodbye to Pests!
           </div>
           <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>

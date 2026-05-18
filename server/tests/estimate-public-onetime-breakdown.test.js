@@ -584,6 +584,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('class="intelligence-badge"');
     expect(html).toContain('Satellite view of 123 Main St');
     expect(html).toContain('1,800 sq ft');
+    expect(html).toContain('Go Waves!');
     expect(html).toContain('Wave Goodbye to Pests!');
     expect(html).not.toContain('cadence and visit counts');
     expect(html).not.toContain('Your technician verifies measurements');
