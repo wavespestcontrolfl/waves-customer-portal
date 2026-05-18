@@ -11,6 +11,7 @@
  * If you add a new transactional email, import wrapEmail + ctaButton
  * from here instead of hand-rolling another <div style>.
  */
+const { WAVES_FL_LICENSE_LINE } = require('../config/business');
 
 // Brand colors — mirrors client/src/theme-brand.js
 const NAVY = '#1B2C5B';
@@ -106,7 +107,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
         </td></tr>
         <tr><td align="center" style="background:${SAND};padding:20px 32px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;text-align:center;">
-            Waves Pest Control, LLC · <a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:none;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · FL License #JB351547
+            Waves Pest Control, LLC · <a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:none;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
         </td></tr>
       </table>
@@ -162,7 +163,7 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
         </td></tr>
         <tr><td align="center" style="background:${SAND};padding:18px 24px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;text-align:center;">
-            Waves Pest Control, LLC · <a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:none;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · FL License #JB351547
+            Waves Pest Control, LLC · <a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:none;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
         </td></tr>
       </table>
@@ -227,7 +228,7 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
             ${unsubLine}<a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:underline;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a>
           </div>
           <div style="margin-top:6px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">
-            Waves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211 · FL License #JB351547
+            Waves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211 · ${WAVES_FL_LICENSE_LINE}
           </div>
           ${footerNote ? `<div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">${footerNote}</div>` : ''}
         </td></tr>

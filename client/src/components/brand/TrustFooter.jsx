@@ -1,7 +1,8 @@
 import React from 'react';
+import { WAVES_FL_LICENSE_LINE } from '../../constants/business';
 
 const YEAR = new Date().getFullYear();
-const LEGAL_LINE = `© ${YEAR} Waves Pest Control, LLC · Licensed & insured · FL License #JB351547 · Backed by the Waves Guarantee`;
+const LEGAL_LINE = `© ${YEAR} Waves Pest Control, LLC · Licensed & insured · ${WAVES_FL_LICENSE_LINE} · Backed by the Waves Guarantee`;
 
 export default function TrustFooter({ tone = 'dark', align = 'center', variant = 'customer' }) {
   // Admin variant swaps the guarantee line for the internal-system line per spec §7.2.

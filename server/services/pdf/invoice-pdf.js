@@ -1,5 +1,6 @@
 const PDFDocument = require('pdfkit');
 const { getLogoBuffer } = require('./brand-logo');
+const { WAVES_FL_LICENSE_LINE } = require('../../config/business');
 
 // Brand palette — mirrors client/src/styles/brand-tokens.css + theme-brand.js
 const NAVY = '#1B2C5B';      // blueDeeper — headings, header bar
@@ -40,7 +41,7 @@ function headerBar(doc, title, statusLabel, statusColor) {
     doc.fontSize(26).font('Helvetica-Bold').fillColor('#fff').text('WAVES', 40, 22);
     doc.fontSize(9).font('Helvetica').fillColor('#B8D4EA').text('PEST CONTROL & LAWN CARE', 40, 52);
   }
-  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text('FL License #JB351547', 108, 70);
+  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_FL_LICENSE_LINE, 108, 70);
 
   doc.fontSize(10).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', 430, 22, { width: 142, align: 'right' });
   doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text('wavespestcontrol.com', 430, 38, { width: 142, align: 'right' });

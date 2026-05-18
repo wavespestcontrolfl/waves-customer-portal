@@ -10,6 +10,7 @@ import {
 } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
+import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 
 /**
  * Public project-report viewer (WDO, termite, pest, rodent, bed bug).
@@ -754,7 +755,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
             marginTop: 8,
             lineHeight: 1.4,
           }}>
-            Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. JB351547
+            Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
           </div>
         </div>
         <img src="/waves-logo.png" alt="Waves" style={{ height: 36, flexShrink: 0 }} />
