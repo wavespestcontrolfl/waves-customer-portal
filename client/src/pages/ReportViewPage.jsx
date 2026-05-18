@@ -9,6 +9,7 @@ import {
   CloudSun,
   Eye,
   FileCheck2,
+  Home,
   Lock,
   MapPin,
   Printer,
@@ -5199,6 +5200,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             </div>
           </div>
           <div className="sr-actions">
+            <a href="/" style={actionButtonStyle('primary')}><Home size={16} /> Portal</a>
             {pdfUrl && <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>}
             <button type="button" onClick={share} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
             <button type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
