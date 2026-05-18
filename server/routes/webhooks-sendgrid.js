@@ -137,6 +137,14 @@ async function handleEvent(ev) {
   const automationSend = !newsletterDelivery ? await db('automation_step_sends')
     .where({ sendgrid_message_id: messageId })
     .first() : null;
+  const emailMessage = !newsletterDelivery && !automationSend
+    ? await db('email_messages')
+      .where({ provider_message_id: messageId })
+      .modify((q) => {
+        if (email) q.whereRaw('LOWER(recipient_email_snapshot) = ?', [String(email).toLowerCase()]);
+      })
+      .first()
+    : null;
 
   if (newsletterDelivery) {
     await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
@@ -146,7 +154,11 @@ async function handleEvent(ev) {
     await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
     return;
   }
-  // Untracked send (transactional invoices, receipts, etc.) — ignore.
+  if (emailMessage) {
+    await processWebhookEvent(ev, messageId, email, (trx) => handleEmailMessageEvent(ev, emailMessage, trx));
+    return;
+  }
+  // Untracked send — ignore.
   return;
 }
 
@@ -275,6 +287,145 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       // group_resubscribe = we don't use SG groups
       return null;
   }
+}
+
+function eventOccurredAt(ev, fallback = new Date()) {
+  const ts = Number(ev?.timestamp);
+  if (!Number.isFinite(ts)) return fallback;
+  return new Date(ts > 1e12 ? ts : ts * 1000);
+}
+
+function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
+  switch (ev.event) {
+    case 'delivered':
+      if (message.delivered_at) return null;
+      return { status: 'delivered', delivered_at: now, updated_at: now };
+
+    case 'open':
+      if (message.opened_at) return null;
+      return { opened_at: now, updated_at: now };
+
+    case 'click':
+      if (message.clicked_at) return null;
+      return { clicked_at: now, updated_at: now };
+
+    case 'bounce':
+    case 'blocked':
+    case 'dropped':
+      if (message.bounced_at) return null;
+      return {
+        status: ev.event === 'bounce' ? 'bounced' : ev.event,
+        bounced_at: now,
+        error_message: (ev.reason || ev.response || ev.type || '').toString().slice(0, 1000),
+        updated_at: now,
+      };
+
+    case 'spamreport':
+      if (message.complained_at) return null;
+      return { status: 'spam_report', complained_at: now, updated_at: now };
+
+    case 'unsubscribe':
+    case 'group_unsubscribe':
+      return { status: 'unsubscribed', updated_at: now };
+
+    case 'processed':
+    case 'deferred':
+    case 'group_resubscribe':
+    default:
+      return null;
+  }
+}
+
+function suppressionForEmailEvent(ev, groupKey = null) {
+  const event = String(ev?.event || '').toLowerCase();
+  if (event === 'spamreport') {
+    return { suppression_type: 'spam_complaint', group_key: null };
+  }
+  if (event === 'unsubscribe') {
+    return { suppression_type: 'unsubscribe', group_key: null };
+  }
+  if (event === 'group_unsubscribe') {
+    return { suppression_type: 'unsubscribe', group_key: groupKey || null };
+  }
+  if (event === 'bounce') {
+    const type = String(ev?.type || '').toLowerCase();
+    if (!type || type === 'bounce' || type === 'hard') {
+      return { suppression_type: 'bounce', group_key: null };
+    }
+  }
+  return null;
+}
+
+async function groupKeyForEmailMessage(message, client = db) {
+  if (!message?.template_id) return null;
+  const template = await client('email_templates')
+    .where({ id: message.template_id })
+    .first('suppression_group_key', 'send_stream');
+  return template?.suppression_group_key || template?.send_stream || null;
+}
+
+async function recordEmailSuppressionForEvent(ev, message, groupKey, at, client = db) {
+  const email = String(ev?.email || message?.recipient_email_snapshot || '').trim().toLowerCase();
+  if (!email) return;
+  const suppression = suppressionForEmailEvent(ev, groupKey);
+  if (!suppression) return;
+
+  const metadata = {
+    provider: 'sendgrid',
+    provider_event_id: ev.sg_event_id || null,
+    event_type: ev.event || null,
+    reason: ev.reason || ev.response || ev.type || null,
+    asm_group_id: ev.asm_group_id || null,
+    email_message_id: message?.id || null,
+  };
+
+  const existingQuery = client('email_suppressions')
+    .whereRaw('LOWER(email) = ?', [email])
+    .where({
+      status: 'active',
+      suppression_type: suppression.suppression_type,
+    });
+  if (suppression.group_key) existingQuery.where({ group_key: suppression.group_key });
+  else existingQuery.whereNull('group_key');
+  const existing = await existingQuery.first();
+
+  if (existing) {
+    await client('email_suppressions').where({ id: existing.id }).update({
+      source: 'sendgrid_event_webhook',
+      metadata: client.raw('COALESCE(metadata, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(metadata)]),
+      updated_at: at,
+    });
+    return;
+  }
+
+  await client('email_suppressions').insert({
+    email,
+    group_key: suppression.group_key,
+    suppression_type: suppression.suppression_type,
+    status: 'active',
+    source: 'sendgrid_event_webhook',
+    suppressed_at: at,
+    metadata: JSON.stringify(metadata),
+    created_at: at,
+    updated_at: at,
+  });
+}
+
+async function handleEmailMessageEvent(ev, message, client = db) {
+  const now = eventOccurredAt(ev);
+  await client('email_message_events').insert({
+    email_message_id: message.id,
+    provider: 'sendgrid',
+    provider_event_id: ev.sg_event_id || null,
+    event_type: ev.event || 'unknown',
+    raw_event: JSON.stringify(ev || {}),
+    occurred_at: now,
+  });
+
+  const updates = computeEmailMessageEventUpdates(ev, message, now);
+  if (updates) await client('email_messages').where({ id: message.id }).update(updates);
+  const groupKey = await groupKeyForEmailMessage(message, client);
+  await recordEmailSuppressionForEvent(ev, message, groupKey, now, client);
 }
 
 async function handleNewsletterEvent(ev, delivery, client = db) {
@@ -448,4 +599,6 @@ async function cancelActiveEnrollments({ email, reason, asmGroup }, client = db)
 // is hung off as a property so the test suite can exercise it directly.
 module.exports = router;
 module.exports.computeNewsletterEventUpdates = computeNewsletterEventUpdates;
+module.exports.computeEmailMessageEventUpdates = computeEmailMessageEventUpdates;
+module.exports.suppressionForEmailEvent = suppressionForEmailEvent;
 module.exports.isFreshTimestamp = isFreshTimestamp;

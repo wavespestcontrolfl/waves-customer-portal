@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { formatVisitLabel, normalizeDate } = require('./time-format');
+const { customerVisiblePressureIndex } = require('./pressure-index');
 
 const SEVERITY_RANK = {
   critical: 5,
@@ -15,9 +16,7 @@ function round1(value) {
 }
 
 function pressureNumber(value) {
-  if (value === null || value === undefined || value === '') return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? round1(n) : null;
+  return customerVisiblePressureIndex(value);
 }
 
 function serviceStartedAt(row) {
@@ -63,17 +62,19 @@ function groupFindingsByRecordId(findings = []) {
 
 function buildCustomerSummary({ direction, percentChange, baseline, current }) {
   if (direction === 'first_visit') {
-    return 'This is your first pressure reading. Future reports will show the trend.';
+    return current?.pressureIndex != null
+      ? `This is your first pressure marker: ${current.pressureIndex.toFixed(1)}. Future reports will show the trend.`
+      : 'This is your first pressure reading. Future reports will show the trend.';
   }
   if (!baseline || !current) return 'Pressure trend will appear after more visits.';
   if (current.pressureIndex < 1) {
-    return 'Pest pressure remains low.';
+    return `Pest pressure remains low at ${current.pressureIndex.toFixed(1)}.`;
   }
   if (baseline.pressureIndex < 1 && direction === 'up') {
     return 'Pest pressure increased this visit. We treated the active zones and will continue monitoring.';
   }
   if (baseline.pressureIndex < 1) {
-    return 'Pest pressure remains low.';
+    return `Pest pressure remains low at ${current.pressureIndex.toFixed(1)}.`;
   }
   if (direction === 'down') {
     return percentChange != null

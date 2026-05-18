@@ -1,7 +1,8 @@
 const db = require('../../models/db');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig } = require('./service-line-configs');
-const { pressureFromFindings } = require('./pressure-index');
+const { customerVisiblePressureIndex, pressureFromFindings } = require('./pressure-index');
+const { buildNoActivityFinding } = require('./no-activity-finding');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -191,7 +192,9 @@ function metricValue(metric, context) {
   if (metric.key === 'on_site_min') return context.onSiteMin;
   if (metric.aggregate === 'count_zones') return `${context.treatedZoneIds.size}/${context.zones.length}`;
   if (metric.aggregate === 'count_applications') return context.applications.length;
-  if (metric.aggregate === 'count_findings') return context.findings.length;
+  if (metric.aggregate === 'count_findings') {
+    return context.findings.filter((finding) => finding?.category !== 'no_activity').length;
+  }
   if (metric.aggregate === 'pressure_index') return context.pressureIndex;
   if (metric.key === 'linear_ft') {
     if (context.linearFt != null) return context.linearFt;
@@ -338,6 +341,9 @@ function normalizeWorkflowType(value) {
 
 function validTimestamp(value) {
   if (!value) return '';
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? '' : value.toISOString();
+  }
   const raw = String(value).trim();
   const naiveWallClock = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?$/.test(raw);
   const date = naiveWallClock ? parseETDateTime(raw.replace(/\.\d+$/, '')) : new Date(value);
@@ -779,8 +785,10 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
   if (configured.length) return configured.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
 
   const events = [];
-  const add = (type, timestamp, description) => {
-    const normalizedTimestamp = validTimestamp(timestamp);
+  const add = (type, candidates, description) => {
+    const list = Array.isArray(candidates) ? candidates : [{ value: candidates }];
+    const candidate = list.find((entry) => entry?.value);
+    const normalizedTimestamp = validTimestamp(candidate?.value);
     if (!normalizedTimestamp) return;
     if (events.some((event) => event.type === type && event.timestamp === normalizedTimestamp)) return;
     events.push({
@@ -793,11 +801,30 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
     });
   };
 
-  add('technician_en_route', service.en_route_at || structured.enRouteAt || serviceData.enRouteAt);
-  add('arrived_on_site', service.arrived_at || structured.arrivedAt || serviceData.arrivedAt || service.started_at);
+  add('technician_en_route', [
+    { value: service.en_route_at },
+    { value: service.scheduled_en_route_at },
+    { value: structured.enRouteAt },
+    { value: serviceData.enRouteAt },
+  ]);
+  add('arrived_on_site', [
+    { value: service.arrived_at },
+    { value: service.scheduled_arrived_at },
+    { value: structured.arrivedAt },
+    { value: serviceData.arrivedAt },
+    { value: service.started_at },
+    { value: service.scheduled_actual_start_time },
+  ]);
   add('inspection_started', structured.inspectionStartedAt || structured.inspection_started_at || serviceData.inspectionStartedAt || serviceData.inspection_started_at);
   add('service_started', structured.serviceStartedAt || structured.service_started_at || serviceData.serviceStartedAt || serviceData.service_started_at);
-  add('service_completed', service.ended_at || structured.serviceCompletedAt || structured.service_completed_at || serviceData.serviceCompletedAt || serviceData.service_completed_at);
+  add('service_completed', [
+    { value: service.ended_at },
+    { value: service.scheduled_actual_end_time },
+    { value: structured.serviceCompletedAt },
+    { value: structured.service_completed_at },
+    { value: serviceData.serviceCompletedAt },
+    { value: serviceData.service_completed_at },
+  ]);
   add('quality_reviewed', structured.qualityReviewedAt || structured.quality_reviewed_at || serviceData.qualityReviewedAt || serviceData.quality_reviewed_at);
   add('report_published', service.report_generated_at || structured.reportPublishedAt || structured.report_published_at || serviceData.reportPublishedAt || serviceData.report_published_at);
 
@@ -840,6 +867,21 @@ function buildProtocolPayload(record) {
     ]),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,
   };
+}
+
+function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
+  const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
+  const concernText = String(
+    structured.customerConcernText
+    || structured.customer_concern_text
+    || structured.customerConcern
+    || structured.customer_concern
+    || '',
+  ).trim();
+  return visitOutcome === 'completed'
+    && !(protocol.observations || []).length
+    && !(protocol.recommendations || []).length
+    && !concernText;
 }
 
 function findingSeverityForObservation(text) {
@@ -894,6 +936,17 @@ function lawnAssessmentSummary(current, initial, count) {
   if (delta > 0) return `Lawn health is up ${delta} point${delta === 1 ? '' : 's'} since your first assessment.`;
   if (delta < 0) return `Lawn health is down ${Math.abs(delta)} point${Math.abs(delta) === 1 ? '' : 's'} since your first assessment.`;
   return 'Lawn health is holding steady since your first assessment.';
+}
+
+function hasLawnAssessmentCustomerSignal(lawnAssessment) {
+  if (!lawnAssessment) return false;
+  if (String(lawnAssessment.customerSummary || '').trim()) return true;
+  if (Array.isArray(lawnAssessment.photos) && lawnAssessment.photos.length) return true;
+  const scores = lawnAssessment.scores || {};
+  if (Object.values(scores).some((value) => value != null && value !== '')) return true;
+  if (String(lawnAssessment.observations || '').trim()) return true;
+  const recommendations = lawnAssessment.recommendations || {};
+  return Object.values(recommendations).some((value) => String(value || '').trim());
 }
 
 async function lawnPhotoUrl(photo) {
@@ -1116,8 +1169,19 @@ async function buildReportV1Data(service, token, knex = db) {
     });
   }
 
+  const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  const hasLawnAssessmentSignal = hasLawnAssessmentCustomerSignal(lawnAssessment);
+
+  if (!findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
+    findings.push({
+      id: `no-activity-${service.id}`,
+      zoneId: null,
+      ...buildNoActivityFinding(serviceLine),
+    });
+  }
+
   const pressureIndex = service.pressure_index != null
-    ? Number(service.pressure_index)
+    ? customerVisiblePressureIndex(service.pressure_index)
     : pressureFromFindings(findings);
 
   const applications = products.map((product, index) => {
@@ -1163,9 +1227,10 @@ async function buildReportV1Data(service, token, knex = db) {
   const workflowEvents = buildWorkflowEvents({
     service: {
       ...service,
-      en_route_at: service.en_route_at || scheduledService?.en_route_at || null,
-      arrived_at: service.arrived_at || scheduledService?.arrived_at || null,
-      started_at: service.started_at || scheduledService?.actual_start_time || scheduledService?.arrived_at || null,
+      scheduled_en_route_at: scheduledService?.en_route_at || null,
+      scheduled_arrived_at: scheduledService?.arrived_at || null,
+      scheduled_actual_start_time: scheduledService?.actual_start_time || null,
+      scheduled_actual_end_time: scheduledService?.actual_end_time || null,
     },
     structured,
     serviceData,
@@ -1223,7 +1288,6 @@ async function buildReportV1Data(service, token, knex = db) {
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
   }, { service, applications });
-  const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
   const metrics = buildMetrics(config, {
     onSiteMin,
     treatedZoneIds,

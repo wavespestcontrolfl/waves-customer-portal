@@ -16,6 +16,8 @@
 
 const db = require('../models/db');
 const EmailService = require('./email');
+const EmailTemplateLibrary = require('./email-template-library');
+const sendgrid = require('./sendgrid-mail');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const logger = require('./logger');
@@ -29,6 +31,10 @@ async function renderTemplate(templateKey, vars, fallback) {
     }
   } catch { /* fall through */ }
   return fallback;
+}
+
+function canFallbackFromTemplateEmailError(err) {
+  return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
 // Join with customers so we have phone + email + first_name in one query.
@@ -96,14 +102,38 @@ async function sendDualChannel(ob, { sms, email }) {
   }
   if (ob.email) {
     try {
-      const r = await EmailService.send({
-        to: ob.email,
-        subject: email.subject,
-        heading: email.heading,
-        body: email.body,
-        ctaUrl: email.ctaUrl,
-        ctaLabel: email.ctaLabel || 'Finish Setup',
-      });
+      let r = null;
+      let sentWithTemplateLibrary = false;
+      if (sendgrid.isConfigured() && email.templateKey) {
+        try {
+          const result = await EmailTemplateLibrary.sendTemplate({
+            templateKey: email.templateKey,
+            to: ob.email,
+            payload: email.payload || {},
+            recipientType: 'customer',
+            recipientId: ob.customer_id || null,
+            triggerEventId: `onboarding_followup:${email.stage}:${ob.id}`,
+            categories: ['onboarding_followup', email.stage].filter(Boolean),
+          });
+          r = result.blocked
+            ? { ok: false, error: result.reason || 'Email suppressed' }
+            : { ok: true, messageId: result.message?.provider_message_id || null };
+          sentWithTemplateLibrary = true;
+        } catch (e) {
+          if (!canFallbackFromTemplateEmailError(e)) throw e;
+          logger.warn(`[onboard-followup] Template unavailable for session ${ob.id}; falling back to SMTP: ${e.message}`);
+        }
+      }
+      if (!sentWithTemplateLibrary) {
+        r = await EmailService.send({
+          to: ob.email,
+          subject: email.subject,
+          heading: email.heading,
+          body: email.body,
+          ctaUrl: email.ctaUrl,
+          ctaLabel: email.ctaLabel || 'Finish Setup',
+        });
+      }
       if (r.ok) attempted = true;
     } catch (e) {
       logger.error(`[onboard-followup] Email failed for session ${ob.id}: ${e.message}`);
@@ -134,6 +164,13 @@ const OnboardingFollowUp = {
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
             email: {
+              templateKey: 'onboarding.24h_reminder',
+              stage: '24h',
+              payload: {
+                first_name: firstName,
+                onboarding_url: url,
+                plan_name: ob.waveguard_tier || 'Bronze',
+              },
               subject: 'Finish setting up your Waves service',
               heading: `Welcome aboard, ${firstName}!`,
               body: `<p>Thanks for choosing Waves Pest Control! We just need a few quick details to get you on the schedule — it takes about 2 minutes.</p><p>Tap the button below to finish.</p>`,
@@ -166,6 +203,12 @@ const OnboardingFollowUp = {
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
             email: {
+              templateKey: 'onboarding.72h_reminder',
+              stage: '72h',
+              payload: {
+                first_name: firstName,
+                onboarding_url: url,
+              },
               subject: 'Still here whenever you are',
               heading: `Hi ${firstName}`,
               body: `<p>Just a friendly nudge — whenever you're ready, finish up your Waves setup and we'll confirm your first service.</p><p>No rush. If anything is holding you up, just reply to this email.</p><p>— Adam, Waves Pest Control</p>`,
@@ -203,6 +246,14 @@ const OnboardingFollowUp = {
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
             email: {
+              templateKey: 'onboarding.expiring_notice',
+              stage: 'expiring',
+              payload: {
+                first_name: firstName,
+                onboarding_url: url,
+                expires_at: expDate,
+                plan_name: tier,
+              },
               subject: `Your Waves onboarding link expires ${expDate}`,
               heading: `Heads up — your link expires ${expDate}`,
               body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,

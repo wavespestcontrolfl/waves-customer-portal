@@ -1,8 +1,8 @@
 /**
- * Transactional email service — thin nodemailer wrapper over Google Workspace
- * SMTP (contact@wavespestcontrol.com). Not Beehiiv (that's marketing); this is
- * for one-off operational sends like follow-ups, onboarding nudges, and
- * dunning notices.
+ * Legacy transactional email fallback — thin nodemailer wrapper over Google
+ * Workspace SMTP (contact@wavespestcontrol.com). New customer-facing
+ * operational emails should render through email-template-library first so
+ * Waves owns template versions, validation, snapshots, and SendGrid events.
  *
  * Returns { ok, error? } so callers can treat email like SMS channels.
  */

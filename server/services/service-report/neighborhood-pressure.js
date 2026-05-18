@@ -1,5 +1,6 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
+const { customerVisiblePressureIndex } = require('./pressure-index');
 
 async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
   if (!record?.id) return undefined;
@@ -22,8 +23,8 @@ async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
     .map((row) => ({
       periodStart: row.period_start instanceof Date ? row.period_start.toISOString() : String(row.period_start),
       periodEnd: row.period_end instanceof Date ? row.period_end.toISOString() : String(row.period_end),
-      avgPressureIndex: Number(row.avg_pressure_index),
-      medianPressureIndex: row.median_pressure_index == null ? undefined : Number(row.median_pressure_index),
+      avgPressureIndex: customerVisiblePressureIndex(row.avg_pressure_index),
+      medianPressureIndex: row.median_pressure_index == null ? undefined : customerVisiblePressureIndex(row.median_pressure_index),
       sampleSize: Number(row.sample_size || 0),
     }))
     .filter((point) => Number.isFinite(point.avgPressureIndex))

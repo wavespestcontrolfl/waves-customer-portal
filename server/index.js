@@ -295,6 +295,7 @@ app.use('/api/admin/dev', require('./routes/admin-dev-dispatch-alert'));
 app.use('/api/stripe/terminal', require('./routes/stripe-terminal'));
 app.use('/api/admin/communications', adminCommsRoutes);
 app.use('/api/admin/communications', adminCommsAttachRoutes);
+app.use('/api/admin/email-templates', require('./routes/admin-email-templates'));
 app.use('/api/admin/newsletter', require('./routes/admin-newsletter'));
 app.use('/api/public/newsletter', require('./routes/public-newsletter'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
