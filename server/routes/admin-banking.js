@@ -210,7 +210,7 @@ router.post('/payouts/instant', async (req, res) => {
     res.json(result);
   } catch (err) {
     logger.error('[banking] Instant payout failed:', err);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || err.statusCode || 500).json({ error: err.message });
   }
 });
 
@@ -234,7 +234,7 @@ router.post('/payouts/standard', async (req, res) => {
     res.json(result);
   } catch (err) {
     logger.error('[banking] Standard payout failed:', err);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || err.statusCode || 500).json({ error: err.message });
   }
 });
 

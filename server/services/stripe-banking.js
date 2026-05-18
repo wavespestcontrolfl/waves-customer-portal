@@ -80,6 +80,12 @@ async function getBalance() {
       currency: b.currency,
       amount: b.amount / 100,
     }));
+    // `instant_available` is only populated for accounts with Instant Payouts
+    // enabled and is a separate, typically-smaller bucket than `available`.
+    const instantAvailable = (balance.instant_available || []).map(b => ({
+      currency: b.currency,
+      amount: b.amount / 100,
+    }));
 
     // Get next pending payout
     let nextPayout = null;
@@ -102,8 +108,10 @@ async function getBalance() {
     return {
       available,
       pending,
+      instant_available: instantAvailable,
       total_available: available.reduce((s, b) => s + b.amount, 0),
       total_pending: pending.reduce((s, b) => s + b.amount, 0),
+      total_instant_available: instantAvailable.reduce((s, b) => s + b.amount, 0),
       next_payout: nextPayout,
     };
   } catch (err) {
@@ -579,12 +587,22 @@ async function createPayout(amountDollars, opts = {}) {
     }
 
     const balance = await stripe.balance.retrieve();
-    const availableUsdCents = (balance.available || [])
+    const sumUsdCents = (entries) => (entries || [])
       .filter(b => String(b.currency || '').toLowerCase() === 'usd')
       .reduce((sum, b) => sum + Number(b.amount || 0), 0);
-    if (amountCents > availableUsdCents && !existingAttempt) {
+    // Instant payouts draw from `instant_available`, which is a separate bucket
+    // from `available` and is typically smaller. Standard payouts draw from `available`.
+    // Checking the wrong bucket here lets requests slip through to Stripe and come
+    // back as a 400 `balance_insufficient`, surfaced as an opaque HTTP 500 in the UI.
+    const guardCents = method === 'instant'
+      ? sumUsdCents(balance.instant_available)
+      : sumUsdCents(balance.available);
+    if (amountCents > guardCents && !existingAttempt) {
       const label = method === 'instant' ? 'Instant payout' : 'Standard payout';
-      throw new Error(`${label} amount exceeds available Stripe balance ($${(availableUsdCents / 100).toFixed(2)})`);
+      const bucketLabel = method === 'instant' ? 'instant-available Stripe balance' : 'available Stripe balance';
+      const err = new Error(`${label} amount exceeds ${bucketLabel} ($${(guardCents / 100).toFixed(2)})`);
+      err.status = 400;
+      throw err;
     }
 
     const actorId = nonPiiActorId(opts.requestedBy);
@@ -618,6 +636,12 @@ async function createPayout(amountDollars, opts = {}) {
     return payoutResponse(payout, method);
   } catch (err) {
     logger.error('[stripe-banking] createPayout failed:', err.message);
+    // Stripe SDK errors expose `statusCode`; copy onto `.status` so route
+    // handlers (which read `err.status`) propagate 4xx instead of falling
+    // back to 500.
+    if (err && err.status == null && Number.isFinite(err.statusCode)) {
+      err.status = err.statusCode;
+    }
     throw err;
   }
 }
