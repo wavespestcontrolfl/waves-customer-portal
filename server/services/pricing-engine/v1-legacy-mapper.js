@@ -11,6 +11,8 @@
 // when EstimatePage migrates off the legacy shape.
 // ============================================================
 
+const { priceTopDressing } = require('./service-pricing');
+
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
   'mosquito', 'termite_bait', 'rodent_bait',
@@ -28,6 +30,17 @@ const ONE_TIME_SERVICES = new Set([
 
 const CAP = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 const roundMoney = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+const finiteMoney = value => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+const effectiveOneTimePrice = li => (
+  finiteMoney(li.priceAfterDiscount)
+  ?? finiteMoney(li.totalAfterDiscount)
+  ?? finiteMoney(li.price)
+  ?? finiteMoney(li.total)
+  ?? 0
+);
 
 const SERVICE_LABEL = {
   one_time_pest: 'One-Time Pest',
@@ -81,6 +94,14 @@ function mapV1ToLegacyShape(v1Result) {
   const lineItems = v1Result.lineItems || [];
   const wg = v1Result.waveGuard || {};
   const summary = v1Result.summary || {};
+  const isRecurringCustomer = !!(
+    v1Result.isRecurringCustomer
+    ?? v1Result.recurringCustomer
+    ?? lineItems.some(li => (
+      Number(li.recurringCustomerDiscountRate || 0) > 0
+      || (li.discount?.appliedDiscounts || []).some(d => d.type === 'recurring_customer_one_time_perk')
+    ))
+  );
 
   const pestLI = lineItems.find(l => l.service === 'pest_control');
   const lawnLI = lineItems.find(l => l.service === 'lawn_care');
@@ -285,7 +306,7 @@ function mapV1ToLegacyShape(v1Result) {
     // legacy services that don't set a label themselves.
     const name = li.display?.name || li.label || labelFor(li.service);
     const quoteRequired = !!li.quoteRequired || !!li.requiresCustomQuote;
-    const price = quoteRequired ? null : (li.price ?? li.priceAfterDiscount ?? li.totalAfterDiscount ?? li.total ?? 0);
+    const price = quoteRequired ? null : effectiveOneTimePrice(li);
     const detail = [
       li.detail || li.det || '',
       li.exteriorDetail || li.display?.exteriorDetail || '',
@@ -339,6 +360,36 @@ function mapV1ToLegacyShape(v1Result) {
     .reduce((s, i) => s + (i.price || 0), 0);
   const oneTimeTotal = oneTimeItemsMoney + specialtyMoney + membershipFee;
 
+  const topDressingLI = lineItems.find(l => l.service === 'top_dressing');
+  if (topDressingLI) {
+    const pricedLawnSqFt = Number(topDressingLI.lawnSqFt || 0);
+    const eighth = priceTopDressing(pricedLawnSqFt, 'eighth', true);
+    const quarter = priceTopDressing(pricedLawnSqFt, 'quarter', true);
+    const selectedBase = finiteMoney(topDressingLI.priceBeforeDiscount)
+      ?? finiteMoney(topDressingLI.price)
+      ?? finiteMoney(topDressingLI.totalBeforeDiscount)
+      ?? finiteMoney(topDressingLI.total);
+    const selectedEffective = finiteMoney(topDressingLI.priceAfterDiscount)
+      ?? finiteMoney(topDressingLI.totalAfterDiscount)
+      ?? finiteMoney(topDressingLI.price)
+      ?? finiteMoney(topDressingLI.total);
+    const selectedMultiplier = selectedBase && selectedBase > 0 && selectedEffective !== null
+      ? selectedEffective / selectedBase
+      : 1;
+    let eighthPrice = roundMoney(eighth.price * selectedMultiplier);
+    let quarterPrice = roundMoney(quarter.price * selectedMultiplier);
+    const linePrice = effectiveOneTimePrice(topDressingLI);
+    if (Number.isFinite(Number(linePrice))) {
+      if (topDressingLI.depth === 'quarter') quarterPrice = Number(linePrice);
+      else eighthPrice = Number(linePrice);
+    }
+    R.td = roundMoney(eighthPrice);
+    R.tdTiers = [
+      { name: '1/8" Depth', price: R.td, detail: 'St. Augustine standard' },
+      { name: '1/4" Depth', price: roundMoney(quarterPrice), detail: 'Bermuda / leveling — 2x material' },
+    ];
+  }
+
   const waveGuardTier = CAP(wg.tier || 'bronze');
   const rodentBaitMonthly = rbLI ? (rbLI.monthly || 0) : 0;
   const rodentBaitAnnual = rodentBaitMonthly * 12;
@@ -379,8 +430,8 @@ function mapV1ToLegacyShape(v1Result) {
     fieldVerify: v1Result.fieldVerify || [],
     notes: v1Result.notes || [],
     urgency: { mult: 1, label: '' },
-    recurringCustomer: false,
-    isRecurringCustomer: false,
+    recurringCustomer: isRecurringCustomer,
+    isRecurringCustomer,
     hasRecurring: services.length > 0 || palmInjectionMonthly > 0 || rodentBaitMonthly > 0,
     hasOneTime: v1OtItems.length > 0 || v1SpecItems.some(s => !s.onProg && (s.quoteRequired || s.price > 0)),
     recurring: {
