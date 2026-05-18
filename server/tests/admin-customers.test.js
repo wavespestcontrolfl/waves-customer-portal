@@ -2,6 +2,7 @@ const adminCustomersRoute = require('../routes/admin-customers');
 
 const {
   cadenceFromEstimateLine,
+  customerSearchTerms,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapPipelineCustomer,
@@ -13,6 +14,17 @@ describe('admin customers route helpers', () => {
     expect(isValidStage('new_lead')).toBe(true);
     expect(isValidStage('active_customer')).toBe(true);
     expect(isValidStage('not_a_stage')).toBe(false);
+  });
+
+  test('tokenizes visible customer-row search phrases', () => {
+    expect(customerSearchTerms('14208 Sundial Pl, Lakewood Ranch FL')).toEqual([
+      '14208',
+      'Sundial',
+      'Pl',
+      'Lakewood',
+      'Ranch',
+      'FL',
+    ]);
   });
 
   test('maps pipeline rows to the V2 customer-card contract', () => {
