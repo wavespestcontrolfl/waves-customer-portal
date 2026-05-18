@@ -406,6 +406,46 @@ describe('email template library rendering', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
+  test('uses the suppression group override for SendGrid ASM grouping', async () => {
+    const queuedMessage = {
+      id: 'msg-1',
+      status: 'queued',
+      subject_snapshot: 'Your estimate expires June 12',
+    };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-1' };
+    const queueInsert = chain({ returning: [queuedMessage] });
+    const sentUpdate = chain({ returning: [sentMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [
+        queueInsert,
+        sentUpdate,
+      ],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      suppressionGroupKey: 'marketing_nurture',
+    });
+
+    expect(queueInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      suppression_group_key_snapshot: 'marketing_nurture',
+    }));
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      asmGroupId: 101,
+    }));
+  });
+
   test('sendTemplate retries a failed idempotent message instead of deduping it', async () => {
     const failedMessage = {
       id: 'msg-1',

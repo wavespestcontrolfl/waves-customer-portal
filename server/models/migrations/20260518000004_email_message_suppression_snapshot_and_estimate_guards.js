@@ -1,22 +1,26 @@
 const ESTIMATE_AUTOMATION_PATCHES = [
   {
     automation_key: 'estimate.delivery',
-    conditions: { estimate_status: ['sent', 'viewed'] },
+    estimate_status: ['sent', 'viewed'],
+    previous_dry_run_notes: 'Counts recent estimates that are still open or sent.',
     dry_run_notes: 'Counts recent sent or viewed estimates that are not closed.',
   },
   {
     automation_key: 'estimate.unviewed_followup',
-    conditions: { estimate_viewed: false, estimate_status: ['sent', 'viewed'] },
+    estimate_status: ['sent', 'viewed'],
+    previous_dry_run_notes: 'Counts recent open estimates where view tracking is not present.',
     dry_run_notes: 'Counts recent sent estimates where view tracking is not present.',
   },
   {
     automation_key: 'estimate.viewed_followup',
-    conditions: { estimate_viewed: true, estimate_status: ['sent', 'viewed'] },
+    estimate_status: ['sent', 'viewed'],
+    previous_dry_run_notes: 'Counts recent open estimates that have a viewed timestamp when available.',
     dry_run_notes: 'Counts recent viewed estimates that have a viewed timestamp when available.',
   },
   {
     automation_key: 'estimate.expiring_notice',
-    conditions: { expires_within_days: 2, estimate_status: ['sent', 'viewed'] },
+    estimate_status: ['sent', 'viewed'],
+    previous_dry_run_notes: 'Counts open estimates with an expiration date in the next two days when that column exists.',
     dry_run_notes: 'Counts sent or viewed estimates with an expiration date in the next two days when that column exists.',
   },
 ];
@@ -24,22 +28,26 @@ const ESTIMATE_AUTOMATION_PATCHES = [
 const ESTIMATE_AUTOMATION_REVERTS = [
   {
     automation_key: 'estimate.delivery',
-    conditions: { estimate_status: ['sent', 'open'] },
+    estimate_status: ['sent', 'open'],
+    previous_dry_run_notes: 'Counts recent sent or viewed estimates that are not closed.',
     dry_run_notes: 'Counts recent estimates that are still open or sent.',
   },
   {
     automation_key: 'estimate.unviewed_followup',
-    conditions: { estimate_viewed: false, estimate_status: ['sent', 'open'] },
+    estimate_status: ['sent', 'open'],
+    previous_dry_run_notes: 'Counts recent sent estimates where view tracking is not present.',
     dry_run_notes: 'Counts recent open estimates where view tracking is not present.',
   },
   {
     automation_key: 'estimate.viewed_followup',
-    conditions: { estimate_viewed: true, estimate_status: ['sent', 'open'] },
+    estimate_status: ['sent', 'open'],
+    previous_dry_run_notes: 'Counts recent viewed estimates that have a viewed timestamp when available.',
     dry_run_notes: 'Counts recent open estimates that have a viewed timestamp when available.',
   },
   {
     automation_key: 'estimate.expiring_notice',
-    conditions: { expires_within_days: 2, estimate_status: ['sent', 'open'] },
+    estimate_status: ['sent', 'open'],
+    previous_dry_run_notes: 'Counts sent or viewed estimates with an expiration date in the next two days when that column exists.',
     dry_run_notes: 'Counts open estimates with an expiration date in the next two days when that column exists.',
   },
 ];
@@ -52,8 +60,14 @@ async function patchEstimateAutomations(knex, patches) {
     await knex('email_template_automations')
       .where({ automation_key: patch.automation_key })
       .update({
-        conditions: knex.raw('?::jsonb', [JSON.stringify(patch.conditions)]),
-        dry_run_notes: patch.dry_run_notes,
+        conditions: knex.raw(
+          "jsonb_set(COALESCE(conditions, '{}'::jsonb), '{estimate_status}', ?::jsonb, true)",
+          [JSON.stringify(patch.estimate_status)],
+        ),
+        dry_run_notes: knex.raw(
+          'CASE WHEN dry_run_notes = ? THEN ? ELSE dry_run_notes END',
+          [patch.previous_dry_run_notes, patch.dry_run_notes],
+        ),
         updated_at: knex.fn.now(),
       });
   }

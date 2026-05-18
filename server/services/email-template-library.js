@@ -206,20 +206,25 @@ function renderBlocks(blocks, payload) {
   return { bodyHtml: htmlParts.join('\n'), bodyText: textParts.filter(Boolean).join('\n\n') };
 }
 
-function asmGroupIdFor(template) {
-  const stream = String(template.send_stream || '').toLowerCase();
+function sendStreamFor(template, suppressionGroupKey) {
+  return String(suppressionGroupKey || template.send_stream || '').toLowerCase();
+}
+
+function asmGroupIdFor(template, suppressionGroupKey) {
+  const stream = sendStreamFor(template, suppressionGroupKey);
   if (stream === 'transactional_required') return 0;
   if (stream.startsWith('marketing_')) return sendgrid.newsletterGroupId();
   return sendgrid.serviceGroupId();
 }
 
-function isMarketingTemplate(template) {
-  return String(template.mode || '').toLowerCase() === 'marketing';
+function isMarketingSend(template, suppressionGroupKey) {
+  return String(template.mode || '').toLowerCase() === 'marketing'
+    || sendStreamFor(template, suppressionGroupKey).startsWith('marketing_');
 }
 
-function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId } = {}) {
+function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppressionGroupKey } = {}) {
   if (unsubscribeUrl) return unsubscribeUrl;
-  if (isMarketingTemplate(template) && asmGroupId) return ASM_UNSUBSCRIBE_URL;
+  if (isMarketingSend(template, suppressionGroupKey) && asmGroupId) return ASM_UNSUBSCRIBE_URL;
   return null;
 }
 
@@ -447,10 +452,15 @@ async function sendTemplate({
     retryMessage = existing || null;
   }
 
-  const asmGroupId = asmGroupIdFor(template);
   const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
-  const effectiveUnsubscribeUrl = unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId });
-  if (isMarketingTemplate(template) && !test && !effectiveUnsubscribeUrl) {
+  const asmGroupId = asmGroupIdFor(template, effectiveSuppressionGroupKey);
+  const effectiveUnsubscribeUrl = unsubscribeUrlForRender({
+    template,
+    unsubscribeUrl,
+    asmGroupId,
+    suppressionGroupKey: effectiveSuppressionGroupKey,
+  });
+  if (isMarketingSend(template, effectiveSuppressionGroupKey) && !test && !effectiveUnsubscribeUrl) {
     const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');
     err.status = 400;
     throw err;
@@ -495,7 +505,7 @@ async function sendTemplate({
   };
 
   if (!test) {
-    const suppression = await activeSuppressionFor(template, to, effectiveSuppressionGroupKey);
+    const suppression = await activeSuppressionFor(template, to, suppressionGroupKey);
     if (suppression) {
       const reason = `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
       const blockedPayload = {
