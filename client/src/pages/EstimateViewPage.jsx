@@ -45,6 +45,7 @@ const ESTIMATE_BG = '#FAF8F3';
 const ESTIMATE_BORDER = '#E7E2D7';
 const ESTIMATE_MUTED = '#6B7280';
 const ESTIMATE_TEXT = '#1B2C5B';
+const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
 
 function fmtMoney(n) {
   if (n == null) return '—';
@@ -404,7 +405,7 @@ function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'rec
             border: 0,
             borderRadius: 10,
             padding: '0 18px',
-            background: COLORS.wavesBlue,
+            background: ESTIMATE_BUTTON_BG,
             color: COLORS.white,
             fontSize: 14,
             fontWeight: 700,
@@ -428,8 +429,8 @@ function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'rec
             disabled={asking}
             style={{
               border: `1px solid ${ESTIMATE_BORDER}`,
-              background: '#F7F5EE',
-              color: ESTIMATE_TEXT,
+              background: ESTIMATE_BUTTON_BG,
+              color: COLORS.white,
               borderRadius: 999,
               padding: '8px 12px',
               fontSize: 12,
@@ -447,7 +448,7 @@ function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'rec
         <div
           aria-live="polite"
           style={{
-            borderLeft: `4px solid ${failed ? COLORS.red : COLORS.wavesBlue}`,
+            borderLeft: `4px solid ${failed ? COLORS.red : ESTIMATE_BUTTON_BG}`,
             background: failed ? '#FFF5F5' : '#F8FCFE',
             borderRadius: 10,
             padding: '12px 14px',
@@ -518,7 +519,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         onClick={() => onChange('recurring')}
         style={{
           ...pillBase,
-          background: mode === 'recurring' ? COLORS.wavesBlue : 'transparent',
+          background: mode === 'recurring' ? ESTIMATE_BUTTON_BG : 'transparent',
           color: mode === 'recurring' ? COLORS.white : COLORS.textBody,
         }}
       >Recurring Pest Control</button>
@@ -527,7 +528,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         onClick={() => onChange('one_time')}
         style={{
           ...pillBase,
-          background: mode === 'one_time' ? COLORS.wavesBlue : 'transparent',
+          background: mode === 'one_time' ? ESTIMATE_BUTTON_BG : 'transparent',
           color: mode === 'one_time' ? COLORS.white : COLORS.textBody,
         }}
       >One-Time Pest Control</button>
@@ -635,10 +636,10 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 24,
-      borderTop: `4px solid ${COLORS.wavesBlue}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+      borderTop: `4px solid ${ESTIMATE_BUTTON_BG}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
       marginBottom: 16,
     }}>
-      <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.wavesBlue, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         Confirm your booking
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 10, lineHeight: 1.5 }}>
@@ -658,7 +659,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
           type="button"
           onClick={onConfirm}
           style={{
-            padding: '16px 20px', background: COLORS.wavesBlue, color: COLORS.white,
+            padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
             border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
           }}
         >Confirm booking</button>
@@ -720,7 +721,7 @@ function SuccessCard({ acceptResult }) {
             href={bookingUrl}
             style={{
               display: 'inline-block', marginTop: 16, padding: '14px 20px',
-              background: COLORS.wavesBlue, color: COLORS.white, textDecoration: 'none',
+              background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
               borderRadius: 12, fontWeight: 600, fontSize: 15,
             }}
           >Pick appointment</a>
@@ -747,7 +748,7 @@ function SuccessCard({ acceptResult }) {
             href={`/onboard/${onboardingToken}`}
             style={{
               display: 'inline-block', marginTop: 16, padding: '14px 20px',
-              background: COLORS.wavesBlue, color: COLORS.white, textDecoration: 'none',
+              background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
               borderRadius: 12, fontWeight: 600, fontSize: 15,
             }}
           >Continue to setup</a>
@@ -791,7 +792,7 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
           onClick={onRetry}
           style={{
             marginTop: 10, padding: '8px 14px',
-            background: COLORS.wavesBlue, color: COLORS.white, border: 'none',
+            background: ESTIMATE_BUTTON_BG, color: COLORS.white, border: 'none',
             borderRadius: 8, cursor: 'pointer', fontSize: 14, fontWeight: 600,
           }}
         >Refresh times</button>

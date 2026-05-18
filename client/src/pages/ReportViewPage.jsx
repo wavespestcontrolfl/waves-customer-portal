@@ -4272,7 +4272,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 48px;
           text-align: left;
           justify-content: flex-start;
-          background: #fff;
+          background: ${B.blueDeeper};
+          border-color: ${B.blueDeeper};
+          color: #fff;
         }
         .report-ask-answer {
           margin-top: 12px;
