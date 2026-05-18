@@ -2064,7 +2064,6 @@ export default function EstimateToolViewV2({
         lines.push(
           `Built ${ep.yearBuilt} · ${ep.constructionMaterial} · ${ep.foundationType} foundation · ${ep.roofType} roof`,
         );
-      if (ep.serviceZone) lines.push(`Service Zone ${ep.serviceZone}`);
       if (ep.propertyDataQuality)
         lines.push(
           `Property data quality: ${String(ep.propertyDataQuality.level || "unknown").toUpperCase()} (${ep.propertyDataQuality.score || 0}/100)`,
@@ -4683,9 +4682,6 @@ export default function EstimateToolViewV2({
                               </>
                             ) : null}
                           </>
-                        )}
-                        {E.property?.serviceZone && (
-                          <Tag>Zone {E.property.serviceZone}</Tag>
                         )}
                         {E.urgency?.label && (
                           <>

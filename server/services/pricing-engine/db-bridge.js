@@ -205,18 +205,6 @@ async function syncConstantsFromDB(dbInstance) {
     }
     if (config.global_conditional_ceiling?.value) constants.GLOBAL.CONDITIONAL_CEILING = config.global_conditional_ceiling.value;
 
-    // ── Zones ────────────────────────────────────────────────
-    // Zones are metadata only. Preserve editable names, but keep all pricing
-    // multipliers neutral even if older DB config rows contain B/C/D bumps.
-    if (config.zone_multipliers) {
-      for (const [key, val] of Object.entries(config.zone_multipliers)) {
-        if (constants.ZONES[key]) {
-          constants.ZONES[key].multiplier = 1.00;
-          if (val.name) constants.ZONES[key].name = val.name;
-        }
-      }
-    }
-
     // ── Pest Control ─────────────────────────────────────────
     if (config.pest_base) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);

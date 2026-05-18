@@ -3,7 +3,7 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, ZONES, URGENCY, SPECIALTY } = require('./constants');
+const { GLOBAL, WAVEGUARD, URGENCY, SPECIALTY } = require('./constants');
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
@@ -102,7 +102,6 @@ function generateEstimate(input) {
     roofType: input.roofType,
     nearWater: input.nearWater,
     waterDistance: input.waterDistance,
-    serviceZone: input.serviceZone || input.zone,
     isHOA: input.isHOA,
     hoaFee: input.hoaFee,
     isRental: input.isRental,
@@ -173,9 +172,6 @@ function generateEstimate(input) {
       lawnLaborMinutesBase: services.lawn.lawnLaborMinutesBase ?? input.lawnLaborMinutesBase,
       lawnLaborMinutesPerK: services.lawn.lawnLaborMinutesPerK ?? input.lawnLaborMinutesPerK,
     });
-    // Lawn brackets are zone-agnostic in v2's calcLawn (pricing-engine-v2.js:557+);
-    // dropping the zone mult here preserves parity so Session 11a's engine swap
-    // doesn't silently raise lawn prices on Zone B/C/D customers.
     lineItems.push(result);
     activeServiceKeys.push('lawn_care');
   }
@@ -748,11 +744,6 @@ function generateEstimate(input) {
   return {
     // Property
     property,
-    zone: (() => {
-      const zoneKey = (input.serviceZone || input.zone || 'UNKNOWN').toUpperCase();
-      const info = ZONES[zoneKey] || ZONES.UNKNOWN;
-      return { key: zoneKey, name: info.name, multiplier: 1 };
-    })(),
 
     // WaveGuard
     waveGuard: {

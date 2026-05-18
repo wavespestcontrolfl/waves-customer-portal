@@ -8,7 +8,6 @@ const { pricePestControl, priceLawnCare, priceTreeShrub, pricePalmInjection,
         priceWDO, priceTrenching, priceTopDressing, priceDethatching } = require('./service-pricing');
 const { calculatePropertyProfile } = require('./property-calculator');
 const { determineWaveGuardTier, getEffectiveDiscount } = require('./discount-engine');
-const { ZONES } = require('./constants');
 
 const fmt = (n) => typeof n === 'number' ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}` : n;
 const pct = (n) => typeof n === 'number' ? `${(n * 100).toFixed(1)}%` : n;
@@ -200,7 +199,6 @@ const estimate = generateEstimate({
   homeSqFt: 2000, stories: 1, lotSqFt: 10000,
   propertyType: 'single_family',
   lawnSqFt: 4500, bedArea: 2000,
-  zone: 'A',
   features: { poolCage: true, shrubs: 'moderate', trees: 'moderate' },
   paymentMethod: 'card',
   services: {
@@ -247,7 +245,7 @@ const achEstimate = generateEstimate({
   ...{
     homeSqFt: 2000, stories: 1, lotSqFt: 10000,
     propertyType: 'single_family', lawnSqFt: 4500, bedArea: 2000,
-    zone: 'A', features: { poolCage: true, shrubs: 'moderate', trees: 'moderate' },
+    features: { poolCage: true, shrubs: 'moderate', trees: 'moderate' },
     services: {
       pest: { frequency: 'quarterly', version: 'v1' },
       lawn: { track: 'st_augustine', tier: 'enhanced' },
@@ -260,30 +258,6 @@ const achEstimate = generateEstimate({
 console.log(`    Card monthly:  ${fmt(estimate.summary.recurringMonthlyAfterDiscount)}`);
 console.log(`    ACH monthly:   ${fmt(achEstimate.summary.recurringMonthlyAfterDiscount)}`);
 console.log(`    ACH savings:   ${fmt(achEstimate.achSavings)}/yr`);
-
-// ── SERVICE ZONE NEUTRALITY ───────────────────────────────────
-// Service zones are routing/metadata labels only.
-console.log('\n' + '═'.repeat(70));
-console.log('SERVICE ZONE NEUTRALITY (constants.ZONES)');
-console.log('═'.repeat(70));
-for (const z of ['A', 'B', 'C', 'D', 'UNKNOWN']) {
-  const c = ZONES[z]?.multiplier;
-  const neutral = typeof c === 'number' && Math.abs(c - 1.0) < 0.0001;
-  console.log(`  ${z.padEnd(8)} | constants: ${c ?? 'MISSING'} ${neutral ? '✓' : '⚠ NOT NEUTRAL'}`);
-}
-// Also exercise the actual engine path with zone='UNKNOWN' — ref customer,
-// v1 quarterly pest only. Output should be a stable number we can eyeball
-// across releases. When Session 6 lands, re-run and compare.
-const unknownRef = generateEstimate({
-  homeSqFt: 2000, stories: 1, lotSqFt: 10000,
-  propertyType: 'single_family', lawnSqFt: 4500, bedArea: 2000,
-  zone: 'UNKNOWN',
-  features: { poolCage: true, shrubs: 'moderate', trees: 'moderate' },
-  services: { pest: { frequency: 'quarterly', version: 'v1' } },
-});
-console.log(`\n  Ref customer, zone=UNKNOWN, v1 pest quarterly:`);
-console.log(`    engine zone.multiplier: ${unknownRef.zone.multiplier}`);
-console.log(`    recurring monthly:      ${fmt(unknownRef.summary.recurringMonthlyAfterDiscount)}`);
 
 console.log('\n' + '═'.repeat(70));
 console.log('ALL TESTS COMPLETE');
