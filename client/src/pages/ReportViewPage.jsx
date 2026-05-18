@@ -1255,15 +1255,19 @@ function ReportAskBox({ mode, token, serviceLine }) {
   );
 }
 
-function QuickNavigationAndAsk({ mode, token, serviceLine }) {
-  const links = [
+export function quickNavigationLinks({ hasProducts = true } = {}) {
+  return [
     ['#service-timeline', 'Timeline'],
     ['#areas-serviced', 'Areas Serviced'],
     ['#service-coverage-map', 'Coverage Map'],
-    ['#products-applied', 'Products Applied'],
+    hasProducts ? ['#products-applied', 'Products Applied'] : null,
     ['#what-to-expect', 'What to Expect'],
     ['#supporting-details', 'Details'],
-  ];
+  ].filter(Boolean);
+}
+
+function QuickNavigationAndAsk({ mode, token, serviceLine, hasProducts = true }) {
+  const links = quickNavigationLinks({ hasProducts });
 
   return (
     <section className="sr-section quick-report-tools" id="quick-navigation">
@@ -1582,11 +1586,12 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   if (mode !== 'live') return null;
   if (data?.hasLeftGoogleReview || data?.reviewRequestEligible === false) return null;
   const location = reviewLocationForReport(data);
-  const isBottom = placement === 'bottom';
+  const copy = reviewRequestCopy(placement);
   return (
     <section className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
-        <h2>{isBottom ? 'Help the next neighbor choose faster' : 'Put Waves on the neighborhood radar'}</h2>
+        <h2>{copy.title}</h2>
+        {copy.body && <p>{copy.body}</p>}
       </div>
       <a
         className="review-cta"
@@ -1595,10 +1600,25 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
         rel="noreferrer"
         onClick={() => trackReportEvent(token, 'review_request_clicked', { location: location.key, placement })}
       >
-        {isBottom ? 'Share feedback' : 'Leave a review'}
+        {copy.cta}
       </a>
     </section>
   );
+}
+
+export function reviewRequestCopy(placement = 'top') {
+  if (placement === 'bottom') {
+    return {
+      title: 'Help the next neighbor choose faster',
+      body: null,
+      cta: 'Share feedback',
+    };
+  }
+  return {
+    title: "How did today's visit go?",
+    body: 'Share a quick note while the visit is fresh.',
+    cta: 'Share feedback',
+  };
 }
 
 function ExecutiveStatusGrid({ data, pressureTrend, reentry, mode }) {
@@ -2225,8 +2245,13 @@ function workflowIconForType(type) {
   return Clock;
 }
 
+export function timelineEventsForDisplay(workflowEvents = []) {
+  if (!Array.isArray(workflowEvents)) return [];
+  return workflowEvents.filter((event) => event?.type !== 'customer_interaction');
+}
+
 function timelineEventsWithCustomerInteraction(workflowEvents = [], customerInteraction, visitTiming = {}) {
-  const events = Array.isArray(workflowEvents) ? [...workflowEvents] : [];
+  const events = timelineEventsForDisplay(workflowEvents);
   const interaction = customerInteractionCopy(customerInteraction);
   if (!interaction) return events;
   const arrived = events.find((event) => event.type === 'arrived_on_site');
@@ -3139,6 +3164,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
+  const hasApplications = Array.isArray(data.applications) && data.applications.length > 0;
 
   useEffect(() => {
     if (mode !== 'live') return;
@@ -5338,7 +5364,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           )}
         </section>
 
-        <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} />
+        <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} hasProducts={hasApplications} />
 
         <div id="map">
           <ServiceReportCoverageAndWorkflow
