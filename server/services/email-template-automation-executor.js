@@ -559,6 +559,179 @@ async function loadAutomationForRun(run) {
     .first();
 }
 
+function relationMissing(err) {
+  return /relation .* does not exist/i.test(err?.message || '');
+}
+
+function hasOwn(source, key) {
+  return Object.prototype.hasOwnProperty.call(source || {}, key);
+}
+
+function setLiveValue(target, key, value) {
+  if (value !== undefined) target[key] = value;
+}
+
+async function loadEntityRow(table, id) {
+  if (!id) return null;
+  try {
+    return await db(table).where({ id }).first();
+  } catch (err) {
+    if (relationMissing(err)) return null;
+    throw err;
+  }
+}
+
+async function livePayloadForRun(run, storedPayload = {}) {
+  const entityType = String(run.entity_type || '').toLowerCase();
+  const id = run.entity_id;
+  if (!entityType || !id) return {};
+
+  if (entityType === 'estimate') {
+    const row = await loadEntityRow('estimates', id);
+    if (!row) return {};
+    const live = {};
+    setLiveValue(live, 'estimate_id', row.id);
+    if (hasOwn(row, 'status')) {
+      setLiveValue(live, 'estimate_status', row.status);
+      setLiveValue(live, 'status', row.status);
+    }
+    if (hasOwn(row, 'viewed_at')) {
+      setLiveValue(live, 'viewed_at', row.viewed_at);
+      setLiveValue(live, 'estimate_viewed', !!row.viewed_at);
+    }
+    if (hasOwn(row, 'renewal_count')) setLiveValue(live, 'renewal_count', row.renewal_count);
+    if (hasOwn(row, 'expires_at')) setLiveValue(live, 'expires_at', row.expires_at);
+    return live;
+  }
+
+  if (entityType === 'onboarding' || entityType === 'onboarding_session') {
+    const row = await loadEntityRow('onboarding_sessions', id);
+    if (!row) return {};
+    const live = {};
+    setLiveValue(live, 'onboarding_id', row.id);
+    if (hasOwn(row, 'status')) {
+      setLiveValue(live, 'onboarding_status', row.status);
+      setLiveValue(live, 'status', row.status);
+    }
+    if (hasOwn(row, 'completed_at')) setLiveValue(live, 'completed_at', row.completed_at);
+    if (hasOwn(row, 'completed_at') || hasOwn(row, 'status')) {
+      const status = normalizeStatus(row.status);
+      setLiveValue(live, 'completed', !!row.completed_at || status === 'complete' || status === 'completed');
+    }
+    if (hasOwn(row, 'expires_at')) setLiveValue(live, 'expires_at', row.expires_at);
+    return live;
+  }
+
+  if (entityType === 'invoice') {
+    const row = await loadEntityRow('invoices', id);
+    if (!row) return {};
+    const live = {};
+    setLiveValue(live, 'invoice_id', row.id);
+    if (hasOwn(row, 'status')) {
+      setLiveValue(live, 'invoice_status', row.status);
+      setLiveValue(live, 'status', row.status);
+    }
+    if (hasOwn(row, 'paid_at')) setLiveValue(live, 'paid_at', row.paid_at);
+    if (hasOwn(row, 'customer_id')) setLiveValue(live, 'customer_id', row.customer_id);
+    return live;
+  }
+
+  if (entityType === 'payment') {
+    const row = await loadEntityRow('payments', id);
+    const live = {};
+    if (row) {
+      setLiveValue(live, 'payment_id', row.id);
+      if (hasOwn(row, 'status')) {
+        setLiveValue(live, 'payment_status', row.status);
+        setLiveValue(live, 'status', row.status);
+      }
+      if (hasOwn(row, 'customer_id')) setLiveValue(live, 'customer_id', row.customer_id);
+      if (hasOwn(row, 'invoice_id')) setLiveValue(live, 'invoice_id', row.invoice_id);
+    }
+
+    const invoiceId = live.invoice_id || storedPayload.invoice_id;
+    const invoice = await loadEntityRow('invoices', invoiceId);
+    if (invoice) {
+      setLiveValue(live, 'invoice_id', invoice.id);
+      if (hasOwn(invoice, 'status')) setLiveValue(live, 'invoice_status', invoice.status);
+      if (hasOwn(invoice, 'paid_at')) setLiveValue(live, 'paid_at', invoice.paid_at);
+      if (hasOwn(invoice, 'customer_id')) setLiveValue(live, 'customer_id', invoice.customer_id);
+    }
+    return live;
+  }
+
+  if (entityType === 'service_record') {
+    const row = await loadEntityRow('service_records', id);
+    if (!row) return {};
+    const live = {};
+    setLiveValue(live, 'service_record_id', row.id);
+    if (hasOwn(row, 'status')) {
+      setLiveValue(live, 'service_status', row.status);
+      setLiveValue(live, 'status', row.status);
+    }
+    return live;
+  }
+
+  if (entityType === 'project') {
+    const row = await loadEntityRow('projects', id);
+    if (!row) return {};
+    const live = {};
+    setLiveValue(live, 'project_id', row.id);
+    const reportStatus = hasOwn(row, 'report_status') && row.report_status != null && String(row.report_status).trim() !== ''
+      ? row.report_status
+      : row.status;
+    setLiveValue(live, 'report_status', reportStatus);
+    if (hasOwn(row, 'status')) setLiveValue(live, 'status', row.status);
+    return live;
+  }
+
+  if (entityType === 'scheduled_service') {
+    const row = await loadEntityRow('scheduled_services', id);
+    if (!row) return {};
+    const live = {};
+    setLiveValue(live, 'scheduled_service_id', row.id);
+    if (hasOwn(row, 'status')) {
+      setLiveValue(live, 'appointment_status', row.status);
+      setLiveValue(live, 'service_status', row.status);
+      setLiveValue(live, 'status', row.status);
+    }
+    if (hasOwn(row, 'service_type')) setLiveValue(live, 'service_type', row.service_type);
+    return live;
+  }
+
+  if (entityType === 'customer') {
+    const row = await loadEntityRow('customers', id);
+    if (!row) return {};
+    const live = {};
+    setLiveValue(live, 'customer_id', row.id);
+    if (hasOwn(row, 'status')) {
+      setLiveValue(live, 'customer_status', row.status);
+      setLiveValue(live, 'status', row.status);
+    }
+    if (hasOwn(row, 'active')) setLiveValue(live, 'active', row.active);
+    if (hasOwn(row, 'recurring')) setLiveValue(live, 'recurring', row.recurring);
+    if (hasOwn(row, 'customer_type')) {
+      setLiveValue(live, 'customer_type', row.customer_type);
+    } else if (hasOwn(row, 'recurring')) {
+      setLiveValue(live, 'customer_type', row.recurring ? 'recurring' : '');
+    }
+    return live;
+  }
+
+  return {};
+}
+
+async function markRunSkipped(run, reason, metadata = {}) {
+  const [skipped] = await db('email_template_automation_runs').where({ id: run.id }).update({
+    status: 'skipped',
+    exit_reason: reason,
+    completed_at: new Date(),
+    updated_at: new Date(),
+  }).returning('*');
+  await logRunEvent(run.id, 'skipped', reason, metadata);
+  return skipped || { ...run, status: 'skipped', exit_reason: reason };
+}
+
 async function scheduleRetry(run, err, attemptNumber, retryPolicy, now = new Date()) {
   const index = Math.max(0, attemptNumber - 1);
   const minutes = retryPolicy.backoffMinutes[Math.min(index, retryPolicy.backoffMinutes.length - 1)] || 15;
@@ -619,19 +792,34 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
   await logRunEvent(run.id, 'attempt_started', `Attempt ${attemptNumber} started`, {
     attempt: attemptNumber,
   });
+  const claimedRun = { ...run, ...running };
 
   try {
+    const storedPayload = asObject(claimedRun.payload);
+    const executionPayload = {
+      ...storedPayload,
+      ...await livePayloadForRun(claimedRun, storedPayload),
+    };
+    const exitReason = exitReasonFor(asObject(resolvedAutomation.exit_conditions), executionPayload);
+    if (exitReason) {
+      return markRunSkipped(claimedRun, exitReason, { guard: 'exit_conditions', attempt: attemptNumber });
+    }
+    const conditionFailure = conditionFailureFor(asObject(resolvedAutomation.conditions), executionPayload, now);
+    if (conditionFailure) {
+      return markRunSkipped(claimedRun, conditionFailure, { guard: 'conditions', attempt: attemptNumber });
+    }
+
     const result = await EmailTemplates.sendTemplate({
-      templateKey: run.template_key,
-      versionId: run.template_version_id || undefined,
-      to: run.recipient_email,
-      payload: asObject(run.payload),
-      recipientType: run.recipient_type,
-      recipientId: run.recipient_id,
-      triggerEventId: run.trigger_event_id,
-      automationRunId: run.id,
-      idempotencyKey: run.idempotency_key,
-      categories: ['email_template_automation', `automation_${run.automation_key}`],
+      templateKey: claimedRun.template_key,
+      versionId: claimedRun.template_version_id || undefined,
+      to: claimedRun.recipient_email,
+      payload: executionPayload,
+      recipientType: claimedRun.recipient_type,
+      recipientId: claimedRun.recipient_id,
+      triggerEventId: claimedRun.trigger_event_id,
+      automationRunId: claimedRun.id,
+      idempotencyKey: claimedRun.idempotency_key,
+      categories: ['email_template_automation', `automation_${claimedRun.automation_key}`],
     });
     const status = result.blocked ? 'blocked' : 'sent';
     const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
@@ -649,7 +837,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     return updated || { ...running, status };
   } catch (err) {
     if (attemptNumber < retryPolicy.maxAttempts) {
-      return scheduleRetry(run, err, attemptNumber, retryPolicy, now);
+      return scheduleRetry(claimedRun, err, attemptNumber, retryPolicy, now);
     }
     const [failed] = await db('email_template_automation_runs').where({ id: run.id }).update({
       status: 'failed',

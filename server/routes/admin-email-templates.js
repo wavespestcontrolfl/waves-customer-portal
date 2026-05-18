@@ -156,6 +156,13 @@ function requireJsonObject(value, field = 'payload') {
   throw badRequest(`${field} must be a JSON object`);
 }
 
+function automationJsonInput(body, camelKey, snakeKey, existingValue, fallback, field) {
+  if (hasBodyField(body, camelKey, snakeKey)) {
+    return requireJsonObject(bodyField(body, camelKey, snakeKey), field);
+  }
+  return parseJsonObject(existingValue, fallback);
+}
+
 function percent(numerator, denominator) {
   if (!denominator) return 0;
   return Math.round((Number(numerator || 0) / Number(denominator || 1)) * 1000) / 10;
@@ -192,10 +199,10 @@ function normalizeAutomationInput(body, existing = {}) {
     ),
     frequency_cap: cleanString(body.frequencyCap ?? body.frequency_cap, existing.frequency_cap || 'once_per_entity'),
     idempotency_key_template: cleanString(body.idempotencyKeyTemplate ?? body.idempotency_key_template, existing.idempotency_key_template || ''),
-    conditions: JSON.stringify(parseJsonObject(body.conditions ?? existing.conditions)),
-    exit_conditions: JSON.stringify(parseJsonObject(body.exitConditions ?? body.exit_conditions ?? existing.exit_conditions)),
-    retry_policy: JSON.stringify(parseJsonObject(body.retryPolicy ?? body.retry_policy ?? existing.retry_policy, { max_attempts: 2, backoff_minutes: [15, 60] })),
-    quiet_hours: JSON.stringify(parseJsonObject(body.quietHours ?? body.quiet_hours ?? existing.quiet_hours, { enabled: false })),
+    conditions: JSON.stringify(automationJsonInput(body, 'conditions', 'conditions', existing.conditions, {}, 'conditions')),
+    exit_conditions: JSON.stringify(automationJsonInput(body, 'exitConditions', 'exit_conditions', existing.exit_conditions, {}, 'exitConditions')),
+    retry_policy: JSON.stringify(automationJsonInput(body, 'retryPolicy', 'retry_policy', existing.retry_policy, { max_attempts: 2, backoff_minutes: [15, 60] }, 'retryPolicy')),
+    quiet_hours: JSON.stringify(automationJsonInput(body, 'quietHours', 'quiet_hours', existing.quiet_hours, { enabled: false }, 'quietHours')),
     timezone: cleanString(body.timezone, existing.timezone || 'America/New_York'),
     owner: cleanString(body.owner, existing.owner || 'operations'),
     dry_run_notes: body.dryRunNotes !== undefined || body.dry_run_notes !== undefined

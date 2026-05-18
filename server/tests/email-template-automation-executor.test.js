@@ -121,6 +121,7 @@ describe('email template automation executor', () => {
         attemptLogQuery,
         sentLogQuery,
       ],
+      estimates: [chain({ first: null })],
     });
     EmailTemplates.sendTemplate.mockResolvedValue({
       sent: true,
@@ -249,6 +250,7 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'event-1' }] }),
         chain({ returning: [{ id: 'event-2' }] }),
       ],
+      estimates: [chain({ first: null })],
     });
     EmailTemplates.sendTemplate.mockRejectedValue(new Error('provider timeout'));
 
@@ -263,6 +265,43 @@ describe('email template automation executor', () => {
       next_retry_at: new Date('2026-05-18T12:15:00.000Z'),
       run_after: new Date('2026-05-18T12:15:00.000Z'),
       last_error: 'provider timeout',
+    }));
+  });
+
+  test('keeps queued guard values when a live row omits optional columns', async () => {
+    const queuedRun = run({ attempts: 0 });
+    const sentRun = { ...queuedRun, status: 'sent', email_message_id: 'message-1' };
+    const sentRunQuery = chain({ returning: [sentRun] });
+    setDbQueues({
+      email_template_automation_runs: [
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        sentRunQuery,
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'event-1' }] }),
+        chain({ returning: [{ id: 'event-2' }] }),
+      ],
+      estimates: [chain({ first: { id: 'est-1', status: 'sent' } })],
+    });
+    EmailTemplates.sendTemplate.mockResolvedValue({
+      sent: true,
+      message: { id: 'message-1', provider_message_id: 'sg-message-1' },
+    });
+
+    const result = await AutomationExecutor.executeRun(queuedRun, {
+      automation: automation(),
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    expect(result.status).toBe('sent');
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        renewal_count: 1,
+        status: 'sent',
+      }),
+    }));
+    expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'sent',
     }));
   });
 
@@ -282,6 +321,59 @@ describe('email template automation executor', () => {
     });
 
     expect(result.status).toBe('running');
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('skips a delayed run when live exit conditions are met before send', async () => {
+    const queuedRun = run({
+      automation_key: 'onboarding.24h_reminder',
+      trigger_event_key: 'onboarding.created',
+      entity_type: 'onboarding',
+      entity_id: 'onboarding-1',
+      template_key: 'onboarding.24h_reminder',
+      recipient_type: 'customer',
+      payload: JSON.stringify({
+        onboarding_id: 'onboarding-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        completed: false,
+      }),
+    });
+    const skipUpdateQuery = chain({ returning: [{ ...queuedRun, status: 'skipped', exit_reason: 'onboarding already completed' }] });
+    setDbQueues({
+      email_template_automation_runs: [
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        skipUpdateQuery,
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'event-1' }] }),
+        chain({ returning: [{ id: 'event-2' }] }),
+      ],
+      onboarding_sessions: [chain({
+        first: {
+          id: 'onboarding-1',
+          status: 'complete',
+          completed_at: new Date('2026-05-18T12:05:00.000Z'),
+        },
+      })],
+    });
+
+    const result = await AutomationExecutor.executeRun(queuedRun, {
+      automation: automation({
+        automation_key: 'onboarding.24h_reminder',
+        trigger_event_key: 'onboarding.created',
+        template_key: 'onboarding.24h_reminder',
+        conditions: JSON.stringify({ completed: false }),
+        exit_conditions: JSON.stringify({ stop_if: ['onboarding.completed'] }),
+      }),
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(skipUpdateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'skipped',
+      exit_reason: 'onboarding already completed',
+    }));
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 

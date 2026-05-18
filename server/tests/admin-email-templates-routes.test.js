@@ -505,6 +505,36 @@ describe('admin email template routes', () => {
     });
   });
 
+  test('rejects malformed automation guard JSON instead of clearing it', async () => {
+    setDbQueues({
+      email_template_automations: [chain({
+        first: {
+          id: 'automation-1',
+          automation_key: 'estimate.extension_notice',
+          name: 'Extension notice',
+          template_key: 'estimate.extension_notice',
+          audience: 'customer',
+          status: 'draft',
+          legal_classification: 'transactional_relationship',
+          conditions: JSON.stringify({ renewal_count_gt: 0 }),
+        },
+      })],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/automations/estimate.extension_notice`, {
+        method: 'PUT',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ conditions: '{not valid json' }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('conditions must be a JSON object');
+      expect(db).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('dry-runs estimate automations against source tables when available', async () => {
     const countQuery = chain({ countFirst: { count: '7' } });
     db.schema.hasTable.mockResolvedValue(true);
