@@ -109,7 +109,7 @@ describe('email template automation executor', () => {
     const sentLogQuery = chain({ returning: [{ id: 'event-3' }] });
 
     setDbQueues({
-      'email_template_automations as a': [chain({ result: [automation()] })],
+      'email_template_automations as a': [chain({ result: [automation({ suppression_group_key: 'service_operational' })] })],
       email_template_automation_runs: [
         existingRunQuery,
         insertRunQuery,
@@ -162,6 +162,7 @@ describe('email template automation executor', () => {
       automationRunId: 'run-1',
       triggerEventId: 'estimate_auto_renew:est-1',
       idempotencyKey: 'estimate.extension_notice:est-1:2026-06-01',
+      suppressionGroupKey: 'service_operational',
     }));
     expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'sent',

@@ -116,8 +116,11 @@ async function sendDualChannel(ob, { sms, email }) {
             categories: ['onboarding_followup', email.stage].filter(Boolean),
           });
           r = result.blocked
-            ? { ok: false, error: result.reason || 'Email suppressed' }
+            ? { ok: true, blocked: true, error: result.reason || 'Email suppressed' }
             : { ok: true, messageId: result.message?.provider_message_id || null };
+          if (result.blocked) {
+            logger.warn(`[onboard-followup] Template email suppressed for session ${ob.id}: ${result.reason || 'suppressed'}`);
+          }
           sentWithTemplateLibrary = true;
         } catch (e) {
           if (!canFallbackFromTemplateEmailError(e)) throw e;

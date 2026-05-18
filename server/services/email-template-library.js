@@ -242,10 +242,18 @@ function redactedPayloadSnapshot(value) {
   ]));
 }
 
-async function activeSuppressionFor(template, email) {
+function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
+  if (suppressionGroupKey !== undefined) {
+    const override = String(suppressionGroupKey || '').trim();
+    return override || null;
+  }
+  return template.suppression_group_key || template.send_stream || null;
+}
+
+async function activeSuppressionFor(template, email, suppressionGroupKey) {
   if (!email) return null;
   if (String(template.send_stream || '').toLowerCase() === 'transactional_required') return null;
-  const groupKey = template.suppression_group_key || template.send_stream || null;
+  const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   const rows = await db('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });
@@ -413,6 +421,7 @@ async function sendTemplate({
   unsubscribeUrl = null,
   categories = [],
   attachments = [],
+  suppressionGroupKey,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -439,6 +448,7 @@ async function sendTemplate({
   }
 
   const asmGroupId = asmGroupIdFor(template);
+  const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   const effectiveUnsubscribeUrl = unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId });
   if (isMarketingTemplate(template) && !test && !effectiveUnsubscribeUrl) {
     const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');
@@ -467,6 +477,7 @@ async function sendTemplate({
     template_id: template.id,
     template_version_id: version.id,
     template_key: template.template_key,
+    suppression_group_key_snapshot: effectiveSuppressionGroupKey || '',
     automation_run_id: automationRunId || null,
     trigger_event_id: triggerEventId || null,
     recipient_type: test ? 'test' : (recipientType || null),
@@ -484,7 +495,7 @@ async function sendTemplate({
   };
 
   if (!test) {
-    const suppression = await activeSuppressionFor(template, to);
+    const suppression = await activeSuppressionFor(template, to, effectiveSuppressionGroupKey);
     if (suppression) {
       const reason = `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
       const blockedPayload = {

@@ -213,6 +213,25 @@ describe('email template library rendering', () => {
     )).resolves.toEqual(serviceSuppression);
   });
 
+  test('honors an automation suppression group override', async () => {
+    const marketingSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'marketing_nurture',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [marketingSuppression] })],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+      'marketing_nurture',
+    )).resolves.toEqual(marketingSuppression);
+  });
+
   test('flags disallowed and missing required variables before publish', () => {
     const validation = EmailTemplates.validationFor(
       serviceTemplate({ allowed_variables: ['first_name'], required_variables: ['first_name', 'estimate_url'] }),
@@ -324,6 +343,48 @@ describe('email template library rendering', () => {
       sent: true,
       message: sentMessage,
     }));
+  });
+
+  test('sendTemplate snapshots and applies suppression group overrides', async () => {
+    const suppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'marketing_nurture',
+      status: 'active',
+    };
+    const blockedMessage = {
+      id: 'msg-blocked',
+      status: 'blocked',
+      error_message: 'Suppressed: manual (marketing_nurture)',
+    };
+    const blockedInsert = chain({ returning: [blockedMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [suppression] })],
+      email_messages: [blockedInsert],
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      suppressionGroupKey: 'marketing_nurture',
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(blockedInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked',
+      suppression_group_key_snapshot: 'marketing_nurture',
+      error_message: 'Suppressed: manual (marketing_nurture)',
+    }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('sendTemplate retries a failed idempotent message instead of deduping it', async () => {

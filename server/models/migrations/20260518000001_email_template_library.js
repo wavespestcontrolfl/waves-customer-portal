@@ -763,6 +763,7 @@ exports.up = async function up(knex) {
     t.uuid('template_id').references('id').inTable('email_templates').onDelete('SET NULL');
     t.uuid('template_version_id').references('id').inTable('email_template_versions').onDelete('SET NULL');
     t.string('template_key', 120);
+    t.string('suppression_group_key_snapshot', 80);
     t.string('automation_run_id');
     t.string('trigger_event_id');
     t.string('recipient_type', 40);
@@ -777,7 +778,7 @@ exports.up = async function up(knex) {
     t.jsonb('payload_snapshot').defaultTo('{}');
     t.jsonb('categories').defaultTo('[]');
     t.string('status', 40).defaultTo('queued');
-    t.string('idempotency_key');
+    t.string('idempotency_key', 260);
     t.text('error_message');
     t.timestamp('queued_at').defaultTo(knex.fn.now());
     t.timestamp('sent_at');
