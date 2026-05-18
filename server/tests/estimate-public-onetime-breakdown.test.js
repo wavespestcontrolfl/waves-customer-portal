@@ -569,6 +569,9 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('<section class="card booking-card" id="booking-card" style="display:none">');
     expect(html).toContain('const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = true;');
     expect(html).toContain('function bookingRequiresPaymentSetup()');
+    expect(html).toContain('isReserving: false');
+    expect(html).toContain('btn.disabled = bookingState.isReserving || !!bookingState.reservation');
+    expect(html).toContain('bookingState.isReserving = true;');
     expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
     expect(html).toContain("toast('Choose a payment setup first.')");
   });

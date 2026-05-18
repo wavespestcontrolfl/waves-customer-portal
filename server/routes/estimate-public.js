@@ -2080,6 +2080,7 @@ ${shellQuestionsBar()}
     pendingPref: null,
     pickedPref: null,
     reservation: null,
+    isReserving: false,
     countdownTimer: null,
     serviceMode: INITIAL_SERVICE_MODE,
   };
@@ -2092,7 +2093,7 @@ ${shellQuestionsBar()}
     document.querySelectorAll('[data-payment-setup]').forEach((btn) => {
       const selected = bookingState.pendingPref === btn.dataset.paymentSetup;
       btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
-      btn.disabled = !!bookingState.reservation;
+      btn.disabled = bookingState.isReserving || !!bookingState.reservation;
       const card = btn.closest('.payment-choice');
       if (card) card.classList.toggle('is-selected', selected);
     });
@@ -2130,6 +2131,10 @@ ${shellQuestionsBar()}
   }
 
   function choosePaymentSetup(pref) {
+    if (bookingState.isReserving) {
+      toast('Hold on while we reserve that time.');
+      return;
+    }
     if (bookingState.reservation) {
       toast('Use Change my pick before switching payment setup.');
       const reviewArea = document.getElementById('review-area');
@@ -2153,6 +2158,10 @@ ${shellQuestionsBar()}
   // include it in their bodies.
   function setServiceMode(mode) {
     if (mode !== 'recurring' && mode !== 'one_time') return;
+    if (bookingState.isReserving) {
+      toast('Hold on while we reserve that time.');
+      return;
+    }
     const changed = bookingState.serviceMode !== mode;
     bookingState.serviceMode = mode;
     document.querySelectorAll('[data-mode-only]').forEach((el) => {
@@ -2305,6 +2314,10 @@ ${shellQuestionsBar()}
   }
 
   async function pickPaymentPref(pref) {
+    if (bookingState.isReserving) {
+      toast('Hold on while we reserve that time.');
+      return;
+    }
     if (!bookingState.selectedSlotId) {
       toast('Pick a time first.');
       return;
@@ -2313,6 +2326,7 @@ ${shellQuestionsBar()}
       pref = 'pay_at_visit';
     }
     const buttons = document.querySelectorAll('[data-pay-pref]');
+    bookingState.isReserving = true;
     buttons.forEach((b) => { b.disabled = true; });
     bookingState.pendingPref = pref;
     bookingState.pickedPref = pref;
@@ -2336,6 +2350,7 @@ ${shellQuestionsBar()}
           }
         }
         buttons.forEach((b) => { b.disabled = false; });
+        bookingState.isReserving = false;
         bookingState.pendingPref = null;
         bookingState.pickedPref = null;
         syncPaymentSetupCards();
@@ -2344,6 +2359,7 @@ ${shellQuestionsBar()}
       if (!r.ok) throw new Error('reserve failed');
       const body = await r.json();
       bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
+      bookingState.isReserving = false;
       syncPaymentSetupCards();
       // Swap UI: hide slot list + pay pref, show review
       document.getElementById('slot-area').style.display = 'none';
@@ -2369,6 +2385,7 @@ ${shellQuestionsBar()}
     } catch (e) {
       toast('Could not reserve. Try again or call ${COMPANY.phone}.');
       buttons.forEach((b) => { b.disabled = false; });
+      bookingState.isReserving = false;
       bookingState.pendingPref = null;
       bookingState.pickedPref = null;
       syncPaymentSetupCards();
@@ -2407,6 +2424,7 @@ ${shellQuestionsBar()}
       fetch('/api/public/estimates/' + TOKEN + '/reserve/' + encodeURIComponent(res.scheduledServiceId), { method: 'DELETE' }).catch(function () {});
     }
     bookingState.reservation = null;
+    bookingState.isReserving = false;
     bookingState.selectedSlotId = null;
     bookingState.selectedSlotLabel = null;
     bookingState.pendingPref = null;
