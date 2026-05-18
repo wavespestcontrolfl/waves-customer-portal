@@ -186,13 +186,22 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
   try {
     const result = await getOrRenderServiceReportPdf(recordId, { token: reportToken });
     pdf = result.pdf;
+    if (result.storageFailed) {
+      await enqueuePdfRenderRetry({
+        serviceRecordId: recordId,
+        payload: {
+          source: 'service_report_v1_email_storage_failed',
+        },
+      }).catch((queueErr) => {
+        logger.warn(`[service-report-v1-email] PDF storage retry queue failed for ${recordId}: ${queueErr.message}`);
+      });
+    }
   } catch (err) {
     logger.warn(`[service-report-v1-email] PDF attachment skipped for ${recordId}: ${err.message}`);
     await enqueuePdfRenderRetry({
       serviceRecordId: recordId,
       payload: {
         source: 'service_report_v1_email',
-        token: reportToken,
       },
     }).catch((queueErr) => {
       logger.warn(`[service-report-v1-email] PDF retry queue failed for ${recordId}: ${queueErr.message}`);

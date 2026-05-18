@@ -4477,10 +4477,14 @@ const scoreButtonStyle = {
 
 function serviceLineFromType(serviceType = "") {
   const text = String(serviceType || "").toLowerCase();
-  if (text.includes("lawn")) return "lawn";
+  if (/\bpalmetto\b/.test(text)) return "pest";
+  if (/\bpalm(s)?\b/.test(text)) return "palm";
+  const category = detectServiceCategory(serviceType);
+  if (category === "lawn") return "lawn";
+  if (category === "tree_shrub") return "tree_shrub";
   if (text.includes("mosquito")) return "mosquito";
-  if (text.includes("termite")) return "termite";
-  if (text.includes("rodent")) return "rodent";
+  if (/\b(termite|wdo|bora|trelona)\b/.test(text)) return "termite";
+  if (/\b(rodent|rat|rats|mouse|mice|mole)\b/.test(text)) return "rodent";
   return "pest";
 }
 

@@ -66,7 +66,12 @@ async function loadServiceRecordForPdf(recordId, knex = db) {
     .first();
 }
 
-async function renderAndStoreServiceReportPdf(recordId, { token, req, knex = db } = {}) {
+async function renderAndStoreServiceReportPdf(recordId, {
+  token,
+  req,
+  knex = db,
+  allowUnstoredPdf = false,
+} = {}) {
   const service = await loadServiceRecordForPdf(recordId, knex);
   if (!service) throw new Error('Service record not found');
   if (service.status !== 'completed' && service.status !== 'complete') {
@@ -90,9 +95,23 @@ async function renderAndStoreServiceReportPdf(recordId, { token, req, knex = db 
     logger,
     serviceRecordId: recordId,
   });
-  const key = await putReportPdf(recordId, pdf);
-  await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
-  return { key, pdf, token: reportToken };
+  try {
+    const key = await putReportPdf(recordId, pdf);
+    await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
+    return { key, pdf, token: reportToken };
+  } catch (err) {
+    if (!allowUnstoredPdf) throw err;
+    const storageError = safePdfRenderError(err);
+    logger.warn(`[service-report-pdf] storage failed for ${recordId}; returning rendered PDF without stored copy: ${storageError}`);
+    return {
+      key: null,
+      pdf,
+      rendered: true,
+      storageFailed: true,
+      storageError,
+      token: reportToken,
+    };
+  }
 }
 
 async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } = {}) {
@@ -100,8 +119,20 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } =
   const stored = await getHealthyStoredReportPdf(service?.pdf_storage_key);
   if (stored) return { pdf: stored, key: service.pdf_storage_key, rendered: false };
 
-  const rendered = await renderAndStoreServiceReportPdf(recordId, { token, req, knex });
-  return { pdf: rendered.pdf, key: rendered.key, rendered: true, token: rendered.token };
+  const rendered = await renderAndStoreServiceReportPdf(recordId, {
+    token,
+    req,
+    knex,
+    allowUnstoredPdf: true,
+  });
+  return {
+    pdf: rendered.pdf,
+    key: rendered.key,
+    rendered: true,
+    storageFailed: !!rendered.storageFailed,
+    storageError: rendered.storageError || null,
+    token: rendered.token,
+  };
 }
 
 async function enqueuePdfRenderJob({
