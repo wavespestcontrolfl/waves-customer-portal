@@ -11,6 +11,7 @@ const {
   formatTechnicianForCustomer,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
+const { parseETDateTime } = require('../../utils/datetime-et');
 
 let PhotoService = null;
 try {
@@ -276,6 +277,537 @@ function matchZoneIds(product, zones) {
   return zones.map((zone) => String(zone.id));
 }
 
+function applicationZoneIds(app = {}) {
+  const ids = Array.isArray(app.zone_ids)
+    ? app.zone_ids
+    : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
+  return ids.map((id) => String(id)).filter(Boolean);
+}
+
+const SERVICE_LOCATION_STATUSES = new Set([
+  'treated',
+  'partially_treated',
+  'serviced',
+  'inspected',
+  'spot_treated',
+  'skipped',
+  'blocked',
+  'inaccessible',
+  'activity_found',
+  'device_checked',
+  'device_placed',
+  'entry_point_found',
+  'not_included',
+]);
+
+const WORKFLOW_EVENT_TYPES = new Set([
+  'scheduled',
+  'technician_en_route',
+  'arrived_on_site',
+  'inspection_started',
+  'service_started',
+  'service_completed',
+  'quality_reviewed',
+  'report_published',
+  'follow_up_recommended',
+  'return_visit_needed',
+]);
+
+function coverageServiceType(serviceLine) {
+  const key = String(serviceLine || '').toLowerCase();
+  if (key === 'lawn') return 'lawn';
+  if (key === 'pest' || key === 'pest_control' || key === 'termite' || key === 'rodent') return 'pest_control';
+  if (key === 'mosquito') return 'mosquito';
+  if (key === 'tree_shrub' || key === 'palm') return 'tree_shrub';
+  return 'other';
+}
+
+function normalizeStatus(value, fallback = 'inspected') {
+  const key = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (SERVICE_LOCATION_STATUSES.has(key)) return key;
+  if (key === 'checked') return 'device_checked';
+  if (key === 'placed') return 'device_placed';
+  if (key === 'complete' || key === 'completed') return 'serviced';
+  return fallback;
+}
+
+function normalizeWorkflowType(value) {
+  const key = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return WORKFLOW_EVENT_TYPES.has(key) ? key : 'service_completed';
+}
+
+function validTimestamp(value) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const naiveWallClock = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?$/.test(raw);
+  const date = naiveWallClock ? parseETDateTime(raw.replace(/\.\d+$/, '')) : new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
+function normalizeGeometry(value) {
+  const geometry = parseJsonObject(value);
+  const candidate = geometry.type === 'Feature' && geometry.geometry ? geometry.geometry : geometry;
+  if (!candidate || typeof candidate !== 'object') return null;
+  if (['Polygon', 'MultiPolygon', 'LineString', 'MultiLineString', 'Point'].includes(candidate.type)) {
+    return candidate;
+  }
+  return null;
+}
+
+function closeRing(points) {
+  if (!points.length) return [];
+  const ring = points.map(([x, y]) => [Number(x) || 0, Number(y) || 0]);
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (first[0] !== last[0] || first[1] !== last[1]) ring.push([...first]);
+  return ring;
+}
+
+function localGeometryToGeoJson(value) {
+  const geometry = parseJsonObject(value);
+  if (!geometry || typeof geometry !== 'object') return null;
+  if (geometry.type === 'polygon' && Array.isArray(geometry.points) && geometry.points.length) {
+    return { type: 'Polygon', coordinates: [closeRing(geometry.points)] };
+  }
+  if (Array.isArray(geometry.points) && geometry.points.length) {
+    return { type: 'Polygon', coordinates: [closeRing(geometry.points)] };
+  }
+  if (geometry.type === 'circle' || (geometry.cx != null && geometry.cy != null)) {
+    return { type: 'Point', coordinates: [Number(geometry.cx) || 0, Number(geometry.cy) || 0] };
+  }
+  const x = Number(geometry.x);
+  const y = Number(geometry.y);
+  const w = Number(geometry.w);
+  const h = Number(geometry.h);
+  if ([x, y, w, h].some((n) => !Number.isFinite(n))) return null;
+  return {
+    type: 'Polygon',
+    coordinates: [[
+      [x, y],
+      [x + w, y],
+      [x + w, y + h],
+      [x, y + h],
+      [x, y],
+    ]],
+  };
+}
+
+function zoneCoverageGeometry(zone = {}) {
+  return normalizeGeometry(zone.geometry_geojson)
+    || localGeometryToGeoJson(zone.geometry)
+    || localGeometryToGeoJson(zone.geometry_image);
+}
+
+function zoneCoverageImageGeometry(zone = {}) {
+  return normalizeGeometry(zone.geometry_image)
+    || localGeometryToGeoJson(zone.geometry_image);
+}
+
+function polygonToLineGeometry(geometry) {
+  if (!geometry) return null;
+  if (geometry.type === 'Polygon') {
+    const ring = Array.isArray(geometry.coordinates?.[0]) ? geometry.coordinates[0] : [];
+    return ring.length ? { type: 'LineString', coordinates: ring } : null;
+  }
+  if (geometry.type === 'MultiPolygon') {
+    const lines = (geometry.coordinates || [])
+      .map((polygon) => Array.isArray(polygon?.[0]) ? polygon[0] : [])
+      .filter((ring) => ring.length);
+    return lines.length ? { type: 'MultiLineString', coordinates: lines } : null;
+  }
+  return null;
+}
+
+function geometryCoordinatePairs(value, output = []) {
+  if (!Array.isArray(value)) return output;
+  if (value.length >= 2 && Number.isFinite(Number(value[0])) && Number.isFinite(Number(value[1]))) {
+    output.push([Number(value[0]), Number(value[1])]);
+    return output;
+  }
+  value.forEach((entry) => geometryCoordinatePairs(entry, output));
+  return output;
+}
+
+function pointFromGeometry(geometry) {
+  if (!geometry) return null;
+  if (geometry.type === 'Point' && Array.isArray(geometry.coordinates)) return geometry;
+  const pairs = geometryCoordinatePairs(geometry.coordinates);
+  if (!pairs.length) return null;
+  const xs = pairs.map(([x]) => x);
+  const ys = pairs.map(([, y]) => y);
+  return {
+    type: 'Point',
+    coordinates: [
+      (Math.min(...xs) + Math.max(...xs)) / 2,
+      (Math.min(...ys) + Math.max(...ys)) / 2,
+    ],
+  };
+}
+
+function isPerimeterZone(zone = {}) {
+  const text = `${zone.label || ''} ${zone.category || ''}`.toLowerCase();
+  return /\b(perimeter|foundation|fence|fenceline|exterior|entry|threshold)\b/.test(text);
+}
+
+function normalizeCoverageLabel(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function findZoneForLocation(entry = {}, zones = []) {
+  const zoneId = entry.zoneId || entry.zone_id || entry.locationId || entry.location_id;
+  if (zoneId) {
+    const match = zones.find((zone) => String(zone.id) === String(zoneId));
+    if (match) return match;
+  }
+  const name = normalizeCoverageLabel(entry.name || entry.label || entry.area || entry.location);
+  if (!name) return null;
+  return zones.find((zone) => {
+    const zoneLabel = normalizeCoverageLabel(zone.label);
+    return zoneLabel === name || zoneLabel.includes(name) || name.includes(zoneLabel);
+  }) || null;
+}
+
+function normalizeExplicitServiceLocation(location = {}, index, fallbackServiceType, fallbackEvidenceLevel) {
+  const serviceType = coverageServiceType(location.serviceType || location.service_type || fallbackServiceType);
+  const fallbackStatus = serviceType === 'lawn' ? 'treated' : 'serviced';
+  const geometry = normalizeGeometry(location.geometry) || localGeometryToGeoJson(location.geometry);
+  const imageGeometry = normalizeGeometry(location.imageGeometry || location.image_geometry || location.geometryImage || location.geometry_image)
+    || localGeometryToGeoJson(location.imageGeometry || location.image_geometry || location.geometryImage || location.geometry_image);
+  const visibleNote = String(location.customerVisibleNote || location.customer_visible_note || '').trim();
+  const areaSqFt = numberOrNull(location.areaSqFt ?? location.area_sqft);
+  const evidenceLevel = location.evidenceLevel || location.evidence_level || fallbackEvidenceLevel || 'technician_confirmed';
+
+  return {
+    id: String(location.id || `service-location-${index + 1}`),
+    serviceType,
+    name: String(location.name || location.label || `Service area ${index + 1}`).trim(),
+    description: String(location.description || '').trim() || undefined,
+    areaSqFt: areaSqFt == null ? undefined : areaSqFt,
+    status: normalizeStatus(location.status, fallbackStatus),
+    geometry: geometry || undefined,
+    imageGeometry: imageGeometry || undefined,
+    skippedReason: String(location.skippedReason || location.skipped_reason || '').trim() || undefined,
+    blockedReason: String(location.blockedReason || location.blocked_reason || '').trim() || undefined,
+    customerVisibleNote: visibleNote || undefined,
+    evidenceLevel,
+    deviceType: location.deviceType || location.device_type || undefined,
+    deviceId: location.deviceId || location.device_id || undefined,
+  };
+}
+
+function configuredServiceLocations(structured = {}, serviceData = {}, serviceType, evidenceLevel) {
+  const candidates = [
+    serviceData.serviceLocations,
+    serviceData.service_locations,
+    serviceData.coverage?.serviceLocations,
+    serviceData.coverage?.service_locations,
+    structured.serviceLocations,
+    structured.service_locations,
+    structured.coverage?.serviceLocations,
+    structured.coverage?.service_locations,
+  ];
+  const source = candidates.find((value) => Array.isArray(value));
+  if (!source) return [];
+  return source
+    .map((location, index) => normalizeExplicitServiceLocation(location, index, serviceType, evidenceLevel))
+    .filter((location) => location.name);
+}
+
+function exceptionEntries(structured = {}, serviceData = {}) {
+  return [
+    ...parseJsonArray(structured.skippedAreas).map((entry) => ({ entry, status: 'skipped' })),
+    ...parseJsonArray(structured.skipped_locations).map((entry) => ({ entry, status: 'skipped' })),
+    ...parseJsonArray(serviceData.skippedAreas).map((entry) => ({ entry, status: 'skipped' })),
+    ...parseJsonArray(serviceData.skippedLocations).map((entry) => ({ entry, status: 'skipped' })),
+    ...parseJsonArray(structured.inaccessibleAreas).map((entry) => ({ entry, status: 'inaccessible' })),
+    ...parseJsonArray(serviceData.inaccessibleAreas).map((entry) => ({ entry, status: 'inaccessible' })),
+    ...parseJsonArray(structured.blockedAreas).map((entry) => ({ entry, status: 'blocked' })),
+    ...parseJsonArray(serviceData.blockedAreas).map((entry) => ({ entry, status: 'blocked' })),
+  ];
+}
+
+function normalizeExceptionLocation(item, index, zones, serviceType, evidenceLevel) {
+  const entry = typeof item.entry === 'string' ? { name: item.entry } : parseJsonObject(item.entry);
+  const zone = findZoneForLocation(entry, zones);
+  const status = normalizeStatus(entry.status || item.status, item.status);
+  const reason = String(entry.reason || entry.skippedReason || entry.skipped_reason || entry.blockedReason || entry.blocked_reason || '').trim();
+  const geometry = normalizeGeometry(entry.geometry) || localGeometryToGeoJson(entry.geometry) || (zone ? zoneCoverageGeometry(zone) : null);
+  const imageGeometry = normalizeGeometry(entry.imageGeometry || entry.image_geometry || entry.geometryImage || entry.geometry_image)
+    || localGeometryToGeoJson(entry.imageGeometry || entry.image_geometry || entry.geometryImage || entry.geometry_image)
+    || (zone ? zoneCoverageImageGeometry(zone) : null);
+  return {
+    id: String(entry.id || `coverage-exception-${index + 1}`),
+    serviceType,
+    zoneId: zone?.id ? String(zone.id) : undefined,
+    name: String(entry.name || entry.label || zone?.label || `Skipped area ${index + 1}`).trim(),
+    status,
+    geometry: geometry || undefined,
+    imageGeometry: imageGeometry || undefined,
+    skippedReason: status === 'skipped' || status === 'inaccessible' ? reason || undefined : undefined,
+    blockedReason: status === 'blocked' ? reason || undefined : undefined,
+    customerVisibleNote: String(entry.customerVisibleNote || entry.customer_visible_note || '').trim() || undefined,
+    evidenceLevel,
+  };
+}
+
+function applicationZoneMap(applications = []) {
+  const map = new Map();
+  applications.forEach((app) => {
+    applicationZoneIds(app).forEach((zoneId) => {
+      const key = String(zoneId);
+      const rows = map.get(key) || [];
+      rows.push(app);
+      map.set(key, rows);
+    });
+  });
+  return map;
+}
+
+function findingCoverageText(finding = {}) {
+  return [
+    finding.category,
+    finding.title,
+    finding.detail,
+  ].filter(Boolean).join(' ');
+}
+
+function findingSuggestsCleanCoverage(finding = {}) {
+  const text = findingCoverageText(finding).toLowerCase().replace(/[_-]+/g, ' ');
+  return /\b(no activity|no visible activity|no significant activity|none observed|not observed|no visible signs|clear|clean)\b/.test(text)
+    || /\b(no|not|none|without)\b.{0,45}\b(activity|entry point|entry points|entry|pest|dropping|droppings|trail|gap|opening)\b/.test(text);
+}
+
+function findingSuggestsEntryPoint(finding = {}) {
+  if (findingSuggestsCleanCoverage(finding)) return false;
+  return /\b(entry|gap|opening|hole|weep|threshold|door|window|penetration)\b/i.test(findingCoverageText(finding));
+}
+
+function findingSuggestsActivity(finding = {}) {
+  if (findingSuggestsCleanCoverage(finding)) return false;
+  return /\b(activity|trail|dropping|nest|harborage|ant|roach|rodent|termite|wasp|mosquito|pest)\b/i.test(findingCoverageText(finding));
+}
+
+function deviceTypeFromApplication(app = {}) {
+  const text = `${app.method || ''} ${app.product?.category || ''} ${app.product?.name || ''}`.toLowerCase();
+  if (text.includes('trap')) return 'trap';
+  if (text.includes('monitor')) return 'monitor';
+  if (text.includes('bait') || text.includes('station')) return 'bait_station';
+  return 'other';
+}
+
+function serviceCoverageLocations({ serviceLine, structured, serviceData, zones, applications, findings, areaLabels, evidenceLevel }) {
+  const serviceType = coverageServiceType(serviceLine);
+  const configured = configuredServiceLocations(structured, serviceData, serviceType, evidenceLevel);
+  if (configured.length) return configured;
+
+  const appByZone = applicationZoneMap(applications);
+  const findingsByZone = new Map();
+  findings.forEach((finding) => {
+    if (!finding.zoneId) return;
+    const key = String(finding.zoneId);
+    const rows = findingsByZone.get(key) || [];
+    rows.push(finding);
+    findingsByZone.set(key, rows);
+  });
+
+  const areaLabelSet = new Set(locationAreaLabels(areaLabels).map(normalizeCoverageLabel));
+  const exceptions = exceptionEntries(structured, serviceData)
+    .map((entry, index) => normalizeExceptionLocation(entry, index, zones, serviceType, evidenceLevel))
+    .filter((location) => location.name);
+  const exceptionZoneIds = new Set(exceptions.map((location) => location.zoneId).filter(Boolean).map(String));
+  const exceptionNames = new Set(exceptions.map((location) => normalizeCoverageLabel(location.name)));
+  const locations = [];
+
+  zones.forEach((zone, index) => {
+    const zoneId = String(zone.id);
+    const zoneName = String(zone.label || `Service area ${index + 1}`).trim();
+    const zoneNameKey = normalizeCoverageLabel(zoneName);
+    if (exceptionZoneIds.has(zoneId) || exceptionNames.has(zoneNameKey)) return;
+
+    const zoneApps = appByZone.get(zoneId) || [];
+    const zoneFindings = findingsByZone.get(zoneId) || [];
+    const hasApplication = zoneApps.length > 0;
+    const hasListedArea = areaLabelSet.has(zoneNameKey);
+    const hasFinding = zoneFindings.length > 0;
+    if (!hasApplication && !hasListedArea && !hasFinding) return;
+
+    const baseGeometry = zoneCoverageGeometry(zone);
+    const baseImageGeometry = zoneCoverageImageGeometry(zone);
+    const shouldDrawLine = serviceType === 'pest_control' && hasApplication && isPerimeterZone(zone);
+    const geometry = shouldDrawLine ? (polygonToLineGeometry(baseGeometry) || baseGeometry) : baseGeometry;
+    const imageGeometry = shouldDrawLine ? (polygonToLineGeometry(baseImageGeometry) || baseImageGeometry) : baseImageGeometry;
+    const areaSqFt = numberOrNull(zone.area_sqft ?? zone.areaSqFt);
+    const fallbackStatus = serviceType === 'lawn'
+      ? (hasApplication ? 'treated' : 'inspected')
+      : (hasApplication ? 'serviced' : 'inspected');
+
+    locations.push({
+      id: `zone-${zoneId}`,
+      serviceType,
+      zoneId,
+      name: zoneName,
+      description: zone.category || undefined,
+      areaSqFt: areaSqFt == null ? undefined : areaSqFt,
+      status: fallbackStatus,
+      geometry: geometry || undefined,
+      imageGeometry: imageGeometry || undefined,
+      evidenceLevel,
+    });
+  });
+
+  if (serviceType === 'pest_control') {
+    applications.forEach((app, appIndex) => {
+      if (app.method !== 'station_check') return;
+      applicationZoneIds(app).forEach((zoneId, zoneIndex) => {
+        const zone = zones.find((candidate) => String(candidate.id) === String(zoneId));
+        if (!zone) return;
+        const point = pointFromGeometry(zoneCoverageGeometry(zone));
+        const imagePoint = pointFromGeometry(zoneCoverageImageGeometry(zone));
+        locations.push({
+          id: `device-${app.id || appIndex}-${zoneId}`,
+          serviceType,
+          zoneId: String(zoneId),
+          name: zone.label ? `${zone.label} device` : `Device ${zoneIndex + 1}`,
+          status: 'device_checked',
+          geometry: point || undefined,
+          imageGeometry: imagePoint || undefined,
+          evidenceLevel: 'device_logged',
+          deviceType: deviceTypeFromApplication(app),
+          deviceId: app.deviceId || app.device_id || undefined,
+        });
+      });
+    });
+
+    findings
+      .filter((finding) => finding.zoneId && (findingSuggestsActivity(finding) || findingSuggestsEntryPoint(finding)))
+      .forEach((finding, index) => {
+        const zone = zones.find((candidate) => String(candidate.id) === String(finding.zoneId));
+        if (!zone) return;
+        const status = findingSuggestsEntryPoint(finding) ? 'entry_point_found' : 'activity_found';
+        const point = pointFromGeometry(zoneCoverageGeometry(zone));
+        const imagePoint = pointFromGeometry(zoneCoverageImageGeometry(zone));
+        locations.push({
+          id: `finding-${finding.id || index}`,
+          serviceType,
+          zoneId: String(finding.zoneId),
+          name: zone.label || finding.title || `Activity noted ${index + 1}`,
+          status,
+          geometry: point || undefined,
+          imageGeometry: imagePoint || undefined,
+          customerVisibleNote: finding.detail || finding.title || undefined,
+          evidenceLevel,
+        });
+      });
+  }
+
+  return [...locations, ...exceptions].filter((location, index, all) => {
+    const key = `${location.id}:${location.status}:${normalizeCoverageLabel(location.name)}`;
+    return all.findIndex((candidate) => `${candidate.id}:${candidate.status}:${normalizeCoverageLabel(candidate.name)}` === key) === index;
+  });
+}
+
+function workflowLabel(type, serviceLine) {
+  const labels = {
+    scheduled: 'Scheduled',
+    technician_en_route: 'Technician en route',
+    arrived_on_site: 'Arrived on site',
+    inspection_started: 'Inspection started',
+    service_started: 'Service started',
+    service_completed: 'Service completed',
+    quality_reviewed: 'Quality reviewed',
+    report_published: 'Report published',
+    follow_up_recommended: 'Follow-up recommended',
+    return_visit_needed: 'Return visit needed',
+  };
+  if (type === 'inspection_started' && coverageServiceType(serviceLine) === 'lawn') return 'Property check started';
+  return labels[type] || 'Service update';
+}
+
+function workflowDescription(type, serviceLine) {
+  const serviceType = coverageServiceType(serviceLine);
+  if (type === 'technician_en_route') return 'Your technician was on the way to the property.';
+  if (type === 'arrived_on_site') return 'Your technician arrived at the property.';
+  if (type === 'inspection_started') {
+    return serviceType === 'pest_control'
+      ? 'Your technician inspected the scheduled service areas.'
+      : 'Your technician checked the scheduled service areas.';
+  }
+  if (type === 'service_started') return serviceType === 'lawn' ? 'Lawn service began.' : 'Service began.';
+  if (type === 'service_completed') {
+    if (serviceType === 'lawn') return 'Mapped lawn areas were marked complete.';
+    if (serviceType === 'pest_control') return 'Pest control service areas were marked complete.';
+    return 'Service areas were marked complete.';
+  }
+  if (type === 'quality_reviewed') return 'The visit details were reviewed before publishing.';
+  if (type === 'report_published') return 'Your service report was generated.';
+  if (type === 'follow_up_recommended') return 'A follow-up was recommended based on today’s visit.';
+  if (type === 'return_visit_needed') return 'A return visit was noted for this service.';
+  return '';
+}
+
+function normalizeWorkflowEvent(event = {}, index, serviceLine) {
+  const type = normalizeWorkflowType(event.type || event.eventType || event.event_name);
+  const timestamp = validTimestamp(event.timestamp || event.occurredAt || event.occurred_at || event.time);
+  if (!timestamp) return null;
+  const status = ['completed', 'current', 'pending', 'skipped'].includes(event.status) ? event.status : 'completed';
+  return {
+    id: String(event.id || `${type}-${index + 1}`),
+    type,
+    label: String(event.label || workflowLabel(type, serviceLine)).trim(),
+    timestamp,
+    status,
+    customerVisibleDescription: String(event.customerVisibleDescription || event.customer_visible_description || '').trim()
+      || workflowDescription(type, serviceLine)
+      || undefined,
+  };
+}
+
+function configuredWorkflowEvents(structured = {}, serviceData = {}, serviceLine) {
+  const candidates = [
+    serviceData.workflowEvents,
+    serviceData.workflow_events,
+    structured.workflowEvents,
+    structured.workflow_events,
+  ];
+  const source = candidates.find((value) => Array.isArray(value));
+  if (!source) return [];
+  return source.map((event, index) => normalizeWorkflowEvent(event, index, serviceLine)).filter(Boolean);
+}
+
+function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, serviceLine }) {
+  const configured = configuredWorkflowEvents(structured, serviceData, serviceLine);
+  if (configured.length) return configured.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+
+  const events = [];
+  const add = (type, timestamp, description) => {
+    const normalizedTimestamp = validTimestamp(timestamp);
+    if (!normalizedTimestamp) return;
+    if (events.some((event) => event.type === type && event.timestamp === normalizedTimestamp)) return;
+    events.push({
+      id: type,
+      type,
+      label: workflowLabel(type, serviceLine),
+      timestamp: normalizedTimestamp,
+      status: 'completed',
+      customerVisibleDescription: description || workflowDescription(type, serviceLine) || undefined,
+    });
+  };
+
+  add('technician_en_route', service.en_route_at || structured.enRouteAt || serviceData.enRouteAt);
+  add('arrived_on_site', service.arrived_at || structured.arrivedAt || serviceData.arrivedAt || service.started_at);
+  add('inspection_started', structured.inspectionStartedAt || structured.inspection_started_at || serviceData.inspectionStartedAt || serviceData.inspection_started_at);
+  add('service_started', structured.serviceStartedAt || structured.service_started_at || serviceData.serviceStartedAt || serviceData.service_started_at);
+  add('service_completed', service.ended_at || structured.serviceCompletedAt || structured.service_completed_at || serviceData.serviceCompletedAt || serviceData.service_completed_at);
+  add('quality_reviewed', structured.qualityReviewedAt || structured.quality_reviewed_at || serviceData.qualityReviewedAt || serviceData.quality_reviewed_at);
+  add('report_published', service.report_generated_at || structured.reportPublishedAt || structured.report_published_at || serviceData.reportPublishedAt || serviceData.report_published_at);
+
+  return events
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+    .filter((event, index, all) => (
+      all.findIndex((candidate) => candidate.type === event.type) === index
+    ));
+}
+
 async function photoUrl(photo) {
   if (photo.s3_url) return photo.s3_url;
   if (!photo.s3_key || !PhotoService) return null;
@@ -539,12 +1071,16 @@ async function buildReportV1Data(service, token, knex = db) {
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
 
-  const [products, geometryRow, dbZones, dbFindings, photos] = await Promise.all([
+  const scheduledServicePromise = service.scheduled_service_id
+    ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
+    : Promise.resolve(null);
+  const [products, geometryRow, dbZones, dbFindings, photos, scheduledService] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
+    scheduledServicePromise,
   ]);
 
   const areaLabels = locationAreaLabels([
@@ -609,6 +1145,35 @@ async function buildReportV1Data(service, token, knex = db) {
       appliedAt: product.applied_at || product.created_at,
     };
   });
+  const evidenceLevel = serviceData.evidenceLevel
+    || serviceData.evidence_level
+    || structured.evidenceLevel
+    || structured.evidence_level
+    || 'technician_confirmed';
+  const serviceLocations = serviceCoverageLocations({
+    serviceLine,
+    structured,
+    serviceData,
+    zones,
+    applications,
+    findings,
+    areaLabels,
+    evidenceLevel,
+  });
+  const workflowEvents = buildWorkflowEvents({
+    service: {
+      ...service,
+      en_route_at: service.en_route_at || scheduledService?.en_route_at || null,
+      arrived_at: service.arrived_at || scheduledService?.arrived_at || null,
+      started_at: service.started_at || scheduledService?.actual_start_time || scheduledService?.arrived_at || null,
+    },
+    structured,
+    serviceData,
+    serviceLine,
+  });
+  const centerLat = numberOrNull(service.customer_latitude ?? service.latitude ?? service.lat);
+  const centerLng = numberOrNull(service.customer_longitude ?? service.longitude ?? service.lng);
+  const mapCenter = centerLat != null && centerLng != null ? { lat: centerLat, lng: centerLng } : null;
 
   const flagFindings = findings
     .filter((finding) => ['high', 'critical'].includes(finding.severity) && finding.zoneId)
@@ -699,6 +1264,7 @@ async function buildReportV1Data(service, token, knex = db) {
     serviceLine,
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
+    coverageServiceType: coverageServiceType(serviceLine),
     technicianName,
     technician: {
       name: technicianName,
@@ -710,6 +1276,9 @@ async function buildReportV1Data(service, token, knex = db) {
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
     cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
     serviceAddress: compactAddress(service),
+    propertyAddress: compactAddress(service),
+    mapCenter,
+    evidenceLevel,
     visitOutcome: protocol.visitOutcome || 'completed',
     visitTiming: {
       arrivedAt: service.started_at || null,
@@ -737,12 +1306,15 @@ async function buildReportV1Data(service, token, knex = db) {
       satellite: satelliteMap,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
+    serviceLocations,
+    workflowEvents,
     zones: zones.map((zone) => ({
       id: zone.id,
       letter: zone.letter,
       label: zone.label,
       category: zone.category,
       geometry: parseJsonObject(zone.geometry),
+      geometryGeoJson: normalizeGeometry(zone.geometry_geojson) || undefined,
       geometryImage: parseJsonObject(zone.geometry_image),
     })),
     applications,
@@ -786,4 +1358,7 @@ module.exports = {
   defaultGeometry,
   defaultZones,
   zoneSupportsServiceLine,
+  coverageServiceType,
+  serviceCoverageLocations,
+  buildWorkflowEvents,
 };

@@ -1,6 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { Cloud, CloudRain, CloudSun, Download, Printer, Share2, Sun, Wind } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  Cloud,
+  CloudRain,
+  CloudSun,
+  Eye,
+  FileCheck2,
+  Lock,
+  MapPin,
+  Printer,
+  Route,
+  Share2,
+  Sun,
+  Wind,
+  Download,
+} from 'lucide-react';
 import {
   COLORS as B,
   FONTS,
@@ -1435,6 +1452,532 @@ function AppliedProductsSection({ data, showTechnical = false, mode = 'live', wh
   );
 }
 
+const COVERAGE_VIEWBOX = { width: 640, height: 340, padding: 28 };
+const COVERAGE_STATUSES = {
+  treated: { label: 'Treated', tone: 'green', Icon: CheckCircle2 },
+  partially_treated: { label: 'Partially treated', tone: 'light-green', Icon: CheckCircle2 },
+  serviced: { label: 'Serviced', tone: 'green', Icon: CheckCircle2 },
+  inspected: { label: 'Inspected', tone: 'blue', Icon: Eye },
+  spot_treated: { label: 'Spot-treated', tone: 'blue', Icon: Eye },
+  skipped: { label: 'Skipped', tone: 'orange', Icon: AlertTriangle },
+  inaccessible: { label: 'Inaccessible', tone: 'orange', Icon: AlertTriangle },
+  activity_found: { label: 'Activity found', tone: 'orange', Icon: MapPin },
+  entry_point_found: { label: 'Entry point noted', tone: 'orange', Icon: MapPin },
+  blocked: { label: 'Blocked', tone: 'red', Icon: Lock },
+  device_checked: { label: 'Checked', tone: 'blue', Icon: MapPin },
+  device_placed: { label: 'Placed', tone: 'green', Icon: MapPin },
+  not_included: { label: 'Not included', tone: 'gray', Icon: AlertTriangle },
+};
+const EVIDENCE_COPY = {
+  technician_confirmed: 'Marked completed by your technician.',
+  gps_assisted: 'Technician visit location was used to help confirm service.',
+  equipment_verified: 'Treatment activity was recorded for this area.',
+  device_logged: 'Device activity was logged during the visit.',
+};
+
+function normalizeCoverageServiceType(value) {
+  const raw = String(value || '').toLowerCase();
+  if (raw.includes('lawn')) return 'lawn';
+  if (raw.includes('pest') || raw === 'pest_control' || raw.includes('termite') || raw.includes('rodent')) return 'pest_control';
+  if (raw.includes('mosquito')) return 'mosquito';
+  if (raw.includes('tree') || raw.includes('shrub') || raw.includes('palm')) return 'tree_shrub';
+  return 'other';
+}
+
+function coverageStatusConfig(status) {
+  return COVERAGE_STATUSES[status] || { label: formatEnumLabel(status) || 'Service location', tone: 'gray', Icon: MapPin };
+}
+
+function coverageSectionSubtitle(serviceType) {
+  if (serviceType === 'lawn') {
+    return 'Your technician marked the areas shown in green as completed during today’s visit.';
+  }
+  if (serviceType === 'pest_control') {
+    return 'Your technician marked serviced, inspected, and inaccessible areas from today’s pest control visit.';
+  }
+  return 'See where your technician serviced, inspected, or could not access during today’s visit.';
+}
+
+function coverageLegendKey(status, serviceType) {
+  if (status === 'treated' || status === 'serviced' || status === 'device_placed') return 'green';
+  if (status === 'partially_treated') return 'light-green';
+  if (status === 'inspected' || status === 'spot_treated' || status === 'device_checked') return 'blue';
+  if (status === 'activity_found' || status === 'entry_point_found' || status === 'skipped' || status === 'inaccessible') return 'orange';
+  if (status === 'blocked') return 'red';
+  if (status === 'not_included') return 'gray';
+  return serviceType === 'lawn' ? 'green' : 'blue';
+}
+
+function coverageLegendLabel(key, serviceType, statuses) {
+  if (key === 'green') return serviceType === 'lawn' ? 'Treated' : 'Serviced';
+  if (key === 'light-green') return 'Partially treated';
+  if (key === 'blue') return serviceType === 'lawn' ? 'Inspected / spot-treated' : 'Inspected';
+  if (key === 'orange') {
+    return serviceType === 'pest_control'
+      ? (statuses.some((status) => status === 'activity_found' || status === 'entry_point_found') ? 'Activity found / skipped' : 'Skipped / inaccessible')
+      : 'Skipped / inaccessible';
+  }
+  if (key === 'red') return 'Blocked / unsafe';
+  if (key === 'gray') return 'Not included';
+  return formatEnumLabel(key);
+}
+
+function coverageLegendItems(locations, serviceType) {
+  const statuses = locations.map((location) => location.status).filter(Boolean);
+  const seen = new Set();
+  return statuses.map((status) => {
+    const key = coverageLegendKey(status, serviceType);
+    if (seen.has(key)) return null;
+    seen.add(key);
+    const Icon = coverageStatusConfig(status).Icon;
+    return {
+      key,
+      tone: key,
+      Icon,
+      label: coverageLegendLabel(key, serviceType, statuses),
+    };
+  }).filter(Boolean);
+}
+
+function formatSqFt(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return `${Math.round(n).toLocaleString()} sq ft`;
+}
+
+function coverageReasonText(location, serviceType) {
+  const reason = String(location.skippedReason || location.blockedReason || '').trim();
+  if (!reason) return '';
+  if (location.status === 'blocked') return `Blocked because: ${reason}`;
+  if (serviceType === 'pest_control' && (location.status === 'skipped' || location.status === 'inaccessible')) {
+    return `Could not access: ${reason}`;
+  }
+  if (location.status === 'skipped' || location.status === 'inaccessible') return `Skipped because: ${reason}`;
+  return reason;
+}
+
+function coverageSummaryParts(location, serviceType) {
+  return [
+    coverageStatusConfig(location.status).label,
+    coverageReasonText(location, serviceType),
+    location.customerVisibleNote,
+    formatSqFt(location.areaSqFt),
+  ].filter(Boolean);
+}
+
+function coverageGeometryPairs(value, output = []) {
+  if (!Array.isArray(value)) return output;
+  if (value.length >= 2 && Number.isFinite(Number(value[0])) && Number.isFinite(Number(value[1]))) {
+    output.push([Number(value[0]), Number(value[1])]);
+    return output;
+  }
+  value.forEach((entry) => coverageGeometryPairs(entry, output));
+  return output;
+}
+
+function coverageLocationPairs(location) {
+  return coverageGeometryPairs(location.geometry?.coordinates);
+}
+
+function hasRenderableCoverageGeometry(location) {
+  return Boolean(location?.geometry?.type && coverageLocationPairs(location).length);
+}
+
+function coverageDisplayLocation(location, preferImageGeometry = false) {
+  if (preferImageGeometry && location?.imageGeometry?.type) {
+    return { ...location, geometry: location.imageGeometry };
+  }
+  return location;
+}
+
+function coverageImageDisplayLocation(location) {
+  return location?.imageGeometry?.type
+    ? { ...location, geometry: location.imageGeometry }
+    : { ...location, geometry: undefined };
+}
+
+function buildCoverageProjection(locations) {
+  const pairs = locations.flatMap(coverageLocationPairs);
+  if (!pairs.length) return null;
+  let minX = Math.min(...pairs.map(([x]) => x));
+  let maxX = Math.max(...pairs.map(([x]) => x));
+  let minY = Math.min(...pairs.map(([, y]) => y));
+  let maxY = Math.max(...pairs.map(([, y]) => y));
+  const coordinatesAreNormalized = minX >= 0 && maxX <= 1 && minY >= 0 && maxY <= 1;
+  if (coordinatesAreNormalized) return { mode: 'normalized' };
+  const coordinatesAreLocal = minX >= 0 && maxX <= COVERAGE_VIEWBOX.width && minY >= 0 && maxY <= COVERAGE_VIEWBOX.height;
+  if (coordinatesAreLocal) return { mode: 'local' };
+  if (minX === maxX) {
+    minX -= 0.0005;
+    maxX += 0.0005;
+  }
+  if (minY === maxY) {
+    minY -= 0.0005;
+    maxY += 0.0005;
+  }
+  const hasNegative = pairs.some(([x, y]) => x < 0 || y < 0);
+  const yDown = !hasNegative;
+  return { minX, maxX, minY, maxY, yDown };
+}
+
+function projectCoveragePoint(point, projection) {
+  const { width, height, padding } = COVERAGE_VIEWBOX;
+  const [rawX, rawY] = point;
+  if (projection.mode === 'normalized') {
+    return { x: Number(rawX) * width, y: Number(rawY) * height };
+  }
+  if (projection.mode === 'local') {
+    return { x: Number(rawX), y: Number(rawY) };
+  }
+  const x = padding + ((Number(rawX) - projection.minX) / (projection.maxX - projection.minX)) * (width - padding * 2);
+  const yRatio = (Number(rawY) - projection.minY) / (projection.maxY - projection.minY);
+  const y = projection.yDown
+    ? padding + yRatio * (height - padding * 2)
+    : padding + (1 - yRatio) * (height - padding * 2);
+  return { x, y };
+}
+
+function coverageLinePath(coordinates = [], projection) {
+  return coordinates.map((point, index) => {
+    const { x, y } = projectCoveragePoint(point, projection);
+    return `${index === 0 ? 'M' : 'L'} ${x} ${y}`;
+  }).join(' ');
+}
+
+function coveragePolygonPath(coordinates = [], projection) {
+  return coordinates.map((ring) => `${coverageLinePath(ring, projection)} Z`).join(' ');
+}
+
+function coverageGeometryCenter(geometry, projection) {
+  const pairs = coverageGeometryPairs(geometry?.coordinates);
+  if (!pairs.length || !projection) return null;
+  const xs = pairs.map(([x]) => x);
+  const ys = pairs.map(([, y]) => y);
+  return projectCoveragePoint([
+    (Math.min(...xs) + Math.max(...xs)) / 2,
+    (Math.min(...ys) + Math.max(...ys)) / 2,
+  ], projection);
+}
+
+function coverageMarkerText(status) {
+  if (status === 'device_checked' || status === 'device_placed') return 'D';
+  if (status === 'inspected' || status === 'spot_treated') return 'i';
+  if (status === 'treated' || status === 'serviced' || status === 'partially_treated') return 'OK';
+  return '!';
+}
+
+function coverageAriaLabel(location) {
+  const detail = coverageSummaryParts(location, normalizeCoverageServiceType(location.serviceType)).join(', ');
+  return `${location.name}: ${detail}`;
+}
+
+function CoverageMapGeometry({ location, projection }) {
+  const geometry = location.geometry;
+  const config = coverageStatusConfig(location.status);
+  const toneClass = `status-${config.tone}`;
+  const label = coverageAriaLabel(location);
+  const center = coverageGeometryCenter(geometry, projection);
+  const labelText = location.status === 'skipped' || location.status === 'inaccessible'
+    ? `${location.name} skipped`
+    : location.status === 'activity_found'
+      ? 'Activity noted'
+      : location.status === 'entry_point_found'
+        ? 'Entry point'
+        : location.name;
+
+  if (geometry.type === 'Polygon') {
+    return (
+      <g className="coverage-geometry-group" tabIndex={0} role="img" aria-label={label}>
+        <path className={`coverage-area ${toneClass} status-${location.status}`} d={coveragePolygonPath(geometry.coordinates || [], projection)}>
+          <title>{label}</title>
+        </path>
+        {center && <text x={center.x} y={center.y} className="coverage-map-label">{labelText}</text>}
+      </g>
+    );
+  }
+  if (geometry.type === 'MultiPolygon') {
+    return (
+      <g className="coverage-geometry-group" tabIndex={0} role="img" aria-label={label}>
+        {(geometry.coordinates || []).map((polygon, index) => (
+          <path key={`${location.id}-poly-${index}`} className={`coverage-area ${toneClass} status-${location.status}`} d={coveragePolygonPath(polygon, projection)}>
+            <title>{label}</title>
+          </path>
+        ))}
+        {center && <text x={center.x} y={center.y} className="coverage-map-label">{labelText}</text>}
+      </g>
+    );
+  }
+  if (geometry.type === 'LineString') {
+    return (
+      <g className="coverage-geometry-group" tabIndex={0} role="img" aria-label={label}>
+        <path className={`coverage-line ${toneClass} status-${location.status}`} d={coverageLinePath(geometry.coordinates || [], projection)}>
+          <title>{label}</title>
+        </path>
+        {center && <text x={center.x} y={center.y - 10} className="coverage-map-label">{labelText}</text>}
+      </g>
+    );
+  }
+  if (geometry.type === 'MultiLineString') {
+    return (
+      <g className="coverage-geometry-group" tabIndex={0} role="img" aria-label={label}>
+        {(geometry.coordinates || []).map((line, index) => (
+          <path key={`${location.id}-line-${index}`} className={`coverage-line ${toneClass} status-${location.status}`} d={coverageLinePath(line, projection)}>
+            <title>{label}</title>
+          </path>
+        ))}
+        {center && <text x={center.x} y={center.y - 10} className="coverage-map-label">{labelText}</text>}
+      </g>
+    );
+  }
+  if (geometry.type === 'Point') {
+    const point = projectCoveragePoint(geometry.coordinates || [0, 0], projection);
+    return (
+      <g className={`coverage-marker ${toneClass} status-${location.status}`} transform={`translate(${point.x} ${point.y})`} tabIndex={0} role="img" aria-label={label}>
+        <title>{label}</title>
+        <circle r="13" className="coverage-marker-outer" />
+        <circle r="9" className="coverage-marker-inner" />
+        <text y="3.5" textAnchor="middle" className="coverage-marker-text">{coverageMarkerText(location.status)}</text>
+        <text x="16" y="4" className="coverage-map-label coverage-point-label">{labelText}</text>
+      </g>
+    );
+  }
+  return null;
+}
+
+function ServiceCoverageMapSection({
+  serviceType,
+  serviceLocations,
+  propertyAddress,
+  serviceDate,
+  evidenceLevel,
+  mapBackgroundUrl,
+  mapAttribution,
+  loading = false,
+}) {
+  const normalizedServiceType = normalizeCoverageServiceType(serviceType);
+  const locations = Array.isArray(serviceLocations) ? serviceLocations : [];
+  const schematicRenderableCount = locations.filter(hasRenderableCoverageGeometry).length;
+  const imageLocations = locations.map(coverageImageDisplayLocation);
+  const imageRenderableCount = imageLocations.filter(hasRenderableCoverageGeometry).length;
+  const canUseImageMap = Boolean(mapBackgroundUrl)
+    && imageRenderableCount > 0
+    && imageRenderableCount === schematicRenderableCount;
+  const activeMapBackgroundUrl = canUseImageMap ? mapBackgroundUrl : null;
+  const displayLocations = useMemo(
+    () => locations.map((location) => coverageDisplayLocation(location, canUseImageMap)),
+    [locations, canUseImageMap],
+  );
+  const renderableLocations = displayLocations.filter(hasRenderableCoverageGeometry);
+  const projection = useMemo(() => buildCoverageProjection(renderableLocations), [renderableLocations]);
+  const legend = coverageLegendItems(locations, normalizedServiceType);
+  const evidenceNote = EVIDENCE_COPY[evidenceLevel]
+    || EVIDENCE_COPY[locations.find((location) => EVIDENCE_COPY[location.evidenceLevel])?.evidenceLevel];
+  const subtitle = coverageSectionSubtitle(normalizedServiceType);
+
+  if (loading) {
+    return (
+      <section className="sr-section service-coverage-section service-coverage-loading" id="service-coverage-map">
+        <h2>Service Coverage Map</h2>
+        <div className="coverage-skeleton-map" aria-label="Loading service coverage map" />
+        <div className="coverage-skeleton-list">
+          <span />
+          <span />
+          <span />
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="sr-section service-coverage-section" id="service-coverage-map">
+      <div className="coverage-section-header">
+        <div>
+          <h2>Service Coverage Map</h2>
+          <p className="map-context-copy">{subtitle}</p>
+        </div>
+        {(propertyAddress || serviceDate) && (
+          <div className="coverage-map-meta" aria-label="Service map context">
+            {propertyAddress && <span>{propertyAddress}</span>}
+            {serviceDate && <span>{formatDate(serviceDate)}</span>}
+          </div>
+        )}
+      </div>
+
+      {!locations.length ? (
+        <div className="coverage-empty-state">Service coverage map is not available for this visit.</div>
+      ) : (
+        <>
+          <div
+            className={`service-coverage-map${activeMapBackgroundUrl ? ' has-map-image' : ''}`}
+            style={activeMapBackgroundUrl ? { '--coverage-map-image': `url("${activeMapBackgroundUrl}")` } : undefined}
+          >
+            {projection && renderableLocations.length ? (
+              <svg
+                role="img"
+                aria-label="Service coverage map showing completed, inspected, skipped, and noted service locations"
+                viewBox={`0 0 ${COVERAGE_VIEWBOX.width} ${COVERAGE_VIEWBOX.height}`}
+                className="coverage-map-svg"
+              >
+                <defs>
+                  <pattern id="coverage-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+                    <path d="M24 0H0V24" className="coverage-grid-line" />
+                  </pattern>
+                  <pattern id="coverage-partial-pattern" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                    <rect width="9" height="9" className="coverage-partial-bg" />
+                    <line x1="0" y1="0" x2="0" y2="9" className="coverage-partial-line" />
+                  </pattern>
+                </defs>
+                <rect width={COVERAGE_VIEWBOX.width} height={COVERAGE_VIEWBOX.height} className="coverage-map-base" />
+                {!activeMapBackgroundUrl && (
+                  <>
+                    <rect x="36" y="30" width="568" height="280" rx="12" className="coverage-map-lot" />
+                    <rect x="248" y="124" width="144" height="92" rx="5" className="coverage-map-structure" />
+                    <rect x="392" y="146" width="64" height="70" rx="4" className="coverage-map-structure coverage-map-garage" />
+                    <path d="M456 217L512 310" className="coverage-map-drive" />
+                  </>
+                )}
+                {renderableLocations.map((location) => (
+                  <CoverageMapGeometry key={location.id || `${location.name}-${location.status}`} location={location} projection={projection} />
+                ))}
+              </svg>
+            ) : (
+              <div className="coverage-empty-state coverage-empty-state-map">Map geometry is not available for these locations.</div>
+            )}
+            {activeMapBackgroundUrl && mapAttribution && <div className="map-attribution coverage-map-attribution">{mapAttribution}</div>}
+          </div>
+
+          {legend.length > 0 && (
+            <div className="coverage-legend" aria-label="Service coverage legend">
+              {legend.map(({ key, label, tone, Icon }) => (
+                <div className={`coverage-legend-item status-${tone}`} key={key}>
+                  <span className="coverage-legend-swatch" aria-hidden="true"><Icon size={14} strokeWidth={2} /></span>
+                  <span>{label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="coverage-summary-list" aria-label="Service location summary">
+            {locations.map((location) => {
+              const config = coverageStatusConfig(location.status);
+              const Icon = config.Icon;
+              return (
+                <article className="coverage-summary-row" key={location.id || `${location.name}-${location.status}`}>
+                  <div>
+                    <h3>{location.name}</h3>
+                    <p>{coverageSummaryParts(location, normalizedServiceType).join(' · ')}</p>
+                  </div>
+                  <span className={`coverage-status-chip status-${config.tone}`}>
+                    <Icon size={14} strokeWidth={2} aria-hidden="true" />
+                    {config.label}
+                  </span>
+                </article>
+              );
+            })}
+          </div>
+
+          {evidenceNote && <p className="coverage-evidence-note">{evidenceNote}</p>}
+          <p className="map-footnote">Service coverage is based on technician-marked locations and available visit data. It is not a property survey.</p>
+        </>
+      )}
+    </section>
+  );
+}
+
+function workflowIconForType(type) {
+  if (type === 'technician_en_route') return Route;
+  if (type === 'arrived_on_site') return MapPin;
+  if (type === 'inspection_started') return Eye;
+  if (type === 'service_completed') return CheckCircle2;
+  if (type === 'report_published') return FileCheck2;
+  return Clock;
+}
+
+function ServiceWorkflowSection({ serviceType, workflowEvents, loading = false }) {
+  const events = Array.isArray(workflowEvents) ? workflowEvents : [];
+  const normalizedServiceType = normalizeCoverageServiceType(serviceType);
+
+  if (loading) {
+    return (
+      <section className="sr-section service-workflow-section service-workflow-loading" id="service-workflow">
+        <h2>Service Workflow</h2>
+        <div className="workflow-skeleton-list">
+          <span />
+          <span />
+          <span />
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="sr-section service-workflow-section" id="service-workflow">
+      <div className="coverage-section-header">
+        <div>
+          <h2>Service Workflow</h2>
+          <p className="map-context-copy">
+            {normalizedServiceType === 'pest_control'
+              ? 'Here’s how today’s pest control visit progressed.'
+              : 'Here’s how today’s visit progressed.'}
+          </p>
+        </div>
+      </div>
+
+      {!events.length ? (
+        <div className="coverage-empty-state">Service workflow details are not available for this visit.</div>
+      ) : (
+        <ol className="service-workflow-timeline">
+          {events.map((event) => {
+            const Icon = workflowIconForType(event.type);
+            return (
+              <li className={`workflow-event workflow-status-${event.status || 'completed'}`} key={event.id || `${event.type}-${event.timestamp}`}>
+                <span className="workflow-event-icon" aria-hidden="true">
+                  <Icon size={16} strokeWidth={2} />
+                </span>
+                <div className="workflow-event-body">
+                  <div className="workflow-event-heading">
+                    <h3>{event.label || formatEnumLabel(event.type)}</h3>
+                    {event.timestamp && <time dateTime={event.timestamp}>{formatClockTime(event.timestamp)}</time>}
+                  </div>
+                  {event.customerVisibleDescription && <p>{event.customerVisibleDescription}</p>}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function ServiceReportCoverageAndWorkflow({
+  serviceType,
+  serviceLocations,
+  workflowEvents,
+  propertyAddress,
+  mapCenter,
+  serviceDate,
+  evidenceLevel,
+  mapBackgroundUrl,
+  mapAttribution,
+}) {
+  return (
+    <>
+      <ServiceCoverageMapSection
+        serviceType={serviceType}
+        serviceLocations={serviceLocations}
+        propertyAddress={propertyAddress}
+        mapCenter={mapCenter}
+        serviceDate={serviceDate}
+        evidenceLevel={evidenceLevel}
+        mapBackgroundUrl={mapBackgroundUrl}
+        mapAttribution={mapAttribution}
+      />
+      <ServiceWorkflowSection serviceType={serviceType} workflowEvents={workflowEvents} />
+    </>
+  );
+}
+
 function overlayBox(geometry = {}) {
   if (geometry.type === 'circle') {
     const r = Number(geometry.r || 8);
@@ -2264,6 +2807,391 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .map-footnote {
           margin-top: 10px;
+        }
+        .coverage-section-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 16px;
+          margin-bottom: 14px;
+        }
+        .coverage-section-header h2 {
+          margin-bottom: 6px;
+        }
+        .coverage-map-meta {
+          display: grid;
+          gap: 4px;
+          justify-items: end;
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.35;
+          text-align: right;
+          max-width: 220px;
+        }
+        .service-coverage-map {
+          position: relative;
+          overflow: hidden;
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          background: #eef2f1;
+          aspect-ratio: 32 / 17;
+        }
+        .service-coverage-map.has-map-image {
+          background-image: linear-gradient(rgba(255,255,255,.14), rgba(255,255,255,.22)), var(--coverage-map-image);
+          background-size: cover;
+          background-position: center;
+        }
+        .coverage-map-svg {
+          display: block;
+          width: 100%;
+          height: 100%;
+        }
+        .coverage-map-base {
+          fill: url(#coverage-grid);
+        }
+        .service-coverage-map.has-map-image .coverage-map-base {
+          fill: rgba(255,255,255,.10);
+        }
+        .coverage-grid-line {
+          fill: none;
+          stroke: rgba(43, 75, 88, .13);
+          stroke-width: .7;
+        }
+        .coverage-map-lot {
+          fill: rgba(255,255,255,.72);
+          stroke: rgba(43,75,88,.20);
+          stroke-width: 1;
+        }
+        .coverage-map-structure {
+          fill: rgba(255,255,255,.86);
+          stroke: rgba(43,75,88,.34);
+          stroke-width: 1;
+        }
+        .coverage-map-drive {
+          fill: none;
+          stroke: rgba(43,75,88,.22);
+          stroke-width: 24;
+          stroke-linecap: round;
+        }
+        .coverage-area,
+        .coverage-line,
+        .coverage-marker-outer,
+        .coverage-marker-inner {
+          vector-effect: non-scaling-stroke;
+        }
+        .coverage-area {
+          stroke-width: 2;
+          fill-opacity: .38;
+          stroke-opacity: .95;
+        }
+        .coverage-area.status-green,
+        .coverage-marker.status-green .coverage-marker-inner {
+          fill: #16a34a;
+          stroke: #14532d;
+        }
+        .coverage-area.status-light-green,
+        .coverage-area.status-partially_treated {
+          fill: url(#coverage-partial-pattern);
+          stroke: #15803d;
+        }
+        .coverage-area.status-blue,
+        .coverage-marker.status-blue .coverage-marker-inner {
+          fill: #2563eb;
+          stroke: #1e3a8a;
+        }
+        .coverage-area.status-orange,
+        .coverage-marker.status-orange .coverage-marker-inner {
+          fill: #f59e0b;
+          stroke: #92400e;
+        }
+        .coverage-area.status-red,
+        .coverage-marker.status-red .coverage-marker-inner {
+          fill: #dc2626;
+          stroke: #7f1d1d;
+        }
+        .coverage-area.status-gray,
+        .coverage-marker.status-gray .coverage-marker-inner {
+          fill: #94a3b8;
+          stroke: #475569;
+        }
+        .coverage-partial-bg {
+          fill: rgba(22,163,74,.28);
+        }
+        .coverage-partial-line {
+          stroke: #14532d;
+          stroke-width: 2;
+          opacity: .65;
+        }
+        .coverage-line {
+          fill: none;
+          stroke-width: 7;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+          opacity: .92;
+        }
+        .coverage-line.status-green { stroke: #16a34a; }
+        .coverage-line.status-light-green { stroke: #65a30d; stroke-dasharray: 12 8; }
+        .coverage-line.status-blue { stroke: #2563eb; stroke-dasharray: 7 7; }
+        .coverage-line.status-orange { stroke: #f59e0b; stroke-dasharray: 10 8; }
+        .coverage-line.status-red { stroke: #dc2626; stroke-dasharray: 7 6; }
+        .coverage-line.status-gray { stroke: #94a3b8; stroke-dasharray: 8 8; }
+        .coverage-geometry-group:focus,
+        .coverage-marker:focus {
+          outline: none;
+        }
+        .coverage-geometry-group:focus .coverage-area,
+        .coverage-geometry-group:focus .coverage-line,
+        .coverage-marker:focus .coverage-marker-outer {
+          stroke: #111827;
+          stroke-width: 3;
+        }
+        .coverage-marker-outer {
+          fill: rgba(255,255,255,.94);
+          stroke: rgba(15,23,42,.28);
+          stroke-width: 1.2;
+        }
+        .coverage-marker-inner {
+          stroke-width: 1.5;
+        }
+        .coverage-marker-text {
+          fill: #fff;
+          font-family: Inter, Arial, sans-serif;
+          font-size: 7px;
+          font-weight: 850;
+          letter-spacing: 0;
+        }
+        .coverage-map-label {
+          fill: #111827;
+          font-family: Inter, Arial, sans-serif;
+          font-size: 12px;
+          font-weight: 750;
+          letter-spacing: 0;
+          paint-order: stroke;
+          stroke: rgba(255,255,255,.92);
+          stroke-width: 4px;
+          stroke-linejoin: round;
+          pointer-events: none;
+        }
+        .coverage-point-label {
+          text-anchor: start;
+        }
+        .coverage-legend {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-top: 12px;
+        }
+        .coverage-legend-item,
+        .coverage-status-chip {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--text);
+          font-size: 12px;
+          line-height: 1;
+          font-weight: 750;
+          white-space: nowrap;
+        }
+        .coverage-legend-item {
+          min-height: 30px;
+          padding: 6px 9px;
+        }
+        .coverage-status-chip {
+          align-self: center;
+          padding: 7px 9px;
+          flex: 0 0 auto;
+        }
+        .coverage-legend-swatch {
+          width: 18px;
+          height: 18px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          color: #fff;
+        }
+        .coverage-legend-item.status-green .coverage-legend-swatch,
+        .coverage-status-chip.status-green { background: #dcfce7; border-color: #86efac; color: #14532d; }
+        .coverage-legend-item.status-green .coverage-legend-swatch { background: #16a34a; color: #fff; }
+        .coverage-legend-item.status-light-green .coverage-legend-swatch,
+        .coverage-status-chip.status-light-green { background: #ecfccb; border-color: #bef264; color: #365314; }
+        .coverage-legend-item.status-light-green .coverage-legend-swatch { background: #65a30d; color: #fff; }
+        .coverage-legend-item.status-blue .coverage-legend-swatch,
+        .coverage-status-chip.status-blue { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+        .coverage-legend-item.status-blue .coverage-legend-swatch { background: #2563eb; color: #fff; }
+        .coverage-legend-item.status-orange .coverage-legend-swatch,
+        .coverage-status-chip.status-orange { background: #ffedd5; border-color: #fdba74; color: #7c2d12; }
+        .coverage-legend-item.status-orange .coverage-legend-swatch { background: #f59e0b; color: #fff; }
+        .coverage-legend-item.status-red .coverage-legend-swatch,
+        .coverage-status-chip.status-red { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
+        .coverage-legend-item.status-red .coverage-legend-swatch { background: #dc2626; color: #fff; }
+        .coverage-legend-item.status-gray .coverage-legend-swatch,
+        .coverage-status-chip.status-gray { background: #f1f5f9; border-color: #cbd5e1; color: #334155; }
+        .coverage-legend-item.status-gray .coverage-legend-swatch { background: #64748b; color: #fff; }
+        .coverage-summary-list {
+          display: grid;
+          gap: 8px;
+          margin-top: 12px;
+        }
+        .coverage-summary-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: #fff;
+          padding: 11px 12px;
+        }
+        .coverage-summary-row h3 {
+          margin: 0;
+          color: var(--text);
+          font-size: 15px;
+          line-height: 1.25;
+          font-weight: 800;
+          letter-spacing: 0;
+        }
+        .coverage-summary-row p,
+        .coverage-evidence-note {
+          margin: 4px 0 0;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
+        .coverage-evidence-note {
+          margin-top: 12px;
+        }
+        .coverage-empty-state {
+          border: 1px dashed var(--line);
+          border-radius: 12px;
+          background: var(--wash);
+          color: var(--muted);
+          padding: 16px;
+          font-size: 14px;
+          line-height: 1.45;
+        }
+        .coverage-empty-state-map {
+          min-height: 210px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+        }
+        .service-workflow-timeline {
+          list-style: none;
+          margin: 0;
+          padding: 0;
+          display: grid;
+          gap: 0;
+        }
+        .workflow-event {
+          display: grid;
+          grid-template-columns: 34px minmax(0, 1fr);
+          gap: 12px;
+          position: relative;
+          padding: 0 0 16px;
+        }
+        .workflow-event:last-child {
+          padding-bottom: 0;
+        }
+        .workflow-event:not(:last-child)::before {
+          content: '';
+          position: absolute;
+          left: 16px;
+          top: 34px;
+          bottom: 0;
+          width: 2px;
+          background: var(--line);
+        }
+        .workflow-event-icon {
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          border: 1px solid #bbf7d0;
+          background: #dcfce7;
+          color: #14532d;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 1;
+        }
+        .workflow-status-pending .workflow-event-icon {
+          border-color: #cbd5e1;
+          background: #f8fafc;
+          color: #475569;
+        }
+        .workflow-status-current .workflow-event-icon {
+          border-color: #93c5fd;
+          background: #dbeafe;
+          color: #1e3a8a;
+        }
+        .workflow-status-skipped .workflow-event-icon {
+          border-color: #fdba74;
+          background: #ffedd5;
+          color: #7c2d12;
+        }
+        .workflow-event-body {
+          min-width: 0;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: #fff;
+          padding: 11px 12px;
+        }
+        .workflow-event-heading {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .workflow-event-heading h3 {
+          margin: 0;
+          color: var(--text);
+          font-size: 15px;
+          line-height: 1.25;
+          font-weight: 800;
+          letter-spacing: 0;
+        }
+        .workflow-event-heading time {
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.3;
+          white-space: nowrap;
+        }
+        .workflow-event-body p {
+          margin: 5px 0 0;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
+        .coverage-skeleton-map,
+        .coverage-skeleton-list span,
+        .workflow-skeleton-list span {
+          display: block;
+          border-radius: 10px;
+          background: linear-gradient(90deg, #eef2f7, #f8fafc, #eef2f7);
+          background-size: 200% 100%;
+          animation: report-skeleton 1.2s ease-in-out infinite;
+        }
+        .coverage-skeleton-map {
+          height: 280px;
+          margin-top: 12px;
+        }
+        .coverage-skeleton-list,
+        .workflow-skeleton-list {
+          display: grid;
+          gap: 8px;
+          margin-top: 12px;
+        }
+        .coverage-skeleton-list span,
+        .workflow-skeleton-list span {
+          height: 48px;
+        }
+        @keyframes report-skeleton {
+          0% { background-position: 200% 0; }
+          100% { background-position: -200% 0; }
         }
         .map-toggle {
           display: inline-flex;
@@ -3369,6 +4297,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           }
           .report-ask-form { flex-direction: column; }
           .report-ask-actions { grid-template-columns: 1fr; }
+          .coverage-section-header { flex-direction: column; }
+          .coverage-map-meta { justify-items: start; text-align: left; max-width: none; }
+          .service-coverage-map { aspect-ratio: 32 / 17; }
+          .coverage-map-label { display: none; }
+          .coverage-summary-row { align-items: flex-start; flex-direction: column; }
+          .coverage-status-chip { align-self: flex-start; }
+          .workflow-event-heading { flex-direction: column; gap: 3px; }
           .treatment-map-header { flex-direction: column; }
           .map-toggle { width: 100%; }
           .map-toggle button { flex: 1; }
@@ -3504,8 +4439,24 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         )}
 
         <div id="map">
-          <TreatmentMapSection data={data} mode={mode} token={token} showTapPrompt={mode === 'live'} />
+          <ServiceReportCoverageAndWorkflow
+            serviceType={data.coverageServiceType || data.serviceLine || data.serviceType}
+            serviceLocations={data.serviceLocations}
+            workflowEvents={data.workflowEvents}
+            propertyAddress={data.propertyAddress || data.serviceAddress}
+            mapCenter={data.mapCenter}
+            serviceDate={data.serviceDate}
+            evidenceLevel={data.evidenceLevel}
+            mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
+            mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+          />
         </div>
+
+        {showNerd && (
+          <div id="application-map">
+            <TreatmentMapSection data={data} mode={mode} token={token} showTapPrompt={mode === 'live'} />
+          </div>
+        )}
 
         <AppliedProductsSection
           data={data}

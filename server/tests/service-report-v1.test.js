@@ -632,6 +632,178 @@ describe('service report v1', () => {
     expect(data.applications[0].zone_ids).toEqual(['default-zone-2']);
   });
 
+  test('v1 data exposes coverage locations and workflow events for the public report', async () => {
+    const fixtures = {
+      service_products: [{
+        id: 'product-1',
+        service_record_id: 'service-coverage',
+        product_name: 'Demand CS',
+        product_category: 'insecticide',
+        application_method: 'perimeter_spray',
+        zone_ids: ['zone-a'],
+      }],
+      property_geometries: [],
+      property_zones: [
+        {
+          id: 'zone-a',
+          customer_id: 'customer-1',
+          is_active: true,
+          letter: 'A',
+          label: 'Exterior perimeter',
+          category: 'perimeter',
+          geometry: { x: 60, y: 42, w: 500, h: 44 },
+          geometry_image: { x: 0.12, y: 0.18, w: 0.76, h: 0.1 },
+          service_lines: ['pest'],
+        },
+        {
+          id: 'zone-b',
+          customer_id: 'customer-1',
+          is_active: true,
+          letter: 'B',
+          label: 'Garage',
+          category: 'interior',
+          geometry: { x: 420, y: 124, w: 70, h: 80 },
+          geometry_image: { x: 0.64, y: 0.38, w: 0.12, h: 0.18 },
+          service_lines: ['pest'],
+        },
+      ],
+      service_findings: [
+        {
+          id: 'finding-1',
+          service_record_id: 'service-coverage',
+          zone_id: 'zone-a',
+          category: 'activity',
+          severity: 'medium',
+          title: 'Ant activity noted',
+          detail: 'Activity was noted near the rear foundation.',
+        },
+        {
+          id: 'finding-clean',
+          service_record_id: 'service-coverage',
+          zone_id: 'zone-b',
+          category: 'no_activity',
+          severity: 'low',
+          title: 'No activity observed',
+          detail: 'No entry points found in the garage.',
+        },
+      ],
+      service_photos: [],
+      scheduled_services: [{
+        id: 'scheduled-coverage',
+        en_route_at: '2026-05-15T13:58:00.000Z',
+      }],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-coverage',
+      scheduled_service_id: 'scheduled-coverage',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-15',
+      started_at: '2026-05-15T14:05:00.000Z',
+      ended_at: '2026-05-15T14:46:00.000Z',
+      report_generated_at: '2026-05-15T14:52:00.000Z',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Exterior perimeter', 'Garage']),
+      structured_notes: JSON.stringify({
+        skippedAreas: [{ name: 'Crawlspace', reason: 'Access blocked' }],
+      }),
+      service_data: '{}',
+    }, 'token-coverage', knex);
+
+    expect(data.coverageServiceType).toBe('pest_control');
+    expect(data.serviceLocations.find((location) => location.name === 'Exterior perimeter')).toMatchObject({
+      status: 'serviced',
+      geometry: { type: 'LineString' },
+      imageGeometry: { type: 'LineString' },
+    });
+    expect(data.serviceLocations.find((location) => location.name === 'Garage')).toMatchObject({
+      status: 'inspected',
+      imageGeometry: { type: 'Polygon' },
+    });
+    expect(data.serviceLocations.find((location) => location.status === 'activity_found')).toMatchObject({
+      name: 'Exterior perimeter',
+      customerVisibleNote: 'Activity was noted near the rear foundation.',
+      imageGeometry: { type: 'Point' },
+    });
+    expect(data.serviceLocations.filter((location) => (
+      location.status === 'activity_found' || location.status === 'entry_point_found'
+    ))).toHaveLength(1);
+    expect(data.serviceLocations.find((location) => location.name === 'Crawlspace')).toMatchObject({
+      status: 'skipped',
+      skippedReason: 'Access blocked',
+    });
+    expect(data.workflowEvents.map((event) => event.type)).toEqual([
+      'technician_en_route',
+      'arrived_on_site',
+      'service_completed',
+      'report_published',
+    ]);
+  });
+
+  test('workflow wall-clock timestamps are interpreted as Eastern time', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-workflow-naive',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-15',
+      first_name: 'Van',
+      last_name: 'Lee',
+      areas_serviced: JSON.stringify(['Perimeter']),
+      structured_notes: JSON.stringify({
+        workflowEvents: [
+          { type: 'arrived_on_site', timestamp: '2026-05-15T14:05' },
+          { type: 'service_completed', timestamp: '2026-05-15T14:46:30' },
+        ],
+      }),
+      service_data: '{}',
+    }, 'token-workflow-naive', knex);
+
+    expect(data.workflowEvents.map((event) => event.timestamp)).toEqual([
+      '2026-05-15T18:05:00.000Z',
+      '2026-05-15T18:46:30.000Z',
+    ]);
+  });
+
   test('v1 data exposes public report asset endpoints', async () => {
     const fixtures = {
       service_products: [],
