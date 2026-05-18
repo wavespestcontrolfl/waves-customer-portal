@@ -138,6 +138,18 @@ function requiresSqftForReportApplication(method, serviceLine = 'pest') {
   return serviceLine === 'lawn' && ['broadcast_spray', 'granular_broadcast'].includes(normalized);
 }
 
+function shouldInsertNoActivityFinding({
+  visitOutcome,
+  observations = [],
+  recommendations = [],
+  concernText = '',
+} = {}) {
+  return visitOutcome === 'completed'
+    && !observations.length
+    && !recommendations.length
+    && !String(concernText || '').trim();
+}
+
 async function renderRequiredTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -1648,7 +1660,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }));
           await trx('service_findings').insert(findingRows);
         }
-        if (useServiceReportV1 && serviceFindingsAvailable && !reportObservations.length && !isIncompleteVisit) {
+        if (
+          useServiceReportV1
+          && serviceFindingsAvailable
+          && shouldInsertNoActivityFinding({
+            visitOutcome,
+            observations: reportObservations,
+            recommendations: reportRecommendations,
+            concernText,
+          })
+        ) {
           await trx('service_findings').insert({
             service_record_id: record.id,
             category: 'no_activity',

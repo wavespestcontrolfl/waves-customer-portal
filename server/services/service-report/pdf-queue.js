@@ -11,6 +11,7 @@ const {
 } = require('./pdf-storage');
 const {
   emitPdfRenderTerminalFailure,
+  safePdfRenderError,
 } = require('./pdf-events');
 
 const CLAIM_LIMIT = 5;
@@ -225,7 +226,7 @@ async function markPdfRenderJobFailed(job, err, knex = db) {
   const attempts = Number(job.attempts || 0);
   const maxAttempts = Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS);
   const exhausted = attempts >= maxAttempts;
-  const errorMessage = err?.message || String(err || 'PDF render failed');
+  const errorMessage = safePdfRenderError(err);
   const nextAttemptAt = exhausted ? job.next_attempt_at : nextPdfRenderAttemptAt(now, attempts - 1);
   await knex('service_report_pdf_jobs').where({ id: job.id }).update({
     status: exhausted ? 'failed' : 'queued',

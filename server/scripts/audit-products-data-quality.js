@@ -5,8 +5,11 @@ async function main() {
   const rows = await db('products_catalog')
     .where(function missingRequiredFields() {
       this.whereRaw("NULLIF(TRIM(active_ingredient), '') IS NULL")
+        .orWhereRaw("LOWER(TRIM(active_ingredient)) IN ('unknown - pending sds', 'unknown', 'pending sds')")
         .orWhereRaw("NULLIF(TRIM(epa_reg_number), '') IS NULL")
-        .orWhereRaw("NULLIF(TRIM(formulation), '') IS NULL");
+        .orWhereRaw("LOWER(TRIM(epa_reg_number)) IN ('n/a', 'na', 'pending', 'pending sds')")
+        .orWhereRaw("NULLIF(TRIM(formulation), '') IS NULL")
+        .orWhereRaw("LOWER(TRIM(formulation)) IN ('unspecified', 'unknown')");
     })
     .select('id', 'name', 'category', 'active_ingredient', 'epa_reg_number', 'formulation')
     .orderBy('name');

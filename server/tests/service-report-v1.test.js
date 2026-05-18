@@ -18,6 +18,7 @@ const {
   serviceReportViewerUrl,
 } = require('../services/service-report/pdf');
 const {
+  safePdfRenderError,
   sanitizedPdfRenderMetadata,
 } = require('../services/service-report/pdf-events');
 const {
@@ -1012,6 +1013,8 @@ describe('service report v1', () => {
       reportUrl: 'https://portal.wavespestcontrol.com/report/token-2',
       report_url: 'https://portal.wavespestcontrol.com/report/token-3',
       viewerUrl: 'https://portal.wavespestcontrol.com/report/token-4',
+      err: 'Navigation failed at https://portal.wavespestcontrol.com/report/token-5?mode=pdf',
+      responseText: 'third-party body',
     });
 
     expect(metadata).toMatchObject({
@@ -1021,7 +1024,13 @@ describe('service report v1', () => {
       reportUrl: '[redacted]',
       report_url: '[redacted]',
       viewerUrl: '[redacted]',
+      err: 'Navigation failed at https://portal.wavespestcontrol.com/report/[redacted]',
+      responseText: '[redacted]',
     });
+    expect(safePdfRenderError({
+      status: 500,
+      message: 'Failed at https://portal.wavespestcontrol.com/report/token-6?mode=pdf',
+    })).toBe('status=500 Failed at https://portal.wavespestcontrol.com/report/[redacted]');
   });
 
   test('v1 SMS delivery copy includes public report link and advisory re-entry', () => {

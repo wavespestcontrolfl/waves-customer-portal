@@ -12,6 +12,23 @@ function sheetURL(tab) {
   return `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tab)}`;
 }
 
+const ACTIVE_INGREDIENT_PLACEHOLDERS = new Set(['unknown - pending sds', 'unknown', 'pending sds']);
+const EPA_REG_PLACEHOLDERS = new Set(['n/a', 'na', 'pending', 'pending sds']);
+
+function normalizedLabelField(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function missingActiveIngredient(value) {
+  const normalized = normalizedLabelField(value);
+  return !normalized || ACTIVE_INGREDIENT_PLACEHOLDERS.has(normalized);
+}
+
+function missingEpaRegNumber(value) {
+  const normalized = normalizedLabelField(value);
+  return !normalized || EPA_REG_PLACEHOLDERS.has(normalized);
+}
+
 // POST /api/admin/import/sms — import SMS recordings from Google Sheet
 router.post('/sms', async (req, res, next) => {
   try {
@@ -221,6 +238,7 @@ router.post('/pricing', async (req, res, next) => {
     for (const row of rows) {
       const product = (row['Product'] || '').trim();
       const activeIngredient = (row['Active Ingredient / Descriptor'] || row['Active Ingredient'] || '').trim();
+      const epaRegNumber = (row['EPA Reg #'] || row['EPA Reg'] || row['EPA Registration'] || row['EPA Registration Number'] || '').trim();
       let category = (row['Category'] || '').trim();
       const subcategory = (row['Subcategory'] || '').trim();
       const categorySection = (row['Category Section'] || '').trim();
@@ -267,7 +285,7 @@ router.post('/pricing', async (req, res, next) => {
           name: product,
           category: (category || 'Uncategorized').substring(0, 100),
           active_ingredient: activeIngredient || 'Unknown - pending SDS',
-          epa_reg_number: 'N/A',
+          epa_reg_number: epaRegNumber || 'N/A',
           formulation: 'unspecified',
           container_size: size || null,
           needs_pricing: !priceStr,
@@ -285,7 +303,8 @@ router.post('/pricing', async (req, res, next) => {
         // Update if we have more info
         const upd = {};
         if ((!productRecord.category || productRecord.category === 'Uncategorized') && category) upd.category = (category).substring(0, 100);
-        if (!productRecord.active_ingredient && activeIngredient) upd.active_ingredient = activeIngredient;
+        if (missingActiveIngredient(productRecord.active_ingredient) && activeIngredient) upd.active_ingredient = activeIngredient;
+        if (missingEpaRegNumber(productRecord.epa_reg_number) && epaRegNumber) upd.epa_reg_number = epaRegNumber;
         if (!productRecord.sku && sku) upd.sku = sku;
         if (!productRecord.container_size && size) upd.container_size = size;
         if (Object.keys(upd).length > 0) await db('products_catalog').where({ id: productRecord.id }).update(upd);

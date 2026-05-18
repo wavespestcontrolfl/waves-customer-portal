@@ -8,6 +8,7 @@ const {
 const {
   emitPdfRenderFailed,
   emitPdfRenderSuccess,
+  safePdfRenderError,
 } = require('./pdf-events');
 
 const CF_ENDPOINT = (accountId) =>
@@ -56,10 +57,9 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
   });
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => '<no body>');
-    const err = new Error(`Cloudflare Browser Rendering failed: ${res.status} ${errText.slice(0, 200)}`);
+    await res.text().catch(() => '');
+    const err = new Error(`Cloudflare Browser Rendering failed`);
     err.status = res.status;
-    err.responseText = errText;
     err.serviceRecordId = serviceRecordId || null;
     throw err;
   }
@@ -94,7 +94,7 @@ async function renderServiceReportV1Pdf(data, { token, req, logger: callLogger, 
     return pdf;
   } catch (err) {
     const elapsedMs = Date.now() - started;
-    const errText = err.responseText || err.message || String(err);
+    const errText = safePdfRenderError(err);
     emitPdfRenderFailed({
       service_record_id: recordId,
       provider,
@@ -103,7 +103,7 @@ async function renderServiceReportV1Pdf(data, { token, req, logger: callLogger, 
       err: String(errText).slice(0, 500),
     });
     const log = callLogger || logger;
-    log.error(`[service-report-v1-pdf] ${provider} render failed for ${recordId || 'unknown-record'}: ${err.message}`);
+    log.error(`[service-report-v1-pdf] ${provider} render failed for ${recordId || 'unknown-record'}: ${errText}`);
     throw err;
   }
 }
