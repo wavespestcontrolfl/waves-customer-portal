@@ -1,13 +1,22 @@
 import { useEffect, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
+import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
+
+const ESTIMATE_BG = '#FAF8F3';
+const ESTIMATE_BORDER = '#E7E2D7';
+const ESTIMATE_INPUT_BORDER = '#CFE7F5';
+const ESTIMATE_INPUT_BG = '#F8FCFE';
+const ESTIMATE_TEXT = '#1B2C5B';
+const ESTIMATE_MUTED = '#6B7280';
+const ESTIMATE_BUTTON_BG = '#1B2C5B';
 
 /**
  * CreateProjectModal — form for creating a Project (inspection or
  * documentation-heavy job). Mobile-first.
  *
- * Flow: pick type → pick customer → fill type-specific findings → attach
- * photos → save as draft. Admin reviews + sends from the admin portal.
+ * Flow: pick type → pick customer → fill type-specific findings → optionally
+ * attach photos → save as draft. Admin reviews + sends from the admin portal.
  *
  * Props:
  *   theme                      'dark' (default, tech portal) | 'light' (admin portal)
@@ -47,13 +56,13 @@ const PALETTES = {
     bodyFont: "'Nunito Sans', sans-serif",
   },
   light: {
-    bg: '#F4F4F5', card: '#FFFFFF', border: '#E4E4E7',
-    accent: '#18181B', text: '#27272A', muted: '#71717A',
+    bg: ESTIMATE_BG, card: '#FFFFFF', border: ESTIMATE_BORDER,
+    accent: ESTIMATE_BUTTON_BG, text: ESTIMATE_TEXT, muted: ESTIMATE_MUTED,
     red: '#991B1B',
     accentText: '#fff',
-    heading: '#09090B',
-    headingFont: "'DM Sans', sans-serif",
-    bodyFont: "'DM Sans', sans-serif",
+    heading: ESTIMATE_TEXT,
+    headingFont: "'Source Serif 4', Georgia, serif",
+    bodyFont: "'Inter', system-ui, sans-serif",
   },
 };
 
@@ -243,28 +252,33 @@ export default function CreateProjectModal({
   theme = 'dark',
 }) {
   const P = PALETTES[theme] || PALETTES.dark;
+  const isEstimateStyle = theme === 'light';
   const inputStyle = {
     width: '100%',
-    background: theme === 'light' ? P.card : P.bg,
+    background: isEstimateStyle ? ESTIMATE_INPUT_BG : P.bg,
     color: P.text,
-    border: `1px solid ${P.border}`,
-    borderRadius: 8,
-    padding: '10px 12px',
-    fontSize: 14,
+    border: `1px solid ${isEstimateStyle ? ESTIMATE_INPUT_BORDER : P.border}`,
+    borderRadius: isEstimateStyle ? 10 : 8,
+    padding: isEstimateStyle ? '12px 14px' : '10px 12px',
+    minHeight: isEstimateStyle ? 48 : undefined,
+    fontSize: isEstimateStyle ? 15 : 14,
+    fontWeight: isEstimateStyle ? 500 : undefined,
     boxSizing: 'border-box',
     fontFamily: P.bodyFont,
+    outline: 'none',
   };
   const labelStyle = {
     display: 'block',
     fontSize: 12,
-    fontWeight: 700,
+    fontWeight: 800,
     color: P.muted,
     textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: 6,
+    letterSpacing: isEstimateStyle ? '0.12em' : 1,
+    marginBottom: 8,
   };
 
   const [typesRegistry, setTypesRegistry] = useState(null);
+  const [productCatalog, setProductCatalog] = useState([]);
   const [projectType, setProjectType] = useState(defaultProjectType || '');
   const [customerId, setCustomerId] = useState(defaultCustomerId || '');
   const [customerQuery, setCustomerQuery] = useState('');
@@ -358,6 +372,14 @@ export default function CreateProjectModal({
     : [];
 
   useEffect(() => {
+    if (!typeCfg?.findingsFields || !hasCatalogBackedProjectFields(typeCfg.findingsFields) || productCatalog.length) return;
+    adminFetch('/admin/dispatch/products/catalog')
+      .then(r => r.json())
+      .then(d => setProductCatalog(d.products || []))
+      .catch(() => { /* product search can still accept free text */ });
+  }, [typeCfg, productCatalog.length]);
+
+  useEffect(() => {
     if (projectType !== 'wdo_inspection') return;
     const address = formatCustomerAddress(selectedCustomer);
     if (!address) return;
@@ -366,6 +388,18 @@ export default function CreateProjectModal({
 
   function handleFindingChange(key, value) {
     setFindings(prev => ({ ...prev, [key]: value }));
+  }
+
+  function handleProductSelect(fieldKey, product) {
+    const productName = product?.name || product?.product_name || '';
+    const epaRegistration = product?.epa_reg_number || product?.epaRegNumber || '';
+    const activeIngredient = product?.active_ingredient || product?.activeIngredient || '';
+    setFindings(prev => ({
+      ...prev,
+      [fieldKey]: productName || prev[fieldKey] || '',
+      ...(fieldKey === 'product_name' && epaRegistration ? { epa_registration: epaRegistration } : {}),
+      ...(fieldKey === 'product_name' && activeIngredient ? { active_ingredient: activeIngredient } : {}),
+    }));
   }
 
   function appendRecommendation(prefix, text) {
@@ -519,30 +553,51 @@ export default function CreateProjectModal({
       role="dialog"
       aria-modal="true"
       style={{
-        position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.6)',
+        position: 'fixed', inset: 0, zIndex: 200, background: isEstimateStyle ? 'rgba(15, 23, 42, 0.42)' : 'rgba(0,0,0,0.6)',
         display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-        overflowY: 'auto', padding: '12px 0',
+        overflowY: 'auto', padding: isEstimateStyle ? '28px 0' : '12px 0',
       }}
       onClick={(e) => { if (e.target === e.currentTarget && !saving) onClose?.(); }}
     >
       <div style={{
-        width: '100%', maxWidth: 520, margin: '0 12px',
-        background: P.card, border: `1px solid ${P.border}`, borderRadius: 14,
+        width: '100%', maxWidth: isEstimateStyle ? 720 : 520, margin: '0 12px',
+        background: isEstimateStyle ? P.bg : P.card,
+        border: `1px solid ${P.border}`,
+        borderRadius: isEstimateStyle ? 16 : 14,
         display: 'flex', flexDirection: 'column',
+        boxShadow: isEstimateStyle ? '0 24px 60px rgba(27, 44, 91, 0.22)' : undefined,
+        overflow: 'hidden',
       }}>
         {/* Header */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 16px', borderBottom: `1px solid ${P.border}`,
+          padding: isEstimateStyle ? '20px 24px' : '14px 16px',
+          borderBottom: `1px solid ${P.border}`,
+          background: P.card,
         }}>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: P.heading, fontFamily: P.headingFont }}>
+            <div style={{
+              fontSize: isEstimateStyle ? 12 : 16,
+              fontWeight: 800,
+              color: isEstimateStyle ? P.muted : P.heading,
+              fontFamily: P.bodyFont,
+              letterSpacing: isEstimateStyle ? '0.12em' : 0,
+              textTransform: isEstimateStyle ? 'uppercase' : 'none',
+            }}>
               Create Project Report
             </div>
-            <div style={{ fontSize: 11, color: P.muted, marginTop: 2 }}>
+            <div style={{
+              fontSize: isEstimateStyle ? 30 : 11,
+              color: P.heading,
+              marginTop: isEstimateStyle ? 4 : 2,
+              fontFamily: isEstimateStyle ? P.headingFont : P.bodyFont,
+              fontWeight: isEstimateStyle ? 500 : 400,
+              lineHeight: 1.1,
+            }}>
               Inspection or documentation-heavy job
             </div>
           </div>
+          {isEstimateStyle && <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />}
           <button
             type="button"
             onClick={() => !saving && onClose?.()}
@@ -555,7 +610,7 @@ export default function CreateProjectModal({
         </div>
 
         {/* Body */}
-        <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ padding: isEstimateStyle ? 24 : 16, display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 18 : 16 }}>
           {/* Project type */}
           <div>
             <label style={labelStyle}>Project type *</label>
@@ -755,32 +810,16 @@ export default function CreateProjectModal({
                       </button>
                     )}
                   </div>
-                  {field.type === 'select' ? (
-                    <select
-                      value={findings[field.key] || ''}
-                      onChange={(e) => handleFindingChange(field.key, e.target.value)}
-                      style={inputStyle}
-                    >
-                      <option value="">Select…</option>
-                      {field.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                    </select>
-                  ) : field.type === 'textarea' ? (
-                    <textarea
-                      value={findings[field.key] || ''}
-                      onChange={(e) => handleFindingChange(field.key, e.target.value)}
-                      placeholder={field.placeholder || ''}
-                      rows={3}
-                      style={{ ...inputStyle, resize: 'vertical', minHeight: 72 }}
-                    />
-                  ) : (
-                    <input
-                      type="text"
-                      value={findings[field.key] || ''}
-                      onChange={(e) => handleFindingChange(field.key, e.target.value)}
-                      placeholder={field.placeholder || ''}
-                      style={inputStyle}
-                    />
-                  )}
+                  <ProjectFindingFieldInput
+                    field={field}
+                    id={`create-project-${projectType}-${field.key}`}
+                    name={`findings.${field.key}`}
+                    value={findings[field.key] || ''}
+                    onChange={(value) => handleFindingChange(field.key, value)}
+                    inputStyle={inputStyle}
+                    products={productCatalog}
+                    onProductSelect={(product) => handleProductSelect(field.key, product)}
+                  />
                 </div>
               ))}
 
@@ -840,7 +879,7 @@ export default function CreateProjectModal({
 
               {/* Photos */}
               <div>
-                <label style={labelStyle}>Photos</label>
+                <label style={labelStyle}>Photos (optional)</label>
                 <PhotoQueue
                   queue={photoQueue}
                   setQueue={setPhotoQueue}
@@ -868,7 +907,9 @@ export default function CreateProjectModal({
 
         {/* Footer */}
         <div style={{
-          padding: '12px 16px', borderTop: `1px solid ${P.border}`,
+          padding: isEstimateStyle ? '16px 24px 20px' : '12px 16px',
+          borderTop: `1px solid ${P.border}`,
+          background: P.card,
           display: 'flex', gap: 10, justifyContent: 'flex-end',
         }}>
           <button
@@ -876,8 +917,13 @@ export default function CreateProjectModal({
             onClick={() => !saving && onClose?.()}
             disabled={saving}
             style={{
-              padding: '10px 16px', borderRadius: 8, fontSize: 13, fontWeight: 700,
-              background: 'transparent', border: `1px solid ${P.border}`,
+              minHeight: isEstimateStyle ? 48 : undefined,
+              padding: isEstimateStyle ? '0 18px' : '10px 16px',
+              borderRadius: isEstimateStyle ? 10 : 8,
+              fontSize: isEstimateStyle ? 14 : 13,
+              fontWeight: 700,
+              background: isEstimateStyle ? '#fff' : 'transparent',
+              border: `1px solid ${P.border}`,
               color: P.text, cursor: saving ? 'default' : 'pointer',
             }}
           >Cancel</button>
@@ -886,7 +932,11 @@ export default function CreateProjectModal({
             onClick={handleSave}
             disabled={saving || !projectType || !customerId}
             style={{
-              padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 800,
+              minHeight: isEstimateStyle ? 48 : undefined,
+              padding: isEstimateStyle ? '0 18px' : '10px 18px',
+              borderRadius: isEstimateStyle ? 10 : 8,
+              fontSize: isEstimateStyle ? 14 : 13,
+              fontWeight: 800,
               background: (!projectType || !customerId) ? P.muted : P.accent,
               color: P.accentText, border: 'none',
               cursor: (saving || !projectType || !customerId) ? 'default' : 'pointer',

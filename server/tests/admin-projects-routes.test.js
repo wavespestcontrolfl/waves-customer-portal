@@ -511,9 +511,6 @@ describe('admin projects routes', () => {
     });
     const sequenceRead = chain();
     const persistDelivery = chain();
-    const photoCount = chain({
-      first: jest.fn().mockResolvedValue({ count: '1' }),
-    });
     const activityInsert = chain();
     const customerRead = chain({
       first: jest.fn().mockResolvedValue({
@@ -528,7 +525,6 @@ describe('admin projects routes', () => {
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
-      if (table === 'project_photos') return photoCount;
       if (table === 'activity_log') return activityInsert;
       throw new Error(`Unexpected table query: ${table}`);
     });
@@ -576,13 +572,9 @@ describe('admin projects routes', () => {
     const customerRead = chain({
       first: jest.fn().mockResolvedValue({ id: 'customer-1', first_name: 'Van', last_name: 'Lee' }),
     });
-    const photoCount = chain({
-      first: jest.fn().mockResolvedValue({ count: '0' }),
-    });
     db.mockImplementation((table) => {
       if (table === 'projects') return projectRead;
       if (table === 'customers') return customerRead;
-      if (table === 'project_photos') return photoCount;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -597,11 +589,11 @@ describe('admin projects routes', () => {
       expect(body.error).toMatch(/missing required details/);
       expect(body.missing.map(item => item.key)).toEqual(expect.arrayContaining([
         'project_date',
-        'recommendations',
-        'photos',
         'wdo_property_address',
         'wdo_inspection_scope',
       ]));
+      expect(body.missing.map(item => item.key)).not.toContain('photos');
+      expect(body.missing.map(item => item.key)).not.toContain('recommendations');
       expect(projectRead.update).not.toHaveBeenCalled();
     });
   });

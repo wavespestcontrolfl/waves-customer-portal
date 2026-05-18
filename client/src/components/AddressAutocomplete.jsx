@@ -21,6 +21,8 @@ const SWFL_BOUNDS = {
  *   country     — default 'us'
  */
 export default function AddressAutocomplete({
+  id,
+  name,
   value,
   onChange,
   onSelect,
@@ -33,6 +35,11 @@ export default function AddressAutocomplete({
   const inputRef = useRef(null);
   const acRef = useRef(null);
   const lastSelectedRef = useRef('');
+  const onSelectRef = useRef(onSelect);
+
+  useEffect(() => {
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
 
   useEffect(() => {
     const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || 'AIzaSyCvzQ84QWUKMby5YcbM8MhDBlEZ2oF7Bsk';
@@ -89,7 +96,7 @@ export default function AddressAutocomplete({
         };
         if (parts.state && parts.state !== 'FL') return;
         lastSelectedRef.current = parts.formatted || parts.line1 || '';
-        onSelect?.(parts);
+        onSelectRef.current?.(parts);
       });
       acRef.current = ac;
       return true;
@@ -113,10 +120,12 @@ export default function AddressAutocomplete({
       setTimeout(() => clearInterval(iv), 8000);
     };
     document.head.appendChild(script);
-  }, [country, onSelect]);
+  }, [country]);
 
   return (
     <input
+      id={id}
+      name={name}
       ref={inputRef}
       type="text"
       autoFocus={autoFocus}
@@ -155,7 +164,7 @@ export default function AddressAutocomplete({
           };
           if (parts.state && parts.state !== 'FL') return;
           lastSelectedRef.current = parts.formatted || parts.line1 || typed;
-          onSelect?.(parts);
+          onSelectRef.current?.(parts);
         });
       }}
       style={style}

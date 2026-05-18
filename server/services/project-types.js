@@ -9,6 +9,18 @@
  * client/src/pages/ReportViewPage.jsx. No schema change required.
  */
 
+const WDO_TARGET_OPTIONS = [
+  'Subterranean termites',
+  'Formosan subterranean termites',
+  'Drywood termites',
+  'Dampwood termites',
+  'Powderpost beetles',
+  'Old house borers',
+  'Wood-decay fungi',
+  'Wood-destroying beetles',
+  'Other',
+];
+
 const PROJECT_TYPES = {
   wdo_inspection: {
     label: 'WDO Inspection',
@@ -31,8 +43,8 @@ const PROJECT_TYPES = {
       { key: 'previous_treatment_notes', label: 'Previous treatment observations', type: 'textarea', placeholder: 'Visible evidence suggesting possible previous treatment' },
       { key: 'notice_location', label: 'Notice of Inspection location', type: 'text', placeholder: 'Where the notice was affixed to the structure' },
       { key: 'treated_at_inspection', label: 'Treated at time of inspection', type: 'select', options: ['No', 'Yes'] },
-      { key: 'organism_treated', label: 'Organism treated', type: 'text', placeholder: 'Common name of organism, if treated' },
-      { key: 'pesticide_used', label: 'Pesticide used', type: 'text', placeholder: 'Name of pesticide, if treated' },
+      { key: 'organism_treated', label: 'Organism treated', type: 'select', options: WDO_TARGET_OPTIONS },
+      { key: 'pesticide_used', label: 'Pesticide used', type: 'product_search', placeholder: 'Search product catalog or type product name' },
       { key: 'treatment_terms', label: 'Treatment terms and conditions', type: 'textarea' },
       { key: 'treatment_method', label: 'Treatment method', type: 'select', options: ['Whole structure', 'Spot treatment', 'Not applicable'] },
       { key: 'treatment_notice_location', label: 'Treatment notice location', type: 'text' },
@@ -125,17 +137,17 @@ const PROJECT_TYPES = {
     requiresFollowup: false,
     photoCategories: ['slab_prep', 'soil_treatment', 'perimeter', 'equipment', 'before', 'after', 'other'],
     findingsFields: [
-      { key: 'treatment_address', label: 'Treatment address', type: 'text', placeholder: 'Street, city, state, ZIP' },
+      { key: 'treatment_address', label: 'Treatment address', type: 'address', placeholder: 'Start typing the treatment address' },
       { key: 'lot_block', label: 'Lot / Block', type: 'text', placeholder: 'Lot 12, Block C (pre-construction lots)' },
       { key: 'subdivision', label: 'Subdivision / Community', type: 'text', placeholder: 'e.g. Lakewood Ranch — Star Farms' },
       { key: 'permit_number', label: 'Building permit #', type: 'text', placeholder: 'Issued by the building department' },
-      { key: 'builder_contractor', label: 'Builder / General contractor', type: 'text' },
-      { key: 'treatment_date', label: 'Date of treatment', type: 'text', placeholder: 'YYYY-MM-DD' },
-      { key: 'treatment_time', label: 'Time of treatment', type: 'text', placeholder: 'e.g. 9:30 AM' },
+      { key: 'builder_contractor', label: 'Builder / General contractor', type: 'customer_search', placeholder: 'Search customer database or type contractor name' },
+      { key: 'treatment_date', label: 'Date of treatment', type: 'date' },
+      { key: 'treatment_time', label: 'Time of treatment', type: 'time' },
       { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
       { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text' },
-      { key: 'wdo_target', label: 'Wood-destroying organism treated for', type: 'text', placeholder: 'e.g. Subterranean termites (Reticulitermes spp.)' },
-      { key: 'product_name', label: 'Product used', type: 'select', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care', 'Other'] },
+      { key: 'wdo_target', label: 'Wood-destroying organism treated for', type: 'select', options: WDO_TARGET_OPTIONS },
+      { key: 'product_name', label: 'Product used', type: 'product_search', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care', 'Other'] },
       { key: 'product_name_other', label: 'Product (if Other)', type: 'text' },
       { key: 'epa_registration', label: 'EPA registration #', type: 'text', placeholder: 'e.g. 7969-210' },
       { key: 'active_ingredient', label: 'Active ingredient', type: 'text', placeholder: 'e.g. fipronil' },
