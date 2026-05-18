@@ -336,8 +336,29 @@ function normalizeWorkflowType(value) {
   return WORKFLOW_EVENT_TYPES.has(key) ? key : 'service_completed';
 }
 
-function validTimestamp(value) {
+function utcWallClockString(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return [
+    date.getUTCFullYear(),
+    '-',
+    pad(date.getUTCMonth() + 1),
+    '-',
+    pad(date.getUTCDate()),
+    'T',
+    pad(date.getUTCHours()),
+    ':',
+    pad(date.getUTCMinutes()),
+    ':',
+    pad(date.getUTCSeconds()),
+  ].join('');
+}
+
+function validTimestamp(value, { dbWallClock = false } = {}) {
   if (!value) return '';
+  if (value instanceof Date) {
+    const date = dbWallClock ? parseETDateTime(utcWallClockString(value)) : value;
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+  }
   const raw = String(value).trim();
   const naiveWallClock = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?$/.test(raw);
   const date = naiveWallClock ? parseETDateTime(raw.replace(/\.\d+$/, '')) : new Date(value);
@@ -779,8 +800,10 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
   if (configured.length) return configured.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
 
   const events = [];
-  const add = (type, timestamp, description) => {
-    const normalizedTimestamp = validTimestamp(timestamp);
+  const add = (type, candidates, description) => {
+    const list = Array.isArray(candidates) ? candidates : [{ value: candidates }];
+    const candidate = list.find((entry) => entry?.value);
+    const normalizedTimestamp = validTimestamp(candidate?.value, { dbWallClock: !!candidate?.dbWallClock });
     if (!normalizedTimestamp) return;
     if (events.some((event) => event.type === type && event.timestamp === normalizedTimestamp)) return;
     events.push({
@@ -793,11 +816,30 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
     });
   };
 
-  add('technician_en_route', service.en_route_at || structured.enRouteAt || serviceData.enRouteAt);
-  add('arrived_on_site', service.arrived_at || structured.arrivedAt || serviceData.arrivedAt || service.started_at);
+  add('technician_en_route', [
+    { value: service.en_route_at },
+    { value: service.scheduled_en_route_at },
+    { value: structured.enRouteAt },
+    { value: serviceData.enRouteAt },
+  ]);
+  add('arrived_on_site', [
+    { value: service.arrived_at },
+    { value: service.scheduled_arrived_at },
+    { value: structured.arrivedAt },
+    { value: serviceData.arrivedAt },
+    { value: service.started_at, dbWallClock: true },
+    { value: service.scheduled_actual_start_time, dbWallClock: true },
+  ]);
   add('inspection_started', structured.inspectionStartedAt || structured.inspection_started_at || serviceData.inspectionStartedAt || serviceData.inspection_started_at);
   add('service_started', structured.serviceStartedAt || structured.service_started_at || serviceData.serviceStartedAt || serviceData.service_started_at);
-  add('service_completed', service.ended_at || structured.serviceCompletedAt || structured.service_completed_at || serviceData.serviceCompletedAt || serviceData.service_completed_at);
+  add('service_completed', [
+    { value: service.ended_at, dbWallClock: true },
+    { value: service.scheduled_actual_end_time, dbWallClock: true },
+    { value: structured.serviceCompletedAt },
+    { value: structured.service_completed_at },
+    { value: serviceData.serviceCompletedAt },
+    { value: serviceData.service_completed_at },
+  ]);
   add('quality_reviewed', structured.qualityReviewedAt || structured.quality_reviewed_at || serviceData.qualityReviewedAt || serviceData.quality_reviewed_at);
   add('report_published', service.report_generated_at || structured.reportPublishedAt || structured.report_published_at || serviceData.reportPublishedAt || serviceData.report_published_at);
 
@@ -1163,9 +1205,10 @@ async function buildReportV1Data(service, token, knex = db) {
   const workflowEvents = buildWorkflowEvents({
     service: {
       ...service,
-      en_route_at: service.en_route_at || scheduledService?.en_route_at || null,
-      arrived_at: service.arrived_at || scheduledService?.arrived_at || null,
-      started_at: service.started_at || scheduledService?.actual_start_time || scheduledService?.arrived_at || null,
+      scheduled_en_route_at: scheduledService?.en_route_at || null,
+      scheduled_arrived_at: scheduledService?.arrived_at || null,
+      scheduled_actual_start_time: scheduledService?.actual_start_time || null,
+      scheduled_actual_end_time: scheduledService?.actual_end_time || null,
     },
     structured,
     serviceData,

@@ -4,6 +4,7 @@ const { buildSatelliteTreatmentMapContext } = require('../services/service-repor
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const {
   buildReportV1Data,
+  buildWorkflowEvents,
   locationAreaLabels,
   methodFromProduct,
   minutesFromElapsed,
@@ -801,6 +802,40 @@ describe('service report v1', () => {
     expect(data.workflowEvents.map((event) => event.timestamp)).toEqual([
       '2026-05-15T18:05:00.000Z',
       '2026-05-15T18:46:30.000Z',
+    ]);
+  });
+
+  test('workflow preserves absolute event Dates while normalizing DB wall-clock Dates', () => {
+    const events = buildWorkflowEvents({
+      service: {
+        en_route_at: new Date('2026-05-15T13:58:00.000Z'),
+        started_at: new Date('2026-05-15T14:05:00.000Z'),
+        ended_at: new Date('2026-05-15T14:46:00.000Z'),
+        report_generated_at: new Date('2026-05-15T18:52:00.000Z'),
+      },
+      serviceLine: 'pest',
+    });
+
+    expect(events.map((event) => [event.type, event.timestamp])).toEqual([
+      ['technician_en_route', '2026-05-15T13:58:00.000Z'],
+      ['arrived_on_site', '2026-05-15T18:05:00.000Z'],
+      ['service_completed', '2026-05-15T18:46:00.000Z'],
+      ['report_published', '2026-05-15T18:52:00.000Z'],
+    ]);
+
+    const scheduledFallbackEvents = buildWorkflowEvents({
+      service: {
+        scheduled_en_route_at: new Date('2026-05-15T13:58:00.000Z'),
+        scheduled_actual_start_time: new Date('2026-05-15T14:05:00.000Z'),
+        scheduled_actual_end_time: new Date('2026-05-15T14:46:00.000Z'),
+      },
+      serviceLine: 'pest',
+    });
+
+    expect(scheduledFallbackEvents.map((event) => [event.type, event.timestamp])).toEqual([
+      ['technician_en_route', '2026-05-15T13:58:00.000Z'],
+      ['arrived_on_site', '2026-05-15T18:05:00.000Z'],
+      ['service_completed', '2026-05-15T18:46:00.000Z'],
     ]);
   });
 
