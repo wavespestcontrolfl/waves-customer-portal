@@ -23,7 +23,14 @@ function cfBrowserRenderingTimeoutMs() {
 }
 
 function selectedPdfRenderer() {
-  return String(process.env.PDF_RENDERER || 'puppeteer').trim().toLowerCase() === 'cloudflare'
+  const requested = String(process.env.PDF_RENDERER || '').trim().toLowerCase();
+  if (requested === 'cloudflare' || requested === 'cloudflare_browser_rendering') {
+    return 'cloudflare_browser_rendering';
+  }
+  if (requested === 'puppeteer' || requested === 'playwright') {
+    return 'puppeteer';
+  }
+  return process.env.CF_ACCOUNT_ID && process.env.CF_BROWSER_RENDERING_TOKEN
     ? 'cloudflare_browser_rendering'
     : 'puppeteer';
 }

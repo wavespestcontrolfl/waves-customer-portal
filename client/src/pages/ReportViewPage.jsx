@@ -248,26 +248,6 @@ function visitSummaryCopy(data = {}) {
   return cleanVisitSummary(data.summary) || 'Your routine service is complete.';
 }
 
-export function customerInteractionCopy(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  const copy = {
-    tech_home_spoke_with_them: 'The technician spoke with someone at the home.',
-    tech_home_no_answer: 'The technician did not reach someone at the home.',
-    customer_home_spoke_with_them: 'The technician spoke with someone at the home.',
-    customer_home_no_answer: 'The technician did not reach someone at the home.',
-    spoke: 'The technician spoke with someone at the home.',
-    not_home_full_access: 'No one was home, and the technician had full access to complete service.',
-    not_home_partial_access: 'No one was home, and the technician completed the accessible areas.',
-    customer_specific_concern: 'The customer shared a specific concern with the technician.',
-    customer_not_home: 'No one was home during the visit.',
-    no_customer_contact: 'No customer interaction was recorded for this visit.',
-    gate_access_used: 'The technician used the recorded access instructions.',
-  };
-  return copy[key] || formatEnumLabel(raw);
-}
-
 function positiveNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : null;
@@ -1014,6 +994,15 @@ function readinessSummary(context, mode = 'live', nowMsOverride) {
   };
 }
 
+export function readinessStatusBadge(context, mode = 'live', nowMsOverride) {
+  if (!context) return null;
+  const summary = readinessSummary(context, mode, nowMsOverride);
+  return {
+    label: summary.badge,
+    ready: summary.allReady,
+  };
+}
+
 function useReadinessNow(context, mode) {
   const generatedAtMs = Date.parse(context?.generatedAt) || Date.now();
   const [nowMs, setNowMs] = useState(mode === 'live' ? Date.now() : generatedAtMs);
@@ -1031,8 +1020,9 @@ function ServiceStatusCard({ data, mode }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
   const arrived = formatClockTime(data.visitTiming?.arrivedAt);
   const completed = formatClockTime(data.visitTiming?.exitedAt);
-  const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
-  const readiness = readinessSummary(data.dynamicContext?.reentry, mode, nowMs);
+  const reentryContext = data.dynamicContext?.reentry;
+  const nowMs = useReadinessNow(reentryContext, mode);
+  const readiness = readinessStatusBadge(reentryContext, mode, nowMs);
   const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
   const completionStatus = completedEvent?.status === 'pending' ? 'In progress' : 'Completed';
 
@@ -1045,7 +1035,9 @@ function ServiceStatusCard({ data, mode }) {
           <div className="sr-meta">{serviceDisplayName(data)} | {formatDate(data.serviceDate)}</div>
           {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
         </div>
-        <div className={`status-badge ${readiness.allReady ? 'status-ready' : 'status-pending'}`}>{readiness.badge}</div>
+        {readiness && (
+          <div className={`status-badge ${readiness.ready ? 'status-ready' : 'status-pending'}`}>{readiness.label}</div>
+        )}
       </div>
       <div className="service-status-grid">
         <div className="sr-cell">
@@ -1208,15 +1200,19 @@ function ReportAskBox({ mode, token, serviceLine }) {
   );
 }
 
-function QuickNavigationAndAsk({ mode, token, serviceLine }) {
-  const links = [
+export function quickNavigationLinks({ hasProducts = true } = {}) {
+  return [
     ['#service-timeline', 'Timeline'],
     ['#areas-serviced', 'Areas Serviced'],
     ['#service-coverage-map', 'Coverage Map'],
-    ['#products-applied', 'Products Applied'],
+    hasProducts ? ['#products-applied', 'Products Applied'] : null,
     ['#what-to-expect', 'What to Expect'],
     ['#supporting-details', 'Details'],
-  ];
+  ].filter(Boolean);
+}
+
+function QuickNavigationAndAsk({ mode, token, serviceLine, hasProducts = true }) {
+  const links = quickNavigationLinks({ hasProducts });
 
   return (
     <section className="sr-section quick-report-tools" id="quick-navigation">
@@ -1531,36 +1527,16 @@ function WhenToContactUsSection() {
   );
 }
 
-function ReportViewModeToggle({ value, onChange }) {
-  return (
-    <div className="view-mode-toggle" aria-label="Report view mode">
-      {[
-        ['clean', 'Clean'],
-        ['detailed', 'Detailed'],
-        ['nerd', 'Nerd mode'],
-      ].map(([key, label]) => (
-        <button
-          type="button"
-          key={key}
-          className={value === key ? 'is-active' : ''}
-          onClick={() => onChange(key)}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   if (mode !== 'live') return null;
   if (data?.hasLeftGoogleReview || data?.reviewRequestEligible === false) return null;
   const location = reviewLocationForReport(data);
-  const isBottom = placement === 'bottom';
+  const copy = reviewRequestCopy(placement);
   return (
     <section className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
-        <h2>{isBottom ? 'Help the next neighbor choose faster' : 'Put Waves on the neighborhood radar'}</h2>
+        <h2>{copy.title}</h2>
+        {copy.body && <p>{copy.body}</p>}
       </div>
       <a
         className="review-cta"
@@ -1569,10 +1545,25 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
         rel="noreferrer"
         onClick={() => trackReportEvent(token, 'review_request_clicked', { location: location.key, placement })}
       >
-        {isBottom ? 'Share feedback' : 'Leave a review'}
+        {copy.cta}
       </a>
     </section>
   );
+}
+
+export function reviewRequestCopy(placement = 'top') {
+  if (placement === 'bottom') {
+    return {
+      title: 'Help the next neighbor choose faster',
+      body: null,
+      cta: 'Share feedback',
+    };
+  }
+  return {
+    title: "How did today's visit go?",
+    body: 'Share a quick note while the visit is fresh.',
+    cta: 'Share feedback',
+  };
 }
 
 function ExecutiveStatusGrid({ data, pressureTrend, reentry, mode }) {
@@ -1759,7 +1750,7 @@ function AppliedProductsSection({ data, showAll = false, showTechnical = false, 
         </div>
       )}
       {!showTechnical && groupedApplications.length > visibleGroups.length && (
-        <p className="sr-muted">{groupedApplications.length - visibleGroups.length} more application group{groupedApplications.length - visibleGroups.length === 1 ? '' : 's'} shown in Detailed mode.</p>
+        <p className="sr-muted">{groupedApplications.length - visibleGroups.length} more application group{groupedApplications.length - visibleGroups.length === 1 ? '' : 's'} included in the downloadable report.</p>
       )}
     </section>
   );
@@ -2183,39 +2174,15 @@ function ServiceCoverageMapSection({
 function workflowIconForType(type) {
   if (type === 'technician_en_route') return Route;
   if (type === 'arrived_on_site') return MapPin;
-  if (type === 'customer_interaction') return CheckCircle2;
   if (type === 'inspection_started') return Eye;
   if (type === 'service_completed') return CheckCircle2;
   if (type === 'report_published') return FileCheck2;
   return Clock;
 }
 
-function timelineEventsWithCustomerInteraction(workflowEvents = [], customerInteraction, visitTiming = {}) {
-  const events = Array.isArray(workflowEvents) ? [...workflowEvents] : [];
-  const interaction = customerInteractionCopy(customerInteraction);
-  if (!interaction) return events;
-  const arrived = events.find((event) => event.type === 'arrived_on_site');
-  const completed = events.find((event) => event.type === 'service_completed');
-  const timestamp = arrived?.timestamp || visitTiming.arrivedAt || completed?.timestamp || visitTiming.exitedAt || null;
-  const interactionEvent = {
-    id: 'customer_interaction',
-    type: 'customer_interaction',
-    label: 'Customer interaction',
-    timestamp,
-    status: 'completed',
-    customerVisibleDescription: interaction,
-  };
-  const insertAfter = events.findIndex((event) => event.type === 'arrived_on_site');
-  if (insertAfter >= 0) {
-    events.splice(insertAfter + 1, 0, interactionEvent);
-    return events;
-  }
-  const beforeCompleted = events.findIndex((event) => event.type === 'service_completed');
-  if (beforeCompleted >= 0) {
-    events.splice(beforeCompleted, 0, interactionEvent);
-    return events;
-  }
-  return [...events, interactionEvent];
+export function timelineEventsForDisplay(workflowEvents = []) {
+  if (!Array.isArray(workflowEvents)) return [];
+  return workflowEvents.filter((event) => event?.type !== 'customer_interaction');
 }
 
 function hasDuplicateDisplayedEventTimes(events = []) {
@@ -2228,8 +2195,8 @@ function hasDuplicateDisplayedEventTimes(events = []) {
   return Array.from(counts.values()).some((count) => count > 1);
 }
 
-function ServiceTimelineSection({ serviceType, workflowEvents, customerInteraction, visitTiming, loading = false }) {
-  const events = timelineEventsWithCustomerInteraction(workflowEvents, customerInteraction, visitTiming);
+function ServiceTimelineSection({ serviceType, workflowEvents, loading = false }) {
+  const events = timelineEventsForDisplay(workflowEvents);
   const normalizedServiceType = normalizeCoverageServiceType(serviceType);
   const showSameTimeNote = hasDuplicateDisplayedEventTimes(events);
 
@@ -2334,8 +2301,6 @@ function ServiceReportCoverageAndWorkflow({
   serviceAreas,
   serviceLocations,
   workflowEvents,
-  customerInteraction,
-  visitTiming,
   propertyAddress,
   mapCenter,
   serviceDate,
@@ -2348,8 +2313,6 @@ function ServiceReportCoverageAndWorkflow({
       <ServiceTimelineSection
         serviceType={serviceType}
         workflowEvents={workflowEvents}
-        customerInteraction={customerInteraction}
-        visitTiming={visitTiming}
       />
       <AreasServicedSection
         serviceType={serviceType}
@@ -2375,7 +2338,6 @@ function SupportingDetailsSection({
   token,
   mode,
   showDetails,
-  showNerd,
   serviceNotes,
   findings,
   recommendations,
@@ -2383,7 +2345,6 @@ function SupportingDetailsSection({
 }) {
   const pressureTrend = data.dynamicContext?.pressureTrend;
   const weatherRows = conditionRows(data.conditions || {});
-  const interaction = customerInteractionCopy(data.customerInteraction);
   const arrival = formatClockTime(data.visitTiming?.arrivedAt);
   const completion = formatClockTime(data.visitTiming?.exitedAt);
   const reportPublished = (data.workflowEvents || []).find((event) => event.type === 'report_published');
@@ -2430,20 +2391,14 @@ function SupportingDetailsSection({
           </details>
         )}
 
-        {(interaction || arrival || completion) && (
+        {(arrival || completion) && (
           <details className="report-accordion" open={mode !== 'live'}>
             <summary>
-              <span>Customer interaction and timing</span>
+              <span>Visit timing</span>
               <span className="accordion-action">Details</span>
             </summary>
             <div className="accordion-body">
               <div className="supporting-detail-grid">
-                {interaction && (
-                  <div className="sr-cell">
-                    <div className="sr-cell-label">Customer interaction</div>
-                    <div className="sr-cell-value">{interaction}</div>
-                  </div>
-                )}
                 {arrival && (
                   <div className="sr-cell">
                     <div className="sr-cell-label">Recorded arrival</div>
@@ -2457,12 +2412,6 @@ function SupportingDetailsSection({
                   </div>
                 )}
               </div>
-              {showNerd && (
-                <p className="sr-nerd-note">
-                  Raw arrival: {data.visitTiming?.arrivedAt || 'not recorded'}
-                  {' | '}Raw completion: {data.visitTiming?.exitedAt || 'not recorded'}
-                </p>
-              )}
             </div>
           </details>
         )}
@@ -2489,7 +2438,7 @@ function SupportingDetailsSection({
         {showDetails && ((data.applications || []).length > 0 || findings.length > 0 || recommendations.length > 0 || serviceNotes) && (
           <details className="report-accordion">
             <summary>
-              <span>Detailed report metadata</span>
+              <span>Report metadata</span>
               <span className="accordion-action">Details</span>
             </summary>
             <div className="accordion-body supporting-metadata">
@@ -3077,7 +3026,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   ].filter(([, value]) => value != null && value !== '');
   const hasVisitSummary = Boolean(
     visitSummary ||
-    data.customerInteraction ||
     serviceAreas.length ||
     visitTimingRows.length ||
     measurementRows.length,
@@ -3086,28 +3034,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
   const heroSummary = dynamicHeroSummary(data);
-  const [reportViewMode, setReportViewMode] = useState(mode === 'live' ? 'clean' : 'detailed');
+  const hasApplications = Array.isArray(data.applications) && data.applications.length > 0;
 
   useEffect(() => {
     if (mode !== 'live') return;
     trackReportEvent(token, 'service_report_viewed');
   }, [mode, token]);
 
-  useEffect(() => {
-    if (mode !== 'live') return;
-    const saved = window.localStorage.getItem('waves.report.viewMode');
-    if (['clean', 'detailed', 'nerd'].includes(saved)) setReportViewMode(saved);
-  }, [mode]);
-
-  const effectiveViewMode = mode === 'live' ? reportViewMode : 'detailed';
-  const showDetails = effectiveViewMode !== 'clean';
-  const showNerd = effectiveViewMode === 'nerd';
+  const showDetails = mode !== 'live';
   const advisoryRows = advisoryDisplayRows(data.advisory || {});
-  const updateReportViewMode = (nextMode) => {
-    setReportViewMode(nextMode);
-    window.localStorage.setItem('waves.report.viewMode', nextMode);
-    trackReportEvent(token, 'report_view_mode_changed', { mode: nextMode });
-  };
 
   const share = async () => {
     if (navigator.share) {
@@ -4829,13 +4764,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           line-height: 1.3;
           font-weight: 700;
         }
-        .report-premium-toolbar {
-          display: flex;
-          align-items: center;
-          justify-content: flex-end;
-          margin-bottom: 14px;
-        }
-        .view-mode-toggle,
         .summary-mode-tabs {
           display: inline-flex;
           border: 1px solid var(--line);
@@ -4844,10 +4772,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
           flex: 0 0 auto;
         }
-        .report-premium-toolbar > .view-mode-toggle {
-          justify-self: end;
-        }
-        .view-mode-toggle button,
         .summary-mode-tabs button {
           border: 0;
           border-left: 1px solid var(--line);
@@ -4858,11 +4782,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding: 8px 11px;
           cursor: pointer;
         }
-        .view-mode-toggle button:first-child,
         .summary-mode-tabs button:first-child {
           border-left: 0;
         }
-        .view-mode-toggle button.is-active,
         .summary-mode-tabs button.is-active {
           background: ${B.blueDark};
           color: #fff;
@@ -5149,19 +5071,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           letter-spacing: 0;
           text-transform: uppercase;
         }
-        .view-mode-toggle,
         .summary-mode-tabs,
         .map-toggle {
           border-color: var(--line-strong);
           border-radius: 8px;
         }
-        .view-mode-toggle button,
         .summary-mode-tabs button,
         .map-toggle button {
           font-family: ${FONTS.heading};
           font-weight: 850;
         }
-        .view-mode-toggle button.is-active,
         .summary-mode-tabs button.is-active,
         .map-toggle button.is-active {
           background: ${B.blueDeeper};
@@ -5198,10 +5117,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
           .sr-shell { padding: 14px 14px 36px; }
-          .report-premium-toolbar { display: flex; align-items: stretch; flex-direction: column; }
-          .report-premium-toolbar > .view-mode-toggle { justify-self: auto; }
-          .view-mode-toggle, .summary-mode-tabs { width: 100%; }
-          .view-mode-toggle button, .summary-mode-tabs button { flex: 1; }
+          .summary-mode-tabs { width: 100%; }
+          .summary-mode-tabs button { flex: 1; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
           .sr-hero { grid-template-columns: 1fr; }
@@ -5292,13 +5209,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           )}
         </section>
 
-        <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} />
+        <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} hasProducts={hasApplications} />
 
-        {mode === 'live' && (
-          <div className="report-premium-toolbar">
-            <ReportViewModeToggle value={effectiveViewMode} onChange={updateReportViewMode} />
-          </div>
-        )}
+        <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />
 
         <div id="map">
           <ServiceReportCoverageAndWorkflow
@@ -5306,8 +5219,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             serviceAreas={serviceAreas}
             serviceLocations={data.serviceLocations}
             workflowEvents={data.workflowEvents}
-            customerInteraction={data.customerInteraction}
-            visitTiming={data.visitTiming}
             propertyAddress={data.propertyAddress || data.serviceAddress}
             mapCenter={data.mapCenter}
             serviceDate={data.serviceDate}
@@ -5320,7 +5231,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <AppliedProductsSection
           data={data}
           showAll={showDetails}
-          showTechnical={showNerd}
+          showTechnical={false}
           mode={mode}
         />
 
@@ -5344,12 +5255,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </section>
         )}
 
-        {showNerd && (
-          <div id="application-map">
-            <TreatmentMapSection data={data} mode={mode} token={token} showTapPrompt={mode === 'live'} />
-          </div>
-        )}
-
         <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />
 
         <SupportingDetailsSection
@@ -5357,7 +5262,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           token={token}
           mode={mode}
           showDetails={showDetails}
-          showNerd={showNerd}
           serviceNotes={serviceNotes}
           findings={findings}
           recommendations={recommendations}

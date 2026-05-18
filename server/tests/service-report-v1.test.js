@@ -19,6 +19,7 @@ const { computeOnSiteMin } = require('../services/service-report/metrics-band');
 const {
   cfBrowserRenderingTimeoutMs,
   renderReportPdfWithCloudflare,
+  selectedPdfRenderer,
   serviceReportViewerUrl,
 } = require('../services/service-report/pdf');
 const {
@@ -1515,6 +1516,33 @@ describe('service report v1', () => {
       expect(calls[0].body.pdf).toBeUndefined();
     } finally {
       global.fetch = originalFetch;
+      restoreEnv('CF_ACCOUNT_ID', originalAccountId);
+      restoreEnv('CF_BROWSER_RENDERING_TOKEN', originalToken);
+    }
+  });
+
+  test('PDF renderer selects Cloudflare automatically when credentials are present', () => {
+    const originalRenderer = process.env.PDF_RENDERER;
+    const originalAccountId = process.env.CF_ACCOUNT_ID;
+    const originalToken = process.env.CF_BROWSER_RENDERING_TOKEN;
+
+    try {
+      delete process.env.PDF_RENDERER;
+      delete process.env.CF_ACCOUNT_ID;
+      delete process.env.CF_BROWSER_RENDERING_TOKEN;
+      expect(selectedPdfRenderer()).toBe('puppeteer');
+
+      process.env.CF_ACCOUNT_ID = 'account-1';
+      process.env.CF_BROWSER_RENDERING_TOKEN = 'token-1';
+      expect(selectedPdfRenderer()).toBe('cloudflare_browser_rendering');
+
+      process.env.PDF_RENDERER = 'puppeteer';
+      expect(selectedPdfRenderer()).toBe('puppeteer');
+
+      process.env.PDF_RENDERER = 'cloudflare';
+      expect(selectedPdfRenderer()).toBe('cloudflare_browser_rendering');
+    } finally {
+      restoreEnv('PDF_RENDERER', originalRenderer);
       restoreEnv('CF_ACCOUNT_ID', originalAccountId);
       restoreEnv('CF_BROWSER_RENDERING_TOKEN', originalToken);
     }
