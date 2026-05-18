@@ -78,6 +78,11 @@ function SearchableProductInput({
     .filter((option) => !query || option.label.toLowerCase().includes(query) || option.meta.toLowerCase().includes(query))
     .slice(0, 8);
   const showOptions = focused && filtered.length > 0;
+  const handleValueChange = (nextValue) => {
+    onChange(nextValue);
+    const exactMatch = options.find((option) => option.label.toLowerCase() === String(nextValue || '').trim().toLowerCase());
+    if (exactMatch?.product) onProductSelect?.(exactMatch.product);
+  };
 
   return (
     <div style={{ position: 'relative' }}>
@@ -86,7 +91,7 @@ function SearchableProductInput({
         name={name}
         type="text"
         value={value || ''}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => handleValueChange(event.target.value)}
         onFocus={() => setFocused(true)}
         onBlur={() => setTimeout(() => setFocused(false), 120)}
         placeholder={placeholder || 'Search products...'}
@@ -115,8 +120,7 @@ function SearchableProductInput({
               type="button"
               onMouseDown={(event) => {
                 event.preventDefault();
-                onChange(option.value);
-                if (option.product) onProductSelect?.(option.product);
+                handleValueChange(option.value);
                 setFocused(false);
               }}
               style={{
@@ -139,6 +143,158 @@ function SearchableProductInput({
               )}
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function parseMultiSelectValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatMultiSelectValue(values) {
+  return values.map((item) => String(item || '').trim()).filter(Boolean).join(', ');
+}
+
+function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] }) {
+  const [open, setOpen] = useState(false);
+  const selected = useMemo(() => parseMultiSelectValue(value), [value]);
+  const selectedSet = useMemo(() => new Set(selected.map((item) => item.toLowerCase())), [selected]);
+
+  const toggleOption = (option) => {
+    const normalized = String(option || '').trim();
+    if (!normalized) return;
+    const next = selectedSet.has(normalized.toLowerCase())
+      ? selected.filter((item) => item.toLowerCase() !== normalized.toLowerCase())
+      : [...selected, normalized];
+    onChange(formatMultiSelectValue(next));
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <input type="hidden" name={name} value={formatMultiSelectValue(selected)} />
+      <button
+        id={id}
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        style={{
+          ...inputStyle,
+          ...ESTIMATE_INPUT_STYLE,
+          width: '100%',
+          minHeight: 48,
+          textAlign: 'left',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+          cursor: 'pointer',
+        }}
+      >
+        <span style={{ flex: 1, color: selected.length ? '#1B2C5B' : '#6B7280', lineHeight: 1.35 }}>
+          {selected.length ? selected.join(', ') : 'Select one or more...'}
+        </span>
+        <span style={{ color: '#6B7280', fontSize: 12, fontWeight: 800 }}>Select</span>
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            top: 'calc(100% + 6px)',
+            zIndex: 30,
+            background: '#FFFFFF',
+            border: '1px solid #D7E3EA',
+            borderRadius: 12,
+            boxShadow: '0 12px 28px rgba(27, 44, 91, 0.14)',
+            maxHeight: 260,
+            overflowY: 'auto',
+            padding: 6,
+          }}
+        >
+          {options.map((option) => {
+            const checked = selectedSet.has(String(option || '').toLowerCase());
+            return (
+              <button
+                key={option}
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => toggleOption(option)}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  textAlign: 'left',
+                  border: 0,
+                  borderRadius: 8,
+                  background: checked ? '#EAF6FC' : '#FFFFFF',
+                  color: '#1B2C5B',
+                  padding: '10px 10px',
+                  cursor: 'pointer',
+                  fontSize: 14,
+                  fontWeight: checked ? 800 : 600,
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 16,
+                    height: 16,
+                    borderRadius: 4,
+                    border: `1px solid ${checked ? '#1B2C5B' : '#CFE7F5'}`,
+                    background: '#FFFFFF',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flex: '0 0 auto',
+                  }}
+                >
+                  {checked && (
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: 2,
+                        background: '#1B2C5B',
+                        display: 'block',
+                      }}
+                    />
+                  )}
+                </span>
+                <span>{option}</span>
+              </button>
+            );
+          })}
+          {selected.length > 0 && (
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => onChange('')}
+              style={{
+                width: '100%',
+                marginTop: 4,
+                border: '1px solid #D7E3EA',
+                borderRadius: 8,
+                background: '#FFFFFF',
+                color: '#6B7280',
+                padding: '9px 10px',
+                cursor: 'pointer',
+                fontSize: 13,
+                fontWeight: 800,
+              }}
+            >
+              Clear selections
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -317,6 +473,19 @@ export default function ProjectFindingFieldInput({
           </option>
         ))}
       </select>
+    );
+  }
+
+  if (field.type === 'multi_select') {
+    return (
+      <MultiSelectInput
+        id={id}
+        name={name}
+        value={value || ''}
+        onChange={onChange}
+        inputStyle={inputStyle}
+        options={field.options || []}
+      />
     );
   }
 

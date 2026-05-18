@@ -394,11 +394,13 @@ export default function CreateProjectModal({
     const productName = product?.name || product?.product_name || '';
     const epaRegistration = product?.epa_reg_number || product?.epaRegNumber || '';
     const activeIngredient = product?.active_ingredient || product?.activeIngredient || '';
+    const hasEpaField = typeCfg?.findingsFields?.some(field => field.key === 'epa_registration');
+    const hasActiveIngredientField = typeCfg?.findingsFields?.some(field => field.key === 'active_ingredient');
     setFindings(prev => ({
       ...prev,
       [fieldKey]: productName || prev[fieldKey] || '',
-      ...(fieldKey === 'product_name' && epaRegistration ? { epa_registration: epaRegistration } : {}),
-      ...(fieldKey === 'product_name' && activeIngredient ? { active_ingredient: activeIngredient } : {}),
+      ...(hasEpaField && epaRegistration ? { epa_registration: epaRegistration } : {}),
+      ...(hasActiveIngredientField && activeIngredient ? { active_ingredient: activeIngredient } : {}),
     }));
   }
 
