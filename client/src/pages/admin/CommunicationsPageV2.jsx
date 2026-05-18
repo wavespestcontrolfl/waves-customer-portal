@@ -63,12 +63,14 @@ import {
   Bell,
   FileText,
   Headphones,
+  Mail,
   MessageSquare,
   PhoneCall,
 } from "lucide-react";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
+import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
 import PushSettingsV2 from "../../components/admin/PushSettingsV2";
 import CallBridgeLink from "../../components/admin/CallBridgeLink";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
@@ -175,8 +177,14 @@ const TABS = [
   { key: "calls", label: "Calls", Icon: PhoneCall },
   {
     key: "templates",
-    label: "Templates",
+    label: "SMS Templates",
     Icon: FileText,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: "email_templates",
+    label: "Email Templates",
+    Icon: Mail,
     className: "hidden md:inline-flex",
   },
   {
@@ -1841,11 +1849,12 @@ export default function CommunicationsPageV2() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Communications section"
-        navGridClassName="grid-cols-2 md:grid-cols-5"
+        navGridClassName="grid-cols-2 md:grid-cols-6"
       />
       {tab === "sms" && <SmsTab />}
       {tab === "calls" && <CallLogTabV2 />}
       {tab === "templates" && <SmsTemplatesTabV2 />}
+      {tab === "email_templates" && <EmailTemplatesPanelV2 />}
       {tab === "csr" && <CSRCoachTabV2 />}
       {tab === "notifications" && <PushSettingsV2 />}
     </div>

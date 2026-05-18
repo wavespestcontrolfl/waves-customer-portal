@@ -13,6 +13,7 @@
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
+ *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
  *
  * In development, all gates are OPEN by default so you can test locally.
  */
@@ -56,6 +57,11 @@ const gates = {
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
   leadAutoBridge: isProd ? process.env.GATE_LEAD_AUTO_BRIDGE === 'true' : true,
+
+  // Email Template Automations — executes trigger-mapped template sends from
+  // the email template automation catalog. Off by default in prod until each
+  // trigger has been verified with run history and idempotency checks.
+  emailTemplateAutomations: isProd ? process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS === 'true' : true,
 
   // Field Content Module — master gate for the tech capture → review →
   // publish pipeline (content_prompts, dispatches, media_uploads,

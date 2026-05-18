@@ -1,0 +1,387 @@
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/sendgrid-mail', () => ({
+  newsletterGroupId: jest.fn(() => 101),
+  serviceGroupId: jest.fn(() => 202),
+  sendOne: jest.fn(),
+}));
+
+const db = require('../models/db');
+const sendgrid = require('../services/sendgrid-mail');
+const EmailTemplates = require('../services/email-template-library');
+
+function chain({ result = [], first, returning } = {}) {
+  const q = {};
+  [
+    'where',
+    'whereRaw',
+    'select',
+    'orderBy',
+    'limit',
+  ].forEach((method) => {
+    q[method] = jest.fn(() => q);
+  });
+  q.insert = jest.fn(() => q);
+  q.update = jest.fn(() => q);
+  q.first = jest.fn(async () => first);
+  q.returning = jest.fn(async () => returning || []);
+  q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+  q.catch = (reject) => Promise.resolve(result).catch(reject);
+  return q;
+}
+
+function setDbQueues(queues) {
+  const tableQueues = new Map(Object.entries(queues));
+  db.mockImplementation((table) => {
+    const queue = tableQueues.get(table);
+    if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+    return queue.shift();
+  });
+}
+
+function serviceTemplate(overrides = {}) {
+  return {
+    id: 'tmpl-1',
+    template_key: 'estimate.expiring_notice',
+    name: 'Estimate Expiring Notice',
+    mode: 'service',
+    send_stream: 'service_operational',
+    allowed_variables: ['first_name', 'estimate_url', 'expires_at', 'company_name'],
+    required_variables: ['first_name', 'estimate_url', 'expires_at'],
+    ...overrides,
+  };
+}
+
+function marketingTemplate(overrides = {}) {
+  return serviceTemplate({
+    id: 'tmpl-marketing',
+    template_key: 'newsletter.monthly',
+    name: 'Monthly Newsletter',
+    mode: 'marketing',
+    send_stream: 'marketing_newsletter',
+    allowed_variables: ['first_name'],
+    required_variables: ['first_name'],
+    ...overrides,
+  });
+}
+
+function version(overrides = {}) {
+  return {
+    id: 'ver-1',
+    subject: 'Your estimate expires {{expires_at}}',
+    preview_text: 'Available until {{expires_at}}.',
+    text_body: '',
+    blocks: [
+      { type: 'paragraph', content: 'Hi {{first_name}}, your estimate is available until {{expires_at}}.' },
+      { type: 'details', rows: [{ label: 'Company', value: '{{company_name}}' }] },
+      { type: 'cta', label: 'View estimate', url_variable: 'estimate_url' },
+    ],
+    ...overrides,
+  };
+}
+
+describe('email template library rendering', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('renders service templates through the professional service wrapper', () => {
+    const rendered = EmailTemplates.renderTemplate({
+      template: serviceTemplate(),
+      version: version(),
+      payload: {
+        first_name: 'Taylor',
+        expires_at: 'June 12',
+        estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample',
+        company_name: 'Waves & Co.',
+      },
+    });
+
+    expect(rendered.subject).toBe('Your estimate expires June 12');
+    expect(rendered.missingPayload).toEqual([]);
+    expect(rendered.validation.ok).toBe(true);
+    expect(rendered.html).toContain('Waves Pest Control');
+    expect(rendered.html).toContain('Hi Taylor');
+    expect(rendered.html).toContain('https://portal.wavespestcontrol.com/estimate/sample');
+    expect(rendered.html).not.toContain('Unsubscribe');
+    expect(rendered.text).toContain('Company: Waves & Co.');
+  });
+
+  test('reports missing payload values separately from template validation', () => {
+    const rendered = EmailTemplates.renderTemplate({
+      template: serviceTemplate(),
+      version: version(),
+      payload: {
+        first_name: 'Taylor',
+        estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample',
+      },
+    });
+
+    expect(rendered.validation.ok).toBe(true);
+    expect(rendered.missingPayload).toEqual(['expires_at']);
+  });
+
+  test('renders variables inside custom text bodies', () => {
+    const rendered = EmailTemplates.renderTemplate({
+      template: serviceTemplate(),
+      version: version({
+        text_body: 'Hi {{first_name}}, view {{estimate_url}} before {{expires_at}}.',
+      }),
+      payload: {
+        first_name: 'Taylor',
+        expires_at: 'June 12',
+        estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample',
+      },
+    });
+
+    expect(rendered.text).toBe('Hi Taylor, view https://portal.wavespestcontrol.com/estimate/sample before June 12.');
+  });
+
+  test('adds the SendGrid ASM unsubscribe placeholder to marketing sends', async () => {
+    const queuedMessage = {
+      id: 'msg-1',
+      status: 'queued',
+      subject_snapshot: 'Monthly update',
+    };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-1' };
+    const queueInsert = chain({ returning: [queuedMessage] });
+    const sentUpdate = chain({ returning: [sentMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: marketingTemplate({ active_version_id: 'ver-marketing' }) })],
+      email_template_versions: [chain({
+        first: version({
+          id: 'ver-marketing',
+          subject: 'Monthly update',
+          preview_text: 'A quick Waves update.',
+          text_body: '',
+          blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}, here is the monthly update.' }],
+        }),
+      })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [
+        queueInsert,
+        sentUpdate,
+      ],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    await EmailTemplates.sendTemplate({
+      templateKey: 'newsletter.monthly',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam' },
+      recipientType: 'subscriber',
+    });
+
+    expect(queueInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      html_snapshot: expect.stringContaining('<%asm_group_unsubscribe_raw_url%>'),
+      text_snapshot: expect.stringContaining('Unsubscribe: <%asm_group_unsubscribe_raw_url%>'),
+    }));
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      asmGroupId: 101,
+      html: expect.stringContaining('<%asm_group_unsubscribe_raw_url%>'),
+      text: expect.stringContaining('Unsubscribe: <%asm_group_unsubscribe_raw_url%>'),
+    }));
+  });
+
+  test('keeps manual suppressions scoped to their selected preference group', async () => {
+    const marketingSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'marketing_newsletter',
+      status: 'active',
+    };
+    const serviceSuppression = {
+      ...marketingSuppression,
+      id: 'suppression-2',
+      group_key: 'service_operational',
+    };
+    setDbQueues({
+      email_suppressions: [
+        chain({ result: [marketingSuppression] }),
+        chain({ result: [serviceSuppression] }),
+      ],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+    )).resolves.toBeNull();
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+    )).resolves.toEqual(serviceSuppression);
+  });
+
+  test('flags disallowed and missing required variables before publish', () => {
+    const validation = EmailTemplates.validationFor(
+      serviceTemplate({ allowed_variables: ['first_name'], required_variables: ['first_name', 'estimate_url'] }),
+      version({
+        subject: 'Hi {{first_name}}',
+        preview_text: '',
+        blocks: [{ type: 'paragraph', content: 'Click {{unsafe_url}}.' }],
+      }),
+    );
+
+    expect(validation.ok).toBe(false);
+    expect(validation.disallowed_variables).toEqual(['unsafe_url']);
+    expect(validation.missing_required_in_template).toEqual(['estimate_url']);
+  });
+
+  test('redacts common sensitive payload keys in send snapshots', () => {
+    expect(EmailTemplates.redactedPayloadSnapshot({
+      first_name: 'Taylor',
+      nested: {
+        auth_token: 'tok_secret',
+        invoice_number: 'W-1042',
+      },
+      cards: [{ card_number: '4242424242424242', amount_due: '$129.00' }],
+    })).toEqual({
+      first_name: 'Taylor',
+      nested: {
+        auth_token: '[redacted]',
+        invoice_number: 'W-1042',
+      },
+      cards: '[redacted]',
+    });
+  });
+
+  test('dedupe preserves terminal messages and retries unfinished messages', () => {
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'failed' })).toBe(true);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'queued' })).toBe(true);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'sending' })).toBe(true);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'sent' })).toBe(false);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'blocked' })).toBe(false);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'dropped' })).toBe(false);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'bounced' })).toBe(false);
+    expect(EmailTemplates.shouldRetryExistingMessage({ status: 'spam_report' })).toBe(false);
+
+    expect(EmailTemplates.dedupedResultForExistingMessage({
+      id: 'msg-blocked',
+      status: 'blocked',
+      error_message: 'Suppressed: unsubscribe',
+    })).toEqual({
+      sent: false,
+      blocked: true,
+      deduped: true,
+      reason: 'Suppressed: unsubscribe',
+      message: {
+        id: 'msg-blocked',
+        status: 'blocked',
+        error_message: 'Suppressed: unsubscribe',
+      },
+    });
+  });
+
+  test('sendTemplate retries a queued idempotent message instead of deduping it', async () => {
+    const staleQueuedMessage = {
+      id: 'msg-queued',
+      status: 'queued',
+      idempotency_key: 'estimate.extension_notice:est-queued',
+      error_message: null,
+      subject_snapshot: 'Stale queued subject',
+    };
+    const queuedMessage = {
+      ...staleQueuedMessage,
+      subject_snapshot: 'Your estimate expires June 12',
+    };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-queued' };
+    const queueUpdate = chain({ returning: [queuedMessage] });
+    const sentUpdate = chain({ returning: [sentMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: staleQueuedMessage }),
+        queueUpdate,
+        sentUpdate,
+      ],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-queued' });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-queued',
+        expires_at: 'June 12',
+      },
+      idempotencyKey: 'estimate.extension_notice:est-queued',
+    });
+
+    expect(queueUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued',
+      idempotency_key: 'estimate.extension_notice:est-queued',
+    }));
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'sam@example.com',
+      subject: 'Your estimate expires June 12',
+    }));
+    expect(result).toEqual(expect.objectContaining({
+      sent: true,
+      message: sentMessage,
+    }));
+  });
+
+  test('sendTemplate retries a failed idempotent message instead of deduping it', async () => {
+    const failedMessage = {
+      id: 'msg-1',
+      status: 'failed',
+      idempotency_key: 'estimate.extension_notice:est-1',
+      error_message: 'provider timeout',
+    };
+    const queuedMessage = {
+      ...failedMessage,
+      status: 'queued',
+      error_message: null,
+      subject_snapshot: 'Your estimate expires June 12',
+    };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-1' };
+    const queueUpdate = chain({ returning: [queuedMessage] });
+    const sentUpdate = chain({ returning: [sentMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_messages: [
+        chain({ first: failedMessage }),
+        queueUpdate,
+        sentUpdate,
+      ],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      idempotencyKey: 'estimate.extension_notice:est-1',
+    });
+
+    expect(queueUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued',
+      error_message: null,
+      idempotency_key: 'estimate.extension_notice:est-1',
+    }));
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'sam@example.com',
+      subject: 'Your estimate expires June 12',
+    }));
+    expect(sentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'sent',
+      provider_message_id: 'sg-1',
+    }));
+    expect(result).toEqual(expect.objectContaining({
+      sent: true,
+      message: sentMessage,
+    }));
+  });
+});

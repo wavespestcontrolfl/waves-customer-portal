@@ -20,7 +20,12 @@ const { buildSubscriberQuery } = require('../services/newsletter-sender');
 const publicRouter = require('../routes/public-newsletter');
 const sendgridWebhook = require('../routes/webhooks-sendgrid');
 const { EMAIL_RE, escapeHtml } = publicRouter;
-const { computeNewsletterEventUpdates, isFreshTimestamp } = sendgridWebhook;
+const {
+  computeNewsletterEventUpdates,
+  computeEmailMessageEventUpdates,
+  suppressionForEmailEvent,
+  isFreshTimestamp,
+} = sendgridWebhook;
 
 describe('newsletter buildSubscriberQuery', () => {
   // Knex .toSQL() returns { sql, bindings } from the query builder
@@ -255,5 +260,94 @@ describe('newsletter computeNewsletterEventUpdates', () => {
     test.each(['processed', 'deferred', 'group_resubscribe', 'unknown_future_event'])('%s is a no-op', (e) => {
       expect(computeNewsletterEventUpdates({ event: e }, fresh(), now)).toBeNull();
     });
+  });
+});
+
+describe('email template suppression event mapping', () => {
+  test('spam complaints and global unsubscribes create global suppressions', () => {
+    expect(suppressionForEmailEvent({ event: 'spamreport' }, 'service_operational')).toEqual({
+      suppression_type: 'spam_complaint',
+      group_key: null,
+    });
+    expect(suppressionForEmailEvent({ event: 'unsubscribe' }, 'marketing_newsletter')).toEqual({
+      suppression_type: 'unsubscribe',
+      group_key: null,
+    });
+  });
+
+  test('group unsubscribe is scoped to the template suppression group', () => {
+    expect(suppressionForEmailEvent({ event: 'group_unsubscribe' }, 'service_operational')).toEqual({
+      suppression_type: 'unsubscribe',
+      group_key: 'service_operational',
+    });
+  });
+
+  test('hard bounce suppresses but blocked and dropped do not', () => {
+    expect(suppressionForEmailEvent({ event: 'bounce', type: 'bounce' })).toEqual({
+      suppression_type: 'bounce',
+      group_key: null,
+    });
+    expect(suppressionForEmailEvent({ event: 'blocked' })).toBeNull();
+    expect(suppressionForEmailEvent({ event: 'dropped' })).toBeNull();
+  });
+});
+
+describe('email template send history webhook updates', () => {
+  const now = new Date('2026-04-29T12:00:00Z');
+  const fresh = (overrides = {}) => ({
+    delivered_at: null,
+    bounced_at: null,
+    opened_at: null,
+    clicked_at: null,
+    complained_at: null,
+    ...overrides,
+  });
+
+  test('delivered stamps status and delivered_at', () => {
+    expect(computeEmailMessageEventUpdates({ event: 'delivered' }, fresh(), now)).toEqual({
+      status: 'delivered',
+      delivered_at: now,
+      updated_at: now,
+    });
+  });
+
+  test('open and click only stamp engagement timestamps', () => {
+    expect(computeEmailMessageEventUpdates({ event: 'open' }, fresh(), now)).toEqual({
+      opened_at: now,
+      updated_at: now,
+    });
+    expect(computeEmailMessageEventUpdates({ event: 'click' }, fresh(), now)).toEqual({
+      clicked_at: now,
+      updated_at: now,
+    });
+  });
+
+  test('bounce, blocked, and dropped preserve the provider reason', () => {
+    const bounced = computeEmailMessageEventUpdates({ event: 'bounce', reason: 'mailbox missing' }, fresh(), now);
+    expect(bounced.status).toBe('bounced');
+    expect(bounced.bounced_at).toBe(now);
+    expect(bounced.error_message).toBe('mailbox missing');
+
+    expect(computeEmailMessageEventUpdates({ event: 'blocked', response: 'rate limited' }, fresh(), now).status).toBe('blocked');
+    expect(computeEmailMessageEventUpdates({ event: 'dropped', type: 'suppressed' }, fresh(), now).status).toBe('dropped');
+  });
+
+  test('complaints and unsubscribes update customer-facing send history status', () => {
+    expect(computeEmailMessageEventUpdates({ event: 'spamreport' }, fresh(), now)).toEqual({
+      status: 'spam_report',
+      complained_at: now,
+      updated_at: now,
+    });
+    expect(computeEmailMessageEventUpdates({ event: 'unsubscribe' }, fresh(), now)).toEqual({
+      status: 'unsubscribed',
+      updated_at: now,
+    });
+  });
+
+  test('idempotent engagement and delivery events are no-ops', () => {
+    expect(computeEmailMessageEventUpdates({ event: 'delivered' }, fresh({ delivered_at: now }), now)).toBeNull();
+    expect(computeEmailMessageEventUpdates({ event: 'open' }, fresh({ opened_at: now }), now)).toBeNull();
+    expect(computeEmailMessageEventUpdates({ event: 'click' }, fresh({ clicked_at: now }), now)).toBeNull();
+    expect(computeEmailMessageEventUpdates({ event: 'spamreport' }, fresh({ complained_at: now }), now)).toBeNull();
   });
 });

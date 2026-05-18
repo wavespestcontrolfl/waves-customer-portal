@@ -12,6 +12,8 @@ const logger = require('./logger');
 const db = require('../models/db');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { wrapEmail, ctaButton, currency, formatDate, plainText } = require('./email-template');
+const EmailTemplateLibrary = require('./email-template-library');
+const sendgrid = require('./sendgrid-mail');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 let cachedTransporter = null;
@@ -31,16 +33,26 @@ function getTransporter() {
   return cachedTransporter;
 }
 
+function canFallbackFromTemplateEmailError(err) {
+  return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
+}
+
+function pdfAttachment(filename, buffer) {
+  return {
+    filename,
+    content: buffer.toString('base64'),
+    type: 'application/pdf',
+    disposition: 'attachment',
+  };
+}
+
 async function sendInvoiceEmail(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   if (!customer?.email) return { ok: false, error: 'No customer email' };
-
-  const transporter = getTransporter();
-  if (!transporter) return { ok: false, error: 'Email not configured' };
 
   const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
   const longPayUrl = `${domain}/pay/${invoice.token}`;
@@ -108,6 +120,43 @@ async function sendInvoiceEmail(invoiceId) {
     '— Waves Pest Control',
   ]);
 
+  if (sendgrid.isConfigured()) {
+    try {
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: 'invoice.sent',
+        to: customer.email,
+        payload: {
+          first_name: first,
+          invoice_url: payUrl,
+          invoice_number: invoice.invoice_number,
+          amount_due: currency(invoice.total),
+          due_date: invoice.due_date ? formatDate(invoice.due_date) : '',
+          service_label: invoice.service_type || '',
+          service_date: invoice.service_date ? formatDate(invoice.service_date) : '',
+          attachment_note: extraAttachmentCount > 0
+            ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
+            : 'Your PDF invoice is attached.',
+        },
+        recipientType: 'customer',
+        recipientId: invoice.customer_id || null,
+        triggerEventId: `invoice_sent:${invoice.id}`,
+        categories: ['invoice_sent'],
+        attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
+      });
+      logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to customer ${invoice.customer_id || 'unknown'}`);
+      return { ok: true, messageId: result.message?.provider_message_id || null };
+    } catch (err) {
+      if (!canFallbackFromTemplateEmailError(err)) {
+        logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);
+        return { ok: false, error: err.message };
+      }
+      logger.warn(`[invoice-email] Template unavailable for ${invoice.invoice_number}; falling back to SMTP: ${err.message}`);
+    }
+  }
+
+  const transporter = getTransporter();
+  if (!transporter) return { ok: false, error: 'Email not configured' };
+
   try {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
@@ -121,7 +170,7 @@ async function sendInvoiceEmail(invoiceId) {
         contentType: 'application/pdf',
       }],
     });
-    logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${customer.email}`);
+    logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to customer ${invoice.customer_id || 'unknown'}`);
     return { ok: true };
   } catch (err) {
     logger.error(`[invoice-email] Send failed for ${invoice.invoice_number}: ${err.message}`);
@@ -136,12 +185,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
 
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   if (!customer?.email) return { ok: false, error: 'No customer email' };
-
-  const transporter = getTransporter();
-  if (!transporter) return { ok: false, error: 'Email not configured' };
 
   const payment = await db('payments')
     .where({ customer_id: invoice.customer_id })
@@ -174,7 +220,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const memoEscaped = memo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const memoHtml = memo
-    ? `<div style="margin-top:16px;padding:14px 16px;background:${SAND};border-left:3px solid ${WAVES_BLUE};border-radius:4px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:${BODY};white-space:pre-wrap;">${memoEscaped}</div>`
+    ? `<div style="margin-top:16px;padding:14px 16px;background:#FDF6EC;border-left:3px solid #009CDE;border-radius:4px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#334155;white-space:pre-wrap;">${memoEscaped}</div>`
     : '';
   const intro = `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.${memoHtml ? '' : ''}`;
   const introWithMemo = memoHtml ? `${intro}${memoHtml}` : intro;
@@ -216,6 +262,41 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
+  if (sendgrid.isConfigured()) {
+    try {
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: 'invoice.receipt',
+        to: customer.email,
+        payload: {
+          first_name: first,
+          receipt_url: receiptUrl,
+          invoice_number: invoice.invoice_number,
+          amount_paid: currency(invoice.total),
+          paid_at: invoice.paid_at ? formatDate(invoice.paid_at) : '',
+          service_label: invoice.service_type || '',
+          payment_method: cardText || '',
+          memo: memo ? `Note from Waves: ${memo}` : '',
+        },
+        recipientType: 'customer',
+        recipientId: invoice.customer_id || null,
+        triggerEventId: `invoice_receipt:${invoice.id}`,
+        categories: ['invoice_receipt'],
+        attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
+      });
+      logger.info(`[invoice-email] Template receipt email sent for ${invoice.invoice_number} to customer ${invoice.customer_id || 'unknown'}`);
+      return { ok: true, messageId: result.message?.provider_message_id || null };
+    } catch (err) {
+      if (!canFallbackFromTemplateEmailError(err)) {
+        logger.error(`[invoice-email] Template receipt send failed for ${invoice.invoice_number}: ${err.message}`);
+        return { ok: false, error: err.message };
+      }
+      logger.warn(`[invoice-email] Template unavailable for receipt ${invoice.invoice_number}; falling back to SMTP: ${err.message}`);
+    }
+  }
+
+  const transporter = getTransporter();
+  if (!transporter) return { ok: false, error: 'Email not configured' };
+
   try {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
@@ -229,7 +310,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         contentType: 'application/pdf',
       }],
     });
-    logger.info(`[invoice-email] Receipt email sent for ${invoice.invoice_number} to ${customer.email}`);
+    logger.info(`[invoice-email] Receipt email sent for ${invoice.invoice_number} to customer ${invoice.customer_id || 'unknown'}`);
     return { ok: true };
   } catch (err) {
     logger.error(`[invoice-email] Receipt send failed for ${invoice.invoice_number}: ${err.message}`);

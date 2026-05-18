@@ -204,10 +204,10 @@ function unsubscribeUrl(unsubscribeToken) {
 }
 
 /**
- * Send a transactional email via a SendGrid dynamic template. Preferred path
- * for operational emails (invoice receipts, appointment reminders, review
- * requests, post-service surveys) so copy can be edited in the SendGrid
- * dashboard without redeploying.
+ * Legacy escape hatch for sending a SendGrid dynamic template directly.
+ * New operational/customer templates should live in the Waves template
+ * library and render in-app before calling sendOne(), so versioning,
+ * previews, validation, and send snapshots stay under Waves control.
  *
  *   templateId      — 'd-...' id from sendgrid.com/dynamic_templates
  *   dynamicData     — { customer_name, appt_date, ... } — template variables

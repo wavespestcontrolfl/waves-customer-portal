@@ -121,6 +121,58 @@ function plainText(lines) {
 }
 
 /**
+ * Service/account email wrapper. This is the professional customer-facing
+ * shell for invoices, estimates, onboarding, reports, prep guides, payment
+ * notices, and account-state messages. It shares the Waves logo, navy/gold
+ * palette, footer, and CTA style, but deliberately avoids newsletter labeling
+ * or promotional chrome.
+ *
+ * @param {{
+ *   preheader?: string,
+ *   body: string,
+ *   footerNote?: string,
+ * }} opts
+ */
+function wrapServiceEmail({ preheader, body, footerNote } = {}) {
+  const safeBody = body || '';
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Waves Pest Control</title>
+</head>
+<body style="margin:0;padding:0;background:${SAND};font-family:Inter,Arial,sans-serif;color:${BODY};">
+  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${SAND};">${preheader}</div>` : ''}
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:${SAND};">
+    <tr><td align="center" style="padding:28px 12px;">
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;background:${CARD};border-radius:14px;overflow:hidden;box-shadow:0 8px 20px rgba(27,44,91,.07);">
+        <tr><td style="background:${NAVY};padding:18px 24px;text-align:left;">
+          <a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-flex;align-items:center;">
+            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:72px;border:0;outline:none;vertical-align:middle;" />
+          </a>
+        </td></tr>
+        <tr><td style="padding:30px 30px 8px 30px;font-family:Inter,Arial,sans-serif;font-size:15px;line-height:1.58;color:${BODY};">
+          ${safeBody}
+        </td></tr>
+        <tr><td align="center" style="padding:10px 30px 28px 30px;">
+          <div style="font-family:Inter,Arial,sans-serif;font-size:13px;line-height:1.55;color:${MUTED};text-align:center;">
+            ${footerNote || 'Questions? Reply to this email or call <a href="tel:+19412975749" style="color:' + WAVES_BLUE + ';text-decoration:none;">(941) 297-5749</a>.'}
+          </div>
+        </td></tr>
+        <tr><td align="center" style="background:${SAND};padding:18px 24px;border-top:1px solid ${RULE};">
+          <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;text-align:center;">
+            Waves Pest Control, LLC · <a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:none;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · FL License #JB351547
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+/**
  * Newsletter / automation chrome wrapper. Unlike wrapEmail() (which is
  * tightly templated for transactional content — heading + intro +
  * lines + CTA), this wrapper takes operator-written HTML body and
@@ -243,6 +295,7 @@ function ensureLegalTextFooter(text, opts = {}) {
 
 module.exports = {
   wrapEmail,
+  wrapServiceEmail,
   wrapNewsletter,
   ensureLegalTextFooter,
   ctaButton,
