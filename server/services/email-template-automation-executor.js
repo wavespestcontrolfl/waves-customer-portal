@@ -163,6 +163,13 @@ function completionValue(payload = {}) {
   return value == null ? false : value;
 }
 
+function estimateViewedValue(payload = {}) {
+  if (payload.viewed_at) return true;
+  if (normalizeStatus(payload.estimate_status || payload.status) === 'viewed') return true;
+  const value = boolValue(payload.estimate_viewed);
+  return value == null ? false : value;
+}
+
 function eventSeen(payload, eventKey) {
   const events = asArray(payload.events || payload.event_keys || payload.stop_events);
   return events.includes(eventKey);
@@ -180,7 +187,7 @@ function exitReasonFor(exitConditions, payload = {}) {
   if (stopIf.includes('estimate.accepted') && estimateStatus === 'accepted') return 'estimate already accepted';
   if (stopIf.includes('estimate.archived') && ['archived', 'cancelled', 'declined'].includes(estimateStatus)) return `estimate status is ${estimateStatus}`;
   if (stopIf.includes('estimate.expired') && estimateStatus === 'expired') return 'estimate already expired';
-  if (stopIf.includes('estimate.viewed') && (payload.viewed_at || boolValue(payload.estimate_viewed) === true)) return 'estimate already viewed';
+  if (stopIf.includes('estimate.viewed') && estimateViewedValue(payload)) return 'estimate already viewed';
 
   const onboardingCompleted = completionValue(payload);
   if (stopIf.includes('onboarding.completed') && onboardingCompleted) return 'onboarding already completed';
@@ -213,7 +220,7 @@ function conditionFailureFor(conditions, payload = {}, now = new Date()) {
   }
 
   if (conditions.estimate_viewed !== undefined) {
-    const actual = payload.viewed_at ? true : boolValue(payload.estimate_viewed);
+    const actual = estimateViewedValue(payload);
     if (actual !== !!conditions.estimate_viewed) return `estimate_viewed must be ${!!conditions.estimate_viewed}`;
   }
 
@@ -832,6 +839,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
       automationRunId: claimedRun.id,
       idempotencyKey: claimedRun.idempotency_key,
       categories: ['email_template_automation', `automation_${claimedRun.automation_key}`],
+      suppressionGroupKey: resolvedAutomation.suppression_group_key || undefined,
     });
     const status = result.blocked ? 'blocked' : 'sent';
     const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({

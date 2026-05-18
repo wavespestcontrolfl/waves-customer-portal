@@ -213,6 +213,90 @@ describe('email template library rendering', () => {
     )).resolves.toEqual(serviceSuppression);
   });
 
+  test('honors an automation suppression group override', async () => {
+    const marketingSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'marketing_nurture',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [marketingSuppression] })],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+      'marketing_nurture',
+    )).resolves.toEqual(marketingSuppression);
+  });
+
+  test('uses suppression overrides for transactional bypass checks', async () => {
+    const serviceSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [serviceSuppression] })],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'transactional_required', suppression_group_key: 'transactional_required' }),
+      'sam@example.com',
+      'service_operational',
+    )).resolves.toEqual(serviceSuppression);
+  });
+
+  test('lets truly transactional templates bypass suppressions', async () => {
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'transactional_required', suppression_group_key: 'transactional_required' }),
+      'sam@example.com',
+    )).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalledWith('email_suppressions');
+  });
+
+  test('ignores transactional suppression overrides on non-transactional templates', async () => {
+    const serviceSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [serviceSuppression] })],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+      'transactional_required',
+    )).resolves.toEqual(serviceSuppression);
+  });
+
+  test('falls back to the template suppression group when override is null', async () => {
+    const serviceSuppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [chain({ result: [serviceSuppression] })],
+    });
+
+    await expect(EmailTemplates.activeSuppressionFor(
+      serviceTemplate({ send_stream: 'service_operational', suppression_group_key: 'service_operational' }),
+      'sam@example.com',
+      null,
+    )).resolves.toEqual(serviceSuppression);
+  });
+
   test('flags disallowed and missing required variables before publish', () => {
     const validation = EmailTemplates.validationFor(
       serviceTemplate({ allowed_variables: ['first_name'], required_variables: ['first_name', 'estimate_url'] }),
@@ -323,6 +407,134 @@ describe('email template library rendering', () => {
     expect(result).toEqual(expect.objectContaining({
       sent: true,
       message: sentMessage,
+    }));
+  });
+
+  test('sendTemplate snapshots and applies suppression group overrides', async () => {
+    const suppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'marketing_nurture',
+      status: 'active',
+    };
+    const blockedMessage = {
+      id: 'msg-blocked',
+      status: 'blocked',
+      error_message: 'Suppressed: manual (marketing_nurture)',
+    };
+    const blockedInsert = chain({ returning: [blockedMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [suppression] })],
+      email_messages: [blockedInsert],
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      suppressionGroupKey: 'marketing_nurture',
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(blockedInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked',
+      suppression_group_key_snapshot: 'marketing_nurture',
+      error_message: 'Suppressed: manual (marketing_nurture)',
+    }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('does not let transactional overrides bypass non-transactional template suppressions', async () => {
+    const suppression = {
+      id: 'suppression-1',
+      email: 'sam@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    const blockedMessage = {
+      id: 'msg-blocked',
+      status: 'blocked',
+      error_message: 'Suppressed: manual (service_operational)',
+    };
+    const blockedInsert = chain({ returning: [blockedMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [suppression] })],
+      email_messages: [blockedInsert],
+    });
+
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      suppressionGroupKey: 'transactional_required',
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(blockedInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked',
+      suppression_group_key_snapshot: 'service_operational',
+      error_message: 'Suppressed: manual (service_operational)',
+    }));
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('uses the suppression group override for SendGrid ASM grouping', async () => {
+    const queuedMessage = {
+      id: 'msg-1',
+      status: 'queued',
+      subject_snapshot: 'Your estimate expires June 12',
+    };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-1' };
+    const queueInsert = chain({ returning: [queuedMessage] });
+    const sentUpdate = chain({ returning: [sentMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [
+        queueInsert,
+        sentUpdate,
+      ],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      suppressionGroupKey: 'marketing_nurture',
+    });
+
+    expect(queueInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      suppression_group_key_snapshot: 'marketing_nurture',
+      html_snapshot: expect.stringContaining('<%asm_group_unsubscribe_raw_url%>'),
+      text_snapshot: expect.stringContaining('Unsubscribe: <%asm_group_unsubscribe_raw_url%>'),
+    }));
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      asmGroupId: 101,
+      html: expect.stringContaining('<%asm_group_unsubscribe_raw_url%>'),
+      text: expect.stringContaining('Unsubscribe: <%asm_group_unsubscribe_raw_url%>'),
     }));
   });
 

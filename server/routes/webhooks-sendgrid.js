@@ -357,6 +357,13 @@ function suppressionForEmailEvent(ev, groupKey = null) {
 }
 
 async function groupKeyForEmailMessage(message, client = db) {
+  if (
+    Object.prototype.hasOwnProperty.call(message || {}, 'suppression_group_key_snapshot') &&
+    message.suppression_group_key_snapshot !== null
+  ) {
+    const snapshot = String(message.suppression_group_key_snapshot || '').trim();
+    return snapshot || null;
+  }
   if (!message?.template_id) return null;
   const template = await client('email_templates')
     .where({ id: message.template_id })

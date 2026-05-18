@@ -74,7 +74,8 @@ async function onboardUrl(ob) {
 // Fire SMS (if phone) + email (if email). Returns true if at least one
 // attempt succeeded, so the caller knows whether to flip the stage flag.
 async function sendDualChannel(ob, { sms, email }) {
-  let attempted = false;
+  let delivered = false;
+  let emailSuppressed = false;
   if (ob.phone) {
     try {
       const smsResult = await sendCustomerMessage({
@@ -92,7 +93,7 @@ async function sendDualChannel(ob, { sms, email }) {
         },
       });
       if (smsResult.sent) {
-        attempted = true;
+        delivered = true;
       } else {
         logger.warn(`[onboard-followup] SMS blocked/failed for session ${ob.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }
@@ -116,8 +117,12 @@ async function sendDualChannel(ob, { sms, email }) {
             categories: ['onboarding_followup', email.stage].filter(Boolean),
           });
           r = result.blocked
-            ? { ok: false, error: result.reason || 'Email suppressed' }
+            ? { ok: false, blocked: true, error: result.reason || 'Email suppressed' }
             : { ok: true, messageId: result.message?.provider_message_id || null };
+          if (result.blocked) {
+            emailSuppressed = true;
+            logger.warn(`[onboard-followup] Template email suppressed for session ${ob.id}: ${result.reason || 'suppressed'}`);
+          }
           sentWithTemplateLibrary = true;
         } catch (e) {
           if (!canFallbackFromTemplateEmailError(e)) throw e;
@@ -134,12 +139,13 @@ async function sendDualChannel(ob, { sms, email }) {
           ctaLabel: email.ctaLabel || 'Finish Setup',
         });
       }
-      if (r.ok) attempted = true;
+      if (r?.blocked) emailSuppressed = true;
+      if (r?.ok) delivered = true;
     } catch (e) {
       logger.error(`[onboard-followup] Email failed for session ${ob.id}: ${e.message}`);
     }
   }
-  return attempted;
+  return delivered || (!ob.phone && emailSuppressed);
 }
 
 const OnboardingFollowUp = {

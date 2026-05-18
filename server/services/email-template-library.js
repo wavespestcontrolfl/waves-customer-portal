@@ -206,20 +206,34 @@ function renderBlocks(blocks, payload) {
   return { bodyHtml: htmlParts.join('\n'), bodyText: textParts.filter(Boolean).join('\n\n') };
 }
 
-function asmGroupIdFor(template) {
-  const stream = String(template.send_stream || '').toLowerCase();
+function sendStreamFor(template, suppressionGroupKey) {
+  return String(suppressionGroupKey || template.send_stream || '').toLowerCase();
+}
+
+function isTransactionalRequiredGroupKey(value) {
+  return String(value || '').toLowerCase() === 'transactional_required';
+}
+
+function templateCanBypassSuppressions(template) {
+  return isTransactionalRequiredGroupKey(template?.send_stream)
+    || isTransactionalRequiredGroupKey(template?.suppression_group_key);
+}
+
+function asmGroupIdFor(template, suppressionGroupKey) {
+  const stream = sendStreamFor(template, suppressionGroupKey);
   if (stream === 'transactional_required') return 0;
   if (stream.startsWith('marketing_')) return sendgrid.newsletterGroupId();
   return sendgrid.serviceGroupId();
 }
 
-function isMarketingTemplate(template) {
-  return String(template.mode || '').toLowerCase() === 'marketing';
+function isMarketingSend(template, suppressionGroupKey) {
+  return String(template.mode || '').toLowerCase() === 'marketing'
+    || sendStreamFor(template, suppressionGroupKey).startsWith('marketing_');
 }
 
-function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId } = {}) {
+function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppressionGroupKey } = {}) {
   if (unsubscribeUrl) return unsubscribeUrl;
-  if (isMarketingTemplate(template) && asmGroupId) return ASM_UNSUBSCRIBE_URL;
+  if (isMarketingSend(template, suppressionGroupKey) && asmGroupId) return ASM_UNSUBSCRIBE_URL;
   return null;
 }
 
@@ -242,10 +256,21 @@ function redactedPayloadSnapshot(value) {
   ]));
 }
 
-async function activeSuppressionFor(template, email) {
+function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
+  if (suppressionGroupKey !== undefined && suppressionGroupKey !== null) {
+    const override = String(suppressionGroupKey).trim();
+    if (isTransactionalRequiredGroupKey(override) && !templateCanBypassSuppressions(template)) {
+      return template.suppression_group_key || template.send_stream || null;
+    }
+    return override || null;
+  }
+  return template.suppression_group_key || template.send_stream || null;
+}
+
+async function activeSuppressionFor(template, email, suppressionGroupKey) {
   if (!email) return null;
-  if (String(template.send_stream || '').toLowerCase() === 'transactional_required') return null;
-  const groupKey = template.suppression_group_key || template.send_stream || null;
+  const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
+  if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) return null;
   const rows = await db('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });
@@ -277,13 +302,13 @@ async function loadVersion(versionId) {
   return version;
 }
 
-function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null } = {}) {
+function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null, modeOverride = null } = {}) {
   if (!template || !version) throw new Error('template and version required');
   const missingPayload = requiredPayloadMissing(template, payload);
   const subject = renderInline(version.subject || template.name, payload, { html: false }).trim();
   const previewText = renderInline(version.preview_text || '', payload, { html: false }).trim();
   const { bodyHtml, bodyText } = renderBlocks(version.blocks, payload);
-  const mode = String(template.mode || 'service').toLowerCase();
+  const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   const footerNote = mode === 'marketing'
     ? null
     : 'Questions? Reply to this email or call <a href="tel:+19412975749" style="color:#009CDE;text-decoration:none;">(941) 297-5749</a>.';
@@ -413,6 +438,7 @@ async function sendTemplate({
   unsubscribeUrl = null,
   categories = [],
   attachments = [],
+  suppressionGroupKey,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -438,9 +464,15 @@ async function sendTemplate({
     retryMessage = existing || null;
   }
 
-  const asmGroupId = asmGroupIdFor(template);
-  const effectiveUnsubscribeUrl = unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId });
-  if (isMarketingTemplate(template) && !test && !effectiveUnsubscribeUrl) {
+  const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
+  const asmGroupId = asmGroupIdFor(template, effectiveSuppressionGroupKey);
+  const effectiveUnsubscribeUrl = unsubscribeUrlForRender({
+    template,
+    unsubscribeUrl,
+    asmGroupId,
+    suppressionGroupKey: effectiveSuppressionGroupKey,
+  });
+  if (isMarketingSend(template, effectiveSuppressionGroupKey) && !test && !effectiveUnsubscribeUrl) {
     const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');
     err.status = 400;
     throw err;
@@ -451,6 +483,7 @@ async function sendTemplate({
     version,
     payload,
     unsubscribeUrl: effectiveUnsubscribeUrl,
+    modeOverride: isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null,
   });
   if (rendered.missingPayload.length) {
     const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
@@ -467,6 +500,7 @@ async function sendTemplate({
     template_id: template.id,
     template_version_id: version.id,
     template_key: template.template_key,
+    suppression_group_key_snapshot: effectiveSuppressionGroupKey || '',
     automation_run_id: automationRunId || null,
     trigger_event_id: triggerEventId || null,
     recipient_type: test ? 'test' : (recipientType || null),
@@ -484,7 +518,7 @@ async function sendTemplate({
   };
 
   if (!test) {
-    const suppression = await activeSuppressionFor(template, to);
+    const suppression = await activeSuppressionFor(template, to, suppressionGroupKey);
     if (suppression) {
       const reason = `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
       const blockedPayload = {
