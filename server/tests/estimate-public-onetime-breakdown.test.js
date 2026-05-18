@@ -1153,7 +1153,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('data-pay-pref="prepay_annual"');
     expect(html).toContain('Pay After Each Visit');
     expect(html).toContain('Most Flexible');
-    expect(html).toContain('$99 setup');
+    expect(html).toContain('<strong data-payment-first-total data-payment-setup-fee="99" data-payment-first-application-count="2">$318.60</strong>');
+    expect(html).toContain('first 2 applications + $99 WaveGuard membership fee');
     expect(html).toContain('then pay after each completed service visit');
     expect(html).toContain('Lawn Care:</span>');
     expect(html).toContain('<span data-payment-visit-price data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4">$104.40</span> / visit');
@@ -1224,6 +1225,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$330</span> / visit');
     expect(html).toContain('Rodent Bait Stations:</span>');
     expect(html).toContain('$147</span> / visit');
+    expect(html).toContain('<strong data-payment-first-total data-payment-setup-fee="99" data-payment-first-application-count="3">$711</strong>');
+    expect(html).toContain('first 3 applications + $99 WaveGuard membership fee');
     expect(html).toContain('<span class="tier-lbl">Recurring service</span>');
     expect(html).toContain('Add Lawn Care and save more');
     expect(html).toContain('Silver tier pricing (10% off qualifying services)');
@@ -1258,7 +1261,8 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('Choose Your WaveGuard Payment Option');
     expect(html).toContain('Pay After Each Visit');
-    expect(html).toContain('No setup fee');
+    expect(html).toContain('<strong data-payment-first-total data-payment-setup-fee="0" data-payment-first-application-count="1">$116</strong>');
+    expect(html).toContain('first application; no setup fee');
     expect(html).toContain('Lawn Care:</span>');
     expect(html).toContain('$116</span> / visit');
     expect(html).toContain('Included with your plan');

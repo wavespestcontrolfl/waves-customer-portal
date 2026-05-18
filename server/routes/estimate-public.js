@@ -1095,7 +1095,6 @@ function renderPage(token, estimate, estData) {
     : (selectedRecurringFrequencyKey === 'bi_monthly' ? 'bi-monthly' : 'monthly');
   const setupFeeAmount = showMembershipFee ? membershipFee : setupDueToday;
   const setupFeeText = fmtMoney(setupFeeAmount);
-  const setupFeeLineText = setupFeeAmount > 0 ? `${setupFeeText} setup` : 'No setup fee';
   const wholeNumber = (n) => Number.isFinite(Number(n)) ? Number(n).toLocaleString('en-US', { maximumFractionDigits: 1 }) : '';
   const lawnBillingRow = billingServiceRows.find((row) => row.kind === 'lawn');
   const pestBillingRow = billingServiceRows.find((row) => row.kind === 'pest');
@@ -1126,6 +1125,17 @@ function renderPage(token, estimate, estData) {
             <span>${escapeHtml(label)}:</span>
             <strong><span data-payment-visit-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)}</span> / visit</strong>
           </div>`).join('');
+  const firstApplicationRows = paymentVisitRows.filter(({ row }) => Number.isFinite(Number(row.price)) && Number(row.price) > 0);
+  const firstApplicationsTotal = firstApplicationRows.reduce((sum, { row }) => sum + Number(row.price || 0), 0);
+  const payAfterFirstTotal = Math.round((firstApplicationsTotal + setupFeeAmount) * 100) / 100;
+  const firstApplicationLabel = firstApplicationRows.length === 1
+    ? 'first application'
+    : `first ${firstApplicationRows.length.toLocaleString('en-US')} applications`;
+  const payAfterFirstTotalCopy = firstApplicationRows.length
+    ? (setupFeeAmount > 0
+      ? `${firstApplicationLabel} + ${setupFeeText} WaveGuard membership fee`
+      : `${firstApplicationLabel}; no setup fee`)
+    : (setupFeeAmount > 0 ? `${setupFeeText} WaveGuard membership fee` : 'No setup fee');
   const paymentBenefits = [
     '90-day money-back guarantee',
     'Priority scheduling',
@@ -1152,7 +1162,8 @@ function renderPage(token, estimate, estData) {
           <span class="payment-choice-label">Most Flexible</span>
         </div>
         <div class="payment-main">
-          <strong>${escapeHtml(setupFeeLineText)}</strong>
+          <strong data-payment-first-total data-payment-setup-fee="${Number(setupFeeAmount || 0)}" data-payment-first-application-count="${firstApplicationRows.length}">${fmtMoney(payAfterFirstTotal)}</strong>
+          <span>${escapeHtml(payAfterFirstTotalCopy)}</span>
           <span>then pay after each completed service visit</span>
         </div>
         ${visitPricingHtml ? `<div class="visit-pricing">${visitPricingHtml}</div>` : ''}
@@ -1755,6 +1766,7 @@ ${shellQuestionsBar()}
   const REVIEW_FALLBACKS = ${JSON.stringify(reviewFallbacks)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
+  const parseMoney = (text) => Number(String(text || '').replace(/[^0-9.-]/g, '')) || 0;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
   const refreshBillingAmounts = (monthlyTotal, annualTotal, prefMonthlyOff) => {
     const monthly = Number(monthlyTotal || 0);
@@ -1787,6 +1799,12 @@ ${shellQuestionsBar()}
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
       el.textContent = fmt(adjusted);
+    });
+    document.querySelectorAll('[data-payment-first-total]').forEach((el) => {
+      const setupFee = Number(el.dataset.paymentSetupFee || 0);
+      const applicationTotal = Array.from(document.querySelectorAll('[data-payment-visit-price]'))
+        .reduce((sum, priceEl) => sum + parseMoney(priceEl.textContent), 0);
+      el.textContent = fmt(Math.round((applicationTotal + setupFee) * 100) / 100);
     });
     document.querySelectorAll('[data-service-card-price]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);
