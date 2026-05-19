@@ -320,6 +320,54 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(quote.manualReviewReasons).toContain('bed_area_at_or_above_8000');
     });
 
+    test('generateEstimate preserves cap metadata when property-calculator pre-caps oversized estimatedBedAreaSf', () => {
+      // Regression for Codex P2 review on PR #960: generateEstimate runs
+      // calculatePropertyProfile first, which converts estimatedBedAreaSf:
+      // 9000 into bedArea: 8000 + bedAreaCapped: true. The T&S pricer must
+      // honor that upstream cap signal — otherwise production estimates for
+      // very large landscapes silently miss bed_area_cap_reached.
+      const estimate = generateEstimate({
+        homeSqFt: 2400,
+        stories: 1,
+        lotSqFt: 30000,
+        estimatedBedAreaSf: 9000,
+        propertyType: 'single_family',
+        features: { shrubs: 'heavy', trees: 'moderate', complexity: 'moderate' },
+        services: {
+          treeShrub: { tier: 'standard', access: 'easy', treeCount: 0 },
+        },
+      });
+      const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
+      expect(ts.bedAreaUsed).toBe(8000);
+      expect(ts.bedAreaCapped).toBe(true);
+      expect(ts.uncappedBedAreaEstimate).toBe(9000);
+      expect(ts.manualReview).toBe(true);
+      expect(ts.manualReviewReasons).toContain('bed_area_cap_reached');
+      expect(ts.manualReviewReasons).toContain('bed_area_at_or_above_8000');
+    });
+
+    test('generateEstimate preserves cap metadata when lot-density estimate exceeds the cap', () => {
+      // Same regression scope but via the lot-derived path:
+      // calculatePropertyProfile derives ~13,500 from a 60k lot with heavy
+      // shrubs + complex landscape, then caps to 8,000 with the raw value
+      // recorded as uncappedBedAreaEstimate.
+      const estimate = generateEstimate({
+        homeSqFt: 2400,
+        stories: 1,
+        lotSqFt: 60000,
+        propertyType: 'single_family',
+        features: { shrubs: 'heavy', trees: 'moderate', complexity: 'complex' },
+        services: {
+          treeShrub: { tier: 'standard', access: 'easy', treeCount: 0 },
+        },
+      });
+      const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
+      expect(ts.bedAreaUsed).toBe(8000);
+      expect(ts.bedAreaCapped).toBe(true);
+      expect(ts.uncappedBedAreaEstimate).toBeGreaterThan(8000);
+      expect(ts.manualReviewReasons).toContain('bed_area_cap_reached');
+    });
+
     test('tree_count_at_or_above_15 trips manual review even with explicit bed area', () => {
       const quote = priceTreeShrub({ bedArea: 1500 }, { tier: 'standard', treeCount: 16 });
       expect(quote.manualReview).toBe(true);

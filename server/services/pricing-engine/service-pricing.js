@@ -642,6 +642,17 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
     };
   }
 
+  // Upstream cap metadata: calculatePropertyProfile may have already capped
+  // an oversized estimated/lot-derived bed area down to BED_AREA_CAP and set
+  // property.bedAreaCapped = true (+ optionally uncappedBedAreaEstimate).
+  // Without this, the explicit-bedArea branch below would discard the cap
+  // signal and silently miss bed_area_cap_reached for inputs like
+  // estimatedBedAreaSf: 9000 routed through generateEstimate.
+  const upstreamCapped = property.bedAreaCapped === true;
+  const upstreamUncapped = hasPositivePricingNumber(property.uncappedBedAreaEstimate)
+    ? Number(property.uncappedBedAreaEstimate)
+    : undefined;
+
   if (hasPositivePricingNumber(property.bedArea)) {
     const bedAreaSource = sourceHint === 'estimated' ? 'estimated' : 'explicit';
     return {
@@ -649,6 +660,10 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
       bedAreaSource,
       pricingConfidence: bedAreaSource === 'estimated' ? 'medium' : 'high',
       requiresManualReview: false,
+      ...(upstreamCapped ? { capped: true } : {}),
+      ...(upstreamCapped && upstreamUncapped !== undefined
+        ? { uncappedBedAreaEstimate: upstreamUncapped }
+        : {}),
     };
   }
 
@@ -657,14 +672,20 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
     : property.estimatedBedAreaSf;
   if (hasPositivePricingNumber(estimatedBedAreaValue)) {
     const rawBedArea = Number(estimatedBedAreaValue);
-    const capped = rawBedArea >= BED_AREA_CAP;
+    const localCapped = rawBedArea >= BED_AREA_CAP;
+    const capped = localCapped || upstreamCapped;
+    // Prefer upstream uncapped (the true raw input) when present, else the
+    // raw value seen on this call.
+    const uncapped = upstreamUncapped !== undefined
+      ? upstreamUncapped
+      : (localCapped ? rawBedArea : undefined);
     return {
       bedArea: Math.min(rawBedArea, BED_AREA_CAP),
       bedAreaSource: 'estimated',
       pricingConfidence: 'medium',
       requiresManualReview: false,
       capped,
-      ...(capped ? { uncappedBedAreaEstimate: rawBedArea } : {}),
+      ...(capped && uncapped !== undefined ? { uncappedBedAreaEstimate: uncapped } : {}),
     };
   }
 
