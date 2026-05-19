@@ -13,6 +13,7 @@ import {
   reviewRequestCopy,
   serviceReportDateTimeLabel,
   timelineEventsForDisplay,
+  timelineEventsWithReportTiming,
 } from './ReportViewPage.jsx';
 
 describe('ReportViewPage date formatting', () => {
@@ -72,6 +73,30 @@ describe('ReportViewPage report chrome helpers', () => {
       { type: 'service_completed', label: 'Completed' },
     ]);
     expect(events.map((event) => event.type)).toEqual(['arrived_on_site', 'service_completed']);
+  });
+
+  it('routes public timing fields into the Visit Progress event list', () => {
+    const events = timelineEventsWithReportTiming(
+      [{ type: 'report_published', timestamp: '2026-05-19T18:35:00.000Z' }],
+      'tech_home_spoke_with_them',
+      {},
+      {
+        coverageServiceType: 'pest_control',
+        serviceRecord: {
+          arrived_at: '2026-05-19T16:44:00.000Z',
+          completed_at: '2026-05-19T18:35:00.000Z',
+        },
+      },
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      'arrived_on_site',
+      'customer_interaction',
+      'service_completed',
+      'report_published',
+    ]);
+    expect(events.find((event) => event.type === 'service_completed').customerVisibleDescription)
+      .toBe('Pest control service areas were marked complete.');
   });
 
   it('uses distinct review request copy for top and bottom placements', () => {

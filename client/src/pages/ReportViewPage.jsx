@@ -1429,7 +1429,7 @@ function ReportAskBox({ mode, token, serviceLine }) {
 
 export function quickNavigationLinks({ hasProducts = true } = {}) {
   return [
-    ['#service-timeline', 'Timeline'],
+    ['#service-timeline', 'Visit Progress'],
     ['#areas-serviced', 'Areas Serviced'],
     ['#service-coverage-map', 'Coverage Map'],
     hasProducts ? ['#products-applied', 'Products Applied'] : null,
@@ -2422,6 +2422,113 @@ export function timelineEventsForDisplay(workflowEvents = []) {
   return workflowEvents.filter((event) => event?.type !== 'customer_interaction');
 }
 
+const TIMELINE_EVENT_ORDER = [
+  'technician_en_route',
+  'arrived_on_site',
+  'customer_interaction',
+  'inspection_started',
+  'service_started',
+  'service_completed',
+  'quality_reviewed',
+  'report_published',
+];
+
+function timelineEventOrder(type) {
+  const index = TIMELINE_EVENT_ORDER.indexOf(type);
+  return index >= 0 ? index : TIMELINE_EVENT_ORDER.length;
+}
+
+function sortTimelineEvents(events = []) {
+  return [...events]
+    .map((event, index) => ({ event, index }))
+    .sort((a, b) => {
+      const aTime = Date.parse(a.event?.timestamp);
+      const bTime = Date.parse(b.event?.timestamp);
+      const aHasTime = Number.isFinite(aTime);
+      const bHasTime = Number.isFinite(bTime);
+
+      if (aHasTime && bHasTime && aTime !== bTime) return aTime - bTime;
+      if (aHasTime !== bHasTime) return aHasTime ? -1 : 1;
+
+      const orderDiff = timelineEventOrder(a.event?.type) - timelineEventOrder(b.event?.type);
+      if (orderDiff !== 0) return orderDiff;
+
+      return a.index - b.index;
+    })
+    .map(({ event }) => event);
+}
+
+function firstValidTimelineValue(...values) {
+  return values.find((value) => value && Number.isFinite(Date.parse(value))) || null;
+}
+
+function minutesBetween(start, end) {
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null;
+  return Math.round((endMs - startMs) / 60000);
+}
+
+function formatDurationMinutes(minutes) {
+  const value = positiveNumber(minutes);
+  if (!value) return '';
+  const rounded = Math.max(1, Math.round(value));
+  if (rounded < 60) return `${rounded} min`;
+  const hours = Math.floor(rounded / 60);
+  const remaining = rounded % 60;
+  return remaining ? `${hours} hr ${remaining} min` : `${hours} hr`;
+}
+
+function timelineAnchorTimes(timingSource = {}, visitTiming = {}) {
+  const sourceTiming = timingSource?.visitTiming || {};
+  const serviceRecord = timingSource?.serviceRecord || {};
+  const scheduledService = timingSource?.scheduledService || timingSource?.scheduled_service || {};
+  const arrivedAt = firstValidTimelineValue(
+    visitTiming?.arrivedAt,
+    visitTiming?.arrived_at,
+    sourceTiming?.arrivedAt,
+    sourceTiming?.arrived_at,
+    serviceRecord?.arrived_at,
+    serviceRecord?.started_at,
+    scheduledService?.arrivedAt,
+    scheduledService?.arrived_at,
+    scheduledService?.actualStartTime,
+    scheduledService?.actual_start_time,
+    scheduledService?.checkInTime,
+    scheduledService?.check_in_time,
+    timingSource?.arrivedAt,
+    timingSource?.arrived_at,
+    timingSource?.started_at,
+  );
+  const completedAt = firstValidTimelineValue(
+    visitTiming?.exitedAt,
+    visitTiming?.completedAt,
+    visitTiming?.completed_at,
+    sourceTiming?.exitedAt,
+    sourceTiming?.completedAt,
+    sourceTiming?.completed_at,
+    serviceRecord?.completed_at,
+    serviceRecord?.ended_at,
+    scheduledService?.completedAt,
+    scheduledService?.completed_at,
+    scheduledService?.actualEndTime,
+    scheduledService?.actual_end_time,
+    scheduledService?.checkOutTime,
+    scheduledService?.check_out_time,
+    timingSource?.completedAt,
+    timingSource?.completed_at,
+    timingSource?.ended_at,
+  );
+  const derivedMinutes = minutesBetween(arrivedAt, completedAt);
+  const reportedMinutes = positiveNumber(visitTiming?.onSiteMinutes || sourceTiming?.onSiteMinutes);
+
+  return {
+    arrivedAt,
+    completedAt,
+    timeOnSiteDisplay: formatDurationMinutes(derivedMinutes || reportedMinutes),
+  };
+}
+
 function timelineEventsWithCustomerInteraction(workflowEvents = [], customerInteraction, visitTiming = {}) {
   const events = timelineEventsForDisplay(workflowEvents);
   const interaction = customerInteractionCopy(customerInteraction);
@@ -2450,6 +2557,45 @@ function timelineEventsWithCustomerInteraction(workflowEvents = [], customerInte
   return [...events, interactionEvent];
 }
 
+export function timelineEventsWithReportTiming(workflowEvents = [], customerInteraction, visitTiming = {}, timingSource = {}) {
+  const events = timelineEventsForDisplay(workflowEvents).filter(Boolean);
+  const { arrivedAt, completedAt } = timelineAnchorTimes(timingSource, visitTiming);
+  const nextEvents = [...events];
+
+  if (arrivedAt && !nextEvents.some((event) => event.type === 'arrived_on_site')) {
+    nextEvents.push({
+      id: 'arrived_on_site-derived',
+      type: 'arrived_on_site',
+      label: 'Technician arrived',
+      timestamp: arrivedAt,
+      status: 'completed',
+      customerVisibleDescription: 'Your technician arrived at the property.',
+    });
+  }
+
+  if (completedAt && !nextEvents.some((event) => event.type === 'service_completed')) {
+    const serviceType = normalizeCoverageServiceType(
+      timingSource?.coverageServiceType || timingSource?.serviceLine || timingSource?.serviceType,
+    );
+    nextEvents.push({
+      id: 'service_completed-derived',
+      type: 'service_completed',
+      label: 'Service completed',
+      timestamp: completedAt,
+      status: 'completed',
+      customerVisibleDescription: serviceType === 'pest_control'
+        ? 'Pest control service areas were marked complete.'
+        : 'Service areas were marked complete.',
+    });
+  }
+
+  return sortTimelineEvents(timelineEventsWithCustomerInteraction(
+    nextEvents,
+    customerInteraction,
+    { ...visitTiming, arrivedAt, exitedAt: completedAt },
+  ));
+}
+
 function hasDuplicateDisplayedEventTimes(events = []) {
   const counts = new Map();
   for (const event of events) {
@@ -2460,8 +2606,9 @@ function hasDuplicateDisplayedEventTimes(events = []) {
   return Array.from(counts.values()).some((count) => count > 1);
 }
 
-function ServiceTimelineSection({ serviceType, workflowEvents, customerInteraction, visitTiming, loading = false }) {
-  const events = timelineEventsWithCustomerInteraction(workflowEvents, customerInteraction, visitTiming);
+function ServiceTimelineSection({ serviceType, workflowEvents, customerInteraction, visitTiming, timingSource, loading = false }) {
+  const events = timelineEventsWithReportTiming(workflowEvents, customerInteraction, visitTiming, timingSource);
+  const { timeOnSiteDisplay } = timelineAnchorTimes(timingSource, visitTiming);
   const normalizedServiceType = normalizeCoverageServiceType(serviceType);
   const showSameTimeNote = hasDuplicateDisplayedEventTimes(events);
 
@@ -2515,6 +2662,12 @@ function ServiceTimelineSection({ serviceType, workflowEvents, customerInteracti
             })}
           </ol>
           {showSameTimeNote && <p className="timeline-note">Some events were recorded at the same time and are shown in standard service order.</p>}
+          {timeOnSiteDisplay && (
+            <div className="visit-progress-summary">
+              <span>Time on site</span>
+              <strong>{timeOnSiteDisplay}</strong>
+            </div>
+          )}
         </>
       )}
     </section>
@@ -2613,6 +2766,7 @@ function ServiceReportCoverageAndWorkflow({
   workflowEvents,
   customerInteraction,
   visitTiming,
+  timingSource,
   propertyAddress,
   mapCenter,
   serviceDate,
@@ -2628,6 +2782,7 @@ function ServiceReportCoverageAndWorkflow({
         workflowEvents={workflowEvents}
         customerInteraction={customerInteraction}
         visitTiming={visitTiming}
+        timingSource={timingSource}
       />
       <AreasServicedSection
         serviceType={serviceType}
@@ -3839,6 +3994,30 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--muted);
           font-size: 13px;
           line-height: 1.45;
+        }
+        .visit-progress-summary {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 12px;
+          margin-top: 12px;
+          padding: 12px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+        }
+        .visit-progress-summary span {
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.35;
+          font-weight: 700;
+        }
+        .visit-progress-summary strong {
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.25;
+          font-weight: 850;
+          white-space: nowrap;
         }
         .areas-serviced-list {
           display: grid;
@@ -5704,6 +5883,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             workflowEvents={data.workflowEvents}
             customerInteraction={data.customerInteraction}
             visitTiming={data.visitTiming}
+            timingSource={data}
             propertyAddress={data.propertyAddress || data.serviceAddress}
             mapCenter={data.mapCenter}
             serviceDate={data.serviceDate}
