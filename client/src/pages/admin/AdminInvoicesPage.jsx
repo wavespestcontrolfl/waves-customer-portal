@@ -2485,7 +2485,32 @@ function RecordPaymentModal({
   const [reference, setReference] = useState("");
   const [note, setNote] = useState("");
   const [sendReceipt, setSendReceipt] = useState(true);
+  const [recipientLookup, setRecipientLookup] = useState(null);
+  const [recipientsLoading, setRecipientsLoading] = useState(true);
+  const [recipientLookupError, setRecipientLookupError] = useState("");
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setRecipientsLoading(true);
+    setRecipientLookupError("");
+    adminFetch(`/admin/invoices/${invoice.id}/recipients`)
+      .then((data) => {
+        if (!alive) return;
+        setRecipientLookup(data);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setRecipientLookup(null);
+        setRecipientLookupError(err.message || "Recipient lookup failed");
+      })
+      .finally(() => {
+        if (alive) setRecipientsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [invoice.id]);
 
   const referenceLabel =
     method === "check"
@@ -2505,10 +2530,24 @@ function RecordPaymentModal({
           ? "e.g. money order #, Venmo handle"
           : "";
 
-  const hasContact = !!(invoice.email || invoice.phone);
+  const receiptEmail = recipientLookup
+    ? recipientLookup.emailRecipient?.email || ""
+    : invoice.email || "";
+  const receiptPhone = recipientLookup
+    ? recipientLookup.smsRecipient?.phone || ""
+    : invoice.phone || "";
+  const hasEmail = !!receiptEmail;
+  const hasPhone = !!receiptPhone;
+  const hasContact = hasEmail || hasPhone;
+  const receiptVia = hasEmail && hasPhone ? "both" : hasEmail ? "email" : "sms";
+  const receiptChannels = [
+    hasEmail && `email to ${receiptEmail}`,
+    hasPhone && "SMS",
+  ].filter(Boolean);
+  const recordDisabled = saving || (sendReceipt && recipientsLoading);
 
   const handleRecord = async () => {
-    if (saving) return;
+    if (recordDisabled) return;
     setSaving(true);
     try {
       const res = await adminFetch(
@@ -2520,6 +2559,7 @@ function RecordPaymentModal({
             reference: reference.trim() || undefined,
             note: note.trim() || undefined,
             sendReceipt: sendReceipt && hasContact,
+            via: sendReceipt && hasContact ? receiptVia : undefined,
           }),
         },
       );
@@ -2688,31 +2728,50 @@ function RecordPaymentModal({
         >
           {note.length}/400
         </div>{" "}
+        {recipientLookupError && (
+          <div
+            style={{
+              marginBottom: 12,
+              padding: "10px 12px",
+              background: "#FEF3C7",
+              border: `1px solid ${D.amber}`,
+              borderRadius: 8,
+              fontSize: 12,
+              color: D.text,
+              lineHeight: 1.45,
+            }}
+          >
+            Recipient lookup failed. Receipt delivery will use the invoice
+            contact shown below.
+          </div>
+        )}
         <label
           style={{
             display: "flex",
             alignItems: "center",
             gap: 10,
-            cursor: hasContact ? "pointer" : "not-allowed",
-            opacity: hasContact ? 1 : 0.5,
+            cursor:
+              hasContact && !recipientsLoading ? "pointer" : "not-allowed",
+            opacity: hasContact && !recipientsLoading ? 1 : 0.5,
           }}
         >
           {" "}
           <input
             type="checkbox"
             checked={sendReceipt && hasContact}
-            disabled={!hasContact}
+            disabled={!hasContact || recipientsLoading}
             onChange={(e) => setSendReceipt(e.target.checked)}
             style={{ width: 16, height: 16, accentColor: D.heading }}
           />{" "}
           <span style={{ fontSize: 14, color: D.text }}>
             Send receipt now
-            {hasContact ? (
+            {recipientsLoading ? (
               <span style={{ color: D.muted, marginLeft: 6 }}>
-                ·{" "}
-                {[invoice.email && "email", invoice.phone && "SMS"]
-                  .filter(Boolean)
-                  .join(" + ")}
+                · loading recipients
+              </span>
+            ) : hasContact ? (
+              <span style={{ color: D.muted, marginLeft: 6 }}>
+                · {receiptChannels.join(" + ")}
               </span>
             ) : (
               <span
@@ -2756,17 +2815,19 @@ function RecordPaymentModal({
           </button>{" "}
           <button
             onClick={handleRecord}
-            disabled={saving}
+            disabled={recordDisabled}
             style={{
               ...sBtn(D.heading, D.white, isMobile),
-              opacity: saving ? 0.5 : 1,
+              opacity: recordDisabled ? 0.5 : 1,
             }}
           >
             {saving
               ? "Recording…"
-              : sendReceipt && hasContact
-                ? "Record & send receipt"
-                : "Record payment"}
+              : sendReceipt && recipientsLoading
+                ? "Loading recipients…"
+                : sendReceipt && hasContact
+                  ? "Record & send receipt"
+                  : "Record payment"}
           </button>{" "}
         </div>{" "}
       </div>{" "}
