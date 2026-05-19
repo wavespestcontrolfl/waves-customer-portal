@@ -483,6 +483,7 @@ Search aggressively, in this order:
 Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
+- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "5.99 Acres Lot", "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "5.99 Acres Lot" → 260864.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
@@ -492,7 +493,7 @@ Output rules:
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
   "squareFootage": <int 500-15000 or null>,
-  "lotSize": <int 1000-200000 or null>,
+  "lotSize": <int 1000-1000000, in SQUARE FEET (convert from acres if needed), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -516,7 +517,7 @@ function parsePropertyJSON(text) {
     const raw = JSON.parse(match[0]);
     const out = {
       squareFootage: coerceInt(raw.squareFootage, 500, 15000),
-      lotSize: coerceInt(raw.lotSize, 1000, 200000),
+      lotSize: coerceLotSize(raw.lotSize),
       yearBuilt: coerceInt(raw.yearBuilt, 1900, new Date().getFullYear() + 1),
       bedrooms: coerceInt(raw.bedrooms, 1, 15),
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
@@ -539,6 +540,25 @@ function coerceInt(raw, min, max) {
   const rounded = Math.round(n);
   if (rounded < min || rounded > max) return null;
   return rounded;
+}
+
+const SQFT_PER_ACRE = 43560;
+const LOT_SQFT_MIN = 1000;
+const LOT_SQFT_MAX = 1_000_000;
+
+// Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
+// or acres ("5.99 Acres Lot"). The pricing engine always wants square feet,
+// so we normalize here. If the string mentions "acre", or the number is too
+// small to be a reasonable lot in sqft (< LOT_SQFT_MIN), treat it as acres.
+function coerceLotSize(raw) {
+  if (raw == null) return null;
+  const str = String(raw).toLowerCase();
+  const n = Number(str.replace(/[^\d.]/g, ''));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const looksLikeAcres = /\bacre/.test(str) || n < LOT_SQFT_MIN;
+  const sqft = Math.round(looksLikeAcres ? n * SQFT_PER_ACRE : n);
+  if (sqft < LOT_SQFT_MIN || sqft > LOT_SQFT_MAX) return null;
+  return sqft;
 }
 
 function coerceFloat(raw, min, max) {
