@@ -16,12 +16,18 @@ const {
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
+  pestMonthlyBaseForFrequency,
+  preferenceMonthlyOffForPestVisits,
   renderPage,
   resolveAcceptOneTimeTotal,
+  resolveRecurringInvoiceFirstVisitAmount,
   resolveRecurringMonthlyParts,
   resolveEstimateDeclineGuard,
   resolveEstimateQuoteRequirement,
+  resolveRecurringFirstVisitAmount,
+  resolveRecurringFirstVisitAmountFromFrequency,
   shouldApplyFirstViewSideEffects,
+  validateRecurringSlotPaymentPreference,
   withSupplementedRecurringServices,
 } = require('../routes/estimate-public');
 const {
@@ -545,6 +551,62 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("changeBookingPickBtn.addEventListener('click', cancelReservation)");
   });
 
+  test('server-rendered recurring estimates wait for payment setup before showing slots', () => {
+    const html = renderPage('booking-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+
+    expect(html).toContain('id="payment-setup-card"');
+    expect(html).toContain('Choose pay-after-visit setup');
+    expect(html).toContain('Choose annual prepay setup');
+    expect(html).toContain('<section class="card booking-card" id="booking-card" style="display:none">');
+    expect(html).toContain('const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = true;');
+    expect(html).toContain('function bookingRequiresPaymentSetup()');
+    expect(html).toContain('isReserving: false');
+    expect(html).toContain('btn.disabled = bookingState.isReserving || !!bookingState.reservation');
+    expect(html).toContain('bookingState.isReserving = true;');
+    expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
+    expect(html).toContain("toast('Choose a payment setup first.')");
+  });
+
+  test('server-rendered slot selection ignores clicks while a reservation is in flight', () => {
+    const html = renderPage('booking-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+    const selectSlot = html.match(/function selectSlot\(btn\) \{[\s\S]*?\n  \}/)?.[0] || '';
+
+    expect(selectSlot).toContain('if (bookingState.isReserving)');
+    expect(selectSlot.indexOf('if (bookingState.isReserving)')).toBeLessThan(
+      selectSlot.indexOf('bookingState.selectedSlotId = btn.dataset.slotId'),
+    );
+  });
+
   test('builds Waves AI payload from estimate property signals', () => {
     const payload = buildWaveGuardIntelligencePayload({
       satelliteUrl: 'https://maps.example/satellite.png',
@@ -629,8 +691,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('class="intelligence-badge"');
     expect(html).toContain('Satellite view of 123 Main St');
     expect(html).toContain('1,800 sq ft');
-    expect(html).toContain('Go Waves!');
-    expect(html).toContain('Wave Goodbye to Pests!');
+    expect(html).toContain('<h2 data-mode-only="recurring">Go Waves! Wave Goodbye to Pests!</h2>');
+    expect(html).not.toContain('No surprise increases, no hidden fees.');
     expect(html).not.toContain('cadence and visit counts');
     expect(html).not.toContain('Your technician verifies measurements');
     expect(html).not.toContain('class="waves-intelligence"');
@@ -1132,6 +1194,99 @@ describe('public estimate one-time breakdown', () => {
     expect(included).not.toContain('$300 / quarter');
   });
 
+  test('recurring first-visit amount uses per-application service pricing', () => {
+    const amount = resolveRecurringFirstVisitAmount([
+      { name: 'Pest Control', mo: 128 },
+      { name: 'Lawn Care', mo: 87, perTreatment: 116, visitsPerYear: 9 },
+    ], {
+      tierDiscount: 0.1,
+      pestRecurring: { monthlyBase: 128, visitsPerYear: 4 },
+      estData: {
+        result: {
+          results: {
+            pest: { apps: 4 },
+            pestTiers: [{ label: 'Quarterly', mo: 128, pa: 128, apps: 4 }],
+          },
+        },
+      },
+    });
+
+    expect(amount).toBe(219.6);
+  });
+
+  test('recurring first-visit amount can come from the selected frequency', () => {
+    const frequency = {
+      key: 'monthly',
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 74.4, perTreatment: 95, visitsPerYear: 12 },
+        { service: 'lawn_care', displayPrice: 104.4, perTreatment: 116 },
+      ],
+    };
+    const amount = resolveRecurringFirstVisitAmountFromFrequency(frequency);
+    const amountWithPrefs = resolveRecurringFirstVisitAmountFromFrequency(frequency, { prefMonthlyOff: 20 });
+
+    expect(amount).toBe(178.8);
+    expect(amountWithPrefs).toBe(158.8);
+  });
+
+  test('selected-frequency first-visit totals require priced rows for every accepted service', () => {
+    const services = [
+      { service: 'pest_control', name: 'Pest Control' },
+      { service: 'lawn_care', name: 'Lawn Care' },
+    ];
+    const partialFrequency = {
+      key: 'monthly',
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 74.4, perTreatment: 95, visitsPerYear: 12 },
+        { service: 'lawn_care', label: 'Lawn Care' },
+      ],
+    };
+    const completeFrequency = {
+      key: 'monthly',
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 74.4, perTreatment: 95, visitsPerYear: 12 },
+        { service: 'lawn_care', displayPrice: 104.4, perTreatment: 116 },
+      ],
+    };
+
+    expect(resolveRecurringFirstVisitAmountFromFrequency(partialFrequency, { services })).toBeNull();
+    expect(resolveRecurringFirstVisitAmountFromFrequency(completeFrequency, { services })).toBe(178.8);
+  });
+
+  test('recurring invoice-mode invoices prefer the accepted first-visit amount', () => {
+    expect(resolveRecurringInvoiceFirstVisitAmount({
+      recurringFirstVisitAmount: 219.6,
+      effectiveBillingCadence: { amount: 350.1 },
+      monthlyTotal: 116.7,
+    })).toBe(219.6);
+    expect(resolveRecurringInvoiceFirstVisitAmount({
+      effectiveBillingCadence: { amount: 350.1 },
+      monthlyTotal: 116.7,
+    })).toBe(350.1);
+    expect(resolveRecurringInvoiceFirstVisitAmount({
+      monthlyTotal: 116.7,
+    })).toBe(350.1);
+  });
+
+  test('selected-frequency preference discounts respect the pest monthly floor', () => {
+    const prefs = { interior_spray: false, exterior_sweep: false };
+
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 70)).toBe(7.7);
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 150)).toBe(20);
+  });
+
+  test('selected-frequency preference caps use raw pest base before tier discount', () => {
+    const frequency = {
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 74.4, perTreatment: 95, visitsPerYear: 12 },
+      ],
+    };
+    const baseMonthly = pestMonthlyBaseForFrequency(frequency);
+
+    expect(baseMonthly).toBe(95);
+    expect(preferenceMonthlyOffForPestVisits({ interior_spray: false, exterior_sweep: false }, 12, baseMonthly)).toBe(20);
+  });
+
   test('server-rendered bundled estimate showcases per-application prices by service', () => {
     const html = renderPage('bundle-token', {
       status: 'sent',
@@ -1161,16 +1316,26 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('class="service-price-list"');
     expect(html).toContain('class="service-price-name">Pest Control</div>');
     expect(html).toContain('class="service-price-name">Lawn Care</div>');
-    expect(html).toContain('Quarterly service &middot; 4 applications/year');
+    expect(html).toContain('4 applications/year');
+    expect(html).not.toContain('Quarterly service &middot; 4 applications/year');
     expect(html).toContain('9 applications/year');
     expect(html).toContain('$128 / application</span>');
     expect(html).toContain('$116 / application</span>');
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
+    expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total>$219.60</strong></div>');
+    expect(html).toContain('let firstVisitTotal = 0;');
+    expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}');
+    expect(html).not.toContain('.payment-summary-row.total strong');
     expect(html).toContain('You save <span data-service-card-savings data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2" data-service-anchor-price="128">$12.80</span> / application with WaveGuard Silver');
     expect(html).toContain('You save <span data-service-card-savings data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4" data-service-anchor-price="116">$11.60</span> / application with WaveGuard Silver');
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2">$1.28</span>/day for pest control.');
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4">$2.61</span>/day for lawn care.');
+    expect(html).not.toContain('Exterior perimeter protection around entry-prone areas');
+    expect(html).not.toContain('Interior service support when activity is reported');
+    expect(html).not.toContain('Free re-service between recurring visits');
+    expect(html).not.toContain('90-day WaveGuard money-back guarantee');
+    expect(html).not.toContain('<ul class="service-inclusions">');
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('/ treatment</span>');
   });
@@ -1747,6 +1912,40 @@ describe('public estimate one-time breakdown', () => {
     expect(normalizeAcceptPaymentMethodPreference('pay_at_visit')).toBe('pay_at_visit');
     expect(normalizeAcceptPaymentMethodPreference('prepay_annual')).toBe('prepay_annual');
     expect(normalizeAcceptPaymentMethodPreference('deposit_later')).toBeNull();
+  });
+
+  test('recurring slot accepts require a setup payment preference', () => {
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: null,
+    })).toMatch(/Choose card-on-file autopay/);
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: 'pay_at_visit',
+    })).toMatch(/Choose card-on-file autopay/);
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: 'card_on_file',
+    })).toBeNull();
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: 'prepay_annual',
+    })).toBeNull();
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: true,
+      paymentMethodPreference: null,
+    })).toBeNull();
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      billByInvoice: true,
+      paymentMethodPreference: 'pay_at_visit',
+    })).toBeNull();
   });
 
   test('accept active guard rejects terminal and past-expiry estimates', () => {

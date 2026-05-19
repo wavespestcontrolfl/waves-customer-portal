@@ -254,6 +254,181 @@ function tierDiscountForEstimate(estData, tier, fallbackDiscount = null) {
   return tierDiscount(tier);
 }
 
+function recurringResultStats(estData = {}) {
+  const estResult = estData?.result || estData || {};
+  return estResult?.results || estData?.results || {};
+}
+
+function visitsForRecurringServiceName(name, resultStats = {}) {
+  const n = String(name || '').toLowerCase();
+  if (n.includes('pest')) return resultStats.pest?.apps;
+  if (n.includes('lawn') && Array.isArray(resultStats.lawn)) {
+    const sel = resultStats.lawn.find((t) => t.recommended) || resultStats.lawn[0];
+    return sel?.v;
+  }
+  if (n.includes('mosquito') && Array.isArray(resultStats.mq)) {
+    const sel = resultStats.mq.find((t) => t.recommended) || resultStats.mq[0];
+    return sel?.v;
+  }
+  if (n.includes('tree') && Array.isArray(resultStats.ts)) return resultStats.ts[0]?.v;
+  if (n.includes('termite') && n.includes('bait')) return 4;
+  return null;
+}
+
+function selectedPestTierForFirstVisit(estData = {}, pestRecurring = null) {
+  const resultStats = recurringResultStats(estData);
+  const pestTiers = Array.isArray(resultStats.pestTiers) ? resultStats.pestTiers : [];
+  return pestTiers.find((t) => Math.abs(Number(t?.mo || 0) - Number(pestRecurring?.monthlyBase || 0)) < 0.01)
+    || pestTiers[0]
+    || null;
+}
+
+function recurringServiceFirstVisitPrice(svc = {}, {
+  estData = {},
+  tierDiscount = 0,
+  prefMonthlyOff = 0,
+  pestRecurring = null,
+  selectedPestTier = null,
+} = {}) {
+  const resultStats = recurringResultStats(estData);
+  const pestTier = selectedPestTier || selectedPestTierForFirstVisit(estData, pestRecurring);
+  const name = svc?.name || svc?.label || svc?.service;
+  const n = String(name || '').toLowerCase();
+  const visits = (() => {
+    if (n.includes('pest')) {
+      return Number(pestTier?.apps || pestTier?.v || resultStats.pest?.apps || pestRecurring?.visitsPerYear || 4) || null;
+    }
+    const explicit = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.frequency);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    return Number(visitsForRecurringServiceName(name, resultStats)) || null;
+  })();
+  const anchorPrice = (() => {
+    let base = null;
+    if (n.includes('pest')) {
+      const pestPa = Number(pestTier?.pa || 0);
+      if (pestPa > 0) base = pestPa;
+    }
+    if (base == null) {
+      const explicit = Number(svc?.perTreatment ?? svc?.perApp ?? svc?.perVisit ?? svc?.pa);
+      if (Number.isFinite(explicit) && explicit > 0) base = explicit;
+    }
+    if (base == null && visits > 0) {
+      const monthly = Number(svc?.mo || svc?.monthly || 0);
+      if (monthly > 0) base = (monthly * 12) / visits;
+    }
+    return base == null ? null : Math.round(base * 100) / 100;
+  })();
+  const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? Number(tierDiscount || 0) : 0;
+  const basePrice = anchorPrice == null ? null : Math.round(anchorPrice * (1 - serviceDiscount) * 100) / 100;
+  const prefPerTreatmentOff = n.includes('pest') && visits > 0
+    ? (Number(prefMonthlyOff || 0) * 12) / visits
+    : 0;
+  const price = basePrice == null ? null : Math.max(0, Math.round((basePrice - prefPerTreatmentOff) * 100) / 100);
+  return { visits, anchorPrice, basePrice, price };
+}
+
+function resolveRecurringFirstVisitAmount(services = [], opts = {}) {
+  const total = (Array.isArray(services) ? services : []).reduce((sum, svc) => {
+    const { price } = recurringServiceFirstVisitPrice(svc, opts);
+    return Number.isFinite(price) && price > 0 ? Math.round((sum + price) * 100) / 100 : sum;
+  }, 0);
+  return total > 0 ? total : null;
+}
+
+function frequencyTreatmentAmount(row = {}) {
+  return firstPositiveNumber(
+    row?.displayPrice,
+    row?.priceAfterDiscount,
+    row?.netPerTreatment,
+    row?.price,
+    row?.perTreatment,
+    row?.perApp,
+    row?.perVisit,
+    row?.pa,
+  );
+}
+
+function frequencyTreatmentsCoverServices(rows = [], services = []) {
+  const expectedKeys = (Array.isArray(services) ? services : [])
+    .map((svc) => recurringServiceKey(svc))
+    .filter(Boolean);
+  if (!expectedKeys.length) return true;
+
+  const pricedKeys = new Set((Array.isArray(rows) ? rows : [])
+    .filter((row) => frequencyTreatmentAmount(row))
+    .map((row) => recurringServiceKey(row))
+    .filter(Boolean));
+  return expectedKeys.every((key) => pricedKeys.has(key));
+}
+
+function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMonthlyOff = 0, services = null } = {}) {
+  const rows = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments
+    : [];
+  if (services && !frequencyTreatmentsCoverServices(rows, services)) return null;
+  const total = rows.reduce((sum, row) => {
+    const amount = frequencyTreatmentAmount(row);
+    if (!amount) return sum;
+    const serviceName = String(row?.service || row?.label || '').toLowerCase();
+    const visits = Number(row?.visitsPerYear ?? row?.visits ?? row?.frequency);
+    const discount = serviceName.includes('pest') && visits > 0
+      ? (Number(prefMonthlyOff || 0) * 12) / visits
+      : 0;
+    const adjusted = Math.max(0, Math.round((amount - discount) * 100) / 100);
+    return adjusted > 0 ? Math.round((sum + adjusted) * 100) / 100 : sum;
+  }, 0);
+  return total > 0 ? total : null;
+}
+
+function resolveRecurringInvoiceFirstVisitAmount({
+  recurringFirstVisitAmount = null,
+  effectiveBillingCadence = null,
+  monthlyTotal = null,
+} = {}) {
+  const firstVisitAmount = Number(recurringFirstVisitAmount);
+  if (Number.isFinite(firstVisitAmount) && firstVisitAmount > 0) {
+    return Math.round(firstVisitAmount * 100) / 100;
+  }
+  const cadenceAmount = Number(effectiveBillingCadence?.amount);
+  if (Number.isFinite(cadenceAmount) && cadenceAmount > 0) {
+    return Math.round(cadenceAmount * 100) / 100;
+  }
+  const monthly = Number(monthlyTotal);
+  return Number.isFinite(monthly) && monthly > 0
+    ? Math.round(monthly * 3 * 100) / 100
+    : null;
+}
+
+function pestTreatmentRowForFrequency(frequency = {}) {
+  const rows = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments
+    : [];
+  return rows.find((row) => /pest/i.test(String(row?.service || row?.label || ''))) || null;
+}
+
+function pestVisitsForFrequency(frequency = {}) {
+  const pestRow = pestTreatmentRowForFrequency(frequency);
+  const visits = Number(pestRow?.visitsPerYear ?? pestRow?.visits ?? pestRow?.frequency);
+  return Number.isFinite(visits) && visits > 0 ? visits : null;
+}
+
+function pestMonthlyBaseForFrequency(frequency = {}) {
+  const pestRow = pestTreatmentRowForFrequency(frequency);
+  const visits = pestVisitsForFrequency(frequency);
+  const amount = firstPositiveNumber(
+    pestRow?.perTreatment,
+    pestRow?.perApp,
+    pestRow?.perVisit,
+    pestRow?.pa,
+    pestRow?.priceBeforeDiscount,
+    pestRow?.displayPrice,
+    pestRow?.priceAfterDiscount,
+    pestRow?.netPerTreatment,
+    pestRow?.price,
+  );
+  return amount && visits ? Math.round(((amount * visits) / 12) * 100) / 100 : null;
+}
+
 // ── Service-preference pricing modifiers ──────────────────────
 // Customers can opt out of interior spraying or exterior (eave/cobweb)
 // sweeping on RECURRING pest only ($10/visit each). On one-time pest
@@ -519,6 +694,24 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
     monthlyOff: Math.round(monthlyOff * 100) / 100,
     oneTimeOff: Math.round(oneTimeOff * 100) / 100,
   };
+}
+
+function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = null) {
+  const visits = Number(visitsPerYear || 0);
+  if (!(visits > 0)) return 0;
+  const p = normalizePrefs(prefs);
+  const monthlyOff = SERVICE_PREF_KEYS.reduce((sum, key) => {
+    return p[key] === false ? sum + ((SERVICE_PREFS[key].perVisit * visits) / 12) : sum;
+  }, 0);
+  const base = Number(monthlyBase);
+  let cappedOff = monthlyOff;
+  if (Number.isFinite(base) && base > 0) {
+    const floor = pestMonthlyFloor(visits);
+    if (base - cappedOff < floor) {
+      cappedOff = Math.max(0, base - floor);
+    }
+  }
+  return Math.round(cappedOff * 100) / 100;
 }
 
 const PERKS = [
@@ -990,9 +1183,9 @@ function renderPage(token, estimate, estData) {
         cardConfirmTitle: 'Confirm and save card',
         cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
         perksHeading: 'What WaveGuard members get',
-        finalHeading: 'Go Waves!',
-        finalSubhead: 'Wave Goodbye to Pests!',
-        finalBody: 'No surprise increases, no hidden fees.',
+        finalHeading: 'Go Waves! Wave Goodbye to Pests!',
+        finalSubhead: '',
+        finalBody: '',
       };
 
   // One-time toggle — admin opted this estimate into letting the customer
@@ -1142,45 +1335,6 @@ function renderPage(token, estimate, estData) {
   const showMembershipFee = membershipFee > 0 && !locked;
 
   const tierDiscountPct = Math.round(estimateTierDiscount * 100);
-  const visitsForRecurringService = (svc) => {
-    const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
-    if (n.includes('pest')) {
-      return Number(selectedPestTier?.apps || selectedPestTier?.v || R.pest?.apps || pestRecurring?.visitsPerYear || 4) || null;
-    }
-    const explicit = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.frequency);
-    if (Number.isFinite(explicit) && explicit > 0) return explicit;
-    return Number(visitsForService(svc?.name || svc?.label || svc?.service)) || null;
-  };
-  const rawPerTreatmentForRecurringService = (svc, visits) => {
-    const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
-    let base = null;
-    if (n.includes('pest')) {
-      const pestPa = Number(selectedPestTier?.pa || 0);
-      if (pestPa > 0) base = pestPa;
-    }
-    if (base == null) {
-      const explicit = Number(svc?.perTreatment ?? svc?.perApp ?? svc?.perVisit ?? svc?.pa);
-      if (Number.isFinite(explicit) && explicit > 0) base = explicit;
-    }
-    if (base == null && visits > 0) {
-      const monthly = Number(svc?.mo || svc?.monthly || 0);
-      if (monthly > 0) base = (monthly * 12) / visits;
-    }
-    return base == null ? null : Math.round(base * 100) / 100;
-  };
-  const basePerTreatmentForRecurringService = (svc, visits) => {
-    const base = rawPerTreatmentForRecurringService(svc, visits);
-    const serviceDiscount = recurringServiceReceivesTierDiscount(svc) ? estimateTierDiscount : 0;
-    return base == null ? null : Math.round(base * (1 - serviceDiscount) * 100) / 100;
-  };
-  const adjustedPerTreatmentForRecurringService = (svc, visits, basePrice) => {
-    const n = String(svc?.name || svc?.label || svc?.service || '').toLowerCase();
-    if (basePrice == null) return null;
-    const prefPerTreatmentOff = n.includes('pest') && visits > 0
-      ? (prefMonthlyOff * 12) / visits
-      : 0;
-    return Math.max(0, Math.round((basePrice - prefPerTreatmentOff) * 100) / 100);
-  };
   const servicePriority = (svc) => {
     const key = recurringServiceKey(svc);
     if (key === 'pest_control') return 0;
@@ -1198,12 +1352,16 @@ function renderPage(token, estimate, estData) {
     .map((svc) => {
       const serviceKey = recurringServiceKey(svc);
       const name = svc?.displayName || recurringServiceDisplayName(serviceKey) || svc?.name || svc?.label || 'Service';
-      const visits = visitsForRecurringService(svc);
+      const firstVisitPricing = recurringServiceFirstVisitPrice(svc, {
+        estData,
+        tierDiscount: estimateTierDiscount,
+        prefMonthlyOff,
+        pestRecurring,
+        selectedPestTier,
+      });
+      const { visits, anchorPrice, basePrice, price } = firstVisitPricing;
       const isPest = /pest/i.test(String(name));
       const isLawn = /lawn/i.test(String(name));
-      const anchorPrice = rawPerTreatmentForRecurringService(svc, visits);
-      const basePrice = basePerTreatmentForRecurringService(svc, visits);
-      const price = adjustedPerTreatmentForRecurringService(svc, visits, basePrice);
       const visitText = visits
         ? `${Math.round(visits).toLocaleString()} ${visits === 1 ? 'application' : 'applications'}/year`
         : 'Service applications/year';
@@ -1233,10 +1391,13 @@ function renderPage(token, estimate, estData) {
           </div>
           ${row.price != null ? `<div class="billing-service-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span>/ application</span></div>` : ''}
         </div>`).join('');
-  const firstServiceVisitTotal = billingServiceRows.reduce((sum, row) => {
-    const price = Number(row.price);
-    return Number.isFinite(price) && price > 0 ? sum + price : sum;
-  }, 0);
+  const firstServiceVisitTotal = resolveRecurringFirstVisitAmount(billingRecurring, {
+    estData,
+    tierDiscount: estimateTierDiscount,
+    prefMonthlyOff,
+    pestRecurring,
+    selectedPestTier,
+  }) || 0;
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
   const showAnnualPrepayOption = showMembershipFee;
@@ -1282,7 +1443,7 @@ function renderPage(token, estimate, estData) {
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(membershipFee)}</strong></div>
           ${annualPrepayWaivesMembership ? `<div class="payment-summary-row discount"><span>Annual Pay-in-Full Waiver</span><strong>-${fmtMoney(membershipFee)}</strong></div>` : ''}` : ''}
-          <div class="payment-summary-row total"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+          <div class="payment-summary-row"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">No payment is charged on this page. The annual prepay invoice is prepared after approval.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
@@ -1495,11 +1656,11 @@ function renderPage(token, estimate, estData) {
   .hero .addr{color:#3F4A65;font-size:17px;margin-top:8px}
   .hero .prop-meta{color:#6B7280;font-size:16px;margin-top:4px}
   .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
-  .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
+  .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04);display:flex;flex-direction:column;min-height:256px}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px;min-height:18px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
-  .service-big-price{margin-top:14px;gap:8px 12px}
+  .service-big-price{margin-top:14px;gap:8px 12px;min-height:132px;align-content:flex-start}
   .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#9CA3AF;text-decoration:line-through}
   .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(62px,8vw,84px);line-height:.92;color:#1B2C5B}
   .service-big-price .anchor{font-size:22px;flex-basis:100%}
@@ -1507,8 +1668,9 @@ function renderPage(token, estimate, estData) {
   .big-price .per{font-size:24px;color:#6B7280}
   .service-big-price .per{font-size:18px}
   .big-price .tier-lbl{display:inline-block;padding:4px 10px;border-radius:6px;background:#EEF2FF;color:#1B2C5B;font-weight:600;font-size:12px;letter-spacing:.04em}
-  .save-row{margin-top:10px}
+  .save-row{margin-top:10px;min-height:20px}
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
+  .service-price-card>.day-price{margin-top:auto;padding-top:8px}
   .day-price{margin-top:8px;font-size:14px;color:#6B7280}
   .setup-fee{margin-top:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;max-width:520px;padding:12px 14px;border:1px solid #D4CBB8;border-radius:10px;background:#fff}
   .setup-fee-title{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
@@ -1582,7 +1744,6 @@ function renderPage(token, estimate, estData) {
   .payment-summary-row span{font-size:12px;color:#6B7280;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
   .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}
   .payment-summary-row.discount strong,.payment-summary-row.discount span{color:${BRAND.green}}
-  .payment-summary-row.total strong{font-family:'Source Serif 4',Georgia,serif;font-size:22px;font-weight:600}
   .payment-choice-cta{margin-top:auto;width:100%;border:1px solid #1B2C5B;background:#fff;color:#1B2C5B;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
   .payment-choice-cta:hover:not([disabled]),.payment-choice-cta[aria-pressed="true"]{background:#1B2C5B;color:#fff}
   .payment-choice-cta.primary{background:${ESTIMATE_BUTTON_BLUE};border-color:${ESTIMATE_BUTTON_BLUE};color:#fff}
@@ -1846,9 +2007,9 @@ ${shellTopBar()}
   </div>` : `
   <div class="final">
     <h2 data-mode-only="recurring">${escapeHtml(pageCopy.finalHeading)}</h2>
-    <div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>
-    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves!</h2><div class="final-subhead" data-mode-only="one_time" hidden>Wave Goodbye to Pests!</div>` : ''}
-    <p>${escapeHtml(pageCopy.finalBody)}</p>
+    ${pageCopy.finalSubhead ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves! Wave Goodbye to Pests!</h2>` : ''}
+    ${pageCopy.finalBody ? `<p>${escapeHtml(pageCopy.finalBody)}</p>` : ''}
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -2080,6 +2241,7 @@ ${shellQuestionsBar()}
     pendingPref: null,
     pickedPref: null,
     reservation: null,
+    isReserving: false,
     countdownTimer: null,
     serviceMode: INITIAL_SERVICE_MODE,
   };
@@ -2092,7 +2254,7 @@ ${shellQuestionsBar()}
     document.querySelectorAll('[data-payment-setup]').forEach((btn) => {
       const selected = bookingState.pendingPref === btn.dataset.paymentSetup;
       btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
-      btn.disabled = !!bookingState.reservation;
+      btn.disabled = bookingState.isReserving || !!bookingState.reservation;
       const card = btn.closest('.payment-choice');
       if (card) card.classList.toggle('is-selected', selected);
     });
@@ -2130,6 +2292,10 @@ ${shellQuestionsBar()}
   }
 
   function choosePaymentSetup(pref) {
+    if (bookingState.isReserving) {
+      toast('Hold on while we reserve that time.');
+      return;
+    }
     if (bookingState.reservation) {
       toast('Use Change my pick before switching payment setup.');
       const reviewArea = document.getElementById('review-area');
@@ -2153,6 +2319,10 @@ ${shellQuestionsBar()}
   // include it in their bodies.
   function setServiceMode(mode) {
     if (mode !== 'recurring' && mode !== 'one_time') return;
+    if (bookingState.isReserving) {
+      toast('Hold on while we reserve that time.');
+      return;
+    }
     const changed = bookingState.serviceMode !== mode;
     bookingState.serviceMode = mode;
     document.querySelectorAll('[data-mode-only]').forEach((el) => {
@@ -2289,6 +2459,10 @@ ${shellQuestionsBar()}
   }
 
   function selectSlot(btn) {
+    if (bookingState.isReserving) {
+      toast('Hold on while we reserve that time.');
+      return;
+    }
     document.querySelectorAll('.slot-btn').forEach((el) => el.classList.remove('selected'));
     btn.classList.add('selected');
     bookingState.selectedSlotId = btn.dataset.slotId;
@@ -2305,6 +2479,10 @@ ${shellQuestionsBar()}
   }
 
   async function pickPaymentPref(pref) {
+    if (bookingState.isReserving) {
+      toast('Hold on while we reserve that time.');
+      return;
+    }
     if (!bookingState.selectedSlotId) {
       toast('Pick a time first.');
       return;
@@ -2313,6 +2491,7 @@ ${shellQuestionsBar()}
       pref = 'pay_at_visit';
     }
     const buttons = document.querySelectorAll('[data-pay-pref]');
+    bookingState.isReserving = true;
     buttons.forEach((b) => { b.disabled = true; });
     bookingState.pendingPref = pref;
     bookingState.pickedPref = pref;
@@ -2336,6 +2515,7 @@ ${shellQuestionsBar()}
           }
         }
         buttons.forEach((b) => { b.disabled = false; });
+        bookingState.isReserving = false;
         bookingState.pendingPref = null;
         bookingState.pickedPref = null;
         syncPaymentSetupCards();
@@ -2344,6 +2524,7 @@ ${shellQuestionsBar()}
       if (!r.ok) throw new Error('reserve failed');
       const body = await r.json();
       bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
+      bookingState.isReserving = false;
       syncPaymentSetupCards();
       // Swap UI: hide slot list + pay pref, show review
       document.getElementById('slot-area').style.display = 'none';
@@ -2369,6 +2550,7 @@ ${shellQuestionsBar()}
     } catch (e) {
       toast('Could not reserve. Try again or call ${COMPANY.phone}.');
       buttons.forEach((b) => { b.disabled = false; });
+      bookingState.isReserving = false;
       bookingState.pendingPref = null;
       bookingState.pickedPref = null;
       syncPaymentSetupCards();
@@ -2407,6 +2589,7 @@ ${shellQuestionsBar()}
       fetch('/api/public/estimates/' + TOKEN + '/reserve/' + encodeURIComponent(res.scheduledServiceId), { method: 'DELETE' }).catch(function () {});
     }
     bookingState.reservation = null;
+    bookingState.isReserving = false;
     bookingState.selectedSlotId = null;
     bookingState.selectedSlotLabel = null;
     bookingState.pendingPref = null;
@@ -2884,6 +3067,15 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+    const paymentPreferenceError = validateRecurringSlotPaymentPreference({
+      slotId,
+      treatAsOneTime,
+      billByInvoice,
+      paymentMethodPreference,
+    });
+    if (paymentPreferenceError) {
+      return res.status(400).json({ error: paymentPreferenceError });
+    }
     const selectedFrequency = !treatAsOneTime && pricingBundle?.frequencies?.length
       ? pricingBundle.frequencies.find((f) => f.key === selectedFrequencyKey)
       : null;
@@ -2905,9 +3097,37 @@ router.put('/:token/accept', async (req, res, next) => {
           fallbackFrequencyKey: 'quarterly',
         })
       : null;
+    const acceptPrefs = normalizePrefs(estData?.preferences);
+    const selectedFrequencyPestVisits = pestVisitsForFrequency(selectedFrequency);
+    const selectedFrequencyPestMonthlyBase = pestMonthlyBaseForFrequency(selectedFrequency);
+    const acceptPestRecurring = detectPestRecurring(recurringSvcList);
+    const { monthlyOff: storedCadencePrefMonthlyOff } = computePrefDiscount(acceptPrefs, acceptPestRecurring, false, 0);
+    const acceptPrefMonthlyOff = selectedFrequencyPestVisits
+      ? preferenceMonthlyOffForPestVisits(acceptPrefs, selectedFrequencyPestVisits, selectedFrequencyPestMonthlyBase)
+      : storedCadencePrefMonthlyOff;
+    const acceptTier = estimate.waveguard_tier || pricingBundle?.waveGuardTier || 'Bronze';
+    const acceptEstResult = estData?.result || estData || {};
+    const savedAcceptTierDiscount = Number(acceptEstResult?.recurring?.discount);
+    const acceptTierDiscount = tierDiscountForEstimate(
+      estData,
+      acceptTier,
+      Number.isFinite(savedAcceptTierDiscount) ? savedAcceptTierDiscount : null,
+    );
+    const selectedFrequencyFirstVisitAmount = resolveRecurringFirstVisitAmountFromFrequency(
+      selectedFrequency,
+      { prefMonthlyOff: acceptPrefMonthlyOff, services: recurringSvcList },
+    );
+    const recurringFirstVisitAmount = !treatAsOneTime
+      ? selectedFrequencyFirstVisitAmount || resolveRecurringFirstVisitAmount(recurringSvcList, {
+          estData,
+          tierDiscount: acceptTierDiscount,
+          prefMonthlyOff: acceptPrefMonthlyOff,
+          pestRecurring: acceptPestRecurring,
+        })
+      : null;
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
-      : (billingTerm === 'prepay_annual' ? null : effectiveBillingCadence?.amount);
+      : (billingTerm === 'prepay_annual' ? null : (recurringFirstVisitAmount || effectiveBillingCadence?.amount));
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
@@ -3273,14 +3493,22 @@ router.put('/:token/accept', async (req, res, next) => {
           notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode one-time).`;
         } else {
           const monthly = parseFloat(effectiveMonthlyTotal || estimate.monthly_total || 0);
-          const quarterAmount = Math.round(monthly * 3 * 100) / 100;
-          invoiceAmount = quarterAmount;
+          const firstVisitInvoiceAmount = resolveRecurringInvoiceFirstVisitAmount({
+            recurringFirstVisitAmount,
+            effectiveBillingCadence,
+            monthlyTotal: monthly,
+          });
+          invoiceAmount = firstVisitInvoiceAmount;
           const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
-          title = `${svcType} — first quarterly visit`;
+          const cadenceLabel = (effectiveBillingCadence?.frequencyLabel || selectedFrequency?.label || 'Recurring').toLowerCase();
+          const visitNoun = String(effectiveBillingCadence?.visitChargeLabel || '')
+            .replace(/^Charged after each\s+/i, '')
+            || `${cadenceLabel} visit`;
+          title = `${svcType} — first ${visitNoun}`;
           lineItems = [{
-            description: `${svcType} (quarterly recurring — first visit)`,
+            description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
             quantity: 1,
-            unit_price: quarterAmount,
+            unit_price: firstVisitInvoiceAmount,
           }];
           notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`;
         }
@@ -4227,6 +4455,17 @@ function normalizeAcceptPaymentMethodPreference(raw) {
   return null;
 }
 
+function validateRecurringSlotPaymentPreference({
+  slotId = '',
+  treatAsOneTime = false,
+  billByInvoice = false,
+  paymentMethodPreference = null,
+} = {}) {
+  if (!slotId || treatAsOneTime || billByInvoice) return null;
+  if (paymentMethodPreference === 'card_on_file' || paymentMethodPreference === 'prepay_annual') return null;
+  return 'Choose card-on-file autopay or annual prepay before booking this recurring plan';
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
@@ -4949,10 +5188,16 @@ module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
+module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
+module.exports.resolveRecurringFirstVisitAmount = resolveRecurringFirstVisitAmount;
+module.exports.resolveRecurringFirstVisitAmountFromFrequency = resolveRecurringFirstVisitAmountFromFrequency;
+module.exports.resolveRecurringInvoiceFirstVisitAmount = resolveRecurringInvoiceFirstVisitAmount;
+module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
+module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
