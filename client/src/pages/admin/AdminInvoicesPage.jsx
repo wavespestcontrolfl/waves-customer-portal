@@ -512,6 +512,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
   const [expanded, setExpanded] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [batchSending, setBatchSending] = useState(false);
+  const [sendModalInvoice, setSendModalInvoice] = useState(null);
   const [receiptModalInvoice, setReceiptModalInvoice] = useState(null);
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag("ff_invoice_send_receipt", true);
@@ -557,20 +558,8 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
     load();
   }, [load]);
 
-  const handleSend = async (id) => {
-    const res = await adminFetch(`/admin/invoices/${id}/send`, {
-      method: "POST",
-    });
-    const channels = [res?.sms?.ok && "SMS", res?.email?.ok && "email"].filter(
-      Boolean,
-    );
-    showToast(
-      channels.length
-        ? `Invoice sent (${channels.join(" + ")})`
-        : "Invoice send failed",
-    );
-    load();
-    onRefresh();
+  const handleSend = (invoice) => {
+    setSendModalInvoice(invoice);
   };
 
   const handleVoid = async (id) => {
@@ -768,6 +757,8 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
             ⌕
           </span>{" "}
           <input
+            id="admin-invoice-search"
+            name="admin_invoice_search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search"
@@ -936,6 +927,8 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                     >
                       {canSelect && (
                         <input
+                          id={`invoice-row-select-${inv.id}`}
+                          name="invoice_row_select"
                           type="checkbox"
                           checked={isSelected}
                           onChange={() => toggleSelect(inv.id)}
@@ -1055,7 +1048,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                           {(inv.status === "draft" ||
                             inv.status === "scheduled") && (
                             <button
-                              onClick={() => handleSend(inv.id)}
+                              onClick={() => handleSend(inv)}
                               style={sBtn(D.heading, D.white, isMobile)}
                               title="Send invoice via SMS + email"
                             >
@@ -1066,7 +1059,7 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
                             inv.status === "viewed" ||
                             inv.status === "overdue") && (
                             <button
-                              onClick={() => handleSend(inv.id)}
+                              onClick={() => handleSend(inv)}
                               style={sBtn(D.heading, D.white, isMobile)}
                               title="Resend invoice via SMS + email"
                             >
@@ -1273,6 +1266,33 @@ function InvoiceList({ showToast, onRefresh, isMobile, stats }) {
             Clear
           </button>{" "}
         </div>
+      )}
+
+      {sendModalInvoice && (
+        <SendInvoiceModal
+          invoice={sendModalInvoice}
+          isMobile={isMobile}
+          onClose={() => setSendModalInvoice(null)}
+          onSent={(res) => {
+            setSendModalInvoice(null);
+            const channels = [
+              res?.sms?.ok && "SMS",
+              res?.email?.ok && (
+                res.email.recipient?.email
+                  ? `email to ${res.email.recipient.email}`
+                  : "email"
+              ),
+            ].filter(Boolean);
+            showToast(
+              channels.length
+                ? `Invoice sent (${channels.join(" + ")})`
+                : "Invoice send failed",
+            );
+            load();
+            onRefresh();
+          }}
+          onError={(msg) => showToast(msg)}
+        />
       )}
 
       {receiptModalInvoice && (
@@ -1637,6 +1657,8 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
           </div>
         </div>
         <input
+          id={`invoice-attachments-${invoiceId}`}
+          name="invoice_attachments"
           ref={fileRef}
           type="file"
           multiple
@@ -1768,6 +1790,389 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
   );
 }
 
+function contactRoleLabel(role) {
+  if (role === "billing_contact") return "Billing recipient";
+  if (role === "invoice_override") return "One-time invoice recipient";
+  if (role === "service_contact") return "Service contact";
+  return "Primary customer";
+}
+
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+function DeliveryRow({ label, value, detail, missing }) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "130px 1fr",
+        gap: 12,
+        alignItems: "start",
+        padding: "12px 0",
+        borderBottom: `1px solid ${D.border}`,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 11,
+          fontWeight: 700,
+          color: D.muted,
+          textTransform: "uppercase",
+          letterSpacing: "0.04em",
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div
+          style={{
+            fontSize: 14,
+            fontWeight: 650,
+            color: missing ? D.red : D.heading,
+            overflowWrap: "anywhere",
+          }}
+        >
+          {value}
+        </div>
+        {detail && (
+          <div style={{ marginTop: 3, fontSize: 12, color: D.muted }}>
+            {detail}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Send Invoice Modal ──
+// Shows the resolved payment-link recipients before delivery. SMS stays on
+// the primary account phone; email can be routed once or saved as billing.
+function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
+  const [loading, setLoading] = useState(true);
+  const [recipients, setRecipients] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [useOverride, setUseOverride] = useState(false);
+  const [recipientName, setRecipientName] = useState("");
+  const [recipientEmail, setRecipientEmail] = useState("");
+  const [saveAsDefault, setSaveAsDefault] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setLoadError("");
+    adminFetch(`/admin/invoices/${invoice.id}/recipients`)
+      .then((data) => {
+        if (!alive) return;
+        setRecipients(data);
+        setUseOverride(false);
+        setRecipientName("");
+        setRecipientEmail("");
+        setSaveAsDefault(false);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setLoadError(err.message || "Recipient lookup failed");
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [invoice.id]);
+
+  const defaultEmail = recipients?.emailRecipient?.email || "";
+  const defaultEmailRole = recipients?.emailRecipient?.role || "primary";
+  const smsPhone = recipients?.smsRecipient?.phone || "";
+  const overrideEmail = recipientEmail.trim();
+  const overrideValid = !useOverride || isEmailLike(overrideEmail);
+  const emailChannel = useOverride ? overrideValid : !!defaultEmail;
+  const canSend =
+    !loading &&
+    !loadError &&
+    !sending &&
+    (emailChannel || !!smsPhone) &&
+    overrideValid;
+
+  const send = async () => {
+    if (!canSend) return;
+    setSending(true);
+    try {
+      const body = {};
+      if (useOverride) {
+        body.invoiceRecipientEmail = overrideEmail;
+        body.invoiceRecipientName = recipientName.trim() || undefined;
+        body.saveBillingRecipient = saveAsDefault;
+      }
+      const res = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      onSent(res);
+    } catch (err) {
+      onError(`Invoice send failed: ${err.message}`);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const customerName =
+    recipients?.customerName ||
+    [invoice.first_name, invoice.last_name].filter(Boolean).join(" ").trim() ||
+    "Customer";
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        zIndex: 400,
+        display: "flex",
+        alignItems: isMobile ? "flex-end" : "center",
+        justifyContent: "center",
+        padding: isMobile ? 0 : 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: D.card,
+          borderRadius: isMobile ? "16px 16px 0 0" : 14,
+          width: "100%",
+          maxWidth: 540,
+          padding: isMobile ? "24px 20px 28px" : 28,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+        }}
+      >
+        <div
+          style={{
+            fontSize: 20,
+            fontWeight: 700,
+            color: D.heading,
+            marginBottom: 4,
+          }}
+        >
+          {invoice.status === "draft" || invoice.status === "scheduled"
+            ? "Send invoice"
+            : "Resend invoice"}
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, marginBottom: 18 }}>
+          Invoice #{invoice.invoice_number} · $
+          {parseFloat(invoice.total).toFixed(2)} · {customerName}
+        </div>
+
+        {loading ? (
+          <div style={{ padding: "18px 0", fontSize: 14, color: D.muted }}>
+            Loading recipients...
+          </div>
+        ) : loadError ? (
+          <div
+            style={{
+              padding: "12px 14px",
+              border: `1px solid ${D.red}`,
+              borderRadius: 8,
+              color: D.red,
+              fontSize: 13,
+              lineHeight: 1.45,
+            }}
+          >
+            {loadError}
+          </div>
+        ) : (
+          <>
+            <div style={{ borderTop: `1px solid ${D.border}` }}>
+              <DeliveryRow
+                label="SMS pay link"
+                value={smsPhone || "No phone on primary customer"}
+                detail={smsPhone ? "Primary customer phone" : "SMS will be skipped"}
+                missing={!smsPhone}
+              />
+              <DeliveryRow
+                label="Invoice email"
+                value={
+                  useOverride
+                    ? (overrideEmail || "Enter one-time recipient email")
+                    : (defaultEmail || "No invoice email configured")
+                }
+                detail={
+                  useOverride
+                    ? "One-time recipient for this send"
+                    : (defaultEmail
+                      ? contactRoleLabel(defaultEmailRole)
+                      : "Email will be skipped unless you add a recipient")
+                }
+                missing={
+                  useOverride
+                    ? !!overrideEmail && !isEmailLike(overrideEmail)
+                    : !defaultEmail
+                }
+              />
+            </div>
+
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                marginTop: 18,
+                fontSize: 14,
+                fontWeight: 650,
+                color: D.text,
+                cursor: "pointer",
+              }}
+            >
+              <input
+                id={`invoice-recipient-override-${invoice.id}`}
+                name="invoice_recipient_override"
+                type="checkbox"
+                checked={useOverride}
+                onChange={(e) => {
+                  setUseOverride(e.target.checked);
+                  if (!e.target.checked) setSaveAsDefault(false);
+                }}
+                style={{ width: 16, height: 16, accentColor: D.heading }}
+              />
+              Send invoice email to someone else
+            </label>
+
+            {useOverride && (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "1fr" : "1fr 1.4fr",
+                  gap: 10,
+                  marginTop: 12,
+                }}
+              >
+                <div>
+                  <label
+                    htmlFor={`invoice-recipient-name-${invoice.id}`}
+                    style={{
+                      display: "block",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: D.muted,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      marginBottom: 6,
+                    }}
+                  >
+                    Name
+                  </label>
+                  <input
+                    id={`invoice-recipient-name-${invoice.id}`}
+                    name="invoice_recipient_name"
+                    autoComplete="name"
+                    value={recipientName}
+                    onChange={(e) => setRecipientName(e.target.value)}
+                    placeholder="Accounts payable"
+                    style={sInput(isMobile)}
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor={`invoice-recipient-email-${invoice.id}`}
+                    style={{
+                      display: "block",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: D.muted,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      marginBottom: 6,
+                    }}
+                  >
+                    Email
+                  </label>
+                  <input
+                    id={`invoice-recipient-email-${invoice.id}`}
+                    name="invoice_recipient_email"
+                    type="email"
+                    autoComplete="email"
+                    value={recipientEmail}
+                    onChange={(e) => setRecipientEmail(e.target.value)}
+                    placeholder="billing@example.com"
+                    style={{
+                      ...sInput(isMobile),
+                      borderColor:
+                        overrideEmail && !isEmailLike(overrideEmail)
+                          ? D.red
+                          : D.border,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {useOverride && (
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 10,
+                  marginTop: 12,
+                  fontSize: 13,
+                  lineHeight: 1.45,
+                  color: D.text,
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  id={`invoice-recipient-save-${invoice.id}`}
+                  name="invoice_recipient_save_default"
+                  type="checkbox"
+                  checked={saveAsDefault}
+                  onChange={(e) => setSaveAsDefault(e.target.checked)}
+                  style={{
+                    width: 16,
+                    height: 16,
+                    accentColor: D.heading,
+                    marginTop: 2,
+                  }}
+                />
+                <span>
+                  Save as this customer's billing recipient for future invoices
+                </span>
+              </label>
+            )}
+          </>
+        )}
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            justifyContent: "flex-end",
+            marginTop: 22,
+          }}
+        >
+          <button
+            onClick={onClose}
+            disabled={sending}
+            style={sBtn("transparent", D.text, isMobile)}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={send}
+            disabled={!canSend}
+            style={{
+              ...sBtn(D.heading, D.white, isMobile),
+              opacity: canSend ? 1 : 0.5,
+            }}
+          >
+            {sending ? "Sending..." : "Send invoice"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Send Receipt Modal ──
 // Per-invoice action for paid invoices. Memo is ephemeral (stored on the
 // invoice row as receipt_memo for audit) — not a customer preference.
@@ -1775,14 +2180,52 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
   const [memo, setMemo] = useState("");
   const [sendEmail, setSendEmail] = useState(!!invoice.email);
   const [sendSms, setSendSms] = useState(!!invoice.phone);
+  const [recipientLookup, setRecipientLookup] = useState(null);
+  const [recipientsLoading, setRecipientsLoading] = useState(true);
+  const [recipientLookupError, setRecipientLookupError] = useState("");
   const [sending, setSending] = useState(false);
 
-  const hasEmail = !!invoice.email;
-  const hasPhone = !!invoice.phone;
+  useEffect(() => {
+    let alive = true;
+    setRecipientsLoading(true);
+    setRecipientLookupError("");
+    adminFetch(`/admin/invoices/${invoice.id}/recipients`)
+      .then((data) => {
+        if (!alive) return;
+        setRecipientLookup(data);
+        const nextEmail = data?.emailRecipient?.email || "";
+        const nextPhone = data?.smsRecipient?.phone || "";
+        setSendEmail(!!nextEmail);
+        setSendSms(!!nextPhone);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setRecipientLookup(null);
+        setSendEmail(!!invoice.email);
+        setSendSms(!!invoice.phone);
+        setRecipientLookupError(err.message || "Recipient lookup failed");
+      })
+      .finally(() => {
+        if (alive) setRecipientsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [invoice.id, invoice.email, invoice.phone]);
+
+  const receiptEmail = recipientLookup
+    ? recipientLookup.emailRecipient?.email || ""
+    : invoice.email || "";
+  const receiptEmailRole = recipientLookup?.emailRecipient?.role || "primary";
+  const receiptPhone = recipientLookup
+    ? recipientLookup.smsRecipient?.phone || ""
+    : invoice.phone || "";
+  const hasEmail = !!receiptEmail;
+  const hasPhone = !!receiptPhone;
   const anyChannel = sendEmail || sendSms;
 
   const handleSend = async () => {
-    if (!anyChannel || sending) return;
+    if (!anyChannel || sending || recipientsLoading) return;
     const via = sendEmail && sendSms ? "both" : sendEmail ? "email" : "sms";
     setSending(true);
     try {
@@ -1886,6 +2329,23 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
         >
           {memo.length}/400
         </div>{" "}
+        {recipientLookupError && (
+          <div
+            style={{
+              marginBottom: 12,
+              padding: "10px 12px",
+              background: "#FEF3C7",
+              border: `1px solid ${D.amber}`,
+              borderRadius: 8,
+              fontSize: 12,
+              color: D.text,
+              lineHeight: 1.45,
+            }}
+          >
+            Recipient lookup failed. Receipt delivery will use the invoice
+            contact shown below.
+          </div>
+        )}
         <div
           style={{
             display: "flex",
@@ -1900,22 +2360,27 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
               display: "flex",
               alignItems: "center",
               gap: 10,
-              cursor: hasEmail ? "pointer" : "not-allowed",
-              opacity: hasEmail ? 1 : 0.5,
+              cursor:
+                hasEmail && !recipientsLoading ? "pointer" : "not-allowed",
+              opacity: hasEmail && !recipientsLoading ? 1 : 0.5,
             }}
           >
             {" "}
             <input
               type="checkbox"
               checked={sendEmail && hasEmail}
-              disabled={!hasEmail}
+              disabled={!hasEmail || recipientsLoading}
               onChange={(e) => setSendEmail(e.target.checked)}
               style={{ width: 16, height: 16, accentColor: D.heading }}
             />{" "}
             <span style={{ fontSize: 14, color: D.text }}>
               Email{" "}
-              {invoice.email ? (
-                <span style={{ color: D.muted }}>· {invoice.email}</span>
+              {recipientsLoading ? (
+                <span style={{ color: D.muted }}>· loading recipient</span>
+              ) : receiptEmail ? (
+                <span style={{ color: D.muted }}>
+                  · {receiptEmail} · {contactRoleLabel(receiptEmailRole)}
+                </span>
               ) : (
                 <span style={{ color: D.muted, fontStyle: "italic" }}>
                   · no email on file
@@ -1928,22 +2393,25 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
               display: "flex",
               alignItems: "center",
               gap: 10,
-              cursor: hasPhone ? "pointer" : "not-allowed",
-              opacity: hasPhone ? 1 : 0.5,
+              cursor:
+                hasPhone && !recipientsLoading ? "pointer" : "not-allowed",
+              opacity: hasPhone && !recipientsLoading ? 1 : 0.5,
             }}
           >
             {" "}
             <input
               type="checkbox"
               checked={sendSms && hasPhone}
-              disabled={!hasPhone}
+              disabled={!hasPhone || recipientsLoading}
               onChange={(e) => setSendSms(e.target.checked)}
               style={{ width: 16, height: 16, accentColor: D.heading }}
             />{" "}
             <span style={{ fontSize: 14, color: D.text }}>
               SMS{" "}
-              {invoice.phone ? (
-                <span style={{ color: D.muted }}>· {invoice.phone}</span>
+              {recipientsLoading ? (
+                <span style={{ color: D.muted }}>· loading recipient</span>
+              ) : receiptPhone ? (
+                <span style={{ color: D.muted }}>· {receiptPhone}</span>
               ) : (
                 <span style={{ color: D.muted, fontStyle: "italic" }}>
                   · no phone on file
@@ -1988,10 +2456,10 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           </button>{" "}
           <button
             onClick={handleSend}
-            disabled={!anyChannel || sending}
+            disabled={!anyChannel || sending || recipientsLoading}
             style={{
               ...sBtn(D.heading, D.white, isMobile),
-              opacity: !anyChannel || sending ? 0.5 : 1,
+              opacity: !anyChannel || sending || recipientsLoading ? 0.5 : 1,
             }}
           >
             {sending ? "Sending…" : "Send receipt"}

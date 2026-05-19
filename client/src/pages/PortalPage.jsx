@@ -3558,11 +3558,11 @@ function BillingTab({ customer }) {
 
       <div style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}>Billing Preferences</div>
-        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Notifications</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, marginBottom: 14 }}>Recipients</div>
 
         <div style={{ marginBottom: 14 }}>
           <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
-            Billing Email
+            Billing recipient email
           </label>
           <input
             id="portal-billing-email"
@@ -3578,7 +3578,7 @@ function BillingTab({ customer }) {
               outline: 'none', boxSizing: 'border-box',
             }}
           />
-          <div style={{ marginTop: 5, color: muted, fontSize: 12 }}>Optional - separate from account email.</div>
+          <div style={{ marginTop: 5, color: muted, fontSize: 12 }}>Optional - invoices and receipts can go here instead of the account email.</div>
         </div>
 
         <div style={{

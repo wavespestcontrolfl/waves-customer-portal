@@ -499,6 +499,10 @@ function cleanEmail(value) {
   return cleaned || null;
 }
 
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value) || '');
+}
+
 function cleanState(value) {
   const cleaned = cleanText(value).toUpperCase();
   return cleaned ? cleaned.slice(0, 2) : 'FL';
@@ -1749,12 +1753,9 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
 // PUT /api/admin/customers/:id/notification-prefs
 //
-// Admin override for a customer's notification_prefs row. Today this
-// only exposes auto_flip_en_route (Phase 2E per-customer opt-out for
-// the geofence EXIT auto-flip pipeline) — customers manage everything
-// else through the customer-facing /api/notifications/preferences
-// endpoint themselves. Add new fields here only when ops genuinely
-// needs to override on a customer's behalf.
+// Admin override for a customer's notification_prefs row. Keep this narrow:
+// ops needs auto-flip control and recipient-routing fields for landlord /
+// tenant / AP-contact workflows.
 //
 // Creates the prefs row if it doesn't exist (defaults to all TRUE).
 router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
@@ -1762,6 +1763,31 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
     const dbUpdates = {};
     if (req.body.autoFlipEnRoute !== undefined) {
       dbUpdates.auto_flip_en_route = !!req.body.autoFlipEnRoute;
+    }
+    if (req.body.billingEmail !== undefined) {
+      const billingEmail = cleanEmail(req.body.billingEmail);
+      if (billingEmail && !isEmailLike(billingEmail)) {
+        return res.status(400).json({ error: 'Enter a valid billing recipient email.' });
+      }
+      dbUpdates.billing_email = billingEmail || null;
+      if (!billingEmail) dbUpdates.billing_contact_name = null;
+    }
+    if (req.body.billingContactName !== undefined) {
+      const billingContactName = cleanOptionalText(req.body.billingContactName);
+      if (dbUpdates.billing_email !== null) {
+        dbUpdates.billing_contact_name = billingContactName
+          ? billingContactName.slice(0, 120)
+          : null;
+      }
+    }
+    if (req.body.paymentConfirmationSms !== undefined) {
+      dbUpdates.payment_confirmation_sms = !!req.body.paymentConfirmationSms;
+    }
+    if (req.body.appointmentNotifyPrimary !== undefined) {
+      dbUpdates.appointment_notify_primary = !!req.body.appointmentNotifyPrimary;
+    }
+    if (req.body.serviceReportNotifyPrimary !== undefined) {
+      dbUpdates.service_report_notify_primary = !!req.body.serviceReportNotifyPrimary;
     }
     if (Object.keys(dbUpdates).length === 0) {
       return res.status(400).json({ error: 'No supported fields provided.' });
@@ -1785,13 +1811,10 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
     const prefs = await db('notification_prefs')
       .where({ customer_id: req.params.id })
       .first();
-    // Log only normalized fields persisted (not raw req.body) — the
-    // endpoint accepts arbitrary JSON and a future caller could put
-    // phone/email/address-like fields into plaintext logs (Railway,
-    // errors.log) and create avoidable PII exposure. Drop updated_at
-    // from the payload — timestamp noise that adds nothing forensically.
-    const { updated_at: _drop, ...logPayload } = dbUpdates;
-    logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify(logPayload)}`);
+    const loggedFields = Object.keys(dbUpdates)
+      .filter((field) => field !== 'updated_at')
+      .sort();
+    logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify({ fields: loggedFields })}`);
     res.json({ success: true, notificationPrefs: prefs });
   } catch (err) { next(err); }
 });

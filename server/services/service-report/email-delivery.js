@@ -12,6 +12,7 @@ const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
+const { getServiceReportEmailRecipients } = require('../customer-contact');
 
 function escapeHtml(value) {
   return String(value || '')
@@ -37,6 +38,10 @@ function minutes(value) {
 
 function serviceDisplayName(data = {}) {
   return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Waves service';
+}
+
+function firstName(value) {
+  return String(value || '').trim().split(/\s+/)[0] || 'there';
 }
 
 function readyAt(dynamicContext, key) {
@@ -67,6 +72,118 @@ function pdfAttachment(filename, buffer) {
     type: 'application/pdf',
     disposition: 'attachment',
   };
+}
+
+function errorMessage(err, fallback = 'Email delivery failed') {
+  return err?.message || err?.error || String(err || fallback);
+}
+
+function serviceReportEmailIdempotencyKey(recordId, recipient, suffix = '') {
+  const role = String(recipient?.role || 'recipient').replace(/[^a-z0-9_-]/gi, '_') || 'recipient';
+  return `service_report_ready:${recordId}:${role}${suffix ? `:${suffix}` : ''}`;
+}
+
+function emailMessageId(result) {
+  return result?.message?.provider_message_id || result?.messageId || null;
+}
+
+function nonRetryableEmailStatus(status) {
+  return ['sent', 'delivered', 'opened', 'clicked', 'blocked', 'dropped', 'bounced', 'bounce', 'spam_report', 'spamreport', 'unsubscribed', 'complained']
+    .includes(String(status || '').toLowerCase());
+}
+
+function deliveredEmailStatus(status) {
+  return ['sent', 'delivered', 'opened', 'clicked'].includes(String(status || '').toLowerCase());
+}
+
+function isEmailMessageSchemaMissing(err) {
+  return err?.code === '42P01' || err?.code === '42703';
+}
+
+async function sendLegacyServiceReportEmail({
+  recordId,
+  customerId,
+  recipient,
+  email,
+  attachments,
+}) {
+  const idempotencyKey = serviceReportEmailIdempotencyKey(recordId, recipient);
+  let message = null;
+  let ledgerAvailable = true;
+
+  try {
+    const existing = await db('email_messages').where({ idempotency_key: idempotencyKey }).first();
+    if (existing && nonRetryableEmailStatus(existing.status)) {
+      if (String(existing.status || '').toLowerCase() === 'blocked') {
+        return { blocked: true, reason: existing.error_message || 'Email suppressed', message: existing };
+      }
+      if (!deliveredEmailStatus(existing.status)) {
+        return { blocked: true, reason: existing.error_message || `Email already ${existing.status}`, message: existing };
+      }
+      return { sent: true, deduped: true, message: existing };
+    }
+
+    const snapshot = {
+      provider: 'sendgrid',
+      template_key: 'service.report_ready.legacy',
+      trigger_event_id: idempotencyKey,
+      recipient_type: 'customer',
+      recipient_id: customerId || null,
+      recipient_email_snapshot: recipient.email,
+      from_name_snapshot: process.env.SENDGRID_FROM_NAME || 'Waves Pest Control',
+      from_email_snapshot: process.env.SENDGRID_FROM_EMAIL || 'newsletter@wavespestcontrol.com',
+      reply_to_snapshot: 'contact@wavespestcontrol.com',
+      subject_snapshot: email.subject,
+      html_snapshot: email.html,
+      text_snapshot: email.text,
+      categories: JSON.stringify(['service_report_v1']),
+      status: 'queued',
+      provider_message_id: null,
+      sent_at: null,
+      error_message: null,
+      idempotency_key: idempotencyKey,
+      queued_at: new Date(),
+      updated_at: new Date(),
+    };
+    const rows = existing
+      ? await db('email_messages').where({ id: existing.id }).update(snapshot).returning('*')
+      : await db('email_messages').insert(snapshot).returning('*');
+    message = rows?.[0] || existing || snapshot;
+  } catch (err) {
+    if (!isEmailMessageSchemaMissing(err)) throw err;
+    ledgerAvailable = false;
+  }
+
+  try {
+    const result = await sendgrid.sendOne({
+      to: recipient.email,
+      subject: email.subject,
+      html: email.html,
+      text: email.text,
+      categories: ['service_report_v1'],
+      asmGroupId: sendgrid.serviceGroupId(),
+      attachments,
+    });
+    if (ledgerAvailable && message?.id) {
+      const rows = await db('email_messages').where({ id: message.id }).update({
+        status: 'sent',
+        provider_message_id: result.messageId,
+        sent_at: new Date(),
+        updated_at: new Date(),
+      }).returning('*');
+      message = rows?.[0] || message;
+    }
+    return { sent: true, messageId: result.messageId || null, message };
+  } catch (err) {
+    if (ledgerAvailable && message?.id) {
+      await db('email_messages').where({ id: message.id }).update({
+        status: 'failed',
+        error_message: errorMessage(err).slice(0, 1000),
+        updated_at: new Date(),
+      }).catch(() => {});
+    }
+    throw err;
+  }
 }
 
 function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}) {
@@ -170,6 +287,10 @@ async function loadServiceRecord(recordId) {
       'customers.first_name',
       'customers.last_name',
       'customers.email as customer_email',
+      'customers.phone as customer_phone',
+      'customers.service_contact_name',
+      'customers.service_contact_phone',
+      'customers.service_contact_email',
       'customers.city',
       'customers.state',
       'technicians.name as technician_name',
@@ -187,7 +308,18 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
   if (!shouldSendServiceReportV1Delivery(service)) {
     return { ok: false, skipped: true, error: 'Not a completed service report v1 record' };
   }
-  if (!service.customer_email) return { ok: false, skipped: true, error: 'No customer email' };
+  const prefs = await db('notification_prefs').where({ customer_id: service.customer_id }).first().catch(() => null);
+  const recipients = getServiceReportEmailRecipients({
+    id: service.customer_id,
+    first_name: service.first_name,
+    last_name: service.last_name,
+    email: service.customer_email,
+    phone: service.customer_phone,
+    service_contact_name: service.service_contact_name,
+    service_contact_phone: service.service_contact_phone,
+    service_contact_email: service.service_contact_email,
+  }, prefs || {});
+  if (!recipients.length) return { ok: false, skipped: true, error: 'No service report recipient email' };
 
   const reportToken = token || service.report_view_token;
   if (!reportToken) return { ok: false, error: 'Missing report token' };
@@ -227,11 +359,6 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     });
   }
 
-  const email = buildServiceReportV1Email({
-    data: { ...data, pdfUrl: fullPdfUrl },
-    reportUrl: fullReportUrl,
-    pdfAttached: !!pdf,
-  });
   const attachments = pdf ? [{
     content: pdf.toString('base64'),
     filename: `waves-service-report-${data.serviceDate || recordId}.pdf`,
@@ -239,50 +366,161 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     disposition: 'attachment',
   }] : undefined;
 
-  try {
-    const serviceLabel = serviceDisplayName(data);
-    const templateResult = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'service.report_ready',
-      to: service.customer_email,
-      payload: {
-        first_name: data?.customerName ? data.customerName.split(/\s+/)[0] : 'there',
-        report_url: fullReportUrl,
-        service_label: serviceLabel,
-        service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
-        technician_name: data?.technicianName || '',
-      },
-      recipientType: 'customer',
-      recipientId: service.customer_id || null,
-      triggerEventId: `service_report_ready:${recordId}`,
-      categories: ['service_report_v1'],
-      attachments: pdf ? [pdfAttachment(`waves-service-report-${data.serviceDate || recordId}.pdf`, pdf)] : [],
-    });
-    if (templateResult.blocked) {
-      logger.warn(`[service-report-v1-email] Template service report ${recordId} blocked: ${templateResult.reason}`);
-      return { ok: false, skipped: true, error: templateResult.reason || 'Email suppressed', attachedPdf: !!pdf };
+  const serviceLabel = serviceDisplayName(data);
+  const templateOutcomes = await Promise.allSettled(
+    recipients.map((recipient) => EmailTemplateLibrary.sendTemplate({
+        templateKey: 'service.report_ready',
+        to: recipient.email,
+        payload: {
+          first_name: firstName(recipient.name || data?.customerName),
+          report_url: fullReportUrl,
+          service_label: serviceLabel,
+          service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
+          technician_name: data?.technicianName || '',
+        },
+        recipientType: 'customer',
+        recipientId: service.customer_id || null,
+        triggerEventId: `service_report_ready:${recordId}:${recipient.role || 'recipient'}`,
+        idempotencyKey: serviceReportEmailIdempotencyKey(recordId, recipient),
+        categories: ['service_report_v1'],
+        attachments: pdf ? [pdfAttachment(`waves-service-report-${data.serviceDate || recordId}.pdf`, pdf)] : [],
+      }).then((result) => ({ recipient, result }))),
+  );
+  const sent = [];
+  const blocked = [];
+  const failed = [];
+  for (const outcome of templateOutcomes) {
+    if (outcome.status === 'fulfilled') {
+      if (outcome.value.result?.blocked) {
+        blocked.push({ recipient: outcome.value.recipient, reason: outcome.value.result.reason });
+      } else if (outcome.value.result?.sent === false) {
+        blocked.push({
+          recipient: outcome.value.recipient,
+          reason: outcome.value.result.reason || outcome.value.result.message?.error_message || 'Email not retryable',
+        });
+      } else {
+        sent.push(outcome.value.result);
+      }
+    } else {
+      failed.push(outcome.reason);
     }
-    logger.info(`[service-report-v1-email] Sent template service report ${recordId} to customer ${service.customer_id || 'unknown'}`);
-    return { ok: true, messageId: templateResult.message?.provider_message_id || null, attachedPdf: !!pdf };
-  } catch (err) {
-    if (!canFallbackFromTemplateEmailError(err)) {
-      logger.error(`[service-report-v1-email] Template send failed for ${recordId}: ${err.message}`);
-      return { ok: false, error: err.message, attachedPdf: !!pdf };
-    }
-    logger.warn(`[service-report-v1-email] Template unavailable for ${recordId}; falling back to legacy renderer: ${err.message}`);
+  }
+  if (!sent.length && !blocked.length && failed.length && failed.every(canFallbackFromTemplateEmailError)) {
+    logger.warn(`[service-report-v1-email] Template unavailable for ${recordId}; falling back to legacy renderer: ${errorMessage(failed[0])}`);
+  } else if (failed.length) {
+    const err = failed[0] || new Error('Email delivery failed');
+    logger.warn(`[service-report-v1-email] Template service report ${recordId} delivered to ${sent.length} recipient(s), ${blocked.length} blocked, ${failed.length} failed; queue will retry failed recipient(s): ${errorMessage(err)}`);
+    return {
+      ok: false,
+      error: errorMessage(err),
+      messageId: emailMessageId(sent[0]) || null,
+      messageIds: sent.map(emailMessageId).filter(Boolean),
+      recipientCount: sent.length,
+      failedCount: failed.length,
+      blockedCount: blocked.length,
+      attachedPdf: !!pdf,
+    };
+  } else if (sent.length) {
+    const partial = blocked.length ? `; ${blocked.length} blocked` : '';
+    logger.info(`[service-report-v1-email] Sent template service report ${recordId} to ${sent.length} recipient(s) for customer ${service.customer_id || 'unknown'}${partial}`);
+    return {
+      ok: true,
+      messageId: emailMessageId(sent[0]) || null,
+      messageIds: sent.map(emailMessageId).filter(Boolean),
+      recipientCount: sent.length,
+      failedCount: 0,
+      blockedCount: blocked.length,
+      attachedPdf: !!pdf,
+    };
+  } else if (blocked.length === recipients.length) {
+    const reason = blocked[0]?.reason || 'Email suppressed';
+    logger.warn(`[service-report-v1-email] Template service report ${recordId} blocked for all recipients: ${reason}`);
+    return { ok: false, skipped: true, error: reason, attachedPdf: !!pdf };
+  } else {
+    const err = failed[0] || new Error(blocked[0]?.reason || 'Email suppressed');
+    logger.error(`[service-report-v1-email] Template send failed for ${recordId}: ${errorMessage(err)}`);
+    return {
+      ok: false,
+      error: errorMessage(err),
+      failedCount: failed.length,
+      blockedCount: blocked.length,
+      attachedPdf: !!pdf,
+    };
   }
 
-  const result = await sendgrid.sendOne({
-    to: service.customer_email,
-    subject: email.subject,
-    html: email.html,
-    text: email.text,
-    categories: ['service_report_v1'],
-    asmGroupId: sendgrid.serviceGroupId(),
-    attachments,
-  });
+  const legacyOutcomes = await Promise.allSettled(recipients.map((recipient) => {
+    const email = buildServiceReportV1Email({
+      data: { ...data, customerName: recipient.name || data.customerName, pdfUrl: fullPdfUrl },
+      reportUrl: fullReportUrl,
+      pdfAttached: !!pdf,
+    });
+    return sendLegacyServiceReportEmail({
+      recordId,
+      customerId: service.customer_id || null,
+      recipient,
+      email,
+      attachments,
+    });
+  }));
 
-  logger.info(`[service-report-v1-email] Sent service report ${recordId} to customer ${service.customer_id || 'unknown'}`);
-  return { ok: true, messageId: result.messageId || null, attachedPdf: !!pdf };
+  const legacySent = [];
+  const legacyBlocked = [];
+  const legacyFailed = [];
+  for (const outcome of legacyOutcomes) {
+    if (outcome.status === 'fulfilled') {
+      if (outcome.value?.blocked) {
+        legacyBlocked.push(outcome.value);
+      } else {
+        legacySent.push(outcome.value);
+      }
+    } else {
+      legacyFailed.push(outcome.reason);
+    }
+  }
+
+  if (!legacySent.length && legacyBlocked.length === recipients.length) {
+    const reason = legacyBlocked[0]?.reason || 'Email suppressed';
+    logger.warn(`[service-report-v1-email] Legacy service report ${recordId} blocked for all recipients: ${reason}`);
+    return { ok: false, skipped: true, error: reason, attachedPdf: !!pdf };
+  }
+
+  if (!legacySent.length) {
+    const err = legacyFailed[0] || new Error('Email delivery failed');
+    logger.error(`[service-report-v1-email] Legacy send failed for ${recordId}: ${errorMessage(err)}`);
+    return {
+      ok: false,
+      error: errorMessage(err),
+      failedCount: legacyFailed.length || recipients.length,
+      attachedPdf: !!pdf,
+    };
+  }
+
+  if (legacyFailed.length) {
+    const err = legacyFailed[0] || new Error('Email delivery failed');
+    logger.warn(`[service-report-v1-email] Legacy service report ${recordId} delivered to ${legacySent.length} recipient(s), ${legacyBlocked.length} blocked, ${legacyFailed.length} failed; queue will retry failed recipient(s): ${errorMessage(err)}`);
+    return {
+      ok: false,
+      error: errorMessage(err),
+      messageId: emailMessageId(legacySent[0]) || null,
+      messageIds: legacySent.map(emailMessageId).filter(Boolean),
+      recipientCount: legacySent.length,
+      failedCount: legacyFailed.length,
+      blockedCount: legacyBlocked.length,
+      attachedPdf: !!pdf,
+    };
+  }
+
+  const partial = legacyBlocked.length ? `; ${legacyBlocked.length} blocked` : '';
+  logger.info(`[service-report-v1-email] Sent service report ${recordId} to ${legacySent.length} recipient(s) for customer ${service.customer_id || 'unknown'}${partial}`);
+  return {
+    ok: true,
+    messageId: emailMessageId(legacySent[0]) || null,
+    messageIds: legacySent.map(emailMessageId).filter(Boolean),
+    recipientCount: legacySent.length,
+    failedCount: legacyFailed.length,
+    blockedCount: legacyBlocked.length,
+    attachedPdf: !!pdf,
+  };
 }
 
 module.exports = {

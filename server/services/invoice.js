@@ -1221,6 +1221,7 @@ const InvoiceService = {
       requestReview = false,
       reviewDelayMinutes = null,
       allowClaimed = false,
+      emailRecipientOverride = null,
     } = {},
   ) {
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
@@ -1245,9 +1246,13 @@ const InvoiceService = {
     }
 
     try {
-      const r = await sendInvoiceEmail(invoiceId);
+      const r = await sendInvoiceEmail(invoiceId, {
+        recipientOverride: emailRecipientOverride,
+      });
       if (r?.ok) email.ok = true;
       else if (r?.error) email.error = r.error;
+      if (r?.recipient) email.recipient = r.recipient;
+      if (r?.messageId) email.messageId = r.messageId;
     } catch (err) {
       email.error = err.message;
     }
