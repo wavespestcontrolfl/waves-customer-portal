@@ -320,6 +320,31 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(quote.manualReviewReasons).toContain('bed_area_at_or_above_8000');
     });
 
+    test('generateEstimate preserves lot_based bedAreaSource through calculatePropertyProfile', () => {
+      // Regression for Codex P2 #2 on PR #960: before this fix, the
+      // production generateEstimate path always reported bedAreaSource:
+      // 'estimated' for lot-derived inferences because
+      // calculatePropertyProfile labeled the lot-density branch 'estimated'
+      // and then priceTreeShrub's explicit-bedArea path could not recover
+      // the lot-based provenance. A lot-only quote must now surface
+      // 'lot_based' so admin tooling can distinguish a customer-confirmed
+      // estimate from a lot-density inference.
+      const estimate = generateEstimate({
+        homeSqFt: 1800,
+        stories: 1,
+        lotSqFt: 10000,
+        propertyType: 'single_family',
+        features: { shrubs: 'light', trees: 'light', complexity: 'simple' },
+        services: {
+          treeShrub: { tier: 'standard', access: 'easy', treeCount: 0 },
+        },
+      });
+      const ts = estimate.lineItems.find(i => i.service === 'tree_shrub');
+      expect(ts.bedAreaSource).toBe('lot_based');
+      expect(ts.bedAreaUsed).toBeGreaterThan(0);
+      expect(ts.bedAreaCapped).toBe(false);
+    });
+
     test('generateEstimate preserves cap metadata when property-calculator pre-caps oversized estimatedBedAreaSf', () => {
       // Regression for Codex P2 review on PR #960: generateEstimate runs
       // calculatePropertyProfile first, which converts estimatedBedAreaSf:

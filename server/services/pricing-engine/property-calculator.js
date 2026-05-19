@@ -220,7 +220,7 @@ function calculatePropertyProfile(input) {
   const turfArea = computeTurfArea(turfInput, { turfSf: legacyLawnEstimate });
   const lawnSqFt = turfArea.turfSf;
   const sourceHint = String(input.bedAreaSource || '').trim().toLowerCase();
-  const validSourceHint = ['explicit', 'estimated', 'fallback'].includes(sourceHint) ? sourceHint : null;
+  const validSourceHint = ['explicit', 'estimated', 'lot_based', 'fallback'].includes(sourceHint) ? sourceHint : null;
   let bedArea;
   let bedAreaSource;
   let bedAreaPricingConfidence;
@@ -258,7 +258,10 @@ function calculatePropertyProfile(input) {
       { uncapped: true }
     );
     bedArea = Math.min(rawLotBedArea, BED_AREA_CAP);
-    bedAreaSource = 'estimated';
+    // Lot-density inference is now distinguishable from a customer-supplied
+    // estimate — `lot_based` is propagated through generateEstimate so the
+    // T&S resolver and admin review surfaces can flag it differently.
+    bedAreaSource = 'lot_based';
     bedAreaPricingConfidence = 'medium';
     bedAreaCapped = rawLotBedArea >= BED_AREA_CAP;
     if (bedAreaCapped) uncappedBedAreaEstimate = rawLotBedArea;

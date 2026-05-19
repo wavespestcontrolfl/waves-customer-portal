@@ -654,11 +654,19 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
     : undefined;
 
   if (hasPositivePricingNumber(property.bedArea)) {
-    const bedAreaSource = sourceHint === 'estimated' ? 'estimated' : 'explicit';
+    // Resolve source from the upstream hint so the lot-derived label from
+    // calculatePropertyProfile survives the explicit-bedArea branch and
+    // priceTreeShrub can distinguish a lot-density inference from a
+    // customer-supplied estimate.
+    let bedAreaSource;
+    if (sourceHint === 'lot_based') bedAreaSource = 'lot_based';
+    else if (sourceHint === 'estimated') bedAreaSource = 'estimated';
+    else bedAreaSource = 'explicit';
+    const pricingConfidence = bedAreaSource === 'explicit' ? 'high' : 'medium';
     return {
       bedArea: Number(property.bedArea),
       bedAreaSource,
-      pricingConfidence: bedAreaSource === 'estimated' ? 'medium' : 'high',
+      pricingConfidence,
       requiresManualReview: false,
       ...(upstreamCapped ? { capped: true } : {}),
       ...(upstreamCapped && upstreamUncapped !== undefined
