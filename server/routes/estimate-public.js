@@ -1141,22 +1141,21 @@ function renderPage(token, estimate, estData) {
         heroSuffix: "here's your lawn care estimate.",
         recurringAssurance: 'Your plan includes scheduled turf applications, visit notes, and treatment timing matched to Southwest Florida conditions.',
         aggregateDayLabel: 'lawn care',
-        billingHeading: 'Choose how to start your lawn care plan',
-        billingLede: 'No payment is charged on this page. After each completed lawn care visit, billing is handled through the payment method you choose.',
+        billingHeading: 'Choose how you want to pay',
+        billingLede: null,
         payAfterTitle: 'Pay after each visit',
-        payAfterBody: 'Approve now, then choose a payment method for billing after each completed lawn care visit.',
-        noPaymentCopy: 'No payment is charged on this page. We will confirm details before your first lawn care visit.',
-        billingWorksIntro: 'For comparison, your lawn care plan averages',
+        payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+        noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
         bookingTitle: 'Pick your first lawn care visit',
         bookingSubhead: 'Choose a window to get your lawn care plan started.',
         payPrefHeading: 'Choose how you want to pay',
-        payPrefCardTitle: 'Pay after lawn care visits',
-        payPrefCardSub: 'Billed after each completed lawn care visit.',
+        payPrefCardTitle: 'Pay after each visit',
+        payPrefCardSub: 'Billed after each completed service through autopay.',
         prepayTitle: 'Pay the 12-month plan in full',
-        prepayBody: 'Approve the 12-month lawn care plan up front. The WaveGuard Membership is included on the prepay invoice.',
-        prepayButtonSub: 'Annual prepay includes the WaveGuard Membership.',
-        cardConfirmTitle: 'Confirm and set up billing',
-        cardConfirmSub: 'next step saves your card for pay-after-visit billing. Lawn care visits are billed after completion.',
+        prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
+        prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
+        cardConfirmTitle: 'Confirm and save card',
+        cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
         perksHeading: 'What your lawn care plan includes',
         finalHeading: 'Ready to start lawn care?',
         finalSubhead: "Let's get your lawn on the schedule.",
@@ -1171,7 +1170,6 @@ function renderPage(token, estimate, estData) {
         payAfterTitle: 'Pay after each visit',
         payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
         noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
-        billingWorksIntro: 'For comparison, this plan averages',
         bookingTitle: 'Find a date & time that works for you',
         bookingSubhead: 'These are the windows when we’ll already be working in your neighborhood — pick whichever fits.',
         payPrefHeading: 'Choose how you want to pay',
@@ -1383,14 +1381,6 @@ function renderPage(token, estimate, estData) {
         tierLabel: svc?.tierLabel || `WaveGuard ${tier}`,
       };
     });
-  const billingServiceRowsHtml = billingServiceRows.map((row) => `
-        <div class="billing-service-row">
-          <div>
-            <div class="billing-service-name">${escapeHtml(row.name)}</div>
-            <div class="billing-service-detail">${row.detailHtml}</div>
-          </div>
-          ${row.price != null ? `<div class="billing-service-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span>/ application</span></div>` : ''}
-        </div>`).join('');
   const firstServiceVisitTotal = resolveRecurringFirstVisitAmount(billingRecurring, {
     estData,
     tierDiscount: estimateTierDiscount,
@@ -1401,7 +1391,7 @@ function renderPage(token, estimate, estData) {
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
   const showAnnualPrepayOption = showMembershipFee;
-  const annualPrepayWaivesMembership = showMembershipFee && !hasOnlyLawnCareServices;
+  const annualPrepayWaivesMembership = showMembershipFee;
   const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
   const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal + prepayMembershipDue) * 100) / 100);
   const showBillingCard = !quoteRequired && !locked && billingRecurring.length > 0;
@@ -1409,9 +1399,6 @@ function renderPage(token, estimate, estData) {
   const billingLede = pageCopy.billingLede || (showAnnualPrepayOption
     ? 'Billed after each completed service visit through autopay, or choose the 12-month prepay option and we send one annual invoice after approval.'
     : 'Billed after each completed service visit through autopay.');
-  const recurringBillCadenceWord = selectedRecurringFrequencyKey === 'quarterly'
-    ? 'quarterly'
-    : (selectedRecurringFrequencyKey === 'bi_monthly' ? 'bi-monthly' : 'monthly');
   const billingCardHtml = showBillingCard ? `
   <section class="card billing-card" id="payment-setup-card"${billingModeAttr}>
     <h2>${escapeHtml(pageCopy.billingHeading)}</h2>
@@ -1451,13 +1438,6 @@ function renderPage(token, estimate, estData) {
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Choose annual prepay setup</button>
       </div>` : ''}
     </div>
-    ${billingServiceRowsHtml ? `
-    <div class="billing-works">
-      <h3>How billing works</h3>
-      <p>${escapeHtml(pageCopy.billingWorksIntro)} <span data-billing-period-total>${fmtMoney(recurringDisplayTotal)}</span> / ${escapeHtml(recurringPricePeriodWord)}. Instead of a flat ${escapeHtml(recurringBillCadenceWord)} bill, billing happens after each completed service visit.</p>
-      <div class="billing-service-list">${billingServiceRowsHtml}</div>
-      ${tierDiscountPct > 0 ? `<p class="billing-small">WaveGuard ${escapeHtml(tier)} prices shown after the ${tierDiscountPct}% bundle discount.</p>` : ''}
-    </div>` : ''}
   </section>` : '';
 
   const servicePriceCardsHtml = billingServiceRows
@@ -1496,6 +1476,22 @@ function renderPage(token, estimate, estData) {
     && billingServiceRows.every((row) => row.price != null && row.visits > 0)
     && serviceCardsMonthlyTotal != null
     && Math.abs(serviceCardsMonthlyTotal - monthlyTotal) < 0.05;
+  const supplementalServiceRowsHtml = !serviceCardsCoverRecurringTotal
+    ? billingServiceRows
+      .filter((row) => row.price != null && !['pest', 'lawn', 'lawn_care'].includes(String(row.kind || '').toLowerCase()))
+      .map((row) => `
+        <div class="supplemental-service-row">
+          <div>
+            <div class="supplemental-service-name">${escapeHtml(row.name)}</div>
+            <div class="supplemental-service-detail">${row.detailHtml}</div>
+          </div>
+          <strong>${fmtMoney(row.price)} / application</strong>
+        </div>`)
+      .join('')
+    : '';
+  const supplementalServiceSummaryHtml = supplementalServiceRowsHtml
+    ? `<div class="supplemental-service-list" data-mode-only="recurring">${supplementalServiceRowsHtml}</div>`
+    : '';
   const recurringHeroPriceHtml = quoteRequired ? `
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:42px">Quote Required</span>
@@ -1512,6 +1508,7 @@ function renderPage(token, estimate, estData) {
       </div>
       ${savingsPerMo > 0 ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
       <div class="day-price" data-mode-only="recurring">${hasOnlyLawnCareServices ? `That\u2019s just ${fmtMoney(dayPrice)}/day to stop lawn pests before they turn green grass brown.` : `That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.`}</div>
+      ${supplementalServiceSummaryHtml}
     `);
 
   const realOneTimeRows = oneTimeItems.map((it) => {
@@ -1671,6 +1668,11 @@ function renderPage(token, estimate, estData) {
   .save-row{margin-top:10px;min-height:20px}
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
   .service-price-card>.day-price{margin-top:auto;padding-top:8px}
+  .supplemental-service-list{display:grid;gap:8px;max-width:720px;margin:18px auto 0}
+  .supplemental-service-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 14px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;text-align:left}
+  .supplemental-service-name{font-size:14px;font-weight:800;color:#1B2C5B;line-height:1.35}
+  .supplemental-service-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .supplemental-service-row strong{font-size:14px;line-height:1.25;color:#1B2C5B;white-space:nowrap}
   .day-price{margin-top:8px;font-size:14px;color:#6B7280}
   .setup-fee{margin-top:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;max-width:520px;padding:12px 14px;border:1px solid #D4CBB8;border-radius:10px;background:#fff}
   .setup-fee-title{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
@@ -1692,7 +1694,7 @@ function renderPage(token, estimate, estData) {
   .mode-btn.is-active{background:${ESTIMATE_BUTTON_BLUE};color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
-  @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}}
+  @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}.supplemental-service-row{grid-template-columns:1fr}.supplemental-service-row strong{white-space:normal}}
   .card{background:#fff;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #E7E2D7}
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
@@ -1755,16 +1757,6 @@ function renderPage(token, estimate, estData) {
   .billing-total-row span{font-size:13px;color:#6B7280;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
   .billing-total-row strong{font-family:'Source Serif 4',Georgia,serif;font-size:28px;font-weight:600;color:#1B2C5B;white-space:nowrap}
   .billing-small{font-size:12px!important;color:#6B7280!important;line-height:1.5!important}
-  .billing-works{border-top:1px solid #E7E2D7;padding-top:16px}
-  .billing-works h3{font-family:Inter,system-ui,sans-serif;font-size:16px;font-weight:800;letter-spacing:0;margin:0 0 6px}
-  .billing-works>p{margin:0 0 12px;color:#3F4A65;font-size:14px;line-height:1.55}
-  .billing-service-list{display:grid;gap:10px;margin:12px 0}
-  .billing-service-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:baseline;padding:12px 0;border-top:1px solid #F0ECE2}
-  .billing-service-row:first-child{border-top:0}
-  .billing-service-name{font-size:14px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .billing-service-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
-  .billing-service-price{font-size:15px;font-weight:800;color:#1B2C5B;white-space:nowrap}
-  .billing-service-price span{font-weight:500;color:#6B7280}
   .prefs-card h2{margin-bottom:4px}
   .prefs-list{margin-top:14px;display:flex;flex-direction:column;gap:10px}
   .pref-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;transition:all .15s}
@@ -2053,9 +2045,6 @@ ${shellQuestionsBar()}
       ? Number(annualTotal)
       : Math.round(monthly * 12 * 100) / 100;
     const prefOff = Number(prefMonthlyOff || 0);
-    document.querySelectorAll('[data-billing-period-total]').forEach((el) => {
-      el.textContent = fmt(intervalPrice(monthly));
-    });
     document.querySelectorAll('[data-annual-total]').forEach((el) => {
       el.textContent = fmt(annual);
     });
@@ -2064,20 +2053,6 @@ ${shellQuestionsBar()}
       el.textContent = fmt(Math.max(0, Math.round((annual + membershipDue) * 100) / 100));
     });
     let firstVisitTotal = 0;
-    document.querySelectorAll('[data-billing-service-price]').forEach((el) => {
-      const base = Number(el.dataset.serviceBasePrice || 0);
-      const visits = Number(el.dataset.serviceVisits || 0);
-      if (!(base > 0)) return;
-      const discount = el.dataset.serviceKind === 'pest' && visits > 0
-        ? (prefOff * 12) / visits
-        : 0;
-      const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
-      firstVisitTotal = Math.round((firstVisitTotal + adjusted) * 100) / 100;
-      el.innerHTML = fmt(adjusted) + ' <span>/ application</span>';
-    });
-    document.querySelectorAll('[data-first-visit-total]').forEach((el) => {
-      if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
-    });
     document.querySelectorAll('[data-service-card-price]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);
       const visits = Number(el.dataset.serviceVisits || 0);
@@ -2086,7 +2061,11 @@ ${shellQuestionsBar()}
         ? (prefOff * 12) / visits
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
+      firstVisitTotal = Math.round((firstVisitTotal + adjusted) * 100) / 100;
       el.textContent = fmt(adjusted);
+    });
+    document.querySelectorAll('[data-first-visit-total]').forEach((el) => {
+      if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
     });
     document.querySelectorAll('[data-service-card-savings]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);

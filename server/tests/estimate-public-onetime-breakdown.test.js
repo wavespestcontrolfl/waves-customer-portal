@@ -1327,6 +1327,9 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('let firstVisitTotal = 0;');
     expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}');
     expect(html).not.toContain('.payment-summary-row.total strong');
+    expect(html).not.toContain('How billing works');
+    expect(html).not.toContain('For comparison, this plan averages');
+    expect(html).not.toContain('data-billing-service-price');
     expect(html).toContain('You save <span data-service-card-savings data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2" data-service-anchor-price="128">$12.80</span> / application with WaveGuard Silver');
     expect(html).toContain('You save <span data-service-card-savings data-service-kind="lawn" data-service-visits="9" data-service-base-price="104.4" data-service-anchor-price="116">$11.60</span> / application with WaveGuard Silver');
     expect(html).toContain('That’s just <span data-service-card-day data-service-kind="pest" data-service-visits="4" data-service-base-price="115.2">$1.28</span>/day for pest control.');
@@ -1373,13 +1376,16 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('your lawn care estimate');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
-    expect(html).toContain('Choose how to start your lawn care plan');
+    expect(html).toContain('Choose how you want to pay');
+    expect(html).not.toContain('Choose how to start your lawn care plan');
     expect(html).toContain('Pick your first lawn care visit');
     expect(html).toContain('What your lawn care plan includes');
     expect(html).toContain('Ready to start lawn care?');
     expect(html).toContain('Let&#39;s get your lawn on the schedule.');
-    expect(html).toContain('Confirm and set up billing');
-    expect(html).toContain('next step saves your card for pay-after-visit billing');
+    expect(html).toContain('Confirm and save card');
+    expect(html).toContain('next step saves your card for autopay');
+    expect(html).not.toContain('Confirm and set up billing');
+    expect(html).not.toContain('pay-after-visit billing');
     expect(html).toContain('/day to stop lawn pests before they turn green grass brown.');
     expect(html).not.toContain('/day for lawn care.');
     expect(html).not.toContain('Seasonal turf treatments matched to the lawn program');
@@ -1388,9 +1394,14 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Lawn notes carried forward for future visits');
     expect(html.match(/WaveGuard Membership Setup/g)).toHaveLength(2);
     expect(html).toContain('Pay the 12-month plan in full');
-    expect(html).toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
-    expect(html).toContain('data-prepay-membership-due="99">$759</strong>');
-    expect(html).not.toContain('Annual Pay-in-Full Waiver');
+    expect(html).toContain('we send one prepay invoice after approval and waive the setup.');
+    expect(html).toContain('Annual Pay-in-Full Waiver');
+    expect(html).toContain('<strong>-$99</strong>');
+    expect(html).toContain('Net setup fee: $0');
+    expect(html).toContain('data-prepay-membership-due="0">$660</strong>');
+    expect(html).not.toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
+    expect(html).not.toContain('How billing works');
+    expect(html).not.toContain('For comparison, your lawn care plan averages');
     expect(html).toContain('.q-bar{display:none}');
     expect(html).not.toContain('Wave Goodbye to Pests!');
     expect(html).not.toContain('90-day money-back guarantee');
