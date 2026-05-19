@@ -3390,9 +3390,13 @@ router.put('/:token/accept', async (req, res, next) => {
           const cadenceAmount = effectiveBillingCadence?.amount || Math.round(monthly * 3 * 100) / 100;
           invoiceAmount = cadenceAmount;
           const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
-          title = `${svcType} — first quarterly visit`;
+          const cadenceLabel = (effectiveBillingCadence?.frequencyLabel || selectedFrequency?.label || 'Recurring').toLowerCase();
+          const visitNoun = String(effectiveBillingCadence?.visitChargeLabel || '')
+            .replace(/^Charged after each\s+/i, '')
+            || `${cadenceLabel} visit`;
+          title = `${svcType} — first ${visitNoun}`;
           lineItems = [{
-            description: `${svcType} (quarterly recurring — first visit)`,
+            description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
             quantity: 1,
             unit_price: cadenceAmount,
           }];
