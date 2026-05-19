@@ -359,6 +359,15 @@ function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMon
   return total > 0 ? total : null;
 }
 
+function pestVisitsForFrequency(frequency = {}) {
+  const rows = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments
+    : [];
+  const pestRow = rows.find((row) => /pest/i.test(String(row?.service || row?.label || '')));
+  const visits = Number(pestRow?.visitsPerYear ?? pestRow?.visits ?? pestRow?.frequency);
+  return Number.isFinite(visits) && visits > 0 ? visits : null;
+}
+
 // ── Service-preference pricing modifiers ──────────────────────
 // Customers can opt out of interior spraying or exterior (eave/cobweb)
 // sweeping on RECURRING pest only ($10/visit each). On one-time pest
@@ -624,6 +633,16 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
     monthlyOff: Math.round(monthlyOff * 100) / 100,
     oneTimeOff: Math.round(oneTimeOff * 100) / 100,
   };
+}
+
+function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear) {
+  const visits = Number(visitsPerYear || 0);
+  if (!(visits > 0)) return 0;
+  const p = normalizePrefs(prefs);
+  const monthlyOff = SERVICE_PREF_KEYS.reduce((sum, key) => {
+    return p[key] === false ? sum + ((SERVICE_PREFS[key].perVisit * visits) / 12) : sum;
+  }, 0);
+  return Math.round(monthlyOff * 100) / 100;
 }
 
 const PERKS = [
@@ -2979,6 +2998,7 @@ router.put('/:token/accept', async (req, res, next) => {
       slotId,
       treatAsOneTime,
       billByInvoice,
+      enforceSetupPreference: !estimate.use_v2_view,
       paymentMethodPreference,
     });
     if (paymentPreferenceError) {
@@ -3005,9 +3025,13 @@ router.put('/:token/accept', async (req, res, next) => {
           fallbackFrequencyKey: 'quarterly',
         })
       : null;
-    const acceptPestRecurring = detectPestRecurring(recurringSvcList);
     const acceptPrefs = normalizePrefs(estData?.preferences);
-    const { monthlyOff: acceptPrefMonthlyOff } = computePrefDiscount(acceptPrefs, acceptPestRecurring, false, 0);
+    const selectedFrequencyPestVisits = pestVisitsForFrequency(selectedFrequency);
+    const acceptPestRecurring = detectPestRecurring(recurringSvcList);
+    const { monthlyOff: storedCadencePrefMonthlyOff } = computePrefDiscount(acceptPrefs, acceptPestRecurring, false, 0);
+    const acceptPrefMonthlyOff = selectedFrequencyPestVisits
+      ? preferenceMonthlyOffForPestVisits(acceptPrefs, selectedFrequencyPestVisits)
+      : storedCadencePrefMonthlyOff;
     const acceptTier = estimate.waveguard_tier || pricingBundle?.waveGuardTier || 'Bronze';
     const acceptEstResult = estData?.result || estData || {};
     const savedAcceptTierDiscount = Number(acceptEstResult?.recurring?.discount);
@@ -4358,9 +4382,10 @@ function validateRecurringSlotPaymentPreference({
   slotId = '',
   treatAsOneTime = false,
   billByInvoice = false,
+  enforceSetupPreference = true,
   paymentMethodPreference = null,
 } = {}) {
-  if (!slotId || treatAsOneTime || billByInvoice) return null;
+  if (!enforceSetupPreference || !slotId || treatAsOneTime || billByInvoice) return null;
   if (paymentMethodPreference === 'card_on_file' || paymentMethodPreference === 'prepay_annual') return null;
   return 'Choose card-on-file autopay or annual prepay before booking this recurring plan';
 }

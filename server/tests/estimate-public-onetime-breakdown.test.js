@@ -1860,6 +1860,12 @@ describe('public estimate one-time breakdown', () => {
       billByInvoice: true,
       paymentMethodPreference: 'pay_at_visit',
     })).toBeNull();
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      enforceSetupPreference: false,
+      paymentMethodPreference: 'pay_at_visit',
+    })).toBeNull();
   });
 
   test('accept active guard rejects terminal and past-expiry estimates', () => {
