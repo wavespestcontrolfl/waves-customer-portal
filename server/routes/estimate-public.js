@@ -359,13 +359,30 @@ function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMon
   return total > 0 ? total : null;
 }
 
-function pestVisitsForFrequency(frequency = {}) {
+function pestTreatmentRowForFrequency(frequency = {}) {
   const rows = Array.isArray(frequency?.perServiceTreatments)
     ? frequency.perServiceTreatments
     : [];
-  const pestRow = rows.find((row) => /pest/i.test(String(row?.service || row?.label || '')));
+  return rows.find((row) => /pest/i.test(String(row?.service || row?.label || ''))) || null;
+}
+
+function pestVisitsForFrequency(frequency = {}) {
+  const pestRow = pestTreatmentRowForFrequency(frequency);
   const visits = Number(pestRow?.visitsPerYear ?? pestRow?.visits ?? pestRow?.frequency);
   return Number.isFinite(visits) && visits > 0 ? visits : null;
+}
+
+function pestMonthlyBaseForFrequency(frequency = {}) {
+  const pestRow = pestTreatmentRowForFrequency(frequency);
+  const visits = pestVisitsForFrequency(frequency);
+  const amount = firstPositiveNumber(
+    pestRow?.displayPrice,
+    pestRow?.priceAfterDiscount,
+    pestRow?.netPerTreatment,
+    pestRow?.price,
+    pestRow?.perTreatment,
+  );
+  return amount && visits ? Math.round(((amount * visits) / 12) * 100) / 100 : null;
 }
 
 // ── Service-preference pricing modifiers ──────────────────────
@@ -635,14 +652,22 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
   };
 }
 
-function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear) {
+function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = null) {
   const visits = Number(visitsPerYear || 0);
   if (!(visits > 0)) return 0;
   const p = normalizePrefs(prefs);
   const monthlyOff = SERVICE_PREF_KEYS.reduce((sum, key) => {
     return p[key] === false ? sum + ((SERVICE_PREFS[key].perVisit * visits) / 12) : sum;
   }, 0);
-  return Math.round(monthlyOff * 100) / 100;
+  const base = Number(monthlyBase);
+  let cappedOff = monthlyOff;
+  if (Number.isFinite(base) && base > 0) {
+    const floor = pestMonthlyFloor(visits);
+    if (base - cappedOff < floor) {
+      cappedOff = Math.max(0, base - floor);
+    }
+  }
+  return Math.round(cappedOff * 100) / 100;
 }
 
 const PERKS = [
@@ -3027,10 +3052,11 @@ router.put('/:token/accept', async (req, res, next) => {
       : null;
     const acceptPrefs = normalizePrefs(estData?.preferences);
     const selectedFrequencyPestVisits = pestVisitsForFrequency(selectedFrequency);
+    const selectedFrequencyPestMonthlyBase = pestMonthlyBaseForFrequency(selectedFrequency);
     const acceptPestRecurring = detectPestRecurring(recurringSvcList);
     const { monthlyOff: storedCadencePrefMonthlyOff } = computePrefDiscount(acceptPrefs, acceptPestRecurring, false, 0);
     const acceptPrefMonthlyOff = selectedFrequencyPestVisits
-      ? preferenceMonthlyOffForPestVisits(acceptPrefs, selectedFrequencyPestVisits)
+      ? preferenceMonthlyOffForPestVisits(acceptPrefs, selectedFrequencyPestVisits, selectedFrequencyPestMonthlyBase)
       : storedCadencePrefMonthlyOff;
     const acceptTier = estimate.waveguard_tier || pricingBundle?.waveGuardTier || 'Bronze';
     const acceptEstResult = estData?.result || estData || {};
@@ -5119,6 +5145,7 @@ module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
 module.exports.resolveRecurringFirstVisitAmount = resolveRecurringFirstVisitAmount;
 module.exports.resolveRecurringFirstVisitAmountFromFrequency = resolveRecurringFirstVisitAmountFromFrequency;
+module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;

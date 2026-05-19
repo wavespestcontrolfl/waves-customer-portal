@@ -16,6 +16,7 @@ const {
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
+  preferenceMonthlyOffForPestVisits,
   renderPage,
   resolveAcceptOneTimeTotal,
   resolveRecurringMonthlyParts,
@@ -1199,6 +1200,13 @@ describe('public estimate one-time breakdown', () => {
 
     expect(amount).toBe(178.8);
     expect(amountWithPrefs).toBe(158.8);
+  });
+
+  test('selected-frequency preference discounts respect the pest monthly floor', () => {
+    const prefs = { interior_spray: false, exterior_sweep: false };
+
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 70)).toBe(7.7);
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 150)).toBe(20);
   });
 
   test('server-rendered bundled estimate showcases per-application prices by service', () => {
