@@ -29,7 +29,7 @@ const SERVICE_KEY_ALIASES = {
   pest_initial_roach: ['pest_initial_cleanout'],
   german_roach: ['pest_initial_cleanout'],
   german_roach_initial: ['pest_initial_cleanout'],
-  lawn_care: ['lawn_fertilization'],
+  lawn_care: ['lawn_care_recurring'],
   tree_shrub: ['tree_shrub_program'],
   mosquito: ['mosquito_monthly'],
   termite_bait: ['termite_bait'],
@@ -133,9 +133,8 @@ function serviceCatalogMatch(line, serviceIndex) {
   if (/rodent|rat|mouse/.test(text) && /monitor|bait|monthly/.test(text)) return pick('rodent_monitoring');
   if (/rodent|rat|mouse|exclusion|trapping/.test(text)) return pick('rodent_exclusion');
   if (/tree|shrub|ornamental/.test(text)) return pick('tree_shrub_program');
-  if (/palm/.test(text)) return pick('palm_treatment');
   if (/mosquito/.test(text)) return pick('mosquito_monthly');
-  if (/lawn|turf|weed|fertil/.test(text)) return pick('lawn_fertilization');
+  if (/lawn|turf|weed|fertil/.test(text)) return pick('lawn_care_recurring');
   if (/flea|tick/.test(text)) return pick('flea_tick');
   if (/fire\s*ant/.test(text)) return pick('fire_ant');
   if (/bee|wasp|hornet|yellow/.test(text)) return pick('bee_wasp_removal');
