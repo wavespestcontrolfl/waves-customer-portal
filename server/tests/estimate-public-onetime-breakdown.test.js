@@ -24,6 +24,7 @@ const {
   resolveRecurringFirstVisitAmount,
   resolveRecurringFirstVisitAmountFromFrequency,
   shouldApplyFirstViewSideEffects,
+  validateRecurringSlotPaymentPreference,
   withSupplementedRecurringServices,
 } = require('../routes/estimate-public');
 const {
@@ -1825,6 +1826,34 @@ describe('public estimate one-time breakdown', () => {
     expect(normalizeAcceptPaymentMethodPreference('pay_at_visit')).toBe('pay_at_visit');
     expect(normalizeAcceptPaymentMethodPreference('prepay_annual')).toBe('prepay_annual');
     expect(normalizeAcceptPaymentMethodPreference('deposit_later')).toBeNull();
+  });
+
+  test('recurring slot accepts require a setup payment preference', () => {
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: null,
+    })).toMatch(/Choose card-on-file autopay/);
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: 'pay_at_visit',
+    })).toMatch(/Choose card-on-file autopay/);
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: 'card_on_file',
+    })).toBeNull();
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: false,
+      paymentMethodPreference: 'prepay_annual',
+    })).toBeNull();
+    expect(validateRecurringSlotPaymentPreference({
+      slotId: 'slot-123',
+      treatAsOneTime: true,
+      paymentMethodPreference: null,
+    })).toBeNull();
   });
 
   test('accept active guard rejects terminal and past-expiry estimates', () => {

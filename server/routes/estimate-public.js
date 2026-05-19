@@ -2975,6 +2975,14 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+    const paymentPreferenceError = validateRecurringSlotPaymentPreference({
+      slotId,
+      treatAsOneTime,
+      paymentMethodPreference,
+    });
+    if (paymentPreferenceError) {
+      return res.status(400).json({ error: paymentPreferenceError });
+    }
     const selectedFrequency = !treatAsOneTime && pricingBundle?.frequencies?.length
       ? pricingBundle.frequencies.find((f) => f.key === selectedFrequencyKey)
       : null;
@@ -4345,6 +4353,16 @@ function normalizeAcceptPaymentMethodPreference(raw) {
   return null;
 }
 
+function validateRecurringSlotPaymentPreference({
+  slotId = '',
+  treatAsOneTime = false,
+  paymentMethodPreference = null,
+} = {}) {
+  if (!slotId || treatAsOneTime) return null;
+  if (paymentMethodPreference === 'card_on_file' || paymentMethodPreference === 'prepay_annual') return null;
+  return 'Choose card-on-file autopay or annual prepay before booking this recurring plan';
+}
+
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
@@ -5067,6 +5085,7 @@ module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
+module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
