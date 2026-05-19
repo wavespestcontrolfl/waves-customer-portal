@@ -68,7 +68,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (!firstName || !lastName || !email || !phone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
-    if (!services || (!services.pest && !services.lawn)) {
+    if (!services || (
+      !services.pest && !services.lawn &&
+      !services.mosquito && !services.termite && !services.rodentBait
+    )) {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
@@ -117,6 +120,35 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         tier: services.lawn.tier || 'enhanced',
       };
     }
+    // Recurring service paths exposed to the marketing-site /estimate
+    // funnel. Each takes its sizing input from the property profile
+    // (lawnSqFt for mosquito, footprint for termite/rodent), so callers
+    // only need to specify the program tier.
+    //
+    // Deliberately NOT exposed here:
+    //   • One-time services (bedBug, trenching, preSlab, dethatching,
+    //     plugging, topDressing, stinging, flea, oneTimeLawn, sanitation,
+    //     exclusion, rodentTrapping) — they divert to /api/leads per the
+    //     architecture note above (recurring-only public quoting).
+    //   • treeShrub + palm — they require count inputs the marketing
+    //     form doesn't collect yet; defer to a follow-up PR that adds
+    //     tree/palm count steps to the EstimateForm island.
+    if (services.mosquito) {
+      engineInput.services.mosquito = {
+        tier: services.mosquito.tier || 'monthly12',
+        stationCount: services.mosquito.stationCount,
+        dunkCount: services.mosquito.dunkCount,
+      };
+    }
+    if (services.termite) {
+      engineInput.services.termite = {
+        system: services.termite.system || 'advance',
+        monitoringTier: services.termite.monitoringTier || 'basic',
+      };
+    }
+    if (services.rodentBait) {
+      engineInput.services.rodentBait = {};
+    }
 
     const estimate = generateEstimate(engineInput);
     const monthly = Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
@@ -127,7 +159,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return res.status(500).json({ error: 'Unable to calculate a price right now.' });
     }
 
-    const serviceInterest = [services.pest ? 'Pest Control' : null, services.lawn ? 'Lawn Care' : null].filter(Boolean).join(' + ');
+    const serviceInterest = [
+      services.pest ? 'Pest Control' : null,
+      services.lawn ? 'Lawn Care' : null,
+      services.mosquito ? 'Mosquito Control' : null,
+      services.termite ? 'Termite Control' : null,
+      services.rodentBait ? 'Rodent Control' : null,
+    ].filter(Boolean).join(' + ');
     const normalizedPhone = normalizePhone(phone);
 
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
