@@ -681,6 +681,10 @@ function SuccessCard({ acceptResult }) {
   const onboardingToken = acceptResult?.onboardingToken || null;
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoiceLinkDelivered = !!acceptResult?.invoiceLinkDelivered;
+  const prepayInvoiceAmount = Number(acceptResult?.prepayInvoiceAmount);
+  const prepayAmountText = Number.isFinite(prepayInvoiceAmount) && prepayInvoiceAmount > 0
+    ? ` for ${fmtMoney(prepayInvoiceAmount)}`
+    : '';
 
   if (nextStep === 'pay_invoice') {
     return (
@@ -698,6 +702,23 @@ function SuccessCard({ acceptResult }) {
           : 'Our team will follow up with the invoice details. Your service request has been received and our team will confirm the schedule.'}
       </div>
     </div>
+    );
+  }
+
+  if (nextStep === 'prepay_invoice') {
+    return (
+      <div style={{
+        background: COLORS.white, borderRadius: 16, padding: 28, textAlign: 'center',
+        borderTop: `4px solid ${COLORS.green}`, boxShadow: '0 2px 12px rgba(15,23,42,0.06)',
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          Your annual prepay is approved.
+        </div>
+        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+          Our team will review and send the annual prepay invoice{prepayAmountText}. Your service request has been received and our team will confirm the schedule.
+        </div>
+      </div>
     );
   }
 
@@ -825,6 +846,7 @@ export default function EstimateViewPage() {
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const countdownRef = useRef(null);
   const selectedFrequencyRef = useRef(null);
+  const reserveAttemptRef = useRef(0);
 
   useEffect(() => {
     selectedFrequencyRef.current = selectedFrequency;
@@ -933,20 +955,37 @@ export default function EstimateViewPage() {
     }
   }, [loadEstimate, selectedAddOns, token]);
 
+  const releaseHeldReservation = useCallback((scheduledServiceId) => {
+    if (!scheduledServiceId) return;
+    fetch(`${API_BASE}/public/estimates/${token}/reserve/${encodeURIComponent(scheduledServiceId)}`, {
+      method: 'DELETE',
+    }).catch(() => {});
+  }, [token]);
+
   const handlePaymentChoice = useCallback(async (pref) => {
     if (!selectedSlotId) return;
+    const attemptId = reserveAttemptRef.current + 1;
+    reserveAttemptRef.current = attemptId;
+    const slotIdForAttempt = selectedSlotId;
+    const serviceModeForAttempt = serviceMode;
+    const selectedFrequencyForAttempt = selectedFrequency;
     setPaymentPreference(pref);
     setCtaPhase('submitting');
     setError(null);
 
     try {
+      const reservePayload = { slotId: slotIdForAttempt, serviceMode: serviceModeForAttempt };
+      if (serviceModeForAttempt !== 'one_time' && selectedFrequencyForAttempt) {
+        reservePayload.selectedFrequency = selectedFrequencyForAttempt;
+      }
       const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slotId: selectedSlotId, serviceMode }),
+        body: JSON.stringify(reservePayload),
       });
       if (r.status === 409) {
         const body = await r.json().catch(() => ({}));
+        if (reserveAttemptRef.current !== attemptId) return;
         const message = body.error || 'Unable to reserve this slot.';
         setPaymentPreference(null);
         setSelectedSlotId(null);
@@ -964,13 +1003,30 @@ export default function EstimateViewPage() {
       }
       if (!r.ok) throw new Error(`reserve failed: ${r.status}`);
       const body = await r.json();
+      if (reserveAttemptRef.current !== attemptId) {
+        releaseHeldReservation(body.scheduledServiceId);
+        return;
+      }
       setReservation({ scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt });
       setCtaPhase('review');
     } catch (err) {
+      if (reserveAttemptRef.current !== attemptId) return;
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [loadEstimate, selectedSlotId, serviceMode, token]);
+  }, [loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+
+  const handleFrequencyChange = useCallback((nextFrequency) => {
+    reserveAttemptRef.current += 1;
+    setSelectedFrequency(nextFrequency);
+    setSelectedSlotId(null);
+    setPaymentPreference(null);
+    setReservation(null);
+    setAcceptResult(null);
+    setError(null);
+    setCtaPhase('configure');
+    setSlotsRefreshSignal((v) => v + 1);
+  }, []);
 
   const handleConfirm = useCallback(async () => {
     setCtaPhase('submitting');
@@ -1116,10 +1172,16 @@ export default function EstimateViewPage() {
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
               onChange={(m) => {
+                reserveAttemptRef.current += 1;
                 setServiceMode(m);
                 // Reset selection state that doesn't apply in the other mode
                 setSelectedSlotId(null);
                 setPaymentPreference(null);
+                setReservation(null);
+                setAcceptResult(null);
+                setError(null);
+                setCtaPhase('configure');
+                setSlotsRefreshSignal((v) => v + 1);
               }}
             />
           ) : null}
@@ -1130,7 +1192,8 @@ export default function EstimateViewPage() {
                 <FrequencySlider
                   frequencies={pricing.frequencies}
                   selected={selectedFrequency}
-                  onChange={setSelectedFrequency}
+                  onChange={handleFrequencyChange}
+                  disabled={ctaPhase === 'submitting'}
                 />
               ) : null}
 
@@ -1171,6 +1234,8 @@ export default function EstimateViewPage() {
             selectedSlotId={selectedSlotId}
             onSelect={setSelectedSlotId}
             refreshSignal={slotsRefreshSignal}
+            serviceMode={serviceMode}
+            selectedFrequency={selectedFrequency}
           />
 
           {selectedSlotId ? (
@@ -1179,6 +1244,7 @@ export default function EstimateViewPage() {
               disabled={ctaPhase === 'submitting'}
               serviceMode={serviceMode}
               setupFee={pricing.setupFee || null}
+              annualPrepayEligible={pricing.annualPrepayEligible === true}
               invoiceMode={!!estimate.billByInvoice}
             />
           ) : null}
