@@ -33,6 +33,7 @@ const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
 const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
+const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const { uploadServicePhotoDataUrls } = require('../services/service-photos');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
@@ -1624,14 +1625,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
           if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
-          if (serviceRecordCols.started_at) {
-            recordInsert.started_at = lifecycleUpdates.actual_start_time
-              || svc.actual_start_time
-              || svc.check_in_time
-              || svc.arrived_at
-              || null;
-          }
-          if (serviceRecordCols.ended_at) recordInsert.ended_at = completionEndedAt;
+          Object.assign(recordInsert, buildServiceRecordCompletionTimingFields({
+            scheduledService: svc,
+            lifecycleUpdates,
+            completedAt: completionEndedAt,
+            serviceRecordCols,
+          }));
           if (serviceRecordCols.conditions && conditionsAtApplication) recordInsert.conditions = serializeJsonb(conditionsAtApplication);
           if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
