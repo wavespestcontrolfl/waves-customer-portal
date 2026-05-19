@@ -483,7 +483,7 @@ Search aggressively, in this order:
 Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
-- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "5.99 Acres Lot", "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "5.99 Acres Lot" → 260864.
+- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "5.99 Acres Lot", "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "5.99 Acres Lot" → 260924 (5.99 × 43560 = 260924).
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
