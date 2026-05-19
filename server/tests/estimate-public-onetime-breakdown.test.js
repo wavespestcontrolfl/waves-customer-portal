@@ -16,9 +16,11 @@ const {
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
   normalizeOneTimeBreakdown,
+  pestMonthlyBaseForFrequency,
   preferenceMonthlyOffForPestVisits,
   renderPage,
   resolveAcceptOneTimeTotal,
+  resolveRecurringInvoiceFirstVisitAmount,
   resolveRecurringMonthlyParts,
   resolveEstimateDeclineGuard,
   resolveEstimateQuoteRequirement,
@@ -578,6 +580,31 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('bookingState.isReserving = true;');
     expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
     expect(html).toContain("toast('Choose a payment setup first.')");
+  });
+
+  test('server-rendered slot selection ignores clicks while a reservation is in flight', () => {
+    const html = renderPage('booking-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+    const selectSlot = html.match(/function selectSlot\(btn\) \{[\s\S]*?\n  \}/)?.[0] || '';
+
+    expect(selectSlot).toContain('if (bookingState.isReserving)');
+    expect(selectSlot.indexOf('if (bookingState.isReserving)')).toBeLessThan(
+      selectSlot.indexOf('bookingState.selectedSlotId = btn.dataset.slotId'),
+    );
   });
 
   test('builds Waves AI payload from estimate property signals', () => {
@@ -1202,11 +1229,62 @@ describe('public estimate one-time breakdown', () => {
     expect(amountWithPrefs).toBe(158.8);
   });
 
+  test('selected-frequency first-visit totals require priced rows for every accepted service', () => {
+    const services = [
+      { service: 'pest_control', name: 'Pest Control' },
+      { service: 'lawn_care', name: 'Lawn Care' },
+    ];
+    const partialFrequency = {
+      key: 'monthly',
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 74.4, perTreatment: 95, visitsPerYear: 12 },
+        { service: 'lawn_care', label: 'Lawn Care' },
+      ],
+    };
+    const completeFrequency = {
+      key: 'monthly',
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 74.4, perTreatment: 95, visitsPerYear: 12 },
+        { service: 'lawn_care', displayPrice: 104.4, perTreatment: 116 },
+      ],
+    };
+
+    expect(resolveRecurringFirstVisitAmountFromFrequency(partialFrequency, { services })).toBeNull();
+    expect(resolveRecurringFirstVisitAmountFromFrequency(completeFrequency, { services })).toBe(178.8);
+  });
+
+  test('recurring invoice-mode invoices prefer the accepted first-visit amount', () => {
+    expect(resolveRecurringInvoiceFirstVisitAmount({
+      recurringFirstVisitAmount: 219.6,
+      effectiveBillingCadence: { amount: 350.1 },
+      monthlyTotal: 116.7,
+    })).toBe(219.6);
+    expect(resolveRecurringInvoiceFirstVisitAmount({
+      effectiveBillingCadence: { amount: 350.1 },
+      monthlyTotal: 116.7,
+    })).toBe(350.1);
+    expect(resolveRecurringInvoiceFirstVisitAmount({
+      monthlyTotal: 116.7,
+    })).toBe(350.1);
+  });
+
   test('selected-frequency preference discounts respect the pest monthly floor', () => {
     const prefs = { interior_spray: false, exterior_sweep: false };
 
     expect(preferenceMonthlyOffForPestVisits(prefs, 12, 70)).toBe(7.7);
     expect(preferenceMonthlyOffForPestVisits(prefs, 12, 150)).toBe(20);
+  });
+
+  test('selected-frequency preference caps use raw pest base before tier discount', () => {
+    const frequency = {
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 74.4, perTreatment: 95, visitsPerYear: 12 },
+      ],
+    };
+    const baseMonthly = pestMonthlyBaseForFrequency(frequency);
+
+    expect(baseMonthly).toBe(95);
+    expect(preferenceMonthlyOffForPestVisits({ interior_spray: false, exterior_sweep: false }, 12, baseMonthly)).toBe(20);
   });
 
   test('server-rendered bundled estimate showcases per-application prices by service', () => {

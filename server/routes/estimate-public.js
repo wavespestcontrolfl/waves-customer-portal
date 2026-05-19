@@ -335,18 +335,39 @@ function resolveRecurringFirstVisitAmount(services = [], opts = {}) {
   return total > 0 ? total : null;
 }
 
-function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMonthlyOff = 0 } = {}) {
+function frequencyTreatmentAmount(row = {}) {
+  return firstPositiveNumber(
+    row?.displayPrice,
+    row?.priceAfterDiscount,
+    row?.netPerTreatment,
+    row?.price,
+    row?.perTreatment,
+    row?.perApp,
+    row?.perVisit,
+    row?.pa,
+  );
+}
+
+function frequencyTreatmentsCoverServices(rows = [], services = []) {
+  const expectedKeys = (Array.isArray(services) ? services : [])
+    .map((svc) => recurringServiceKey(svc))
+    .filter(Boolean);
+  if (!expectedKeys.length) return true;
+
+  const pricedKeys = new Set((Array.isArray(rows) ? rows : [])
+    .filter((row) => frequencyTreatmentAmount(row))
+    .map((row) => recurringServiceKey(row))
+    .filter(Boolean));
+  return expectedKeys.every((key) => pricedKeys.has(key));
+}
+
+function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMonthlyOff = 0, services = null } = {}) {
   const rows = Array.isArray(frequency?.perServiceTreatments)
     ? frequency.perServiceTreatments
     : [];
+  if (services && !frequencyTreatmentsCoverServices(rows, services)) return null;
   const total = rows.reduce((sum, row) => {
-    const amount = firstPositiveNumber(
-      row?.displayPrice,
-      row?.priceAfterDiscount,
-      row?.netPerTreatment,
-      row?.price,
-      row?.perTreatment,
-    );
+    const amount = frequencyTreatmentAmount(row);
     if (!amount) return sum;
     const serviceName = String(row?.service || row?.label || '').toLowerCase();
     const visits = Number(row?.visitsPerYear ?? row?.visits ?? row?.frequency);
@@ -357,6 +378,25 @@ function resolveRecurringFirstVisitAmountFromFrequency(frequency = {}, { prefMon
     return adjusted > 0 ? Math.round((sum + adjusted) * 100) / 100 : sum;
   }, 0);
   return total > 0 ? total : null;
+}
+
+function resolveRecurringInvoiceFirstVisitAmount({
+  recurringFirstVisitAmount = null,
+  effectiveBillingCadence = null,
+  monthlyTotal = null,
+} = {}) {
+  const firstVisitAmount = Number(recurringFirstVisitAmount);
+  if (Number.isFinite(firstVisitAmount) && firstVisitAmount > 0) {
+    return Math.round(firstVisitAmount * 100) / 100;
+  }
+  const cadenceAmount = Number(effectiveBillingCadence?.amount);
+  if (Number.isFinite(cadenceAmount) && cadenceAmount > 0) {
+    return Math.round(cadenceAmount * 100) / 100;
+  }
+  const monthly = Number(monthlyTotal);
+  return Number.isFinite(monthly) && monthly > 0
+    ? Math.round(monthly * 3 * 100) / 100
+    : null;
 }
 
 function pestTreatmentRowForFrequency(frequency = {}) {
@@ -376,11 +416,15 @@ function pestMonthlyBaseForFrequency(frequency = {}) {
   const pestRow = pestTreatmentRowForFrequency(frequency);
   const visits = pestVisitsForFrequency(frequency);
   const amount = firstPositiveNumber(
+    pestRow?.perTreatment,
+    pestRow?.perApp,
+    pestRow?.perVisit,
+    pestRow?.pa,
+    pestRow?.priceBeforeDiscount,
     pestRow?.displayPrice,
     pestRow?.priceAfterDiscount,
     pestRow?.netPerTreatment,
     pestRow?.price,
-    pestRow?.perTreatment,
   );
   return amount && visits ? Math.round(((amount * visits) / 12) * 100) / 100 : null;
 }
@@ -2415,6 +2459,10 @@ ${shellQuestionsBar()}
   }
 
   function selectSlot(btn) {
+    if (bookingState.isReserving) {
+      toast('Hold on while we reserve that time.');
+      return;
+    }
     document.querySelectorAll('.slot-btn').forEach((el) => el.classList.remove('selected'));
     btn.classList.add('selected');
     bookingState.selectedSlotId = btn.dataset.slotId;
@@ -3067,7 +3115,7 @@ router.put('/:token/accept', async (req, res, next) => {
     );
     const selectedFrequencyFirstVisitAmount = resolveRecurringFirstVisitAmountFromFrequency(
       selectedFrequency,
-      { prefMonthlyOff: acceptPrefMonthlyOff },
+      { prefMonthlyOff: acceptPrefMonthlyOff, services: recurringSvcList },
     );
     const recurringFirstVisitAmount = !treatAsOneTime
       ? selectedFrequencyFirstVisitAmount || resolveRecurringFirstVisitAmount(recurringSvcList, {
@@ -3445,8 +3493,12 @@ router.put('/:token/accept', async (req, res, next) => {
           notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode one-time).`;
         } else {
           const monthly = parseFloat(effectiveMonthlyTotal || estimate.monthly_total || 0);
-          const cadenceAmount = effectiveBillingCadence?.amount || Math.round(monthly * 3 * 100) / 100;
-          invoiceAmount = cadenceAmount;
+          const firstVisitInvoiceAmount = resolveRecurringInvoiceFirstVisitAmount({
+            recurringFirstVisitAmount,
+            effectiveBillingCadence,
+            monthlyTotal: monthly,
+          });
+          invoiceAmount = firstVisitInvoiceAmount;
           const svcType = recurringSvcList.map(s => s.name).join(' + ') || 'Pest Control';
           const cadenceLabel = (effectiveBillingCadence?.frequencyLabel || selectedFrequency?.label || 'Recurring').toLowerCase();
           const visitNoun = String(effectiveBillingCadence?.visitChargeLabel || '')
@@ -3456,7 +3508,7 @@ router.put('/:token/accept', async (req, res, next) => {
           lineItems = [{
             description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
             quantity: 1,
-            unit_price: cadenceAmount,
+            unit_price: firstVisitInvoiceAmount,
           }];
           notes = `Auto-generated from accepted estimate #${estimate.id} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`;
         }
@@ -5143,7 +5195,9 @@ module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;
 module.exports.resolveRecurringFirstVisitAmount = resolveRecurringFirstVisitAmount;
 module.exports.resolveRecurringFirstVisitAmountFromFrequency = resolveRecurringFirstVisitAmountFromFrequency;
+module.exports.resolveRecurringInvoiceFirstVisitAmount = resolveRecurringInvoiceFirstVisitAmount;
 module.exports.preferenceMonthlyOffForPestVisits = preferenceMonthlyOffForPestVisits;
+module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
