@@ -161,6 +161,139 @@ function formatClockTime(value, timezone = SERVICE_REPORT_TIME_ZONE) {
   });
 }
 
+export function getFirstPresentValue(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
+function getFirstValidTimelineValue(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue;
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return value;
+  }
+  return null;
+}
+
+export function getReportArrivalTime(report = {}) {
+  return getFirstValidTimelineValue(
+    report?.serviceRecord?.arrived_at,
+    report?.serviceRecord?.arrivedAt,
+    report?.serviceRecord?.actual_start_time,
+    report?.serviceRecord?.actualStartTime,
+    report?.serviceRecord?.check_in_time,
+    report?.serviceRecord?.checkInTime,
+
+    report?.service_record?.arrived_at,
+    report?.service_record?.actual_start_time,
+    report?.service_record?.check_in_time,
+
+    report?.arrived_at,
+    report?.arrivedAt,
+    report?.actual_start_time,
+    report?.actualStartTime,
+    report?.check_in_time,
+    report?.checkInTime,
+
+    report?.scheduledService?.arrived_at,
+    report?.scheduledService?.arrivedAt,
+    report?.scheduledService?.actual_start_time,
+    report?.scheduledService?.actualStartTime,
+    report?.scheduledService?.check_in_time,
+    report?.scheduledService?.checkInTime,
+
+    report?.scheduled_service?.arrived_at,
+    report?.scheduled_service?.actual_start_time,
+    report?.scheduled_service?.check_in_time,
+
+    report?.visitTiming?.arrivedAt,
+    report?.visitTiming?.arrived_at,
+    report?.serviceRecord?.started_at,
+    report?.service_record?.started_at,
+    report?.started_at,
+  );
+}
+
+export function getReportCompletionTime(report = {}) {
+  return getFirstValidTimelineValue(
+    report?.serviceRecord?.completed_at,
+    report?.serviceRecord?.completedAt,
+    report?.serviceRecord?.actual_end_time,
+    report?.serviceRecord?.actualEndTime,
+    report?.serviceRecord?.check_out_time,
+    report?.serviceRecord?.checkOutTime,
+
+    report?.service_record?.completed_at,
+    report?.service_record?.actual_end_time,
+    report?.service_record?.check_out_time,
+
+    report?.completed_at,
+    report?.completedAt,
+    report?.actual_end_time,
+    report?.actualEndTime,
+    report?.check_out_time,
+    report?.checkOutTime,
+
+    report?.scheduledService?.completed_at,
+    report?.scheduledService?.completedAt,
+    report?.scheduledService?.actual_end_time,
+    report?.scheduledService?.actualEndTime,
+    report?.scheduledService?.check_out_time,
+    report?.scheduledService?.checkOutTime,
+
+    report?.scheduled_service?.completed_at,
+    report?.scheduled_service?.actual_end_time,
+    report?.scheduled_service?.check_out_time,
+
+    report?.visitTiming?.exitedAt,
+    report?.visitTiming?.exited_at,
+    report?.serviceRecord?.ended_at,
+    report?.service_record?.ended_at,
+    report?.ended_at,
+  );
+}
+
+export function getMinutesBetween(start, end) {
+  if (!start || !end) return null;
+
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return null;
+  }
+
+  const diffMs = endDate.getTime() - startDate.getTime();
+
+  if (diffMs <= 0) {
+    return null;
+  }
+
+  return Math.round(diffMs / 60000);
+}
+
+export function formatTimelineTime(value) {
+  return formatClockTime(value) || null;
+}
+
+export function formatDurationMinutes(minutes) {
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return null;
+  }
+
+  if (minutes < 60) {
+    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+
+  if (remainingMinutes === 0) {
+    return `${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+
+  return `${hours} hr ${remainingMinutes} min`;
+}
+
 function formatReportTitleDate(value) {
   if (!value) return '';
   const date = value instanceof Date && !Number.isNaN(value.getTime())
@@ -235,8 +368,8 @@ function applyReportDocumentMetadata(data = {}) {
 }
 
 function visitTimeRange(data = {}) {
-  const arrived = formatClockTime(data.visitTiming?.arrivedAt);
-  const exited = formatClockTime(data.visitTiming?.exitedAt);
+  const arrived = formatTimelineTime(getReportArrivalTime(data));
+  const exited = formatTimelineTime(getReportCompletionTime(data));
   if (arrived && exited) return `Arrived ${arrived} | Finished ${exited}`;
   if (arrived) return `Arrived ${arrived}`;
   if (exited) return `Finished ${exited}`;
@@ -1063,12 +1196,16 @@ function useReadinessNow(context, mode) {
 
 function ServiceStatusCard({ data, mode }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
-  const arrived = formatClockTime(data.visitTiming?.arrivedAt);
-  const completed = formatClockTime(data.visitTiming?.exitedAt);
+  const arrivalTime = getReportArrivalTime(data);
+  const completionTime = getReportCompletionTime(data);
+  const arrivalDisplayTime = formatTimelineTime(arrivalTime);
+  const completionDisplayTime = formatTimelineTime(completionTime);
+  const timeOnSiteMinutes = getMinutesBetween(arrivalTime, completionTime);
+  const timeOnSiteDisplay = formatDurationMinutes(timeOnSiteMinutes);
   const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
   const readinessBadge = readinessStatusBadge(data.dynamicContext?.reentry, mode, nowMs);
   const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
-  const completionStatus = completedEvent?.status === 'pending' ? 'In progress' : 'Completed';
+  const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const serviceLabel = serviceDisplayName(data);
   const serviceDateTime = serviceReportDateTimeLabel(data);
@@ -1095,18 +1232,6 @@ function ServiceStatusCard({ data, mode }) {
             <div className="sr-cell-label">Technician</div>
             <div className="sr-cell-value">{technician}</div>
           </div>
-          {arrived && (
-            <div className="sr-cell">
-              <div className="sr-cell-label">Recorded arrival</div>
-              <div className="sr-cell-value">{arrived}</div>
-            </div>
-          )}
-          {completed && (
-            <div className="sr-cell">
-              <div className="sr-cell-label">Recorded completion</div>
-              <div className="sr-cell-value">{completed}</div>
-            </div>
-          )}
           <div className="sr-cell">
             <div className="sr-cell-label">Completion status</div>
             <div className="sr-cell-value">{completionStatus}</div>
@@ -1116,6 +1241,35 @@ function ServiceStatusCard({ data, mode }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
         />
+      </div>
+      <div className="service-status-timeline" aria-label="Service Timeline">
+        <div className="section-eyebrow">Service Timeline</div>
+        <div className="status-timeline-list">
+          <div className="status-timeline-item">
+            <span className="status-timeline-marker status-timeline-marker-complete" aria-hidden="true">
+              <CheckCircle2 size={15} strokeWidth={2.3} />
+            </span>
+            <div className="status-timeline-copy">
+              <div className="status-timeline-title">Technician arrived</div>
+              <div className="status-timeline-time">{arrivalDisplayTime || 'Arrival time unavailable'}</div>
+            </div>
+          </div>
+          <div className="status-timeline-item">
+            <span className={`status-timeline-marker ${completionDisplayTime ? 'status-timeline-marker-complete' : 'status-timeline-marker-pending'}`} aria-hidden="true">
+              {completionDisplayTime ? <CheckCircle2 size={15} strokeWidth={2.3} /> : <Clock size={15} strokeWidth={2.3} />}
+            </span>
+            <div className="status-timeline-copy">
+              <div className="status-timeline-title">Service completed</div>
+              <div className="status-timeline-time">{completionDisplayTime || 'In progress'}</div>
+            </div>
+          </div>
+        </div>
+        {timeOnSiteDisplay && (
+          <div className="status-timeline-summary">
+            <div className="status-timeline-summary-label">Time on site</div>
+            <div className="status-timeline-summary-value">{timeOnSiteDisplay}</div>
+          </div>
+        )}
       </div>
     </section>
   );
@@ -2314,7 +2468,7 @@ function ServiceTimelineSection({ serviceType, workflowEvents, customerInteracti
   if (loading) {
     return (
       <section className="sr-section service-workflow-section service-workflow-loading" id="service-timeline">
-        <h2>Service Timeline</h2>
+        <h2>Visit Progress</h2>
         <div className="workflow-skeleton-list">
           <span />
           <span />
@@ -2328,7 +2482,7 @@ function ServiceTimelineSection({ serviceType, workflowEvents, customerInteracti
     <section className="sr-section service-workflow-section" id="service-timeline">
       <div className="coverage-section-header">
         <div>
-          <h2>Service Timeline</h2>
+          <h2>Visit Progress</h2>
           <p className="map-context-copy">
             {normalizedServiceType === 'pest_control'
               ? 'Here’s how today’s pest control visit progressed.'
@@ -2508,8 +2662,8 @@ function SupportingDetailsSection({
   const pressureTrend = data.dynamicContext?.pressureTrend;
   const weatherRows = conditionRows(data.conditions || {});
   const interaction = customerInteractionCopy(data.customerInteraction);
-  const arrival = formatClockTime(data.visitTiming?.arrivedAt);
-  const completion = formatClockTime(data.visitTiming?.exitedAt);
+  const arrival = formatTimelineTime(getReportArrivalTime(data));
+  const completion = formatTimelineTime(getReportCompletionTime(data));
   const reportPublished = (data.workflowEvents || []).find((event) => event.type === 'report_published');
   const pressureOpen = mode !== 'live' || showDetails;
 
@@ -2570,13 +2724,13 @@ function SupportingDetailsSection({
                 )}
                 {arrival && (
                   <div className="sr-cell">
-                    <div className="sr-cell-label">Recorded arrival</div>
+                    <div className="sr-cell-label">Technician arrived</div>
                     <div className="sr-cell-value">{arrival}</div>
                   </div>
                 )}
                 {completion && (
                   <div className="sr-cell">
-                    <div className="sr-cell-label">Recorded completion</div>
+                    <div className="sr-cell-label">Service completed</div>
                     <div className="sr-cell-value">{completion}</div>
                   </div>
                 )}
@@ -3209,8 +3363,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const findings = Array.isArray(data.findings) ? data.findings : [];
   const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
   const visitTimingRows = [
-    ['Arrival', formatClockTime(data.visitTiming?.arrivedAt)],
-    ['Exit', formatClockTime(data.visitTiming?.exitedAt)],
+    ['Arrival', formatTimelineTime(getReportArrivalTime(data))],
+    ['Exit', formatTimelineTime(getReportCompletionTime(data))],
   ].filter(([, value]) => value);
   const measurements = data.measurements || data.legacy?.measurements || {};
   const measurementRows = [
@@ -3561,6 +3715,81 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--line);
           border-radius: 12px;
           background: var(--line);
+        }
+        .service-status-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .service-status-timeline {
+          margin-top: 16px;
+          padding: 15px;
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          background: #fff;
+        }
+        .status-timeline-list {
+          display: grid;
+          gap: 10px;
+          margin-top: 10px;
+        }
+        .status-timeline-item {
+          display: grid;
+          grid-template-columns: 30px minmax(0, 1fr);
+          gap: 10px;
+          align-items: start;
+        }
+        .status-timeline-marker {
+          width: 30px;
+          height: 30px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid #bbf7d0;
+          background: #dcfce7;
+          color: #14532d;
+        }
+        .status-timeline-marker-pending {
+          border-color: #cbd5e1;
+          background: #f8fafc;
+          color: #475569;
+        }
+        .status-timeline-copy {
+          min-width: 0;
+          padding-top: 2px;
+        }
+        .status-timeline-title {
+          color: var(--text);
+          font-size: 15px;
+          line-height: 1.3;
+          font-weight: 800;
+        }
+        .status-timeline-time {
+          margin-top: 2px;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.35;
+        }
+        .status-timeline-summary {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 12px;
+          margin-top: 13px;
+          padding-top: 13px;
+          border-top: 1px solid var(--line);
+        }
+        .status-timeline-summary-label {
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.35;
+          font-weight: 700;
+        }
+        .status-timeline-summary-value {
+          color: var(--text);
+          font-size: 16px;
+          line-height: 1.25;
+          font-weight: 850;
+          white-space: nowrap;
         }
         .readiness-facts,
         .supporting-detail-grid {

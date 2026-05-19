@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   cleanVisitSummary,
+  customerInteractionCopy,
   formatDate,
+  formatDurationMinutes,
+  formatTimelineTime,
+  getMinutesBetween,
+  getReportArrivalTime,
+  getReportCompletionTime,
   quickNavigationLinks,
   readinessStatusBadge,
   reviewRequestCopy,
@@ -76,5 +82,95 @@ describe('ReportViewPage report chrome helpers', () => {
     expect(top.title).not.toBe(bottom.title);
     expect(top.cta).toBe('Share feedback');
     expect(bottom.cta).toBe('Share feedback');
+  });
+});
+
+describe('ReportViewPage service timeline helpers', () => {
+  it('uses service record arrived_at and completed_at for the customer timeline', () => {
+    const report = {
+      serviceRecord: {
+        arrived_at: '2026-05-19T13:42:00.000Z',
+        completed_at: '2026-05-19T14:28:00.000Z',
+      },
+    };
+
+    const arrival = getReportArrivalTime(report);
+    const completion = getReportCompletionTime(report);
+
+    expect(formatTimelineTime(arrival)).toBe('9:42 AM');
+    expect(formatTimelineTime(completion)).toBe('10:28 AM');
+    expect(formatDurationMinutes(getMinutesBetween(arrival, completion))).toBe('46 minutes');
+  });
+
+  it('falls back through service record arrival aliases before scheduled service timing', () => {
+    expect(getReportArrivalTime({
+      serviceRecord: { actual_start_time: '2026-05-19T13:43:00.000Z' },
+      scheduledService: { arrived_at: '2026-05-19T13:42:00.000Z' },
+    })).toBe('2026-05-19T13:43:00.000Z');
+
+    expect(getReportArrivalTime({
+      serviceRecord: { check_in_time: '2026-05-19T13:44:00.000Z' },
+      scheduledService: { arrived_at: '2026-05-19T13:42:00.000Z' },
+    })).toBe('2026-05-19T13:44:00.000Z');
+  });
+
+  it('falls back to scheduled service arrival when report arrival is missing', () => {
+    expect(getReportArrivalTime({
+      scheduled_service: {
+        arrived_at: '2026-05-19T13:42:00.000Z',
+      },
+    })).toBe('2026-05-19T13:42:00.000Z');
+  });
+
+  it('skips invalid timestamp values instead of displaying NaN dates', () => {
+    expect(getReportArrivalTime({
+      serviceRecord: {
+        arrived_at: 'not a date',
+        actual_start_time: '2026-05-19T13:42:00.000Z',
+      },
+    })).toBe('2026-05-19T13:42:00.000Z');
+    expect(formatTimelineTime('not a date')).toBeNull();
+  });
+
+  it('uses completion aliases in priority order', () => {
+    expect(getReportCompletionTime({
+      serviceRecord: { actual_end_time: '2026-05-19T14:28:00.000Z' },
+    })).toBe('2026-05-19T14:28:00.000Z');
+
+    expect(getReportCompletionTime({
+      serviceRecord: { check_out_time: '2026-05-19T14:29:00.000Z' },
+    })).toBe('2026-05-19T14:29:00.000Z');
+  });
+
+  it('does not render a duration without valid arrival and completion timestamps', () => {
+    expect(formatDurationMinutes(getMinutesBetween(null, '2026-05-19T14:28:00.000Z'))).toBeNull();
+    expect(formatDurationMinutes(getMinutesBetween(
+      '2026-05-19T14:28:00.000Z',
+      '2026-05-19T13:42:00.000Z',
+    ))).toBeNull();
+  });
+
+  it('does not surface internal tracking metadata through timeline helpers', () => {
+    const report = {
+      serviceRecord: {
+        arrived_at: '2026-05-19T13:42:00.000Z',
+        completed_at: '2026-05-19T14:28:00.000Z',
+        arrival_source: 'bouncie_auto',
+        arrival_metadata: { distanceMeters: 83 },
+      },
+    };
+    const timelineCopy = [
+      'Technician arrived',
+      formatTimelineTime(getReportArrivalTime(report)),
+      'Service completed',
+      formatTimelineTime(getReportCompletionTime(report)),
+      'Time on site',
+      formatDurationMinutes(getMinutesBetween(
+        getReportArrivalTime(report),
+        getReportCompletionTime(report),
+      )),
+    ].filter(Boolean).join(' ');
+
+    expect(timelineCopy).not.toMatch(/Bouncie|GPS|geofence|auto-arrival|arrival_source|distanceMeters|83 meters/i);
   });
 });

@@ -350,6 +350,70 @@ function validTimestamp(value) {
   return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
+function firstValidTimestamp(...values) {
+  for (const value of values) {
+    const timestamp = validTimestamp(value);
+    if (timestamp) return timestamp;
+  }
+  return null;
+}
+
+function publicTimingFields(record = {}) {
+  return {
+    arrived_at: validTimestamp(record.arrived_at) || null,
+    actual_start_time: validTimestamp(record.actual_start_time) || null,
+    check_in_time: validTimestamp(record.check_in_time) || null,
+    completed_at: validTimestamp(record.completed_at) || null,
+    actual_end_time: validTimestamp(record.actual_end_time) || null,
+    check_out_time: validTimestamp(record.check_out_time) || null,
+    started_at: validTimestamp(record.started_at) || null,
+    ended_at: validTimestamp(record.ended_at) || null,
+  };
+}
+
+function workflowEventTimestamp(workflowEvents = [], type) {
+  const event = workflowEvents.find((candidate) => candidate?.type === type && candidate?.status !== 'pending');
+  return validTimestamp(event?.timestamp) || null;
+}
+
+function resolveReportArrivalTime(service = {}, scheduledService = {}, options = {}) {
+  const structured = options.structured || {};
+  const serviceData = options.serviceData || {};
+  return firstValidTimestamp(
+    service.arrived_at,
+    service.actual_start_time,
+    service.check_in_time,
+    service.started_at,
+    structured.arrivedAt,
+    structured.arrived_at,
+    serviceData.arrivedAt,
+    serviceData.arrived_at,
+    workflowEventTimestamp(options.workflowEvents, 'arrived_on_site'),
+    scheduledService?.arrived_at,
+    scheduledService?.actual_start_time,
+    scheduledService?.check_in_time,
+  );
+}
+
+function resolveReportCompletionTime(service = {}, scheduledService = {}, options = {}) {
+  const structured = options.structured || {};
+  const serviceData = options.serviceData || {};
+  return firstValidTimestamp(
+    service.completed_at,
+    service.actual_end_time,
+    service.check_out_time,
+    service.ended_at,
+    structured.serviceCompletedAt,
+    structured.service_completed_at,
+    serviceData.serviceCompletedAt,
+    serviceData.service_completed_at,
+    workflowEventTimestamp(options.workflowEvents, 'service_completed'),
+    scheduledService?.completed_at,
+    scheduledService?.actual_end_time,
+    scheduledService?.check_out_time,
+  );
+}
+
 function normalizeGeometry(value) {
   const geometry = parseJsonObject(value);
   const candidate = geometry.type === 'Feature' && geometry.geometry ? geometry.geometry : geometry;
@@ -716,7 +780,7 @@ function workflowLabel(type, serviceLine) {
   const labels = {
     scheduled: 'Scheduled',
     technician_en_route: 'Technician en route',
-    arrived_on_site: 'Arrived on site',
+    arrived_on_site: 'Technician arrived',
     inspection_started: 'Inspection started',
     service_started: 'Service started',
     service_completed: 'Service completed',
@@ -809,21 +873,29 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
   ]);
   add('arrived_on_site', [
     { value: service.arrived_at },
-    { value: service.scheduled_arrived_at },
+    { value: service.actual_start_time },
+    { value: service.check_in_time },
     { value: structured.arrivedAt },
     { value: serviceData.arrivedAt },
-    { value: service.started_at },
+    { value: service.scheduled_arrived_at },
     { value: service.scheduled_actual_start_time },
+    { value: service.scheduled_check_in_time },
+    { value: service.started_at },
   ]);
   add('inspection_started', structured.inspectionStartedAt || structured.inspection_started_at || serviceData.inspectionStartedAt || serviceData.inspection_started_at);
   add('service_started', structured.serviceStartedAt || structured.service_started_at || serviceData.serviceStartedAt || serviceData.service_started_at);
   add('service_completed', [
-    { value: service.ended_at },
-    { value: service.scheduled_actual_end_time },
+    { value: service.completed_at },
+    { value: service.actual_end_time },
+    { value: service.check_out_time },
     { value: structured.serviceCompletedAt },
     { value: structured.service_completed_at },
     { value: serviceData.serviceCompletedAt },
     { value: serviceData.service_completed_at },
+    { value: service.scheduled_completed_at },
+    { value: service.scheduled_actual_end_time },
+    { value: service.scheduled_check_out_time },
+    { value: service.ended_at },
   ]);
   add('quality_reviewed', structured.qualityReviewedAt || structured.quality_reviewed_at || serviceData.qualityReviewedAt || serviceData.quality_reviewed_at);
   add('report_published', service.report_generated_at || structured.reportPublishedAt || structured.report_published_at || serviceData.reportPublishedAt || serviceData.report_published_at);
@@ -1224,18 +1296,26 @@ async function buildReportV1Data(service, token, knex = db) {
     areaLabels,
     evidenceLevel,
   });
+  const serviceRecordTiming = publicTimingFields(service);
+  const scheduledServiceTiming = publicTimingFields(scheduledService || {});
   const workflowEvents = buildWorkflowEvents({
     service: {
       ...service,
       scheduled_en_route_at: scheduledService?.en_route_at || null,
       scheduled_arrived_at: scheduledService?.arrived_at || null,
       scheduled_actual_start_time: scheduledService?.actual_start_time || null,
+      scheduled_check_in_time: scheduledService?.check_in_time || null,
+      scheduled_completed_at: scheduledService?.completed_at || null,
       scheduled_actual_end_time: scheduledService?.actual_end_time || null,
+      scheduled_check_out_time: scheduledService?.check_out_time || null,
     },
     structured,
     serviceData,
     serviceLine,
   });
+  const timingOptions = { structured, serviceData, workflowEvents };
+  const arrivalTime = resolveReportArrivalTime(service, scheduledService, timingOptions);
+  const completionTime = resolveReportCompletionTime(service, scheduledService, timingOptions);
   const centerLat = numberOrNull(service.customer_latitude ?? service.latitude ?? service.lat);
   const centerLng = numberOrNull(service.customer_longitude ?? service.longitude ?? service.lng);
   const mapCenter = centerLat != null && centerLng != null ? { lat: centerLat, lng: centerLng } : null;
@@ -1261,6 +1341,8 @@ async function buildReportV1Data(service, token, knex = db) {
 
   const onSiteMin = computeOnSiteMin({
     ...service,
+    started_at: arrivalTime || service.started_at,
+    ended_at: completionTime || service.ended_at,
     timeOnSite: structured.timeOnSite,
   });
   const linearFt = await computeLinearFt(service.id, knex).catch(() => null);
@@ -1344,9 +1426,17 @@ async function buildReportV1Data(service, token, knex = db) {
     mapCenter,
     evidenceLevel,
     visitOutcome: protocol.visitOutcome || 'completed',
+    arrived_at: arrivalTime,
+    actual_start_time: serviceRecordTiming.actual_start_time || scheduledServiceTiming.actual_start_time || null,
+    check_in_time: serviceRecordTiming.check_in_time || scheduledServiceTiming.check_in_time || null,
+    completed_at: completionTime,
+    actual_end_time: serviceRecordTiming.actual_end_time || scheduledServiceTiming.actual_end_time || null,
+    check_out_time: serviceRecordTiming.check_out_time || scheduledServiceTiming.check_out_time || null,
+    serviceRecord: serviceRecordTiming,
+    scheduledService: scheduledServiceTiming,
     visitTiming: {
-      arrivedAt: service.started_at || null,
-      exitedAt: service.ended_at || null,
+      arrivedAt: arrivalTime,
+      exitedAt: completionTime,
       onSiteMinutes: onSiteMin,
     },
     summary: structured.customerRecap || '',
@@ -1425,4 +1515,8 @@ module.exports = {
   coverageServiceType,
   serviceCoverageLocations,
   buildWorkflowEvents,
+  firstValidTimestamp,
+  publicTimingFields,
+  resolveReportArrivalTime,
+  resolveReportCompletionTime,
 };

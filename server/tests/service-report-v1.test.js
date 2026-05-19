@@ -1086,6 +1086,247 @@ describe('service report v1', () => {
     expect(data.zones.map((zone) => zone.label)).toEqual(['Perimeter']);
   });
 
+  test('v1 data exposes customer-safe service timeline timestamps from finalized report data', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+      scheduled_services: [{
+        id: 'scheduled-timing',
+        arrived_at: '2026-05-19T13:40:00.000Z',
+        actual_start_time: '2026-05-19T13:41:00.000Z',
+        check_in_time: '2026-05-19T13:42:00.000Z',
+        completed_at: '2026-05-19T14:29:00.000Z',
+        actual_end_time: '2026-05-19T14:30:00.000Z',
+        check_out_time: '2026-05-19T14:31:00.000Z',
+        arrival_source: 'bouncie_auto',
+        arrival_metadata: { distanceMeters: 83 },
+      }],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-timing',
+      scheduled_service_id: 'scheduled-timing',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-19',
+      arrived_at: '2026-05-19T13:42:00.000Z',
+      actual_start_time: '2026-05-19T13:43:00.000Z',
+      check_in_time: '2026-05-19T13:44:00.000Z',
+      completed_at: '2026-05-19T14:28:00.000Z',
+      actual_end_time: '2026-05-19T14:29:00.000Z',
+      check_out_time: '2026-05-19T14:30:00.000Z',
+      arrival_source: 'bouncie_auto',
+      arrival_metadata: { distanceMeters: 83 },
+      first_name: 'Van',
+      last_name: 'Lee',
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-timing', knex);
+
+    expect(data.visitTiming).toMatchObject({
+      arrivedAt: '2026-05-19T13:42:00.000Z',
+      exitedAt: '2026-05-19T14:28:00.000Z',
+      onSiteMinutes: 46,
+    });
+    expect(data.serviceRecord).toMatchObject({
+      arrived_at: '2026-05-19T13:42:00.000Z',
+      actual_start_time: '2026-05-19T13:43:00.000Z',
+      check_in_time: '2026-05-19T13:44:00.000Z',
+      completed_at: '2026-05-19T14:28:00.000Z',
+    });
+    expect(data.scheduledService).toMatchObject({
+      arrived_at: '2026-05-19T13:40:00.000Z',
+      completed_at: '2026-05-19T14:29:00.000Z',
+    });
+    const serialized = JSON.stringify(data);
+    expect(serialized).not.toMatch(/bouncie|gps|geofence|auto-arrival|arrival_source|distanceMeters/i);
+  });
+
+  test('v1 data falls back to scheduled service arrival when service record arrival is missing', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+      scheduled_services: [{
+        id: 'scheduled-fallback',
+        arrived_at: '2026-05-19T13:42:00.000Z',
+        completed_at: '2026-05-19T14:28:00.000Z',
+      }],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-fallback',
+      scheduled_service_id: 'scheduled-fallback',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-19',
+      first_name: 'Van',
+      last_name: 'Lee',
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-fallback', knex);
+
+    expect(data.visitTiming).toMatchObject({
+      arrivedAt: '2026-05-19T13:42:00.000Z',
+      exitedAt: '2026-05-19T14:28:00.000Z',
+      onSiteMinutes: 46,
+    });
+    expect(data.serviceRecord.arrived_at).toBeNull();
+    expect(data.scheduledService.arrived_at).toBe('2026-05-19T13:42:00.000Z');
+  });
+
+  test('v1 data prefers finalized legacy service record timing before scheduled service timing', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+      scheduled_services: [{
+        id: 'scheduled-legacy-fallback',
+        arrived_at: '2026-05-19T13:42:00.000Z',
+        completed_at: '2026-05-19T14:28:00.000Z',
+      }],
+    };
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const query = {
+        where(criteria) {
+          if (criteria && typeof criteria === 'object') {
+            rows = rows.filter((row) => Object.entries(criteria)
+              .every(([key, value]) => row[key] === value));
+          }
+          return query;
+        },
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-legacy-timing',
+      scheduled_service_id: 'scheduled-legacy-fallback',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-19',
+      started_at: '2026-05-19T13:50:00.000Z',
+      ended_at: '2026-05-19T14:20:00.000Z',
+      first_name: 'Van',
+      last_name: 'Lee',
+      structured_notes: '{}',
+      service_data: '{}',
+    }, 'token-legacy-timing', knex);
+
+    expect(data.visitTiming).toMatchObject({
+      arrivedAt: '2026-05-19T13:50:00.000Z',
+      exitedAt: '2026-05-19T14:20:00.000Z',
+      onSiteMinutes: 30,
+    });
+    expect(data.scheduledService).toMatchObject({
+      arrived_at: '2026-05-19T13:42:00.000Z',
+      completed_at: '2026-05-19T14:28:00.000Z',
+    });
+  });
+
+  test('v1 data uses structured workflow events as public timing fallback', async () => {
+    const fixtures = {
+      service_products: [],
+      property_geometries: [],
+      property_zones: [],
+      service_findings: [],
+      service_photos: [],
+    };
+    const knex = (table) => {
+      const rows = fixtures[table] || [];
+      const query = {
+        where: () => query,
+        orderBy: () => query,
+        first: () => Promise.resolve(rows[0] || null),
+        catch: () => Promise.resolve(rows),
+        then: (resolve) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+
+    const data = await buildReportV1Data({
+      id: 'service-workflow-timing',
+      customer_id: 'customer-1',
+      service_line: 'pest',
+      service_type: 'Residential Pest Control',
+      service_date: '2026-05-19',
+      first_name: 'Van',
+      last_name: 'Lee',
+      structured_notes: JSON.stringify({
+        workflowEvents: [
+          {
+            type: 'arrived_on_site',
+            timestamp: '2026-05-19T13:42:00.000Z',
+          },
+          {
+            type: 'service_completed',
+            timestamp: '2026-05-19T14:28:00.000Z',
+          },
+        ],
+      }),
+      service_data: '{}',
+    }, 'token-workflow-timing', knex);
+
+    expect(data.visitTiming).toMatchObject({
+      arrivedAt: '2026-05-19T13:42:00.000Z',
+      exitedAt: '2026-05-19T14:28:00.000Z',
+      onSiteMinutes: 46,
+    });
+    expect(data.workflowEvents.map((event) => event.type)).toEqual([
+      'arrived_on_site',
+      'service_completed',
+    ]);
+  });
+
   test('v1 data carries completion panel fields into the public report payload', async () => {
     const fixtures = {
       service_products: [],
