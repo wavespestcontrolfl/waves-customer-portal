@@ -161,11 +161,16 @@ function computeTurfArea(input, fallback = {}) {
   };
 }
 
-function estimateBedArea(lotSqFt, shrubDensity = 'moderate', complexity = 'standard') {
+function estimateBedArea(lotSqFt, shrubDensity = 'moderate', complexity = 'standard', options = {}) {
   const density = BED_DENSITY[shrubDensity] || BED_DENSITY.moderate;
   let pct = density.basePct;
   if (complexity === 'complex' || complexity === 'moderate') pct += density.complexAdd;
-  return Math.min(Math.round(lotSqFt * pct), BED_AREA_CAP);
+  const raw = Math.round(lotSqFt * pct);
+  // `uncapped: true` returns the raw lot-density estimate so callers can
+  // preserve uncappedBedAreaEstimate when the cap fires. Default behavior
+  // (caller passes nothing) is unchanged: always cap at BED_AREA_CAP.
+  if (options && options.uncapped) return raw;
+  return Math.min(raw, BED_AREA_CAP);
 }
 
 function calculatePerimeter(footprint, complexity = 'standard') {
@@ -215,11 +220,15 @@ function calculatePropertyProfile(input) {
   const turfArea = computeTurfArea(turfInput, { turfSf: legacyLawnEstimate });
   const lawnSqFt = turfArea.turfSf;
   const sourceHint = String(input.bedAreaSource || '').trim().toLowerCase();
-  const validSourceHint = ['explicit', 'estimated', 'fallback'].includes(sourceHint) ? sourceHint : null;
+  const validSourceHint = ['explicit', 'estimated', 'lot_based', 'fallback'].includes(sourceHint) ? sourceHint : null;
   let bedArea;
   let bedAreaSource;
   let bedAreaPricingConfidence;
   let bedAreaCapped = false;
+  // Raw uncapped estimate — preserved when capping fires so downstream
+  // consumers (priceTreeShrub, admin review surfaces) can show what the
+  // estimator wanted to use vs what BED_AREA_CAP allowed.
+  let uncappedBedAreaEstimate;
 
   if (validSourceHint === 'fallback') {
     bedArea = 0;
@@ -231,6 +240,7 @@ function calculatePropertyProfile(input) {
     if (bedAreaSource === 'estimated') {
       bedArea = Math.min(inputBedArea, BED_AREA_CAP);
       bedAreaCapped = inputBedArea >= BED_AREA_CAP;
+      if (bedAreaCapped) uncappedBedAreaEstimate = inputBedArea;
     } else {
       bedArea = inputBedArea;
     }
@@ -239,11 +249,22 @@ function calculatePropertyProfile(input) {
     bedAreaSource = 'estimated';
     bedAreaPricingConfidence = 'medium';
     bedAreaCapped = providedEstimatedBedArea >= BED_AREA_CAP;
+    if (bedAreaCapped) uncappedBedAreaEstimate = providedEstimatedBedArea;
   } else if (toPositiveNumber(input.lotSqFt) > 0) {
-    bedArea = estimateBedArea(input.lotSqFt, (input.features || {}).shrubs, (input.features || {}).complexity);
-    bedAreaSource = 'estimated';
+    const rawLotBedArea = estimateBedArea(
+      input.lotSqFt,
+      (input.features || {}).shrubs,
+      (input.features || {}).complexity,
+      { uncapped: true }
+    );
+    bedArea = Math.min(rawLotBedArea, BED_AREA_CAP);
+    // Lot-density inference is now distinguishable from a customer-supplied
+    // estimate — `lot_based` is propagated through generateEstimate so the
+    // T&S resolver and admin review surfaces can flag it differently.
+    bedAreaSource = 'lot_based';
     bedAreaPricingConfidence = 'medium';
-    bedAreaCapped = bedArea >= BED_AREA_CAP;
+    bedAreaCapped = rawLotBedArea >= BED_AREA_CAP;
+    if (bedAreaCapped) uncappedBedAreaEstimate = rawLotBedArea;
   } else {
     bedArea = 0;
     bedAreaSource = 'fallback';
@@ -266,6 +287,7 @@ function calculatePropertyProfile(input) {
     bedAreaSource,
     bedAreaPricingConfidence,
     bedAreaCapped,
+    ...(uncappedBedAreaEstimate !== undefined ? { uncappedBedAreaEstimate } : {}),
     perimeter, lotCategory,
     mosquitoTreatableSqFt, mosquitoLotCategory,
     complexityScore: calculateComplexityScore(features),
