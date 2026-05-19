@@ -1,16 +1,14 @@
 /**
  * Payment preference picker. Rendered after a slot is selected. Clicking
- * any button triggers the /reserve → confirm → /accept flow.
+ * any button triggers the /reserve -> confirm -> /accept flow.
  *
  * Copy shifts when serviceMode='one_time' — the customer is booking a
  * single visit, so framing changes.
  *
  * Third "Pay the year upfront" button renders only when setupFee is
  * present AND waivedWithPrepay is true (recurring pest estimates).
- * Selection encodes as 'prepay_annual' — the server treats it like
- * pay_at_visit for reservation purposes (no immediate charge) but
- * the converter creates the prepaid-annual draft invoice instead of
- * the standard $99 setup draft invoice.
+ * Selection encodes as 'prepay_annual'; the converter creates the
+ * prepaid-annual draft invoice instead of the standard $99 setup draft.
  */
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -34,15 +32,14 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
     opacity: disabled ? 0.65 : 1,
   };
 
-  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Reserve + save card on file';
-  const payAtVisitLabel = isOneTime ? 'Book + pay on service day' : 'Reserve + pay at visit';
+  const cardOnFileLabel = isOneTime ? 'Book visit' : 'Choose pay-after-visit setup';
   const fineprint = offerPrepay
-    ? 'Saving a card on file locks your slot — we still charge on the visit day. Pick "pay the year upfront" to settle the year now.'
+    ? 'Choose autopay to be billed after each completed service visit, or annual prepay to approve the 12-month plan up front with setup included.'
     : invoiceMode
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
         ? 'This books a single visit. We do not charge you now.'
-      : 'Saving a card on file locks your slot. Either way, we charge on the visit day, not now.';
+        : 'Choose autopay setup to be billed after each completed service visit.';
 
   if (invoiceMode) {
     return (
@@ -115,12 +112,6 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
           onClick={() => onSelect('card_on_file')}
           style={{ ...btnBase, background: ACTION_BG, color: W.white }}
         >{cardOnFileLabel}</button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => onSelect('pay_at_visit')}
-          style={{ ...btnBase, background: ACTION_BG, color: W.white }}
-        >{payAtVisitLabel}</button>
         {offerPrepay && (
           <button
             type="button"
@@ -128,7 +119,7 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
             onClick={() => onSelect('prepay_annual')}
             style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
           >
-            Pay the year upfront
+            Choose annual prepay setup
             <span style={{
               display: 'block', fontSize: 12, fontWeight: 500,
               color: 'rgba(255,255,255,0.9)', marginTop: 2,

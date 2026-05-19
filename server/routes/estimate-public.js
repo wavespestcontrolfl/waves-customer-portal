@@ -3023,7 +3023,6 @@ router.put('/:token/accept', async (req, res, next) => {
       slotId,
       treatAsOneTime,
       billByInvoice,
-      enforceSetupPreference: !estimate.use_v2_view,
       paymentMethodPreference,
     });
     if (paymentPreferenceError) {
@@ -4408,10 +4407,9 @@ function validateRecurringSlotPaymentPreference({
   slotId = '',
   treatAsOneTime = false,
   billByInvoice = false,
-  enforceSetupPreference = true,
   paymentMethodPreference = null,
 } = {}) {
-  if (!enforceSetupPreference || !slotId || treatAsOneTime || billByInvoice) return null;
+  if (!slotId || treatAsOneTime || billByInvoice) return null;
   if (paymentMethodPreference === 'card_on_file' || paymentMethodPreference === 'prepay_annual') return null;
   return 'Choose card-on-file autopay or annual prepay before booking this recurring plan';
 }

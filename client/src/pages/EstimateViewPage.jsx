@@ -16,7 +16,7 @@
  *   selectedSlotId       — string | null
  *   ctaPhase             — 'configure' | 'review' | 'submitting' | 'success' | 'slot_conflict' | 'reservation_expired'
  *   reservation          — { scheduledServiceId, expiresAt } | null
- *   paymentPreference    — 'card_on_file' | 'pay_at_visit' | null
+ *   paymentPreference    — 'card_on_file' | 'pay_at_visit' | 'prepay_annual' | null
  *   countdownSeconds     — derived from reservation.expiresAt
  *
  * Matches PayPage / TrackPage convention: inline styles + W palette,
