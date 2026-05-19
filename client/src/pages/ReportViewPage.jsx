@@ -1295,6 +1295,8 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
 function ReentryReadinessCard({ context, mode, token }) {
   const nowMs = useReadinessNow(context, mode);
   const readiness = readinessSummary(context, mode, nowMs);
+  const targets = Array.isArray(context?.targets) ? context.targets : [];
+  const timezone = context?.displayTimezone || SERVICE_REPORT_TIME_ZONE;
 
   useEffect(() => {
     if (mode !== 'live' || !context) return;
@@ -1326,6 +1328,19 @@ function ReentryReadinessCard({ context, mode, token }) {
           <div className="sr-cell-value">{readiness.precautions}</div>
         </div>
       </div>
+      {targets.length > 0 && (
+        <div className="reentry-target-grid readiness-target-grid" aria-label="Re-entry ready times">
+          {targets.map((target) => (
+            <ReentryTargetTile
+              key={target.key || target.label || target.readyAt}
+              target={target}
+              nowMs={nowMs}
+              mode={mode}
+              timezone={timezone}
+            />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -1754,6 +1769,19 @@ function WhenToContactUsSection() {
   );
 }
 
+export function reviewRequestCopy(placement = 'top') {
+  if (placement === 'bottom') {
+    return {
+      title: 'Help the next neighbor choose faster',
+      cta: 'Share feedback',
+    };
+  }
+  return {
+    title: "How did today's visit go?",
+    cta: 'Share feedback',
+  };
+}
+
 function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   if (mode !== 'live') return null;
   if (data?.hasLeftGoogleReview || data?.reviewRequestEligible === false) return null;
@@ -1763,7 +1791,6 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
     <section className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
         <h2>{copy.title}</h2>
-        {copy.body && <p>{copy.body}</p>}
       </div>
       <a
         className="review-cta"
@@ -1776,21 +1803,6 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
       </a>
     </section>
   );
-}
-
-export function reviewRequestCopy(placement = 'top') {
-  if (placement === 'bottom') {
-    return {
-      title: 'Help the next neighbor choose faster',
-      body: null,
-      cta: 'Share feedback',
-    };
-  }
-  return {
-    title: "How did today's visit go?",
-    body: 'Share a quick note while the visit is fresh.',
-    cta: 'Share feedback',
-  };
 }
 
 function ExecutiveStatusGrid({ data, pressureTrend, reentry, mode }) {
@@ -2418,8 +2430,8 @@ function workflowIconForType(type) {
 }
 
 export function timelineEventsForDisplay(workflowEvents = []) {
-  if (!Array.isArray(workflowEvents)) return [];
-  return workflowEvents.filter((event) => event?.type !== 'customer_interaction');
+  return (Array.isArray(workflowEvents) ? workflowEvents : [])
+    .filter((event) => event?.type !== 'customer_interaction');
 }
 
 const TIMELINE_EVENT_ORDER = [
@@ -3517,6 +3529,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas.filter(Boolean) : [];
   const findings = Array.isArray(data.findings) ? data.findings : [];
   const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
+  const hasApplications = (data.applications || []).length > 0;
   const visitTimingRows = [
     ['Arrival', formatTimelineTime(getReportArrivalTime(data))],
     ['Exit', formatTimelineTime(getReportCompletionTime(data))],
@@ -3538,7 +3551,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
-  const hasApplications = Array.isArray(data.applications) && data.applications.length > 0;
 
   useEffect(() => {
     if (mode !== 'live') return;
