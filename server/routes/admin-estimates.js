@@ -30,6 +30,10 @@ const {
   estimateViewUrl,
 } = require('../services/admin-estimate-persistence');
 const {
+  inferEstimateServiceInterest,
+  inferEstimateServiceLines,
+} = require('../services/estimate-service-lines');
+const {
   acceptanceServiceLists,
   buildPricingBundle,
   bookingServiceFor,
@@ -740,6 +744,21 @@ router.get('/', async (req, res, next) => {
       estimates: estimates.map(e => {
         let estData = e.estimate_data;
         if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = null; } }
+        const monthlyTotal = parseFloat(e.monthly_total || 0);
+        const onetimeTotal = parseFloat(e.onetime_total || 0);
+        const serviceLines = inferEstimateServiceLines({
+          ...e,
+          estimateData: estData,
+          serviceInterest: e.service_interest,
+          monthlyTotal,
+          onetimeTotal,
+        });
+        const serviceInterest = e.service_interest || inferEstimateServiceInterest({
+          ...e,
+          estimateData: estData,
+          monthlyTotal,
+          onetimeTotal,
+        });
         const linkedSvcId = estData?.scheduled_service_id || null;
         const linkedAppt = linkedSvcId ? apptByLinkedId.get(linkedSvcId) : null;
         const sourceLinkedAppt = apptBySourceEstimateId.get(e.id) || null;
@@ -762,7 +781,7 @@ router.get('/', async (req, res, next) => {
           customerPhone: e.customer_phone, address: e.address,
           customerEmail: e.customer_email,
           updatedAt: e.updated_at,
-          monthlyTotal: parseFloat(e.monthly_total || 0),
+          monthlyTotal,
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,
           scheduledAt: e.scheduled_at,
@@ -774,11 +793,12 @@ router.get('/', async (req, res, next) => {
           lastClickedAt: clickStats.get(e.id)?.last_clicked_at || null,
           createdAt: e.created_at,
           source: e.source || 'manual',
-          serviceInterest: e.service_interest,
+          serviceInterest,
+          serviceLines,
           leadSource: e.lead_source,
           leadSourceDetail: e.lead_source_detail,
           isPriority: e.is_priority,
-          description: e.service_interest || e.notes,
+          description: serviceInterest || e.notes,
           notes: e.notes,
           followUpCount: e.follow_up_count || 0,
           lastFollowUpAt: e.last_follow_up_at,

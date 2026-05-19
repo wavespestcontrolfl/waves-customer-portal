@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import PropTypes from "prop-types";
-import { Bug, Leaf, PawPrint, ShieldCheck, Trees } from "lucide-react";
+import { Bug, HelpCircle, Leaf, PawPrint, ShieldCheck, Trees } from "lucide-react";
 import { classifyEstimate } from "./EstimatePage";
 import { Card, cn } from "../../components/ui";
 import { etParts } from "../../lib/timezone";
@@ -30,7 +30,9 @@ export function classifyEstimateServiceLine(estimate) {
   if (/rodent|rat|mouse/.test(interest)) return "rodent";
   if (/lawn|turf|fertili[sz]/.test(interest)) return "lawn";
   if (/tree|shrub|palm|ornamental/.test(interest)) return "tree_shrub";
-  return "pest";
+  if (/pest|roach|cockroach|flea|wasp|bed.?bug|ant|spider|general/.test(interest))
+    return "pest";
+  return "unknown";
 }
 
 const SERVICE_META = {
@@ -40,6 +42,7 @@ const SERVICE_META = {
   tree_shrub: { label: "Tree & shrub", icon: Trees, ticketSuffix: "per visit" },
   rodent: { label: "Rodent", icon: PawPrint, ticketSuffix: "/mo recurring" },
   termite: { label: "Termite bait", icon: ShieldCheck, ticketSuffix: "one-time" },
+  unknown: { label: "Unknown", icon: HelpCircle, ticketSuffix: "unclassified" },
 };
 
 export function withinDateRange(iso, range, nowMs = Date.now()) {
@@ -79,22 +82,37 @@ export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
   return age > 48 * HOUR && age < 168 * HOUR;
 }
 
-// Aggregate sent/won/avg-ticket per service line. Sent = any non-draft estimate
-// in the window. Won = status === 'accepted'.
+function serviceLineEntriesForEstimate(estimate) {
+  if (Array.isArray(estimate.serviceLines) && estimate.serviceLines.length) {
+    return estimate.serviceLines
+      .filter((line) => line && SERVICE_META[line.key])
+      .map((line) => ({
+        key: line.key,
+        amount: Number(line.amount || 0),
+      }));
+  }
+  const key = classifyEstimateServiceLine(estimate);
+  return [{ key, amount: Number(estimate.monthlyTotal || 0) }];
+}
+
+// Aggregate offers/won/avg-ticket per service line. Offers = any non-draft
+// estimate in the window, counted once per quoted service line when the API
+// provides line-level service data. Won = status === 'accepted'.
 export function aggregateServiceLineRows(estimates) {
   const buckets = new Map();
   for (const e of estimates) {
     if (e.status === "draft") continue;
-    const line = classifyEstimateServiceLine(e);
-    if (!buckets.has(line))
-      buckets.set(line, { sent: 0, won: 0, ticketSum: 0, ticketCount: 0 });
-    const b = buckets.get(line);
-    const monthlyTotal = Number(e.monthlyTotal || 0);
-    b.sent += 1;
-    if (e.status === "accepted") b.won += 1;
-    if (monthlyTotal > 0) {
-      b.ticketSum += monthlyTotal;
-      b.ticketCount += 1;
+    for (const entry of serviceLineEntriesForEstimate(e)) {
+      const line = entry.key;
+      if (!buckets.has(line))
+        buckets.set(line, { sent: 0, won: 0, ticketSum: 0, ticketCount: 0 });
+      const b = buckets.get(line);
+      b.sent += 1;
+      if (e.status === "accepted") b.won += 1;
+      if (entry.amount > 0) {
+        b.ticketSum += entry.amount;
+        b.ticketCount += 1;
+      }
     }
   }
   return Array.from(buckets.entries())
@@ -106,7 +124,7 @@ export function aggregateServiceLineRows(estimates) {
       acceptancePct: b.sent > 0 ? Math.round((b.won / b.sent) * 100) : 0,
       avgTicket: b.ticketCount > 0 ? Math.round(b.ticketSum / b.ticketCount) : 0,
     }))
-    .sort((a, b) => b.sent - a.sent);
+    .sort((a, b) => b.sent - a.sent || a.label.localeCompare(b.label));
 }
 
 function money(value) {
@@ -441,9 +459,9 @@ export default function PipelineAnalytics({
           sub={metrics.kpis.avgTrend}
         />
         <StatCard
-          label="Acceptance rate"
+          label="Offer acceptance"
           value={`${metrics.kpis.acceptanceRate}%`}
-          sub={`${metrics.kpis.accepted} won of ${metrics.kpis.closed} closed`}
+          sub={`${metrics.kpis.accepted} accepted of ${metrics.kpis.closed} offers`}
         />
         <StatCard
           label="MRR won"
@@ -491,16 +509,16 @@ export default function PipelineAnalytics({
       </Card>
 
       <Card className="mb-5 overflow-hidden">
-        <SectionHeader title="ROI by service line" sub="Sent · accepted · avg ticket" />
+        <SectionHeader title="ROI by service line" sub="Offers · accepted · avg ticket" />
         <div className="hidden md:grid md:grid-cols-4 gap-3 px-3 py-2 bg-zinc-50 text-10 uppercase tracking-label text-ink-tertiary font-medium">
           <div>Service</div>
-          <div className="u-nums">Sent</div>
-          <div>Acceptance bar</div>
+          <div className="u-nums">Offers</div>
+          <div>Accepted / offers</div>
           <div>Avg ticket</div>
         </div>
         {metrics.serviceRows.length === 0 ? (
           <div className="p-4 text-13 text-ink-secondary">
-            No sent estimates in this date range.
+            No non-draft estimates in this date range.
           </div>
         ) : (
           metrics.serviceRows.map((row) => {
