@@ -117,7 +117,7 @@ describe("classifyEstimateServiceLine", () => {
     ["rodent rat exclusion", "rodent"],
     ["palm injection", "tree_shrub"],
     ["Trelona ATBS", "termite"],
-    ["", "pest"],
+    ["", "unknown"],
   ])("classifies %s as %s", (serviceInterest, expected) => {
     expect(classifyEstimateServiceLine({ serviceInterest })).toBe(expected);
   });
@@ -149,6 +149,55 @@ describe("aggregateServiceLineRows", () => {
       avgTicket: 60,
     });
   });
+
+  it("uses API serviceLines so bundles count under each actual quoted service", () => {
+    const rows = aggregateServiceLineRows([
+      estimate({
+        id: "bundle",
+        status: "accepted",
+        serviceInterest: "",
+        monthlyTotal: 120,
+        serviceLines: [
+          { key: "pest", amount: 44 },
+          { key: "lawn", amount: 76 },
+        ],
+      }),
+      estimate({
+        id: "pest-only",
+        status: "viewed",
+        serviceInterest: "",
+        monthlyTotal: 30,
+        serviceLines: [{ key: "pest", amount: 30 }],
+      }),
+      estimate({
+        id: "missing-service",
+        status: "sent",
+        serviceInterest: "",
+        monthlyTotal: 99,
+        serviceLines: [{ key: "unknown", amount: null }],
+      }),
+    ]);
+
+    expect(rows.map((row) => row.key)).toEqual(["pest", "lawn", "unknown"]);
+    expect(rows[0]).toMatchObject({
+      sent: 2,
+      won: 1,
+      acceptancePct: 50,
+      avgTicket: 37,
+    });
+    expect(rows[1]).toMatchObject({
+      sent: 1,
+      won: 1,
+      acceptancePct: 100,
+      avgTicket: 76,
+    });
+    expect(rows[2]).toMatchObject({
+      sent: 1,
+      won: 0,
+      acceptancePct: 0,
+      avgTicket: 0,
+    });
+  });
 });
 
 describe("withinDateRange", () => {
@@ -171,7 +220,7 @@ describe("PipelineAnalytics", () => {
 
     expect(screen.getByText("Pipeline value")).toBeInTheDocument();
     expect(screen.getAllByText("Avg ticket").length).toBeGreaterThan(0);
-    expect(screen.getByText("Acceptance rate")).toBeInTheDocument();
+    expect(screen.getByText("Offer acceptance")).toBeInTheDocument();
     expect(screen.getByText("MRR won")).toBeInTheDocument();
     expect(screen.getByText("$600")).toBeInTheDocument();
     expect(screen.getByText("$63")).toBeInTheDocument();
