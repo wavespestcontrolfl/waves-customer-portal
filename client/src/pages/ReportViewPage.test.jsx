@@ -5,6 +5,7 @@ import {
   quickNavigationLinks,
   readinessStatusBadge,
   reviewRequestCopy,
+  serviceReportDateTimeLabel,
   timelineEventsForDisplay,
 } from './ReportViewPage.jsx';
 
@@ -16,6 +17,26 @@ describe('ReportViewPage date formatting', () => {
 
   it('still formats true timestamps in Eastern time', () => {
     expect(formatDate('2026-05-17T02:00:00.000Z')).toBe('Saturday, May 16, 2026');
+  });
+
+  it('adds the visit time to the service report details date', () => {
+    expect(serviceReportDateTimeLabel({
+      serviceDate: '2026-05-17T00:00:00.000Z',
+      visitTiming: {
+        arrivedAt: '2026-05-17T18:35:27.764Z',
+        exitedAt: '2026-05-17T18:35:27.766Z',
+      },
+    })).toBe('Sunday, May 17, 2026 at 2:35 PM');
+  });
+
+  it('uses a range when the visit has different arrival and completion times', () => {
+    expect(serviceReportDateTimeLabel({
+      serviceDate: '2026-05-17',
+      visitTiming: {
+        arrivedAt: '2026-05-17T18:35:00.000Z',
+        exitedAt: '2026-05-17T19:10:00.000Z',
+      },
+    })).toBe('Sunday, May 17, 2026 at 2:35 PM to 3:10 PM');
   });
 });
 
