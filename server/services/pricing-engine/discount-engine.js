@@ -161,6 +161,20 @@ function applyDiscount(basePrice, discountResult, priceFloor = 0) {
   return roundCurrency(price);
 }
 
+// Tree & Shrub post-discount margin guard.
+//
+// Protects the same margin definition the engine displays to admin/customer:
+//     margin = (annual - directCost - adminCost) / annual
+//
+// So the discounted annual must satisfy
+//     annual >= (directCost + adminCost) / (1 - marginFloor)
+//
+// Guard policy:
+//  - Cap the discount when it would push displayed margin below the floor.
+//  - Never raise the discounted price above the original undiscounted annual:
+//    if the undiscounted price itself doesn't clear the floor, the discount
+//    engine just prevents *additional* discounting. Fixing under-priced base
+//    quotes is the pricing engine's job, not the discount engine's.
 function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   if (!serviceQuote || serviceQuote.service !== 'tree_shrub') {
     return {
@@ -175,6 +189,8 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   const adminCost = Number(serviceQuote.costs?.adminCost ?? GLOBAL.ADMIN_ANNUAL);
   const marginFloor = Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR);
   const candidateAnnual = roundMoney(finalAnnual);
+  const originalAnnual = Number(serviceQuote.annual);
+  const hasOriginal = Number.isFinite(originalAnnual) && originalAnnual > 0;
 
   if (!Number.isFinite(annualDirectCost) || annualDirectCost < 0 || candidateAnnual <= 0) {
     return {
@@ -193,16 +209,19 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
       marginGuardApplied: false,
       discountCapped: false,
       requestedDiscountPct,
-      actualDiscountPct: serviceQuote.annual > 0
-        ? roundRatio(1 - candidateAnnual / serviceQuote.annual)
+      actualDiscountPct: hasOriginal
+        ? roundRatio(1 - candidateAnnual / originalAnnual)
         : 0,
     };
   }
 
   const minAnnualForMargin = (annualDirectCost + adminCost) / (1 - marginFloor);
-  const guardedAnnual = ceilMoney(Math.max(candidateAnnual, minAnnualForMargin));
+  // Raise the discounted price to the margin floor, but never above the
+  // original undiscounted price — see policy comment above.
+  const lifted = Math.max(candidateAnnual, minAnnualForMargin);
+  const guardedAnnual = ceilMoney(hasOriginal ? Math.min(lifted, originalAnnual) : lifted);
   const guardedMargin = (guardedAnnual - annualDirectCost - adminCost) / guardedAnnual;
-  const actualDiscountPct = serviceQuote.annual > 0 ? 1 - guardedAnnual / serviceQuote.annual : 0;
+  const actualDiscountPct = hasOriginal ? 1 - guardedAnnual / originalAnnual : 0;
 
   return {
     finalAnnual: guardedAnnual,

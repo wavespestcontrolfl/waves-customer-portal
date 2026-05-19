@@ -288,10 +288,37 @@ const SHADE_RULES = {
 
 // ============================================================
 // TREE & SHRUB
+//
+// Pricing model:
+//   onSiteMin           = max(25, 20 + bedArea/500 + treeCount*1.5 + accessMin)
+//   annualMaterialCost  = max(frequency * 10, bedArea * materialRate)
+//   laborPerVisit       = $35/hr loaded * (onSiteMin + 10) / 60
+//   directCost          = annualMaterialCost + laborPerVisit * frequency
+//   baseAnnual          = directCost / directCostRatioTarget    // NOT margin
+//   monthly             = max(monthlyFloor, baseAnnual / 12)    // pre-discount
+//   annual              = monthly * 12
+//   displayed margin    = (annual - directCost - ADMIN_ANNUAL) / annual
+//
+// Key semantics — do not get these wrong:
+//   - materialRate is an ANNUAL $/sqft for the tier/program. Do NOT multiply
+//     by `frequency` again; it's already amortized across the year.
+//   - directCostRatioTarget (0.43) means price = directCost / 0.43, i.e. we
+//     target direct costs at 43% of price. It is NOT a 43% margin target;
+//     the displayed margin is a different (admin-cost-inclusive) calculation.
+//   - monthlyFloor is a PRE-DISCOUNT list-price floor. The WaveGuard
+//     post-discount margin guard (discount-engine.js#applyMarginGuard) may
+//     take the collected price below this floor only as far as the 35%
+//     displayed-margin floor allows.
+//   - Premium (12x) is deprecated as of v4.4. Active tiers are standard
+//     and enhanced only; legacy `premium` requests map to enhanced with a
+//     warning. See service-pricing.js#normalizeTreeShrubTier.
+//
+// Material rates increased after April 2026 vendor cost audit. Prior values
+// were 0.063 / 0.104 / 0.118 — under what wholesalers were actually invoicing
+// for the per-sqft chemistry. Current values: 0.110 / 0.190 (+ the legacy
+// 0.220 for the deprecated premium tier seeded in pricing_config).
 // ============================================================
 const TREE_SHRUB = {
-  // Material rates updated per vendor cost audit (April 2026)
-  // Old: 0.063/0.104/0.118 — underestimated by ~2×
   tiers: {
     standard:  { label: 'Standard', frequency: 6, materialRate: 0.110, monthlyFloor: r(50) },
     enhanced:  { label: 'Enhanced', frequency: 9, materialRate: 0.190, monthlyFloor: r(65) },
