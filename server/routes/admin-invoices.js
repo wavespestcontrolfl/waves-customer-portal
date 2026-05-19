@@ -14,6 +14,8 @@ const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/cu
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
+
 function aggregateAttachmentMemoryStorage() {
   return {
     _handleFile(req, file, cb) {
@@ -160,6 +162,17 @@ function cleanEmail(value) {
 
 function isEmailLike(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
+}
+
+function invoiceRecipientOverrideError(email, saveBillingRecipient = false) {
+  if (!email) return null;
+  if (!isEmailLike(email)) {
+    return 'Enter a valid invoice recipient email.';
+  }
+  if (saveBillingRecipient && cleanEmail(email).length > BILLING_RECIPIENT_EMAIL_MAX_LENGTH) {
+    return 'Billing recipient email must be 200 characters or fewer.';
+  }
+  return null;
 }
 
 function fullName(customer = {}) {
@@ -710,8 +723,9 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     let emailRecipientOverride = null;
 
     if (overrideEmail) {
-      if (!isEmailLike(overrideEmail)) {
-        return res.status(400).json({ error: 'Enter a valid invoice recipient email.' });
+      const recipientError = invoiceRecipientOverrideError(overrideEmail, saveBillingRecipient);
+      if (recipientError) {
+        return res.status(400).json({ error: recipientError });
       }
       emailRecipientOverride = {
         email: overrideEmail,
@@ -1144,5 +1158,9 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
+
+router._private = {
+  invoiceRecipientOverrideError,
+};
 
 module.exports = router;

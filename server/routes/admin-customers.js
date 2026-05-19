@@ -507,12 +507,24 @@ function comparableEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
+  ['autoFlipEnRoute', 'auto_flip_en_route'],
+  ['paymentConfirmationSms', 'payment_confirmation_sms'],
+  ['appointmentNotifyPrimary', 'appointment_notify_primary'],
+  ['serviceReportNotifyPrimary', 'service_report_notify_primary'],
+];
+
 function adminNotificationPrefsDbUpdates(body = {}, existing = {}) {
   const dbUpdates = {};
 
-  if (body.autoFlipEnRoute !== undefined) {
-    dbUpdates.auto_flip_en_route = !!body.autoFlipEnRoute;
+  for (const [bodyField, dbField] of ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS) {
+    if (body[bodyField] === undefined) continue;
+    if (typeof body[bodyField] !== 'boolean') {
+      return { error: `${bodyField} must be true or false.` };
+    }
+    dbUpdates[dbField] = body[bodyField];
   }
+
   if (body.billingEmail !== undefined) {
     const billingEmail = cleanEmail(body.billingEmail);
     if (billingEmail && !isEmailLike(billingEmail)) {
@@ -537,15 +549,6 @@ function adminNotificationPrefsDbUpdates(body = {}, existing = {}) {
         ? billingContactName.slice(0, 120)
         : null;
     }
-  }
-  if (body.paymentConfirmationSms !== undefined) {
-    dbUpdates.payment_confirmation_sms = !!body.paymentConfirmationSms;
-  }
-  if (body.appointmentNotifyPrimary !== undefined) {
-    dbUpdates.appointment_notify_primary = !!body.appointmentNotifyPrimary;
-  }
-  if (body.serviceReportNotifyPrimary !== undefined) {
-    dbUpdates.service_report_notify_primary = !!body.serviceReportNotifyPrimary;
   }
 
   return { dbUpdates };

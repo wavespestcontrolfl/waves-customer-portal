@@ -69,8 +69,13 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
       dbUpdates.billing_contact_name = null;
     }
   }
-  if (updates.billingContactName !== undefined && dbUpdates.billing_email !== null) {
-    dbUpdates.billing_contact_name = updates.billingContactName || null;
+  if (updates.billingContactName !== undefined) {
+    const effectiveBillingEmail = dbUpdates.billing_email !== undefined
+      ? dbUpdates.billing_email
+      : existing.billing_email;
+    if (effectiveBillingEmail) {
+      dbUpdates.billing_contact_name = updates.billingContactName || null;
+    }
   }
   if (updates.paymentConfirmationSms !== undefined) dbUpdates.payment_confirmation_sms = updates.paymentConfirmationSms;
   if (updates.serviceReportNotifyPrimary !== undefined) dbUpdates.service_report_notify_primary = updates.serviceReportNotifyPrimary;

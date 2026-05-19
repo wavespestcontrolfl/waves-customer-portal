@@ -65,4 +65,24 @@ describe('notification preference updates', () => {
       billing_contact_name: 'New Accounts Payable',
     });
   });
+
+  test('ignores billing contact name when no effective billing email exists', () => {
+    const updates = notificationPrefsDbUpdates(
+      { billingContactName: 'Accounts Payable' },
+      {},
+    );
+
+    expect(updates).toEqual({});
+  });
+
+  test('updates billing contact name when existing billing email is present', () => {
+    const updates = notificationPrefsDbUpdates(
+      { billingContactName: 'Accounts Payable' },
+      { billing_email: 'ap@example.com' },
+    );
+
+    expect(updates).toEqual({
+      billing_contact_name: 'Accounts Payable',
+    });
+  });
 });

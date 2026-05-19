@@ -210,4 +210,28 @@ describe('admin customers route helpers', () => {
 
     expect(error).toBe('Billing recipient email must be 200 characters or fewer.');
   });
+
+  test('rejects string values for admin notification preference booleans', () => {
+    const { error } = adminNotificationPrefsDbUpdates({
+      serviceReportNotifyPrimary: 'false',
+    });
+
+    expect(error).toBe('serviceReportNotifyPrimary must be true or false.');
+  });
+
+  test('preserves explicit false admin notification preference booleans', () => {
+    const { dbUpdates } = adminNotificationPrefsDbUpdates({
+      autoFlipEnRoute: false,
+      paymentConfirmationSms: false,
+      appointmentNotifyPrimary: false,
+      serviceReportNotifyPrimary: false,
+    });
+
+    expect(dbUpdates).toEqual({
+      appointment_notify_primary: false,
+      auto_flip_en_route: false,
+      payment_confirmation_sms: false,
+      service_report_notify_primary: false,
+    });
+  });
 });
