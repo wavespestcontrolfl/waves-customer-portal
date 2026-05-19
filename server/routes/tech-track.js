@@ -42,6 +42,9 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const trackTransitions = require('../services/track-transitions');
 const { transitionJobStatus } = require('../services/job-status');
 const {
+  buildOnSiteLifecycleUpdates,
+} = require('../utils/service-duration-capture');
+const {
   uploadServicePhotoBuffer,
   VALID_PHOTO_TYPES,
 } = require('../services/service-photos');
@@ -150,6 +153,79 @@ router.post('/:id/en-route', async (req, res, next) => {
       enRouteAt: result.enRouteAt,
       smsSent: result.smsSent,
       alreadyEnRoute: !!result.alreadyEnRoute,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/tech/services/:id/on-site
+//
+// Manual companion to geofence arrival. Tech Home needs a reliable way
+// to stamp the customer-facing "Arrived on site" report event when the
+// geofence prompt does not appear or the tech is working without a
+// precise location signal.
+router.post('/:id/on-site', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first();
+
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    if (svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    const fromStatus = svc.status;
+    const PRE_ON_SITE = new Set(['pending', 'confirmed', 'rescheduled', 'en_route']);
+    if (!PRE_ON_SITE.has(fromStatus) && fromStatus !== 'on_site') {
+      return res.status(409).json({
+        error: `Cannot mark on-site from status '${fromStatus}'`,
+      });
+    }
+
+    if (fromStatus !== 'on_site') {
+      const arrivedAt = new Date();
+      try {
+        await db.transaction(async (trx) => {
+          const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, arrivedAt);
+          if (Object.keys(lifecycleUpdates).length > 0) {
+            await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
+          }
+          await transitionJobStatus({
+            jobId: svc.id,
+            fromStatus,
+            toStatus: 'on_site',
+            transitionedBy: req.technicianId,
+            trx,
+          });
+        });
+      } catch (err) {
+        if (err && err.message && err.message.includes('not in state')) {
+          return res.status(409).json({
+            error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
+          });
+        }
+        throw err;
+      }
+    }
+
+    const result = await trackTransitions.markOnProperty(svc.id);
+    if (!result.ok) {
+      const status = result.reason === 'not_found' ? 404 : 409;
+      return res.status(status).json({ error: result.reason });
+    }
+
+    logger.info(
+      `[tech-track] on-site service=${svc.id} tech=${req.technicianId} ` +
+      `fromStatus=${fromStatus} arrivedAt=${result.arrivedAt || 'n/a'}`
+    );
+
+    return res.json({
+      state: result.state,
+      arrivedAt: result.arrivedAt,
+      alreadyOnSite: fromStatus === 'on_site',
     });
   } catch (err) {
     next(err);

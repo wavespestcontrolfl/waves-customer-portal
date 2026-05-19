@@ -13,6 +13,7 @@
 //   PATCH /api/tech/services/:id/complete     (finish service)
 //   PATCH /api/tech/services/:id/skip         (skip with reason)
 //   POST  /api/tech/services/:id/en-route     (begin drive)
+//   POST  /api/tech/services/:id/on-site      (arrive at property)
 //   GET   /api/tech/notifications             (geofence prompts;
 //                                              polled every 10s by
 //                                              GeofenceArrivalPrompt)
@@ -97,6 +98,7 @@ function serviceTechnicianId(service) {
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
+const ON_SITE_ELIGIBLE = new Set(['en_route']);
 
 // /tech/messages and /tech/quick-invoice are both dead — neither has
 // an underlying feature. Dropped from QUICK_ACTIONS until those
@@ -117,6 +119,7 @@ export default function TechHomePage() {
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
+  const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const techName = getAdminDisplayName('Tech');
   const firstName = techName.split(' ')[0];
   // Login persists `waves_admin_user` as JSON ({ id, name, email, role }).
@@ -189,6 +192,26 @@ export default function TechHomePage() {
       setEnRouteState({ pendingId: null, message: err.message || 'Failed to mark en route', isError: true });
     }
   }, [enRouteState.pendingId, fetchSchedule]);
+
+  const handleOnSite = useCallback(async (serviceId) => {
+    if (!serviceId || onSiteState.pendingId) return;
+    setOnSiteState({ pendingId: serviceId, message: '', isError: false });
+    try {
+      const token = getAdminAuthToken();
+      const res = await fetch(`${API}/api/tech/services/${serviceId}/on-site`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const msg = data.alreadyOnSite ? 'Already marked on site' : 'Marked on site';
+      setOnSiteState({ pendingId: null, message: msg, isError: false });
+      fetchSchedule();
+      setTimeout(() => setOnSiteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
+    } catch (err) {
+      setOnSiteState({ pendingId: null, message: err.message || 'Failed to mark on site', isError: true });
+    }
+  }, [fetchSchedule, onSiteState.pendingId]);
 
   // Live updates via Socket.io. Tech JWTs auth into the same
   // dispatch:admins room as admins (server/sockets/index.js), so the
@@ -374,15 +397,24 @@ export default function TechHomePage() {
               disabled={enRouteState.pendingId === nextStop.id || !EN_ROUTE_ELIGIBLE.has(nextStop.status || 'pending')}
               onClick={() => handleEnRoute(nextStop.id)}
             />
+            {ON_SITE_ELIGIBLE.has(nextStop.status || 'pending') && (
+              <ActionBtn
+                label={onSiteState.pendingId === nextStop.id ? 'Marking…' : 'On Site'}
+                icon="📍"
+                primary
+                disabled={onSiteState.pendingId === nextStop.id}
+                onClick={() => handleOnSite(nextStop.id)}
+              />
+            )}
           </div>
-          {enRouteState.message && (
+          {(enRouteState.message || onSiteState.message) && (
             <div style={{
               marginTop: 10, fontSize: 12, padding: '6px 10px', borderRadius: 6,
-              background: enRouteState.isError ? '#ef444422' : '#22c55e22',
-              border: `1px solid ${enRouteState.isError ? '#ef4444' : '#22c55e'}`,
-              color: enRouteState.isError ? '#ef4444' : '#22c55e',
+              background: (enRouteState.isError || onSiteState.isError) ? '#ef444422' : '#22c55e22',
+              border: `1px solid ${(enRouteState.isError || onSiteState.isError) ? '#ef4444' : '#22c55e'}`,
+              color: (enRouteState.isError || onSiteState.isError) ? '#ef4444' : '#22c55e',
             }}>
-              {enRouteState.message}
+              {onSiteState.message || enRouteState.message}
             </div>
           )}
         </div>
