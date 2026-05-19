@@ -190,7 +190,11 @@ const sInput = (isMobile) => ({
 
 const ATTACHMENT_MAX_COUNT = 10;
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+const ATTACHMENT_MAX_MB = ATTACHMENT_MAX_BYTES / 1024 / 1024;
 const ATTACHMENT_ACCEPT = ".jpg,.jpeg,.png,.gif,.tif,.tiff,.bmp,.pdf";
+const ATTACHMENT_ALLOWED_TYPE_LABEL = "JPG, PNG, GIF, TIFF, BMP, and PDF";
+export const ATTACHMENT_HELP_TEXT = `Attach up to ${ATTACHMENT_MAX_COUNT} files totaling ${ATTACHMENT_MAX_MB} MB. Supported file types: ${ATTACHMENT_ALLOWED_TYPE_LABEL}.`;
+export const ATTACHMENT_VISIBILITY_TEXT = "Customers can view these files from the invoice/payment link. They are not sent as separate email attachments.";
 const ATTACHMENT_ALLOWED_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -216,7 +220,7 @@ function fileExtension(name = "") {
   return match ? match[1] : "";
 }
 
-function isAllowedAttachmentFile(file) {
+export function isAllowedAttachmentFile(file) {
   return (
     ATTACHMENT_ALLOWED_TYPES.has(String(file.type || "").toLowerCase()) ||
     ATTACHMENT_ALLOWED_EXTENSIONS.has(fileExtension(file.name))
@@ -230,11 +234,19 @@ function formatFileSize(bytes = 0) {
   return `${value} B`;
 }
 
-function attachmentTotalBytes(files = []) {
+export function attachmentTotalBytes(files = []) {
   return files.reduce((sum, file) => sum + Number(file.size || file.file_size_bytes || file.fileSizeBytes || 0), 0);
 }
 
-function validateAttachmentFiles(existingFiles, incomingFiles) {
+export function canAddInvoiceAttachments(files = []) {
+  return files.length < ATTACHMENT_MAX_COUNT && attachmentTotalBytes(files) < ATTACHMENT_MAX_BYTES;
+}
+
+export function invoiceAttachmentLimitLabel(files = []) {
+  return `${files.length}/${ATTACHMENT_MAX_COUNT} files · ${formatFileSize(attachmentTotalBytes(files))}/${ATTACHMENT_MAX_MB} MB`;
+}
+
+export function validateAttachmentFiles(existingFiles, incomingFiles) {
   const next = [...existingFiles, ...incomingFiles];
   if (next.length > ATTACHMENT_MAX_COUNT) {
     return `Attach up to ${ATTACHMENT_MAX_COUNT} files`;
@@ -244,7 +256,7 @@ function validateAttachmentFiles(existingFiles, incomingFiles) {
   }
   const unsupported = incomingFiles.find((file) => !isAllowedAttachmentFile(file));
   if (unsupported) {
-    return "Supported file types: JPG, PNG, GIF, TIFF, BMP, and PDF";
+    return `Supported file types: ${ATTACHMENT_ALLOWED_TYPE_LABEL}`;
   }
   return null;
 }
@@ -1509,6 +1521,8 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
   const [deletingId, setDeletingId] = useState(null);
   const fileRef = useRef(null);
   const showToastRef = useRef(showToast);
+  const helpId = `invoice-attachments-${invoiceId}-help`;
+  const statusId = `invoice-attachments-${invoiceId}-status`;
 
   useEffect(() => {
     showToastRef.current = showToast;
@@ -1579,8 +1593,7 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
     }
   };
 
-  const totalBytes = attachmentTotalBytes(attachments);
-  const canAdd = attachments.length < ATTACHMENT_MAX_COUNT && totalBytes < ATTACHMENT_MAX_BYTES;
+  const canAdd = canAddInvoiceAttachments(attachments);
 
   return (
     <div
@@ -1617,9 +1630,10 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
             <Paperclip size={13} strokeWidth={2.2} />
             Attachments
           </div>
-          <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.4 }}>
-            Attach up to 10 files totalling 25 MB. Supported file types: JPG,
-            PNG, GIF, TIFF, BMP, and PDF.
+          <div id={helpId} style={{ fontSize: 12, color: D.muted, lineHeight: 1.4 }}>
+            {ATTACHMENT_HELP_TEXT}
+            <br />
+            {ATTACHMENT_VISIBILITY_TEXT}
           </div>
         </div>
         <input
@@ -1628,12 +1642,14 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
           multiple
           accept={ATTACHMENT_ACCEPT}
           onChange={handleFiles}
+          aria-describedby={`${helpId} ${statusId}`}
           style={{ display: "none" }}
         />
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
           disabled={!canAdd || uploading}
+          aria-describedby={`${helpId} ${statusId}`}
           style={{
             ...sBtn(D.card, D.text, isMobile),
             border: `1px solid ${D.border}`,
@@ -1649,9 +1665,9 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
       </div>
 
       {loading ? (
-        <div style={{ fontSize: 12, color: D.muted }}>Loading attachments...</div>
+        <div id={statusId} role="status" aria-live="polite" style={{ fontSize: 12, color: D.muted }}>Loading attachments...</div>
       ) : attachments.length === 0 ? (
-        <div style={{ fontSize: 12, color: D.muted }}>No files attached.</div>
+        <div id={statusId} role="status" aria-live="polite" style={{ fontSize: 12, color: D.muted }}>No files attached.</div>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
           {attachments.map((attachment) => (
@@ -1743,9 +1759,8 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
               </div>
             </div>
           ))}
-          <div style={{ fontSize: 11, color: D.muted }}>
-            {attachments.length}/{ATTACHMENT_MAX_COUNT} files · {formatFileSize(totalBytes)}
-            /25 MB
+          <div id={statusId} role="status" aria-live="polite" style={{ fontSize: 11, color: D.muted }}>
+            {invoiceAttachmentLimitLabel(attachments)}
           </div>
         </div>
       )}
@@ -2885,6 +2900,9 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
       : sendTiming === "draft"
         ? "Create Draft"
         : "Schedule Invoice";
+  const canAddQueuedAttachments = canAddInvoiceAttachments(queuedAttachments);
+  const queuedAttachmentHelpId = "invoice-create-attachments-help";
+  const queuedAttachmentStatusId = "invoice-create-attachments-status";
   const lineTableColumns = "minmax(260px, 1fr) 84px 132px 36px";
   const summaryRowStyle = (size = 12, weight = 400) => ({
     display: "grid",
@@ -3446,21 +3464,26 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
             multiple
             accept={ATTACHMENT_ACCEPT}
             onChange={handleQueuedAttachments}
+            aria-describedby={`${queuedAttachmentHelpId} ${queuedAttachmentStatusId}`}
             style={{ display: "none" }}
           />
-          <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45, marginBottom: 12 }}>
-            Attach up to 10 files totalling 25 MB. Supported file types: JPG,
-            PNG, GIF, TIFF, BMP, and PDF.
+          <div id={queuedAttachmentHelpId} style={{ fontSize: 12, color: D.muted, lineHeight: 1.45, marginBottom: 12 }}>
+            {ATTACHMENT_HELP_TEXT}
+            <br />
+            {ATTACHMENT_VISIBILITY_TEXT}
           </div>
           <button
             type="button"
             onClick={() => attachmentInputRef.current?.click()}
+            disabled={!canAddQueuedAttachments}
+            aria-describedby={`${queuedAttachmentHelpId} ${queuedAttachmentStatusId}`}
             style={{
               ...sBtn(D.card, D.text, isMobile),
               border: `1px solid ${D.border}`,
               display: "inline-flex",
               alignItems: "center",
               gap: 6,
+              opacity: canAddQueuedAttachments ? 1 : 0.55,
             }}
           >
             <Upload size={14} strokeWidth={2.2} />
@@ -3528,13 +3551,12 @@ function CreateInvoice({ showToast, onCreated, isMobile }) {
                   </button>
                 </div>
               ))}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                {queuedAttachments.length}/{ATTACHMENT_MAX_COUNT} files ·{" "}
-                {formatFileSize(attachmentTotalBytes(queuedAttachments))}/25 MB
+              <div id={queuedAttachmentStatusId} role="status" aria-live="polite" style={{ fontSize: 11, color: D.muted }}>
+                {invoiceAttachmentLimitLabel(queuedAttachments)}
               </div>
             </div>
           ) : (
-            <div style={{ fontSize: 12, color: D.muted, marginTop: 10 }}>
+            <div id={queuedAttachmentStatusId} role="status" aria-live="polite" style={{ fontSize: 12, color: D.muted, marginTop: 10 }}>
               No files selected.
             </div>
           )}
