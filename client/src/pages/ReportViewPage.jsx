@@ -2469,7 +2469,7 @@ function minutesBetween(start, end) {
   return Math.round((endMs - startMs) / 60000);
 }
 
-function formatDurationMinutes(minutes) {
+function formatCompactDurationMinutes(minutes) {
   const value = positiveNumber(minutes);
   if (!value) return '';
   const rounded = Math.max(1, Math.round(value));
@@ -2525,7 +2525,7 @@ function timelineAnchorTimes(timingSource = {}, visitTiming = {}) {
   return {
     arrivedAt,
     completedAt,
-    timeOnSiteDisplay: formatDurationMinutes(derivedMinutes || reportedMinutes),
+    timeOnSiteDisplay: formatCompactDurationMinutes(derivedMinutes || reportedMinutes),
   };
 }
 
