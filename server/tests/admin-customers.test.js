@@ -1,6 +1,7 @@
 const adminCustomersRoute = require('../routes/admin-customers');
 
 const {
+  adminNotificationPrefsDbUpdates,
   cadenceFromEstimateLine,
   customerSearchTerms,
   isSchedulableOneTimeEstimateLine,
@@ -164,5 +165,49 @@ describe('admin customers route helpers', () => {
       source: 'recurring',
       estimateId: 'estimate-annual-recurring',
     });
+  });
+
+  test('ignores billing contact name when no billing email exists', () => {
+    const { dbUpdates } = adminNotificationPrefsDbUpdates(
+      { billingContactName: 'Accounts Payable' },
+      {},
+    );
+
+    expect(dbUpdates).toEqual({});
+  });
+
+  test('updates billing contact name when an existing billing email is present', () => {
+    const { dbUpdates } = adminNotificationPrefsDbUpdates(
+      { billingContactName: 'Accounts Payable' },
+      { billing_email: 'ap@example.com' },
+    );
+
+    expect(dbUpdates).toEqual({
+      billing_contact_name: 'Accounts Payable',
+    });
+  });
+
+  test('clears stale billing contact name when billing email changes without a replacement name', () => {
+    const { dbUpdates } = adminNotificationPrefsDbUpdates(
+      { billingEmail: 'new-ap@example.com' },
+      {
+        billing_email: 'old-ap@example.com',
+        billing_contact_name: 'Old Accounts Payable',
+      },
+    );
+
+    expect(dbUpdates).toEqual({
+      billing_email: 'new-ap@example.com',
+      billing_contact_name: null,
+    });
+  });
+
+  test('rejects billing emails that exceed the database column length', () => {
+    const localPart = 'a'.repeat(190);
+    const { error } = adminNotificationPrefsDbUpdates({
+      billingEmail: `${localPart}@example.com`,
+    });
+
+    expect(error).toBe('Billing recipient email must be 200 characters or fewer.');
   });
 });

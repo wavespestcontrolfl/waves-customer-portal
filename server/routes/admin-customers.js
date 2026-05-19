@@ -503,6 +503,54 @@ function isEmailLike(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value) || '');
 }
 
+function comparableEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function adminNotificationPrefsDbUpdates(body = {}, existing = {}) {
+  const dbUpdates = {};
+
+  if (body.autoFlipEnRoute !== undefined) {
+    dbUpdates.auto_flip_en_route = !!body.autoFlipEnRoute;
+  }
+  if (body.billingEmail !== undefined) {
+    const billingEmail = cleanEmail(body.billingEmail);
+    if (billingEmail && !isEmailLike(billingEmail)) {
+      return { error: 'Enter a valid billing recipient email.' };
+    }
+    if (billingEmail && billingEmail.length > 200) {
+      return { error: 'Billing recipient email must be 200 characters or fewer.' };
+    }
+    dbUpdates.billing_email = billingEmail || null;
+    const emailChanged = comparableEmail(billingEmail) !== comparableEmail(existing.billing_email);
+    if (!billingEmail || (emailChanged && body.billingContactName === undefined)) {
+      dbUpdates.billing_contact_name = null;
+    }
+  }
+  if (body.billingContactName !== undefined) {
+    const billingContactName = cleanOptionalText(body.billingContactName);
+    const effectiveBillingEmail = dbUpdates.billing_email !== undefined
+      ? dbUpdates.billing_email
+      : cleanEmail(existing.billing_email);
+    if (effectiveBillingEmail) {
+      dbUpdates.billing_contact_name = billingContactName
+        ? billingContactName.slice(0, 120)
+        : null;
+    }
+  }
+  if (body.paymentConfirmationSms !== undefined) {
+    dbUpdates.payment_confirmation_sms = !!body.paymentConfirmationSms;
+  }
+  if (body.appointmentNotifyPrimary !== undefined) {
+    dbUpdates.appointment_notify_primary = !!body.appointmentNotifyPrimary;
+  }
+  if (body.serviceReportNotifyPrimary !== undefined) {
+    dbUpdates.service_report_notify_primary = !!body.serviceReportNotifyPrimary;
+  }
+
+  return { dbUpdates };
+}
+
 function cleanState(value) {
   const cleaned = cleanText(value).toUpperCase();
   return cleaned ? cleaned.slice(0, 2) : 'FL';
@@ -1760,43 +1808,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 // Creates the prefs row if it doesn't exist (defaults to all TRUE).
 router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
   try {
-    const dbUpdates = {};
-    if (req.body.autoFlipEnRoute !== undefined) {
-      dbUpdates.auto_flip_en_route = !!req.body.autoFlipEnRoute;
-    }
-    if (req.body.billingEmail !== undefined) {
-      const billingEmail = cleanEmail(req.body.billingEmail);
-      if (billingEmail && !isEmailLike(billingEmail)) {
-        return res.status(400).json({ error: 'Enter a valid billing recipient email.' });
-      }
-      dbUpdates.billing_email = billingEmail || null;
-      if (!billingEmail) dbUpdates.billing_contact_name = null;
-    }
-    if (req.body.billingContactName !== undefined) {
-      const billingContactName = cleanOptionalText(req.body.billingContactName);
-      if (dbUpdates.billing_email !== null) {
-        dbUpdates.billing_contact_name = billingContactName
-          ? billingContactName.slice(0, 120)
-          : null;
-      }
-    }
-    if (req.body.paymentConfirmationSms !== undefined) {
-      dbUpdates.payment_confirmation_sms = !!req.body.paymentConfirmationSms;
-    }
-    if (req.body.appointmentNotifyPrimary !== undefined) {
-      dbUpdates.appointment_notify_primary = !!req.body.appointmentNotifyPrimary;
-    }
-    if (req.body.serviceReportNotifyPrimary !== undefined) {
-      dbUpdates.service_report_notify_primary = !!req.body.serviceReportNotifyPrimary;
+    const existing = await db('notification_prefs')
+      .where({ customer_id: req.params.id })
+      .first();
+    const { dbUpdates, error } = adminNotificationPrefsDbUpdates(req.body, existing || {});
+    if (error) {
+      return res.status(400).json({ error });
     }
     if (Object.keys(dbUpdates).length === 0) {
       return res.status(400).json({ error: 'No supported fields provided.' });
     }
     dbUpdates.updated_at = new Date();
 
-    const existing = await db('notification_prefs')
-      .where({ customer_id: req.params.id })
-      .first();
     if (existing) {
       await db('notification_prefs')
         .where({ customer_id: req.params.id })
@@ -1966,6 +1989,7 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  adminNotificationPrefsDbUpdates,
   cadenceFromEstimateLine,
   customerSearchTerms,
   isSchedulableOneTimeEstimateLine,
