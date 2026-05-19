@@ -43,16 +43,17 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
 const WAVES_OFFICE_PHONE = '+19413187612';
 const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
 
-// Render an SMS template from the DB, falling back to an inline body. Keeps
-// billing-cron copy editable from the admin UI without a deploy.
-async function renderTemplate(templateKey, vars, fallback) {
+// Render customer billing SMS from the editable template table.
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body && !body.includes('{first_name}')) return body;
     }
-  } catch { /* fall through */ }
-  return fallback;
+  } catch (err) {
+    throw new Error(`SMS template ${templateKey} could not be rendered: ${err.message}`);
+  }
+  throw new Error(`SMS template ${templateKey} is missing or inactive`);
 }
 
 const BillingCron = {
@@ -173,7 +174,6 @@ const BillingCron = {
           const receiptLine = receiptUrl ? ` View your receipt: ${receiptUrl}` : '';
           const body = await renderTemplate('autopay_charge_success',
             { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
-            `Hi ${customer.first_name}, your WaveGuard monthly payment was successfully processed. Thank you!${receiptLine}`
           );
           await sendCustomerBillingSms({
             customer,
@@ -284,7 +284,6 @@ const BillingCron = {
         try {
           const body = await renderTemplate('autopay_charge_failed',
             { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
-            `Hi ${customer.first_name}, your WaveGuard monthly payment couldn't be processed. We'll retry automatically in a few days. Update your card here if you'd like to fix it now: ${BILLING_PORTAL_URL}\n\nQuestions? (941) 318-7612`
           );
           await sendCustomerBillingSms({
             customer,
@@ -386,7 +385,6 @@ const BillingCron = {
           const receiptLine = retryReceiptUrl ? ` View your receipt: ${retryReceiptUrl}` : '';
           const body = await renderTemplate('autopay_retry_success',
             { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
-            `Hi ${customer.first_name}, great news - your payment just went through. Thank you for being a Waves customer!${receiptLine}`
           );
           await sendCustomerBillingSms({
             customer,
@@ -424,7 +422,6 @@ const BillingCron = {
           try {
             const body = await renderTemplate('autopay_retry_final_failed',
               { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
-              `Hi ${customer.first_name}, after several attempts we still couldn't process your payment. Please update your card to keep your service active: ${BILLING_PORTAL_URL}\n\nQuestions? Call (941) 318-7612 or reply to this message.`
             );
             await sendCustomerBillingSms({
               customer,
@@ -507,10 +504,8 @@ const BillingCron = {
 
           // Send retry SMS with update-card link
           try {
-            const amount = parseFloat(payment.amount).toFixed(2);
             const body = await renderTemplate('autopay_retry_failed',
               { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
-              `Hi ${customer.first_name}, your payment still didn't go through. We'll try again in a few days, or you can update your card here to fix it now: ${BILLING_PORTAL_URL}\n\nQuestions? (941) 318-7612`
             );
             await sendCustomerBillingSms({
               customer,

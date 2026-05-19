@@ -71,6 +71,36 @@ function buildServiceReportV1Sms({
   return lines.join('\n');
 }
 
+function buildServiceReportV1SmsVars({
+  customerFirstName,
+  reportUrl,
+  advisory,
+  fallbackAdvisory,
+  payUrl,
+} = {}) {
+  const url = String(reportUrl || '').trim();
+  if (!url) return null;
+
+  const mergedAdvisory = normalizeAdvisory(advisory, fallbackAdvisory);
+  const exterior = normalizeMinutes(mergedAdvisory.exterior_reentry_min);
+  const interior = normalizeMinutes(mergedAdvisory.interior_reentry_min);
+  let reentryLine = '';
+  if (exterior !== null && interior !== null) {
+    reentryLine = `\nRe-entry: ${exterior} min outside, ${interior} min inside.`;
+  } else if (exterior !== null) {
+    reentryLine = `\nRe-entry: ${exterior} min outside.`;
+  } else if (interior !== null) {
+    reentryLine = `\nRe-entry: ${interior} min inside.`;
+  }
+
+  return {
+    first_name: normalizeName(customerFirstName) || 'there',
+    report_url: url,
+    reentry_line: reentryLine,
+    pay_url: String(payUrl || '').trim(),
+  };
+}
+
 function buildServiceReportV1DeliveryContext({
   record,
   service,
@@ -85,6 +115,13 @@ function buildServiceReportV1DeliveryContext({
   const config = getServiceLineConfig(record.service_line || service?.service_type);
   const hasInvoiceLink = !!String(payUrl || '').trim();
   const smsType = serviceReportV1SmsType({ hasInvoiceLink });
+  const vars = buildServiceReportV1SmsVars({
+    customerFirstName: service?.first_name,
+    reportUrl: smsReportUrl || reportUrl,
+    advisory: record.advisory,
+    fallbackAdvisory: config.advisoryDefaults,
+    payUrl,
+  });
   const body = buildServiceReportV1Sms({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
@@ -96,6 +133,7 @@ function buildServiceReportV1DeliveryContext({
   return {
     enabled: true,
     body,
+    vars,
     smsType,
     metadata: {
       original_message_type: smsType,
@@ -111,6 +149,7 @@ function buildServiceReportV1DeliveryContext({
 module.exports = {
   buildServiceReportV1DeliveryContext,
   buildServiceReportV1Sms,
+  buildServiceReportV1SmsVars,
   serviceReportV1SmsType,
   shouldSendServiceReportV1Delivery,
 };

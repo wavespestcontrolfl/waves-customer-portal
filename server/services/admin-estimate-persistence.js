@@ -6,6 +6,7 @@ const {
   assertLeadCanAttachEstimate,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
+const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 
 function errorWithStatus(message, statusCode) {
   const err = new Error(message);
@@ -28,6 +29,14 @@ function estimateExpiresAt(now = () => new Date()) {
 }
 
 function buildEstimatePersistenceFields(body) {
+  const serviceInterest = inferEstimateServiceInterest({
+    serviceInterest: body.serviceInterest,
+    estimateData: body.estimateData,
+    monthlyTotal: body.monthlyTotal,
+    onetimeTotal: body.onetimeTotal,
+    notes: body.notes,
+  });
+
   return {
     customer_id: body.customerId || null,
     estimate_data: body.estimateData ? JSON.stringify(body.estimateData) : null,
@@ -39,6 +48,7 @@ function buildEstimatePersistenceFields(body) {
     annual_total: body.annualTotal,
     onetime_total: body.onetimeTotal,
     waveguard_tier: body.waveguardTier,
+    service_interest: serviceInterest,
     notes: body.notes,
     satellite_url: body.satelliteUrl,
     show_one_time_option: !!body.showOneTimeOption,

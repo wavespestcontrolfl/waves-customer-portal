@@ -4,6 +4,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
 const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
+const { renderSmsTemplate } = require('./sms-template-renderer');
 
 class AppointmentTagger {
 
@@ -176,7 +177,7 @@ class AppointmentTagger {
 
   // Pest prep — SMS (Beehiiv email if configured)
   async triggerPestPrep(service, pestType) {
-    const prepSMS = this.getPrepSMS(pestType, service);
+    const prepSMS = await this.getPrepSMS(pestType, service);
     if (!prepSMS) return;
 
     const prepResult = await sendCustomerMessage({
@@ -216,7 +217,7 @@ class AppointmentTagger {
     });
   }
 
-  getPrepSMS(pestType, service) {
+  async getPrepSMS(pestType, service) {
     // Knex returns DATE columns as Date objects; guard both shapes so the
     // template never renders "Invalid Date" in a customer-facing SMS.
     // Mirrors the pattern in server/services/invoice.js (sendViaSMS).
@@ -236,11 +237,20 @@ class AppointmentTagger {
     } catch { date = ''; }
     if (!date) date = 'your scheduled date';
 
-    const msgs = {
-      cockroach: `Hi ${service.first_name}! Your cockroach treatment is ${date}. To prep: clear under sinks/behind appliances, remove items from cabinet bases, clean food debris, and leave home 2-4h after treatment. Questions? Reply here. - Waves`,
-      bed_bug: `Hi ${service.first_name}! Bed bug prep for ${date}: strip bedding and dry on high heat, pull beds 6 inches from walls, bag clothing for wash/dry, vacuum mattress/baseboards, and do not move items to other rooms. Questions? Reply here. - Waves`,
-    };
-    return msgs[pestType];
+    const templateKey = pestType === 'cockroach'
+      ? 'pest_prep_cockroach'
+      : pestType === 'bed_bug'
+        ? 'pest_prep_bed_bug'
+        : null;
+    if (!templateKey) return null;
+    const body = await renderSmsTemplate(templateKey, {
+      first_name: service.first_name || 'there',
+      service_date: date,
+    });
+    if (!body) {
+      logger.warn(`[appointment-tagger] ${templateKey} template missing/disabled; prep SMS skipped for service ${service.id}`);
+    }
+    return body;
   }
 
   // Welcome sequence for new recurring customers

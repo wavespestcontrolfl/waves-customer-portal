@@ -1,6 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 
 const {
+  buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateViewUrl,
 } = require('../services/admin-estimate-persistence');
@@ -78,6 +79,25 @@ const baseBody = {
 describe('admin estimate persistence', () => {
   beforeEach(() => {
     clearAllEstimatePricingCache();
+  });
+
+  test('persists service_interest inferred from quoted service lines', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      serviceInterest: '',
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { service: 'lawn_care', name: 'Lawn Care', mo: 84 },
+              { service: 'pest_control', name: 'Pest Control', mo: 48.33 },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(fields.service_interest).toBe('Lawn Care + Pest Control');
   });
 
   test('reuses an existing lead-linked draft instead of creating a second estimate', async () => {

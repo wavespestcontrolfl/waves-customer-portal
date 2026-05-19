@@ -7,6 +7,7 @@ const { renderServiceReportV1Pdf } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
+  reportPdfStorageKey,
 } = require('./pdf-storage');
 const {
   emitPdfRenderTerminalFailure,
@@ -115,7 +116,10 @@ async function renderAndStoreServiceReportPdf(recordId, {
 
 async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } = {}) {
   const service = await knex('service_records').where({ id: recordId }).first('id', 'pdf_storage_key');
-  const stored = await getHealthyStoredReportPdf(service?.pdf_storage_key);
+  const expectedPdfStorageKey = service?.id ? reportPdfStorageKey(service.id) : null;
+  const stored = service?.pdf_storage_key === expectedPdfStorageKey
+    ? await getHealthyStoredReportPdf(service.pdf_storage_key)
+    : null;
   if (stored) return { pdf: stored, key: service.pdf_storage_key, rendered: false };
 
   const rendered = await renderAndStoreServiceReportPdf(recordId, {

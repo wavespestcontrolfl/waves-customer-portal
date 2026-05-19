@@ -243,6 +243,20 @@ function visitTimeRange(data = {}) {
   return '';
 }
 
+export function visitTimeLabel(data = {}) {
+  const arrived = formatClockTime(data.visitTiming?.arrivedAt);
+  const exited = formatClockTime(data.visitTiming?.exitedAt);
+  if (arrived && exited && arrived !== exited) return `${arrived} to ${exited}`;
+  return arrived || exited || '';
+}
+
+export function serviceReportDateTimeLabel(data = {}) {
+  const serviceDate = formatDate(data.serviceDate);
+  const serviceTime = visitTimeLabel(data);
+  if (serviceDate && serviceTime) return `${serviceDate} at ${serviceTime}`;
+  return serviceDate || serviceTime;
+}
+
 export function cleanVisitSummary(value) {
   let text = String(value || '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -1057,7 +1071,7 @@ function ServiceStatusCard({ data, mode }) {
   const completionStatus = completedEvent?.status === 'pending' ? 'In progress' : 'Completed';
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   const serviceLabel = serviceDisplayName(data);
-  const serviceDate = formatDate(data.serviceDate);
+  const serviceDateTime = serviceReportDateTimeLabel(data);
 
   return (
     <section className="service-report-hero" id="service-status">
@@ -1070,7 +1084,7 @@ function ServiceStatusCard({ data, mode }) {
         <div className="service-status-main">
           <div>
             <div className="section-eyebrow">Report details</div>
-            <div className="sr-meta">{[serviceLabel, serviceDate].filter(Boolean).join(' | ')}</div>
+            <div className="sr-meta">{[serviceLabel, serviceDateTime].filter(Boolean).join(' | ')}</div>
           </div>
           {readinessBadge && (
             <div className={`status-badge ${readinessBadge.ready ? 'status-ready' : 'status-pending'}`}>{readinessBadge.label}</div>
@@ -1098,6 +1112,10 @@ function ServiceStatusCard({ data, mode }) {
             <div className="sr-cell-value">{completionStatus}</div>
           </div>
         </div>
+        <HeroConditions
+          conditions={data.conditions || {}}
+          weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
+        />
       </div>
     </section>
   );
@@ -2361,20 +2379,53 @@ function ServiceTimelineSection({ serviceType, workflowEvents, customerInteracti
   );
 }
 
-function AreasServicedSection({ serviceAreas = [], serviceLocations = [], serviceType }) {
+function zoneColorByIndex(index = 0) {
+  return TREATMENT_OVERLAY_COLORS[Math.max(0, index) % TREATMENT_OVERLAY_COLORS.length];
+}
+
+function zoneLetterByIndex(index = 0) {
+  return String.fromCharCode(65 + (Math.max(0, index) % 26));
+}
+
+function areaStatusCopy(row = {}) {
+  const status = String(row.status || '').trim();
+  if (!status) return row.zoneLetter ? `Zone ${row.zoneLetter}` : 'Service area';
+  const verb = status.toLowerCase() === 'serviced' ? 'treated' : status.toLowerCase();
+  return row.zoneLetter ? `Zone ${row.zoneLetter} ${verb}` : status;
+}
+
+function AreasServicedSection({ serviceAreas = [], serviceLocations = [], serviceType, zones = [] }) {
   const normalizedServiceType = normalizeCoverageServiceType(serviceType);
+  const zoneIndexById = new Map((zones || []).map((zone, index) => [String(zone.id), index]));
+  const zoneById = new Map((zones || []).map((zone, index) => [
+    String(zone.id),
+    {
+      ...zone,
+      color: zone.color || zoneColorByIndex(index),
+    },
+  ]));
   const locationRows = Array.isArray(serviceLocations) && serviceLocations.length
-    ? serviceLocations.map((location) => ({
-      key: location.id || `${location.name}-${location.status}`,
-      name: location.name,
-      status: coverageStatusConfig(location.status).label,
-      tone: coverageStatusConfig(location.status).tone,
-    }))
-    : serviceAreas.map((area) => ({
+    ? serviceLocations.map((location, index) => {
+      const zone = zoneById.get(String(location.zoneId || location.zone_id || ''));
+      const status = coverageStatusConfig(location.status);
+      return {
+        key: location.id || `${location.name}-${location.status}`,
+        name: location.name,
+        status: status.label,
+        tone: status.tone,
+        zoneLetter: zone?.letter || zoneLetterByIndex(index),
+        zoneLabel: zone?.label || location.name,
+        zoneColor: zone?.color || zoneColorByIndex(zoneIndexById.get(String(location.zoneId || location.zone_id || '')) ?? index),
+      };
+    })
+    : serviceAreas.map((area, index) => ({
       key: area,
       name: area,
       status: 'Serviced',
       tone: 'green',
+      zoneLetter: zones[index]?.letter || zoneLetterByIndex(index),
+      zoneLabel: zones[index]?.label || area,
+      zoneColor: zones[index]?.color || zoneColorByIndex(index),
     }));
 
   return (
@@ -2390,9 +2441,21 @@ function AreasServicedSection({ serviceAreas = [], serviceLocations = [], servic
       ) : (
         <div className="areas-serviced-list" aria-label="Areas serviced">
           {locationRows.map((row) => (
-            <article className="coverage-summary-row" key={row.key}>
-              <h3>{row.name}</h3>
-              <span className={`coverage-status-chip status-${row.tone}`}>{row.status}</span>
+            <article
+              className="coverage-summary-row zone-service-row"
+              key={row.key}
+              style={{ '--zone-color': row.zoneColor }}
+            >
+              <div className="zone-service-identity">
+                <span className="zone-letter-badge" aria-label={row.zoneLetter ? `Zone ${row.zoneLetter}` : 'Service zone'}>
+                  {row.zoneLetter}
+                </span>
+                <div className="zone-service-copy">
+                  <h3>{row.name}</h3>
+                  <p>{areaStatusCopy(row)}</p>
+                </div>
+              </div>
+              <span className={`coverage-status-chip zone-status-chip status-${row.tone}`}>{row.status}</span>
             </article>
           ))}
         </div>
@@ -2414,6 +2477,7 @@ function ServiceReportCoverageAndWorkflow({
   evidenceLevel,
   mapBackgroundUrl,
   mapAttribution,
+  zones,
 }) {
   return (
     <>
@@ -2427,6 +2491,7 @@ function ServiceReportCoverageAndWorkflow({
         serviceType={serviceType}
         serviceAreas={serviceAreas}
         serviceLocations={serviceLocations}
+        zones={zones}
       />
       <ServiceCoverageMapSection
         serviceType={serviceType}
@@ -3393,12 +3458,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 650;
         }
         .hero-conditions {
-          margin-top: 12px;
+          margin-top: 16px;
           padding: 12px 14px 14px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
-          max-width: 820px;
         }
         .hero-conditions-copy {
           display: flex;
@@ -3444,15 +3508,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           text-align: right;
         }
         .hero-condition-row {
-          display: grid;
-          grid-template-columns: repeat(6, minmax(92px, 1fr));
+          display: flex;
           gap: 1px;
-          overflow: hidden;
+          overflow-x: auto;
+          overflow-y: hidden;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--line);
+          scrollbar-width: thin;
+          -webkit-overflow-scrolling: touch;
         }
         .hero-condition-cell {
+          flex: 0 0 148px;
           min-height: 62px;
           padding: 10px;
           background: var(--wash);
@@ -3862,9 +3929,36 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           justify-content: space-between;
           gap: 12px;
           border: 1px solid var(--line);
+          border-left: 5px solid var(--zone-color, var(--line));
           border-radius: 10px;
           background: #fff;
           padding: 11px 12px;
+        }
+        .zone-service-row {
+          align-items: center;
+        }
+        .zone-service-identity {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          min-width: 0;
+        }
+        .zone-letter-badge {
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          background: var(--zone-color, ${B.blueDeeper});
+          color: #fff;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
+          font-size: 13px;
+          font-weight: 850;
+          line-height: 1;
+        }
+        .zone-service-copy {
+          min-width: 0;
         }
         .coverage-summary-row h3 {
           margin: 0;
@@ -3883,6 +3977,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-evidence-note {
           margin-top: 12px;
+        }
+        .coverage-status-chip.zone-status-chip {
+          border-color: var(--zone-color, ${B.blueDeeper});
+          background: #fff;
+          color: var(--zone-color, ${B.blueDeeper});
+          border-color: color-mix(in srgb, var(--zone-color, ${B.blueDeeper}) 42%, #fff);
+          background: color-mix(in srgb, var(--zone-color, ${B.blueDeeper}) 12%, #fff);
+          color: var(--zone-color, ${B.blueDeeper});
         }
         .coverage-empty-state {
           border: 1px dashed var(--line);
@@ -5305,10 +5407,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-row { grid-template-columns: 1fr; }
           .hero-conditions-copy { display: block; }
           .hero-conditions-copy p { margin-top: 6px; text-align: left; }
-          .hero-condition-row {
-            grid-template-columns: repeat(6, minmax(112px, 1fr));
-            overflow-x: auto;
-          }
+          .hero-condition-cell { flex-basis: 138px; }
           .report-ask-form { flex-direction: column; }
           .report-ask-actions { grid-template-columns: 1fr; }
           .coverage-section-header { flex-direction: column; }
@@ -5316,6 +5415,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .service-coverage-map { aspect-ratio: 32 / 17; }
           .coverage-map-label { display: none; }
           .coverage-summary-row { align-items: flex-start; flex-direction: column; }
+          .zone-service-row { align-items: stretch; }
+          .zone-service-identity { width: 100%; }
           .coverage-status-chip { align-self: flex-start; }
           .workflow-event-heading { flex-direction: column; gap: 3px; }
           .treatment-map-header { flex-direction: column; }
@@ -5392,6 +5493,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             evidenceLevel={data.evidenceLevel}
             mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
             mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+            zones={data.zones}
           />
         </div>
 

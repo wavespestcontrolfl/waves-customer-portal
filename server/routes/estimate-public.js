@@ -3,7 +3,6 @@ const router = express.Router();
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
-const { WAVES_FDACS_LICENSE_NUMBER } = require('../config/business');
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -34,6 +33,12 @@ const {
   buildEstimateAssistantContext,
 } = require('../services/estimate-assistant');
 const { loadPublicEstimateSupportSources } = require('../services/estimate-ai-context');
+const {
+  WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_SUPPORT_PHONE_E164,
+  WAVES_SUPPORT_PHONE_TEL,
+  WAVES_SUPPORT_SMS_TEL,
+} = require('../constants/business');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
@@ -166,13 +171,18 @@ function hhmm(value) {
 }
 
 async function renderTemplate(templateKey, vars, fallback) {
+  const body = await renderEditableSmsTemplate(templateKey, vars);
+  return body || fallback;
+}
+
+async function renderEditableSmsTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch { /* fall through */ }
-  return fallback;
+  return null;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -181,81 +191,11 @@ async function renderTemplate(templateKey, vars, fallback) {
 
 const BRAND = {
   blue: '#009CDE', blueDark: '#065A8C', blueDeeper: '#1B2C5B', blueLight: '#E3F5FD',
-  yellow: '#FFD700', navy: '#0F172A', green: '#16A34A', red: '#C8102E',
+  yellow: '#F6C343', navy: '#0F172A', green: '#16A34A', red: '#C8102E',
   sand: '#FDF6EC', sandDark: '#F5EBD7',
 };
 
 const ESTIMATE_BUTTON_BLUE = BRAND.blueDeeper;
-
-const ESTIMATE_SERVICE_INCLUSIONS = {
-  pest: [
-    'Exterior perimeter protection around entry-prone areas',
-    'Interior service support when activity is reported',
-    'Free re-service between recurring visits',
-    '90-day WaveGuard money-back guarantee',
-  ],
-  pest_control: [
-    'Exterior perimeter protection around entry-prone areas',
-    'Interior service support when activity is reported',
-    'Free re-service between recurring visits',
-    '90-day WaveGuard money-back guarantee',
-  ],
-  lawn: [
-    'Seasonal turf treatments matched to the lawn program',
-    'Weed, fungus, chinch, and turf-stress observations',
-    'Treatment timing adjusted for Southwest Florida conditions',
-    'Lawn notes carried forward for future visits',
-  ],
-  lawn_care: [
-    'Seasonal turf treatments matched to the lawn program',
-    'Weed, fungus, chinch, and turf-stress observations',
-    'Treatment timing adjusted for Southwest Florida conditions',
-    'Lawn notes carried forward for future visits',
-  ],
-  mosquito: [
-    'Targeted barrier application in mosquito resting zones',
-    'Standing-water and breeding-pressure observations',
-    'Weather-aware treatment timing',
-    'Recurring pressure support during peak season',
-  ],
-  tree_shrub: [
-    'Ornamental inspection during service visits',
-    'Targeted insect, mite, and disease observations',
-    'Seasonal plant-health treatment support',
-    'Care notes documented for future visits',
-  ],
-  termite_bait: [
-    'Termite bait station monitoring',
-    'Activity documentation when stations are checked',
-    'Annual termite inspection support',
-    'Escalation if live activity or WDO concerns are found',
-  ],
-  palm_injection: [
-    'Palm health and canopy observations',
-    'Nutrition and pest-pressure support by palm count',
-    'Treatment timing matched to the selected palm program',
-    'Future visit notes for visible decline or recovery',
-  ],
-  rodent_bait: [
-    'Exterior bait station monitoring',
-    'Rodent activity documentation',
-    'Entry-point observations when visible',
-    'Recurring station service support',
-  ],
-};
-
-function serviceInclusionsForEstimateCard(row = {}) {
-  const key = String(row.kind || '').toLowerCase();
-  const name = String(row.name || '').toLowerCase();
-  if (ESTIMATE_SERVICE_INCLUSIONS[key]) return ESTIMATE_SERVICE_INCLUSIONS[key];
-  if (name.includes('lawn')) return ESTIMATE_SERVICE_INCLUSIONS.lawn;
-  if (name.includes('mosquito')) return ESTIMATE_SERVICE_INCLUSIONS.mosquito;
-  if (name.includes('tree') || name.includes('shrub')) return ESTIMATE_SERVICE_INCLUSIONS.tree_shrub;
-  if (name.includes('termite')) return ESTIMATE_SERVICE_INCLUSIONS.termite_bait;
-  if (name.includes('palm')) return ESTIMATE_SERVICE_INCLUSIONS.palm_injection;
-  if (name.includes('rodent') || name.includes('bait station')) return ESTIMATE_SERVICE_INCLUSIONS.rodent_bait;
-  return ESTIMATE_SERVICE_INCLUSIONS.pest;
-}
 
 // SSR top bar — phone on the LEFT, full Waves logo on the RIGHT. The
 // logo is /waves-logo.png served from client/public so the static and
@@ -263,23 +203,22 @@ function serviceInclusionsForEstimateCard(row = {}) {
 function shellTopBar() {
   return `<header class="top-bar">
     <div class="top-bar-inner">
-      <a href="tel:+19412975749" class="top-phone">(941) 297-5749</a>
+      <a href="${WAVES_SUPPORT_PHONE_TEL}" class="top-phone">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
       <img src="/waves-logo.png" alt="Waves" class="top-logo"/>
     </div>
   </header>`;
 }
 
-// Sticky "Questions?" bar pinned to the bottom of the customer estimate
-// page. Two equal-width buttons (Call / Text) using tel: + sms: schemes
-// so mobile users land in their dialer / messages app, and desktop users
-// see the same affordance via the platform handler.
+// Mobile sticky "Questions?" bar pinned to the bottom of the customer
+// estimate page. Desktop keeps the top phone link and footer CTA visible
+// without covering long-form estimate content.
 function shellQuestionsBar() {
   return `<div class="q-bar" role="region" aria-label="Questions for Waves">
-    <a href="tel:+19412975749" class="q-btn q-call" aria-label="Call Waves at (941) 297-5749">
+    <a href="${WAVES_SUPPORT_PHONE_TEL}" class="q-btn q-call" aria-label="Call Waves at ${WAVES_SUPPORT_PHONE_DISPLAY}">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92Z"/></svg>
       <span>Questions? Call Waves</span>
     </a>
-    <a href="sms:+19412975749" class="q-btn q-text" aria-label="Text Waves at (941) 297-5749">
+    <a href="${WAVES_SUPPORT_SMS_TEL}" class="q-btn q-text" aria-label="Text Waves at ${WAVES_SUPPORT_PHONE_DISPLAY}">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       <span>Questions? Text Waves!</span>
     </a>
@@ -594,12 +533,19 @@ const PERKS = [
   'Owner-operator accountability on every visit',
 ];
 
+const LAWN_CARE_PERKS = [
+  'Locked-in pricing for 12 months',
+  'Text your tech directly for quick questions',
+  'Billing after completed lawn care visits',
+  'Owner-operator accountability on every visit',
+];
+
 // Canonical SWFL stores — name, physical address, ZIPs, spoke page slug
 // on wavespestcontrol.com, and Google Place ID for map links. Mirrors
 // server/config/locations.js but kept inline so the SSR estimate page
 // stays self-contained (no require cycle at render time).
 const LOCATIONS = [
-  { name: 'Lakewood Ranch', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: '(941) 318-7612', phoneRaw: '+19413187612', slug: 'pest-control-bradenton-fl', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
+  { name: 'Lakewood Ranch', address: '13649 Luxe Ave #110, Bradenton, FL 34211', phone: WAVES_SUPPORT_PHONE_DISPLAY, phoneRaw: WAVES_SUPPORT_PHONE_E164, slug: 'pest-control-bradenton-fl', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
   { name: 'Parrish',        address: '5155 115th Dr E, Parrish, FL 34219',       phone: '(941) 297-2817', phoneRaw: '+19412972817', slug: 'pest-control-parrish-fl',   placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
   { name: 'Sarasota',       address: '1450 Pine Warbler Pl, Sarasota, FL 34240', phone: '(941) 297-2606', phoneRaw: '+19412972606', slug: 'pest-control-sarasota-fl',  placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
   { name: 'Venice',         address: '1978 S Tamiami Trl #10, Venice, FL 34293', phone: '(941) 297-3337', phoneRaw: '+19412973337', slug: 'pest-control-venice-fl',    placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
@@ -610,8 +556,8 @@ const LOCATIONS = [
 // one source.
 const COMPANY = {
   legalName: 'Waves Pest Control, LLC',
-  phone: '(941) 297-5749',
-  phoneRaw: '+19412975749',
+  phone: WAVES_SUPPORT_PHONE_DISPLAY,
+  phoneRaw: WAVES_SUPPORT_PHONE_E164,
   email: 'contact@wavespestcontrol.com',
 };
 
@@ -845,6 +791,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     || !!inputServices.lawn
     || !!inputServices.lawnCare
     || inputs.svcLawn === true;
+  const isLawnOnly = serviceNames.length > 0
+    && serviceNames.every((name) => /lawn/i.test(String(name)));
   const hasTermiteBait = serviceNames.some((name) => isTermiteBaitServiceName(name))
     || !!inputServices.termiteBait
     || !!inputServices.termite;
@@ -891,10 +839,16 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
   return {
     eyebrow: 'Waves AI',
-    title: 'Waves AI reviewed your property before pricing this estimate',
-    body: satelliteUrl || metrics.length
-      ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
-      : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.',
+    title: isLawnOnly
+      ? 'Waves AI reviewed your lawn before pricing this estimate'
+      : 'Waves AI reviewed your property before pricing this estimate',
+    body: isLawnOnly
+      ? (satelliteUrl || metrics.length
+        ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
+        : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your lawn care plan.')
+      : (satelliteUrl || metrics.length
+        ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
+        : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.'),
     satelliteUrl,
     metrics,
     signals: [],
@@ -912,8 +866,8 @@ function renderExpiredPage(estimate) {
   .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
   .top-logo{height:28px;display:block}
   .wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 24px}
-  .box{max-width:560px;background:#fff;border-radius:14px;padding:40px;text-align:center;border:1px solid #E7E2D7}
-  h1{font-family:'Source Serif 4','Source Serif Pro',Georgia,serif;font-weight:500;letter-spacing:-0.01em;font-size:32px;margin:0 0 12px;color:#1B2C5B}
+  .box{max-width:560px;background:#fff;border-radius:8px;padding:40px;text-align:center;border:1px solid #E7E2D7}
+  h1{font-family:'Source Serif 4',Georgia,serif;font-weight:500;letter-spacing:0;font-size:32px;margin:0 0 12px;color:#1B2C5B}
   p{line-height:1.6;color:#3F4A65}
   a.btn{display:inline-block;margin-top:16px;padding:12px 22px;background:#1B2C5B;color:#fff;text-decoration:none;border-radius:8px;font-weight:500}
 </style>
@@ -922,7 +876,33 @@ ${shellTopBar()}
 <div class="wrap"><div class="box">
   <h1>This estimate has expired</h1>
   <p>Hi ${escapeHtml((estimate.customerName || '').split(' ')[0] || 'there')} — the estimate for <strong>${escapeHtml(estimate.address || 'your property')}</strong> is no longer active. Give us a call and we'll put together a fresh one.</p>
-  <a class="btn" href="tel:+19412975749">Call (941) 297-5749</a>
+  <a class="btn" href="${WAVES_SUPPORT_PHONE_TEL}">Call ${WAVES_SUPPORT_PHONE_DISPLAY}</a>
+</div></div>
+</body></html>`;
+}
+
+function renderEstimateNotFoundPage() {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Estimate Not Found — Waves</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Inter,system-ui,sans-serif;background:#FAF8F3;color:#1B2C5B;min-height:100vh;display:flex;flex-direction:column}
+  .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
+  .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
+  .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
+  .top-logo{height:28px;display:block}
+  .wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 24px}
+  .box{max-width:520px;background:#fff;border-radius:8px;padding:40px;text-align:center;border:1px solid #E7E2D7}
+  h1{font-family:'Source Serif 4',Georgia,serif;font-weight:500;letter-spacing:0;font-size:32px;line-height:1.12;margin:0 0 12px;color:#1B2C5B}
+  p{line-height:1.6;color:#3F4A65;margin:0}
+  a.btn{display:inline-block;margin-top:18px;padding:12px 22px;background:#1B2C5B;color:#fff;text-decoration:none;border-radius:8px;font-weight:700}
+</style>
+</head><body>
+${shellTopBar()}
+<div class="wrap"><div class="box">
+  <h1>Estimate not found</h1>
+  <p>This link may have expired or is no longer valid. Give us a call and we can send a fresh estimate link.</p>
+  <a class="btn" href="${WAVES_SUPPORT_PHONE_TEL}">Call ${WAVES_SUPPORT_PHONE_DISPLAY}</a>
 </div></div>
 </body></html>`;
 }
@@ -954,6 +934,66 @@ function renderPage(token, estimate, estData) {
   const showPrefs = !!(pestRecurring || hasPestOneTime);
   const prefs = normalizePrefs(estData?.preferences);
   const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
+  const isLawnCareOneTimeItem = (item = {}) => {
+    const raw = String(item.service || item.name || item.label || '').toLowerCase();
+    if (!raw || raw.includes('waveguard setup') || raw.includes('membership')) return true;
+    return /\blawn|turf|weed|fertili[sz]|chinch|fung/.test(raw);
+  };
+  const hasOnlyLawnCareServices = recurring.length > 0
+    && recurring.every((svc) => recurringServiceKey(svc) === 'lawn_care')
+    && !hasPestOneTime
+    && oneTimeItems.every(isLawnCareOneTimeItem);
+  const pageCopy = hasOnlyLawnCareServices
+    ? {
+        heroSuffix: "here's your lawn care estimate.",
+        recurringAssurance: 'Your plan includes scheduled turf applications, visit notes, and treatment timing matched to Southwest Florida conditions.',
+        aggregateDayLabel: 'lawn care',
+        billingHeading: 'Choose how to start your lawn care plan',
+        billingLede: 'No payment is charged on this page. After each completed lawn care visit, billing is handled through the payment method you choose.',
+        payAfterTitle: 'Pay after each visit',
+        payAfterBody: 'Approve now, then choose a payment method for billing after each completed lawn care visit.',
+        noPaymentCopy: 'No payment is charged on this page. We will confirm details before your first lawn care visit.',
+        billingWorksIntro: 'For comparison, your lawn care plan averages',
+        bookingTitle: 'Pick your first lawn care visit',
+        bookingSubhead: 'Choose a window to get your lawn care plan started.',
+        payPrefHeading: 'Choose how you want to pay',
+        payPrefCardTitle: 'Pay after lawn care visits',
+        payPrefCardSub: 'Billed after each completed lawn care visit.',
+        prepayTitle: 'Pay the 12-month plan in full',
+        prepayBody: 'Approve the 12-month lawn care plan up front. The WaveGuard Membership is included on the prepay invoice.',
+        prepayButtonSub: 'Annual prepay includes the WaveGuard Membership.',
+        cardConfirmTitle: 'Confirm and set up billing',
+        cardConfirmSub: 'next step saves your card for pay-after-visit billing. Lawn care visits are billed after completion.',
+        perksHeading: 'What your lawn care plan includes',
+        finalHeading: 'Ready to start lawn care?',
+        finalSubhead: "Let's get your lawn on the schedule.",
+        finalBody: 'No payment today. No surprise increases.',
+      }
+    : {
+        heroSuffix: "here's your custom quote.",
+        recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
+        aggregateDayLabel: 'complete home protection',
+        billingHeading: 'Choose how you want to pay',
+        billingLede: null,
+        payAfterTitle: 'Pay after each visit',
+        payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+        noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
+        billingWorksIntro: 'For comparison, this plan averages',
+        bookingTitle: 'Find a date & time that works for you',
+        bookingSubhead: 'These are the windows when we’ll already be working in your neighborhood — pick whichever fits.',
+        payPrefHeading: 'Choose how you want to pay',
+        payPrefCardTitle: 'Pay after each visit',
+        payPrefCardSub: 'Billed after each completed service through autopay.',
+        prepayTitle: 'Pay the 12-month plan in full',
+        prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
+        prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
+        cardConfirmTitle: 'Confirm and save card',
+        cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+        perksHeading: 'What WaveGuard members get',
+        finalHeading: 'Go Waves!',
+        finalSubhead: 'Wave Goodbye to Pests!',
+        finalBody: 'No surprise increases, no hidden fees.',
+      };
 
   // One-time toggle — admin opted this estimate into letting the customer
   // pick "single visit" instead of a recurring plan. Only renders when the
@@ -1090,13 +1130,13 @@ function renderPage(token, estimate, estData) {
   const recurringDisplayBase = intervalPriceFromMonthly(baseMonthly, selectedRecurringFrequencyKey);
   const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedRecurringFrequencyKey);
 
-  // WaveGuard Membership — strictly recurring-pest-only. Lawn-only, T&S-only,
-  // mosquito-only, or termite-bait-only estimates never show the $99 setup
-  // line, even if a stale `oneTime.membershipFee` exists in cached data.
+  // WaveGuard Membership. Recurring pest and lawn-care-only estimates include
+  // the $99 membership; one-off and non-WaveGuard recurring add-ons do not.
   // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
-  // to the pricing constant when a recurring pest line is present.
+  // to the pricing constant when a qualifying recurring line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  const membershipFee = pestRecurring
+  const hasWaveGuardMembership = !!pestRecurring || hasOnlyLawnCareServices;
+  const membershipFee = hasWaveGuardMembership
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
   const showMembershipFee = membershipFee > 0 && !locked;
@@ -1168,8 +1208,11 @@ function renderPage(token, estimate, estData) {
         ? `${Math.round(visits).toLocaleString()} ${visits === 1 ? 'application' : 'applications'}/year`
         : 'Service applications/year';
       const cadenceText = svc?.cadenceLabel || (isPest && pestTierCadence ? `${pestTierCadence} service` : '');
-      const detailHtml = cadenceText || visits
-        ? [cadenceText ? escapeHtml(cadenceText) : null, escapeHtml(visitText)].filter(Boolean).join(' &middot; ')
+      const displayCadenceText = isPest && /quarterly service/i.test(String(cadenceText || ''))
+        ? ''
+        : cadenceText;
+      const detailHtml = displayCadenceText || visits
+        ? [displayCadenceText ? escapeHtml(displayCadenceText) : null, escapeHtml(visitText)].filter(Boolean).join(' &middot; ')
         : escapeHtml(svc?.detail || 'Service applications/year');
       return {
         name,
@@ -1190,46 +1233,67 @@ function renderPage(token, estimate, estData) {
           </div>
           ${row.price != null ? `<div class="billing-service-price" data-billing-service-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)} <span>/ application</span></div>` : ''}
         </div>`).join('');
+  const firstServiceVisitTotal = billingServiceRows.reduce((sum, row) => {
+    const price = Number(row.price);
+    return Number.isFinite(price) && price > 0 ? sum + price : sum;
+  }, 0);
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
   const showAnnualPrepayOption = showMembershipFee;
-  const billingLede = showAnnualPrepayOption
-    ? 'Billed after each completed service visit through autopay unless you choose to pay the 12-month plan in full at signup.'
-    : 'Billed after each completed service visit through autopay.';
+  const annualPrepayWaivesMembership = showMembershipFee && !hasOnlyLawnCareServices;
+  const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
+  const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal + prepayMembershipDue) * 100) / 100);
+  const showBillingCard = !quoteRequired && !locked && billingRecurring.length > 0;
+  const requirePaymentSetupBeforeSlots = showBillingCard;
+  const billingLede = pageCopy.billingLede || (showAnnualPrepayOption
+    ? 'Billed after each completed service visit through autopay, or choose the 12-month prepay option and we send one annual invoice after approval.'
+    : 'Billed after each completed service visit through autopay.');
   const recurringBillCadenceWord = selectedRecurringFrequencyKey === 'quarterly'
     ? 'quarterly'
     : (selectedRecurringFrequencyKey === 'bi_monthly' ? 'bi-monthly' : 'monthly');
-  const billingCardHtml = (!quoteRequired && !locked && billingRecurring.length) ? `
-  <section class="card billing-card"${billingModeAttr}>
-    <h2>Choose how you want to pay</h2>
+  const billingCardHtml = showBillingCard ? `
+  <section class="card billing-card" id="payment-setup-card"${billingModeAttr}>
+    <h2>${escapeHtml(pageCopy.billingHeading)}</h2>
     <p class="billing-lede">${escapeHtml(billingLede)}</p>
     <div class="payment-choice-grid">
       <div class="payment-choice">
-        <h3>Pay after each visit</h3>
-        <p>Billed after each completed service through autopay.</p>
-        ${showMembershipFee ? `
-        <div class="billing-line"><span>WaveGuard Membership Setup &mdash; ${fmtMoney(membershipFee)} one-time charge</span></div>
-        <p class="billing-small">A setup invoice is prepared after approval. This one-time setup activates your WaveGuard membership benefits, service schedule, and protection plan.</p>` : ''}
-        ${showMembershipFee ? `<div class="billing-total-row"><span>Setup invoice</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
-        <p class="billing-small">No payment is charged on this page. Your first service visit will be billed after completion.</p>
+        <div class="payment-choice-head">
+          <h3>${escapeHtml(pageCopy.payAfterTitle)}</h3>
+          <span class="payment-choice-badge">$0 today</span>
+        </div>
+        <p class="payment-choice-body">${escapeHtml(pageCopy.payAfterBody)}</p>
+        <div class="payment-summary-list">
+          <div class="payment-summary-row"><span>Today</span><strong>$0</strong></div>
+          ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
+          <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal > 0 ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
+        </div>
+        <p class="billing-small">${showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy)}</p>
+        <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Choose pay-after-visit setup</button>
       </div>
       ${showAnnualPrepayOption ? `
       <div class="payment-choice">
-        <h3>Pay the 12-month plan in full</h3>
-        <p>Approve the 12-month plan up front and the setup is included at no charge.</p>
-        <div class="billing-total-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
-        ${showMembershipFee ? `
-        <div class="billing-line"><span>WaveGuard Membership Setup &mdash; ${fmtMoney(membershipFee)} one-time charge</span></div>
-        <div class="billing-line discount"><span>Annual Pay-in-Full Waiver &mdash; -${fmtMoney(membershipFee)}</span></div>
-        <p class="billing-small">The WaveGuard Membership Setup is included at no charge when the 12-month plan is paid in full.</p>` : ''}
-        <div class="billing-total-row"><span>Prepay invoice</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
-        ${showMembershipFee ? `<p class="billing-small">Net setup fee: $0</p>` : ''}
+        <div class="payment-choice-head">
+          <h3>${escapeHtml(pageCopy.prepayTitle)}</h3>
+          <span class="payment-choice-badge primary">${annualPrepayWaivesMembership ? 'Setup waived' : '$0 today'}</span>
+        </div>
+        <p class="payment-choice-body">${escapeHtml(pageCopy.prepayBody)}</p>
+        <div class="payment-summary-list">
+          <div class="payment-summary-row"><span>Today</span><strong>$0</strong></div>
+          <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
+          ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(membershipFee)}</strong></div>
+          ${annualPrepayWaivesMembership ? `<div class="payment-summary-row discount"><span>Annual Pay-in-Full Waiver</span><strong>-${fmtMoney(membershipFee)}</strong></div>` : ''}` : ''}
+          <div class="payment-summary-row total"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+        </div>
+        <p class="billing-small">No payment is charged on this page. The annual prepay invoice is prepared after approval.</p>
+        ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
+        ${annualPrepayWaivesMembership ? `<p class="billing-small">Net setup fee: $0</p>` : ''}
+        <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Choose annual prepay setup</button>
       </div>` : ''}
     </div>
     ${billingServiceRowsHtml ? `
     <div class="billing-works">
       <h3>How billing works</h3>
-      <p>This plan is shown as <span data-billing-period-total>${fmtMoney(recurringDisplayTotal)}</span> / ${escapeHtml(recurringPricePeriodWord)}, but you are not charged a flat ${escapeHtml(recurringBillCadenceWord)} bill. You are billed after each completed service visit.</p>
+      <p>${escapeHtml(pageCopy.billingWorksIntro)} <span data-billing-period-total>${fmtMoney(recurringDisplayTotal)}</span> / ${escapeHtml(recurringPricePeriodWord)}. Instead of a flat ${escapeHtml(recurringBillCadenceWord)} bill, billing happens after each completed service visit.</p>
       <div class="billing-service-list">${billingServiceRowsHtml}</div>
       ${tierDiscountPct > 0 ? `<p class="billing-small">WaveGuard ${escapeHtml(tier)} prices shown after the ${tierDiscountPct}% bundle discount.</p>` : ''}
     </div>` : ''}
@@ -1240,7 +1304,12 @@ function renderPage(token, estimate, estData) {
     .map((row) => {
       const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
       const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
-      const inclusions = serviceInclusionsForEstimateCard(row);
+      const dayPriceHtml = day != null
+        ? `<span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>`
+        : '';
+      const dayPriceCopy = hasOnlyLawnCareServices
+        ? `That\u2019s just ${dayPriceHtml}/day to stop lawn pests before they turn green grass brown.`
+        : `That\u2019s just ${dayPriceHtml}/day for ${escapeHtml(row.name.toLowerCase())}.`;
       return `
         <section class="service-price-card">
           <div class="service-price-name">${escapeHtml(row.name)}</div>
@@ -1252,10 +1321,7 @@ function renderPage(token, estimate, estData) {
             <span class="tier-lbl">${escapeHtml(row.tierLabel)}</span>
           </div>
           ${savings > 0 ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
-          ${day != null ? `<div class="day-price">That\u2019s just <span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
-          <ul class="service-inclusions">
-            ${inclusions.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
-          </ul>
+          ${day != null ? `<div class="day-price">${dayPriceCopy}</div>` : ''}
         </section>`;
     })
     .join('');
@@ -1284,7 +1350,7 @@ function renderPage(token, estimate, estData) {
         <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
       </div>
       ${savingsPerMo > 0 ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
-      <div class="day-price" data-mode-only="recurring">That\u2019s just ${fmtMoney(dayPrice)}/day for complete home protection.</div>
+      <div class="day-price" data-mode-only="recurring">${hasOnlyLawnCareServices ? `That\u2019s just ${fmtMoney(dayPrice)}/day to stop lawn pests before they turn green grass brown.` : `That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.`}</div>
     `);
 
   const realOneTimeRows = oneTimeItems.map((it) => {
@@ -1298,7 +1364,9 @@ function renderPage(token, estimate, estData) {
   const hasRealOneTime = realOneTimeRows.length > 0;
   const oneTimeRows = realOneTimeRows;
 
-  const perksHtml = PERKS.map((p) => `<li>${escapeHtml(p)}</li>`).join('');
+  const perksHtml = (hasOnlyLawnCareServices ? LAWN_CARE_PERKS : PERKS)
+    .map((p) => `<li>${escapeHtml(p)}</li>`)
+    .join('');
   const reviewFallbacks = LOCATIONS.slice(0, 3).map((l) => ({
     reviewerName: `Waves ${l.name}`,
     text: `Read current Google reviews for our ${l.name} location.`,
@@ -1411,7 +1479,7 @@ function renderPage(token, estimate, estData) {
   *{box-sizing:border-box}
   [hidden]{display:none!important}
   body{margin:0;font-family:Inter,system-ui,sans-serif;background:#FAF8F3;color:#1B2C5B;line-height:1.55;min-height:100vh;display:flex;flex-direction:column}
-  h1,h2,h3{font-family:'Source Serif 4','Source Serif Pro',Georgia,serif;font-weight:500;letter-spacing:-0.01em;margin:0 0 12px;color:#1B2C5B}
+  h1,h2,h3{font-family:'Source Serif 4',Georgia,serif;font-weight:500;letter-spacing:0;margin:0 0 12px;color:#1B2C5B}
   h1{font-size:clamp(40px,6vw,64px);line-height:1.04;max-width:860px}
   h2{font-size:clamp(22px,3vw,28px);line-height:1.2}
   h3{font-size:18px;font-weight:600}
@@ -1430,9 +1498,6 @@ function renderPage(token, estimate, estData) {
   .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
   .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px}
-  .service-inclusions{list-style:none;margin:14px 0 0;padding:12px 0 0;border-top:1px solid #F0ECE2;display:grid;gap:7px}
-  .service-inclusions li{position:relative;padding-left:18px;color:#3F4A65;font:600 13px/1.4 Inter,system-ui,sans-serif}
-  .service-inclusions li::before{content:'';position:absolute;left:0;top:.58em;width:6px;height:6px;border-radius:50%;background:#1B2C5B}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
   .service-big-price{margin-top:14px;gap:8px 12px}
   .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#9CA3AF;text-decoration:line-through}
@@ -1460,7 +1525,7 @@ function renderPage(token, estimate, estData) {
   .pt-total .pt-label{font-weight:700}
   .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
   .mini-guarantee[data-mode-only="one_time"]{margin-top:4px;font-size:14px;line-height:1.55;color:#3F4A65}
-  .mode-toggle{display:inline-flex;gap:4px;margin-top:18px;padding:4px;background:#F1F5F9;border-radius:999px;border:1px solid #E2E8F0}
+  .mode-toggle{display:inline-flex;gap:4px;margin-top:18px;padding:4px;background:#F8FCFE;border-radius:999px;border:1px solid #CFE7F5}
   .mode-btn{appearance:none;border:0;background:transparent;color:#475569;font:600 13px/1 Inter,system-ui,sans-serif;padding:10px 18px;border-radius:999px;cursor:pointer;letter-spacing:.02em;transition:background .15s,color .15s}
   .mode-btn.is-active{background:${ESTIMATE_BUTTON_BLUE};color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
@@ -1504,8 +1569,25 @@ function renderPage(token, estimate, estData) {
   .payment-choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   @media(max-width:760px){.payment-choice-grid{grid-template-columns:1fr}}
   .payment-choice{border:1px solid #E7E2D7;border-radius:10px;background:#fff;padding:18px;display:flex;flex-direction:column;gap:10px}
+  .payment-choice.is-selected{border-color:${ESTIMATE_BUTTON_BLUE};box-shadow:0 0 0 3px rgba(27,44,91,.08)}
+  .payment-choice-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
   .payment-choice h3{font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:1.25;font-weight:800;letter-spacing:0;margin:0;color:#1B2C5B}
+  .payment-choice-badge{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#F8FCFE;border:1px solid #CFE7F5;color:#1B2C5B;padding:5px 9px;font:800 11px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+  .payment-choice-badge.primary{background:#ECFDF5;border-color:#BBF7D0;color:#166534}
   .payment-choice p{margin:0;color:#6B7280;font-size:13px;line-height:1.5}
+  .payment-choice-body{min-height:39px}
+  .payment-summary-list{display:grid;border-top:1px solid #E7E2D7;border-bottom:1px solid #E7E2D7;margin:2px 0}
+  .payment-summary-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 0;border-top:1px solid #F0ECE2}
+  .payment-summary-row:first-child{border-top:0}
+  .payment-summary-row span{font-size:12px;color:#6B7280;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
+  .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}
+  .payment-summary-row.discount strong,.payment-summary-row.discount span{color:${BRAND.green}}
+  .payment-summary-row.total strong{font-family:'Source Serif 4',Georgia,serif;font-size:22px;font-weight:600}
+  .payment-choice-cta{margin-top:auto;width:100%;border:1px solid #1B2C5B;background:#fff;color:#1B2C5B;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
+  .payment-choice-cta:hover:not([disabled]),.payment-choice-cta[aria-pressed="true"]{background:#1B2C5B;color:#fff}
+  .payment-choice-cta.primary{background:${ESTIMATE_BUTTON_BLUE};border-color:${ESTIMATE_BUTTON_BLUE};color:#fff}
+  .payment-choice-cta.primary:hover:not([disabled]),.payment-choice-cta.primary[aria-pressed="true"]{background:#121E3D;border-color:#121E3D}
+  .payment-choice-cta[disabled]{opacity:.55;cursor:not-allowed}
   .billing-line{padding-top:8px;border-top:1px solid #F0ECE2;color:#1B2C5B;font-size:13px;font-weight:700;line-height:1.45}
   .billing-line.discount{color:${BRAND.green}}
   .billing-total-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding-top:10px;border-top:1px solid #E7E2D7}
@@ -1634,17 +1716,21 @@ function renderPage(token, estimate, estData) {
   .site-footer-contact a:hover{text-decoration:underline}
   .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
   .site-footer-legal{font-size:11px;color:#6B7280}
-  #toast{position:fixed;bottom:calc(80px + env(safe-area-inset-bottom,0));left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
   #toast.show{opacity:1}
-  .q-bar{position:fixed;left:0;right:0;bottom:0;z-index:90;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0));background:rgba(255,255,255,.96);backdrop-filter:saturate(140%) blur(8px);-webkit-backdrop-filter:saturate(140%) blur(8px);border-top:1px solid #E7E2D7;box-shadow:0 -2px 12px rgba(15,23,42,.06)}
+  .q-bar{display:none}
   .q-bar .q-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding:10px 14px;border-radius:10px;font-size:14px;font-weight:600;text-decoration:none;line-height:1.2;transition:background .15s,color .15s}
   .q-bar .q-btn svg{flex-shrink:0}
   .q-bar .q-call{background:#1B2C5B;color:#fff}
   .q-bar .q-call:hover{background:#121E3D}
   .q-bar .q-text{background:#F7F5EE;color:#1B2C5B;border:1px solid #E7E2D7}
   .q-bar .q-text:hover{background:#EDE8D8}
+  @media(max-width:760px){
+    #toast{bottom:calc(80px + env(safe-area-inset-bottom,0))}
+    .q-bar{position:fixed;left:0;right:0;bottom:0;z-index:90;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0));background:rgba(255,255,255,.96);backdrop-filter:saturate(140%) blur(8px);-webkit-backdrop-filter:saturate(140%) blur(8px);border-top:1px solid #E7E2D7;box-shadow:0 -2px 12px rgba(15,23,42,.06)}
+    body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0))}
+  }
   @media(max-width:480px){.q-bar .q-btn{font-size:13px;padding:10px}}
-  body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0))}
 </style>
 </head><body>
 
@@ -1657,7 +1743,7 @@ ${shellTopBar()}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
-    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : "here's your custom quote."}</h1>
+    <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : escapeHtml(pageCopy.heroSuffix)}</h1>
     <div class="addr">${address}</div>
     ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
     ${canChooseOneTime ? `
@@ -1674,7 +1760,7 @@ ${shellTopBar()}
     <div class="onetime-note" data-mode-only="one_time" hidden>
       One visit, pay on service day. No recurring schedule, no tier discount.
     </div>` : ''}
-    ${quoteRequired ? '' : `<div class="mini-guarantee" data-mode-only="recurring">Try us risk-free \u2014 90-day money-back guarantee.</div>`}
+    ${quoteRequired ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
   </div>
 
@@ -1689,30 +1775,32 @@ ${shellTopBar()}
   ${showUpsell ? `
 	  <button type="button" class="upsell"${recurringOnlyAttr} onclick="inquireBundle('${escapeHtml(upsellService)}')" aria-label="Get a bundle quote for ${escapeHtml(upsellService)}">
 	    <span class="txt">
-	      <h3>Add ${escapeHtml(upsellService)} and save more</h3>
-	      <div style="font-size:14px">Bundling unlocks ${escapeHtml(nextTierName)} tier pricing (${nextTierPct}% off qualifying services). Curious what that looks like?</div>
+	      <h3>${escapeHtml(hasOnlyLawnCareServices && upsellService === 'Pest Control' ? 'Add Pest Control for bundled pricing' : `Add ${upsellService} and save more`)}</h3>
+	      <div style="font-size:14px">${escapeHtml(hasOnlyLawnCareServices && upsellService === 'Pest Control'
+          ? `Want the home perimeter covered too? Bundling unlocks ${nextTierName} tier pricing (${nextTierPct}% off qualifying services).`
+          : `Bundling unlocks ${nextTierName} tier pricing (${nextTierPct}% off qualifying services). Curious what that looks like?`)}</div>
 	    </span>
     <span class="upsell-btn">Get a bundle quote</span>
   </button>` : ''}
 
   ${locked ? '' : `
-  <section class="card booking-card" id="booking-card">
-    <h2 id="booking-title">Find a date &amp; time that works for you</h2>
-    <p class="card-sub">These are the windows when we\u2019ll already be working in your neighborhood \u2014 pick whichever fits.</p>
+  <section class="card booking-card" id="booking-card"${requirePaymentSetupBeforeSlots && !isOneTimeOnly ? ' style="display:none"' : ''}>
+    <h2 id="booking-title">${escapeHtml(pageCopy.bookingTitle)}</h2>
+    <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
     <div id="slot-area" class="booking-state">Checking the route map\u2026</div>
     <div id="pay-pref-area" style="display:none">
-      <h3 id="pay-pref-heading" style="margin:20px 0 4px">Choose how you want to pay</h3>
+      <h3 id="pay-pref-heading" style="margin:20px 0 4px">${escapeHtml(pageCopy.payPrefHeading)}</h3>
       <p class="card-sub" id="pay-pref-subhead" style="margin:0">${escapeHtml(billingLede)}</p>
       <div class="pay-pref-grid options">
-        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">Pay after each visit</span><span class="pay-pref-sub">Billed after each completed service through autopay.</span></button>
+        <button type="button" class="pay-pref-btn primary" data-pay-pref="card_on_file" data-pay-pref-card><span class="pay-pref-title">${escapeHtml(pageCopy.payPrefCardTitle)}</span><span class="pay-pref-sub">${escapeHtml(pageCopy.payPrefCardSub)}</span></button>
         <button type="button" class="pay-pref-btn" data-pay-pref="pay_at_visit" data-pay-pref-visit hidden><span class="pay-pref-title" data-pay-visit-title>Pay at the visit</span><span class="pay-pref-sub" data-pay-visit-sub>We will collect payment with the tech on-site. No card needed now.</span></button>
-        ${showMembershipFee ? `<button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">Pay the 12-month plan in full</span><span class="pay-pref-sub">Approve annual prepay and the setup is included at no charge.</span></button>` : ''}
+        ${showMembershipFee ? `<button type="button" class="pay-pref-btn prepay" data-pay-pref="prepay_annual" data-pay-pref-prepay><span class="pay-pref-title">${escapeHtml(pageCopy.prepayTitle)}</span><span class="pay-pref-sub">${escapeHtml(pageCopy.prepayButtonSub)}</span></button>` : ''}
       </div>
     </div>
     <div id="review-area" style="display:none">
       <div class="reservation-banner"><span>Slot held for you</span><span class="countdown" id="reservation-countdown">15:00</span></div>
       <div class="pay-pref-grid">
-        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">Confirm and save card</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
+        <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">You will be taken to a secure Stripe page to add your card.</span></button>
         <button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>
       </div>
     </div>
@@ -1729,7 +1817,7 @@ ${shellTopBar()}
   </div>` : ''}
 
   ${quoteRequired ? '' : `<div class="card" data-mode-only="recurring">
-    <h2>What WaveGuard members get</h2>
+    <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
 
@@ -1757,10 +1845,10 @@ ${shellTopBar()}
     </div>
   </div>` : `
   <div class="final">
-    <h2 data-mode-only="recurring">Go Waves!</h2>
-    <div class="final-subhead" data-mode-only="recurring">Wave Goodbye to Pests!</div>
+    <h2 data-mode-only="recurring">${escapeHtml(pageCopy.finalHeading)}</h2>
+    <div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>
     ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves!</h2><div class="final-subhead" data-mode-only="one_time" hidden>Wave Goodbye to Pests!</div>` : ''}
-    <p>No surprise increases, no hidden fees.</p>
+    <p>${escapeHtml(pageCopy.finalBody)}</p>
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -1788,9 +1876,13 @@ ${shellQuestionsBar()}
   const ESTIMATE_ASK_TOKEN = ${JSON.stringify(estimateAskToken)};
   const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
   const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
+  const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = ${JSON.stringify(requirePaymentSetupBeforeSlots)};
   const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedRecurringFrequencyKey))};
   const PRICE_PERIOD_WORD = ${JSON.stringify(recurringPricePeriodWord)};
   const REVIEW_FALLBACKS = ${JSON.stringify(reviewFallbacks)};
+  const RECURRING_PAY_PREF_HEADING = ${JSON.stringify(pageCopy.payPrefHeading)};
+  const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
+  const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
@@ -1806,6 +1898,11 @@ ${shellQuestionsBar()}
     document.querySelectorAll('[data-annual-total]').forEach((el) => {
       el.textContent = fmt(annual);
     });
+    document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
+      const membershipDue = Number(el.dataset.prepayMembershipDue || 0);
+      el.textContent = fmt(Math.max(0, Math.round((annual + membershipDue) * 100) / 100));
+    });
+    let firstVisitTotal = 0;
     document.querySelectorAll('[data-billing-service-price]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);
       const visits = Number(el.dataset.serviceVisits || 0);
@@ -1814,7 +1911,11 @@ ${shellQuestionsBar()}
         ? (prefOff * 12) / visits
         : 0;
       const adjusted = Math.max(0, Math.round((base - discount) * 100) / 100);
+      firstVisitTotal = Math.round((firstVisitTotal + adjusted) * 100) / 100;
       el.innerHTML = fmt(adjusted) + ' <span>/ application</span>';
+    });
+    document.querySelectorAll('[data-first-visit-total]').forEach((el) => {
+      if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
     });
     document.querySelectorAll('[data-service-card-price]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);
@@ -1976,11 +2077,75 @@ ${shellQuestionsBar()}
   const bookingState = {
     selectedSlotId: null,
     selectedSlotLabel: null,
+    pendingPref: null,
     pickedPref: null,
     reservation: null,
     countdownTimer: null,
     serviceMode: INITIAL_SERVICE_MODE,
   };
+
+  function bookingRequiresPaymentSetup() {
+    return REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS && bookingState.serviceMode !== 'one_time';
+  }
+
+  function syncPaymentSetupCards() {
+    document.querySelectorAll('[data-payment-setup]').forEach((btn) => {
+      const selected = bookingState.pendingPref === btn.dataset.paymentSetup;
+      btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      btn.disabled = !!bookingState.reservation;
+      const card = btn.closest('.payment-choice');
+      if (card) card.classList.toggle('is-selected', selected);
+    });
+  }
+
+  function ensureBookingCardVisible() {
+    const target = document.getElementById('booking-card');
+    if (!target) return null;
+    target.style.display = '';
+    if (target.dataset.slotsLoaded !== 'true') {
+      target.dataset.slotsLoaded = 'true';
+      loadSlots();
+    }
+    return target;
+  }
+
+  function scrollToBookingCard() {
+    const target = ensureBookingCardVisible();
+    if (!target) return;
+    try { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    catch (e) { target.scrollIntoView(true); }
+    target.animate([
+      { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
+      { boxShadow: '0 0 0 6px rgba(27,44,91,.16)' },
+      { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
+    ], { duration: 900, easing: 'ease-out' });
+  }
+
+  function hideBookingCardUntilSetup() {
+    if (!bookingRequiresPaymentSetup()) return;
+    const target = document.getElementById('booking-card');
+    if (!target) return;
+    target.style.display = 'none';
+    target.dataset.slotsLoaded = 'false';
+  }
+
+  function choosePaymentSetup(pref) {
+    if (bookingState.reservation) {
+      toast('Use Change my pick before switching payment setup.');
+      const reviewArea = document.getElementById('review-area');
+      if (reviewArea) reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      return;
+    }
+    bookingState.pendingPref = pref;
+    bookingState.pickedPref = null;
+    syncPaymentSetupCards();
+    scrollToBookingCard();
+    if (bookingState.selectedSlotId) {
+      pickPaymentPref(pref);
+    } else {
+      toast(pref === 'prepay_annual' ? 'Annual prepay selected. Pick a time to continue.' : 'Pay-after-visit selected. Pick a time to continue.');
+    }
+  }
 
   // Recurring/one-time inline toggle. Swaps visibility of [data-mode-only]
   // elements (hero price block, perks card, final CTA copy) and stamps
@@ -2002,7 +2167,14 @@ ${shellQuestionsBar()}
     if (changed && bookingState.reservation) {
       cancelReservation();
     } else if (changed) {
+      bookingState.pendingPref = null;
       bookingState.pickedPref = null;
+      syncPaymentSetupCards();
+      if (bookingRequiresPaymentSetup()) {
+        hideBookingCardUntilSetup();
+      } else {
+        ensureBookingCardVisible();
+      }
       document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
     }
   }
@@ -2030,7 +2202,7 @@ ${shellQuestionsBar()}
     if (prepayBtn) {
       prepayBtn.hidden = isOneTime;
     }
-    if (heading) heading.textContent = isOneTime ? 'Book your visit' : 'Choose how you want to pay';
+    if (heading) heading.textContent = isOneTime ? 'Book your visit' : RECURRING_PAY_PREF_HEADING;
     if (subhead) {
       subhead.textContent = isOneTime
         ? 'This books a single visit. You will not be charged today.'
@@ -2042,6 +2214,7 @@ ${shellQuestionsBar()}
         ? 'We will collect payment with the tech on-site. No card needed now.'
         : 'We will collect payment with the tech on-site. No card needed now.';
     }
+    syncPaymentSetupCards();
   }
   syncPaymentMode();
 
@@ -2120,6 +2293,10 @@ ${shellQuestionsBar()}
     btn.classList.add('selected');
     bookingState.selectedSlotId = btn.dataset.slotId;
     bookingState.selectedSlotLabel = btn.dataset.slotLabel;
+    if (bookingState.pendingPref && bookingState.serviceMode === 'recurring') {
+      pickPaymentPref(bookingState.pendingPref);
+      return;
+    }
     const payArea = document.getElementById('pay-pref-area');
     if (payArea) {
       payArea.style.display = '';
@@ -2137,7 +2314,9 @@ ${shellQuestionsBar()}
     }
     const buttons = document.querySelectorAll('[data-pay-pref]');
     buttons.forEach((b) => { b.disabled = true; });
+    bookingState.pendingPref = pref;
     bookingState.pickedPref = pref;
+    syncPaymentSetupCards();
     try {
       const r = await fetch('/api/public/estimates/' + TOKEN + '/reserve', {
         method: 'POST',
@@ -2157,12 +2336,15 @@ ${shellQuestionsBar()}
           }
         }
         buttons.forEach((b) => { b.disabled = false; });
+        bookingState.pendingPref = null;
         bookingState.pickedPref = null;
+        syncPaymentSetupCards();
         return;
       }
       if (!r.ok) throw new Error('reserve failed');
       const body = await r.json();
       bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
+      syncPaymentSetupCards();
       // Swap UI: hide slot list + pay pref, show review
       document.getElementById('slot-area').style.display = 'none';
       document.getElementById('pay-pref-area').style.display = 'none';
@@ -2173,8 +2355,8 @@ ${shellQuestionsBar()}
       const title = document.getElementById('confirm-book-title');
       const sub = document.getElementById('confirm-book-sub');
       if (pref === 'card_on_file') {
-        if (title) title.textContent = 'Confirm and save card';
-        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · next step saves your card for autopay. Service visits are billed after completion.';
+        if (title) title.textContent = CARD_CONFIRM_TITLE;
+        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · ' + CARD_CONFIRM_SUB;
       } else if (pref === 'prepay_annual') {
         if (title) title.textContent = 'Confirm annual prepay';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · annual prepay invoice will be reviewed and sent after approval.';
@@ -2187,7 +2369,9 @@ ${shellQuestionsBar()}
     } catch (e) {
       toast('Could not reserve. Try again or call ${COMPANY.phone}.');
       buttons.forEach((b) => { b.disabled = false; });
+      bookingState.pendingPref = null;
       bookingState.pickedPref = null;
+      syncPaymentSetupCards();
     }
   }
 
@@ -2223,7 +2407,11 @@ ${shellQuestionsBar()}
       fetch('/api/public/estimates/' + TOKEN + '/reserve/' + encodeURIComponent(res.scheduledServiceId), { method: 'DELETE' }).catch(function () {});
     }
     bookingState.reservation = null;
+    bookingState.selectedSlotId = null;
+    bookingState.selectedSlotLabel = null;
+    bookingState.pendingPref = null;
     bookingState.pickedPref = null;
+    syncPaymentSetupCards();
     document.getElementById('review-area').style.display = 'none';
     document.getElementById('slot-area').style.display = '';
     const payArea = document.getElementById('pay-pref-area');
@@ -2233,8 +2421,12 @@ ${shellQuestionsBar()}
       payArea.style.display = 'none';
       document.querySelectorAll('[data-pay-pref]').forEach((b) => { b.disabled = false; });
     }
-    // Reload slots to reflect any changes since the first fetch
-    loadSlots();
+    if (bookingRequiresPaymentSetup()) {
+      hideBookingCardUntilSetup();
+    } else {
+      // Reload slots to reflect any changes since the first fetch
+      loadSlots();
+    }
   }
 
   async function confirmBooking() {
@@ -2285,6 +2477,9 @@ ${shellQuestionsBar()}
   document.querySelectorAll('[data-pay-pref]').forEach((b) => {
     b.addEventListener('click', () => pickPaymentPref(b.dataset.payPref));
   });
+  document.querySelectorAll('[data-payment-setup]').forEach((b) => {
+    b.addEventListener('click', () => choosePaymentSetup(b.dataset.paymentSetup));
+  });
   const confirmBookBtn = document.getElementById('confirm-book-btn');
   if (confirmBookBtn) {
     confirmBookBtn.addEventListener('click', confirmBooking);
@@ -2296,7 +2491,7 @@ ${shellQuestionsBar()}
 
   // Kick off the slot fetch if the booking card is on the page (i.e.,
   // estimate is not yet accepted/expired).
-  if (document.getElementById('booking-card')) {
+  if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup()) {
     loadSlots();
   }
 
@@ -2404,17 +2599,20 @@ ${shellQuestionsBar()}
     if (!btns.length) return;
     btns.forEach(function (btn) {
       btn.addEventListener('click', function () {
-        var target = document.getElementById('booking-card');
-        if (!target) return;
-        try { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-        catch (e) { target.scrollIntoView(true); }
-        // Pulse the card border so the landing is obvious even on
-        // short viewports where the scroll barely moves.
-        target.animate([
-          { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
-          { boxShadow: '0 0 0 6px rgba(27,44,91,.18)' },
-          { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
-        ], { duration: 900, easing: 'ease-out' });
+        if (bookingRequiresPaymentSetup() && !bookingState.pendingPref) {
+          var setupTarget = document.getElementById('payment-setup-card');
+          if (!setupTarget) return;
+          try { setupTarget.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+          catch (e) { setupTarget.scrollIntoView(true); }
+          setupTarget.animate([
+            { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
+            { boxShadow: '0 0 0 6px rgba(27,44,91,.16)' },
+            { boxShadow: '0 0 0 0 rgba(27,44,91,0)' },
+          ], { duration: 900, easing: 'ease-out' });
+          toast('Choose a payment setup first.');
+          return;
+        }
+        scrollToBookingCard();
       });
     });
   })();
@@ -2462,9 +2660,7 @@ async function handleEstimateView(req, res, next) {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) {
-      return res.status(404).set('Content-Type', 'text/html').send(
-        `<!doctype html><html><head><meta charset="utf-8"><title>Not Found</title></head><body style="font-family:system-ui;padding:40px;text-align:center"><h1>Estimate Not Found</h1><p>This link may have expired. Call <a href="tel:+19412975749">(941) 297-5749</a>.</p></body></html>`
-      );
+      return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
 
     // V2 gate — when this estimate's row has use_v2_view=true, or when it
@@ -2932,27 +3128,30 @@ router.put('/:token/accept', async (req, res, next) => {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
               { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
-              `Hey ${firstName}! Thanks for booking your ${primarySvc.label} with Waves. Pick your time here - we'll show you slots when a tech will already be in your neighborhood: ${bookingUrl}`
             );
-            const sendResult = await sendCustomerMessage({
-              to: estimate.customer_phone,
-              body: customerBody,
-              channel: 'sms',
-              audience: customerId ? 'customer' : 'lead',
-              purpose: 'estimate_followup',
-              customerId: customerId || undefined,
-              estimateId: estimate.id,
-              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-              consentBasis: customerId ? undefined : {
-                status: 'transactional_allowed',
-                source: 'estimate_token_acceptance',
-                capturedAt: new Date().toISOString(),
-              },
-              entryPoint: 'estimate_accept_onetime_booking',
-              metadata: { original_message_type: 'estimate_accepted_onetime' },
-            });
-            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+            if (!customerBody) {
+              logger.warn(`[estimate-accept] estimate_accepted_onetime template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
+            } else {
+              const sendResult = await sendCustomerMessage({
+                to: estimate.customer_phone,
+                body: customerBody,
+                channel: 'sms',
+                audience: customerId ? 'customer' : 'lead',
+                purpose: 'estimate_followup',
+                customerId: customerId || undefined,
+                estimateId: estimate.id,
+                identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+                consentBasis: customerId ? undefined : {
+                  status: 'transactional_allowed',
+                  source: 'estimate_token_acceptance',
+                  capturedAt: new Date().toISOString(),
+                },
+                entryPoint: 'estimate_accept_onetime_booking',
+                metadata: { original_message_type: 'estimate_accepted_onetime' },
+              });
+              if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+              logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+            }
           } else {
             const scheduledDate = dateOnly(reservationRow?.scheduled_date);
             const serviceDate = scheduledDate
@@ -2969,23 +3168,26 @@ router.put('/:token/accept', async (req, res, next) => {
                 date: serviceDate,
                 time: timeWindow,
               },
-              `Hi ${firstName}! Your ${primarySvc.label} with Waves is confirmed for ${serviceDate} between ${timeWindow}. Reply to reschedule.`
             );
-            const sendResult = await sendCustomerMessage({
-              to: estimate.customer_phone,
-              body: customerBody,
-              channel: 'sms',
-              audience: 'customer',
-              purpose: 'appointment_confirmation',
-              customerId: customerId || undefined,
-              appointmentId: reservationRow?.id,
-              estimateId: estimate.id,
-              identityTrustLevel: 'service_contact_authorized',
-              entryPoint: 'estimate_accept_onetime_confirmed',
-              metadata: { original_message_type: 'appointment_confirmation' },
-            });
-            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+            if (!customerBody) {
+              logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
+            } else {
+              const sendResult = await sendCustomerMessage({
+                to: estimate.customer_phone,
+                body: customerBody,
+                channel: 'sms',
+                audience: 'customer',
+                purpose: 'appointment_confirmation',
+                customerId: customerId || undefined,
+                appointmentId: reservationRow?.id,
+                estimateId: estimate.id,
+                identityTrustLevel: 'service_contact_authorized',
+                entryPoint: 'estimate_accept_onetime_confirmed',
+                metadata: { original_message_type: 'appointment_confirmation' },
+              });
+              if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+              logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+            }
           }
         } else {
           const longObUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
@@ -2997,30 +3199,33 @@ router.put('/:token/accept', async (req, res, next) => {
                 customerId,
               })
             : '';
-          const customerBody = await renderTemplate(
+          const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_customer',
             { first_name: firstName, onboarding_url: obUrl },
-            `Hello ${firstName}! Thanks for approving your estimate. Complete your setup here so we can get you on the schedule: ${obUrl}`
           );
-          const sendResult = await sendCustomerMessage({
-            to: estimate.customer_phone,
-            body: customerBody,
-            channel: 'sms',
-            audience: customerId ? 'customer' : 'lead',
-            purpose: 'estimate_followup',
-            customerId: customerId || undefined,
-            estimateId: estimate.id,
-            identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-            consentBasis: customerId ? undefined : {
-              status: 'transactional_allowed',
-              source: 'estimate_token_acceptance',
-              capturedAt: new Date().toISOString(),
-            },
-            entryPoint: 'estimate_accept_onboarding',
-            metadata: { original_message_type: 'estimate_accepted_customer' },
-          });
-          if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-          logger.info(`[estimate-accept] Acceptance SMS sent for estimate ${estimate.id}`);
+          if (!customerBody) {
+            logger.warn(`[estimate-accept] estimate_accepted_customer SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
+          } else {
+            const sendResult = await sendCustomerMessage({
+              to: estimate.customer_phone,
+              body: customerBody,
+              channel: 'sms',
+              audience: customerId ? 'customer' : 'lead',
+              purpose: 'estimate_followup',
+              customerId: customerId || undefined,
+              estimateId: estimate.id,
+              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+              consentBasis: customerId ? undefined : {
+                status: 'transactional_allowed',
+                source: 'estimate_token_acceptance',
+                capturedAt: new Date().toISOString(),
+              },
+              entryPoint: 'estimate_accept_onboarding',
+              metadata: { original_message_type: 'estimate_accepted_customer' },
+            });
+            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            logger.info(`[estimate-accept] Acceptance SMS sent for estimate ${estimate.id}`);
+          }
         }
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
@@ -4652,7 +4857,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         satelliteUrl: estimate.satellite_url || null,
         intelligence,
         notes: estimate.notes || null,
-        licenseNumber: WAVES_FDACS_LICENSE_NUMBER,
+        licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
         billByInvoice: !!estimate.bill_by_invoice,
       },
@@ -4755,3 +4960,4 @@ module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;
+module.exports.renderEditableSmsTemplate = renderEditableSmsTemplate;

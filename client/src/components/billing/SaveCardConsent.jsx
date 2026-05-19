@@ -17,6 +17,13 @@
 
 import { getConsentText } from '../../lib/paymentMethodConsentText';
 
+const CONSENT_STYLE = {
+  soft: '#FAF8F3',
+  border: '#E7E2D7',
+  text: '#1B2C5B',
+  muted: '#6B7280',
+};
+
 export default function SaveCardConsent({
   checked,
   onChange,
@@ -36,8 +43,8 @@ export default function SaveCardConsent({
       style={{
         display: 'flex', gap: 10, alignItems: 'flex-start',
         padding: 14,
-        background: '#F8FAFC',
-        border: '1px solid #E1E7EF',
+        background: CONSENT_STYLE.soft,
+        border: `1px solid ${CONSENT_STYLE.border}`,
         borderRadius: 8,
         cursor: locked ? 'default' : 'pointer',
         ...style,
@@ -49,16 +56,16 @@ export default function SaveCardConsent({
         disabled={locked}
         onChange={(e) => !locked && onChange?.(e.target.checked)}
         style={{
-          width: 18, height: 18, accentColor: '#1B2C5B',
+          width: 18, height: 18, accentColor: CONSENT_STYLE.text,
           marginTop: 2, flexShrink: 0,
           cursor: locked ? 'default' : 'pointer',
         }}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 850, color: '#1B2C5B', lineHeight: 1.35 }}>
+        <div style={{ fontSize: 14, fontWeight: 850, color: CONSENT_STYLE.text, lineHeight: 1.35 }}>
           {resolvedHeadline}
         </div>
-        <div style={{ fontSize: 14, color: '#64748B', marginTop: 6, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: CONSENT_STYLE.muted, marginTop: 6, lineHeight: 1.5 }}>
           {consentText}
         </div>
       </div>

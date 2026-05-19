@@ -268,4 +268,9 @@ module.exports = {
   getForInvoice,
   signedViewUrl,
   remove,
+  _private: {
+    assertAttachmentBudget,
+    detectedMimeFromBuffer,
+    validateAttachmentFile,
+  },
 };

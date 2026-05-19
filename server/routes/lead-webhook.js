@@ -7,6 +7,7 @@ const LeadScorer = require('../services/lead-scorer');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { etDateString } = require('../utils/datetime-et');
@@ -399,18 +400,9 @@ router.post('/', async (req, res) => {
     // server/services/lead-intake.js captures service interest + address
     // overnight, so Virginia/Adam can send a finalized estimate first
     // thing in the morning without any back-and-forth. Edit copy in the
-    // admin UI; keep the hardcoded fallback in sync with the seeded default.
+    // admin UI.
     try {
-      const smsTemplatesRouter = require('./admin-sms-templates');
-      const templateKey = 'lead_auto_reply_biz';
-      const fallback = `Hello ${firstName}! Thanks for reaching out to Waves!\n\nWhat are you interested in: Pest Control, Lawn Care, or a One-Time Service?\n\nReply and we'll get you a quote right away.`;
-      let replyMsg = fallback;
-      try {
-        if (typeof smsTemplatesRouter.getTemplate === 'function') {
-          const rendered = await smsTemplatesRouter.getTemplate(templateKey, { first_name: firstName });
-          if (rendered) replyMsg = rendered;
-        }
-      } catch (tErr) { logger.warn(`[lead-webhook] template render failed, using fallback: ${tErr.message}`); }
+      const replyMsg = await renderRequiredSmsTemplate('lead_auto_reply_biz', { first_name: firstName });
 
       const smsResult = await sendCustomerMessage({
         to: phoneFormatted,

@@ -6,6 +6,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const crypto = require('crypto');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -101,6 +102,11 @@ async function generateUniqueCode() {
 function templateReplace(template, vars) {
   if (!template) return '';
   return template.replace(/\{(\w+)\}/g, (_, k) => vars[k] || '');
+}
+
+async function renderReferralSms(templateKey, vars, legacyTemplate) {
+  if (legacyTemplate) return templateReplace(legacyTemplate, vars);
+  return renderRequiredSmsTemplate(templateKey, vars);
 }
 
 async function sendSMS(to, body, options = {}) {
@@ -328,14 +334,11 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   });
 
   // --- Send invite SMS ---
-  const smsBody = templateReplace(
-    settings.invite_sms_template || 'Hi {referee_name}! Your neighbor {referrer_name} thinks you\'d love Waves Pest Control. Get a free quote: {referral_link} or call (941) 318-7612',
-    {
-      referee_name: firstName,
-      referrer_name: promoter.first_name,
-      referral_link: referralLink,
-    }
-  );
+  const smsBody = await renderReferralSms('referral_invite', {
+    referee_name: firstName,
+    referrer_name: promoter.first_name || 'your neighbor',
+    referral_link: referralLink,
+  }, settings.invite_sms_template);
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
     messageType: 'referral_invite',
     referralId: referral.id,
@@ -410,14 +413,11 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
     // Send reward SMS
     const promoter = await db('referral_promoters').where({ id: referral.promoter_id }).first();
     if (promoter) {
-      const rewardSms = templateReplace(
-        settings.reward_sms_template || 'Great news, {referrer_name}! Your referral {referee_name} signed up. You earned {reward_amount}!',
-        {
-          referrer_name: promoter.first_name,
-          referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-          reward_amount: 'a referral reward',
-        }
-      );
+      const rewardSms = await renderReferralSms('referral_reward', {
+        referrer_name: promoter.first_name,
+        referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
+        reward_amount: 'a referral reward',
+      }, settings.reward_sms_template);
       await sendSMS(promoter.customer_phone, rewardSms, {
         customerId: promoter.customer_id,
         messageType: 'referral_reward',
@@ -545,15 +545,12 @@ async function checkMilestones(promoterId) {
   });
 
   // Send milestone SMS
-  const milestoneSms = templateReplace(
-    settings.milestone_sms_template || 'Congrats {referrer_name}! You hit the {milestone_level} milestone with {count} referrals. Bonus: {bonus_amount}!',
-    {
-      referrer_name: promoter.first_name,
-      milestone_level: newLevel,
-      count: String(converted),
-      bonus_amount: 'a bonus reward',
-    }
-  );
+  const milestoneSms = await renderReferralSms('referral_milestone', {
+    referrer_name: promoter.first_name,
+    milestone_level: newLevel,
+    count: String(converted),
+    bonus_amount: 'a bonus reward',
+  }, settings.milestone_sms_template);
   await sendSMS(promoter.customer_phone, milestoneSms, {
     customerId: promoter.customer_id,
     messageType: 'referral_milestone',

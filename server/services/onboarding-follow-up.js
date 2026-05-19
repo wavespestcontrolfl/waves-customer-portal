@@ -22,15 +22,17 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
-async function renderTemplate(templateKey, vars, fallback) {
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body && !body.includes('{first_name}')) return body;
     }
   } catch { /* fall through */ }
-  return fallback;
+  logger.warn(`[onboard-followup] SMS template ${templateKey} is missing or inactive`);
+  return null;
 }
 
 function canFallbackFromTemplateEmailError(err) {
@@ -76,7 +78,7 @@ async function onboardUrl(ob) {
 async function sendDualChannel(ob, { sms, email }) {
   let delivered = false;
   let emailSuppressed = false;
-  if (ob.phone) {
+  if (ob.phone && sms) {
     try {
       const smsResult = await sendCustomerMessage({
         to: ob.phone,
@@ -100,6 +102,8 @@ async function sendDualChannel(ob, { sms, email }) {
     } catch (e) {
       logger.error(`[onboard-followup] SMS failed for session ${ob.id}: ${e.message}`);
     }
+  } else if (ob.phone && !sms) {
+    logger.warn(`[onboard-followup] SMS skipped for session ${ob.id}: missing rendered template`);
   }
   if (ob.email) {
     try {
@@ -165,7 +169,6 @@ const OnboardingFollowUp = {
           const url = await onboardUrl(ob);
           const smsBody = await renderTemplate('onboarding_followup_24h',
             { first_name: firstName, onboarding_url: url, waveguard_tier: ob.waveguard_tier || 'Bronze' },
-            `Hey ${firstName}! Thanks again for choosing Waves. Just need a few quick details to get you on the schedule: ${url}. Questions? Reply here or call (941) 318-7612.`
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
@@ -204,7 +207,6 @@ const OnboardingFollowUp = {
           const url = await onboardUrl(ob);
           const smsBody = await renderTemplate('onboarding_followup_72h',
             { first_name: firstName, onboarding_url: url, waveguard_tier: ob.waveguard_tier || 'Bronze' },
-            `Hi ${firstName}! Still here whenever you're ready. Wrap up your Waves setup here and we'll confirm your first service: ${url}. - Waves Pest Control`
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
@@ -247,7 +249,6 @@ const OnboardingFollowUp = {
           const tier = ob.waveguard_tier || 'Bronze';
           const smsBody = await renderTemplate('onboarding_followup_expiring',
             { first_name: firstName, onboarding_url: url, expires_at: expDate, waveguard_tier: tier },
-            `Hey ${firstName}, heads up: your Waves onboarding link expires on ${expDate}. Lock in your WaveGuard ${tier} plan and first service here: ${url}. Questions? (941) 318-7612`
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
@@ -262,7 +263,7 @@ const OnboardingFollowUp = {
               },
               subject: `Your Waves onboarding link expires ${expDate}`,
               heading: `Heads up — your link expires ${expDate}`,
-              body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
+              body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
               ctaUrl: url,
             },
           });

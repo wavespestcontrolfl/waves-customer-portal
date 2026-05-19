@@ -50,6 +50,18 @@ import { etDateString, addETDays } from '../../lib/timezone';
 import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 
+const PORTAL_BILLING = {
+  surface: '#FFFFFF',
+  page: '#FAF8F3',
+  border: '#E7E2D7',
+  borderStrong: '#D8D0C0',
+  soft: '#F8FCFE',
+  softBorder: '#CFE7F5',
+  text: '#1B2C5B',
+  body: '#3F4A65',
+  muted: '#6B7280',
+};
+
 function loadStripeJs(publishableKey) {
   return new Promise((resolve) => {
     if (window.Stripe) return resolve(window.Stripe(publishableKey));
@@ -61,10 +73,10 @@ function loadStripeJs(publishableKey) {
 }
 
 const AUTOPAY_CARD_STYLE = {
-  background: B.white,
-  border: '1px solid #E1E7EF',
+  background: PORTAL_BILLING.surface,
+  border: `1px solid ${PORTAL_BILLING.border}`,
   borderRadius: 8,
-  boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+  boxShadow: 'none',
   padding: 20,
   display: 'flex',
   flexDirection: 'column',
@@ -75,7 +87,7 @@ const AUTOPAY_CARD_STYLE = {
 function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actionLabel, onAction }) {
   const iconTone = tone === 'danger'
     ? { background: `${B.red}10`, color: B.red }
-    : { background: '#EEF6FF', color: B.blueDeeper };
+    : { background: PORTAL_BILLING.soft, color: PORTAL_BILLING.text };
   return (
     <div style={AUTOPAY_CARD_STYLE}>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
@@ -92,14 +104,14 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
           <Icon name={icon} size={18} strokeWidth={2} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 850, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
             Auto Pay
           </div>
-          <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
+          <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
             {title}
           </div>
           {message && (
-            <div style={{ marginTop: 4, fontSize: 14, color: B.grayMid, lineHeight: 1.45 }}>
+            <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.45 }}>
               {message}
             </div>
           )}
@@ -111,9 +123,9 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
           minHeight: 36,
           padding: '9px 13px',
           borderRadius: 8,
-          border: '1px solid #CBD5E1',
-          background: '#fff',
-          color: B.blueDeeper,
+          border: `1px solid ${PORTAL_BILLING.borderStrong}`,
+          background: PORTAL_BILLING.surface,
+          color: PORTAL_BILLING.text,
           fontSize: 14,
           fontWeight: 850,
           fontFamily: FONTS.heading,
@@ -208,7 +220,7 @@ export default function AutopayCard({ onStateChange }) {
   const themeMap = {
     active: { bg: '#F0FDF4', border: '#BBF7D0', dot: B.green, label: 'Active' },
     paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.orange, label: 'Paused' },
-    disabled: { bg: '#F8FAFC', border: '#E1E7EF', dot: B.grayMid, label: 'Off' },
+    disabled: { bg: PORTAL_BILLING.page, border: PORTAL_BILLING.border, dot: PORTAL_BILLING.muted, label: 'Off' },
   };
   const theme = themeMap[state];
 
@@ -328,9 +340,9 @@ export default function AutopayCard({ onStateChange }) {
     padding: '10px 14px', borderRadius: 8, fontSize: 14, fontWeight: 800,
     cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1,
     fontFamily: FONTS.heading,
-    border: kind === 'primary' ? 'none' : '1px solid #CBD5E1',
-    background: kind === 'primary' ? B.blueDeeper : '#fff',
-    color: kind === 'primary' ? '#fff' : B.blueDeeper,
+    border: kind === 'primary' ? 'none' : `1px solid ${PORTAL_BILLING.borderStrong}`,
+    background: kind === 'primary' ? PORTAL_BILLING.text : PORTAL_BILLING.surface,
+    color: kind === 'primary' ? '#fff' : PORTAL_BILLING.text,
     minHeight: 36,
   });
 
@@ -346,11 +358,11 @@ export default function AutopayCard({ onStateChange }) {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block' }} />
-            <span style={{ fontSize: 12, fontWeight: 850, color: B.grayMid, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <span style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
               Auto Pay / {theme.label}
             </span>
           </div>
-          <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
+          <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
             {state === 'active'
               ? `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`
               : state === 'paused'
@@ -358,7 +370,7 @@ export default function AutopayCard({ onStateChange }) {
                 : 'Auto Pay is off. Charges will not run automatically.'}
           </div>
           {activeCard && state !== 'disabled' && (
-            <div style={{ fontSize: 14, color: B.grayMid, marginTop: 5 }}>
+            <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
               Charging {activeCard.brand || 'card'} ending in {activeCard.last4}
             </div>
           )}
@@ -396,14 +408,14 @@ export default function AutopayCard({ onStateChange }) {
           {errorBanner}
           {modal === 'pause' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Pause until</label>
+              <label style={{ fontSize: 14, color: PORTAL_BILLING.body, fontWeight: 600 }}>Pause until</label>
               <input type="date" value={pauseUntil} onChange={(e) => setPauseUntil(e.target.value)}
                 min={etDateString(addETDays(new Date(), 1))}
-                style={{ padding: 10, fontSize: 14, border: '1px solid #CBD5E1', borderRadius: 8 }} />
-              <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Reason (optional)</label>
+                style={{ padding: 10, fontSize: 14, border: `1px solid ${PORTAL_BILLING.borderStrong}`, borderRadius: 8 }} />
+              <label style={{ fontSize: 14, color: PORTAL_BILLING.body, fontWeight: 600 }}>Reason (optional)</label>
               <textarea value={pauseReason} onChange={(e) => setPauseReason(e.target.value)} rows={2}
                 placeholder="e.g. Out of town for the month"
-                style={{ padding: 10, fontSize: 14, border: '1px solid #CBD5E1', borderRadius: 8, fontFamily: FONTS.body }} />
+                style={{ padding: 10, fontSize: 14, border: `1px solid ${PORTAL_BILLING.borderStrong}`, borderRadius: 8, fontFamily: FONTS.body }} />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button type="button" style={btn('secondary')} onClick={() => setModal(null)}>Cancel</button>
                 <button type="button" style={btn('primary')} disabled={saving || !pauseUntil} onClick={submitPause}>
@@ -416,20 +428,20 @@ export default function AutopayCard({ onStateChange }) {
           {modal === 'card' && !addingCard && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {payment_methods.length === 0 ? (
-                <div style={{ fontSize: 14, color: B.grayMid }}>
+                <div style={{ fontSize: 14, color: PORTAL_BILLING.muted }}>
                   No cards on file yet. Add a payment method before Auto Pay can run.
                 </div>
               ) : (
                 payment_methods.map((pm) => (
                   <label key={pm.id} style={{
                     display: 'flex', alignItems: 'center', gap: 10, padding: 12,
-                    border: `1px solid ${selectedCard === pm.id ? B.wavesBlue : '#CBD5E1'}`,
-                    background: selectedCard === pm.id ? '#EEF6FF' : '#fff',
+                    border: `1px solid ${selectedCard === pm.id ? PORTAL_BILLING.softBorder : PORTAL_BILLING.borderStrong}`,
+                    background: selectedCard === pm.id ? PORTAL_BILLING.soft : PORTAL_BILLING.surface,
                     borderRadius: 8, cursor: 'pointer',
                   }}>
                     <input type="radio" name="autopay-card" checked={selectedCard === pm.id}
                       onChange={() => setSelectedCard(pm.id)} />
-                    <span style={{ fontSize: 14, color: B.grayDark }}>
+                    <span style={{ fontSize: 14, color: PORTAL_BILLING.body }}>
                       {pm.brand || 'Card'} ending in {pm.last4}
                       {pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}
                     </span>
@@ -457,7 +469,7 @@ export default function AutopayCard({ onStateChange }) {
           {modal === 'card' && addingCard && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div ref={mountRef} style={{ minHeight: 180 }} />
-              {!stripeReady && <div style={{ fontSize: 14, color: B.grayMid }}>Loading payment form...</div>}
+              {!stripeReady && <div style={{ fontSize: 14, color: PORTAL_BILLING.muted }}>Loading payment form...</div>}
               {/* Save-card authorization — locked because saving is the
                   whole purpose of this modal. Shown so the consent row
                   reflects the copy the customer saw. */}
@@ -473,11 +485,11 @@ export default function AutopayCard({ onStateChange }) {
 
           {modal === 'day' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <label style={{ fontSize: 14, color: B.grayDark, fontWeight: 600 }}>Charge day of month (1-28)</label>
+              <label style={{ fontSize: 14, color: PORTAL_BILLING.body, fontWeight: 600 }}>Charge day of month (1-28)</label>
               <input type="number" min={1} max={28} value={selectedDay}
                 onChange={(e) => setSelectedDay(parseInt(e.target.value) || 1)}
-                style={{ padding: 10, fontSize: 14, border: '1px solid #CBD5E1', borderRadius: 8 }} />
-              <div style={{ fontSize: 12, color: B.grayMid }}>
+                style={{ padding: 10, fontSize: 14, border: `1px solid ${PORTAL_BILLING.borderStrong}`, borderRadius: 8 }} />
+              <div style={{ fontSize: 12, color: PORTAL_BILLING.muted }}>
                 Auto Pay runs on this day each month. Max is the 28th so every month is covered.
               </div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -502,19 +514,19 @@ function Modal({ title, children, onClose }) {
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
     }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        background: '#fff', borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
+        background: PORTAL_BILLING.surface, borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
-        border: '1px solid #E1E7EF',
+        border: `1px solid ${PORTAL_BILLING.border}`,
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
+          <div style={{ fontSize: 16, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading }}>{title}</div>
           <button type="button" aria-label="Close" onClick={onClose} style={{
-            background: '#fff',
-            border: '1px solid #CBD5E1',
+            background: PORTAL_BILLING.surface,
+            border: `1px solid ${PORTAL_BILLING.borderStrong}`,
             borderRadius: 8,
             cursor: 'pointer',
-            color: B.grayMid,
+            color: PORTAL_BILLING.muted,
             width: 36,
             height: 36,
             display: 'inline-flex',

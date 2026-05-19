@@ -21,14 +21,14 @@
   --brand-soft:    rgba(27, 44, 91, 0.08);
   --brand-ring:    rgba(27, 44, 91, 0.18);
 
-  /* Neutrals — inherited from admin portal */
-  --page:          #F6F8FB;
+  /* Customer neutrals — warm public portal surface. */
+  --page:          #FAF8F3;
   --surface:       #FFFFFF;
-  --text:          #0A0A0A;
-  --text-muted:    #4B5563;
+  --text:          #1B2C5B;
+  --text-muted:    #3F4A65;
   --text-subtle:   #6B7280;
-  --border:        #E1E7EF;
-  --border-strong: #CBD5E1;
+  --border:        #E7E2D7;
+  --border-strong: #D8D0C0;
 
   /* Status — reserved per portal spec */
   --danger:        #C8102E;   /* marketing brand red per wavespestcontrol.com (--color-brand-red); overdue invoices, destructive confirms, system failure */

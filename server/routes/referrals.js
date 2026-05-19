@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 router.use(authenticate);
 
@@ -123,9 +124,14 @@ router.post('/', async (req, res, next) => {
 
     // Send SMS to referee
     try {
+      const body = await renderRequiredSmsTemplate('referral_invite', {
+        referee_name: refereeName.trim(),
+        referrer_name: customer.first_name || 'your neighbor',
+        referral_link: `https://wavespestcontrol.com?ref=${customer.referral_code}`,
+      });
       const smsResult = await sendCustomerMessage({
         to: refereePhone.trim(),
-        body: `Hi ${refereeName.trim()}! Your neighbor ${customer.first_name} thinks you'd love Waves Pest Control. Get a free quote: https://wavespestcontrol.com?ref=${customer.referral_code} or call us: (941) 318-7612`,
+        body,
         channel: 'sms',
         audience: 'lead',
         purpose: 'referral',

@@ -142,7 +142,7 @@ function StepProgress({ current, payAtVisit }) {
 
 function StatusPill({ tone = 'neutral', children }) {
   const tones = {
-    neutral: { bg: '#F8FAFC', color: 'var(--text)', border: '#E1E7EF' },
+    neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
     success: { bg: '#F0FDF4', color: '#047857', border: '#BBF7D0' },
     attention: { bg: '#FFFBEB', color: '#92400E', border: '#FDE68A' },
     brand: { bg: 'var(--brand-soft)', color: 'var(--brand)', border: 'var(--brand-ring)' },
@@ -238,7 +238,7 @@ function ToggleSwitch({ value, onChange, label }) {
         height: 28,
         borderRadius: 999,
         border: `1px solid ${value ? 'var(--brand)' : 'var(--border-strong)'}`,
-        background: value ? 'var(--brand)' : '#F8FAFC',
+        background: value ? 'var(--brand)' : '#FAF8F3',
         position: 'relative',
         cursor: 'pointer',
         flexShrink: 0,
@@ -859,7 +859,7 @@ export default function OnboardingPage() {
                 {q.tier && (
                   <div style={{
                     border: '1px solid var(--border)',
-                    background: '#F8FAFC',
+                    background: '#FAF8F3',
                     borderRadius: 8,
                     padding: 14,
                     marginBottom: 20,
@@ -958,7 +958,7 @@ export default function OnboardingPage() {
                 )}
 
                 {svc && (
-                  <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 16, background: '#F8FAFC' }}>
+                  <div style={{ border: '1px solid #E7E2D7', borderRadius: 8, padding: 16, background: '#FAF8F3' }}>
                     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14 }}>
                       <div>
                         <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase' }}>First service</div>

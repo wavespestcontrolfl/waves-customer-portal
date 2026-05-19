@@ -17,18 +17,19 @@ const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
 } = require('../services/estimate-automation-duplicates');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
 
-async function renderTemplate(templateKey, vars, fallback) {
+async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
       const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
-  } catch { /* fall through to fallback */ }
-  return fallback;
+  } catch { /* fall through */ }
+  return null;
 }
 
 const quoteLimiter = rateLimit({
@@ -67,7 +68,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (!firstName || !lastName || !email || !phone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
-    if (!services || (!services.pest && !services.lawn)) {
+    if (!services || (
+      !services.pest && !services.lawn &&
+      !services.mosquito && !services.termite && !services.rodentBait
+    )) {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
@@ -116,6 +120,35 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         tier: services.lawn.tier || 'enhanced',
       };
     }
+    // Recurring service paths exposed to the marketing-site /estimate
+    // funnel. Each takes its sizing input from the property profile
+    // (lawnSqFt for mosquito, footprint for termite/rodent), so callers
+    // only need to specify the program tier.
+    //
+    // Deliberately NOT exposed here:
+    //   • One-time services (bedBug, trenching, preSlab, dethatching,
+    //     plugging, topDressing, stinging, flea, oneTimeLawn, sanitation,
+    //     exclusion, rodentTrapping) — they divert to /api/leads per the
+    //     architecture note above (recurring-only public quoting).
+    //   • treeShrub + palm — they require count inputs the marketing
+    //     form doesn't collect yet; defer to a follow-up PR that adds
+    //     tree/palm count steps to the EstimateForm island.
+    if (services.mosquito) {
+      engineInput.services.mosquito = {
+        tier: services.mosquito.tier || 'monthly12',
+        stationCount: services.mosquito.stationCount,
+        dunkCount: services.mosquito.dunkCount,
+      };
+    }
+    if (services.termite) {
+      engineInput.services.termite = {
+        system: services.termite.system || 'advance',
+        monitoringTier: services.termite.monitoringTier || 'basic',
+      };
+    }
+    if (services.rodentBait) {
+      engineInput.services.rodentBait = {};
+    }
 
     const estimate = generateEstimate(engineInput);
     const monthly = Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
@@ -126,7 +159,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return res.status(500).json({ error: 'Unable to calculate a price right now.' });
     }
 
-    const serviceInterest = [services.pest ? 'Pest Control' : null, services.lawn ? 'Lawn Care' : null].filter(Boolean).join(' + ');
+    const serviceInterest = [
+      services.pest ? 'Pest Control' : null,
+      services.lawn ? 'Lawn Care' : null,
+      services.mosquito ? 'Mosquito Control' : null,
+      services.termite ? 'Termite Control' : null,
+      services.rodentBait ? 'Rodent Control' : null,
+    ].filter(Boolean).join(' + ');
     const normalizedPhone = normalizePhone(phone);
 
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
@@ -375,26 +414,29 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const customerBody = await renderTemplate(
           'estimate_accepted_onetime',
           { first_name: firstName, service_label: serviceLabel, booking_url: bookingUrl },
-          `Hey ${firstName}! Thanks for booking your ${serviceLabel} with Waves. Pick your time here and we'll show slots when a tech will already be in your neighborhood: ${bookingUrl}. Questions? Just reply. - Waves`
         );
-        const smsResult = await sendCustomerMessage({
-          to: normalizedPhone,
-          body: customerBody,
-          channel: 'sms',
-          audience: 'lead',
-          purpose: 'conversational',
-          leadId: lead.id,
-          identityTrustLevel: 'phone_provided_unverified',
-          entryPoint: 'public_quote_booking_sms',
-          metadata: {
-            original_message_type: 'auto_reply',
-            mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
-          },
-        });
-        if (!smsResult.sent) {
-          logger.warn(`[public-quote] Customer SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        if (!customerBody) {
+          logger.warn(`[public-quote] estimate_accepted_onetime template missing/disabled; booking SMS skipped for lead ${lead.id}`);
         } else {
-          logger.info(`[public-quote] Customer SMS sent for lead ${lead.id}`);
+          const smsResult = await sendCustomerMessage({
+            to: normalizedPhone,
+            body: customerBody,
+            channel: 'sms',
+            audience: 'lead',
+            purpose: 'conversational',
+            leadId: lead.id,
+            identityTrustLevel: 'phone_provided_unverified',
+            entryPoint: 'public_quote_booking_sms',
+            metadata: {
+              original_message_type: 'auto_reply',
+              mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
+            },
+          });
+          if (!smsResult.sent) {
+            logger.warn(`[public-quote] Customer SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          } else {
+            logger.info(`[public-quote] Customer SMS sent for lead ${lead.id}`);
+          }
         }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }
@@ -477,7 +519,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     });
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });
-    res.status(500).json({ error: 'Something went wrong. Please call (941) 318-7612 for a quote.' });
+    res.status(500).json({ error: `Something went wrong. Please call ${WAVES_SUPPORT_PHONE_DISPLAY} for a quote.` });
   }
 });
 

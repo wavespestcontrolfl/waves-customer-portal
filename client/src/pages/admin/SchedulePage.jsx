@@ -592,6 +592,19 @@ function editNextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   d.setDate(d.getDate() + gap * i);
   return isNaN(d.getTime()) ? base : d;
 }
+
+function editShiftPastWeekend(date, skip, direction) {
+  if (!skip || !date || isNaN(date.getTime())) return date;
+  const day = date.getDay();
+  if (day !== 0 && day !== 6) return date;
+  const shifted = new Date(date);
+  if (direction === "back") {
+    shifted.setDate(shifted.getDate() - (day === 6 ? 1 : 2));
+  } else {
+    shifted.setDate(shifted.getDate() + (day === 6 ? 2 : 1));
+  }
+  return shifted;
+}
 const EDIT_FALLBACK_SERVICES = [
   {
     category: "pest_control",
@@ -654,6 +667,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
     service.recurringParentId ||
     service.recurring_parent_id
   );
+  const serviceIsRecurringTemplate = !!(
+    service.isRecurring &&
+    !service.recurringParentId &&
+    !service.recurring_parent_id
+  );
   const [form, setForm] = useState({
     scheduledDate: service.scheduledDate
       ? String(service.scheduledDate).split("T")[0]
@@ -676,15 +694,31 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
   const [expandedCategory, setExpandedCategory] = useState(null);
   const [editingServiceType, setEditingServiceType] = useState(false);
-  const [isRecurring, setIsRecurring] = useState(false);
+  const [isRecurring, setIsRecurring] = useState(serviceIsRecurringTemplate);
   const [recurringFreq, setRecurringFreq] = useState(
-    service.recurringPattern || "quarterly",
+    service.recurringPattern || service.recurring_pattern || "quarterly",
   );
   const [recurringCount, setRecurringCount] = useState(4);
-  const [recurringOngoing, setRecurringOngoing] = useState(true);
-  const [recurringNth, setRecurringNth] = useState(3);
-  const [recurringWeekday, setRecurringWeekday] = useState(3);
-  const [recurringIntervalDays, setRecurringIntervalDays] = useState(30);
+  const [recurringOngoing, setRecurringOngoing] = useState(
+    service.recurringOngoing ?? service.recurring_ongoing ?? true,
+  );
+  const [recurringNth, setRecurringNth] = useState(
+    service.recurringNth ?? service.recurring_nth ?? 3,
+  );
+  const [recurringWeekday, setRecurringWeekday] = useState(
+    service.recurringWeekday ?? service.recurring_weekday ?? 3,
+  );
+  const [recurringIntervalDays, setRecurringIntervalDays] = useState(
+    service.recurringIntervalDays ?? service.recurring_interval_days ?? 30,
+  );
+  const [skipWeekends, setSkipWeekends] = useState(
+    !!(service.skipWeekends ?? service.skip_weekends),
+  );
+  const [weekendShift, setWeekendShift] = useState(
+    (service.weekendShift || service.weekend_shift) === "back"
+      ? "back"
+      : "forward",
+  );
   const [assignmentScope, setAssignmentScope] = useState(() =>
     serviceHasSeries ? "following" : "this_only",
   );
@@ -760,9 +794,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
   };
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const recurringControlsActive = isRecurring || serviceIsRecurringTemplate;
 
   const recurringPreview = () => {
-    if (!isRecurring || !form.scheduledDate) return null;
+    if (!recurringControlsActive || !form.scheduledDate) return null;
     const opts = {
       nth: recurringNth,
       weekday: recurringWeekday,
@@ -777,8 +812,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
         i,
         opts,
       );
+      const displayDate =
+        i === 0
+          ? d
+          : editShiftPastWeekend(d, !!skipWeekends, weekendShift);
       dates.push(
-        d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        displayDate.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+        }),
       );
     }
     return dates;
@@ -791,26 +833,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
         method: "PUT",
         body: JSON.stringify({
           ...form,
-          isRecurring,
-          recurringPattern: isRecurring ? recurringFreq : undefined,
-          recurringCount: isRecurring
+          isRecurring: recurringControlsActive,
+          spawnRecurringChildren: isRecurring && !serviceIsRecurringTemplate,
+          recurringPattern: recurringControlsActive ? recurringFreq : undefined,
+          recurringCount: isRecurring && !serviceHasSeries
             ? recurringOngoing
               ? 4
               : recurringCount
             : undefined,
-          recurringOngoing: isRecurring ? recurringOngoing : undefined,
+          recurringOngoing: recurringControlsActive ? recurringOngoing : undefined,
           recurringNth:
-            isRecurring && recurringFreq === "monthly_nth_weekday"
+            recurringControlsActive && recurringFreq === "monthly_nth_weekday"
               ? recurringNth
               : undefined,
           recurringWeekday:
-            isRecurring && recurringFreq === "monthly_nth_weekday"
+            recurringControlsActive && recurringFreq === "monthly_nth_weekday"
               ? recurringWeekday
               : undefined,
           recurringIntervalDays:
-            isRecurring && recurringFreq === "custom"
+            recurringControlsActive && recurringFreq === "custom"
               ? recurringIntervalDays
               : undefined,
+          skipWeekends: recurringControlsActive ? !!skipWeekends : undefined,
+          weekendShift:
+            recurringControlsActive && skipWeekends ? weekendShift : undefined,
           discountType: discountType || undefined,
           discountAmount:
             discountType && discountAmount !== ""
@@ -912,6 +958,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
     fontWeight: 700,
     color: "#111827",
     margin: "0 0 14px",
+  };
+  const weekendRuleValue = skipWeekends ? weekendShift : "allow";
+  const updateWeekendRule = (value) => {
+    if (value === "allow") {
+      setSkipWeekends(false);
+      return;
+    }
+    setSkipWeekends(true);
+    setWeekendShift(value === "back" ? "back" : "forward");
   };
 
   return (
@@ -1815,14 +1870,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                   display: "flex",
                   alignItems: "center",
                   gap: 10,
-                  marginBottom: isRecurring ? 14 : 0,
+                  marginBottom: recurringControlsActive ? 14 : 0,
                 }}
               >
                 {" "}
                 <input
                   type="checkbox"
-                  checked={isRecurring}
+                  checked={recurringControlsActive}
                   onChange={(e) => setIsRecurring(e.target.checked)}
+                  disabled={serviceHasSeries}
                   style={{ width: 17, height: 17, accentColor: D.teal }}
                 />{" "}
                 <div>
@@ -1835,7 +1891,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                   </div>{" "}
                 </div>{" "}
               </div>
-              {isRecurring && (
+              {recurringControlsActive && (
                 <div
                   style={{
                     border: `1px solid ${D.border}`,
@@ -1871,23 +1927,25 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                         ))}
                       </select>{" "}
                     </div>{" "}
-                    <div>
-                      {" "}
-                      <label style={labelStyle}>End repeating</label>{" "}
-                      <select
-                        value={recurringOngoing ? "never" : "count"}
-                        onChange={(e) =>
-                          setRecurringOngoing(e.target.value === "never")
-                        }
-                        className="font-bold"
-                        style={inputStyle}
-                      >
+                    {!serviceIsRecurringTemplate && (
+                      <div>
                         {" "}
-                        <option value="never">Never</option>{" "}
-                        <option value="count">After count</option>{" "}
-                      </select>{" "}
-                    </div>
-                    {!recurringOngoing && (
+                        <label style={labelStyle}>End repeating</label>{" "}
+                        <select
+                          value={recurringOngoing ? "never" : "count"}
+                          onChange={(e) =>
+                            setRecurringOngoing(e.target.value === "never")
+                          }
+                          className="font-bold"
+                          style={inputStyle}
+                        >
+                          {" "}
+                          <option value="never">Never</option>{" "}
+                          <option value="count">After count</option>{" "}
+                        </select>{" "}
+                      </div>
+                    )}
+                    {!serviceIsRecurringTemplate && !recurringOngoing && (
                       <div>
                         {" "}
                         <label style={labelStyle}>Count</label>{" "}
@@ -1955,22 +2013,62 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                     </div>
                   )}
                   {recurringFreq === "custom" && (
-                    <div style={{ marginBottom: 10 }}>
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns:
+                          "repeat(auto-fit, minmax(150px, 1fr))",
+                        gap: 10,
+                        marginBottom: 10,
+                      }}
+                    >
                       {" "}
-                      <label style={labelStyle}>Frequency</label>{" "}
-                      <input
-                        type="number"
-                        min={1}
-                        max={365}
-                        value={recurringIntervalDays}
-                        onChange={(e) =>
-                          setRecurringIntervalDays(
-                            parseInt(e.target.value) || 30,
-                          )
-                        }
+                      <div>
+                        <label style={labelStyle}>Frequency</label>{" "}
+                        <input
+                          type="number"
+                          min={1}
+                          max={365}
+                          value={recurringIntervalDays}
+                          onChange={(e) =>
+                            setRecurringIntervalDays(
+                              parseInt(e.target.value) || 30,
+                            )
+                          }
+                          className="font-bold"
+                          style={inputStyle}
+                        />{" "}
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Weekend rule</label>{" "}
+                        <select
+                          value={weekendRuleValue}
+                          onChange={(e) => updateWeekendRule(e.target.value)}
+                          className="font-bold"
+                          style={inputStyle}
+                        >
+                          <option value="allow">Allow weekends</option>
+                          <option value="forward">
+                            Move Sat/Sun to Monday
+                          </option>
+                          <option value="back">Move Sat/Sun to Friday</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                  {recurringFreq !== "custom" && (
+                    <div style={{ marginBottom: 10 }}>
+                      <label style={labelStyle}>Weekend rule</label>{" "}
+                      <select
+                        value={weekendRuleValue}
+                        onChange={(e) => updateWeekendRule(e.target.value)}
                         className="font-bold"
                         style={inputStyle}
-                      />{" "}
+                      >
+                        <option value="allow">Allow weekends</option>
+                        <option value="forward">Move Sat/Sun to Monday</option>
+                        <option value="back">Move Sat/Sun to Friday</option>
+                      </select>
                     </div>
                   )}
                   {recurringPreview() && (

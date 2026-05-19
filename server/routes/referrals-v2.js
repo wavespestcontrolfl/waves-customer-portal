@@ -10,6 +10,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 router.use(authenticate);
 
@@ -214,8 +215,12 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
       return res.json({ success: true, deduped: true });
     }
 
-    const friendly = friendName ? ` ${friendName.replace(/[<>]/g, '')}` : '';
-    const body = `Hi${friendly}! ${promoter.first_name} thinks you'd love Waves Pest Control. Get a free quote: ${referralLink} or call (941) 318-7612`;
+    const friendly = friendName ? friendName.replace(/[<>]/g, '') : 'there';
+    const body = await renderRequiredSmsTemplate('referral_invite', {
+      referee_name: friendly,
+      referrer_name: promoter.first_name || 'your neighbor',
+      referral_link: referralLink,
+    });
 
     const smsResult = await sendCustomerMessage({
       to: cleanPhone,

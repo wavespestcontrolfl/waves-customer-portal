@@ -5,6 +5,7 @@ const { authenticate } = require('../middleware/auth');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 
 router.use(authenticate);
 
@@ -181,9 +182,13 @@ router.post('/', async (req, res, next) => {
       // 8-10: Send Google review SMS to customer
       const reviewLink = REVIEW_LINKS[office];
       try {
+        const body = await renderRequiredSmsTemplate('review_request', {
+          first_name: customer.first_name || 'there',
+          review_url: reviewLink,
+        });
         const smsResult = await sendCustomerMessage({
           to: customer.phone,
-          body: `Thanks for the feedback, ${customer.first_name}! We'd love if you shared your experience on Google. It means the world to our team: ${reviewLink}. Thank you for choosing Waves!`,
+          body,
           channel: 'sms',
           audience: 'customer',
           purpose: 'review_request',

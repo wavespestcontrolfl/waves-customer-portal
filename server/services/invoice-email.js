@@ -1,7 +1,7 @@
 /**
  * Transactional invoice + receipt emails. Layered on top of the existing
  * SMS-only flow (InvoiceService.sendInvoice / .sendReceipt) — does not
- * replace it. Brand-matched HTML with a gold CTA and the invoice/receipt
+ * replace it. Brand-matched HTML with the shared customer CTA and invoice/receipt
  * PDF attached.
  *
  * Uses its own nodemailer transporter (same SMTP settings as email.js) so
@@ -15,6 +15,8 @@ const { wrapEmail, ctaButton, currency, formatDate, plainText } = require('./ema
 const EmailTemplateLibrary = require('./email-template-library');
 const sendgrid = require('./sendgrid-mail');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { formatDateOnly } = require('../utils/date-only');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -88,8 +90,8 @@ async function sendInvoiceEmail(invoiceId) {
   const lines = [
     ['Invoice', invoice.invoice_number],
     ['Service', invoice.service_type || '—'],
-    invoice.service_date ? ['Service date', formatDate(invoice.service_date)] : null,
-    invoice.due_date ? ['Due', formatDate(invoice.due_date)] : null,
+    invoice.service_date ? ['Service date', formatDateOnly(invoice.service_date)] : null,
+    invoice.due_date ? ['Due', formatDateOnly(invoice.due_date)] : null,
     ['Amount due', currency(invoice.total), true],
   ].filter(Boolean);
   const html = wrapEmail({
@@ -100,8 +102,8 @@ async function sendInvoiceEmail(invoiceId) {
     ctaHref: payUrl,
     ctaLabel: `Pay ${currency(invoice.total)}`,
     footerNote: extraAttachmentCount > 0
-      ? 'Your PDF invoice is attached. Additional invoice attachments are available from the payment link. Reply to this email or call (941) 318-7612 with any questions.'
-      : 'Your PDF invoice is attached. Reply to this email or call (941) 318-7612 with any questions.',
+      ? `Your PDF invoice is attached. Additional invoice attachments are available from the payment link. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
+      : `Your PDF invoice is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`,
   });
   const text = plainText([
     `Hi ${first},`,
@@ -110,13 +112,13 @@ async function sendInvoiceEmail(invoiceId) {
     '',
     `Invoice: ${invoice.invoice_number}`,
     invoice.service_type ? `Service: ${invoice.service_type}` : null,
-    invoice.due_date ? `Due: ${formatDate(invoice.due_date)}` : null,
+    invoice.due_date ? `Due: ${formatDateOnly(invoice.due_date)}` : null,
     `Amount due: ${currency(invoice.total)}`,
     '',
     `Pay online: ${payUrl}`,
     extraAttachmentCount > 0 ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from that link.` : null,
     '',
-    'Questions? Reply to this email or call (941) 318-7612.',
+    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     '— Waves Pest Control',
   ]);
 
@@ -130,9 +132,9 @@ async function sendInvoiceEmail(invoiceId) {
           invoice_url: payUrl,
           invoice_number: invoice.invoice_number,
           amount_due: currency(invoice.total),
-          due_date: invoice.due_date ? formatDate(invoice.due_date) : '',
+          due_date: invoice.due_date ? formatDateOnly(invoice.due_date) : '',
           service_label: invoice.service_type || '',
-          service_date: invoice.service_date ? formatDate(invoice.service_date) : '',
+          service_date: invoice.service_date ? formatDateOnly(invoice.service_date) : '',
           attachment_note: extraAttachmentCount > 0
             ? `${extraAttachmentCount} additional invoice attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the payment link.`
             : 'Your PDF invoice is attached.',
@@ -220,7 +222,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const memoEscaped = memo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const memoHtml = memo
-    ? `<div style="margin-top:16px;padding:14px 16px;background:#FDF6EC;border-left:3px solid #009CDE;border-radius:4px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#334155;white-space:pre-wrap;">${memoEscaped}</div>`
+    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:Inter,Arial,sans-serif;font-size:14px;line-height:1.55;color:#3F4A65;white-space:pre-wrap;">${memoEscaped}</div>`
     : '';
   const intro = `Hi ${first}, we received your payment of ${currency(invoice.total)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.${memoHtml ? '' : ''}`;
   const introWithMemo = memoHtml ? `${intro}${memoHtml}` : intro;

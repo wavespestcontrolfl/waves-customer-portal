@@ -7,6 +7,7 @@ const stripeConfig = require('../config/stripe-config');
 const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { etDateString } = require('../utils/datetime-et');
 const {
   assertInvoicePaymentIntentTenderMatches,
@@ -1149,16 +1150,18 @@ async function handleAchFailure(paymentIntent, failureReason) {
       if (customer.phone) {
         let body;
         let messageType;
+        const billingUrl = `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing`;
         if (recentFailures >= 3) {
           messageType = 'ach_suspended';
-          body = `Hi ${customer.first_name}, your bank payment failed again. We updated your default payment to your card. Card payments include a processing fee. Update your bank account at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to pay with no added fee. - Waves Pest Control`;
         } else if (recentFailures >= 2) {
           messageType = 'ach_card_fallback';
-          body = `Hi ${customer.first_name}, your bank payment failed again. We switched this payment to your card on file. Card payments include a processing fee. You can switch back to bank payment once your account is verified. - Waves Pest Control`;
         } else {
           messageType = 'ach_retry_notice';
-          body = `Hi ${customer.first_name}, your bank payment did not go through. We will retry automatically in 3 business days. No action needed. - Waves Pest Control`;
         }
+        body = await renderRequiredSmsTemplate(messageType, {
+          first_name: customer.first_name || 'there',
+          billing_url: billingUrl,
+        });
         const smsResult = await sendBillingSms(customer, body, {
           original_message_type: messageType,
           stripe_payment_intent_id: paymentIntent.id,
@@ -1332,9 +1335,13 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
     if (payment?.customer_id) {
       const customer = await db('customers').where({ id: payment.customer_id }).first();
       if (customer?.phone) {
+        const body = await renderRequiredSmsTemplate('bank_verification_incomplete', {
+          first_name: customer.first_name || 'there',
+          billing_url: `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing`,
+        });
         const smsResult = await sendBillingSms(
           customer,
-          `Hi ${customer.first_name}, your bank account verification is incomplete. Please finish setup at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing to complete your payment. - Waves`,
+          body,
           { original_message_type: 'bank_verification_incomplete', stripe_payment_intent_id: piId }
         );
         if (!smsResult.sent) {
@@ -1485,9 +1492,13 @@ async function handleSetupIntentFailed(setupIntent) {
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).first();
       if (customer?.phone) {
+        const body = await renderRequiredSmsTemplate('bank_verification_failed', {
+          first_name: customer.first_name || 'there',
+          billing_url: `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing`,
+        });
         const smsResult = await sendBillingSms(
           customer,
-          `Hi ${customer.first_name}, we could not verify your bank account. Please try again at ${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing or use a card. - Waves`,
+          body,
           { original_message_type: 'bank_verification_failed', stripe_setup_intent_id: setupIntent.id }
         );
         if (!smsResult.sent) {

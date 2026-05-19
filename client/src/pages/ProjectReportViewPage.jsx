@@ -38,7 +38,7 @@ const cardStyle = {
 const eyebrowStyle = {
   fontSize: 12,
   color: ESTIMATE_MUTED,
-  letterSpacing: '0.12em',
+  letterSpacing: 0,
   textTransform: 'uppercase',
   fontWeight: 700,
 };
@@ -903,7 +903,7 @@ function CertificateOfCompliance({ findings, customerName, customerAddress, tech
               fontSize: 12,
               fontWeight: 700,
               textTransform: 'uppercase',
-              letterSpacing: '0.08em',
+              letterSpacing: 0,
               color: ESTIMATE_MUTED,
               marginBottom: 5,
             }}>
