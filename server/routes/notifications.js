@@ -45,6 +45,38 @@ function preferencePayload(prefs = {}) {
   };
 }
 
+function comparableEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function notificationPrefsDbUpdates(updates = {}, existing = {}) {
+  const dbUpdates = {};
+  if (updates.appointmentConfirmation !== undefined) dbUpdates.appointment_confirmation = updates.appointmentConfirmation;
+  if (updates.serviceReminder72h !== undefined) dbUpdates.service_reminder_72h = updates.serviceReminder72h;
+  if (updates.serviceReminder24h !== undefined) dbUpdates.service_reminder_24h = updates.serviceReminder24h;
+  if (updates.techEnRoute !== undefined) dbUpdates.tech_en_route = updates.techEnRoute;
+  if (updates.appointmentNotifyPrimary !== undefined) dbUpdates.appointment_notify_primary = updates.appointmentNotifyPrimary;
+  if (updates.autoFlipEnRoute !== undefined) dbUpdates.auto_flip_en_route = updates.autoFlipEnRoute;
+  if (updates.serviceCompleted !== undefined) dbUpdates.service_completed = updates.serviceCompleted;
+  if (updates.billingReminder !== undefined) dbUpdates.billing_reminder = updates.billingReminder;
+  if (updates.seasonalTips !== undefined) dbUpdates.seasonal_tips = updates.seasonalTips;
+  if (updates.smsEnabled !== undefined) dbUpdates.sms_enabled = updates.smsEnabled;
+  if (updates.emailEnabled !== undefined) dbUpdates.email_enabled = updates.emailEnabled;
+  if (updates.billingEmail !== undefined) {
+    dbUpdates.billing_email = updates.billingEmail || null;
+    const emailChanged = comparableEmail(updates.billingEmail) !== comparableEmail(existing.billing_email);
+    if (!updates.billingEmail || (emailChanged && updates.billingContactName === undefined)) {
+      dbUpdates.billing_contact_name = null;
+    }
+  }
+  if (updates.billingContactName !== undefined && dbUpdates.billing_email !== null) {
+    dbUpdates.billing_contact_name = updates.billingContactName || null;
+  }
+  if (updates.paymentConfirmationSms !== undefined) dbUpdates.payment_confirmation_sms = updates.paymentConfirmationSms;
+  if (updates.serviceReportNotifyPrimary !== undefined) dbUpdates.service_report_notify_primary = updates.serviceReportNotifyPrimary;
+  return dbUpdates;
+}
+
 async function ensurePrefs(customerId) {
   let prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
   if (!prefs) {
@@ -160,31 +192,11 @@ router.put('/preferences', async (req, res, next) => {
 
     const updates = await schema.validateAsync(req.body);
 
-    // Map camelCase to snake_case
-    const dbUpdates = {};
-    if (updates.appointmentConfirmation !== undefined) dbUpdates.appointment_confirmation = updates.appointmentConfirmation;
-    if (updates.serviceReminder72h !== undefined) dbUpdates.service_reminder_72h = updates.serviceReminder72h;
-    if (updates.serviceReminder24h !== undefined) dbUpdates.service_reminder_24h = updates.serviceReminder24h;
-    if (updates.techEnRoute !== undefined) dbUpdates.tech_en_route = updates.techEnRoute;
-    if (updates.appointmentNotifyPrimary !== undefined) dbUpdates.appointment_notify_primary = updates.appointmentNotifyPrimary;
-    if (updates.autoFlipEnRoute !== undefined) dbUpdates.auto_flip_en_route = updates.autoFlipEnRoute;
-    if (updates.serviceCompleted !== undefined) dbUpdates.service_completed = updates.serviceCompleted;
-    if (updates.billingReminder !== undefined) dbUpdates.billing_reminder = updates.billingReminder;
-    if (updates.seasonalTips !== undefined) dbUpdates.seasonal_tips = updates.seasonalTips;
-    if (updates.smsEnabled !== undefined) dbUpdates.sms_enabled = updates.smsEnabled;
-    if (updates.emailEnabled !== undefined) dbUpdates.email_enabled = updates.emailEnabled;
-    if (updates.billingEmail !== undefined) {
-      dbUpdates.billing_email = updates.billingEmail || null;
-      if (!updates.billingEmail) dbUpdates.billing_contact_name = null;
-    }
-    if (updates.billingContactName !== undefined && dbUpdates.billing_email !== null) {
-      dbUpdates.billing_contact_name = updates.billingContactName || null;
-    }
-    if (updates.paymentConfirmationSms !== undefined) dbUpdates.payment_confirmation_sms = updates.paymentConfirmationSms;
-    if (updates.serviceReportNotifyPrimary !== undefined) dbUpdates.service_report_notify_primary = updates.serviceReportNotifyPrimary;
-    dbUpdates.updated_at = new Date();
-
     const existing = await db('notification_prefs').where({ customer_id: req.customerId }).first();
+    const dbUpdates = {
+      ...notificationPrefsDbUpdates(updates, existing || {}),
+      updated_at: new Date(),
+    };
 
     if (existing) {
       await db('notification_prefs')
@@ -264,5 +276,10 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     next(err);
   }
 });
+
+router._private = {
+  comparableEmail,
+  notificationPrefsDbUpdates,
+};
 
 module.exports = router;
