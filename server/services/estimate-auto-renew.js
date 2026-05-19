@@ -69,12 +69,14 @@ const EstimateAutoRenew = {
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
           let smsBody = null;
-          try {
-            smsBody = await renderTemplate('estimate_auto_renewed',
-              { first_name: firstName, estimate_url: url },
-            );
-          } catch (e) {
-            logger.warn(`[est-auto-renew] SMS template unavailable for estimate ${est.id}: ${e.message}`);
+          if (est.customer_phone) {
+            try {
+              smsBody = await renderTemplate('estimate_auto_renewed',
+                { first_name: firstName, estimate_url: url },
+              );
+            } catch (e) {
+              logger.warn(`[est-auto-renew] SMS template unavailable for estimate ${est.id}: ${e.message}`);
+            }
           }
 
           if (est.customer_phone && smsBody) {

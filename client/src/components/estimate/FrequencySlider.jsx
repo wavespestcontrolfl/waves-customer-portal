@@ -24,7 +24,7 @@ const W = {
   white: '#FFFFFF', offWhite: '#F1F5F9', border: '#CBD5E1', borderLight: '#E2E8F0',
 };
 
-export default function FrequencySlider({ frequencies, selected, onChange }) {
+export default function FrequencySlider({ frequencies, selected, onChange, disabled = false }) {
   if (!frequencies || frequencies.length === 0) return null;
 
   const n = frequencies.length;
@@ -37,27 +37,31 @@ export default function FrequencySlider({ frequencies, selected, onChange }) {
   const fillPercent = fractionFor(idx) * 100;
 
   const pickByIndex = useCallback((i) => {
+    if (disabled) return;
     const clamped = Math.max(0, Math.min(frequencies.length - 1, i));
     onChange(frequencies[clamped].key);
-  }, [frequencies, onChange]);
+  }, [disabled, frequencies, onChange]);
 
   const handleKeyDown = useCallback((e) => {
+    if (disabled) return;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); pickByIndex(idx - 1); }
     else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); pickByIndex(idx + 1); }
     else if (e.key === 'Home') { e.preventDefault(); pickByIndex(0); }
     else if (e.key === 'End') { e.preventDefault(); pickByIndex(frequencies.length - 1); }
-  }, [idx, frequencies.length, pickByIndex]);
+  }, [disabled, idx, frequencies.length, pickByIndex]);
 
   return (
     <div
       role="group"
       aria-label="Service frequency"
-      tabIndex={0}
+      aria-disabled={disabled}
+      tabIndex={disabled ? -1 : 0}
       onKeyDown={handleKeyDown}
       style={{
         background: W.white, borderRadius: 16, padding: '22px 20px 14px',
         border: `1px solid ${W.border}`, marginBottom: 16,
         outline: 'none',
+        opacity: disabled ? 0.68 : 1,
       }}
     >
       <div style={{
@@ -101,6 +105,7 @@ export default function FrequencySlider({ frequencies, selected, onChange }) {
               type="button"
               aria-label={`${f.label} frequency`}
               aria-pressed={isActive}
+              disabled={disabled}
               onClick={() => pickByIndex(i)}
               style={{
                 position: 'absolute',
@@ -113,7 +118,7 @@ export default function FrequencySlider({ frequencies, selected, onChange }) {
                 background: isActive ? W.blueBright : W.white,
                 border: `2px solid ${isActive ? W.blueBright : W.border}`,
                 boxShadow: isActive ? '0 2px 8px rgba(0,156,222,0.35)' : 'none',
-                cursor: 'pointer',
+                cursor: disabled ? 'not-allowed' : 'pointer',
                 padding: 0,
                 transition: 'all 180ms ease',
               }}

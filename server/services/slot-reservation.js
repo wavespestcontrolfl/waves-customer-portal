@@ -35,6 +35,7 @@ const estimateSlotAvailability = require('./estimate-slot-availability');
 
 const DEFAULT_HOLD_MINUTES = 15;
 const DEFAULT_DURATION_MINUTES = 60;
+const MAX_SERVICE_TYPE_LENGTH = 100;
 
 // Slot IDs come from PR A's getAvailableSlots:
 //   `${date}_${startTime.replace(':', '-')}_${techId || 'unassigned'}`
@@ -64,15 +65,110 @@ function addMinutesToTime(hhmmss, minutes) {
   return `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}:00`;
 }
 
+function applyWindowOverlapFilter(query, windowStart, windowEnd) {
+  return query.andWhereRaw(
+    "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time",
+    [windowEnd, DEFAULT_DURATION_MINUTES, windowStart],
+  );
+}
+
+function dateOnly(value) {
+  if (!value) return value;
+  if (typeof value === 'string') return value.slice(0, 10);
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return value;
+}
+
+function cappedServiceType(value, fallback = 'Estimate service') {
+  const label = String(value || fallback).replace(/\s+/g, ' ').trim() || fallback;
+  if (label.length <= MAX_SERVICE_TYPE_LENGTH) return label;
+  return `${label.slice(0, MAX_SERVICE_TYPE_LENGTH - 3).trimEnd()}...`;
+}
+
+function serviceKeyForLabel(value = '') {
+  const raw = String(value || '').toLowerCase();
+  if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
+  if (/lawn|turf|fertili[sz]|weed|fungus|chinch/.test(raw)) return 'lawn_care';
+  if (/mosquito/.test(raw)) return 'mosquito';
+  if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
+  if (/palm/.test(raw)) return 'palm_injection';
+  if (/rodent|rat|mouse|mice/.test(raw)) return 'rodent_bait';
+  if (/termite/.test(raw)) return 'termite_bait';
+  return '';
+}
+
+function pestServiceTypeFromVisits(visitsPerYear) {
+  const visits = Number(visitsPerYear);
+  if (Number.isFinite(visits) && visits >= 12) return 'Monthly Pest Control';
+  if (Number.isFinite(visits) && visits >= 6) return 'Bi-Monthly Pest Control';
+  return 'Quarterly Pest Control';
+}
+
+function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimate service') {
+  const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
+  const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  const key = primary?.service || serviceKeyForLabel(fallback);
+
+  if (key === 'pest_control') return pestServiceTypeFromVisits(primary?.visitsPerYear);
+  if (key === 'lawn_care') return 'Lawn Care';
+  if (key === 'mosquito') return 'Mosquito Treatment';
+  if (key === 'tree_shrub') return 'Tree & Shrub';
+  if (key === 'termite_bait') return 'Termite Bait';
+  if (key === 'palm_injection') return 'Palm Injection';
+  if (key === 'rodent_bait') return 'Rodent Bait';
+  return cappedServiceType(fallback);
+}
+
+function normalizedServiceMixLabel(serviceProfile = {}, fallback = '') {
+  const label = String(serviceProfile?.serviceLabel || fallback || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return label || null;
+}
+
+function notesWithServiceMix(existingNotes, serviceProfile = {}, fallback = '') {
+  const mixLabel = normalizedServiceMixLabel(serviceProfile, fallback);
+  if (!mixLabel) return existingNotes || null;
+  const line = `Accepted service mix: ${mixLabel}.`;
+  const current = String(existingNotes || '').trim();
+  if (!current) return line;
+  if (current.includes(line)) return current;
+  if (/^Accepted service mix:/m.test(current)) {
+    return current.replace(/^Accepted service mix:.*$/m, line);
+  }
+  return `${current}\n${line}`;
+}
+
+async function resolveReservationServiceProfile(client, row, opts = {}) {
+  if (!estimateSlotAvailability.resolveEstimateSlotProfile) return null;
+  let estimate = opts.estimate || null;
+  if (!estimate && row?.source_estimate_id) {
+    estimate = await client('estimates').where({ id: row.source_estimate_id }).first();
+  }
+  if (!estimate) return null;
+  return estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+    serviceMode: opts.serviceMode,
+    selectedFrequency: opts.selectedFrequency,
+    durationMinutes: opts.durationMinutes,
+  });
+}
+
 /**
  * Reserve a slot for an estimate. Atomic — if the slot is already taken
  * (by another committed visit, or by a live reservation that hasn't
  * expired), throws SLOT_UNAVAILABLE.
  *
- * opts: { estimateId, slotId, holdMinutes?, durationMinutes? }
+ * opts: { estimateId, slotId, holdMinutes?, durationMinutes?, serviceMode?, selectedFrequency? }
  * returns: { scheduledServiceId, expiresAt }
  */
-async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINUTES, durationMinutes = DEFAULT_DURATION_MINUTES }) {
+async function reserveSlot({
+  estimateId,
+  slotId,
+  holdMinutes = DEFAULT_HOLD_MINUTES,
+  durationMinutes,
+  serviceMode = 'recurring',
+  selectedFrequency = '',
+}) {
   const parsed = parseSlotId(slotId);
   if (!parsed) {
     const err = new Error('invalid slotId format');
@@ -80,7 +176,6 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
     throw err;
   }
   const { date, windowStart, techId } = parsed;
-  const windowEnd = addMinutesToTime(windowStart, durationMinutes);
 
   // Numeric coerce + bound the hold window so we can safely interpolate it
   // into a Postgres INTERVAL string below.
@@ -116,20 +211,36 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
         throw err;
       }
 
-      // Conflict check + insert in the same txn so a concurrent reserve on
-      // the same (tech, date, windowStart) can't slip past us. Expired
+      const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
+        ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+          serviceMode,
+          selectedFrequency,
+          durationMinutes,
+        })
+        : null;
+      const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
+        ? Number(serviceProfile.durationMinutes)
+        : DEFAULT_DURATION_MINUTES;
+      const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
+      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest);
+      const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
+      const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+
+      // Conflict check + insert in the same txn so a concurrent reserve that
+      // overlaps this tech/date window can't slip past us. Expired
       // reservations are harmless cruft — releaseExpiredReservations()
       // reclaims them, and the new reservation can overlap safely. Use
       // NOW() server-side instead of a JS-side `new Date()` to keep the
       // inequality consistent with the timestamp the INSERT will set.
       const conflict = await trx('scheduled_services')
-        .where({ scheduled_date: date, window_start: windowStart })
+        .where({ scheduled_date: date })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
         .whereNotIn('status', ['cancelled'])
         .andWhere((q) => {
           q.whereNull('reservation_expires_at')
             .orWhereRaw('reservation_expires_at > NOW()');
         })
+        .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
         .first('id');
 
       if (conflict) {
@@ -139,23 +250,23 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
         throw err;
       }
 
-      // service_type falls back to the estimate's service_interest. Admin
-      // can always rename via the dispatch board; this is the initial
-      // label that appears in scheduled_services + the tech app.
+      // service_type stays canonical for protocol/default lookups; notes
+      // carry the full accepted service mix for dispatch and tech execution.
       const [row] = await trx('scheduled_services').insert({
         customer_id: null,
         technician_id: techId,
         scheduled_date: date,
         window_start: windowStart,
         window_end: windowEnd,
-        service_type: estimate.service_interest || 'Estimate service',
+        service_type: serviceType,
         status: 'pending',
         source_estimate_id: estimateId,
         // DB-side expiry timestamp. holdMins is clamped above; safe to
         // splice into the INTERVAL string.
         reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`),
         payment_method_preference: null,
-        estimated_duration_minutes: durationMinutes,
+        estimated_duration_minutes: effectiveDurationMinutes,
+        notes,
         // track_state uses its DB default ('scheduled'). track_view_token
         // stays null — reservation rows aren't yet customer-linked, so
         // there's nothing to track. commitReservation can mint a token
@@ -167,6 +278,9 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
       const expiresAt = row.reservation_expires_at || null;
       logger.info('[slot-reservation] reserved', {
         estimateId, slotId, scheduledServiceId,
+        serviceType,
+        displayServiceLabel,
+        durationMinutes: effectiveDurationMinutes,
         expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : expiresAt,
       });
 
@@ -189,7 +303,17 @@ async function reserveSlot({ estimateId, slotId, holdMinutes = DEFAULT_HOLD_MINU
  * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, trx? }
  * returns: updated scheduled_services row
  */
-async function commitReservation({ scheduledServiceId, customerId, paymentMethodPreference, estimatedPrice, trx }) {
+async function commitReservation({
+  scheduledServiceId,
+  customerId,
+  paymentMethodPreference,
+  estimatedPrice,
+  estimate = null,
+  serviceMode = 'recurring',
+  selectedFrequency = '',
+  durationMinutes,
+  trx,
+}) {
   // Body is shared between the "caller already has a txn" path (use it) and
   // the "no caller txn" path (open our own). Either way the SELECT runs
   // FOR UPDATE so a concurrent commit/release/expiry-cleanup can't race
@@ -217,6 +341,42 @@ async function commitReservation({ scheduledServiceId, customerId, paymentMethod
       throw err;
     }
 
+    const serviceProfile = await resolveReservationServiceProfile(client, row, {
+      estimate,
+      serviceMode,
+      selectedFrequency,
+      durationMinutes,
+    });
+    const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
+      ? Number(serviceProfile.durationMinutes)
+      : null;
+    const scheduledDate = dateOnly(row.scheduled_date);
+    const windowStart = row.window_start;
+    const windowEnd = effectiveDurationMinutes && scheduledDate && windowStart
+      ? addMinutesToTime(windowStart, effectiveDurationMinutes)
+      : null;
+
+    if (windowEnd) {
+      const conflict = await client('scheduled_services')
+        .where({ scheduled_date: scheduledDate })
+        .modify((q) => { if (row.technician_id) q.where('technician_id', row.technician_id); })
+        .whereNot('id', scheduledServiceId)
+        .whereNotIn('status', ['cancelled'])
+        .andWhere((q) => {
+          q.whereNull('reservation_expires_at')
+            .orWhereRaw('reservation_expires_at > NOW()');
+        })
+        .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
+        .first('id');
+
+      if (conflict) {
+        const err = new Error('slot no longer available');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = `${scheduledDate}_${String(windowStart).slice(0, 5).replace(':', '-')}_${row.technician_id || 'unassigned'}`;
+        throw err;
+      }
+    }
+
     const updates = {
       customer_id: customerId,
       reservation_expires_at: null,
@@ -229,6 +389,12 @@ async function commitReservation({ scheduledServiceId, customerId, paymentMethod
     if (Number.isFinite(price) && price > 0) {
       updates.estimated_price = Math.round(price * 100) / 100;
     }
+    if (windowEnd) {
+      updates.window_end = windowEnd;
+      updates.estimated_duration_minutes = effectiveDurationMinutes;
+      updates.service_type = canonicalServiceTypeForProfile(serviceProfile, row.service_type);
+      updates.notes = notesWithServiceMix(row.notes, serviceProfile, row.service_type);
+    }
 
     const [updated] = await client('scheduled_services')
       .where({ id: scheduledServiceId })
@@ -240,6 +406,7 @@ async function commitReservation({ scheduledServiceId, customerId, paymentMethod
       customerId,
       paymentMethodPreference: paymentMethodPreference || null,
       estimatedPrice: updates.estimated_price || null,
+      durationMinutes: updates.estimated_duration_minutes || null,
     });
 
     return updated;
@@ -306,5 +473,5 @@ module.exports = {
   commitReservation,
   releaseReservation,
   releaseExpiredReservations,
-  _internals: { parseSlotId, addMinutesToTime },
+  _internals: { parseSlotId, addMinutesToTime, cappedServiceType, canonicalServiceTypeForProfile, notesWithServiceMix },
 };

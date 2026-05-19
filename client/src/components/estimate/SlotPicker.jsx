@@ -76,7 +76,14 @@ function SlotCard({ slot, isSelected, onSelect }) {
 
 const INITIAL_VISIBLE = 3;
 
-export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSignal }) {
+export default function SlotPicker({
+  token,
+  selectedSlotId,
+  onSelect,
+  refreshSignal,
+  serviceMode = 'recurring',
+  selectedFrequency = null,
+}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -87,12 +94,18 @@ export default function SlotPicker({ token, selectedSlotId, onSelect, refreshSig
     setLoading(true);
     setError(null);
     setShowMore(false);
-    fetch(`${API_BASE}/public/estimates/${token}/available-slots`)
+    const params = new URLSearchParams();
+    params.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
+    if (serviceMode !== 'one_time' && selectedFrequency) {
+      params.set('selectedFrequency', selectedFrequency);
+    }
+    const query = params.toString();
+    fetch(`${API_BASE}/public/estimates/${token}/available-slots${query ? `?${query}` : ''}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
       .then((body) => { if (!cancelled) { setData(body); setLoading(false); } })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
-  }, [token, refreshSignal]);
+  }, [token, refreshSignal, serviceMode, selectedFrequency]);
 
   if (loading) {
     return (

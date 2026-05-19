@@ -3,10 +3,10 @@
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1216,
-      "annualAfterDiscount": 1094.4,
-      "monthlyTotal": 91.2,
-      "savings": 121.6,
+      "annualBeforeDiscount": 1176,
+      "annualAfterDiscount": 1058.4,
+      "monthlyTotal": 88.2,
+      "savings": 117.6,
       "serviceCount": 2
     },
     "results": {
@@ -34,19 +34,19 @@
       ],
       "pestTiers": [
         {
-          "mo": 42.33,
+          "mo": 39,
           "apps": 4,
           "recommended": true,
           "label": "Quarterly"
         },
         {
-          "mo": 53.98,
+          "mo": 49.73,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 88.9,
+          "mo": 81.9,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -63,18 +63,18 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1193.4,
-      "year2": 1094.4
+      "year1": 1157.4,
+      "year2": 1058.4
     }
   },
   "v1adapter_platinum_bundle_4_services_zone_a": {
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 4613,
-      "annualAfterDiscount": 3690.4,
-      "monthlyTotal": 307.53,
-      "savings": 922.6,
+      "annualBeforeDiscount": 3705,
+      "annualAfterDiscount": 2964,
+      "monthlyTotal": 247,
+      "savings": 741,
       "serviceCount": 4
     },
     "results": {
@@ -85,17 +85,17 @@
           "name": "4x"
         },
         {
-          "mo": 46,
+          "mo": 45,
           "recommended": false,
           "name": "6x"
         },
         {
-          "mo": 64,
+          "mo": 59,
           "recommended": false,
           "name": "9x"
         },
         {
-          "mo": 93,
+          "mo": 84,
           "recommended": true,
           "name": "12x"
         }
@@ -122,7 +122,7 @@
       ],
       "ts": [
         {
-          "mo": 122.42,
+          "mo": 55.75,
           "recommended": true,
           "name": "Standard"
         }
@@ -135,14 +135,6 @@
         {
           "mo": 125,
           "recommended": true
-        },
-        {
-          "mo": 141,
-          "recommended": false
-        },
-        {
-          "mo": 169,
-          "recommended": false
         }
       ],
       "tmBait": null
@@ -154,8 +146,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 3789.4,
-      "year2": 3690.4
+      "year1": 3063,
+      "year2": 2964
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -341,18 +333,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 444,
+      "total": 410,
       "tmInstall": 0,
       "items": [
         {
           "name": "One-Time Pest",
-          "price": 444
+          "price": 410
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 444,
+      "year1": 410,
       "year2": 0
     }
   },
@@ -411,14 +403,6 @@
         {
           "mo": 331,
           "recommended": true
-        },
-        {
-          "mo": 375.75,
-          "recommended": false
-        },
-        {
-          "mo": 444,
-          "recommended": false
         }
       ],
       "tmBait": null
@@ -505,10 +489,10 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 2218.42,
-      "annualAfterDiscount": 1885.66,
-      "monthlyTotal": 157.14,
-      "savings": 332.76,
+      "annualBeforeDiscount": 2009.7,
+      "annualAfterDiscount": 1708.25,
+      "monthlyTotal": 142.35,
+      "savings": 301.45,
       "serviceCount": 3
     },
     "results": {
@@ -536,19 +520,19 @@
       ],
       "pestTiers": [
         {
-          "mo": 47.41,
+          "mo": 39,
           "apps": 4,
           "recommended": false,
           "label": "Quarterly"
         },
         {
-          "mo": 60.45,
+          "mo": 49.73,
           "apps": 6,
           "recommended": true,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 99.57,
+          "mo": 81.9,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -556,7 +540,7 @@
       ],
       "ts": [
         {
-          "mo": 62.42,
+          "mo": 55.75,
           "recommended": true,
           "name": "Standard"
         }
@@ -571,18 +555,18 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1984.66,
-      "year2": 1885.66
+      "year1": 1807.25,
+      "year2": 1708.25
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1269.6,
-      "annualAfterDiscount": 1142.64,
-      "monthlyTotal": 95.22,
-      "savings": 126.96,
+      "annualBeforeDiscount": 1128,
+      "annualAfterDiscount": 1015.2,
+      "monthlyTotal": 84.6,
+      "savings": 112.8,
       "serviceCount": 2
     },
     "results": {
@@ -610,19 +594,19 @@
       ],
       "pestTiers": [
         {
-          "mo": 50.8,
+          "mo": 39,
           "apps": 4,
           "recommended": true,
           "label": "Quarterly"
         },
         {
-          "mo": 64.77,
+          "mo": 49.73,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 106.68,
+          "mo": 81.9,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -639,8 +623,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1241.64,
-      "year2": 1142.64
+      "year1": 1114.2,
+      "year2": 1015.2
     }
   }
 }
