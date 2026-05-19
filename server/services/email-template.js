@@ -1,7 +1,7 @@
 /**
  * Shared branded email template used by every transactional email we
  * send (invoice, receipt, estimate, future). Single source of truth for
- * the Waves logo header + navy/gold palette + gold CTA + footer so a
+ * the Waves logo header + estimate-style palette + blue CTA + footer so a
  * copy-change lands everywhere.
  *
  * Consumers:
@@ -11,19 +11,27 @@
  * If you add a new transactional email, import wrapEmail + ctaButton
  * from here instead of hand-rolling another <div style>.
  */
-const { WAVES_FL_LICENSE_LINE } = require('../config/business');
+
+const {
+  WAVES_BUSINESS_NAME,
+  WAVES_WEBSITE_HOST,
+  WAVES_WEBSITE_URL,
+  WAVES_ADDRESS_LINE,
+  WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_SUPPORT_PHONE_E164,
+  WAVES_FL_LICENSE_LINE,
+} = require('../constants/business');
 const { formatDisplayDate } = require('../utils/date-only');
 
-// Brand colors — mirrors client/src/theme-brand.js
+// Customer-facing email colors mirror the public estimate/project pages.
 const NAVY = '#1B2C5B';
 const WAVES_BLUE = '#009CDE';
-const GOLD = '#FFD700';
-const INK = '#0F172A';
-const BODY = '#334155';
-const MUTED = '#64748B';
-const SAND = '#FDF6EC';
+const INK = NAVY;
+const BODY = '#3F4A65';
+const MUTED = '#6B7280';
+const SAND = '#FAF8F3';
 const CARD = '#FFFFFF';
-const RULE = '#E2E8F0';
+const RULE = '#E7E2D7';
 
 function currency(n) {
   const v = Number(n || 0);
@@ -34,13 +42,12 @@ function formatDate(d) {
   return formatDisplayDate(d);
 }
 
-// Gold CTA with navy 3D-offset shadow — matches theme-brand.js GOLD_CTA identity.
 function ctaButton(href, label) {
   return `
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
       <tr>
-        <td style="border-radius:12px;background:${GOLD};border:2px solid ${NAVY};box-shadow:4px 4px 0 ${NAVY};">
-          <a href="${href}" style="display:inline-block;padding:16px 28px;font-family:Inter,Arial,sans-serif;font-size:16px;font-weight:800;color:${NAVY};text-decoration:none;text-transform:uppercase;letter-spacing:0.03em;line-height:1;">
+        <td style="border-radius:10px;background:${NAVY};border:1px solid ${NAVY};">
+          <a href="${href}" style="display:inline-block;padding:14px 24px;font-family:Inter,Arial,sans-serif;font-size:15px;font-weight:800;color:#FFFFFF;text-decoration:none;letter-spacing:0;line-height:1.1;">
             ${label}
           </a>
         </td>
@@ -79,12 +86,21 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
   ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${SAND};">${preheader}</div>` : ''}
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:${SAND};">
     <tr><td align="center" style="padding:32px 16px;">
-      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:560px;background:${CARD};border-radius:16px;overflow:hidden;box-shadow:0 10px 24px rgba(27,44,91,.08);">
-        <tr><td style="background:${NAVY};padding:24px 32px;text-align:center;">
-          <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="140" height="140" style="display:inline-block;width:140px;height:140px;max-width:140px;border:0;outline:none;text-decoration:none;" />
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:560px;background:${CARD};border-radius:16px;overflow:hidden;border:1px solid ${RULE};box-shadow:none;">
+        <tr><td style="background:${CARD};padding:18px 24px;border-bottom:1px solid ${RULE};">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+              <td align="left">
+                <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;text-decoration:none;" />
+              </td>
+              <td align="right" style="font-family:Inter,Arial,sans-serif;font-size:13px;font-weight:800;color:${NAVY};">
+                <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${NAVY};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
+              </td>
+            </tr>
+          </table>
         </td></tr>
         <tr><td style="padding:36px 32px 8px 32px;">
-          <h1 style="margin:0 0 16px 0;font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:28px;line-height:1.15;color:${INK};font-weight:400;">${heading}</h1>
+          <h1 style="margin:0 0 16px 0;font-family:'Source Serif 4',Georgia,serif;font-style:normal;font-size:28px;line-height:1.15;color:${NAVY};font-weight:500;">${heading}</h1>
           <div style="font-family:Inter,Arial,sans-serif;font-size:15px;line-height:1.55;color:${BODY};">
             ${intro}
           </div>
@@ -101,12 +117,12 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
         </td></tr>` : ''}
         <tr><td align="center" style="padding:0 32px 28px 32px;">
           <div style="font-family:Inter,Arial,sans-serif;font-size:13px;line-height:1.55;color:${MUTED};text-align:center;">
-            ${footerNote || 'Questions? Reply to this email or call <a href="tel:+19412975749" style="color:' + WAVES_BLUE + ';text-decoration:none;">(941) 297-5749</a>.'}
+            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${WAVES_BLUE};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
           </div>
         </td></tr>
         <tr><td align="center" style="background:${SAND};padding:20px 32px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;text-align:center;">
-            Waves Pest Control, LLC · <a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:none;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · ${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME} · <a href="${WAVES_WEBSITE_URL}" style="color:${MUTED};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${MUTED};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
         </td></tr>
       </table>
@@ -123,8 +139,8 @@ function plainText(lines) {
 /**
  * Service/account email wrapper. This is the professional customer-facing
  * shell for invoices, estimates, onboarding, reports, prep guides, payment
- * notices, and account-state messages. It shares the Waves logo, navy/gold
- * palette, footer, and CTA style, but deliberately avoids newsletter labeling
+ * notices, and account-state messages. It shares the Waves logo, public
+ * estimate-page palette, footer, and CTA style, but deliberately avoids newsletter labeling
  * or promotional chrome.
  *
  * @param {{
@@ -146,10 +162,10 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
   ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${SAND};">${preheader}</div>` : ''}
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:${SAND};">
     <tr><td align="center" style="padding:28px 12px;">
-      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;background:${CARD};border-radius:14px;overflow:hidden;box-shadow:0 8px 20px rgba(27,44,91,.07);">
-        <tr><td style="background:${NAVY};padding:18px 24px;text-align:left;">
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;background:${CARD};border-radius:16px;overflow:hidden;border:1px solid ${RULE};box-shadow:none;">
+        <tr><td style="background:${CARD};padding:16px 24px;text-align:left;border-bottom:1px solid ${RULE};">
           <a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-flex;align-items:center;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:72px;border:0;outline:none;vertical-align:middle;" />
+            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="64" height="64" style="display:inline-block;width:64px;height:64px;max-width:64px;border:0;outline:none;vertical-align:middle;" />
           </a>
         </td></tr>
         <tr><td style="padding:30px 30px 8px 30px;font-family:Inter,Arial,sans-serif;font-size:15px;line-height:1.58;color:${BODY};">
@@ -157,12 +173,12 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
         </td></tr>
         <tr><td align="center" style="padding:10px 30px 28px 30px;">
           <div style="font-family:Inter,Arial,sans-serif;font-size:13px;line-height:1.55;color:${MUTED};text-align:center;">
-            ${footerNote || 'Questions? Reply to this email or call <a href="tel:+19412975749" style="color:' + WAVES_BLUE + ';text-decoration:none;">(941) 297-5749</a>.'}
+            ${footerNote || `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${WAVES_BLUE};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`}
           </div>
         </td></tr>
         <tr><td align="center" style="background:${SAND};padding:18px 24px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;text-align:center;">
-            Waves Pest Control, LLC · <a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:none;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a> · ${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME} · <a href="${WAVES_WEBSITE_URL}" style="color:${MUTED};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${MUTED};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
         </td></tr>
       </table>
@@ -210,12 +226,12 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
   ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${SAND};">${preheader}</div>` : ''}
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:${SAND};">
     <tr><td align="center" style="padding:24px 12px;">
-      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;background:${CARD};border-radius:16px;overflow:hidden;box-shadow:0 10px 24px rgba(27,44,91,.08);">
-        <tr><td style="background:${NAVY};padding:20px 24px;text-align:center;">
+      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;background:${CARD};border-radius:16px;overflow:hidden;border:1px solid ${RULE};box-shadow:none;">
+        <tr><td style="background:${CARD};padding:18px 24px;text-align:center;border-bottom:1px solid ${RULE};">
           <a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="120" height="120" style="display:inline-block;width:120px;height:120px;max-width:120px;border:0;outline:none;" />
+            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:72px;border:0;outline:none;" />
           </a>
-          <div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.18em;text-transform:uppercase;color:${GOLD};font-weight:700;">
+          <div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:12px;letter-spacing:0;text-transform:none;color:${NAVY};font-weight:800;">
             The Waves Newsletter
           </div>
         </td></tr>
@@ -224,10 +240,10 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
         </td></tr>
         <tr><td align="center" style="background:${SAND};padding:18px 24px 22px 24px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:12px;line-height:1.6;color:${MUTED};text-align:center;">
-            ${unsubLine}<a href="https://wavespestcontrol.com" style="color:${MUTED};text-decoration:underline;">wavespestcontrol.com</a> · <a href="tel:+19412975749" style="color:${MUTED};text-decoration:none;">(941) 297-5749</a>
+            ${unsubLine}<a href="${WAVES_WEBSITE_URL}" style="color:${MUTED};text-decoration:underline;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${MUTED};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>
           </div>
           <div style="margin-top:6px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">
-            Waves Pest Control, LLC · 13649 Luxe Ave #110, Bradenton, FL 34211 · ${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · ${WAVES_FL_LICENSE_LINE}
           </div>
           ${footerNote ? `<div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};text-align:center;">${footerNote}</div>` : ''}
         </td></tr>
@@ -302,5 +318,5 @@ module.exports = {
   currency,
   formatDate,
   plainText,
-  colors: { NAVY, WAVES_BLUE, GOLD, INK, BODY, MUTED, SAND, CARD, RULE },
+  colors: { NAVY, WAVES_BLUE, INK, BODY, MUTED, SAND, CARD, RULE },
 };

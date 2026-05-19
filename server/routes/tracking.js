@@ -10,6 +10,7 @@ const {
   finiteNumber,
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 router.use(authenticate);
 
@@ -18,9 +19,9 @@ const STALE_VEHICLE_MS = 5 * 60 * 1000;
 const STEP_NAMES = ['', 'Scheduled', 'Confirmed', 'En Route', 'On-Site', 'In Progress', 'Wrapping Up', 'Complete'];
 
 const OFFICES = {
-  lakewood_ranch: { name: 'Waves Pest Control Lakewood Ranch', phone: '(941) 318-7612', area: 'Lakewood Ranch / Bradenton' },
-  sarasota: { name: 'Waves Pest Control Sarasota', phone: '(941) 318-7612', area: 'Sarasota / Siesta Key' },
-  venice: { name: 'Waves Pest Control Venice', phone: '(941) 318-7612', area: 'Venice / North Port' },
+  lakewood_ranch: { name: 'Waves Pest Control Lakewood Ranch', phone: WAVES_SUPPORT_PHONE_DISPLAY, area: 'Lakewood Ranch / Bradenton' },
+  sarasota: { name: 'Waves Pest Control Sarasota', phone: WAVES_SUPPORT_PHONE_DISPLAY, area: 'Sarasota / Siesta Key' },
+  venice: { name: 'Waves Pest Control Venice', phone: WAVES_SUPPORT_PHONE_DISPLAY, area: 'Venice / North Port' },
   parrish: { name: 'Waves Pest Control Parrish', phone: '(941) 297-2817', area: 'Parrish / Palmetto / Ellenton' },
 };
 

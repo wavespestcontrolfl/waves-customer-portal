@@ -8,6 +8,7 @@
  */
 
 const logger = require('./logger');
+const { wrapServiceEmail, ctaButton, colors } = require('./email-template');
 
 let cachedTransporter = null;
 
@@ -27,23 +28,20 @@ function getTransporter() {
   return cachedTransporter;
 }
 
-// Minimal HTML body with Waves branding. Keep inline styles — most email
-// clients strip <style> blocks.
+// Legacy callers still reach this path when the template library is
+// unavailable. Keep the body flexible, but use the same customer-facing
+// chrome as the main transactional template.
 function wrapHtml({ heading, body, ctaUrl, ctaLabel }) {
   const cta = ctaUrl && ctaLabel
-    ? `<p style="text-align:center;margin:24px 0;"><a href="${ctaUrl}" style="display:inline-block;padding:14px 28px;background:#0ea5e9;color:#fff;text-decoration:none;border-radius:8px;font-weight:bold;">${ctaLabel}</a></p>`
+    ? `<div style="margin:26px 0 14px 0;text-align:center;">${ctaButton(ctaUrl, ctaLabel)}</div>`
     : '';
-  return `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a;">
-      <h2 style="color:#0ea5e9;margin-top:0;">Waves Pest Control, LLC</h2>
-      ${heading ? `<h3 style="margin:0 0 12px 0;">${heading}</h3>` : ''}
-      <div style="font-size:15px;line-height:1.5;">${body}</div>
-      ${cta}
-      <hr style="border:none;border-top:1px solid #eee;margin:24px 0;" />
-      <p style="color:#666;font-size:13px;">Questions? Call or text (941) 318-7612 or reply to this email.</p>
-      <p style="color:#999;font-size:12px;">Waves Pest Control, LLC · Lakewood Ranch, FL</p>
-    </div>
-  `;
+  const headingHtml = heading
+    ? `<h1 style="margin:0 0 16px 0;font-family:'Source Serif 4',Georgia,serif;font-size:28px;line-height:1.15;color:${colors.NAVY};font-weight:500;">${heading}</h1>`
+    : '';
+  return wrapServiceEmail({
+    preheader: heading,
+    body: `${headingHtml}<div style="font-size:15px;line-height:1.58;color:${colors.BODY};">${body || ''}</div>${cta}`,
+  });
 }
 
 async function send({ to, subject, heading, body, ctaUrl, ctaLabel }) {

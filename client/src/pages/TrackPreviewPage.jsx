@@ -10,13 +10,41 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
-import { COLORS, FONTS, GOLD_CTA } from '../theme-brand';
-import BrandFooter from '../components/BrandFooter';
+import { COLORS, FONTS } from '../theme-brand';
+import { WavesShell } from '../components/brand';
+import {
+  WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_SUPPORT_SMS_TEL,
+} from '../constants/business';
 
 const FONT_BODY = FONTS.body;
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
-const WAVES_SMS_TEL = '+19412975749';
-const WAVES_PHONE_DISPLAY = '(941) 297-5749';
+const TRACK_SURFACE = {
+  surface: '#FFFFFF',
+  border: '#E7E2D7',
+  soft: '#F8FCFE',
+  softBorder: '#CFE7F5',
+  text: '#1B2C5B',
+  body: '#3F4A65',
+  muted: '#6B7280',
+};
+
+const TRACK_PRIMARY_CTA = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minHeight: 48,
+  padding: '0 20px',
+  background: COLORS.blueDeeper,
+  color: COLORS.white,
+  border: `1px solid ${COLORS.blueDeeper}`,
+  borderRadius: 8,
+  fontFamily: FONTS.ui,
+  fontWeight: 800,
+  fontSize: 15,
+  letterSpacing: 0,
+  textDecoration: 'none',
+};
 
 // ── Mock data ────────────────────────────────────────────────────
 // Sarasota, FL — tech ~2.4 mi from property along US-41
@@ -139,30 +167,23 @@ function useLastUpdated(iso) {
 // ── UI primitives ────────────────────────────────────────────────
 function Page({ children }) {
   return (
-    <div style={{
-      minHeight: '100vh',
-      background: COLORS.sand,
-      fontFamily: FONT_BODY,
-      color: COLORS.navy,
-      display: 'flex',
-      flexDirection: 'column',
-    }}>
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto' }}>
+    <WavesShell variant="customer" topBar="solid">
+      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
       </div>
-      <BrandFooter />
-    </div>
+    </WavesShell>
   );
 }
 
 function Card({ children, accent }) {
   return (
     <div style={{
-      background: COLORS.white,
-      borderRadius: 20,
+      background: TRACK_SURFACE.surface,
+      borderRadius: 8,
       padding: 24,
-      boxShadow: '0 4px 24px rgba(15, 23, 42, 0.06)',
-      borderTop: accent ? `4px solid ${accent}` : 'none',
+      boxShadow: 'none',
+      border: `1px solid ${TRACK_SURFACE.border}`,
+      borderTop: accent ? `3px solid ${accent}` : `1px solid ${TRACK_SURFACE.border}`,
       marginBottom: 16,
     }}>
       {children}
@@ -176,7 +197,7 @@ function StatusPill({ label, color }) {
       display: 'inline-block',
       fontSize: 12,
       fontWeight: 700,
-      letterSpacing: '0.1em',
+      letterSpacing: 0,
       textTransform: 'uppercase',
       color,
       background: `${color}1A`,
@@ -200,16 +221,16 @@ function EtaHero({ minutes, techFirst, source }) {
   const showUnit = !isNow && minutes != null;
   return (
     <div style={{ marginTop: 16 }}>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginBottom: 4 }}>
         {techFirst} arrives in
       </div>
       <div style={{
-        fontFamily: FONTS.display,
-        fontSize: 'clamp(56px, 14vw, 88px)',
-        fontWeight: 700,
-        color: COLORS.blueDeeper,
+        fontFamily: FONTS.serif,
+        fontSize: 64,
+        fontWeight: 600,
+        color: TRACK_SURFACE.text,
         lineHeight: 1,
-        letterSpacing: '0.02em',
+        letterSpacing: 0,
         display: 'flex',
         alignItems: 'baseline',
         gap: 12,
@@ -218,17 +239,17 @@ function EtaHero({ minutes, techFirst, source }) {
         {showUnit ? (
           <span style={{
             fontSize: 22,
-            color: COLORS.textCaption,
+            color: TRACK_SURFACE.muted,
             fontFamily: FONTS.body,
             fontWeight: 600,
-            letterSpacing: '0.02em',
+            letterSpacing: 0,
           }}>
             min
           </span>
         ) : null}
       </div>
       {source === 'haversine' ? (
-        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 6 }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 6 }}>
           Estimated based on distance
         </div>
       ) : null}
@@ -253,14 +274,14 @@ function TrackerMap({ tech, property }) {
       <div style={{
         marginTop: 20,
         height: 240,
-        borderRadius: 16,
-        background: `linear-gradient(135deg, ${COLORS.blueSurface} 0%, ${COLORS.blueLight} 100%)`,
+        borderRadius: 8,
+        background: TRACK_SURFACE.soft,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        border: `1px dashed ${COLORS.grayLight}`,
-        fontSize: 14, color: COLORS.textCaption,
+        border: `1px dashed ${TRACK_SURFACE.softBorder}`,
+        fontSize: 14, color: TRACK_SURFACE.muted,
         textAlign: 'center', padding: 24,
       }}>
-        Map preview — set <code style={{ background: COLORS.white, padding: '2px 6px', borderRadius: 4 }}>VITE_GOOGLE_MAPS_API_KEY</code> to render the live map.
+        Map preview unavailable.
       </div>
     );
   }
@@ -268,15 +289,15 @@ function TrackerMap({ tech, property }) {
   if (!isLoaded) {
     return (
       <div style={{
-        marginTop: 20, height: 240, borderRadius: 16,
-        background: COLORS.offWhite,
+        marginTop: 20, height: 240, borderRadius: 8,
+        background: TRACK_SURFACE.soft,
       }} />
     );
   }
 
   return (
     <div style={{
-      borderRadius: 16,
+      borderRadius: 8,
       overflow: 'hidden',
       marginTop: 20,
       boxShadow: '0 2px 12px rgba(15, 23, 42, 0.08)',
@@ -346,8 +367,8 @@ function TechBlock({ tech, size = 'md' }) {
           style={{
             width: px, height: px, borderRadius: '50%',
             objectFit: 'cover',
-            border: `3px solid ${COLORS.white}`,
-            boxShadow: `0 0 0 2px ${COLORS.blueLight}`,
+            border: `3px solid ${TRACK_SURFACE.surface}`,
+            boxShadow: `0 0 0 2px ${TRACK_SURFACE.border}`,
           }}
         />
       ) : (
@@ -361,11 +382,11 @@ function TechBlock({ tech, size = 'md' }) {
         </div>
       )}
       <div>
-        <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.navy, lineHeight: 1.2 }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: TRACK_SURFACE.text, lineHeight: 1.2 }}>
           {tech.firstName}
         </div>
         {tech.yearsWithWaves ? (
-          <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 2 }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 2 }}>
             {tech.yearsWithWaves}+ years with Waves
           </div>
         ) : null}
@@ -382,22 +403,22 @@ function ServiceMeta({ data }) {
     <div style={{
       marginTop: 16,
       paddingTop: 16,
-      borderTop: `1px solid ${COLORS.offWhite}`,
+      borderTop: `1px solid ${TRACK_SURFACE.border}`,
     }}>
-      <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 4 }}>Today's visit</div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.navy }}>
+      <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 4 }}>Today's visit</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>
         {data.service?.type}
       </div>
       {summary ? (
-        <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 6, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 6, lineHeight: 1.5 }}>
           {summary}
         </div>
       ) : null}
       {window ? (
-        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10 }}>{window}</div>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 10 }}>{window}</div>
       ) : null}
       {addr ? (
-        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 2 }}>{addr}</div>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 2 }}>{addr}</div>
       ) : null}
     </div>
   );
@@ -414,9 +435,9 @@ function PrepChecklist() {
     <div style={{
       marginTop: 16,
       padding: '14px 18px',
-      background: COLORS.white,
-      borderRadius: 12,
-      border: `1px solid ${COLORS.slate200}`,
+      background: TRACK_SURFACE.surface,
+      borderRadius: 8,
+      border: `1px solid ${TRACK_SURFACE.border}`,
     }}>
       <button
         onClick={() => setOpen(!open)}
@@ -432,19 +453,19 @@ function PrepChecklist() {
           fontFamily: FONTS.body,
           fontSize: 16,
           fontWeight: 600,
-          color: COLORS.blueDeeper,
+          color: TRACK_SURFACE.text,
           padding: 0,
         }}
       >
         <span>Quick prep</span>
-        <span style={{ fontSize: 14, color: COLORS.textCaption }}>{open ? '▴' : '▾'}</span>
+        <span style={{ fontSize: 14, color: TRACK_SURFACE.muted }}>{open ? '▴' : '▾'}</span>
       </button>
       {open ? (
         <ul style={{
           margin: '12px 0 0',
           paddingLeft: 22,
           fontSize: 15,
-          color: COLORS.textBody,
+          color: TRACK_SURFACE.body,
           lineHeight: 1.7,
         }}>
           {items.map((t) => <li key={t}>{t}</li>)}
@@ -467,16 +488,16 @@ function ScheduledCard({ data }) {
         fontWeight: 700,
         marginTop: 16,
         lineHeight: 1.25,
-        color: COLORS.blueDeeper,
+        color: TRACK_SURFACE.text,
       }}>
         {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
         your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
       </div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
       {data.property?.addressLine1 ? (
-        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 16 }}>
+        <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 16 }}>
           {data.property.addressLine1}
         </div>
       ) : null}
@@ -507,7 +528,7 @@ function EnRouteCard({ data }) {
             <TrackerMap tech={techCoords} property={property} />
             {lastUpdated ? (
               <div style={{
-                fontSize: 14, color: COLORS.textCaption,
+                fontSize: 14, color: TRACK_SURFACE.muted,
                 marginTop: 10, textAlign: 'right',
               }}>
                 {lastUpdated}{v?.stale ? ' · GPS reconnecting' : ''}
@@ -516,8 +537,8 @@ function EnRouteCard({ data }) {
           </>
         ) : (
           <div style={{
-            marginTop: 20, padding: 14, background: COLORS.blueSurface,
-            borderRadius: 10, fontSize: 14, color: COLORS.textBody,
+            marginTop: 20, padding: 14, background: TRACK_SURFACE.soft,
+            borderRadius: 8, fontSize: 14, color: TRACK_SURFACE.body,
           }}>
             {techFirst} is on the way. We'll update once GPS reconnects.
           </div>
@@ -525,7 +546,7 @@ function EnRouteCard({ data }) {
 
         <div style={{
           marginTop: 24, paddingTop: 20,
-          borderTop: `1px solid ${COLORS.offWhite}`,
+          borderTop: `1px solid ${TRACK_SURFACE.border}`,
         }}>
           <TechBlock tech={data.tech} size="lg" />
         </div>
@@ -533,8 +554,8 @@ function EnRouteCard({ data }) {
         <ServiceMeta data={data} />
 
         <a
-          href={`sms:${WAVES_SMS_TEL}`}
-          style={{ ...GOLD_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
+          href={WAVES_SUPPORT_SMS_TEL}
+          style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >
           TEXT WAVES
         </a>
@@ -577,7 +598,7 @@ function CompleteCard({ data }) {
         Thanks for choosing Waves
         {data.customerFirstName ? `, ${data.customerFirstName}` : ''}.
       </div>
-      <div style={{ fontSize: 15, color: COLORS.textBody, marginTop: 8 }}>
+      <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 8 }}>
         {data.service?.type} completed.
       </div>
       <div style={{ marginTop: 20 }}>
@@ -585,7 +606,7 @@ function CompleteCard({ data }) {
       </div>
       <a
         href={data.summary?.reviewUrl || '#'}
-        style={{ ...GOLD_CTA, width: '100%', marginTop: 24, boxSizing: 'border-box' }}
+        style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 24, boxSizing: 'border-box' }}
       >
         LEAVE A 5-STAR REVIEW
       </a>
@@ -603,13 +624,13 @@ function StateSwitcher({ value, onChange }) {
       flexWrap: 'wrap',
       marginBottom: 16,
       padding: 10,
-      background: COLORS.white,
-      borderRadius: 12,
-      border: `1px solid ${COLORS.slate200}`,
+      background: TRACK_SURFACE.surface,
+      borderRadius: 8,
+      border: `1px solid ${TRACK_SURFACE.border}`,
     }}>
       <div style={{
-        fontSize: 12, fontWeight: 700, letterSpacing: '0.08em',
-        textTransform: 'uppercase', color: COLORS.textCaption,
+        fontSize: 12, fontWeight: 700, letterSpacing: 0,
+        textTransform: 'uppercase', color: TRACK_SURFACE.muted,
         width: '100%', marginBottom: 4,
       }}>
         Preview state
@@ -624,9 +645,9 @@ function StateSwitcher({ value, onChange }) {
             fontSize: 14,
             fontWeight: 600,
             fontFamily: FONTS.body,
-            border: `1.5px solid ${value === s ? COLORS.blueDeeper : COLORS.slate200}`,
-            background: value === s ? COLORS.blueDeeper : COLORS.white,
-            color: value === s ? COLORS.white : COLORS.textBody,
+            border: `1.5px solid ${value === s ? COLORS.blueDeeper : TRACK_SURFACE.border}`,
+            background: value === s ? COLORS.blueDeeper : TRACK_SURFACE.surface,
+            color: value === s ? COLORS.white : TRACK_SURFACE.body,
             cursor: 'pointer',
           }}
         >
@@ -657,10 +678,10 @@ export default function TrackPreviewPage() {
       {state === 'on_property' ? <OnPropertyCard  data={data} /> : null}
       {state === 'complete'    ? <CompleteCard    data={data} /> : null}
       <div style={{
-        fontSize: 12, color: COLORS.textCaption, marginTop: 16,
+        fontSize: 12, color: TRACK_SURFACE.muted, marginTop: 16,
         textAlign: 'center', padding: '0 8px',
       }}>
-        Preview only · mock data · {WAVES_PHONE_DISPLAY}
+        Preview only · mock data · {WAVES_SUPPORT_PHONE_DISPLAY}
       </div>
     </Page>
   );

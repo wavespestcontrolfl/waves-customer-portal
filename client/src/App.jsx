@@ -13,7 +13,7 @@ class PageErrorBoundary extends Component {
       return (
         <div style={{
           minHeight: '100vh',
-          background: '#F8FAFC',
+          background: '#FAF8F3',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -24,7 +24,7 @@ class PageErrorBoundary extends Component {
           <div style={{
             width: 'min(420px, 100%)',
             background: '#fff',
-            border: '1px solid #E1E7EF',
+            border: '1px solid #E7E2D7',
             borderRadius: 8,
             padding: 24,
             textAlign: 'center',
@@ -119,7 +119,7 @@ function showReloadToast() {
   el.textContent = 'New version available — reloading…';
   Object.assign(el.style, {
     position: 'fixed', top: '20px', left: '50%', transform: 'translateX(-50%)',
-    background: '#0ea5e9', color: '#fff', padding: '10px 20px', borderRadius: '8px',
+    background: '#009CDE', color: '#fff', padding: '10px 20px', borderRadius: '8px',
     fontSize: '14px', fontWeight: '600', fontFamily: "'DM Sans', sans-serif",
     boxShadow: '0 4px 12px rgba(0,0,0,0.25)', zIndex: '99999',
   });
@@ -213,7 +213,7 @@ function ProtectedRoute({ children }) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: '#F8FAFC',
+        background: '#FAF8F3',
         fontFamily: FONTS.body,
         padding: 24,
         boxSizing: 'border-box',
@@ -221,7 +221,7 @@ function ProtectedRoute({ children }) {
         <div style={{
           width: 'min(360px, 100%)',
           background: '#fff',
-          border: '1px solid #E1E7EF',
+          border: '1px solid #E7E2D7',
           borderRadius: 8,
           padding: 24,
           textAlign: 'center',
@@ -264,22 +264,22 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/onboard/:token" element={<OnboardingPage />} />
-          <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#1E7FD9',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
+          <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><RatePage /></Suspense>} />
           <Route path="/report/project/:token" element={<ProjectReportViewPage />} />
           <Route path="/report/:token" element={<ReportViewPage />} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
-          <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
+          <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/track-preview" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><TrackPreviewPage /></Suspense>} />
-          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
           <Route path="/review/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReviewPage /></Suspense>} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#F5F1EB',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
-          <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
+          <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
           <Route path="/quote" element={<Navigate to="/estimate" replace />} />
           <Route path="/newsletter" element={<Suspense fallback={<div style={{background:'#1B2C5B',minHeight:'100vh'}}/>}><NewsletterLandingPage /></Suspense>} />
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#FEF7E0',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
-          <Route path="/button-examples" element={<Suspense fallback={<div style={{background:'#F1F5F9',minHeight:'100vh'}}/>}><ButtonExamples /></Suspense>} />
+          <Route path="/button-examples" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ButtonExamples /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookingPage />} />
           <Route path="/admin/login" element={<AdminLoginPage />} />
           <Route path="/tech" element={<TechLayout />}>

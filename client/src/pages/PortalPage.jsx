@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import api from '../utils/api';
-import { COLORS as B, TIER, FONTS, BUTTON_BASE, GOLD_CTA } from '../theme-brand';
+import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
@@ -40,7 +40,7 @@ function fmtDate(d, opts) {
 // SECTION HEADING HELPER
 // =========================================================================
 function SectionHeading({ children }) {
-  return <div style={{ fontSize: 22, fontWeight: 400, color: B.navy, fontFamily: FONTS.display, letterSpacing: 0 }}>{children}</div>;
+  return <div style={{ fontSize: 24, fontWeight: 500, color: ESTIMATE_TEXT, fontFamily: FONTS.serif, letterSpacing: 0, lineHeight: 1.15 }}>{children}</div>;
 }
 
 const VISUALLY_HIDDEN = {
@@ -55,20 +55,30 @@ const VISUALLY_HIDDEN = {
   border: 0,
 };
 
+const ESTIMATE_BG = '#FAF8F3';
+const ESTIMATE_BORDER = '#E7E2D7';
+const ESTIMATE_BORDER_STRONG = '#D8D0C0';
+const ESTIMATE_TEXT = '#1B2C5B';
+const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_MUTED = '#6B7280';
+const ESTIMATE_SOFT = '#F8FCFE';
+const ESTIMATE_SOFT_BORDER = '#CFE7F5';
+
 const PORTAL_SHELL = {
-  page: '#F8FAFC',
+  page: ESTIMATE_BG,
   surface: '#FFFFFF',
-  border: '#E1E7EF',
-  borderStrong: '#CBD5E1',
-  muted: '#64748B',
-  text: B.blueDeeper,
-  soft: '#EEF6FF',
-  softBorder: '#CDEAFE',
+  border: ESTIMATE_BORDER,
+  borderStrong: ESTIMATE_BORDER_STRONG,
+  muted: ESTIMATE_MUTED,
+  text: ESTIMATE_TEXT,
+  body: ESTIMATE_BODY,
+  soft: ESTIMATE_SOFT,
+  softBorder: ESTIMATE_SOFT_BORDER,
   successBg: '#F0FDF4',
   successBorder: '#BBF7D0',
   successText: '#047857',
-  shadow: '0 18px 45px rgba(15,23,42,0.14)',
-  shadowSoft: '0 1px 2px rgba(15,23,42,0.04)',
+  shadow: '0 18px 45px rgba(27,44,91,0.10)',
+  shadowSoft: 'none',
 };
 
 const PORTAL_BUTTON_BASE = {
@@ -126,7 +136,7 @@ function ShellCloseButton({ onClick, label = 'Close' }) {
 const PORTAL_CARD_STYLE = {
   background: PORTAL_SHELL.surface,
   border: `1px solid ${PORTAL_SHELL.border}`,
-  borderRadius: 8,
+  borderRadius: 16,
   boxShadow: PORTAL_SHELL.shadowSoft,
 };
 
@@ -135,11 +145,12 @@ const PORTAL_SECONDARY_ACTION = {
   background: PORTAL_SHELL.surface,
   color: PORTAL_SHELL.text,
   border: `1px solid ${PORTAL_SHELL.borderStrong}`,
-  borderRadius: 8,
+  borderRadius: 10,
   boxShadow: 'none',
-  padding: '10px 14px',
+  padding: '11px 15px',
   fontSize: 14,
-  fontFamily: FONTS.heading,
+  fontFamily: FONTS.body,
+  fontWeight: 800,
 };
 
 const PORTAL_PRIMARY_ACTION = {
@@ -1094,8 +1105,8 @@ function DashboardTab({ customer, onSwitchTab }) {
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
-            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : '#F8FAFC',
-            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : '#E1E7EF'}`,
+            background: balanceReady ? (hasBalance ? '#FFF7ED' : '#F0FDF4') : '#FAF8F3',
+            border: `1px solid ${balanceReady ? (hasBalance ? '#FED7AA' : '#BBF7D0') : '#E7E2D7'}`,
             cursor: 'pointer',
             textAlign: 'left',
             fontFamily: FONTS.body,
@@ -1145,7 +1156,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                   return (
                     <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
                       minWidth: 0, height: 38, borderRadius: 8, border: 'none',
-                      background: active ? color : '#F1F5F9',
+                      background: active ? color : '#FAF8F3',
                       color: active ? '#fff' : B.grayMid,
                       fontWeight: 800, cursor: satSubmitting ? 'wait' : 'pointer',
                     }}>{n}</button>
@@ -1167,7 +1178,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 }}>Open Google</a>
                 <button type="button" onClick={() => setSatDismissed(true)} style={{
                   ...PORTAL_BUTTON_BASE, background: '#fff', color: B.blueDeeper, padding: '10px 18px',
-                  boxShadow: 'none', border: '1px solid #E1E7EF', borderRadius: 8,
+                  boxShadow: 'none', border: '1px solid #E7E2D7', borderRadius: 8,
                 }}>Done</button>
               </div>
             </div>
@@ -1182,7 +1193,7 @@ function DashboardTab({ customer, onSwitchTab }) {
                 rows={3}
                 style={{
                   width: '100%', marginTop: 10, padding: 12, borderRadius: 8,
-                  border: '1px solid #CBD5E1', fontSize: 14, fontFamily: FONTS.body,
+                  border: '1px solid #D8D0C0', fontSize: 14, fontFamily: FONTS.body,
                   resize: 'vertical',
                 }}
               />
@@ -1202,7 +1213,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
         <section style={{ ...card, overflow: 'hidden' }}>
-          <div style={{ padding: 20, borderBottom: '1px solid #E1E7EF', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+          <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <ShellIconTile icon="calendar" size={38} />
               <div style={{ minWidth: 0 }}>
@@ -1276,7 +1287,7 @@ function DashboardTab({ customer, onSwitchTab }) {
               { label: 'Services YTD', value: stats?.servicesYTD ?? '—', sub: stats?.celsiusApplicationsThisYear != null ? `${stats.celsiusApplicationsThisYear} weed treatments` : 'completed visits' },
               { label: 'Member since', value: customer.memberSince ? fmtDate(customer.memberSince, { month: 'short', year: 'numeric' }) : '—', sub: 'active customer' },
             ].map(item => (
-              <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'baseline', borderBottom: '1px solid #E1E7EF', paddingBottom: 10 }}>
+              <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'baseline', borderBottom: '1px solid #E7E2D7', paddingBottom: 10 }}>
                 <div>
                   <div style={{ fontSize: 14, color: muted }}>{item.label}</div>
                   <div style={{ fontSize: 12, color: '#94A3B8', marginTop: 1 }}>{item.sub}</div>
@@ -1437,12 +1448,12 @@ function ServicesTab() {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
@@ -1505,8 +1516,8 @@ function ServicesTab() {
   const statusBadge = (status) => {
     const styles = {
       Completed: { bg: '#F0FDF4', color: B.green, border: '#BBF7D0' },
-      Callback: { bg: '#EEF6FF', color: B.wavesBlue, border: '#BFDBFE' },
-      Rescheduled: { bg: subtle, color: muted, border: '#E1E7EF' },
+      Callback: { bg: '#F8FCFE', color: B.wavesBlue, border: '#BFDBFE' },
+      Rescheduled: { bg: subtle, color: muted, border: '#E7E2D7' },
     };
     const st = styles[status] || styles.Completed;
     return (
@@ -1574,18 +1585,18 @@ function ServicesTab() {
   // --- Available years ---
   const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
 
-  const thSt = { padding: '9px 10px', fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted, textAlign: 'left', borderBottom: '1px solid #E1E7EF', background: subtle };
+  const thSt = { padding: '9px 10px', fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted, textAlign: 'left', borderBottom: '1px solid #E7E2D7', background: subtle };
   const tdSt = { padding: '10px', fontSize: 12, color: B.blueDeeper, borderBottom: '1px solid #EEF2F7', verticalAlign: 'top' };
 
   const pillStyle = (active) => ({
     padding: '7px 12px',
     borderRadius: 8,
-    border: `1px solid ${active ? B.wavesBlue : '#CBD5E1'}`,
+    border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
     cursor: 'pointer',
     fontSize: 12,
     fontWeight: 850,
     fontFamily: FONTS.heading,
-    background: active ? '#EEF6FF' : '#fff',
+    background: active ? '#F8FCFE' : '#fff',
     color: active ? B.blueDeeper : muted,
     minHeight: 34,
   });
@@ -1609,7 +1620,7 @@ function ServicesTab() {
             { val: uniqueTechs, label: 'Technicians' },
             { val: avgMinutes > 0 ? `${avgMinutes} min` : 'N/A', label: 'Avg visit' },
           ].map((stat) => (
-            <div key={stat.label} style={{ padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF', minHeight: 70 }}>
+            <div key={stat.label} style={{ padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', minHeight: 70 }}>
               <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.1 }}>{stat.val}</div>
               <div style={{ marginTop: 5, fontSize: 12, color: muted, fontWeight: 800 }}>{stat.label}</div>
             </div>
@@ -1640,7 +1651,7 @@ function ServicesTab() {
                 marginLeft: compact ? 0 : 'auto',
                 padding: '9px 12px',
                 borderRadius: 8,
-                border: '1px solid #CBD5E1',
+                border: '1px solid #D8D0C0',
                 fontSize: 14,
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
@@ -1698,7 +1709,7 @@ function ServicesTab() {
                   <div key={s.id} style={{
                     ...card,
                     overflow: 'hidden',
-                    border: `1px solid ${expanded === s.id ? '#BFDBFE' : '#E1E7EF'}`,
+                    border: `1px solid ${expanded === s.id ? '#BFDBFE' : '#E7E2D7'}`,
                   }}>
                     {/* Header — always visible */}
                     <button type="button" onClick={() => toggleExpand(s)}
@@ -1707,7 +1718,7 @@ function ServicesTab() {
                         <div style={{
                           width: 50, height: 50, borderRadius: 8,
                           background: subtle,
-                          border: '1px solid #E1E7EF',
+                          border: '1px solid #E7E2D7',
                           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                           flexShrink: 0,
                         }}>
@@ -1737,14 +1748,14 @@ function ServicesTab() {
 
                     {/* Expanded detail — full service inspection report */}
                     {expanded === s.id && (
-                      <div style={{ borderTop: '1px solid #E1E7EF' }}>
+                      <div style={{ borderTop: '1px solid #E7E2D7' }}>
 
                         {/* Technician Notes — speech bubble at top */}
                         {s.notes && (
-                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E1E7EF' }}>
+                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E7E2D7' }}>
                             <div style={{
                               padding: '12px 14px', borderRadius: 8,
-                              background: subtle, border: '1px solid #E1E7EF',
+                              background: subtle, border: '1px solid #E7E2D7',
                             }}>
                               <div style={{ fontSize: 12, fontWeight: 850, color: muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0 }}>
                                 {s.technician || 'Technician'} says:
@@ -1758,7 +1769,7 @@ function ServicesTab() {
                         {status === 'Callback' && (
                           <div style={{ padding: '0 18px 0', marginTop: -4 }}>
                             <div style={{
-                              padding: '9px 12px', borderRadius: 8, background: '#EEF6FF',
+                              padding: '9px 12px', borderRadius: 8, background: '#F8FCFE',
                               border: '1px solid #BFDBFE', fontSize: 12, color: B.blueDeeper,
                               fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6,
                               marginBottom: 10,
@@ -1769,14 +1780,14 @@ function ServicesTab() {
                         )}
 
                         {/* Service Info Bar */}
-                        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(4, 1fr)', gap: 8, padding: 18, borderBottom: '1px solid #E1E7EF', background: subtle }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(4, 1fr)', gap: 8, padding: 18, borderBottom: '1px solid #E7E2D7', background: subtle }}>
                           {[
                             { label: 'Date', value: parseDate(s.date).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }) },
                             { label: 'Technician', value: s.technician },
                             { label: 'Duration', value: s.serviceTimeMinutes ? `${s.serviceTimeMinutes} min` : '—' },
                             { label: 'Status', value: status },
                           ].map((item, i) => (
-                            <div key={i} style={{ padding: 12, borderRadius: 8, border: '1px solid #E1E7EF', background: '#fff' }}>
+                            <div key={i} style={{ padding: 12, borderRadius: 8, border: '1px solid #E7E2D7', background: '#fff' }}>
                               <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted }}>{item.label}</div>
                               <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginTop: 4, wordBreak: 'break-word' }}>{item.value || 'N/A'}</div>
                             </div>
@@ -1785,7 +1796,7 @@ function ServicesTab() {
 
                         {/* Conditions */}
                         {(s.soilTemp || s.soilPh || s.thatchMeasurement || s.soilMoisture) && (
-                          <div style={{ padding: '14px 18px', background: '#fff', borderBottom: '1px solid #E1E7EF' }}>
+                          <div style={{ padding: '14px 18px', background: '#fff', borderBottom: '1px solid #E7E2D7' }}>
                             <div style={{ ...sectionTitle, marginBottom: 8 }}>Conditions & Measurements</div>
                             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                               {s.soilTemp && <div style={{ fontSize: 14, color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon name="thermometer" size={16} strokeWidth={1.75} /> Soil Temp: <strong>{s.soilTemp}F</strong></div>}
@@ -1798,9 +1809,9 @@ function ServicesTab() {
 
                         {/* Products Applied — full table */}
                         {s.products?.length > 0 && (
-                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E1E7EF' }}>
+                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E7E2D7' }}>
                             <div style={{ ...sectionTitle, marginBottom: 10 }}>Products Applied</div>
-                            <div style={{ overflowX: 'auto', border: '1px solid #E1E7EF', borderRadius: 8 }}>
+                            <div style={{ overflowX: 'auto', border: '1px solid #E7E2D7', borderRadius: 8 }}>
                               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                                 <thead>
                                   <tr>
@@ -1841,7 +1852,7 @@ function ServicesTab() {
 
                         {/* Photos */}
                         {s.hasPhotos && (
-                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E1E7EF' }}>
+                          <div style={{ padding: '14px 18px', borderBottom: '1px solid #E7E2D7' }}>
                             <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                               <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
@@ -1864,7 +1875,7 @@ function ServicesTab() {
                                     onClick={() => setLightbox(p)}
                                     style={{
                                       position: 'relative', cursor: 'pointer', borderRadius: 8, overflow: 'hidden',
-                                      border: '1px solid #E1E7EF', aspectRatio: '1 / 1', background: subtle,
+                                      border: '1px solid #E7E2D7', aspectRatio: '1 / 1', background: subtle,
                                     }}>
                                     <img src={p.url} alt={p.caption || p.type || 'service photo'}
                                       style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
@@ -2164,12 +2175,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
@@ -2191,7 +2202,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
-    border: '1px solid #CBD5E1',
+    border: '1px solid #D8D0C0',
     borderRadius: 8,
     boxShadow: 'none',
     padding: '10px 14px',
@@ -2300,7 +2311,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     const isGreen = s.isToday;
     const isOrange = s.isSoon;
     const toneColor = isGreen ? B.green : isOrange ? B.orange : B.wavesBlue;
-    const toneBg = isGreen ? '#F0FDF4' : isOrange ? '#FFF7ED' : '#EEF6FF';
+    const toneBg = isGreen ? '#F0FDF4' : isOrange ? '#FFF7ED' : '#F8FCFE';
     const toneBorder = isGreen ? '#BBF7D0' : isOrange ? '#FED7AA' : '#BFDBFE';
 
     return (
@@ -2351,7 +2362,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           <div style={{
             fontSize: 14, color: B.blueDeeper, marginTop: 10,
             padding: '10px 12px', borderRadius: 8,
-            background: subtle, border: '1px solid #E1E7EF',
+            background: subtle, border: '1px solid #E7E2D7',
           }}>
             Visit #{s.visitNum} — {s.description}
           </div>
@@ -2360,7 +2371,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           {/* Communication Timeline */}
           <div style={{
             marginTop: 14, padding: 12, borderRadius: 10,
-            background: subtle, border: '1px solid #E1E7EF',
+            background: subtle, border: '1px solid #E7E2D7',
           }}>
             <div style={{ ...sectionTitle, marginBottom: 8 }}>
               You'll hear from us
@@ -2377,7 +2388,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                   background: step.done ? '#F0FDF4' : step.active ? '#FFF7ED' : '#fff',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   color: step.done ? B.green : step.active ? B.orange : muted,
-                  border: `1px solid ${step.done ? '#BBF7D0' : step.active ? '#FED7AA' : '#E1E7EF'}`,
+                  border: `1px solid ${step.done ? '#BBF7D0' : step.active ? '#FED7AA' : '#E7E2D7'}`,
                 }}><Icon name={step.icon} size={12} strokeWidth={2} /></div>
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 850, color: step.done ? B.green : step.active ? B.orange : B.blueDeeper }}>
@@ -2412,7 +2423,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     }}>
       <div style={{
         minWidth: 52, height: 52, borderRadius: 8,
-        background: subtle, border: '1px solid #E1E7EF',
+        background: subtle, border: '1px solid #E7E2D7',
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
       }}>
         <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui, lineHeight: 1 }}>
@@ -2496,7 +2507,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             return (
               <div key={s.id} style={{
                 background: subtle, borderRadius: 8, padding: '12px 14px', marginTop: 10,
-                border: '1px solid #E1E7EF', display: 'flex', gap: 12, alignItems: 'center',
+                border: '1px solid #E7E2D7', display: 'flex', gap: 12, alignItems: 'center',
               }}>
                 <div style={{
                   width: 9, height: 9, borderRadius: '50%', background: B.green, flexShrink: 0,
@@ -2521,7 +2532,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       {/* Notification Preferences */}
       {prefs && (
         <section style={{ ...card, overflow: 'hidden' }}>
-          <div style={{ padding: '16px 18px', borderBottom: '1px solid #E1E7EF' }}>
+          <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div style={sectionTitle}>Reminder Settings</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Service notifications</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted }}>Messages sent to {formatPhoneDisplay(customer.phone)}</div>
@@ -2551,11 +2562,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 <div key={p.key} style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   padding: '12px 0',
-                  borderBottom: i < items.length - 1 ? '1px solid #E1E7EF' : 'none',
+                  borderBottom: i < items.length - 1 ? '1px solid #E7E2D7' : 'none',
                   gap: 12,
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
-                    <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF', color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', color: B.blueDeeper, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
                     <div>
@@ -2570,7 +2581,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     <div onClick={p.locked ? undefined : () => handleToggle(p.key)} style={{
                       width: 44, height: 24, borderRadius: 12,
                       cursor: p.locked ? 'default' : 'pointer',
-                      background: isOn ? (p.locked ? B.green : B.blueDeeper) : '#CBD5E1',
+                      background: isOn ? (p.locked ? B.green : B.blueDeeper) : '#D8D0C0',
                       position: 'relative', transition: 'background 0.3s',
                       opacity: p.locked ? 0.85 : 1,
                     }}>
@@ -2594,7 +2605,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
       {propertyPrefs.length > 1 && (
         <section style={{ ...card, overflow: 'hidden' }}>
-          <div style={{ padding: '16px 18px', borderBottom: '1px solid #E1E7EF' }}>
+          <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div style={sectionTitle}>Property Notifications</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper }}>Notifications by property</div>
             <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
@@ -2616,10 +2627,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               const contactLockKey = `${property.id}:contact`;
               return (
                 <div key={property.id} style={{
-                  border: '1px solid #E1E7EF',
+                  border: '1px solid #E7E2D7',
                   borderRadius: 8,
                   padding: 14,
-                  background: property.id === customer.id ? '#EEF6FF' : subtle,
+                  background: property.id === customer.id ? '#F8FCFE' : subtle,
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 10 }}>
                     <div>
@@ -2645,7 +2656,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                           disabled={!!prefsLocked[lockKey]}
                           onClick={() => handlePropertyPrefToggle(property.id, option.key)}
                           style={{
-                            border: `1px solid ${on ? B.wavesBlue : '#CBD5E1'}`,
+                            border: `1px solid ${on ? B.wavesBlue : '#D8D0C0'}`,
                             borderRadius: 8,
                             padding: '9px 6px',
                             background: on ? '#fff' : B.white,
@@ -2662,20 +2673,20 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       );
                     })}
                   </div>
-                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E1E7EF' }}>
+                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
                     <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 8 }}>On-location contact</div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
                       <input
                         value={contact.firstName || ''}
                         onChange={(e) => handlePropertyContactChange(property.id, 'firstName', e.target.value)}
                         placeholder="First name"
-                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
+                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                       />
                       <input
                         value={contact.lastName || ''}
                         onChange={(e) => handlePropertyContactChange(property.id, 'lastName', e.target.value)}
                         placeholder="Last name"
-                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
+                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                       />
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 10 }}>
@@ -2684,14 +2695,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         onChange={(e) => handlePropertyContactChange(property.id, 'phone', e.target.value)}
                         placeholder="Phone number"
                         inputMode="tel"
-                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
+                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                       />
                       <input
                         value={contact.email || ''}
                         onChange={(e) => handlePropertyContactChange(property.id, 'email', e.target.value)}
                         placeholder="Email address"
                         inputMode="email"
-                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
+                        style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.blueDeeper, fontFamily: FONTS.body }}
                       />
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -2874,12 +2885,12 @@ function BillingTab({ customer }) {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
@@ -2901,7 +2912,7 @@ function BillingTab({ customer }) {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
-    border: '1px solid #CBD5E1',
+    border: '1px solid #D8D0C0',
     borderRadius: 8,
     boxShadow: 'none',
     padding: '10px 14px',
@@ -3027,7 +3038,7 @@ function BillingTab({ customer }) {
         : 'Automatic charges are paused until you resume Auto Pay.',
     },
     disabled: {
-      bg: subtle, border: '#E1E7EF', icon: 'card',
+      bg: subtle, border: '#E7E2D7', icon: 'card',
       badge: 'Auto Pay off', titleColor: B.blueDeeper, subtitleColor: B.grayDark,
       title: 'Auto Pay is off',
       detail: balance?.currentBalance > 0
@@ -3035,7 +3046,7 @@ function BillingTab({ customer }) {
         : 'Charges will not run automatically unless you enable Auto Pay below.',
     },
     unknown: {
-      bg: subtle, border: '#E1E7EF', icon: 'alert',
+      bg: subtle, border: '#E7E2D7', icon: 'alert',
       badge: 'Status unavailable', titleColor: B.blueDeeper, subtitleColor: B.grayDark,
       title: 'Auto Pay status unavailable',
       detail: 'We could not load your Auto Pay status. Your saved settings have not been changed.',
@@ -3113,8 +3124,8 @@ function BillingTab({ customer }) {
           style={{
             padding: '7px 12px',
             borderRadius: 8,
-            border: `1px solid ${value === opt ? B.wavesBlue : '#CBD5E1'}`,
-            background: value === opt ? '#EEF6FF' : '#fff',
+            border: `1px solid ${value === opt ? B.wavesBlue : '#D8D0C0'}`,
+            background: value === opt ? '#F8FCFE' : '#fff',
             color: value === opt ? B.blueDeeper : muted,
             fontSize: 12,
             fontWeight: 800,
@@ -3147,7 +3158,7 @@ function BillingTab({ customer }) {
               gap: 8,
               padding: '5px 10px',
               borderRadius: 999,
-              background: tier ? `${tier.color}18` : '#EEF6FF',
+              background: tier ? `${tier.color}18` : '#F8FCFE',
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
@@ -3201,7 +3212,7 @@ function BillingTab({ customer }) {
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
           ].map((item) => (
             <div key={item.label} style={{
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               borderRadius: 8,
               background: subtle,
               padding: 14,
@@ -3227,7 +3238,7 @@ function BillingTab({ customer }) {
         <div style={{
           width: 36,
           height: 36,
-          borderRadius: 8,
+          borderRadius: 10,
           background: '#fff',
           color: bannerConfig.titleColor,
           display: 'flex',
@@ -3280,7 +3291,7 @@ function BillingTab({ customer }) {
               padding: '10px 12px',
               borderRadius: 8,
               background: subtle,
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               fontSize: 14,
               color: B.grayDark,
             }}>
@@ -3326,7 +3337,7 @@ function BillingTab({ customer }) {
         {cards.map(c => (
           <div key={c.id} style={{
             display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px',
-            background: subtle, borderRadius: 8, marginBottom: 8, border: '1px solid #E1E7EF',
+            background: subtle, borderRadius: 8, marginBottom: 8, border: '1px solid #E7E2D7',
             flexWrap: 'wrap',
           }}>
             <div style={{
@@ -3376,7 +3387,7 @@ function BillingTab({ customer }) {
           <div style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
             boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-            border: '1px solid #E1E7EF',
+            border: '1px solid #E7E2D7',
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
               <div style={{ fontSize: 18, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>Add Payment Method</div>
@@ -3447,7 +3458,7 @@ function BillingTab({ customer }) {
               {group.items.map((cr, i) => (
                 <div key={i} style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  padding: '10px 12px', background: subtle, borderRadius: 8, marginBottom: 4, border: '1px solid #E1E7EF',
+                  padding: '10px 12px', background: subtle, borderRadius: 8, marginBottom: 4, border: '1px solid #E7E2D7',
                 }}>
                   <span style={{ fontSize: 14, color: B.grayDark }}>{cr.description || group.label}</span>
                   <span style={{ fontSize: 14, fontWeight: 850, color: B.green, fontFamily: FONTS.ui }}>{money(cr.amount || 0)}</span>
@@ -3470,11 +3481,11 @@ function BillingTab({ customer }) {
           Across {ytdPayments.length} payment{ytdPayments.length !== 1 ? 's' : ''}
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 10, marginTop: 14 }}>
-          <div style={{ padding: 12, background: subtle, border: '1px solid #E1E7EF', borderRadius: 8 }}>
+          <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
             <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>WaveGuard {tierName}</div>
             <div style={{ marginTop: 5, color: B.blueDeeper, fontSize: 18, fontWeight: 850 }}>{money(ytdRecurring)}</div>
           </div>
-          <div style={{ padding: 12, background: subtle, border: '1px solid #E1E7EF', borderRadius: 8 }}>
+          <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
             <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>One-time services</div>
             <div style={{ marginTop: 5, color: B.blueDeeper, fontSize: 18, fontWeight: 850 }}>{money(ytdOneTime)}</div>
           </div>
@@ -3512,7 +3523,7 @@ function BillingTab({ customer }) {
             display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
             gap: 12,
             padding: '14px 0',
-            borderBottom: `1px solid #E1E7EF`,
+            borderBottom: `1px solid #E7E2D7`,
           }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{p.description}</div>
@@ -3562,7 +3573,7 @@ function BillingTab({ customer }) {
             placeholder={customer?.email || 'billing@example.com'}
             aria-label="Billing email"
             style={{
-              width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #CBD5E1',
+              width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0',
               fontSize: 14, fontFamily: FONTS.body, color: B.blueDeeper, background: '#fff',
               outline: 'none', boxSizing: 'border-box',
             }}
@@ -3572,7 +3583,7 @@ function BillingTab({ customer }) {
 
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E1E7EF', gap: 12,
+          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Payment confirmation texts</div>
@@ -3621,7 +3632,7 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
       background: B.white,
       borderRadius: 8,
       overflow: 'hidden',
-      border: '1px solid #E1E7EF',
+      border: '1px solid #E7E2D7',
       boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
     }}>
       <button
@@ -3647,7 +3658,7 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
             width: 34,
             height: 34,
             borderRadius: 8,
-            background: '#EEF6FF',
+            background: '#F8FCFE',
             color: B.blueDeeper,
             display: 'inline-flex',
             alignItems: 'center',
@@ -3658,12 +3669,12 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
           </span>
           <span style={{ minWidth: 0 }}>
             <span style={{ display: 'block', fontSize: 15, fontWeight: 850, color: B.blueDeeper }}>{title}</span>
-            {summary && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: '#64748B', lineHeight: 1.35 }}>{summary}</span>}
+            {summary && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: '#6B7280', lineHeight: 1.35 }}>{summary}</span>}
           </span>
         </span>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
           {aside}
-          <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: '#64748B', transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
+          <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: '#6B7280', transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
         </span>
       </button>
       {open && <div style={{ padding: '0 18px 18px' }}>{children}</div>}
@@ -3676,7 +3687,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
   const inputLabel = label || placeholder || 'Secure field';
   return (
     <div>
-      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#64748B', marginBottom: 6, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
+      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#6B7280', marginBottom: 6, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
       <div style={{ position: 'relative' }}>
         <input
           type={show ? 'text' : 'password'}
@@ -3688,7 +3699,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
             width: '100%',
             padding: '10px 42px 10px 12px',
             borderRadius: 8,
-            border: '1px solid #CBD5E1',
+            border: '1px solid #D8D0C0',
             fontSize: 14,
             fontFamily: FONTS.body,
             color: B.blueDeeper,
@@ -3697,12 +3708,12 @@ function PasswordField({ value, onChange, placeholder, label }) {
             background: '#fff',
           }}
           onFocus={e => e.target.style.borderColor = B.wavesBlue}
-          onBlur={e => e.target.style.borderColor = '#CBD5E1'}
+          onBlur={e => e.target.style.borderColor = '#D8D0C0'}
         />
         <button type="button" onClick={() => setShow(!show)} aria-label={show ? `Hide ${inputLabel}` : `Show ${inputLabel}`} style={{
           position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
           background: 'transparent', border: 'none', cursor: 'pointer',
-          color: '#64748B', padding: 4, width: 32, height: 32,
+          color: '#6B7280', padding: 4, width: 32, height: 32,
         }}><Icon name={show ? 'eyeOff' : 'eye'} size={18} strokeWidth={2} /></button>
       </div>
     </div>
@@ -3721,9 +3732,9 @@ function PillSelector({ options, value, onChange }) {
           borderRadius: 8,
           letterSpacing: 0,
           boxShadow: 'none',
-          background: value === o.value ? '#EEF6FF' : '#fff',
-          color: value === o.value ? B.blueDeeper : '#64748B',
-          border: `1px solid ${value === o.value ? B.wavesBlue : '#CBD5E1'}`,
+          background: value === o.value ? '#F8FCFE' : '#fff',
+          color: value === o.value ? B.blueDeeper : '#6B7280',
+          border: `1px solid ${value === o.value ? B.wavesBlue : '#D8D0C0'}`,
         }}>{o.label}</button>
       ))}
     </div>
@@ -3735,13 +3746,13 @@ function NumberStepper({ value, onChange, min = 0, max = 99, label = 'Value' }) 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <button type="button" onClick={() => onChange(Math.max(min, v - 1))} aria-label={`Decrease ${label}`} style={{
-        width: 38, height: 38, borderRadius: 8, border: '1px solid #CBD5E1',
+        width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.blueDeeper,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="minus" size={16} strokeWidth={2} /></button>
       <span style={{ fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui, minWidth: 28, textAlign: 'center' }}>{v}</span>
       <button type="button" onClick={() => onChange(Math.min(max, v + 1))} aria-label={`Increase ${label}`} style={{
-        width: 38, height: 38, borderRadius: 8, border: '1px solid #CBD5E1',
+        width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.blueDeeper,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="plus" size={16} strokeWidth={2} /></button>
@@ -3764,7 +3775,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
         borderRadius: 999,
         border: 'none',
         cursor: disabled ? 'wait' : 'pointer',
-        background: checked ? B.wavesBlue : '#CBD5E1',
+        background: checked ? B.wavesBlue : '#D8D0C0',
         position: 'relative',
         flexShrink: 0,
         transition: 'background 0.18s ease',
@@ -3832,7 +3843,7 @@ function ServicePrefsSection() {
       icon="wrench"
       summary="Choose what is included on each recurring pest control visit."
     >
-      <div style={{ fontSize: 14, color: '#64748B', marginBottom: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 14, color: '#6B7280', marginBottom: 12, lineHeight: 1.5 }}>
         These update your next work order automatically, so the office and technician see the same preference.
       </div>
       {rows.map((r) => {
@@ -3844,26 +3855,26 @@ function ServicePrefsSection() {
             justifyContent: 'space-between',
             gap: 14,
             padding: '14px 0',
-            borderTop: '1px solid #E1E7EF',
+            borderTop: '1px solid #E7E2D7',
           }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flex: 1, minWidth: 0 }}>
               <span style={{
                 width: 34,
                 height: 34,
                 borderRadius: 8,
-                background: on ? '#EEF6FF' : '#F8FAFC',
-                color: on ? B.blueDeeper : '#64748B',
+                background: on ? '#F8FCFE' : '#FAF8F3',
+                color: on ? B.blueDeeper : '#6B7280',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 flexShrink: 0,
-                border: '1px solid #E1E7EF',
+                border: '1px solid #E7E2D7',
               }}>
                 <Icon name={r.icon} size={17} strokeWidth={2} />
               </span>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>{r.title}</div>
-                <div style={{ fontSize: 14, color: '#64748B', marginTop: 2, lineHeight: 1.45 }}>{r.desc}</div>
+                <div style={{ fontSize: 14, color: '#6B7280', marginTop: 2, lineHeight: 1.45 }}>{r.desc}</div>
               </div>
             </div>
             <ToggleSwitch
@@ -3937,12 +3948,12 @@ function PropertyTab({ customer }) {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -3963,7 +3974,7 @@ function PropertyTab({ customer }) {
     width: '100%',
     padding: '10px 12px',
     borderRadius: 8,
-    border: '1px solid #CBD5E1',
+    border: '1px solid #D8D0C0',
     fontSize: 14,
     fontFamily: FONTS.body,
     color: B.blueDeeper,
@@ -4011,7 +4022,7 @@ function PropertyTab({ customer }) {
   })() : null;
 
   const focusBorder = e => { e.target.style.borderColor = B.wavesBlue; };
-  const blurBorder = e => { e.target.style.borderColor = '#CBD5E1'; };
+  const blurBorder = e => { e.target.style.borderColor = '#D8D0C0'; };
   const textArea = (field, placeholder, rows = 2, label, valueOverride) => (
     <textarea
       value={valueOverride ?? prefs[field] ?? ''}
@@ -4138,7 +4149,7 @@ function PropertyTab({ customer }) {
                 gap: 8,
                 padding: '5px 10px',
                 borderRadius: 999,
-                background: '#EEF6FF',
+                background: '#F8FCFE',
                 color: B.blueDeeper,
                 fontSize: 12,
                 fontWeight: 850,
@@ -4166,7 +4177,7 @@ function PropertyTab({ customer }) {
               padding: '14px 16px',
               borderRadius: 8,
               background: subtle,
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               boxSizing: 'border-box',
             }}>
               <div style={{ ...sectionTitle, color: saveColor }}>Status</div>
@@ -4192,7 +4203,7 @@ function PropertyTab({ customer }) {
               { label: 'Lot', value: sqft(customer.property?.lotSqFt), sub: 'Parcel size' },
             ].map((item) => (
               <div key={item.label} style={{
-                border: '1px solid #E1E7EF',
+                border: '1px solid #E7E2D7',
                 borderRadius: 8,
                 background: subtle,
                 padding: 14,
@@ -4264,7 +4275,7 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       <PropertySection title="Pets" icon="paw" summary={petSummary}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF', marginBottom: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', marginBottom: 14 }}>
           <div>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Pets at this property</div>
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Helps technicians plan safe entry and treatment timing.</div>
@@ -4299,7 +4310,7 @@ function PropertyTab({ customer }) {
                   padding: 14,
                   borderRadius: 8,
                   background: '#fff',
-                  border: '1px solid #E1E7EF',
+                  border: '1px solid #E7E2D7',
                 }}>
                   <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 12 }}>
                     Pet {idx + 1}
@@ -4395,7 +4406,7 @@ function PropertyTab({ customer }) {
             />
           </div>
         </div>
-        <div style={{ marginTop: 16, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF' }}>
+        <div style={{ marginTop: 16, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7' }}>
           <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 4 }}>Blackout dates</div>
           <div style={{ fontSize: 14, color: muted, marginBottom: 12 }}>
             Do not service between these dates (vacation, events, etc.)
@@ -4442,9 +4453,9 @@ function PropertyTab({ customer }) {
                       borderRadius: 8,
                       letterSpacing: 0,
                       boxShadow: 'none',
-                      background: active ? '#EEF6FF' : '#fff',
+                      background: active ? '#F8FCFE' : '#fff',
                       color: active ? B.blueDeeper : muted,
-                      border: `1px solid ${active ? B.wavesBlue : '#CBD5E1'}`,
+                      border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
                     }}>{day}</button>
                   );
                 })}
@@ -4463,7 +4474,7 @@ function PropertyTab({ customer }) {
                   ]}
                 />
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #E1E7EF', borderRadius: 8, background: subtle }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #E7E2D7', borderRadius: 8, background: subtle }}>
                 <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper }}>Rain sensor</div>
                 <ToggleSwitch checked={!!prefs.rainSensor} onChange={() => updateField('rainSensor', !prefs.rainSensor)} label="Rain sensor installed" />
               </div>
@@ -4577,12 +4588,12 @@ function WeatherPestWidget({ customer, nextService }) {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
 
   if (loading) return (
     <PortalStatePanel
@@ -4652,7 +4663,7 @@ function WeatherPestWidget({ customer, nextService }) {
             gap: 8,
             padding: '5px 10px',
             borderRadius: 999,
-            background: '#EEF6FF',
+            background: '#F8FCFE',
             color: B.blueDeeper,
             fontSize: 12,
             fontWeight: 850,
@@ -4672,7 +4683,7 @@ function WeatherPestWidget({ customer, nextService }) {
           padding: '12px 14px',
           borderRadius: 8,
           background: subtle,
-          border: '1px solid #E1E7EF',
+          border: '1px solid #E7E2D7',
           textAlign: 'right',
         }}>
           <div style={{ fontSize: 40, lineHeight: 1, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.ui }}>
@@ -4694,7 +4705,7 @@ function WeatherPestWidget({ customer, nextService }) {
           const action = getActionItem(p.type, p.level);
           return (
             <div key={p.label} style={{
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               borderRadius: 8,
               background: subtle,
               padding: 12,
@@ -4732,8 +4743,8 @@ function WeatherPestWidget({ customer, nextService }) {
         marginTop: 10,
         padding: 14,
         borderRadius: 8,
-        background: '#EEF6FF',
-        border: '1px solid #CDEAFE',
+        background: '#F8FCFE',
+        border: '1px solid #CFE7F5',
         display: 'flex', alignItems: 'center', gap: 12,
       }}>
         <span style={{
@@ -4846,7 +4857,7 @@ function ContentCard({ post, large, compact }) {
       background: B.white,
       borderRadius: 8,
       overflow: 'hidden',
-      border: '1px solid #E1E7EF',
+      border: '1px solid #E7E2D7',
       textDecoration: 'none',
       display: 'flex',
       flexDirection: large ? 'column' : 'row',
@@ -4857,14 +4868,14 @@ function ContentCard({ post, large, compact }) {
         <div style={{
           height: compact ? 130 : 170,
           background: `url("${safeImg}") center/cover no-repeat`,
-          borderBottom: '1px solid #E1E7EF',
+          borderBottom: '1px solid #E7E2D7',
         }} />
       )}
       {!safeImg && large && (
         <div style={{
           height: compact ? 92 : 124,
-          background: '#EEF6FF',
-          borderBottom: '1px solid #E1E7EF',
+          background: '#F8FCFE',
+          borderBottom: '1px solid #E7E2D7',
           color: B.blueDeeper,
           display: 'flex',
           alignItems: 'center',
@@ -4894,7 +4905,7 @@ function ContentCard({ post, large, compact }) {
             width: 40,
             height: 40,
             borderRadius: 8,
-            background: '#EEF6FF',
+            background: '#F8FCFE',
             color: B.blueDeeper,
             display: 'inline-flex',
             alignItems: 'center',
@@ -4921,7 +4932,7 @@ function ContentCard({ post, large, compact }) {
               {sourceLabel}
             </span>
             {pubDate && !isNaN(pubDate) && (
-              <span style={{ fontSize: 12, color: '#64748B' }}>
+              <span style={{ fontSize: 12, color: '#6B7280' }}>
                 {pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               </span>
             )}
@@ -4939,7 +4950,7 @@ function ContentCard({ post, large, compact }) {
           {post.description && (large || !safeImg) && (
             <div style={{
               fontSize: 14,
-              color: '#64748B',
+              color: '#6B7280',
               marginTop: 7,
               lineHeight: 1.45,
               overflow: 'hidden',
@@ -4984,12 +4995,12 @@ function LearnTab({ customer }) {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -5001,7 +5012,7 @@ function LearnTab({ customer }) {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
-    border: '1px solid #CBD5E1',
+    border: '1px solid #D8D0C0',
     borderRadius: 8,
     boxShadow: 'none',
     padding: '9px 12px',
@@ -5012,7 +5023,7 @@ function LearnTab({ customer }) {
     width: 38,
     height: 38,
     borderRadius: 8,
-    background: '#EEF6FF',
+    background: '#F8FCFE',
     color: B.blueDeeper,
     display: 'inline-flex',
     alignItems: 'center',
@@ -5107,7 +5118,7 @@ function LearnTab({ customer }) {
               gap: 8,
               padding: '5px 10px',
               borderRadius: 999,
-              background: '#EEF6FF',
+              background: '#F8FCFE',
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
@@ -5134,7 +5145,7 @@ function LearnTab({ customer }) {
             padding: '14px 16px',
             borderRadius: 8,
             background: subtle,
-            border: '1px solid #E1E7EF',
+            border: '1px solid #E7E2D7',
             boxSizing: 'border-box',
           }}>
             <div style={sectionTitle}>Your Plan</div>
@@ -5164,7 +5175,7 @@ function LearnTab({ customer }) {
             },
           ].map(item => (
             <div key={item.label} style={{
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               borderRadius: 8,
               background: subtle,
               padding: 14,
@@ -5218,7 +5229,7 @@ function LearnTab({ customer }) {
                 background: subtle,
                 borderRadius: 8,
                 padding: 14,
-                border: '1px solid #E1E7EF',
+                border: '1px solid #E7E2D7',
                 borderLeft: `4px solid ${alertColors[a.type] || B.wavesBlue}`,
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
@@ -5250,7 +5261,7 @@ function LearnTab({ customer }) {
                   padding: 12,
                   borderRadius: 8,
                   background: subtle,
-                  border: '1px solid #E1E7EF',
+                  border: '1px solid #E7E2D7',
                   fontSize: 14,
                   color: muted,
                   lineHeight: 1.45,
@@ -5312,7 +5323,7 @@ function LearnTab({ customer }) {
           marginTop: 14,
           padding: 16,
           background: B.sand,
-          border: '1px solid #E1E7EF',
+          border: '1px solid #E7E2D7',
           borderRadius: 8,
         }}>
           <NewsletterSignup
@@ -5370,7 +5381,7 @@ function LearnTab({ customer }) {
                 width: '100%',
                 padding: '10px 14px 10px 38px',
                 borderRadius: 8,
-                border: '1px solid #CBD5E1',
+                border: '1px solid #D8D0C0',
                 fontSize: 14,
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
@@ -5378,7 +5389,7 @@ function LearnTab({ customer }) {
                 boxSizing: 'border-box',
               }}
               onFocus={e => e.target.style.borderColor = B.wavesBlue}
-              onBlur={e => e.target.style.borderColor = '#CBD5E1'}
+              onBlur={e => e.target.style.borderColor = '#D8D0C0'}
             />
           </div>
 
@@ -5406,7 +5417,7 @@ function LearnTab({ customer }) {
                     background: isOpen ? subtle : B.white,
                     borderRadius: 8,
                     marginBottom: 8,
-                    border: `1px solid ${isOpen ? '#A7DDF8' : '#E1E7EF'}`,
+                    border: `1px solid ${isOpen ? '#A7DDF8' : '#E7E2D7'}`,
                     overflow: 'hidden',
                   }}>
                     <button
@@ -5431,7 +5442,7 @@ function LearnTab({ customer }) {
                       <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: muted, transform: isOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
                     </button>
                     {isOpen && (
-                      <div style={{ padding: '0 14px 14px', borderTop: '1px solid #E1E7EF' }}>
+                      <div style={{ padding: '0 14px 14px', borderTop: '1px solid #E7E2D7' }}>
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, marginTop: 10 }}>
                           {personalizeFaqAnswer(q.a)}
                         </div>
@@ -5589,7 +5600,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
         <div style={{ minWidth: 0 }}>
           <div style={sectionTitle}>WAVES AI</div>
           <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>Property-aware pricing</div>
-          <div style={{ marginTop: 4, color: '#64748B', fontSize: 14, lineHeight: 1.5 }}>
+          <div style={{ marginTop: 4, color: '#6B7280', fontSize: 14, lineHeight: 1.5 }}>
             Pricing is calculated from this property profile and your current Waves services.
           </div>
         </div>
@@ -5611,8 +5622,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                   <span key={service} style={{
                     padding: '5px 8px',
                     borderRadius: 8,
-                    border: '1px solid #CDEAFE',
-                    background: '#EEF6FF',
+                    border: '1px solid #CFE7F5',
+                    background: '#F8FCFE',
                     color: B.blueDeeper,
                     fontSize: 12,
                     fontWeight: 800,
@@ -5645,7 +5656,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
               width: '100%',
               minHeight: 42,
               borderRadius: 8,
-              border: '1px solid #CBD5E1',
+              border: '1px solid #D8D0C0',
               padding: '10px 12px 10px 38px',
               fontSize: 14,
               color: B.blueDeeper,
@@ -5703,7 +5714,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           }}>
             <strong style={{ color: B.blueDeeper }}>{result.ok ? 'WAVES AI:' : 'Review needed:'}</strong> {result.message}
             {result.property?.homeSqFt || result.property?.lotSqFt ? (
-              <div style={{ marginTop: 6, color: '#64748B', fontSize: 12 }}>
+              <div style={{ marginTop: 6, color: '#6B7280', fontSize: 12 }}>
                 Property basis: {[
                   result.property.homeSqFt ? `${Number(result.property.homeSqFt).toLocaleString()} sq ft home` : null,
                   result.property.lotSqFt ? `${Number(result.property.lotSqFt).toLocaleString()} sq ft lot` : null,
@@ -5716,7 +5727,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           {options.length > 0 && (
             <>
               <label style={{ display: 'grid', gap: 6 }}>
-                <span style={{ fontSize: 12, color: '#64748B', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
+                <span style={{ fontSize: 12, color: '#6B7280', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
                 <select
                   value={selected?.id || ''}
                   onChange={(e) => {
@@ -5727,7 +5738,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     width: '100%',
                     minHeight: 42,
                     borderRadius: 8,
-                    border: '1px solid #CBD5E1',
+                    border: '1px solid #D8D0C0',
                     background: '#fff',
                     color: B.blueDeeper,
                     padding: '9px 12px',
@@ -5745,7 +5756,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 
               {selected && (
                 <div style={{
-                  border: '1px solid #E1E7EF',
+                  border: '1px solid #E7E2D7',
                   borderRadius: 8,
                   background: '#fff',
                   padding: 14,
@@ -5755,13 +5766,13 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                     <div>
                       <div style={{ fontSize: 16, color: B.blueDeeper, fontWeight: 850 }}>{selected.label}</div>
-                      <div style={{ marginTop: 3, color: '#64748B', fontSize: 14 }}>{selected.cadence}</div>
+                      <div style={{ marginTop: 3, color: '#6B7280', fontSize: 14 }}>{selected.cadence}</div>
                     </div>
                     <div style={{ textAlign: compact ? 'left' : 'right' }}>
                       <div style={{ fontSize: 24, color: B.blueDeeper, fontWeight: 850, lineHeight: 1 }}>
                         {selected.monthly ? `${money(selected.monthly, 0)}/mo` : money(selected.oneTime || selected.dueAtStart, 0)}
                       </div>
-                      <div style={{ marginTop: 4, color: '#64748B', fontSize: 12 }}>
+                      <div style={{ marginTop: 4, color: '#6B7280', fontSize: 12 }}>
                         {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
                       </div>
                     </div>
@@ -5775,8 +5786,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       selected.oneTime ? { label: 'One-time', value: money(selected.oneTime, 0) } : null,
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (
-                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#F8FAFC', border: '1px solid #E1E7EF' }}>
-                        <div style={{ color: '#64748B', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
+                      <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#FAF8F3', border: '1px solid #E7E2D7' }}>
+                        <div style={{ color: '#6B7280', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
                         <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
                       </div>
                     ))}
@@ -5961,8 +5972,8 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                 <span key={service} style={{
                   padding: '5px 8px',
                   borderRadius: 8,
-                  border: '1px solid #CDEAFE',
-                  background: '#EEF6FF',
+                  border: '1px solid #CFE7F5',
+                  background: '#F8FCFE',
                   color: B.blueDeeper,
                   fontSize: 12,
                   fontWeight: 800,
@@ -5998,7 +6009,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                   textAlign: 'left',
                   border: `1px solid ${isSelected ? B.wavesBlue : PORTAL_SHELL.border}`,
                   borderRadius: 8,
-                  background: isSelected ? '#EEF6FF' : PORTAL_SHELL.surface,
+                  background: isSelected ? '#F8FCFE' : PORTAL_SHELL.surface,
                   padding: 13,
                   cursor: 'pointer',
                   fontFamily: FONTS.body,
@@ -6104,7 +6115,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                         width: '100%',
                         minHeight: 42,
                         borderRadius: 8,
-                        border: '1px solid #CBD5E1',
+                        border: '1px solid #D8D0C0',
                         background: '#fff',
                         color: B.blueDeeper,
                         padding: '9px 12px',
@@ -6121,7 +6132,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                   </label>
 
                   {selected && (
-                    <div style={{ border: '1px solid #E1E7EF', borderRadius: 8, background: '#fff', padding: 14, display: 'grid', gap: 12 }}>
+                    <div style={{ border: '1px solid #E7E2D7', borderRadius: 8, background: '#fff', padding: 14, display: 'grid', gap: 12 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                         <div>
                           <div style={{ fontSize: 16, color: B.blueDeeper, fontWeight: 850 }}>{selected.label}</div>
@@ -6143,7 +6154,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                           selected.estimatedPlanMonthly ? { label: 'Plan total', value: `${money(selected.estimatedPlanMonthly, 0)}/mo` } : null,
                           selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                         ].filter(Boolean).map(item => (
-                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#F8FAFC', border: '1px solid #E1E7EF' }}>
+                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: '#FAF8F3', border: '1px solid #E7E2D7' }}>
                             <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
                             <div style={{ marginTop: 4, color: B.blueDeeper, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
                           </div>
@@ -6400,12 +6411,12 @@ function MyPlanTab({ customer }) {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 14,
     fontWeight: 850,
@@ -6427,7 +6438,7 @@ function MyPlanTab({ customer }) {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
-    border: '1px solid #CBD5E1',
+    border: '1px solid #D8D0C0',
     borderRadius: 8,
     boxShadow: 'none',
     padding: '10px 14px',
@@ -6456,7 +6467,7 @@ function MyPlanTab({ customer }) {
             <div style={{
               display: 'inline-flex', alignItems: 'center', gap: 8,
               padding: '5px 10px', borderRadius: 999,
-              background: tier ? `${tier.color}18` : '#EEF6FF',
+              background: tier ? `${tier.color}18` : '#F8FCFE',
               color: B.blueDeeper, fontSize: 12, fontWeight: 850,
             }}>
               WaveGuard {tierName}
@@ -6506,7 +6517,7 @@ function MyPlanTab({ customer }) {
             { label: 'Renewal credit', value: money(renewalCredit, 0), sub: 'Month 13' },
           ].map((item) => (
             <div key={item.label} style={{
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               borderRadius: 8,
               background: subtle,
               padding: 14,
@@ -6528,7 +6539,7 @@ function MyPlanTab({ customer }) {
       }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <section style={{ ...card, overflow: 'hidden' }}>
-            <div style={{ padding: 20, borderBottom: '1px solid #E1E7EF' }}>
+            <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7' }}>
               <div style={sectionTitle}>Included Services</div>
               <div style={{ marginTop: 6, color: B.blueDeeper, fontSize: 20, fontWeight: 850 }}>
                 {tierName} covers {numServices} recurring service{numServices > 1 ? 's' : ''}
@@ -6547,7 +6558,7 @@ function MyPlanTab({ customer }) {
                 const expanded = expandedService === svc.id;
                 return (
                   <div key={svc.id} style={{
-                    borderTop: index === 0 ? 'none' : '1px solid #E1E7EF',
+                    borderTop: index === 0 ? 'none' : '1px solid #E7E2D7',
                     padding: 18,
                   }}>
                     <button
@@ -6570,7 +6581,7 @@ function MyPlanTab({ customer }) {
                             width: 38,
                             height: 38,
                             borderRadius: 8,
-                            background: '#EEF6FF',
+                            background: '#F8FCFE',
                             color: B.blueDeeper,
                             display: 'inline-flex',
                             alignItems: 'center',
@@ -6613,10 +6624,10 @@ function MyPlanTab({ customer }) {
                     </div>
 
                     {expanded && (
-                      <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E1E7EF' }}>
+                      <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>{svc.description}</div>
                         {coverage && (
-                          <div style={{ marginTop: 12, padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E1E7EF' }}>
+                          <div style={{ marginTop: 12, padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7' }}>
                             <div style={{ fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>{coverage.summary}</div>
                             <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
                               {coverage.details.map((detail) => (
@@ -6634,7 +6645,7 @@ function MyPlanTab({ customer }) {
                               <span key={product} style={{
                                 padding: '4px 9px',
                                 borderRadius: 999,
-                                background: '#EEF6FF',
+                                background: '#F8FCFE',
                                 color: B.blueDeeper,
                                 fontSize: 12,
                                 fontWeight: 700,
@@ -6681,8 +6692,8 @@ function MyPlanTab({ customer }) {
                         const isCompleted = completedMonths.has(mi);
                         const isCurrentMonth = mi === currentMonth;
                         const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
-                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#CBD5E1' : 'transparent';
-                        const border = isScheduled ? fill : '#E1E7EF';
+                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? '#D8D0C0' : 'transparent';
+                        const border = isScheduled ? fill : '#E7E2D7';
                         const statusLabel = isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth && isScheduled ? 'This month' : isScheduled ? 'Scheduled' : 'No service';
                         const detail = isScheduled ? getCalendarDetail(svc, mi, statusLabel) : null;
                         const tooltipKey = `${svc.id}-${mi}`;
@@ -6821,8 +6832,8 @@ function MyPlanTab({ customer }) {
                 <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                   {['1', '2'].map(d => (
                     <button key={d} type="button" onClick={() => setPauseDuration(d)} style={{
-                      border: `1px solid ${pauseDuration === d ? B.wavesBlue : '#CBD5E1'}`,
-                      background: pauseDuration === d ? '#EEF6FF' : '#fff',
+                      border: `1px solid ${pauseDuration === d ? B.wavesBlue : '#D8D0C0'}`,
+                      background: pauseDuration === d ? '#F8FCFE' : '#fff',
                       color: pauseDuration === d ? B.blueDeeper : B.grayDark,
                       borderRadius: 8,
                       padding: '8px 12px',
@@ -6846,7 +6857,7 @@ function MyPlanTab({ customer }) {
                     padding: '10px 12px',
                     borderRadius: 8,
                     fontSize: 14,
-                    border: '1px solid #CBD5E1',
+                    border: '1px solid #D8D0C0',
                     fontFamily: FONTS.body,
                     outline: 'none',
                     boxSizing: 'border-box',
@@ -6901,7 +6912,7 @@ function MyPlanTab({ customer }) {
                       borderRadius: 999,
                       fontSize: 12,
                       fontWeight: 800,
-                      border: `1px solid ${cancelReason === r ? B.red : '#CBD5E1'}`,
+                      border: `1px solid ${cancelReason === r ? B.red : '#D8D0C0'}`,
                       background: cancelReason === r ? `${B.red}10` : '#fff',
                       color: cancelReason === r ? B.red : B.grayDark,
                       cursor: 'pointer',
@@ -6921,7 +6932,7 @@ function MyPlanTab({ customer }) {
                     padding: '10px 12px',
                     borderRadius: 8,
                     fontSize: 14,
-                    border: '1px solid #CBD5E1',
+                    border: '1px solid #D8D0C0',
                     fontFamily: FONTS.body,
                     outline: 'none',
                     resize: 'vertical',
@@ -7111,7 +7122,7 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
         borderRadius: 8,
         overflow: 'hidden',
         background: B.blueLight,
-        border: '1px solid #E1E7EF',
+        border: '1px solid #E7E2D7',
       }}
     />
   );
@@ -7227,7 +7238,7 @@ function ServiceTracker() {
     background: B.white,
     borderRadius: 8,
     padding: 20,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
   const subCardBase = {
@@ -7288,7 +7299,7 @@ function ServiceTracker() {
           </>
         )}
 
-        {/* Step 3: EN ROUTE — Anton ETA hero + map + tech block + gold CTA */}
+        {/* Step 3: EN ROUTE — Anton ETA hero + map + tech block + contact CTA */}
         {step === 3 && (
           <>
             <div>
@@ -7444,14 +7455,22 @@ function ServiceTracker() {
           )}
         </div>
 
-        {/* Gold "TEXT WAVES" CTA — only EN ROUTE. Same pattern as
+        {/* Text Waves CTA — only EN ROUTE. Same pattern as
             /track/<token>: SMS to office.phone (per-office). */}
         {step === 3 && office?.phone && (
           <a
             href={`sms:${office.phone.replace(/\D/g, '')}`}
-            style={{ ...GOLD_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box', borderRadius: 8, boxShadow: 'none', letterSpacing: 0 }}
+            style={{
+              ...PORTAL_PRIMARY_ACTION,
+              width: '100%',
+              minHeight: 48,
+              marginTop: 20,
+              boxSizing: 'border-box',
+              textDecoration: 'none',
+              textTransform: 'none',
+            }}
           >
-            TEXT WAVES
+            Text Waves
           </a>
         )}
       </div>
@@ -7522,7 +7541,7 @@ function ServiceTracker() {
         </div>
       )}
 
-      {/* Office card — Call / Text. Always shown; the gold CTA above
+      {/* Office card — Call / Text. Always shown; the CTA above
           covers en-route specifically, this is the always-available
           contact path. */}
       <div style={subCardBase}>
@@ -7533,11 +7552,11 @@ function ServiceTracker() {
         <div style={{ display: 'flex', gap: 8 }}>
           <a
             href={`tel:${office.phone.replace(/\D/g, '')}`}
-            style={{ ...PORTAL_BUTTON_BASE, flex: 1, padding: '12px 16px', fontSize: 14, background: B.yellow, color: B.blueDeeper, textDecoration: 'none', borderRadius: 8, boxShadow: 'none' }}
+            style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
           >Call</a>
           <a
             href={`sms:${office.phone.replace(/\D/g, '')}`}
-            style={{ ...PORTAL_BUTTON_BASE, flex: 1, padding: '12px 16px', fontSize: 14, background: B.wavesBlue, color: '#fff', textDecoration: 'none', borderRadius: 8, boxShadow: 'none' }}
+            style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, padding: '12px 16px', fontSize: 14, textDecoration: 'none', borderRadius: 10, boxShadow: 'none' }}
           >Text</a>
         </div>
       </div>
@@ -7693,12 +7712,12 @@ function ReferTab({ customer, onSwitchTab }) {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -7720,7 +7739,7 @@ function ReferTab({ customer, onSwitchTab }) {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
-    border: '1px solid #CBD5E1',
+    border: '1px solid #D8D0C0',
     borderRadius: 8,
     boxShadow: 'none',
     padding: '10px 14px',
@@ -7772,8 +7791,8 @@ function ReferTab({ customer, onSwitchTab }) {
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
-    pending: { label: 'Pending', color: muted, bg: '#F1F5F9' },
-    contacted: { label: 'Contacted', color: B.wavesBlue, bg: '#EEF6FF' },
+    pending: { label: 'Pending', color: muted, bg: '#FAF8F3' },
+    contacted: { label: 'Contacted', color: B.wavesBlue, bg: '#F8FCFE' },
     estimated: { label: 'Estimated', color: B.orange, bg: `${B.orange}14` },
     signed_up: { label: 'Signed up', color: B.green, bg: '#F0FDF4' },
     credited: { label: 'Credit applied', color: B.green, bg: '#F0FDF4' },
@@ -7836,7 +7855,7 @@ function ReferTab({ customer, onSwitchTab }) {
               gap: 8,
               padding: '5px 10px',
               borderRadius: 999,
-              background: '#EEF6FF',
+              background: '#F8FCFE',
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
@@ -7863,7 +7882,7 @@ function ReferTab({ customer, onSwitchTab }) {
             padding: '14px 16px',
             borderRadius: 8,
             background: availableBalance > 0 ? '#F0FDF4' : subtle,
-            border: `1px solid ${availableBalance > 0 ? '#BBF7D0' : '#E1E7EF'}`,
+            border: `1px solid ${availableBalance > 0 ? '#BBF7D0' : '#E7E2D7'}`,
             boxSizing: 'border-box',
           }}>
             <div style={{ fontSize: 12, color: availableBalance > 0 ? B.green : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
@@ -7891,7 +7910,7 @@ function ReferTab({ customer, onSwitchTab }) {
             { label: 'Clicks', value: clicks, sub: clicks ? 'Link traffic' : 'No clicks yet' },
           ].map((item) => (
             <div key={item.label} style={{
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               borderRadius: 8,
               background: subtle,
               padding: 14,
@@ -7921,7 +7940,7 @@ function ReferTab({ customer, onSwitchTab }) {
             padding: '12px 14px',
             borderRadius: 8,
             background: subtle,
-            border: '1px solid #E1E7EF',
+            border: '1px solid #E7E2D7',
           }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>Code</div>
@@ -7942,7 +7961,7 @@ function ReferTab({ customer, onSwitchTab }) {
             marginTop: 10,
             padding: '10px 12px',
             borderRadius: 8,
-            border: '1px solid #E1E7EF',
+            border: '1px solid #E7E2D7',
             color: muted,
             fontSize: 12,
             lineHeight: 1.45,
@@ -7982,7 +8001,7 @@ function ReferTab({ customer, onSwitchTab }) {
                 width: '100%',
                 padding: '10px 12px',
                 borderRadius: 8,
-                border: '1px solid #CBD5E1',
+                border: '1px solid #D8D0C0',
                 fontSize: 14,
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
@@ -8008,7 +8027,7 @@ function ReferTab({ customer, onSwitchTab }) {
                 width: '100%',
                 padding: '10px 12px',
                 borderRadius: 8,
-                border: '1px solid #CBD5E1',
+                border: '1px solid #D8D0C0',
                 fontSize: 14,
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
@@ -8048,7 +8067,7 @@ function ReferTab({ customer, onSwitchTab }) {
             <div style={{ color: B.green, fontSize: 14, fontWeight: 850 }}>Top referral level reached</div>
           )}
         </div>
-        <div style={{ height: 8, borderRadius: 999, background: subtle, overflow: 'hidden', border: '1px solid #E1E7EF' }}>
+        <div style={{ height: 8, borderRadius: 999, background: subtle, overflow: 'hidden', border: '1px solid #E7E2D7' }}>
           <div style={{
             width: `${milestoneProgress}%`,
             height: '100%',
@@ -8078,7 +8097,7 @@ function ReferTab({ customer, onSwitchTab }) {
           <div style={{
             padding: 18,
             background: subtle,
-            border: '1px solid #E1E7EF',
+            border: '1px solid #E7E2D7',
             borderRadius: 8,
             display: 'flex',
             gap: 12,
@@ -8088,7 +8107,7 @@ function ReferTab({ customer, onSwitchTab }) {
               width: 36,
               height: 36,
               borderRadius: 8,
-              background: '#EEF6FF',
+              background: '#F8FCFE',
               color: B.blueDeeper,
               display: 'inline-flex',
               alignItems: 'center',
@@ -8116,7 +8135,7 @@ function ReferTab({ customer, onSwitchTab }) {
               return (
                 <div key={r.id || `${nameLabel}-${idx}`} style={{
                   padding: '14px 0',
-                  borderTop: idx === 0 ? 'none' : '1px solid #E1E7EF',
+                  borderTop: idx === 0 ? 'none' : '1px solid #E7E2D7',
                   display: 'flex',
                   justifyContent: 'space-between',
                   gap: 12,
@@ -8161,7 +8180,7 @@ function ReferTab({ customer, onSwitchTab }) {
             <div key={item.title} style={{
               padding: 14,
               background: subtle,
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               borderRadius: 8,
               minHeight: 108,
               boxSizing: 'border-box',
@@ -8170,7 +8189,7 @@ function ReferTab({ customer, onSwitchTab }) {
                 width: 34,
                 height: 34,
                 borderRadius: 8,
-                background: '#EEF6FF',
+                background: '#F8FCFE',
                 color: B.blueDeeper,
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -8204,12 +8223,12 @@ function DocumentsTab({ customer, onSwitchTab }) {
 
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -8232,7 +8251,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
-    border: '1px solid #CBD5E1',
+    border: '1px solid #D8D0C0',
     borderRadius: 8,
     boxShadow: 'none',
     padding: '10px 14px',
@@ -8489,7 +8508,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               gap: 8,
               padding: '5px 10px',
               borderRadius: 999,
-              background: '#EEF6FF',
+              background: '#F8FCFE',
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
@@ -8516,7 +8535,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             padding: '14px 16px',
             borderRadius: 8,
             background: subtle,
-            border: '1px solid #E1E7EF',
+            border: '1px solid #E7E2D7',
             boxSizing: 'border-box',
           }}>
             <div style={{ fontSize: 12, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
@@ -8544,7 +8563,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             { label: 'Latest', value: latestDoc ? formatDate(latestDoc) : 'None', sub: latestDoc?.title || 'No paperwork yet' },
           ].map((item) => (
             <div key={item.label} style={{
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               borderRadius: 8,
               background: subtle,
               padding: 14,
@@ -8588,7 +8607,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
                 minHeight: 40,
                 padding: '10px 12px 10px 38px',
                 borderRadius: 8,
-                border: '1px solid #CBD5E1',
+                border: '1px solid #D8D0C0',
                 fontSize: 14,
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
@@ -8609,8 +8628,8 @@ function DocumentsTab({ customer, onSwitchTab }) {
                   style={{
                     padding: '8px 12px',
                     borderRadius: 8,
-                    border: `1px solid ${active ? B.wavesBlue : '#CBD5E1'}`,
-                    background: active ? '#EEF6FF' : '#fff',
+                    border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
+                    background: active ? '#F8FCFE' : '#fff',
                     color: active ? B.blueDeeper : muted,
                     fontSize: 12,
                     fontWeight: 850,
@@ -8641,8 +8660,8 @@ function DocumentsTab({ customer, onSwitchTab }) {
         justifyContent: 'space-between',
         gap: 14,
         flexWrap: 'wrap',
-        background: '#EEF6FF',
-        borderColor: '#CDEAFE',
+        background: '#F8FCFE',
+        borderColor: '#CFE7F5',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <span style={{
@@ -8706,7 +8725,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             width: 38,
             height: 38,
             borderRadius: 8,
-            background: '#EEF6FF',
+            background: '#F8FCFE',
             color: B.blueDeeper,
             display: 'inline-flex',
             alignItems: 'center',
@@ -8760,8 +8779,8 @@ function DocumentsTab({ customer, onSwitchTab }) {
 
 function DocumentSection({ section, items, emptyMessage, onDownload, onShare, onShareWithRealtor, shareStatus, getExpirationBadge, formatDate, relativeTime, formatSize, customer, compact }) {
   const [open, setOpen] = useState(true);
-  const muted = '#64748B';
-  const subtle = '#F8FAFC';
+  const muted = '#6B7280';
+  const subtle = '#FAF8F3';
   const sectionTitle = {
     fontSize: 12,
     fontWeight: 850,
@@ -8773,7 +8792,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
     color: B.blueDeeper,
-    border: '1px solid #CBD5E1',
+    border: '1px solid #D8D0C0',
     borderRadius: 8,
     boxShadow: 'none',
     padding: '8px 10px',
@@ -8787,7 +8806,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
       background: B.white,
       borderRadius: 8,
       overflow: 'hidden',
-      border: '1px solid #E1E7EF',
+      border: '1px solid #E7E2D7',
       boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
     }}>
       <button
@@ -8813,7 +8832,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
             width: 34,
             height: 34,
             borderRadius: 8,
-            background: '#EEF6FF',
+            background: '#F8FCFE',
             color: B.blueDeeper,
             display: 'inline-flex',
             alignItems: 'center',
@@ -8841,7 +8860,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
               message={emptyMessage}
             />
           ) : (
-            <div style={{ borderTop: '1px solid #E1E7EF' }}>
+            <div style={{ borderTop: '1px solid #E7E2D7' }}>
               {items.map((doc, idx) => {
               const expBadge = doc.expirationDate ? getExpirationBadge(doc.expirationDate) : null;
               const share = shareStatus[doc.id];
@@ -8859,7 +8878,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
               return (
                 <div key={doc.id} style={{
                   padding: '16px 0',
-                  borderTop: idx === 0 ? 'none' : '1px solid #E1E7EF',
+                  borderTop: idx === 0 ? 'none' : '1px solid #E7E2D7',
                 }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
                     <span style={{
@@ -8867,8 +8886,8 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                       height: 38,
                       borderRadius: 8,
                       flexShrink: 0,
-                      background: doc.isAutoGenerated ? '#EEF6FF' : subtle,
-                      border: '1px solid #E1E7EF',
+                      background: doc.isAutoGenerated ? '#F8FCFE' : subtle,
+                      border: '1px solid #E7E2D7',
                       color: B.blueDeeper,
                       display: 'inline-flex',
                       alignItems: 'center',
@@ -8909,7 +8928,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                             fontWeight: 850,
                             padding: '4px 8px',
                             borderRadius: 8,
-                            background: '#EEF6FF',
+                            background: '#F8FCFE',
                             color: B.blueDeeper,
                           }}>Shared</span>
                         )}
@@ -8921,7 +8940,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                             borderRadius: 8,
                             background: subtle,
                             color: muted,
-                            border: '1px solid #E1E7EF',
+                            border: '1px solid #E7E2D7',
                           }}>License {doc.licenseNumber || customer.licenseNumber}</span>
                         )}
                       </div>
@@ -9398,7 +9417,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   <div style={helperText}>Routine is best for most issues. Use urgent for active interior activity or access-sensitive timing.</div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8, marginTop: 12 }}>
                     {[
-                      { value: 'routine', label: 'Routine', desc: 'Next business window', icon: 'clock', color: B.wavesBlue, bg: '#EEF6FF' },
+                      { value: 'routine', label: 'Routine', desc: 'Next business window', icon: 'clock', color: B.wavesBlue, bg: '#F8FCFE' },
                       { value: 'urgent', label: 'Urgent', desc: 'Prioritize response', icon: 'warning', color: B.red, bg: '#FEF2F2' },
                     ].map(u => {
                       const active = urgency === u.value;
@@ -9412,7 +9431,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                             minHeight: 72,
                             borderRadius: 8,
                             cursor: 'pointer',
-                            border: `1px solid ${active ? u.color : '#E1E7EF'}`,
+                            border: `1px solid ${active ? u.color : '#E7E2D7'}`,
                             background: active ? u.bg : '#fff',
                             textAlign: 'left',
                             padding: 12,
@@ -9422,7 +9441,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                             fontFamily: FONTS.body,
                           }}
                         >
-                          <span style={{ ...iconTile, background: active ? '#fff' : '#EEF6FF', color: active ? u.color : B.blueDeeper }}>
+                          <span style={{ ...iconTile, background: active ? '#fff' : '#F8FCFE', color: active ? u.color : B.blueDeeper }}>
                             <Icon name={u.icon} size={16} strokeWidth={2} />
                           </span>
                           <span style={{ minWidth: 0 }}>
@@ -9457,7 +9476,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     marginTop: 10,
                     padding: '12px 13px',
                     borderRadius: 8,
-                    border: '1px solid #CBD5E1',
+                    border: '1px solid #D8D0C0',
                     fontSize: 14,
                     fontFamily: FONTS.body,
                     color: B.blueDeeper,
@@ -9468,7 +9487,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     lineHeight: 1.5,
                   }}
                   onFocus={e => e.target.style.borderColor = B.wavesBlue}
-                  onBlur={e => e.target.style.borderColor = '#CBD5E1'}
+                  onBlur={e => e.target.style.borderColor = '#D8D0C0'}
                 />
                 <div style={{
                   marginTop: 6,
@@ -9500,8 +9519,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                             minHeight: 36,
                             padding: '8px 10px',
                             borderRadius: 8,
-                            border: `1px solid ${active ? B.wavesBlue : '#CBD5E1'}`,
-                            background: active ? '#EEF6FF' : '#fff',
+                            border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
+                            background: active ? '#F8FCFE' : '#fff',
                             color: active ? B.blueDeeper : B.textBody,
                             cursor: 'pointer',
                             fontSize: 12,
@@ -9546,7 +9565,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                         borderRadius: 8,
                         cursor: 'pointer',
                         border: '1px dashed #93C5FD',
-                        background: '#EEF6FF',
+                        background: '#F8FCFE',
                         color: B.blueDeeper,
                         display: 'flex',
                         flexDirection: 'column',
@@ -9569,8 +9588,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     alignItems: photos.length ? 'stretch' : 'center',
                     minHeight: photos.length ? 0 : 92,
                     borderRadius: 8,
-                    border: photos.length ? 'none' : '1px solid #E1E7EF',
-                    background: photos.length ? 'transparent' : '#F8FAFC',
+                    border: photos.length ? 'none' : '1px solid #E7E2D7',
+                    background: photos.length ? 'transparent' : '#FAF8F3',
                     padding: photos.length ? 0 : 12,
                     color: muted,
                     fontSize: 14,
@@ -9583,7 +9602,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                           height: '100%',
                           objectFit: 'cover',
                           borderRadius: 8,
-                          border: '1px solid #E1E7EF',
+                          border: '1px solid #E7E2D7',
                           display: 'block',
                         }} />
                         <button
@@ -9637,7 +9656,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
             <footer style={{
               flexShrink: 0,
-              borderTop: '1px solid #E1E7EF',
+              borderTop: '1px solid #E7E2D7',
               background: 'rgba(255,255,255,0.96)',
               backdropFilter: 'blur(12px)',
               padding: compact ? '10px 14px max(14px, env(safe-area-inset-bottom))' : '14px 18px',
@@ -9658,7 +9677,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 minHeight: 44,
                 borderRadius: 8,
                 border: 'none',
-                background: canSubmit ? B.blueDeeper : '#CBD5E1',
+                background: canSubmit ? B.blueDeeper : '#D8D0C0',
                 color: '#fff',
                 fontSize: 14,
                 fontWeight: 850,
@@ -9701,21 +9720,21 @@ function MyRequestsCard() {
   if (!open.length) return null;
 
   const statusConfig = {
-    new: { label: 'New', color: B.wavesBlue, bg: '#EEF6FF', border: '#A7DDF8' },
+    new: { label: 'New', color: B.wavesBlue, bg: '#F8FCFE', border: '#A7DDF8' },
     acknowledged: { label: 'Reviewed', color: B.orange, bg: '#FFFBEB', border: '#FDE68A' },
     scheduled: { label: 'Scheduled', color: B.teal, bg: '#F0F9FF', border: '#BAE6FD' },
     resolved: { label: 'Resolved', color: B.green, bg: '#F0FDF4', border: '#BBF7D0' },
   };
 
   const STATUS_ORDER = ['new', 'acknowledged', 'scheduled', 'resolved'];
-  const muted = '#64748B';
+  const muted = '#6B7280';
 
   return (
     <section style={{
       background: B.white,
       borderRadius: 8,
       padding: 16,
-      border: '1px solid #E1E7EF',
+      border: '1px solid #E7E2D7',
       boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
     }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
@@ -9724,7 +9743,7 @@ function MyRequestsCard() {
             width: 38,
             height: 38,
             borderRadius: 8,
-            background: '#EEF6FF',
+            background: '#F8FCFE',
             color: B.blueDeeper,
             display: 'inline-flex',
             alignItems: 'center',
@@ -9743,9 +9762,9 @@ function MyRequestsCard() {
           fontWeight: 850,
           padding: '5px 9px',
           borderRadius: 8,
-          background: '#EEF6FF',
+          background: '#F8FCFE',
           color: B.blueDeeper,
-          border: '1px solid #CDEAFE',
+          border: '1px solid #CFE7F5',
           whiteSpace: 'nowrap',
         }}>{open.length} open</span>
       </div>
@@ -9757,9 +9776,9 @@ function MyRequestsCard() {
           const currentStep = Math.max(0, STATUS_ORDER.indexOf(r.status));
           return (
             <article key={r.id} style={{
-              border: '1px solid #E1E7EF',
+              border: '1px solid #E7E2D7',
               borderRadius: 8,
-              background: '#F8FAFC',
+              background: '#FAF8F3',
               padding: 12,
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
@@ -9788,7 +9807,7 @@ function MyRequestsCard() {
                   <div key={st} style={{
                     height: 4,
                     borderRadius: 999,
-                    background: currentStep >= i ? s.color : '#E1E7EF',
+                    background: currentStep >= i ? s.color : '#E7E2D7',
                   }} />
                 ))}
               </div>
@@ -9955,7 +9974,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
       }}>
         <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
         <div style={{
-          width: 36, height: 4, borderRadius: 999, background: '#CBD5E1',
+          width: 36, height: 4, borderRadius: 999, background: '#D8D0C0',
           margin: '0 auto 12px',
         }} />
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
@@ -10034,11 +10053,11 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
   const card = {
     background: B.white,
-    border: '1px solid #E1E7EF',
+    border: '1px solid #E7E2D7',
     borderRadius: 8,
     boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
   };
-  const muted = '#64748B';
+  const muted = '#6B7280';
   const propertyLine = [
     customer.address?.line1,
     customer.address?.city,
@@ -10056,7 +10075,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
           flex: 1, padding: '9px 14px', borderRadius: 8, border: `1px solid ${isActive ? B.wavesBlue : 'transparent'}`,
           cursor: 'pointer', fontSize: 14, fontWeight: 850,
           fontFamily: FONTS.heading,
-          background: isActive ? '#EEF6FF' : 'transparent',
+          background: isActive ? '#F8FCFE' : 'transparent',
           color: isActive ? B.blueDeeper : muted,
           minHeight: 38,
         }}
@@ -10074,7 +10093,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
               gap: 8,
               padding: '5px 10px',
               borderRadius: 999,
-              background: '#EEF6FF',
+              background: '#F8FCFE',
               color: B.blueDeeper,
               fontSize: 12,
               fontWeight: 850,
@@ -10099,10 +10118,10 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
           <div style={{
             display: 'flex',
             gap: 4,
-            background: '#F8FAFC',
+            background: '#FAF8F3',
             borderRadius: 8,
             padding: 4,
-            border: '1px solid #E1E7EF',
+            border: '1px solid #E7E2D7',
             minWidth: compact ? '100%' : 260,
           }}>
             {pill('upcoming', 'Upcoming')}
@@ -10284,7 +10303,7 @@ function ChatWidget({ customer, onClose }) {
             height: 44,
             borderRadius: 8,
             border: 'none',
-            background: input.trim() ? B.blueDeeper : '#CBD5E1',
+            background: input.trim() ? B.blueDeeper : '#D8D0C0',
             color: '#fff', cursor: input.trim() ? 'pointer' : 'default',
             display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
             transition: 'background 0.15s',
@@ -10351,9 +10370,9 @@ export default function PortalPage() {
           minWidth: 'max-content',
           background: isActive ? PORTAL_SHELL.surface : 'transparent',
           color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
-          fontFamily: FONTS.heading,
+          fontFamily: FONTS.body,
           fontSize: 12,
-          fontWeight: 850,
+          fontWeight: 800,
           cursor: 'pointer',
           boxShadow: isActive ? PORTAL_SHELL.shadowSoft : 'none',
         }}
@@ -10422,7 +10441,7 @@ export default function PortalPage() {
     { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
     { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
   ];
-  const shellMaxWidth = 960;
+  const shellMaxWidth = 1040;
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
   return (
@@ -10430,14 +10449,14 @@ export default function PortalPage() {
       minHeight: '100vh',
       background: PORTAL_SHELL.page,
       fontFamily: FONTS.body,
+      color: PORTAL_SHELL.body,
     }}>
       {/* Header */}
       <div style={{
-        background: 'rgba(255,255,255,0.96)',
-        backdropFilter: 'blur(16px)',
+        background: PORTAL_SHELL.surface,
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
-        boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
-        padding: '10px max(16px, calc((100vw - 1440px) / 2 + 16px))',
+        boxShadow: 'none',
+        padding: '12px max(16px, calc((100vw - 1440px) / 2 + 16px))',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
@@ -10453,9 +10472,9 @@ export default function PortalPage() {
             flex: 1, minWidth: 0, margin: '0 10px',
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
-            background: PORTAL_SHELL.page,
+            background: PORTAL_SHELL.soft,
             border: `1px solid ${PORTAL_SHELL.border}`,
-            borderRadius: 8,
+            borderRadius: 12,
             padding: 4,
           }}>
             {headerNavItems.map(headerNavButton)}
@@ -10468,18 +10487,18 @@ export default function PortalPage() {
               onClick={() => setShowReportIssue(true)}
               style={{
                 minHeight: 38,
-                borderRadius: 8,
-                border: `1px solid ${PORTAL_SHELL.borderStrong}`,
-                background: PORTAL_SHELL.surface,
-                color: PORTAL_SHELL.text,
+                borderRadius: 10,
+                border: 'none',
+                background: PORTAL_SHELL.text,
+                color: '#fff',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: 7,
                 padding: '0 12px',
                 fontSize: 14,
-                fontWeight: 850,
-                fontFamily: FONTS.heading,
+                fontWeight: 800,
+                fontFamily: FONTS.body,
                 cursor: 'pointer',
               }}
             >
@@ -10498,7 +10517,7 @@ export default function PortalPage() {
               style={{
                 minHeight: 38,
                 width: isMobileShell ? 38 : 'auto',
-                borderRadius: 8,
+                borderRadius: 10,
                 background: PORTAL_SHELL.surface,
                 border: `1px solid ${PORTAL_SHELL.borderStrong}`,
                 padding: isMobileShell ? 0 : '4px 8px 4px 4px',
@@ -10508,16 +10527,16 @@ export default function PortalPage() {
                 gap: 8,
                 color: PORTAL_SHELL.text,
                 fontSize: 14,
-                fontWeight: 850,
+                fontWeight: 800,
                 cursor: 'pointer',
-                fontFamily: FONTS.heading,
+                fontFamily: FONTS.body,
                 boxShadow: showMenu ? '0 0 0 3px rgba(0,156,222,0.14)' : PORTAL_SHELL.shadowSoft,
               }}
             >
               <span style={{
                 width: 30,
                 height: 30,
-                borderRadius: 8,
+                borderRadius: 10,
                 background: PORTAL_SHELL.text,
                 color: '#fff',
                 display: 'inline-flex',
@@ -10542,7 +10561,7 @@ export default function PortalPage() {
                 width: 360,
                 maxWidth: 'calc(100vw - 24px)',
                 background: PORTAL_SHELL.page,
-                borderRadius: 8,
+                borderRadius: 16,
                 overflow: 'hidden',
                 maxHeight: 'calc(100vh - 72px)',
                 overflowY: 'auto',

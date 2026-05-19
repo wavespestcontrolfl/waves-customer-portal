@@ -1,13 +1,14 @@
 // Client mirror of server/services/payment-method-consent-text.js.
 // Keep in sync — when the server version bumps, update this too.
+import { WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 
-export const CONSENT_VERSION = 'v5_2026-05-14';
+export const CONSENT_VERSION = 'v6_2026-05-18';
 
 export const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
   'this card and charge it for future service visits and invoices as',
   'agreed, until I revoke authorization in writing or by calling',
-  '(941) 318-7612. Credit and debit card payments include a 3.99%',
+  `${WAVES_SUPPORT_PHONE_DISPLAY}. Credit and debit card payments include a 3.99%`,
   'processing fee. I can manage or remove saved payment methods anytime',
   'in my customer portal.',
 ].join(' ');
@@ -18,7 +19,7 @@ export const ACH_CONSENT_TEXT = [
   'above for each invoice in the amount of that invoice, on or after',
   'its due date (or on the Auto Pay billing day I have selected),',
   'until I revoke this authorization. I may revoke by writing to',
-  'contact@wavespestcontrol.com or calling (941) 318-7612 at least',
+  `contact@wavespestcontrol.com or calling ${WAVES_SUPPORT_PHONE_DISPLAY} at least`,
   '3 business days before the next scheduled debit. I may request a',
   'copy of this authorization at any time by contacting Waves at the',
   'email or phone above. I can manage or remove saved payment methods',

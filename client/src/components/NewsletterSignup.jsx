@@ -26,7 +26,7 @@
 // for grandfathered rows that confirmed under the old flow.
 
 import { useState } from 'react';
-import { COLORS as B, FONTS, GOLD_CTA } from '../theme-brand';
+import { COLORS as B, FONTS } from '../theme-brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -52,6 +52,7 @@ export default function NewsletterSignup({
   const fieldText = B.navy;
   const successFg = onDark ? B.yellow : B.green;
   const errorFg = onDark ? '#FFB4B4' : B.red;
+  const buttonBg = onDark ? B.wavesBlue : B.blueDeeper;
 
   const submit = async (e) => {
     e.preventDefault();
@@ -113,7 +114,7 @@ export default function NewsletterSignup({
           fontWeight: 700,
           color: headingColor,
           marginBottom: 6,
-          letterSpacing: '0.01em',
+          letterSpacing: 0,
         }}>{heading}</div>
       )}
       {blurb && !compact && (
@@ -180,10 +181,16 @@ export default function NewsletterSignup({
           type="submit"
           disabled={state === 'loading' || locked}
           style={{
-            ...GOLD_CTA,
-            padding: '0 20px',
             minHeight: 44,
+            padding: '0 20px',
+            borderRadius: 8,
+            border: `1px solid ${buttonBg}`,
+            background: buttonBg,
+            color: '#fff',
+            fontFamily: FONTS.ui,
+            fontWeight: 850,
             fontSize: 14,
+            letterSpacing: 0,
             cursor: state === 'loading' || locked ? 'default' : 'pointer',
             opacity: state === 'loading' || locked ? 0.7 : 1,
             whiteSpace: 'nowrap',

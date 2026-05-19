@@ -17,6 +17,10 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { resolveShortCode } = require('../services/short-url');
 const { isBotUserAgent } = require('../utils/bot-ua');
+const {
+  WAVES_SUPPORT_PHONE_DISPLAY,
+  WAVES_SUPPORT_PHONE_TEL,
+} = require('../constants/business');
 
 // Accept lowercase alphanum + hyphen only, 3-80 chars. Keeps the route from matching
 // unexpected paths (/l/favicon.ico etc) and short-circuits obvious bots.
@@ -56,19 +60,41 @@ router.get('/:code', async (req, res) => {
 });
 
 function notFoundPage() {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Link not found</title>
-  <style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:480px;margin:60px auto;padding:0 20px;color:#111}h1{font-size:24px;margin-bottom:8px}p{line-height:1.5;color:#555}</style></head>
-  <body><h1>Link not found</h1><p>This short link doesn't match anything in our system. If you got it from a Waves text or email, reach out to us at <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> or (941) 318-7612 and we'll resend it.</p></body></html>`;
+  return messagePage({
+    title: 'Link not found',
+    heading: 'Link not found',
+    body: `This short link doesn't match anything in our system. If you got it from a Waves text or email, reach out to us at <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> or <a href="${WAVES_SUPPORT_PHONE_TEL}">${WAVES_SUPPORT_PHONE_DISPLAY}</a> and we'll resend it.`,
+  });
 }
 
 function expiredPage() {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Link expired</title>
-  <style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:480px;margin:60px auto;padding:0 20px;color:#111}h1{font-size:24px;margin-bottom:8px}p{line-height:1.5;color:#555}</style></head>
-  <body><h1>This link has expired</h1><p>Contact us at <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> or (941) 318-7612 and we'll send a fresh one.</p></body></html>`;
+  return messagePage({
+    title: 'Link expired',
+    heading: 'This link has expired',
+    body: `Contact us at <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> or <a href="${WAVES_SUPPORT_PHONE_TEL}">${WAVES_SUPPORT_PHONE_DISPLAY}</a> and we'll send a fresh one.`,
+  });
 }
 
 function genericErrorPage() {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Something went wrong</title></head><body><p>Something went wrong on our end. Try again in a minute, or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a>.</p></body></html>`;
+  return messagePage({
+    title: 'Something went wrong',
+    heading: 'Something went wrong',
+    body: 'Try again in a minute, or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a>.',
+  });
+}
+
+function messagePage({ title, heading, body }) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title} — Waves</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#FAF8F3;color:#1B2C5B;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 20px}
+    .box{max-width:520px;background:#fff;border:1px solid #E7E2D7;border-radius:8px;padding:36px;text-align:center}
+    h1{font-family:'Source Serif 4',Georgia,serif;font-size:32px;line-height:1.12;font-weight:500;margin:0 0 12px;color:#1B2C5B;letter-spacing:0}
+    p{font-size:15px;line-height:1.6;color:#3F4A65;margin:0}
+    a{color:#1B2C5B;font-weight:700}
+  </style></head>
+  <body><main class="box"><h1>${heading}</h1><p>${body}</p></main></body></html>`;
 }
 
 module.exports = router;

@@ -22,6 +22,7 @@ const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const RENEWAL_DAYS = 7;
 
@@ -67,11 +68,16 @@ const EstimateAutoRenew = {
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
           const url = await shortenOrPassthrough(longUrl, { kind: 'estimate', entityType: 'estimates', entityId: est.id, customerId: est.customer_id });
-          const smsBody = await renderTemplate('estimate_auto_renewed',
-            { first_name: firstName, estimate_url: url },
-          );
+          let smsBody = null;
+          try {
+            smsBody = await renderTemplate('estimate_auto_renewed',
+              { first_name: firstName, estimate_url: url },
+            );
+          } catch (e) {
+            logger.warn(`[est-auto-renew] SMS template unavailable for estimate ${est.id}: ${e.message}`);
+          }
 
-          if (est.customer_phone) {
+          if (est.customer_phone && smsBody) {
             try {
               const smsResult = await sendCustomerMessage({
                 to: est.customer_phone,
@@ -158,7 +164,7 @@ const EstimateAutoRenew = {
                   to: est.customer_email,
                   subject: 'Your Waves estimate was extended',
                   heading: `Hey ${firstName} — we extended your estimate`,
-                  body: `<p>Your Waves Pest Control estimate was about to expire, so we went ahead and extended it by another few days. It's still good — take another look whenever you're ready.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
+                  body: `<p>Your Waves Pest Control estimate was about to expire, so we went ahead and extended it by another few days. It's still good — take another look whenever you're ready.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
                   ctaUrl: url,
                   ctaLabel: 'View Your Estimate',
                 });

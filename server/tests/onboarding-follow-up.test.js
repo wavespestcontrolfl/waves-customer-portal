@@ -26,6 +26,7 @@ jest.mock('../services/logger', () => ({
 const db = require('../models/db');
 const EmailService = require('../services/email');
 const EmailTemplateLibrary = require('../services/email-template-library');
+const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const OnboardingFollowUp = require('../services/onboarding-follow-up');
 
@@ -129,6 +130,7 @@ describe('onboarding follow-up emails', () => {
         chain({ result: [] }),
       ],
     });
+    smsTemplatesRouter.getTemplate.mockResolvedValue('Finish your Waves onboarding setup.');
     sendCustomerMessage.mockResolvedValue({
       sent: false,
       reason: 'temporary carrier failure',

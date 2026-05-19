@@ -6,16 +6,23 @@ const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const {
+  WAVES_ADDRESS_LINE,
+  WAVES_SUPPORT_PHONE_DISPLAY,
+} = require('../constants/business');
 
 // =========================================================================
 // PDF GENERATION — builds a branded service report
 // =========================================================================
 // Waves brand colors
-const NAVY = '#1B2A4A';
-const TEAL = '#0ea5e9';
+const NAVY = '#1B2C5B';
+const TEAL = '#009CDE';
 const GREEN = '#10b981';
 const RED = '#A83B34';
-const LIGHT_BG = '#F0F7FC';
+const LIGHT_BG = '#F8FCFE';
+const BODY = '#3F4A65';
+const MUTED_ON_DARK = '#B8D4EA';
+const MUTED = '#6B7280';
 
 function sectionHeader(doc, title, x, y, w) {
   const width = w || 512;
@@ -159,15 +166,15 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   const logoBuf = getLogoBuffer();
   if (logoBuf) {
     doc.image(logoBuf, L + 2, 8, { width: 64, height: 64 });
-    doc.fontSize(8).font('Helvetica').fillColor('#ccc').text(credentialText, L + 72, 60);
+    doc.fontSize(8).font('Helvetica').fillColor(MUTED_ON_DARK).text(credentialText, L + 72, 60);
   } else {
     doc.fontSize(22).font('Helvetica-Bold').fillColor('#fff').text('WAVES', L + 10, 18);
     doc.fontSize(9).font('Helvetica').fillColor(TEAL).text('LAWN & PEST CONTROL', L + 10, 42);
-    doc.fontSize(8).fillColor('#ccc').text(credentialText, L + 10, 56);
+    doc.fontSize(8).fillColor(MUTED_ON_DARK).text(credentialText, L + 10, 56);
   }
 
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text('(941) 318-7612', R - 150, 22, { width: 150, align: 'right' });
-  doc.fontSize(8).font('Helvetica').fillColor('#ccc').text('wavespestcontrol.com', R - 150, 36, { width: 150, align: 'right' });
+  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(WAVES_SUPPORT_PHONE_DISPLAY, R - 150, 22, { width: 150, align: 'right' });
+  doc.fontSize(8).font('Helvetica').fillColor(MUTED_ON_DARK).text('wavespestcontrol.com', R - 150, 36, { width: 150, align: 'right' });
   doc.text('Bradenton, FL 34211', R - 150, 48, { width: 150, align: 'right' });
   doc.restore();
 
@@ -334,7 +341,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
       doc.rect(L, y, W, rowH).fill(bg);
 
       // Row 1: Product name + Active ingredient + EPA
-      doc.fontSize(9).font('Helvetica-Bold').fillColor('#333').text(p.product_name || '', L + 8, y + 4, { width: 200 });
+      doc.fontSize(9).font('Helvetica-Bold').fillColor(BODY).text(p.product_name || '', L + 8, y + 4, { width: 200 });
       if (p.active_ingredient) {
         doc.fontSize(7).font('Helvetica').fillColor('#888').text(`Active: ${p.active_ingredient}${formulation ? ` (${formulation})` : ''}`, L + 8, y + 16, { width: 200 });
       }
@@ -348,16 +355,16 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
       // Row 1 right side: Application details
       const detailX = L + 280;
       doc.fontSize(7.5).font('Helvetica').fillColor('#555').text('Method:', detailX, y + 4, { width: 40 });
-      doc.font('Helvetica').fillColor('#333').text(targetArea || '—', detailX + 42, y + 4, { width: 200 });
+      doc.font('Helvetica').fillColor(BODY).text(targetArea || '—', detailX + 42, y + 4, { width: 200 });
       doc.fontSize(7.5).fillColor('#555').text('Rate:', detailX, y + 16, { width: 40 });
-      doc.fillColor('#333').text(p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}`.trim() : '—', detailX + 42, y + 16, { width: 200 });
+      doc.fillColor(BODY).text(p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}`.trim() : '—', detailX + 42, y + 16, { width: 200 });
       if (dilution) {
         doc.fontSize(7.5).fillColor('#555').text('Dilution:', detailX, y + 28, { width: 42 });
-        doc.fillColor('#333').text(dilution, detailX + 42, y + 28, { width: 200 });
+        doc.fillColor(BODY).text(dilution, detailX + 42, y + 28, { width: 200 });
       }
       if (p.total_amount) {
         doc.fontSize(7.5).fillColor('#555').text('Applied:', detailX + 160, y + 28, { width: 38 });
-        doc.fillColor('#333').text(`${p.total_amount} ${p.amount_unit || ''}`.trim(), detailX + 200, y + 28, { width: 80 });
+        doc.fillColor(BODY).text(`${p.total_amount} ${p.amount_unit || ''}`.trim(), detailX + 200, y + 28, { width: 80 });
       }
 
       // Target pests row
@@ -378,7 +385,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   if (notes) {
     if (y > 620) { doc.addPage(); y = 50; }
     y = sectionHeader(doc, 'What We Did', L, y);
-    doc.fontSize(9).font('Helvetica').fillColor('#333').text(notes, L + 8, y, { width: W - 16, lineGap: 3 });
+    doc.fontSize(9).font('Helvetica').fillColor(BODY).text(notes, L + 8, y, { width: W - 16, lineGap: 3 });
     y = doc.y + 12;
   }
 
@@ -414,7 +421,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
     y = sectionHeader(doc, 'What I Noticed', L, y);
     observations.forEach(obs => {
       if (y > 700) { doc.addPage(); y = 50; }
-      doc.fontSize(8.5).font('Helvetica').fillColor('#333');
+      doc.fontSize(8.5).font('Helvetica').fillColor(BODY);
       doc.text(`  \u2022  ${obs}`, L + 8, y, { width: W - 24, lineGap: 2 });
       y = doc.y + 4;
     });
@@ -444,10 +451,10 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
     if (y > 620) { doc.addPage(); y = 50; }
     y = sectionHeader(doc, 'What We Recommend', L, y);
     doc.save();
-    doc.roundedRect(L, y, W, 4 + recommendations.length * 16, 3).fill('#F0F7FC');
+    doc.roundedRect(L, y, W, 4 + recommendations.length * 16, 3).fill(LIGHT_BG);
     doc.roundedRect(L, y, 4, 4 + recommendations.length * 16, 2).fill(TEAL);
     recommendations.forEach((rec, i) => {
-      doc.fontSize(8.5).font('Helvetica').fillColor('#333');
+      doc.fontSize(8.5).font('Helvetica').fillColor(BODY);
       doc.text(`  \u2022  ${rec}`, L + 14, y + 6 + i * 16, { width: W - 28, lineGap: 2 });
     });
     doc.restore();
@@ -462,7 +469,7 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   doc.save();
   doc.roundedRect(L, y, W, 36, 3).fill('#F0FAF0');
   doc.roundedRect(L, y, 4, 36, 2).fill(GREEN);
-  doc.fontSize(9).font('Helvetica').fillColor('#333').text(
+  doc.fontSize(9).font('Helvetica').fillColor(BODY).text(
     getAftercareTips(service.service_type),
     L + 14, y + 6, { width: W - 28, lineGap: 3 }
   );
@@ -507,24 +514,27 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // FOOTER
   // ══════════════════════════════════════════════════════
+  const previousBottomMargin = doc.page.margins.bottom;
   doc.save();
+  doc.page.margins.bottom = 0;
   doc.rect(0, 730, 612, 62).fill(NAVY);
   doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(
     `Waves Pest Control, LLC · ${credentialText}`,
     0, 738, { width: 612, align: 'center' }
   );
-  doc.fontSize(7).font('Helvetica').fillColor('#ccc').text(
-    '13649 Luxe Ave #110, Bradenton, FL 34211 · (941) 318-7612',
+  doc.fontSize(7).font('Helvetica').fillColor(MUTED_ON_DARK).text(
+    `${WAVES_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY}`,
     0, 750, { width: 612, align: 'center' }
   );
   const techLine = service.technician_name && service.technician_name !== 'Waves Team'
     ? `Your technician: ${service.technician_name}${service.technician_license ? ` (FL #${service.technician_license})` : ''}`
     : 'wavespestcontrol.com';
   doc.text(techLine, 0, 760, { width: 612, align: 'center' });
-  doc.fillColor('#999').text(
+  doc.fillColor(MUTED).text(
     'View this report in your Waves portal · National Poison Control: (800) 222-1222',
     0, 770, { width: 612, align: 'center' }
   );
+  doc.page.margins.bottom = previousBottomMargin;
   doc.restore();
 
   doc.end();

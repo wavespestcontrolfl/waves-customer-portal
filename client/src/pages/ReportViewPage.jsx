@@ -9,7 +9,6 @@ import {
   CloudSun,
   Eye,
   FileCheck2,
-  Home,
   Lock,
   MapPin,
   Printer,
@@ -26,6 +25,17 @@ import {
 import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const WAVES_PHONE_DISPLAY = '(941) 297-5749';
+const WAVES_PHONE_TEL = '+19412975749';
+const FONT_BODY = "'Inter', system-ui, sans-serif";
+const ESTIMATE_BG = '#FAF8F3';
+const ESTIMATE_BORDER = '#E7E2D7';
+const ESTIMATE_MUTED = '#6B7280';
+const ESTIMATE_TEXT = '#1B2C5B';
+const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_BUTTON_BG = B.blueDeeper;
+const ESTIMATE_INPUT_BORDER = '#CFE7F5';
+const ESTIMATE_INPUT_BG = '#F8FCFE';
 const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
 const PRESSURE_INDEX_DISPLAY_FLOOR = 0.3;
 const DEFAULT_PORTAL_DESCRIPTION = 'Your Waves service reports, billing, and account — view past visits, track action items, and schedule the next service.';
@@ -247,6 +257,26 @@ export function cleanVisitSummary(value) {
 
 function visitSummaryCopy(data = {}) {
   return cleanVisitSummary(data.summary) || 'Your routine service is complete.';
+}
+
+export function customerInteractionCopy(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const copy = {
+    tech_home_spoke_with_them: 'The technician spoke with someone at the home.',
+    tech_home_no_answer: 'The technician did not reach someone at the home.',
+    customer_home_spoke_with_them: 'The technician spoke with someone at the home.',
+    customer_home_no_answer: 'The technician did not reach someone at the home.',
+    spoke: 'The technician spoke with someone at the home.',
+    not_home_full_access: 'No one was home, and the technician had full access to complete service.',
+    not_home_partial_access: 'No one was home, and the technician completed the accessible areas.',
+    customer_specific_concern: 'The customer shared a specific concern with the technician.',
+    customer_not_home: 'No one was home during the visit.',
+    no_customer_contact: 'No customer interaction was recorded for this visit.',
+    gate_access_used: 'The technician used the recorded access instructions.',
+  };
+  return copy[key] || formatEnumLabel(raw);
 }
 
 function positiveNumber(value) {
@@ -642,14 +672,14 @@ function recommendedFinding(findings = []) {
 function actionButtonStyle(kind = 'plain') {
   const isPrimary = kind === 'primary';
   return {
-    minHeight: 38,
-    padding: '9px 12px',
-    borderRadius: 8,
-    border: `1px solid ${isPrimary ? B.blueDeeper : '#CBD5E1'}`,
-    background: isPrimary ? B.blueDeeper : '#FFFFFF',
-    color: isPrimary ? '#FFFFFF' : B.blueDeeper,
-    fontFamily: FONTS.heading,
-    fontWeight: 850,
+    minHeight: 48,
+    padding: '0 18px',
+    borderRadius: 10,
+    border: isPrimary ? `1px solid ${ESTIMATE_BUTTON_BG}` : `1px solid ${ESTIMATE_BORDER}`,
+    background: isPrimary ? ESTIMATE_BUTTON_BG : '#FFFFFF',
+    color: isPrimary ? '#FFFFFF' : ESTIMATE_TEXT,
+    fontFamily: FONT_BODY,
+    fontWeight: 700,
     fontSize: 14,
     lineHeight: 1,
     cursor: 'pointer',
@@ -1021,56 +1051,78 @@ function ServiceStatusCard({ data, mode }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
   const arrived = formatClockTime(data.visitTiming?.arrivedAt);
   const completed = formatClockTime(data.visitTiming?.exitedAt);
-  const reentryContext = data.dynamicContext?.reentry;
-  const nowMs = useReadinessNow(reentryContext, mode);
-  const readiness = readinessStatusBadge(reentryContext, mode, nowMs);
+  const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
+  const readinessBadge = readinessStatusBadge(data.dynamicContext?.reentry, mode, nowMs);
   const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
   const completionStatus = completedEvent?.status === 'pending' ? 'In progress' : 'Completed';
+  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const serviceLabel = serviceDisplayName(data);
+  const serviceDate = formatDate(data.serviceDate);
 
   return (
-    <section className="sr-hero service-status-card" id="service-status">
-      <div className="service-status-main">
-        <div>
-          <div className="section-eyebrow">Service status</div>
-          <h1 className="sr-title">Service report</h1>
-          <div className="sr-meta">{serviceDisplayName(data)} | {formatDate(data.serviceDate)}</div>
-          {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
-        </div>
-        {readiness && (
-          <div className={`status-badge ${readiness.ready ? 'status-ready' : 'status-pending'}`}>{readiness.label}</div>
-        )}
+    <section className="service-report-hero" id="service-status">
+      <div className="service-report-hero-copy">
+        <div className="section-eyebrow">Service report{serviceLabel ? ` · ${serviceLabel}` : ''}</div>
+        <h1 className="sr-title">Hey {firstName}, here's your service report.</h1>
+        {data.serviceAddress && <div className="service-meta-address">{data.serviceAddress}</div>}
       </div>
-      <div className="service-status-grid">
-        <div className="sr-cell">
-          <div className="sr-cell-label">Technician</div>
-          <div className="sr-cell-value">Technician: {technician}</div>
+      <div className="service-status-card">
+        <div className="service-status-main">
+          <div>
+            <div className="section-eyebrow">Report details</div>
+            <div className="sr-meta">{[serviceLabel, serviceDate].filter(Boolean).join(' | ')}</div>
+          </div>
+          {readinessBadge && (
+            <div className={`status-badge ${readinessBadge.ready ? 'status-ready' : 'status-pending'}`}>{readinessBadge.label}</div>
+          )}
         </div>
-        {arrived && (
+        <div className="service-status-grid">
           <div className="sr-cell">
-            <div className="sr-cell-label">Recorded arrival</div>
-            <div className="sr-cell-value">{arrived}</div>
+            <div className="sr-cell-label">Technician</div>
+            <div className="sr-cell-value">{technician}</div>
           </div>
-        )}
-        {completed && (
+          {arrived && (
+            <div className="sr-cell">
+              <div className="sr-cell-label">Recorded arrival</div>
+              <div className="sr-cell-value">{arrived}</div>
+            </div>
+          )}
+          {completed && (
+            <div className="sr-cell">
+              <div className="sr-cell-label">Recorded completion</div>
+              <div className="sr-cell-value">{completed}</div>
+            </div>
+          )}
           <div className="sr-cell">
-            <div className="sr-cell-label">Recorded completion</div>
-            <div className="sr-cell-value">{completed}</div>
+            <div className="sr-cell-label">Completion status</div>
+            <div className="sr-cell-value">{completionStatus}</div>
           </div>
-        )}
-        <div className="sr-cell">
-          <div className="sr-cell-label">Completion status</div>
-          <div className="sr-cell-value">{completionStatus}</div>
         </div>
       </div>
     </section>
   );
 }
 
+function ReportActionBar({ pdfUrl, token, onShare }) {
+  return (
+    <div className="report-action-bar" aria-label="Report actions">
+      <div>
+        <div className="section-eyebrow">Report tools</div>
+        <div className="report-action-copy">Download, share, or print this report for your records.</div>
+      </div>
+      <div className="report-action-buttons">
+        {pdfUrl && <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>}
+        <button type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
+        <button type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
+        <a href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
+      </div>
+    </div>
+  );
+}
+
 function ReentryReadinessCard({ context, mode, token }) {
   const nowMs = useReadinessNow(context, mode);
   const readiness = readinessSummary(context, mode, nowMs);
-  const timezone = context?.displayTimezone || SERVICE_REPORT_TIME_ZONE;
-  const targets = Array.isArray(context?.targets) ? context.targets : [];
 
   useEffect(() => {
     if (mode !== 'live' || !context) return;
@@ -1102,19 +1154,6 @@ function ReentryReadinessCard({ context, mode, token }) {
           <div className="sr-cell-value">{readiness.precautions}</div>
         </div>
       </div>
-      {targets.length > 0 && (
-        <div className="reentry-target-grid" style={{ marginTop: 16 }}>
-          {targets.map((target) => (
-            <ReentryTargetTile
-              key={target.key}
-              target={target}
-              nowMs={nowMs}
-              mode={mode}
-              timezone={timezone}
-            />
-          ))}
-        </div>
-      )}
     </section>
   );
 }
@@ -1705,7 +1744,7 @@ function WhatHappenedWhere({ data, token, mode = 'live' }) {
   );
 }
 
-function AppliedProductsSection({ data, showAll = false, showTechnical = false, mode = 'live' }) {
+function AppliedProductsSection({ data, showAll = false, mode = 'live' }) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
   if (!applications.length) return null;
   const groupedApplications = groupApplicationsByPurpose(applications, data);
@@ -1723,7 +1762,6 @@ function AppliedProductsSection({ data, showAll = false, showTechnical = false, 
         <div className="applied-products-grid">
           {visibleGroups.map((group) => (
             <article className="applied-product-card product-group-card" key={group.key}>
-              <div className="sr-cell-label">{group.purpose}</div>
               <h3>{group.purpose}</h3>
               <p>{group.copy}</p>
               <div className="product-group-list" aria-label={`${group.purpose} products`}>
@@ -1741,32 +1779,42 @@ function AppliedProductsSection({ data, showAll = false, showTechnical = false, 
                 <span>Method: {group.method}</span>
                 <span>{group.zones}</span>
               </div>
-              {showTechnical && (
-                <details className="solution-detail report-accordion" open={mode !== 'live'}>
-                  <summary>
-                    <span>Technical application details</span>
-                    <span className="accordion-action">Details</span>
-                  </summary>
-                  <div className="accordion-body solution-detail-body">
-                    {group.products.map((app) => (
-                      <p key={`${app.id}-tech`}>
-                        {[
-                          app.product?.name || 'Product application',
-                          app.product?.epa_reg ? `EPA reg. ${app.product.epa_reg}` : null,
-                          app.rate && app.rateUnit ? `Rate: ${app.rate} ${app.rateUnit}` : null,
-                          app.totalAmount && app.amountUnit ? `Total: ${app.totalAmount} ${app.amountUnit}` : null,
-                        ].filter(Boolean).join(' | ')}
-                      </p>
-                    ))}
-                  </div>
-                </details>
-              )}
+              <details className="solution-detail report-accordion" open={mode !== 'live'}>
+                <summary>
+                  <span>More information</span>
+                  <span className="accordion-action">Details</span>
+                </summary>
+                <div className="accordion-body solution-detail-body">
+                  {group.products.map((app) => {
+                    const productName = app.product?.name || 'Product application';
+                    const active = app.product?.active_ingredient;
+                    const epa = app.product?.epa_reg;
+                    const applicationFacts = [
+                      active ? `Active ingredient: ${active}` : null,
+                      epa ? `EPA reg. ${epa}` : null,
+                      app.rate && app.rateUnit ? `Rate: ${app.rate} ${app.rateUnit}` : null,
+                      app.totalAmount && app.amountUnit ? `Total: ${app.totalAmount} ${app.amountUnit}` : null,
+                    ].filter(Boolean);
+                    return (
+                      <div key={`${app.id}-tech`} className="solution-product-detail">
+                        <div className="solution-product-name">{productName}</div>
+                        {applicationFacts.length > 0 && (
+                          <div className="solution-product-facts">{applicationFacts.join(' | ')}</div>
+                        )}
+                        {applicationTechnicalExplanation(app, data.serviceLine).map((detail) => (
+                          <p key={detail}>{detail}</p>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
             </article>
           ))}
         </div>
       )}
-      {!showTechnical && groupedApplications.length > visibleGroups.length && (
-        <p className="sr-muted">{groupedApplications.length - visibleGroups.length} more application group{groupedApplications.length - visibleGroups.length === 1 ? '' : 's'} included in the downloadable report.</p>
+      {groupedApplications.length > visibleGroups.length && (
+        <p className="sr-muted">{groupedApplications.length - visibleGroups.length} more application group{groupedApplications.length - visibleGroups.length === 1 ? '' : 's'} available in the full service data.</p>
       )}
     </section>
   );
@@ -2078,16 +2126,16 @@ function ServiceCoverageMapSection({
   const locations = Array.isArray(serviceLocations) ? serviceLocations : [];
   const imageLocations = locations.map(coverageImageDisplayLocation);
   const imageRenderableCount = imageLocations.filter(hasRenderableCoverageGeometry).length;
-  const canUseImageMap = Boolean(mapBackgroundUrl)
+  const canUseImageGeometry = Boolean(mapBackgroundUrl)
     && imageRenderableCount > 0
     && locations.every((location) => (
       !hasRenderableCoverageGeometry(location)
       || hasRenderableCoverageGeometry(coverageImageDisplayLocation(location))
     ));
-  const activeMapBackgroundUrl = canUseImageMap ? mapBackgroundUrl : null;
+  const activeMapBackgroundUrl = canUseImageGeometry ? mapBackgroundUrl : null;
   const displayLocations = useMemo(
-    () => locations.map((location) => coverageDisplayLocation(location, canUseImageMap)),
-    [locations, canUseImageMap],
+    () => locations.map((location) => coverageDisplayLocation(location, canUseImageGeometry)),
+    [locations, canUseImageGeometry],
   );
   const renderableLocations = displayLocations.filter(hasRenderableCoverageGeometry);
   const projection = useMemo(() => buildCoverageProjection(renderableLocations), [renderableLocations]);
@@ -2190,6 +2238,7 @@ function ServiceCoverageMapSection({
 function workflowIconForType(type) {
   if (type === 'technician_en_route') return Route;
   if (type === 'arrived_on_site') return MapPin;
+  if (type === 'customer_interaction') return CheckCircle2;
   if (type === 'inspection_started') return Eye;
   if (type === 'service_completed') return CheckCircle2;
   if (type === 'report_published') return FileCheck2;
@@ -2199,6 +2248,34 @@ function workflowIconForType(type) {
 export function timelineEventsForDisplay(workflowEvents = []) {
   if (!Array.isArray(workflowEvents)) return [];
   return workflowEvents.filter((event) => event?.type !== 'customer_interaction');
+}
+
+function timelineEventsWithCustomerInteraction(workflowEvents = [], customerInteraction, visitTiming = {}) {
+  const events = timelineEventsForDisplay(workflowEvents);
+  const interaction = customerInteractionCopy(customerInteraction);
+  if (!interaction) return events;
+  const arrived = events.find((event) => event.type === 'arrived_on_site');
+  const completed = events.find((event) => event.type === 'service_completed');
+  const timestamp = arrived?.timestamp || visitTiming.arrivedAt || completed?.timestamp || visitTiming.exitedAt || null;
+  const interactionEvent = {
+    id: 'customer_interaction',
+    type: 'customer_interaction',
+    label: 'Customer interaction',
+    timestamp,
+    status: 'completed',
+    customerVisibleDescription: interaction,
+  };
+  const insertAfter = events.findIndex((event) => event.type === 'arrived_on_site');
+  if (insertAfter >= 0) {
+    events.splice(insertAfter + 1, 0, interactionEvent);
+    return events;
+  }
+  const beforeCompleted = events.findIndex((event) => event.type === 'service_completed');
+  if (beforeCompleted >= 0) {
+    events.splice(beforeCompleted, 0, interactionEvent);
+    return events;
+  }
+  return [...events, interactionEvent];
 }
 
 function hasDuplicateDisplayedEventTimes(events = []) {
@@ -2211,8 +2288,8 @@ function hasDuplicateDisplayedEventTimes(events = []) {
   return Array.from(counts.values()).some((count) => count > 1);
 }
 
-function ServiceTimelineSection({ serviceType, workflowEvents, loading = false }) {
-  const events = timelineEventsForDisplay(workflowEvents);
+function ServiceTimelineSection({ serviceType, workflowEvents, customerInteraction, visitTiming, loading = false }) {
+  const events = timelineEventsWithCustomerInteraction(workflowEvents, customerInteraction, visitTiming);
   const normalizedServiceType = normalizeCoverageServiceType(serviceType);
   const showSameTimeNote = hasDuplicateDisplayedEventTimes(events);
 
@@ -2317,6 +2394,8 @@ function ServiceReportCoverageAndWorkflow({
   serviceAreas,
   serviceLocations,
   workflowEvents,
+  customerInteraction,
+  visitTiming,
   propertyAddress,
   mapCenter,
   serviceDate,
@@ -2329,6 +2408,8 @@ function ServiceReportCoverageAndWorkflow({
       <ServiceTimelineSection
         serviceType={serviceType}
         workflowEvents={workflowEvents}
+        customerInteraction={customerInteraction}
+        visitTiming={visitTiming}
       />
       <AreasServicedSection
         serviceType={serviceType}
@@ -2360,29 +2441,83 @@ function SupportingDetailsSection({
   advisoryRows,
 }) {
   const pressureTrend = data.dynamicContext?.pressureTrend;
+  const weatherRows = conditionRows(data.conditions || {});
+  const interaction = customerInteractionCopy(data.customerInteraction);
+  const arrival = formatClockTime(data.visitTiming?.arrivedAt);
+  const completion = formatClockTime(data.visitTiming?.exitedAt);
   const reportPublished = (data.workflowEvents || []).find((event) => event.type === 'report_published');
-  const hasMetrics = showDetails && (data.metrics || []).length > 0;
-  const hasMetadata = showDetails && ((data.applications || []).length > 0 || findings.length > 0 || recommendations.length > 0 || serviceNotes);
-  const hasAdvisory = showDetails && (advisoryRows.length > 0 || data.advisory?.pet_advisory);
-
-  if (!pressureTrend && !hasMetrics && !hasMetadata && !hasAdvisory) return null;
+  const pressureOpen = mode !== 'live' || showDetails;
 
   return (
     <section className="sr-section supporting-details-section" id="supporting-details">
       <h2>Supporting Details</h2>
       <div className="supporting-details-list">
-        {pressureTrend && (
-          <div className="supporting-detail-block">
-            <h3 className="supporting-detail-heading">Pest Pressure</h3>
-            <PressureTrendCard
-              context={pressureTrend}
-              neighborhood={data.dynamicContext?.neighborhoodPressure}
-              mode={mode}
-              token={token}
-              embedded
-            />
-            <PressureMethodologyDropdown />
+        <details className="report-accordion" open={mode !== 'live'}>
+          <summary>
+            <span>Conditions at application</span>
+            <span className="accordion-action">Details</span>
+          </summary>
+          <div className="accordion-body">
+            <p className="supporting-detail-copy">{conditionInterpretation(data.conditions || {})}</p>
+            <div className="supporting-detail-grid">
+              {weatherRows.map(([label, value]) => (
+                <div className="sr-cell" key={label}>
+                  <div className="sr-cell-label">{label}</div>
+                  <div className="sr-cell-value">{value}</div>
+                </div>
+              ))}
+            </div>
           </div>
+        </details>
+
+        {pressureTrend && (
+          <details className="report-accordion" open={pressureOpen}>
+            <summary>
+              <span>Pest Pressure</span>
+              <span className="accordion-action">Details</span>
+            </summary>
+            <div className="accordion-body">
+              <PressureTrendCard
+                context={pressureTrend}
+                neighborhood={data.dynamicContext?.neighborhoodPressure}
+                mode={mode}
+                token={token}
+                embedded
+              />
+              <PressureMethodologyDropdown />
+            </div>
+          </details>
+        )}
+
+        {(interaction || arrival || completion) && (
+          <details className="report-accordion" open={mode !== 'live'}>
+            <summary>
+              <span>Customer interaction and timing</span>
+              <span className="accordion-action">Details</span>
+            </summary>
+            <div className="accordion-body">
+              <div className="supporting-detail-grid">
+                {interaction && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Customer interaction</div>
+                    <div className="sr-cell-value">{interaction}</div>
+                  </div>
+                )}
+                {arrival && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Recorded arrival</div>
+                    <div className="sr-cell-value">{arrival}</div>
+                  </div>
+                )}
+                {completion && (
+                  <div className="sr-cell">
+                    <div className="sr-cell-label">Recorded completion</div>
+                    <div className="sr-cell-value">{completion}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </details>
         )}
 
         {showDetails && (data.metrics || []).length > 0 && (
@@ -2407,7 +2542,7 @@ function SupportingDetailsSection({
         {showDetails && ((data.applications || []).length > 0 || findings.length > 0 || recommendations.length > 0 || serviceNotes) && (
           <details className="report-accordion">
             <summary>
-              <span>Report metadata</span>
+              <span>Service record</span>
               <span className="accordion-action">Details</span>
             </summary>
             <div className="accordion-body supporting-metadata">
@@ -2929,18 +3064,25 @@ function SmsReportPreview({ data }) {
 
 function LoadingState() {
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: '#fafafa', fontFamily: FONTS.body }}>
-      <div style={{ fontSize: 14, color: '#525252' }}>Loading report...</div>
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: ESTIMATE_BG, fontFamily: FONT_BODY, padding: 20 }}>
+      <div style={{ background: '#fff', borderRadius: 16, border: `1px solid ${ESTIMATE_BORDER}`, padding: 24, width: 'min(420px, 100%)', boxSizing: 'border-box' }}>
+        <div style={{ height: 12, width: 120, background: '#F7F5EE', borderRadius: 4 }} />
+        <div style={{ height: 32, width: '70%', background: '#F7F5EE', borderRadius: 4, marginTop: 14 }} />
+        <div style={{ height: 14, width: '50%', background: '#F7F5EE', borderRadius: 4, marginTop: 10 }} />
+      </div>
     </div>
   );
 }
 
 function NotFoundState() {
   return (
-    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: '#fafafa', padding: 20, fontFamily: FONTS.body }}>
-      <div style={{ background: '#fff', borderRadius: 8, border: '0.5px solid #d4d4d4', padding: 28, maxWidth: 400, textAlign: 'center' }}>
-        <div style={{ fontSize: 18, fontWeight: 600, color: '#171717' }}>Report not found</div>
-        <a href="tel:+19412975749" style={{ ...actionButtonStyle('primary'), marginTop: 16 }}>Call (941) 297-5749</a>
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: ESTIMATE_BG, padding: 20, fontFamily: FONT_BODY }}>
+      <div style={{ background: '#fff', borderRadius: 16, border: `1px solid ${ESTIMATE_BORDER}`, padding: 32, maxWidth: 420, textAlign: 'center' }}>
+        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT }}>Report unavailable</div>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
+          This link may have expired or is not valid.
+        </div>
+        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}>Call Waves</a>
       </div>
     </div>
   );
@@ -2948,28 +3090,47 @@ function NotFoundState() {
 
 function LegacyReport({ data, token }) {
   const pdfUrl = `${API_BASE}/reports/${token}`;
+  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   return (
-    <div style={{ minHeight: '100vh', background: B.offWhite, fontFamily: FONTS.body }}>
-      <div style={{ background: '#111111', padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 28 }} />
-          <div style={{ minWidth: 0 }}>
-            <h1 style={{ fontSize: 20, color: '#fff', lineHeight: 1, margin: 0 }}>Service report</h1>
-            <div style={{ fontSize: 12, color: '#d4d4d4', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{data.customerName}</div>
-          </div>
+    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, fontFamily: FONT_BODY, color: ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
+      <header style={{ background: '#fff', borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
+        <div style={{
+          maxWidth: 960,
+          margin: '0 auto',
+          padding: '16px 24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 16,
+        }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: ESTIMATE_TEXT, fontSize: 15, fontWeight: 600, textDecoration: 'none' }}>
+            {WAVES_PHONE_DISPLAY}
+          </a>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />
         </div>
-        <a href={pdfUrl} download style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
-      </div>
-      <main style={{ maxWidth: 720, margin: '16px auto', padding: '0 16px 32px' }}>
-        <section style={{ background: '#fff', borderRadius: 8, padding: 20, border: '0.5px solid #d4d4d4' }}>
-          <div style={{ fontSize: 18, fontWeight: 600, color: '#171717' }}>{data.serviceType}</div>
-          <div style={{ fontSize: 14, color: '#525252', marginTop: 4 }}>{formatDate(data.serviceDate)} | {data.technicianName}</div>
-          {data.notes && <p style={{ fontSize: 15, color: '#404040', lineHeight: 1.6, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
+      </header>
+      <main style={{ flex: 1, maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+        <div style={{ padding: '8px 0 24px' }}>
+          <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>
+            Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
+          </div>
+          <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
+            Hey {firstName}, here's your service report.
+          </h1>
+          {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
+        </div>
+        <section style={{ background: '#fff', borderRadius: 16, padding: 24, border: `1px solid ${ESTIMATE_BORDER}` }}>
+          <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: ESTIMATE_TEXT }}>{data.serviceType}</div>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
+          {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.6, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
+          <a href={pdfUrl} download style={{ ...actionButtonStyle('primary'), marginTop: 18 }}><Download size={16} /> Download PDF</a>
         </section>
-        <div style={{ marginTop: 16, borderRadius: 8, overflow: 'hidden', border: '0.5px solid #d4d4d4' }}>
+        <div style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: `1px solid ${ESTIMATE_BORDER}`, background: '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none' }} title="Service report PDF" />
         </div>
       </main>
+      <BrandFooter />
     </div>
   );
 }
@@ -2995,6 +3156,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   ].filter(([, value]) => value != null && value !== '');
   const hasVisitSummary = Boolean(
     visitSummary ||
+    data.customerInteraction ||
     serviceAreas.length ||
     visitTimingRows.length ||
     measurementRows.length,
@@ -3002,7 +3164,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
-  const heroSummary = dynamicHeroSummary(data);
   const hasApplications = Array.isArray(data.applications) && data.applications.length > 0;
 
   useEffect(() => {
@@ -3029,27 +3190,27 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     <div className="service-report-v1">
       <style>{`
         .service-report-v1 {
-          --text: ${B.blueDeeper};
-          --muted: #64748B;
-          --soft: #64748B;
-          --line: #E1E7EF;
-          --line-strong: #CBD5E1;
+          --text: ${ESTIMATE_TEXT};
+          --muted: ${ESTIMATE_MUTED};
+          --soft: ${ESTIMATE_BODY};
+          --line: ${ESTIMATE_BORDER};
+          --line-strong: #D4CBB8;
           --paper: #ffffff;
-          --wash: #F8FAFC;
-          --soft-blue: #EEF6FF;
-          --soft-blue-border: #CDEAFE;
-          --page: #F8FAFC;
+          --wash: ${ESTIMATE_INPUT_BG};
+          --soft-blue: ${ESTIMATE_INPUT_BG};
+          --soft-blue-border: ${ESTIMATE_INPUT_BORDER};
+          --page: ${ESTIMATE_BG};
           --red: ${B.red};
           --report-text: var(--text);
           --report-muted: var(--muted);
           --report-border: var(--line);
-          --report-action: var(--red);
+          --report-action: ${ESTIMATE_BUTTON_BG};
           --report-surface: var(--paper);
-          --shadow-soft: 0 1px 2px rgba(15,23,42,0.04);
+          --shadow-soft: none;
           min-height: 100vh;
           background: var(--page);
           color: var(--text);
-          font-family: ${FONTS.body};
+          font-family: ${FONT_BODY};
         }
         .sr-top {
           position: relative;
@@ -3060,15 +3221,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           box-shadow: var(--shadow-soft);
         }
         .sr-top-inner {
-          max-width: 1120px;
+          max-width: 960px;
           margin: 0 auto;
-          min-height: 72px;
-          padding: 12px 20px;
+          min-height: 62px;
+          padding: 16px 24px;
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 16px;
           box-sizing: border-box;
+        }
+        .sr-top-phone {
+          color: var(--text);
+          font-size: 15px;
+          font-weight: 600;
+          text-decoration: none;
+          white-space: nowrap;
         }
         .sr-brand-lockup {
           display: flex;
@@ -3077,7 +3245,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-width: 0;
         }
         .sr-brand-logo {
-          height: 30px;
+          height: 28px;
           flex: 0 0 auto;
         }
         .sr-brand-title {
@@ -3097,41 +3265,72 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           white-space: nowrap;
         }
         .sr-shell {
-          max-width: 1040px;
+          max-width: 720px;
+          width: 100%;
           margin: 0 auto;
-          padding: 18px 20px 56px;
+          padding: 32px 20px 64px;
           box-sizing: border-box;
         }
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-        .sr-hero {
+        .report-action-bar {
+          margin-top: 16px;
+          padding: 20px;
+          background: var(--paper);
+          border: 1px solid var(--line);
+          border-radius: 16px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+        }
+        .report-action-copy {
+          margin-top: 4px;
+          color: ${ESTIMATE_BODY};
+          font-size: 14px;
+          line-height: 1.45;
+        }
+        .report-action-buttons {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+        .service-report-hero {
+          padding: 8px 0 0;
+        }
+        .service-report-hero-copy {
+          padding-bottom: 24px;
+        }
+        .service-status-card {
           display: block;
           padding: 24px;
           background: var(--paper);
           border: 1px solid var(--line);
-          border-radius: 8px;
+          border-radius: 16px;
           box-shadow: var(--shadow-soft);
         }
         .sr-title {
           margin: 0;
           color: var(--text);
-          font-family: ${FONTS.heading};
-          font-size: clamp(28px, 4vw, 34px);
+          font-family: ${FONTS.serif};
+          font-size: clamp(34px, 5vw, 48px);
           line-height: 1.1;
-          font-weight: 850;
+          font-weight: 500;
           letter-spacing: 0;
         }
         .sr-meta {
-          margin-top: 14px;
-          color: var(--muted);
+          margin-top: 8px;
+          color: ${ESTIMATE_BODY};
           font-size: 15px;
           line-height: 1.55;
         }
         .service-meta-address {
-          margin-top: 4px;
-          color: var(--text);
-          font-size: 15px;
-          line-height: 1.45;
-          font-weight: 650;
+          margin-top: 16px;
+          color: ${ESTIMATE_BODY};
+          font-size: 20px;
+          line-height: 1.35;
+          font-weight: 400;
         }
         .tech-visit-line {
           display: flex;
@@ -3376,16 +3575,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: var(--paper);
           border: 1px solid var(--line);
           border-radius: 16px;
-          padding: 20px;
+          padding: 24px;
           margin-top: 16px;
           break-inside: avoid;
         }
         .sr-section h2 {
           margin: 0 0 16px;
           color: var(--text);
-          font-size: 21px;
-          line-height: 1.2;
-          font-weight: 650;
+          font-family: ${FONTS.serif};
+          font-size: 28px;
+          line-height: 1.18;
+          font-weight: 500;
           letter-spacing: 0;
         }
         .sr-map {
@@ -4243,6 +4443,26 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: grid;
           gap: 10px;
         }
+        .solution-product-detail {
+          display: grid;
+          gap: 6px;
+        }
+        .solution-product-detail + .solution-product-detail {
+          border-top: 1px solid var(--line);
+          padding-top: 10px;
+        }
+        .solution-product-name {
+          color: var(--text);
+          font-size: 15px;
+          font-weight: 800;
+          line-height: 1.3;
+        }
+        .solution-product-facts {
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.45;
+          font-weight: 700;
+        }
         .applied-product-card p {
           margin: 0;
           color: var(--muted);
@@ -4733,31 +4953,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           line-height: 1.3;
           font-weight: 700;
         }
-        .summary-mode-tabs {
-          display: inline-flex;
-          border: 1px solid var(--line);
-          border-radius: 10px;
-          overflow: hidden;
-          background: #fff;
-          flex: 0 0 auto;
-        }
-        .summary-mode-tabs button {
-          border: 0;
-          border-left: 1px solid var(--line);
-          background: #fff;
-          color: var(--muted);
-          font: inherit;
-          font-size: 13px;
-          padding: 8px 11px;
-          cursor: pointer;
-        }
-        .summary-mode-tabs button:first-child {
-          border-left: 0;
-        }
-        .summary-mode-tabs button.is-active {
-          background: ${B.blueDark};
-          color: #fff;
-        }
         .premium-section-header {
           display: flex;
           align-items: flex-start;
@@ -4913,18 +5108,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .supporting-detail-grid {
           margin-top: 12px;
         }
-        .supporting-detail-block {
-          background: #fff;
-          border: 1px solid var(--line);
-          border-radius: 10px;
-          padding: 14px;
-        }
-        .supporting-detail-heading {
-          margin: 0 0 12px;
-          font-size: 16px;
-          line-height: 1.2;
-          color: var(--text);
-        }
         .supporting-details-section .pressure-trend-card-embedded {
           margin-top: 0;
           padding-top: 0;
@@ -4981,7 +5164,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-section,
         .report-card {
           border-color: var(--line);
-          border-radius: 8px;
+          border-radius: 16px;
           box-shadow: var(--shadow-soft);
         }
         .sr-section h2,
@@ -4989,14 +5172,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .applied-product-card h3,
         .coverage-summary-row h3,
         .workflow-event-heading h3 {
-          font-family: ${FONTS.heading};
-          font-weight: 850;
+          font-family: ${FONTS.serif};
+          font-weight: 500;
           color: var(--text);
           letter-spacing: 0;
         }
         .sr-section h2,
         .report-card h2 {
-          font-size: 20px;
+          font-size: 28px;
+          line-height: 1.18;
         }
         .sr-band,
         .sr-grid-3,
@@ -5006,7 +5190,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-score-grid,
         .hero-condition-row,
         .hero-reentry-status .reentry-target-grid {
-          border-radius: 8px;
+          border-radius: 10px;
         }
         .tech-visit-line,
         .hero-conditions,
@@ -5034,35 +5218,32 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-overall-score,
         .lawn-photo-strip figure,
         .review-request-card .review-cta {
-          border-radius: 8px;
+          border-radius: 10px;
         }
         .sr-cell-label {
           color: var(--muted);
-          font-family: ${FONTS.heading};
-          font-size: 11px;
-          font-weight: 850;
+          font-family: ${FONT_BODY};
+          font-size: 12px;
+          font-weight: 700;
           letter-spacing: 0;
           text-transform: uppercase;
         }
         .section-eyebrow {
           color: var(--muted);
-          font-family: ${FONTS.heading};
-          font-size: 11px;
-          font-weight: 850;
+          font-family: ${FONT_BODY};
+          font-size: 12px;
+          font-weight: 700;
           letter-spacing: 0;
           text-transform: uppercase;
         }
-        .summary-mode-tabs,
         .map-toggle {
           border-color: var(--line-strong);
           border-radius: 8px;
         }
-        .summary-mode-tabs button,
         .map-toggle button {
           font-family: ${FONTS.heading};
           font-weight: 850;
         }
-        .summary-mode-tabs button.is-active,
         .map-toggle button.is-active {
           background: ${B.blueDeeper};
           color: #fff;
@@ -5094,15 +5275,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           box-shadow: none;
         }
         @media (max-width: 760px) {
-          .sr-top-inner { align-items: flex-start; flex-direction: column; }
+          .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
           .sr-shell { padding: 14px 14px 36px; }
-          .summary-mode-tabs { width: 100%; }
-          .summary-mode-tabs button { flex: 1; }
+          .report-action-bar { align-items: stretch; flex-direction: column; }
+          .report-action-buttons { justify-content: stretch; }
+          .report-action-buttons a, .report-action-buttons button { flex: 1 1 140px; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
-          .sr-hero { grid-template-columns: 1fr; }
           .sr-pressure { justify-self: stretch; }
           .sr-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .sr-grid-2, .sr-grid-3, .sr-advisory, .service-status-grid, .readiness-facts, .supporting-detail-grid, .executive-status-grid, .defense-status-grid, .receipt-grid, .one-thing-detail, .lawn-score-grid, .lawn-assessment-layout { grid-template-columns: 1fr; }
@@ -5136,10 +5317,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         @media print {
           .sr-top { position: static; }
-          .sr-actions { display: none; }
+          .sr-actions,
+          .report-action-bar { display: none; }
           .service-report-v1 { background: #fff; }
           .sr-shell { padding: 0; }
-          .sr-hero,
+          .service-status-card,
           .sr-section,
           .report-card,
           .executive-status-grid,
@@ -5157,26 +5339,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
       <header className="sr-top">
         <div className="sr-top-inner">
-          <div className="sr-brand-lockup">
-            <img src="/waves-logo.png" alt="Waves" className="sr-brand-logo" />
-            <div style={{ minWidth: 0 }}>
-              <div className="sr-brand-title">Customer Portal</div>
-              <div className="sr-brand-subtitle">Service report · {data.customerName}</div>
-            </div>
-          </div>
-          <div className="sr-actions">
-            <a href="/" style={actionButtonStyle('primary')}><Home size={16} /> Portal</a>
-            {pdfUrl && <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>}
-            <button type="button" onClick={share} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
-            <button type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
-          </div>
+          <a className="sr-top-phone" href={`tel:${WAVES_PHONE_TEL}`}>{WAVES_PHONE_DISPLAY}</a>
+          <img src="/waves-logo.png" alt="Waves" className="sr-brand-logo" />
         </div>
       </header>
 
       <main className="sr-shell">
         <ServiceStatusCard data={data} mode={mode} />
 
-        <HeroConditions conditions={data.conditions} weatherCall={premium.weatherCall} />
+        {mode === 'live' && <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />}
 
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 
@@ -5195,14 +5366,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} hasProducts={hasApplications} />
 
-        <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />
-
         <div id="map">
           <ServiceReportCoverageAndWorkflow
             serviceType={data.coverageServiceType || data.serviceLine || data.serviceType}
             serviceAreas={serviceAreas}
             serviceLocations={data.serviceLocations}
             workflowEvents={data.workflowEvents}
+            customerInteraction={data.customerInteraction}
+            visitTiming={data.visitTiming}
             propertyAddress={data.propertyAddress || data.serviceAddress}
             mapCenter={data.mapCenter}
             serviceDate={data.serviceDate}
@@ -5215,7 +5386,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <AppliedProductsSection
           data={data}
           showAll={showDetails}
-          showTechnical={false}
           mode={mode}
         />
 

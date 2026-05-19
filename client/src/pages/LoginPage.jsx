@@ -84,13 +84,13 @@ export default function LoginPage() {
       style={{
         '--login-blue': B.blueDeeper,
         '--login-brand': B.wavesBlue,
-        '--login-yellow': B.yellow,
-        '--login-text': B.grayDark,
-        '--login-muted': '#64748B',
-        '--login-border': '#E1E7EF',
-        '--login-border-strong': '#CBD5E1',
-        '--login-soft': '#EEF6FF',
-        '--login-bg': '#F8FAFC',
+        '--login-text': '#3F4A65',
+        '--login-muted': '#6B7280',
+        '--login-border': '#E7E2D7',
+        '--login-border-strong': '#D8D0C0',
+        '--login-soft': '#F8FCFE',
+        '--login-soft-border': '#CFE7F5',
+        '--login-bg': '#FAF8F3',
         '--login-card': B.white,
         '--login-red': B.red,
         fontFamily: FONTS.body,
@@ -110,8 +110,8 @@ export default function LoginPage() {
         .portal-login-shell {
           width: min(1060px, 100%);
           display: grid;
-          grid-template-columns: minmax(280px, 0.9fr) minmax(340px, 430px);
-          gap: 24px;
+          grid-template-columns: minmax(280px, 0.9fr) minmax(340px, 420px);
+          gap: 28px;
           align-items: center;
         }
         .portal-login-brand {
@@ -131,9 +131,9 @@ export default function LoginPage() {
           object-fit: contain;
         }
         .portal-login-logo span {
-          font-family: ${FONTS.heading};
+          font-family: ${FONTS.body};
           font-size: 15px;
-          font-weight: 850;
+          font-weight: 800;
           letter-spacing: 0;
         }
         .portal-login-eyebrow {
@@ -144,19 +144,21 @@ export default function LoginPage() {
           align-items: center;
           gap: 8px;
           padding: 6px 10px;
-          border-radius: 8px;
+          border-radius: 999px;
           background: var(--login-soft);
           color: var(--login-blue);
           font-size: 14px;
-          font-weight: 850;
+          font-weight: 800;
+          border: 1px solid var(--login-soft-border);
         }
         .portal-login-brand h1 {
           margin: 14px 0 12px;
           color: var(--login-blue);
-          font-family: ${FONTS.heading};
+          font-family: ${FONTS.serif};
           font-size: 44px;
           line-height: 1.06;
           letter-spacing: 0;
+          font-weight: 500;
         }
         .portal-login-brand p {
           margin: 0;
@@ -176,10 +178,10 @@ export default function LoginPage() {
         .portal-login-tool {
           min-width: 0;
           border: 1px solid var(--login-border);
-          border-radius: 8px;
+          border-radius: 16px;
           background: var(--login-card);
           padding: 12px;
-          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+          box-shadow: none;
           display: flex;
           gap: 10px;
           align-items: flex-start;
@@ -187,7 +189,7 @@ export default function LoginPage() {
         .portal-login-tool-icon {
           width: 34px;
           height: 34px;
-          border-radius: 8px;
+          border-radius: 10px;
           background: var(--login-soft);
           color: var(--login-blue);
           display: inline-flex;
@@ -198,9 +200,9 @@ export default function LoginPage() {
         .portal-login-tool-title {
           display: block;
           color: var(--login-blue);
-          font-family: ${FONTS.heading};
+          font-family: ${FONTS.body};
           font-size: 14px;
-          font-weight: 850;
+          font-weight: 800;
           line-height: 1.2;
         }
         .portal-login-tool-text {
@@ -217,8 +219,8 @@ export default function LoginPage() {
         .portal-login-help {
           background: var(--login-card);
           border: 1px solid var(--login-border);
-          border-radius: 8px;
-          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+          border-radius: 16px;
+          box-shadow: none;
         }
         .portal-login-card {
           padding: 22px;
@@ -232,7 +234,7 @@ export default function LoginPage() {
         .portal-login-icon {
           width: 42px;
           height: 42px;
-          border-radius: 8px;
+          border-radius: 10px;
           background: var(--login-soft);
           color: var(--login-blue);
           display: inline-flex;
@@ -243,10 +245,10 @@ export default function LoginPage() {
         .portal-login-title {
           margin: 0;
           color: var(--login-blue);
-          font-family: ${FONTS.heading};
+          font-family: ${FONTS.serif};
           font-size: 20px;
           line-height: 1.2;
-          font-weight: 850;
+          font-weight: 500;
           letter-spacing: 0;
         }
         .portal-login-subtitle {
@@ -263,25 +265,25 @@ export default function LoginPage() {
           margin-bottom: 18px;
           padding: 4px;
           border: 1px solid var(--login-border);
-          border-radius: 8px;
+          border-radius: 12px;
           background: var(--login-bg);
         }
         .portal-login-step-item {
           min-height: 34px;
-          border-radius: 7px;
+          border-radius: 9px;
           display: inline-flex;
           align-items: center;
           justify-content: center;
           gap: 7px;
           color: var(--login-muted);
-          font-family: ${FONTS.heading};
+          font-family: ${FONTS.body};
           font-size: 12px;
-          font-weight: 850;
+          font-weight: 800;
         }
         .portal-login-step-item.active {
           background: var(--login-card);
           color: var(--login-blue);
-          box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+          box-shadow: none;
         }
         .portal-login-field {
           display: grid;
@@ -290,17 +292,17 @@ export default function LoginPage() {
         .portal-login-field label {
           color: var(--login-blue);
           font-size: 14px;
-          font-weight: 850;
+          font-weight: 800;
           letter-spacing: 0;
-          font-family: ${FONTS.heading};
+          font-family: ${FONTS.body};
         }
         .portal-login-input {
           width: 100%;
           height: 52px;
           box-sizing: border-box;
           border: 1px solid var(--login-border-strong);
-          border-radius: 8px;
-          background: #fff;
+          border-radius: 10px;
+          background: var(--login-soft);
           color: var(--login-blue);
           font-family: ${FONTS.body};
           font-size: 18px;
@@ -324,10 +326,10 @@ export default function LoginPage() {
         .portal-login-secondary {
           width: 100%;
           min-height: 48px;
-          border-radius: 8px;
-          font-family: ${FONTS.heading};
+          border-radius: 10px;
+          font-family: ${FONTS.body};
           font-size: 14px;
-          font-weight: 850;
+          font-weight: 800;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -346,7 +348,7 @@ export default function LoginPage() {
         }
         .portal-login-submit:disabled {
           cursor: not-allowed;
-          background: #CBD5E1;
+          background: #D8D0C0;
           color: #fff;
         }
         .portal-login-secondary {
@@ -363,14 +365,14 @@ export default function LoginPage() {
         }
         .portal-login-secondary:hover {
           border-color: #94A3B8;
-          background: #F8FAFC;
+          background: var(--login-soft);
         }
         .portal-login-note {
           margin-top: 12px;
           padding: 10px 12px;
-          border-radius: 8px;
+          border-radius: 10px;
           background: var(--login-soft);
-          border: 1px solid #CDEAFE;
+          border: 1px solid var(--login-soft-border);
           color: var(--login-blue);
           font-size: 13px;
           line-height: 1.45;
@@ -382,7 +384,7 @@ export default function LoginPage() {
         .portal-login-error {
           margin-top: 14px;
           padding: 12px;
-          border-radius: 8px;
+          border-radius: 10px;
           background: #FEF2F2;
           border: 1px solid #FECACA;
           color: var(--login-red);
@@ -402,7 +404,7 @@ export default function LoginPage() {
         }
         .portal-login-help a {
           min-height: 42px;
-          border-radius: 8px;
+          border-radius: 10px;
           border: 1px solid var(--login-border);
           color: var(--login-blue);
           text-decoration: none;
@@ -410,14 +412,14 @@ export default function LoginPage() {
           align-items: center;
           justify-content: center;
           gap: 6px;
-          font-family: ${FONTS.heading};
+          font-family: ${FONTS.body};
           font-size: 14px;
-          font-weight: 850;
+          font-weight: 800;
           background: #fff;
         }
         .portal-login-help a:hover {
           border-color: #94A3B8;
-          background: #F8FAFC;
+          background: var(--login-soft);
         }
         .portal-login-footer {
           margin-top: 18px;
@@ -438,7 +440,7 @@ export default function LoginPage() {
         }
         .portal-login-footer-brand {
           color: var(--login-blue);
-          font-weight: 850;
+          font-weight: 800;
         }
         .portal-login-footer-cities {
           display: inline-flex;

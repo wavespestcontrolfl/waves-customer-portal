@@ -22,6 +22,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 async function renderTemplate(templateKey, vars) {
   try {
@@ -262,7 +263,7 @@ const OnboardingFollowUp = {
               },
               subject: `Your Waves onboarding link expires ${expDate}`,
               heading: `Heads up — your link expires ${expDate}`,
-              body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call (941) 318-7612.</p>`,
+              body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
               ctaUrl: url,
             },
           });
