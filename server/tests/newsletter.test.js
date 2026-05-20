@@ -329,6 +329,8 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
   test('accepts unbound rows and rejects rows bound to a different provider message id', () => {
     expect(canUseDeliveryIdFallback({ provider_message_id: null }, 'new-msg')).toBe(true);
     expect(canUseDeliveryIdFallback({ provider_message_id: null, status: 'sending' }, 'new-msg')).toBe(false);
+    expect(canUseDeliveryIdFallback({ provider_message_id: null, status: 'sending', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-1')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: null, status: 'sending', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-2')).toBe(false);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'new-msg' }, 'new-msg')).toBe(true);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg' }, 'new-msg')).toBe(false);
   });
@@ -348,6 +350,7 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
     const result = await bindNewsletterDeliveryMessageId(
       { id: 'delivery-1', provider_message_id: null },
       'sg-msg-1',
+      null,
       client,
     );
 
@@ -377,6 +380,7 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
     const result = await bindNewsletterDeliveryMessageId(
       { id: 'delivery-1', provider_message_id: null },
       'sg-msg-1',
+      null,
       client,
     );
 

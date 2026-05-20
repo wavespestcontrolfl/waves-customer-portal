@@ -12,6 +12,7 @@
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const crypto = require('crypto');
 const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
 
@@ -81,13 +82,15 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
 
 async function claimRetryableDeliveriesForResume(sendId, subscriberIds) {
   if (!subscriberIds.length) return [];
-  return applyRetryableDeliveryFilter(
+  const attemptToken = crypto.randomUUID();
+  const rows = await applyRetryableDeliveryFilter(
     db('newsletter_send_deliveries')
       .where({ send_id: sendId })
       .whereIn('subscriber_id', subscriberIds),
   )
-    .update({ status: 'sending', updated_at: new Date() })
-    .returning(['id', 'subscriber_id']);
+    .update({ status: 'sending', send_attempt_token: attemptToken, updated_at: new Date() })
+    .returning(['id', 'subscriber_id', 'send_attempt_token']);
+  return rows.map((row) => ({ ...row, send_attempt_token: row.send_attempt_token || attemptToken }));
 }
 
 /**
@@ -96,8 +99,9 @@ async function claimRetryableDeliveriesForResume(sendId, subscriberIds) {
  * rows, and flips status to 'sending' before doing any external work.
  *
  * Per-recipient idempotency: resume sends only retry explicitly transient
- * rows (queued / failed / abandoned sending with no success or engagement timestamps). Provider
- * terminal rows such as delivered, bounced, or complained are skipped.
+ * rows (queued / failed / abandoned sending with no success or engagement
+ * timestamps). Provider terminal rows such as delivered, bounced, or
+ * complained are skipped.
  *
  * opts.force — bypass the 0-recipient guard. The route layer also
  *   pre-validates so the operator gets a 400 with a force=true hint;
@@ -177,7 +181,7 @@ async function sendCampaign(sendId, opts = {}) {
   }
   const existingDeliveries = await db('newsletter_send_deliveries')
     .where({ send_id: send.id })
-    .select('id', 'subscriber_id', 'status', 'ab_variant', 'sent_at', 'delivered_at', 'opened_at', 'clicked_at');
+    .select('id', 'subscriber_id', 'status', 'ab_variant', 'sent_at', 'delivered_at', 'opened_at', 'clicked_at', 'send_attempt_token');
 
   if (opts.existingDeliveriesOnly) {
     const retryableSubscriberIds = Array.from(new Set(existingDeliveries
@@ -246,27 +250,33 @@ async function sendCampaign(sendId, opts = {}) {
     for (const chunk of chunks) {
       let chunkToSend = chunk;
       let claimedDeliveryIds = [];
+      let attemptTokenBySub = new Map();
       if (opts.existingDeliveriesOnly) {
         const claimedRows = await claimRetryableDeliveriesForResume(send.id, chunk.map((s) => s.id));
-        const claimedBySub = new Map(claimedRows.map((d) => [d.subscriber_id, d.id]));
+        const claimedBySub = new Map(claimedRows.map((d) => [d.subscriber_id, d]));
         chunkToSend = chunk.filter((s) => claimedBySub.has(s.id));
-        claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)).filter(Boolean);
+        claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)?.id).filter(Boolean);
+        attemptTokenBySub = new Map(chunkToSend.map((s) => [s.id, claimedBySub.get(s.id)?.send_attempt_token]).filter(([, token]) => token));
         if (!chunkToSend.length) continue;
       }
 
-      const recipients = chunkToSend.map((s) => ({
-        email: s.email,
-        unsubscribeUrl: sendgrid.unsubscribeUrl(s.unsubscribe_token),
-        // delivery_id rides on every SendGrid event webhook for this
-        // recipient, so the handler can resolve back to the right row
-        // even when the X-Message-Id from this batch was never observed
-        // (lost-response case). send_id is included so the handler can
-        // shortcut to the right table without a join.
-        customArgs: {
-          delivery_id: String(deliveryBySub.get(s.id)?.id || ''),
-          send_id: String(send.id),
-        },
-      }));
+      const recipients = chunkToSend.map((s) => {
+        const attemptToken = attemptTokenBySub.get(s.id);
+        return {
+          email: s.email,
+          unsubscribeUrl: sendgrid.unsubscribeUrl(s.unsubscribe_token),
+          // delivery_id rides on every SendGrid event webhook for this
+          // recipient, so the handler can resolve back to the right row
+          // even when the X-Message-Id from this batch was never observed
+          // (lost-response case). send_id is included so the handler can
+          // shortcut to the right table without a join.
+          customArgs: {
+            delivery_id: String(deliveryBySub.get(s.id)?.id || ''),
+            send_id: String(send.id),
+            ...(attemptToken ? { send_attempt_token: String(attemptToken) } : {}),
+          },
+        };
+      });
       const subscriberIds = chunkToSend.map((s) => s.id);
 
       try {
@@ -301,6 +311,7 @@ async function sendCampaign(sendId, opts = {}) {
         .update({
           status: 'sent',
           provider_message_id: result.messageId,
+          send_attempt_token: null,
           sent_at: new Date(),
           updated_at: new Date(),
         });

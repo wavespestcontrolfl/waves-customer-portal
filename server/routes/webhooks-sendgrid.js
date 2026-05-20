@@ -80,23 +80,29 @@ function shouldMarkProcessedNewsletterDeliverySent(delivery) {
   return ['queued', 'failed'].includes(String(delivery?.status || '').toLowerCase());
 }
 
-function canUseDeliveryIdFallback(delivery, messageId) {
+function canUseDeliveryIdFallback(delivery, messageId, attemptToken = null) {
   if (!delivery) return false;
   if (!delivery.provider_message_id) {
+    const rowToken = delivery.send_attempt_token ? String(delivery.send_attempt_token) : null;
+    const eventToken = attemptToken ? String(attemptToken) : null;
+    if (rowToken || eventToken) return !!rowToken && !!eventToken && rowToken === eventToken;
     return String(delivery.status || '').toLowerCase() !== 'sending';
   }
   return String(delivery.provider_message_id) === String(messageId || '');
 }
 
-async function bindNewsletterDeliveryMessageId(delivery, messageId, client = db) {
+async function bindNewsletterDeliveryMessageId(delivery, messageId, attemptToken = null, client = db) {
   if (!delivery || !messageId || delivery.provider_message_id) return delivery;
 
-  const updated = await client('newsletter_send_deliveries')
+  const bindQuery = client('newsletter_send_deliveries')
     .where({ id: delivery.id })
     .where((q) => {
       q.whereNull('provider_message_id').orWhere({ provider_message_id: messageId });
-    })
-    .update({ provider_message_id: messageId, updated_at: new Date() });
+    });
+  if (delivery.send_attempt_token || attemptToken) {
+    bindQuery.where({ send_attempt_token: attemptToken || delivery.send_attempt_token });
+  }
+  const updated = await bindQuery.update({ provider_message_id: messageId, updated_at: new Date() });
   if (updated) return { ...delivery, provider_message_id: messageId };
 
   return client('newsletter_send_deliveries')
@@ -188,7 +194,7 @@ async function handleEvent(ev) {
     newsletterDelivery = await db('newsletter_send_deliveries')
       .where({ id: String(ev.delivery_id) })
       .first();
-    if (newsletterDelivery && !canUseDeliveryIdFallback(newsletterDelivery, messageId)) {
+    if (newsletterDelivery && !canUseDeliveryIdFallback(newsletterDelivery, messageId, ev.send_attempt_token)) {
       newsletterDelivery = null;
     } else if (newsletterDelivery && newsletterDelivery.email && email
         && String(newsletterDelivery.email).toLowerCase() !== String(email).toLowerCase()) {
@@ -198,8 +204,8 @@ async function handleEvent(ev) {
       logger.warn(deliveryEmailMismatchLogMessage(ev.delivery_id, newsletterDelivery.email, email));
       newsletterDelivery = null;
     } else if (newsletterDelivery && !newsletterDelivery.provider_message_id && messageId) {
-      const boundDelivery = await bindNewsletterDeliveryMessageId(newsletterDelivery, messageId);
-      newsletterDelivery = canUseDeliveryIdFallback(boundDelivery, messageId) ? boundDelivery : null;
+      const boundDelivery = await bindNewsletterDeliveryMessageId(newsletterDelivery, messageId, ev.send_attempt_token);
+      newsletterDelivery = canUseDeliveryIdFallback(boundDelivery, messageId, ev.send_attempt_token) ? boundDelivery : null;
     }
   }
   // Automation step sends are always single-recipient (one customer per

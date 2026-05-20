@@ -425,7 +425,7 @@ describe('resumeCampaign — preconditions', () => {
           { id: 'd-1', subscriber_id: 1, status: 'delivered', ab_variant: null },
           { id: 'd-2', subscriber_id: 2, status: 'failed', ab_variant: null },
         ] }),
-        chain({ returning: [{ id: 'd-2', subscriber_id: 2 }] }), // claim retryable row before SendGrid
+        chain({ returning: [{ id: 'd-2', subscriber_id: 2, send_attempt_token: 'attempt-2' }] }), // claim retryable row before SendGrid
         chain({ updated: 1 }),                                // post-send bulk update
         chain({ count: 0 }),                                  // final retryable ledger count
       ],
@@ -452,6 +452,11 @@ describe('resumeCampaign — preconditions', () => {
     expect(subscriberWhereIn).toEqual(['id', [2]]);
     expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
     expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients[0].customArgs).toEqual({
+      delivery_id: 'd-2',
+      send_id: 's',
+      send_attempt_token: 'attempt-2',
+    });
   });
 
   test('resume skips a delivery row that self-healed before the external send claim', async () => {
@@ -556,7 +561,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ count: 1 }),                                  // rows exist
         chain({ count: 1 }),                                  // one outstanding
         chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'failed', ab_variant: null }] }),
-        chain({ returning: [{ id: 'd-1', subscriber_id: 1 }] }), // claim retryable row before SendGrid
+        chain({ returning: [{ id: 'd-1', subscriber_id: 1, send_attempt_token: 'attempt-1' }] }), // claim retryable row before SendGrid
         chain({ updated: 1 }),                                // post-send bulk update
         chain({ count: 0 }),                                  // final retryable ledger count
       ],
