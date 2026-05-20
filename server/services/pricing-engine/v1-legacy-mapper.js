@@ -342,6 +342,8 @@ function mapV1ToLegacyShape(v1Result) {
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;
       if (li.addOns !== undefined) item.addOns = li.addOns;
+      if (li.serviceSpecificDiscountApplied !== undefined) item.serviceSpecificDiscountApplied = !!li.serviceSpecificDiscountApplied;
+      if (li.serviceSpecificDiscounts !== undefined) item.serviceSpecificDiscounts = li.serviceSpecificDiscounts;
       v1OtItems.push(item);
       if (li.service === 'trenching') R.trench = true;
     } else {
@@ -356,6 +358,8 @@ function mapV1ToLegacyShape(v1Result) {
         requiresCustomQuote: !!li.requiresCustomQuote,
         customQuoteReason: li.customQuoteReason || null,
         fleaExteriorZones: li.fleaExteriorZones || [],
+        serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied,
+        serviceSpecificDiscounts: li.serviceSpecificDiscounts || [],
         ...commercialManualQuoteFields(li),
       });
     }
@@ -487,7 +491,7 @@ function mapV1ToLegacyShape(v1Result) {
     oneTime: {
       items: v1OtItems,
       specItems: v1SpecItems
-        .filter(s => !s.onProg && (s.quoteRequired || s.price > 0))
+        .filter(s => !s.onProg && (s.quoteRequired || s.price > 0 || s.serviceSpecificDiscountApplied))
         .map(s => ({
           service: s.service,
           name: s.name,
@@ -511,6 +515,8 @@ function mapV1ToLegacyShape(v1Result) {
           requiresCustomQuote: !!s.requiresCustomQuote,
           customQuoteReason: s.customQuoteReason,
           fleaExteriorZones: s.fleaExteriorZones,
+          serviceSpecificDiscountApplied: !!s.serviceSpecificDiscountApplied,
+          serviceSpecificDiscounts: s.serviceSpecificDiscounts || [],
         })),
       total: oneTimeTotal,
       tmInstall,
@@ -525,8 +531,10 @@ function mapV1ToLegacyShape(v1Result) {
       year2: quoteRequired ? 0 : year2,
       year2mo: quoteRequired ? 0 : year2Monthly,
       manualDiscount: summary.manualDiscount || null,
+      serviceSpecificDiscounts: summary.serviceSpecificDiscounts || [],
     },
     manualDiscount: summary.manualDiscount || null,
+    serviceSpecificDiscounts: summary.serviceSpecificDiscounts || [],
     results: R,
     specItems: v1SpecItems,
   };

@@ -581,6 +581,7 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
           const isQuoteRequired = item.quoteRequired === true || item.kind === 'quote_required';
           const amount = Number(item.amount) || 0;
           const isDiscount = !isQuoteRequired && (amount < 0 || item.kind === 'discount');
+          const isIncluded = !isQuoteRequired && item.kind === 'included';
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -599,10 +600,10 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
               </div>
               <div style={{
                 fontSize: 14, fontWeight: 700,
-                color: isQuoteRequired ? COLORS.red : (isDiscount ? COLORS.green : COLORS.navy),
+                color: isQuoteRequired ? COLORS.red : (isDiscount || isIncluded ? COLORS.green : COLORS.navy),
                 whiteSpace: 'nowrap',
               }}>
-                {isQuoteRequired ? 'Quote Required' : `${isDiscount ? '-' : ''}${fmtMoney(Math.abs(amount))}`}
+                {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : `${isDiscount ? '-' : ''}${fmtMoney(Math.abs(amount))}`)}
               </div>
             </div>
           );

@@ -33,6 +33,215 @@ function serviceSelected(value) {
   return value.selected === true || value.enabled === true || value.value === true;
 }
 
+function uniqueStrings(values = []) {
+  return [...new Set((values || []).filter(Boolean))];
+}
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+const MANUAL_RECURRING_DISCOUNT_ELIGIBLE = new Set([
+  'pest_control',
+  'lawn_care',
+  'lawn_care_enhanced',
+  'lawn_care_premium',
+  'mosquito',
+  'tree_shrub',
+]);
+
+function isManualRecurringDiscountEligible(item) {
+  return MANUAL_RECURRING_DISCOUNT_ELIGIBLE.has(resolveDiscountKey(item));
+}
+
+function normalizedDiscountText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeServiceCreditServiceKey(value) {
+  return normalizedDiscountText(value).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
+
+function serviceCreditTargetsLine(credit = {}, item = {}) {
+  const targetKeys = [
+    credit.service,
+    credit.serviceKey,
+    credit.service_key,
+    credit.serviceKeyFilter,
+    credit.service_key_filter,
+    credit.eligibility?.serviceKeyFilter,
+  ].map(normalizeServiceCreditServiceKey).filter(Boolean);
+  const itemService = normalizeServiceCreditServiceKey(item.service);
+  const itemName = normalizedDiscountText(item.displayName || item.label || item.name || item.service);
+  if (targetKeys.length > 0) {
+    if (targetKeys.includes(itemService)) return true;
+    if (targetKeys.includes('termite_inspection') && itemService === 'wdo_inspection') return true;
+    if (targetKeys.includes('wdo_inspection') && itemService === 'termite_inspection') return true;
+    return false;
+  }
+  const creditName = normalizedDiscountText(credit.catalogName || credit.label || credit.name);
+  return (creditName.includes('termite inspection') || creditName.includes('wdo'))
+    && (itemService === 'wdo_inspection' || itemService === 'termite_inspection' || itemName.includes('termite inspection') || itemName.includes('wdo'));
+}
+
+function serviceCreditLinePrice(item = {}) {
+  const value = item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.total;
+  const amount = Number(value);
+  return Number.isFinite(amount) ? roundMoney(amount) : 0;
+}
+
+function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = []) {
+  const credits = Array.isArray(serviceSpecificDiscounts)
+    ? serviceSpecificDiscounts.filter(Boolean)
+    : [];
+  if (!credits.length) return [];
+
+  const appliedByService = new Set();
+  const applied = [];
+
+  for (const credit of credits) {
+    const warnings = uniqueStrings(credit.warnings || []);
+    const target = lineItems.find((item) => serviceCreditTargetsLine(credit, item));
+    const targetService = target?.service || credit.service || credit.serviceKey || credit.service_key || null;
+
+    if (!target) {
+      applied.push({
+        source: credit.source || 'catalog_preset',
+        presetId: credit.presetId || null,
+        presetKey: credit.presetKey || null,
+        catalogName: credit.catalogName || credit.name || null,
+        catalogCategory: 'service_specific_credit',
+        discountType: credit.discountType || credit.discount_type || 'free_service',
+        service: targetService,
+        serviceLineId: null,
+        requestedAmount: 0,
+        amount: 0,
+        label: credit.label || credit.catalogName || credit.name || 'Service credit',
+        eligibility: credit.eligibility || null,
+        capped: true,
+        capReason: 'service_line_not_present',
+        warnings: uniqueStrings([...warnings, 'service_specific_discount_service_not_present']),
+      });
+      continue;
+    }
+
+    if (appliedByService.has(target.service)) {
+      applied.push({
+        source: credit.source || 'catalog_preset',
+        presetId: credit.presetId || null,
+        presetKey: credit.presetKey || null,
+        catalogName: credit.catalogName || credit.name || null,
+        catalogCategory: 'service_specific_credit',
+        discountType: credit.discountType || credit.discount_type || 'free_service',
+        service: target.service,
+        serviceLineId: target.id || target.service,
+        requestedAmount: 0,
+        amount: 0,
+        label: credit.label || credit.catalogName || credit.name || 'Service credit',
+        eligibility: credit.eligibility || null,
+        capped: true,
+        capReason: 'duplicate_service_line_credit',
+        warnings: uniqueStrings([...warnings, 'service_specific_discount_duplicate_skipped']),
+      });
+      continue;
+    }
+
+    const currentPrice = serviceCreditLinePrice(target);
+    const requestedAmount = roundMoney(credit.requestedAmount ?? currentPrice);
+    const amount = Math.min(requestedAmount, currentPrice);
+    if (target.price !== undefined || target.priceAfterDiscount !== undefined) {
+      target.priceBeforeServiceSpecificDiscount = target.priceBeforeServiceSpecificDiscount ?? (target.priceAfterDiscount ?? target.price ?? 0);
+      target.priceAfterDiscount = roundMoney(currentPrice - amount);
+    } else if (target.total !== undefined || target.totalAfterDiscount !== undefined) {
+      target.totalBeforeServiceSpecificDiscount = target.totalBeforeServiceSpecificDiscount ?? (target.totalAfterDiscount ?? target.total ?? 0);
+      target.totalAfterDiscount = roundMoney(currentPrice - amount);
+    }
+    target.serviceSpecificDiscountApplied = true;
+    target.serviceSpecificDiscounts = [
+      ...(target.serviceSpecificDiscounts || []),
+      {
+        presetId: credit.presetId || null,
+        presetKey: credit.presetKey || null,
+        catalogName: credit.catalogName || credit.name || null,
+        amount,
+      },
+    ];
+
+    appliedByService.add(target.service);
+    applied.push({
+      source: credit.source || 'catalog_preset',
+      presetId: credit.presetId || null,
+      presetKey: credit.presetKey || null,
+      catalogName: credit.catalogName || credit.name || null,
+      catalogCategory: 'service_specific_credit',
+      discountType: credit.discountType || credit.discount_type || 'free_service',
+      service: target.service,
+      serviceLineId: target.id || target.service,
+      requestedAmount,
+      amount,
+      label: credit.label || credit.catalogName || credit.name || 'Service credit',
+      eligibility: credit.eligibility || null,
+      capped: true,
+      capReason: 'service_line_price',
+      warnings,
+    });
+  }
+
+  return applied;
+}
+
+function isAnnualPrepayBilling(input = {}) {
+  const candidates = [
+    input.billingMode,
+    input.billingTerm,
+    input.paymentPreference,
+    input.paymentMethodPreference,
+    input.billing_mode,
+    input.billing_term,
+    input.payment_preference,
+    input.payment_method_preference,
+  ].map(normalizedDiscountText);
+  return candidates.some((value) => value === 'prepay_annual' || value === 'annual' || value === 'prepay' || value === 'annual_prepay');
+}
+
+function manualDiscountEligibilityWarnings(md = {}, input = {}) {
+  const eligibility = md.eligibility || {};
+  const warnings = [...(md.warnings || [])];
+  const confirmed = md.eligibilityConfirmed === true;
+  const annualPrepay = isAnnualPrepayBilling(input);
+  const add = (warning) => warnings.push(warning);
+
+  const requiresPrepay = !!eligibility.requiresPrepayment;
+  const requiresReferral = !!eligibility.requiresReferral;
+  const requiresMultiHome = !!eligibility.requiresMultiHome;
+  const requiresCustomerStatus = !!(
+    eligibility.requiresMilitary ||
+    eligibility.requiresSenior ||
+    eligibility.requiresNewCustomer
+  );
+  const requiresAny = requiresPrepay || requiresReferral || requiresMultiHome || requiresCustomerStatus;
+
+  if (requiresPrepay && !annualPrepay) add('manual_discount_requires_prepay');
+  if (requiresReferral) add('manual_discount_requires_referral');
+  if (requiresMultiHome) add('manual_discount_requires_multi_home');
+  if (requiresCustomerStatus) add('manual_discount_requires_customer_status');
+  if (requiresAny && !confirmed) add('manual_discount_eligibility_not_confirmed');
+
+  return uniqueStrings(warnings);
+}
+
+function assertManualDiscountEligibility(md = {}, input = {}) {
+  const warnings = manualDiscountEligibilityWarnings(md, input);
+  const requiresConfirmation = warnings.includes('manual_discount_eligibility_not_confirmed');
+  if (requiresConfirmation) {
+    const err = new Error('Manual discount eligibility must be confirmed before applying this discount');
+    err.code = 'MANUAL_DISCOUNT_ELIGIBILITY_REQUIRED';
+    err.warnings = warnings;
+    throw err;
+  }
+  return warnings;
+}
+
 function normalizeCommercialFlag(value) {
   if (value === true) return true;
   const raw = String(value || '').trim().toLowerCase();
@@ -766,42 +975,67 @@ function generateEstimate(input) {
   const recurringItems = lineItems.filter(i => i.annual);
   const oneTimeItems = lineItems.filter(i => i.price && !i.annual);
   const specialtyItems = lineItems.filter(i => i.total && !i.annual);
+  const serviceSpecificDiscounts = applyServiceSpecificCredits(
+    lineItems,
+    input.serviceSpecificDiscounts || input.serviceSpecificCredits || [],
+  );
 
   const recurringAnnualBefore = recurringItems.reduce((sum, i) => sum + (i.annualBeforeDiscount || 0), 0);
   const recurringAnnualAfterWG = recurringItems.reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
 
-  // Session 11a Step 2b-4: manual discount fan-out. Mirrors v2's calcTotals
-  // (pricing-engine-v2.js:1417-1437) — applies to the WaveGuard-discounted
-  // recurring annual, excluding rodent bait because it receives no WaveGuard
-  // credit, discount, setup credit, coupon, or tier benefit. Does not
-  // touch one-time/specialty totals.
+  // Manual recurring estimate discount. Applies after WaveGuard to explicitly
+  // discountable recurring annual services only. It does not touch one-time,
+  // specialty, palm flat-credit, termite, rodent, or free-service credit paths.
   let manualDiscountAmount = 0;
   let manualDiscountInfo = null;
-  const manualDiscountableRecurringAnnual = recurringItems
-    .filter(i => resolveDiscountKey(i) !== 'rodent_bait')
+  const manualEligibleItems = recurringItems.filter(isManualRecurringDiscountEligible);
+  const manualExcludedItems = recurringItems.filter(i => !isManualRecurringDiscountEligible(i));
+  const manualDiscountableRecurringAnnual = manualEligibleItems
     .reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
   const md = input.manualDiscount;
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
+    const manualWarnings = assertManualDiscountEligibility(md, input);
     if (md.type === 'PERCENT') {
+      if (v > 100) throw new Error('Manual percentage discount cannot exceed 100');
       manualDiscountAmount = Math.round(manualDiscountableRecurringAnnual * (v / 100) * 100) / 100;
     } else {
       manualDiscountAmount = Math.round(v * 100) / 100;
     }
+    const requestedAmount = manualDiscountAmount;
     manualDiscountAmount = Math.min(manualDiscountAmount, manualDiscountableRecurringAnnual);
     manualDiscountInfo = {
+      source: md.source || 'legacy_custom',
+      presetId: md.presetId || null,
+      presetKey: md.presetKey || null,
+      catalogName: md.catalogName || null,
+      catalogCategory: md.catalogCategory || null,
       type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
       value: v,
+      requestedAmount,
       amount: manualDiscountAmount,
       label: md.label || (md.type === 'PERCENT' ? `Discount (${v}%)` : `Discount -$${v.toFixed(2)}`),
+      internalReason: md.internalReason || null,
+      eligibility: md.eligibility || null,
+      eligibilityConfirmed: md.eligibilityConfirmed === true,
+      eligibilityOverrideReason: md.eligibilityOverrideReason || null,
+      stack: md.stack || null,
+      discountableBase: manualDiscountableRecurringAnnual,
+      capped: requestedAmount > manualDiscountAmount,
+      capReason: requestedAmount > manualDiscountAmount ? 'discountable_base' : null,
+      scope: 'recurring_annual_after_waveguard',
+      stackingOrder: 'after_waveguard',
+      eligibleServices: manualEligibleItems.map(i => resolveDiscountKey(i)),
+      excludedServices: manualExcludedItems.map(i => resolveDiscountKey(i)),
+      warnings: manualWarnings,
     };
   }
 
   const recurringAnnualAfter = Math.round((recurringAnnualAfterWG - manualDiscountAmount) * 100) / 100;
   const recurringMonthlyAfter = Math.round(recurringAnnualAfter / 12 * 100) / 100;
 
-  const oneTimeTotal = oneTimeItems.reduce((sum, i) => sum + (i.priceAfterDiscount || i.price || 0), 0);
-  const specialtyTotal = specialtyItems.reduce((sum, i) => sum + (i.totalAfterDiscount || i.total || 0), 0);
+  const oneTimeTotal = oneTimeItems.reduce((sum, i) => sum + (i.priceAfterDiscount ?? i.price ?? 0), 0);
+  const specialtyTotal = specialtyItems.reduce((sum, i) => sum + (i.totalAfterDiscount ?? i.total ?? 0), 0);
 
   // Installation costs (termite)
   const installationTotal = recurringItems
@@ -855,6 +1089,7 @@ function generateEstimate(input) {
       // Manual discount surfaced separately via summary.manualDiscount.
       waveGuardSavings: recurringAnnualBefore - recurringAnnualAfterWG,
       manualDiscount: manualDiscountInfo,
+      serviceSpecificDiscounts,
       oneTimeTotal,
       specialtyTotal,
       installationTotal,
