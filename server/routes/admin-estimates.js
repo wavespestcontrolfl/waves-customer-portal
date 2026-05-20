@@ -23,6 +23,7 @@ const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/con
 const {
   markLinkedLeadEstimateSent,
 } = require('../services/lead-estimate-link');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
 const {
   createOrReuseAdminEstimate,
@@ -205,7 +206,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     '',
     `View your estimate: ${viewUrl}`,
     '',
-    'Questions? Reply to this email or call (941) 297-5749.',
+    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     '- Waves Pest Control',
   ]);
   await transporter.sendMail({

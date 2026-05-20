@@ -13,6 +13,7 @@ const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients } = require('../customer-contact');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 
 function escapeHtml(value) {
   return String(value || '')
@@ -249,8 +250,8 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
     ctaHref: reportUrl,
     ctaLabel: 'View full report',
     footerNote: pdfAttached
-      ? 'Your PDF service report is attached. Reply to this email or call (941) 297-5749 with any questions.'
-      : 'Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call (941) 297-5749 with any questions.',
+      ? `Your PDF service report is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
+      : `Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`,
   });
   const text = plainText([
     `Hi ${first},`,
@@ -270,7 +271,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
     '',
     pdfAttached ? 'The PDF service report is attached.' : 'A downloadable PDF will be available shortly.',
     '',
-    'Questions? Reply to this email or call (941) 297-5749.',
+    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     'Waves Pest Control',
   ]);
 
