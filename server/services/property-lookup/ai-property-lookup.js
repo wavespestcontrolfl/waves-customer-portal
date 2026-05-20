@@ -660,10 +660,10 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
   const separator = afterMatch[1] || '';
   if (/[:=]/.test(separator)) return true;
 
-  if (unitKind === 'acre' && /[./]/.test(rawNumber) && Number.isInteger(beforeValue)) return true;
-
   const beforeSqft = unitKind === 'acre' ? beforeValue * SQFT_PER_ACRE : beforeValue;
   const afterSqft = unitKind === 'acre' ? afterValue * SQFT_PER_ACRE : afterValue;
+  if (unitKind === 'acre' && Number.isInteger(beforeValue) && afterSqft >= LOT_SQFT_MIN) return true;
+
   return (beforeSqft < LOT_SQFT_MIN || beforeSqft > LOT_SQFT_MAX)
     && afterSqft >= LOT_SQFT_MIN
     && afterSqft <= LOT_SQFT_MAX;
