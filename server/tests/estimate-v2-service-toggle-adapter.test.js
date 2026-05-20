@@ -287,6 +287,7 @@ describe('estimate v2 service toggle adapter', () => {
     expect(serviceKeys.filter((key) => key === 'pest_initial_roach')).toHaveLength(1);
     expect(serviceKeys).toContain('german_roach');
     expect(serviceKeys).not.toContain('german_roach_initial');
+    expect(estimate.pricingMetadata.manualReviewReasons).toContain('german_roach_initial_and_cleanout_both_selected');
   });
 
   test('does not double-bill regular roach when recurring pest already includes regular knockdown', () => {
@@ -305,12 +306,18 @@ describe('estimate v2 service toggle adapter', () => {
       roachType: 'regular',
     });
     expect(input.services.pestInitialRoach).toBeUndefined();
+    expect(input.pricingMetadata).toEqual(expect.objectContaining({
+      skippedDuplicateRoachLine: true,
+      skippedService: 'standalone_native_cockroach_treatment',
+      skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
+    }));
 
     const estimate = generateEstimate(input);
     const serviceKeys = estimate.lineItems.map((line) => line.service);
     expect(serviceKeys.filter((key) => key === 'pest_initial_roach')).toHaveLength(1);
     expect(serviceKeys).not.toContain('german_roach');
     expect(serviceKeys).not.toContain('german_roach_initial');
+    expect(estimate.pricingMetadata.skippedDuplicateRoachLine).toBe(true);
   });
 
   test('regular roach modifier does not alter recurring per-app price or discount the initial', () => {
@@ -354,7 +361,10 @@ describe('estimate v2 service toggle adapter', () => {
     );
 
     expect(input.services.pest).toBeUndefined();
-    expect(input.services.pestInitialRoach).toEqual({ roachType: 'regular' });
+    expect(input.services.pestInitialRoach).toEqual({
+      roachType: 'regular',
+      source: 'standalone_native_cockroach_treatment',
+    });
 
     const estimate = generateEstimate(input);
     const roachLine = estimate.lineItems.find((line) => line.service === 'pest_initial_roach');
@@ -362,6 +372,8 @@ describe('estimate v2 service toggle adapter', () => {
       label: 'Initial Native Roach Knockdown',
       price: 289,
       roachType: 'regular',
+      standalone: true,
+      source: 'standalone_native_cockroach_treatment',
     }));
   });
 
@@ -384,7 +396,10 @@ describe('estimate v2 service toggle adapter', () => {
       frequency: 'quarterly',
       roachType: 'none',
     });
-    expect(input.services.pestInitialRoach).toEqual({ roachType: 'regular' });
+    expect(input.services.pestInitialRoach).toEqual({
+      roachType: 'regular',
+      source: 'standalone_native_cockroach_treatment',
+    });
 
     const estimate = generateEstimate(input);
     const roachLines = estimate.lineItems.filter((line) => line.service === 'pest_initial_roach');

@@ -77,7 +77,7 @@ function validateSortedBrackets(errors, name, rows, key, valueKey, options = {})
 
 function validatePestPricingConfig(snapshot = constants) {
   const errors = [];
-  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG } = snapshot;
+  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE } = snapshot;
 
   if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
   if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
@@ -160,6 +160,55 @@ function validatePestPricingConfig(snapshot = constants) {
   const exclusion = SPECIALTY.exclusion || {};
   for (const [key, value] of Object.entries(exclusion.perPoint || {})) {
     if (!isPositiveNumber(value)) errors.push(`SPECIALTY.exclusion.perPoint.${key} must be positive`);
+  }
+
+  if (!isPositiveNumber(TERMITE.stationSpacing)) errors.push('TERMITE.stationSpacing must be positive');
+  if (!isPositiveNumber(TERMITE.minStations)) errors.push('TERMITE.minStations must be positive');
+  if (!isPositiveNumber(TERMITE.installMultiplier)) errors.push('TERMITE.installMultiplier must be positive');
+  for (const system of ['advance', 'trelona']) {
+    for (const key of ['stationCost', 'laborMaterial', 'misc']) {
+      if (!isNonNegativeNumber(TERMITE.systems?.[system]?.[key])) {
+        errors.push(`TERMITE.systems.${system}.${key} must be non-negative`);
+      }
+    }
+  }
+  for (const tier of ['basic', 'premier']) {
+    if (!isPositiveNumber(TERMITE.monitoring?.[tier]?.monthly)) {
+      errors.push(`TERMITE.monitoring.${tier}.monthly must be positive`);
+    }
+  }
+
+  const trenching = SPECIALTY.trenching || {};
+  if (!isPositiveNumber(trenching.dirtPerLF)) errors.push('SPECIALTY.trenching.dirtPerLF must be positive');
+  if (!isPositiveNumber(trenching.concretePerLF)) errors.push('SPECIALTY.trenching.concretePerLF must be positive');
+  if (!isPositiveNumber(trenching.floor)) errors.push('SPECIALTY.trenching.floor must be positive');
+  if (!isNonNegativeNumber(trenching.renewal)) errors.push('SPECIALTY.trenching.renewal must be non-negative');
+  for (const key of ['concretePctBase', 'concretePctCage', 'concretePctPool', 'concretePctDriveway', 'concretePctCap']) {
+    if (!isFiniteNumber(trenching[key]) || Number(trenching[key]) < 0 || Number(trenching[key]) > 1) {
+      errors.push(`SPECIALTY.trenching.${key} must be between 0 and 1`);
+    }
+  }
+
+  const boraCare = SPECIALTY.boraCare || {};
+  if (!isPositiveNumber(boraCare.coverage)) errors.push('SPECIALTY.boraCare.coverage must be positive');
+  if (!isPositiveNumber(boraCare.galCost)) errors.push('SPECIALTY.boraCare.galCost must be positive');
+  if (!isPositiveNumber(boraCare.marginDivisor) || Number(boraCare.marginDivisor) >= 1) {
+    errors.push('SPECIALTY.boraCare.marginDivisor must be positive and less than 1');
+  }
+
+  const preSlab = SPECIALTY.preSlabTermidor || {};
+  if (!isPositiveNumber(preSlab.coverage)) errors.push('SPECIALTY.preSlabTermidor.coverage must be positive');
+  if (!isPositiveNumber(preSlab.bottleCost)) errors.push('SPECIALTY.preSlabTermidor.bottleCost must be positive');
+  if (!isPositiveNumber(preSlab.marginDivisor) || Number(preSlab.marginDivisor) >= 1) {
+    errors.push('SPECIALTY.preSlabTermidor.marginDivisor must be positive and less than 1');
+  }
+  for (const key of ['none', '5plus', '10plus']) {
+    if (!isPositiveNumber(preSlab.volumeDiscounts?.[key])) {
+      errors.push(`SPECIALTY.preSlabTermidor.volumeDiscounts.${key} is required`);
+    }
+  }
+  if (!isNonNegativeNumber(preSlab.warrantyExtended)) {
+    errors.push('SPECIALTY.preSlabTermidor.warrantyExtended must be non-negative');
   }
 
   return { valid: errors.length === 0, errors };
@@ -519,12 +568,19 @@ async function syncConstantsFromDB(dbInstance) {
     // ── Termite ──────────────────────────────────────────────
     if (config.termite_install) {
       const t = config.termite_install;
-      if (t.multiplier) constants.TERMITE.installMultiplier = t.multiplier;
-      if (t.advance_bait) constants.TERMITE.systems.advance.stationCost = t.advance_bait;
-      if (t.trelona_bait) constants.TERMITE.systems.trelona.stationCost = t.trelona_bait;
-      if (t.labor_per_station) {
-        constants.TERMITE.systems.advance.laborMaterial = t.labor_per_station;
-        constants.TERMITE.systems.trelona.laborMaterial = t.labor_per_station;
+      setNumber(constants.TERMITE, 'installMultiplier', t.multiplier ?? t.install_multiplier, Number);
+      setNumber(constants.TERMITE, 'stationSpacing', t.station_spacing_ft ?? t.stationSpacing, Number);
+      setNumber(constants.TERMITE, 'minStations', t.min_stations ?? t.minStations, Number);
+      setNumber(constants.TERMITE.systems.advance, 'stationCost', t.advance_bait ?? t.advance_station_cost, Number);
+      setNumber(constants.TERMITE.systems.trelona, 'stationCost', t.trelona_bait ?? t.trelona_station_cost, Number);
+      const laborPerStation = t.labor_per_station ?? t.labor_material_per_station;
+      if (laborPerStation != null) {
+        constants.TERMITE.systems.advance.laborMaterial = Number(laborPerStation);
+        constants.TERMITE.systems.trelona.laborMaterial = Number(laborPerStation);
+      }
+      if (t.misc_per_station != null) {
+        constants.TERMITE.systems.advance.misc = Number(t.misc_per_station);
+        constants.TERMITE.systems.trelona.misc = Number(t.misc_per_station);
       }
     }
     if (config.termite_monitoring) {
@@ -788,21 +844,36 @@ async function syncConstantsFromDB(dbInstance) {
     }
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;
-      if (ot.per_lf_dirt) constants.SPECIALTY.trenching.dirtPerLF = r(ot.per_lf_dirt);
-      if (ot.per_lf_concrete) constants.SPECIALTY.trenching.concretePerLF = r(ot.per_lf_concrete);
-      if (ot.floor) constants.SPECIALTY.trenching.floor = r(ot.floor);
+      if (ot.per_lf_dirt != null) constants.SPECIALTY.trenching.dirtPerLF = r(Number(ot.per_lf_dirt));
+      if (ot.per_lf_concrete != null) constants.SPECIALTY.trenching.concretePerLF = r(Number(ot.per_lf_concrete));
+      if (ot.floor != null) constants.SPECIALTY.trenching.floor = r(Number(ot.floor));
+      if (ot.renewal != null) constants.SPECIALTY.trenching.renewal = r(Number(ot.renewal));
+      setNumber(constants.SPECIALTY.trenching, 'concretePctBase', ot.concretePctBase ?? ot.concrete_pct_base, Number);
+      setNumber(constants.SPECIALTY.trenching, 'concretePctCage', ot.concretePctCage ?? ot.concrete_pct_cage, Number);
+      setNumber(constants.SPECIALTY.trenching, 'concretePctPool', ot.concretePctPool ?? ot.concrete_pct_pool, Number);
+      setNumber(constants.SPECIALTY.trenching, 'concretePctDriveway', ot.concretePctDriveway ?? ot.concrete_pct_driveway, Number);
+      setNumber(constants.SPECIALTY.trenching, 'concretePctCap', ot.concretePctCap ?? ot.concrete_pct_cap, Number);
     }
     if (config.onetime_boracare) {
       const bc = config.onetime_boracare;
-      if (bc.bc_gal) constants.SPECIALTY.boraCare.galCost = bc.bc_gal;
-      if (bc.bc_cov) constants.SPECIALTY.boraCare.coverage = bc.bc_cov;
-      if (bc.bc_equip) constants.SPECIALTY.boraCare.equipCost = bc.bc_equip;
+      setNumber(constants.SPECIALTY.boraCare, 'galCost', bc.bc_gal ?? bc.galCost, Number);
+      setNumber(constants.SPECIALTY.boraCare, 'coverage', bc.bc_cov ?? bc.coverage, Number);
+      setNumber(constants.SPECIALTY.boraCare, 'equipCost', bc.bc_equip ?? bc.equipCost, Number);
+      setNumber(constants.SPECIALTY.boraCare, 'marginDivisor', bc.marginDivisor ?? bc.margin_divisor, Number);
     }
     if (config.onetime_preslab) {
       const ps = config.onetime_preslab;
-      if (ps.ps_btl) constants.SPECIALTY.preSlabTermidor.bottleCost = ps.ps_btl;
-      if (ps.ps_cov) constants.SPECIALTY.preSlabTermidor.coverage = ps.ps_cov;
-      if (ps.ps_equip) constants.SPECIALTY.preSlabTermidor.equipCost = ps.ps_equip;
+      setNumber(constants.SPECIALTY.preSlabTermidor, 'bottleCost', ps.ps_btl ?? ps.bottleCost, Number);
+      setNumber(constants.SPECIALTY.preSlabTermidor, 'coverage', ps.ps_cov ?? ps.coverage, Number);
+      setNumber(constants.SPECIALTY.preSlabTermidor, 'equipCost', ps.ps_equip ?? ps.equipCost, Number);
+      setNumber(constants.SPECIALTY.preSlabTermidor, 'marginDivisor', ps.marginDivisor ?? ps.margin_divisor, Number);
+      if (ps.volumeDiscounts && typeof ps.volumeDiscounts === 'object') {
+        Object.assign(constants.SPECIALTY.preSlabTermidor.volumeDiscounts, ps.volumeDiscounts);
+      }
+      if (ps.volume_discounts && typeof ps.volume_discounts === 'object') {
+        Object.assign(constants.SPECIALTY.preSlabTermidor.volumeDiscounts, ps.volume_discounts);
+      }
+      setNumber(constants.SPECIALTY.preSlabTermidor, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
     }
     if (config.onetime_exclusion) {
       const ex = config.onetime_exclusion;

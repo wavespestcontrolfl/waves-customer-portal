@@ -66,6 +66,41 @@ function numberOrNull(...values) {
   return null;
 }
 
+function measurementMetadata(source = {}) {
+  const metadata = {};
+  if (source.measurements) metadata.measurements = source.measurements;
+  if (Array.isArray(source.measurementWarnings)) metadata.measurementWarnings = source.measurementWarnings;
+  if (source.requiresMeasurement !== undefined) metadata.requiresMeasurement = !!source.requiresMeasurement;
+  if (source.requiresManualReview !== undefined) metadata.requiresManualReview = !!source.requiresManualReview;
+  if (Array.isArray(source.manualReviewReasons)) metadata.manualReviewReasons = source.manualReviewReasons;
+  if (source.inputSourceSummary) metadata.inputSourceSummary = source.inputSourceSummary;
+  return metadata;
+}
+
+function mergeMeasurementMetadata(existing = {}, next = {}) {
+  const merged = { ...existing };
+  if (next.measurements) {
+    merged.measurements = {
+      ...(merged.measurements || {}),
+      ...next.measurements,
+    };
+  }
+  if (next.measurementWarnings) {
+    merged.measurementWarnings = unique([...(merged.measurementWarnings || []), ...next.measurementWarnings]);
+  }
+  if (next.manualReviewReasons) {
+    merged.manualReviewReasons = unique([...(merged.manualReviewReasons || []), ...next.manualReviewReasons]);
+  }
+  if (next.requiresMeasurement !== undefined) {
+    merged.requiresMeasurement = !!merged.requiresMeasurement || !!next.requiresMeasurement;
+  }
+  if (next.requiresManualReview !== undefined) {
+    merged.requiresManualReview = !!merged.requiresManualReview || !!next.requiresManualReview;
+  }
+  if (next.inputSourceSummary) merged.inputSourceSummary = next.inputSourceSummary;
+  return merged;
+}
+
 function commercialMetadata(line = {}) {
   if (!line.isCommercial && !String(line.service || '').startsWith('commercial_')) return {};
   return {
@@ -127,7 +162,7 @@ function getEstimateOnetimeTotal(estimate) {
   return numberOrNull(estimate?.onetimeTotal, estimate?.onetime_total, estimate?.oneTimeTotal);
 }
 
-function addLine(linesByKey, key, amount, amountBasis = 'monthly') {
+function addLine(linesByKey, key, amount, amountBasis = 'monthly', metadata = {}) {
   if (!key) return;
   const existing = linesByKey.get(key) || { key, amount: null, amountBasis };
   if (Number.isFinite(amount) && amount > 0) {
@@ -136,6 +171,7 @@ function addLine(linesByKey, key, amount, amountBasis = 'monthly') {
       : Math.round(amount * 100) / 100;
     existing.amountBasis = amountBasis;
   }
+  Object.assign(existing, mergeMeasurementMetadata(existing, metadata));
   linesByKey.set(key, existing);
 }
 
@@ -168,7 +204,7 @@ function recurringServicesFromData(data) {
     );
     const amount = rawAmounts[index];
     const prorated = Number.isFinite(amount) && amount > 0 ? amount * ratio : amount;
-    addLine(linesByKey, keys[0] || 'unknown', prorated, 'monthly');
+    addLine(linesByKey, keys[0] || 'unknown', prorated, 'monthly', measurementMetadata(service));
   });
 
   return Array.from(linesByKey.values());
@@ -209,7 +245,13 @@ function oneTimeServicesFromData(data) {
       item?.label,
       detail,
     );
-    addLine(linesByKey, keys[0] || 'unknown', numberOrNull(item?.price, item?.amount, item?.total), 'one_time');
+    addLine(
+      linesByKey,
+      keys[0] || 'unknown',
+      numberOrNull(item?.price, item?.amount, item?.total),
+      'one_time',
+      measurementMetadata(item)
+    );
   });
   return Array.from(linesByKey.values());
 }

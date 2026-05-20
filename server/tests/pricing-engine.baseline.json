@@ -45,9 +45,9 @@
   },
   "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
     "summary": {
-      "recurringAnnualAfterDiscount": 3284.57,
-      "recurringMonthlyAfterDiscount": 273.71,
-      "year1Total": 3285
+      "recurringAnnualAfterDiscount": 3275.9,
+      "recurringMonthlyAfterDiscount": 272.99,
+      "year1Total": 3276
     },
     "waveGuard": {
       "tier": "gold",
@@ -56,8 +56,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 622.2,
-        "monthly": 51.85
+        "annual": 612,
+        "monthly": 51
       },
       "lawn_care": {
         "annual": 636,
@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 7799.2,
-      "recurringMonthlyAfterDiscount": 649.93,
-      "year1Total": 7799
+      "recurringAnnualAfterDiscount": 7785.76,
+      "recurringMonthlyAfterDiscount": 648.81,
+      "year1Total": 7786
     },
     "waveGuard": {
       "tier": "platinum",
@@ -122,8 +122,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1260,
-        "monthly": 105
+        "annual": 1243.2,
+        "monthly": 103.6
       },
       "lawn_care": {
         "annual": 1344,

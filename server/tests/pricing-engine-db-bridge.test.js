@@ -1,5 +1,5 @@
 const constants = require('../services/pricing-engine/constants');
-const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
+const { syncConstantsFromDB, validatePestPricingConfig } = require('../services/pricing-engine/db-bridge');
 const { priceFlea } = require('../services/pricing-engine');
 
 function pricingConfigDb(rows) {
@@ -26,6 +26,10 @@ describe('pricing engine DB bridge', () => {
   const originalPalmTreatments = JSON.parse(JSON.stringify(constants.PALM.treatments));
   const originalBedBug = JSON.parse(JSON.stringify(constants.BED_BUG));
   const originalFlea = JSON.parse(JSON.stringify(constants.SPECIALTY.flea));
+  const originalTermite = JSON.parse(JSON.stringify(constants.TERMITE));
+  const originalTrenching = JSON.parse(JSON.stringify(constants.SPECIALTY.trenching));
+  const originalBoraCare = JSON.parse(JSON.stringify(constants.SPECIALTY.boraCare));
+  const originalPreSlabTermidor = JSON.parse(JSON.stringify(constants.SPECIALTY.preSlabTermidor));
   const originalUrgency = JSON.parse(JSON.stringify(constants.URGENCY));
   const originalPalm = {
     minPerVisit: constants.PALM.minPerVisit,
@@ -52,6 +56,14 @@ describe('pricing engine DB bridge', () => {
     Object.assign(constants.BED_BUG, JSON.parse(JSON.stringify(originalBedBug)));
     for (const key of Object.keys(constants.SPECIALTY.flea)) delete constants.SPECIALTY.flea[key];
     Object.assign(constants.SPECIALTY.flea, JSON.parse(JSON.stringify(originalFlea)));
+    for (const key of Object.keys(constants.TERMITE)) delete constants.TERMITE[key];
+    Object.assign(constants.TERMITE, JSON.parse(JSON.stringify(originalTermite)));
+    for (const key of Object.keys(constants.SPECIALTY.trenching)) delete constants.SPECIALTY.trenching[key];
+    Object.assign(constants.SPECIALTY.trenching, JSON.parse(JSON.stringify(originalTrenching)));
+    for (const key of Object.keys(constants.SPECIALTY.boraCare)) delete constants.SPECIALTY.boraCare[key];
+    Object.assign(constants.SPECIALTY.boraCare, JSON.parse(JSON.stringify(originalBoraCare)));
+    for (const key of Object.keys(constants.SPECIALTY.preSlabTermidor)) delete constants.SPECIALTY.preSlabTermidor[key];
+    Object.assign(constants.SPECIALTY.preSlabTermidor, JSON.parse(JSON.stringify(originalPreSlabTermidor)));
     for (const key of Object.keys(constants.URGENCY)) delete constants.URGENCY[key];
     Object.assign(constants.URGENCY, JSON.parse(JSON.stringify(originalUrgency)));
     Object.assign(constants.PALM, originalPalm);
@@ -297,5 +309,52 @@ describe('pricing engine DB bridge', () => {
     }));
     expect(constants.BED_BUG.hybrid.residualAddOn).toEqual({ base: 200, perRoom: 85 });
     expect(constants.BED_BUG.hybrid.protocol.residualApplicationType).toBe('targeted');
+  });
+
+  test('validates termite and termite specialty pricing config shape', () => {
+    const snapshot = {
+      ...constants,
+      TERMITE: JSON.parse(JSON.stringify(originalTermite)),
+      SPECIALTY: {
+        ...constants.SPECIALTY,
+        trenching: JSON.parse(JSON.stringify(originalTrenching)),
+        boraCare: JSON.parse(JSON.stringify(originalBoraCare)),
+        preSlabTermidor: JSON.parse(JSON.stringify(originalPreSlabTermidor)),
+      },
+    };
+
+    snapshot.TERMITE.stationSpacing = 0;
+    snapshot.TERMITE.systems.advance.stationCost = -1;
+    snapshot.TERMITE.monitoring.basic.monthly = 0;
+    snapshot.SPECIALTY.trenching.concretePctCap = 1.2;
+    snapshot.SPECIALTY.boraCare.coverage = 0;
+    snapshot.SPECIALTY.preSlabTermidor.marginDivisor = 1;
+    delete snapshot.SPECIALTY.preSlabTermidor.volumeDiscounts['10plus'];
+    snapshot.SPECIALTY.preSlabTermidor.warrantyExtended = -1;
+
+    const result = validatePestPricingConfig(snapshot);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      'TERMITE.stationSpacing must be positive',
+      'TERMITE.systems.advance.stationCost must be non-negative',
+      'TERMITE.monitoring.basic.monthly must be positive',
+      'SPECIALTY.trenching.concretePctCap must be between 0 and 1',
+      'SPECIALTY.boraCare.coverage must be positive',
+      'SPECIALTY.preSlabTermidor.marginDivisor must be positive and less than 1',
+      'SPECIALTY.preSlabTermidor.volumeDiscounts.10plus is required',
+      'SPECIALTY.preSlabTermidor.warrantyExtended must be non-negative',
+    ]));
+  });
+
+  test('rejects invalid termite DB overlay and restores previous constants', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'termite_install',
+      data: { station_spacing_ft: 0, multiplier: 1.45 },
+    }]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(false);
+    expect(constants.TERMITE.stationSpacing).toBe(originalTermite.stationSpacing);
+    expect(constants.TERMITE.installMultiplier).toBe(originalTermite.installMultiplier);
   });
 });

@@ -97,6 +97,24 @@ function commercialManualQuoteFields(li = {}) {
   };
 }
 
+function measurementMetadataFields(li = {}) {
+  const fields = {};
+  if (li.measurements !== undefined) fields.measurements = li.measurements;
+  if (li.measurementWarnings !== undefined) fields.measurementWarnings = li.measurementWarnings;
+  if (li.warnings !== undefined) fields.warnings = Array.isArray(li.warnings) ? li.warnings : [];
+  if (li.footprintUsed !== undefined) fields.footprintUsed = li.footprintUsed;
+  if (li.footprintSource !== undefined) fields.footprintSource = li.footprintSource;
+  if (li.footprintWasDefaulted !== undefined) fields.footprintWasDefaulted = !!li.footprintWasDefaulted;
+  if (li.requiresMeasurement !== undefined) fields.requiresMeasurement = !!li.requiresMeasurement;
+  if (li.quoteRequired !== undefined) fields.quoteRequired = !!li.quoteRequired;
+  if (li.requiresManualReview !== undefined) fields.requiresManualReview = !!li.requiresManualReview;
+  if (li.manualReviewReasons !== undefined) {
+    fields.manualReviewReasons = Array.isArray(li.manualReviewReasons) ? li.manualReviewReasons : [];
+  }
+  if (li.inputSourceSummary !== undefined) fields.inputSourceSummary = li.inputSourceSummary;
+  return fields;
+}
+
 function describeMosquitoAddOns(addOns = {}, multiplier = 1) {
   const parts = [];
   const mult = Number.isFinite(Number(multiplier)) && Number(multiplier) > 0 ? Number(multiplier) : 1;
@@ -265,6 +283,12 @@ function mapV1ToLegacyShape(v1Result) {
       pmo: tbLI.monitoringTier === 'premier' ? monMonthly : 65,
       perim: tbLI.perimeter || 0,
       sta: tbLI.stations || 0,
+      measurements: tbLI.measurements || null,
+      measurementWarnings: tbLI.measurementWarnings || [],
+      requiresMeasurement: !!tbLI.requiresMeasurement,
+      quoteRequired: !!tbLI.quoteRequired,
+      requiresManualReview: !!tbLI.requiresManualReview,
+      manualReviewReasons: tbLI.manualReviewReasons || [],
     };
   }
 
@@ -286,7 +310,7 @@ function mapV1ToLegacyShape(v1Result) {
     const mo = li.monthly || 0;
     const perTreatment = Number(li.perApp ?? li.perVisit ?? 0) || null;
     const visitsPerYear = Number(li.visitsPerYear ?? li.visits ?? li.frequency ?? 0) || null;
-    services.push({ name, mo, monthly: mo, perTreatment, visitsPerYear, ...extra });
+    services.push({ name, mo, monthly: mo, perTreatment, visitsPerYear, ...measurementMetadataFields(li), ...extra });
   };
   svcAdd('Lawn Care', lawnLI, { service: 'lawn_care' });
   svcAdd('Pest Control', pestLI, { service: 'pest_control' });
@@ -337,11 +361,13 @@ function mapV1ToLegacyShape(v1Result) {
       // Preserve `service` on the mapped item so consumers can match by
       // canonical key (e.g. estimate-public's findInitialRoachItem) without
       // depending on display labels that may be re-translated downstream.
-      const item = { service: li.service, name, price, detail };
+      const item = { service: li.service, name, price, detail, ...measurementMetadataFields(li) };
       if (li.spacing !== undefined) item.spacing = li.spacing;
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;
       if (li.addOns !== undefined) item.addOns = li.addOns;
+      if (li.renewal !== undefined) item.renewal = li.renewal;
+      if (li.renewalLabel !== undefined) item.renewalLabel = li.renewalLabel;
       v1OtItems.push(item);
       if (li.service === 'trenching') R.trench = true;
     } else {
@@ -356,6 +382,11 @@ function mapV1ToLegacyShape(v1Result) {
         requiresCustomQuote: !!li.requiresCustomQuote,
         customQuoteReason: li.customQuoteReason || null,
         fleaExteriorZones: li.fleaExteriorZones || [],
+        addOns: li.addOns || [],
+        warrantyExtendedSelected: li.warrantyExtendedSelected,
+        warrantyExtendedPrice: li.warrantyExtendedPrice,
+        warrantyAdd: li.warrantyAdd,
+        ...measurementMetadataFields(li),
         ...commercialManualQuoteFields(li),
       });
     }
@@ -366,9 +397,11 @@ function mapV1ToLegacyShape(v1Result) {
   if (tbLI && (tbLI.installation?.price || 0) > 0) {
     tmInstall = tbLI.installation.price;
     v1OtItems.push({
+      service: 'termite_bait_installation',
       name: `${CAP(tbLI.system)} Installation`,
       price: tmInstall,
       detail: `${tbLI.stations} stations · ${tbLI.perimeter} linear ft perimeter`,
+      ...measurementMetadataFields(tbLI),
     });
   }
 
@@ -387,6 +420,7 @@ function mapV1ToLegacyShape(v1Result) {
       service: li.service,
       name: li.display?.name || li.label || labelFor(li.service),
       reason: li.reason || li.customQuoteReason || null,
+      ...measurementMetadataFields(li),
       ...commercialManualQuoteFields(li),
       quoteRequired: true,
     }));
@@ -461,6 +495,8 @@ function mapV1ToLegacyShape(v1Result) {
     productionDiagnostics: pestLI?.productionDiagnostics || null,
     fieldVerify: v1Result.fieldVerify || [],
     notes: v1Result.notes || [],
+    pricingMetadata: v1Result.pricingMetadata || v1Result.routingMetadata || null,
+    routingMetadata: v1Result.routingMetadata || v1Result.pricingMetadata || null,
     urgency: { mult: 1, label: '' },
     recurringCustomer: isRecurringCustomer,
     isRecurringCustomer,
@@ -511,6 +547,13 @@ function mapV1ToLegacyShape(v1Result) {
           requiresCustomQuote: !!s.requiresCustomQuote,
           customQuoteReason: s.customQuoteReason,
           fleaExteriorZones: s.fleaExteriorZones,
+          measurements: s.measurements,
+          measurementWarnings: s.measurementWarnings,
+          requiresMeasurement: !!s.requiresMeasurement,
+          inputSourceSummary: s.inputSourceSummary,
+          addOns: s.addOns,
+          warrantyExtendedSelected: s.warrantyExtendedSelected,
+          warrantyExtendedPrice: s.warrantyExtendedPrice,
         })),
       total: oneTimeTotal,
       tmInstall,

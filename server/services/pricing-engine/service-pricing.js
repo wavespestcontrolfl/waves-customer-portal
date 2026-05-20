@@ -51,6 +51,16 @@ function hasValue(value) {
   return value !== undefined && value !== null && value !== '';
 }
 
+function parsePositiveMeasurement(value) {
+  return positiveFiniteNumber(value);
+}
+
+function parseNonNegativeMeasurement(value) {
+  if (!hasValue(value)) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
 function normalizeToken(value) {
   return String(value || '')
     .trim()
@@ -67,6 +77,495 @@ function livingAreaToFootprint(value, stories) {
   const parsed = positiveFiniteNumber(value);
   if (parsed === null) return null;
   return Math.max(1, Math.round(parsed / positiveStories(stories)));
+}
+
+function optionMeasurements(options = {}) {
+  return options && typeof options.measurements === 'object' && options.measurements !== null
+    ? options.measurements
+    : {};
+}
+
+function collectManualOverride(options = {}, fieldNames = []) {
+  const measurements = optionMeasurements(options);
+  for (const field of fieldNames) {
+    if (hasValue(options[field])) return options[field];
+    if (hasValue(measurements[field])) return measurements[field];
+  }
+  return undefined;
+}
+
+function resolvePositiveMeasurement({
+  manualValue,
+  propertySources = [],
+  manualReason = 'termite_measurement_manual_override_used',
+  missingReason,
+  invalidReason,
+  manualSource = 'manual_override',
+}) {
+  const warnings = [];
+  const manualReviewReasons = [];
+
+  if (hasValue(manualValue)) {
+    const parsed = parsePositiveMeasurement(manualValue);
+    if (parsed !== null) {
+      warnings.push(manualReason);
+      manualReviewReasons.push(manualReason);
+      return {
+        value: parsed,
+        source: manualSource,
+        wasDefaulted: false,
+        wasManualOverride: true,
+        requiresMeasurement: false,
+        requiresManualReview: true,
+        manualReviewReasons,
+        warnings,
+      };
+    }
+    warnings.push(invalidReason);
+    manualReviewReasons.push(invalidReason);
+    return {
+      value: null,
+      source: manualSource,
+      wasDefaulted: false,
+      wasManualOverride: true,
+      requiresMeasurement: true,
+      requiresManualReview: true,
+      manualReviewReasons,
+      warnings,
+    };
+  }
+
+  let sawInvalidPropertyValue = false;
+  for (const [source, rawValue] of propertySources) {
+    if (!hasValue(rawValue)) continue;
+    const parsed = parsePositiveMeasurement(rawValue);
+    if (parsed !== null) {
+      return {
+        value: parsed,
+        source,
+        wasDefaulted: false,
+        wasManualOverride: false,
+        requiresMeasurement: false,
+        requiresManualReview: false,
+        manualReviewReasons,
+        warnings,
+      };
+    }
+    sawInvalidPropertyValue = true;
+  }
+
+  const reason = sawInvalidPropertyValue ? invalidReason : missingReason;
+  warnings.push(reason);
+  manualReviewReasons.push(reason);
+  return {
+    value: null,
+    source: 'missing',
+    wasDefaulted: false,
+    wasManualOverride: false,
+    requiresMeasurement: true,
+    requiresManualReview: true,
+    manualReviewReasons,
+    warnings,
+  };
+}
+
+function normalizeTermiteComplexity(property = {}, options = {}) {
+  const raw = normalizeToken(options.complexity || options.layoutComplexity || property.features?.complexity);
+  if (raw === 'complex' || raw === 'moderate') return raw;
+  return 'standard';
+}
+
+function normalizeTermiteSystem(value) {
+  const requestedSystem = value;
+  const raw = normalizeToken(value || 'advance');
+  const aliases = {
+    advance: 'advance',
+    advanced: 'advance',
+    active: 'advance',
+    sentricon: 'advance',
+    sentricon_recruit_hd: 'advance',
+    trelona: 'trelona',
+  };
+  const selectedSystem = aliases[raw] || 'advance';
+  const warnings = raw && !aliases[raw] ? ['invalid_termite_system_defaulted_to_advance'] : [];
+  return { requestedSystem, selectedSystem, warnings };
+}
+
+function normalizeTermiteMonitoringTier(value) {
+  const requestedMonitoringTier = value;
+  const raw = normalizeToken(value || 'basic');
+  const aliases = {
+    basic: 'basic',
+    standard: 'basic',
+    premier: 'premier',
+    premium: 'premier',
+  };
+  const selectedMonitoringTier = aliases[raw] || 'basic';
+  const warnings = raw && !aliases[raw] ? ['invalid_termite_monitoring_tier_defaulted_to_basic'] : [];
+  return { requestedMonitoringTier, selectedMonitoringTier, warnings };
+}
+
+function normalizePositiveTermiteModifier(value, fallback, warningName) {
+  if (!hasValue(value)) return { value: fallback, warnings: [] };
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return { value: fallback, warnings: [warningName] };
+  }
+  return { value: parsed, warnings: [] };
+}
+
+function normalizeFiniteTermiteModifier(value, fallback, warningName) {
+  if (!hasValue(value)) return { value: fallback, warnings: [] };
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return { value: fallback, warnings: [warningName] };
+  return { value: parsed, warnings: [] };
+}
+
+function measurementObject(value, source) {
+  return { value, source: source || 'missing' };
+}
+
+function mergeMeasurementState(...states) {
+  const warnings = uniqueList(states.flatMap(s => s?.warnings || []));
+  const manualReviewReasons = uniqueList(states.flatMap(s => s?.manualReviewReasons || []));
+  return {
+    warnings,
+    manualReviewReasons,
+    requiresMeasurement: states.some(s => !!s?.requiresMeasurement),
+    requiresManualReview: states.some(s => !!s?.requiresManualReview),
+  };
+}
+
+function resolveTermiteFootprint(property = {}, options = {}) {
+  const manualValue = collectManualOverride(options, ['footprintSqFt', 'footprint', 'buildingFootprintSqFt']);
+  return resolvePositiveMeasurement({
+    manualValue,
+    missingReason: 'missing_termite_footprint',
+    invalidReason: 'invalid_termite_footprint',
+    propertySources: [
+      ['property_footprint', property.footprint],
+      ['property_footprint', property.footprintSqFt],
+      ['property_alias', property.buildingFootprintSqFt],
+      ['property_alias', property.structureFootprintSqFt],
+      ['property_alias', property.livingAreaSqFt],
+      ['property_alias', property.homeSqFt],
+      ['property_alias', property.buildingSqFt],
+    ],
+  });
+}
+
+function resolveTermiteBaitPerimeter(property = {}, options = {}) {
+  const manualValue = collectManualOverride(options, ['perimeterLF', 'perimeterLf', 'perimeter']);
+  if (hasValue(manualValue)) {
+    return resolvePositiveMeasurement({
+      manualValue,
+      missingReason: 'missing_termite_perimeter_lf',
+      invalidReason: 'invalid_termite_perimeter_lf',
+      manualReason: 'termite_perimeter_manual_override_used',
+      propertySources: [],
+    });
+  }
+
+  const footprintResolution = resolveTermiteFootprint(property, options);
+  if (footprintResolution.value === null) return footprintResolution;
+
+  const complexity = normalizeTermiteComplexity(property, options);
+  const perimMult = (complexity === 'complex' || complexity === 'moderate')
+    ? TERMITE.perimeterMultiplier.complex
+    : TERMITE.perimeterMultiplier.standard;
+  return {
+    value: Math.round(4 * Math.sqrt(footprintResolution.value) * perimMult),
+    source: 'computed_from_footprint',
+    wasDefaulted: false,
+    wasManualOverride: false,
+    requiresMeasurement: false,
+    requiresManualReview: footprintResolution.requiresManualReview,
+    manualReviewReasons: [...footprintResolution.manualReviewReasons],
+    warnings: [...footprintResolution.warnings],
+    computedFromFootprintSqFt: footprintResolution.value,
+  };
+}
+
+function resolvePropertyPerimeter(property = {}, options = {}) {
+  const allowComputedPerimeter = !!(
+    options.allowComputedPerimeterFromFootprint ||
+    options.estimateFromFootprint ||
+    options.useComputedPerimeter
+  );
+  const perimeterSourceIsComputed = property.perimeterSource === 'computed_from_footprint';
+  const propertyPerimeter = perimeterSourceIsComputed && !allowComputedPerimeter
+    ? undefined
+    : property.perimeter;
+  return resolvePositiveMeasurement({
+    manualValue: collectManualOverride(options, ['perimeterLF', 'perimeterLf', 'perimeter']),
+    missingReason: 'missing_termite_perimeter_lf',
+    invalidReason: 'invalid_termite_perimeter_lf',
+    manualReason: 'perimeter_lf_manual_override_used',
+    propertySources: [
+      [perimeterSourceIsComputed ? 'computed_from_footprint' : 'property_perimeter', propertyPerimeter],
+      ['property_perimeter', property.perimeterLF],
+      ['property_perimeter', property.perimeterLf],
+    ],
+  });
+}
+
+function normalizeConcretePct(value) {
+  if (!hasValue(value)) return null;
+  let parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return { value: null, warnings: ['invalid_trenching_concrete_pct'] };
+  if (parsed > 1) parsed /= 100;
+  if (parsed > SPECIALTY.trenching.concretePctCap) {
+    return {
+      value: SPECIALTY.trenching.concretePctCap,
+      warnings: ['concrete_pct_clamped'],
+    };
+  }
+  return { value: parsed, warnings: [] };
+}
+
+function resolveFeatureConcretePct(property = {}) {
+  const f = property.features || {};
+  let concretePct = SPECIALTY.trenching.concretePctBase;
+  if (f.poolCage) concretePct = SPECIALTY.trenching.concretePctCage;
+  else if (f.pool) concretePct = SPECIALTY.trenching.concretePctPool;
+  if (f.largeDriveway) concretePct += SPECIALTY.trenching.concretePctDriveway;
+  return Math.min(concretePct, SPECIALTY.trenching.concretePctCap);
+}
+
+function resolveTrenchingMeasurements(property = {}, options = {}) {
+  const perimeterResolution = resolvePropertyPerimeter(property, options);
+  const warnings = [...perimeterResolution.warnings];
+  const manualReviewReasons = [...perimeterResolution.manualReviewReasons];
+
+  if (perimeterResolution.value === null) {
+    return {
+      perimeter: null,
+      perimeterSource: perimeterResolution.source,
+      perimeterWasManualOverride: perimeterResolution.wasManualOverride,
+      concretePct: null,
+      concretePctSource: 'missing',
+      concreteLF: null,
+      concreteLFSource: 'missing',
+      dirtLF: null,
+      dirtLFSource: 'missing',
+      measurementWarnings: uniqueList(warnings),
+      requiresMeasurement: true,
+      requiresManualReview: true,
+      manualReviewReasons: uniqueList(manualReviewReasons),
+    };
+  }
+
+  const perimeter = perimeterResolution.value;
+  const manualConcreteLF = collectManualOverride(options, ['concreteLF', 'concreteLf', 'concreteSlabLF', 'slabDrillLF']);
+  const manualDirtLF = collectManualOverride(options, ['dirtLF', 'dirtLf']);
+  const manualConcretePct = collectManualOverride(options, ['concretePct', 'concretePercentage']);
+  let concreteLF = null;
+  let concreteLFSource = 'missing';
+  let dirtLF = null;
+  let dirtLFSource = 'missing';
+  let concretePct = null;
+  let concretePctSource = 'missing';
+  let invalidConcreteLF = false;
+
+  if (hasValue(manualConcreteLF)) {
+    const parsedConcreteLF = parseNonNegativeMeasurement(manualConcreteLF);
+    if (parsedConcreteLF === null) {
+      warnings.push('invalid_trenching_concrete_lf');
+      manualReviewReasons.push('invalid_trenching_concrete_lf');
+      invalidConcreteLF = true;
+    } else if (parsedConcreteLF > perimeter) {
+      warnings.push('concrete_lf_exceeds_perimeter');
+      manualReviewReasons.push('concrete_lf_exceeds_perimeter');
+      invalidConcreteLF = true;
+      concreteLF = parsedConcreteLF;
+      concreteLFSource = 'manual_override';
+    } else {
+      concreteLF = parsedConcreteLF;
+      concreteLFSource = 'manual_override';
+      concretePct = roundRatio(concreteLF / perimeter);
+      concretePctSource = 'manual_override';
+      dirtLF = Math.max(0, Math.round(perimeter - concreteLF));
+      dirtLFSource = 'derived_from_perimeter_minus_concrete_lf';
+      warnings.push('concrete_lf_manual_override_used');
+      manualReviewReasons.push('concrete_lf_manual_override_used');
+    }
+  }
+
+  if (!invalidConcreteLF && concreteLF === null && hasValue(manualDirtLF)) {
+    const parsedDirtLF = parseNonNegativeMeasurement(manualDirtLF);
+    if (parsedDirtLF === null || parsedDirtLF > perimeter) {
+      warnings.push('invalid_trenching_dirt_lf');
+      manualReviewReasons.push('invalid_trenching_dirt_lf');
+    } else {
+      dirtLF = parsedDirtLF;
+      dirtLFSource = 'manual_override';
+      concreteLF = Math.max(0, Math.round(perimeter - dirtLF));
+      concreteLFSource = 'derived_from_perimeter_minus_dirt_lf';
+      concretePct = roundRatio(concreteLF / perimeter);
+      concretePctSource = 'derived_from_dirt_lf';
+      warnings.push('termite_measurement_manual_override_used');
+      manualReviewReasons.push('termite_measurement_manual_override_used');
+    }
+  }
+
+  if (!invalidConcreteLF && hasValue(manualConcreteLF) && hasValue(manualDirtLF)) {
+    const parsedConcreteLF = parseNonNegativeMeasurement(manualConcreteLF);
+    const parsedDirtLF = parseNonNegativeMeasurement(manualDirtLF);
+    if (parsedConcreteLF !== null && parsedDirtLF !== null && Math.abs((parsedConcreteLF + parsedDirtLF) - perimeter) > 5) {
+      warnings.push('trenching_lf_sum_mismatch');
+      manualReviewReasons.push('trenching_lf_sum_mismatch');
+    }
+  }
+
+  if (!invalidConcreteLF && concreteLF === null) {
+    const normalizedPct = normalizeConcretePct(manualConcretePct);
+    if (normalizedPct && normalizedPct.value !== null) {
+      concretePct = normalizedPct.value;
+      concretePctSource = 'manual_override';
+      warnings.push(...normalizedPct.warnings, 'termite_measurement_manual_override_used');
+      manualReviewReasons.push(...normalizedPct.warnings, 'termite_measurement_manual_override_used');
+    } else if (normalizedPct && normalizedPct.value === null) {
+      warnings.push(...normalizedPct.warnings);
+      manualReviewReasons.push(...normalizedPct.warnings);
+      concretePct = resolveFeatureConcretePct(property);
+      concretePctSource = 'feature_estimate';
+    } else {
+      concretePct = resolveFeatureConcretePct(property);
+      concretePctSource = 'feature_estimate';
+    }
+    concretePct = roundRatio(concretePct);
+    concreteLF = Math.round(perimeter * concretePct);
+    concreteLFSource = concretePctSource === 'manual_override' ? 'derived_from_manual_pct' : 'feature_estimate';
+    dirtLF = Math.round(perimeter * (1 - concretePct));
+    dirtLFSource = concretePctSource === 'manual_override' ? 'derived_from_manual_pct' : 'feature_estimate';
+  }
+
+  const requiresMeasurement = invalidConcreteLF || perimeterResolution.requiresMeasurement;
+  const requiresManualReview = requiresMeasurement || warnings.length > 0 || perimeterResolution.requiresManualReview;
+  return {
+    perimeter,
+    perimeterSource: perimeterResolution.source,
+    perimeterWasManualOverride: perimeterResolution.wasManualOverride,
+    concretePct,
+    concretePctSource,
+    concreteLF,
+    concreteLFSource,
+    dirtLF,
+    dirtLFSource,
+    measurementWarnings: uniqueList(warnings),
+    requiresMeasurement,
+    requiresManualReview,
+    manualReviewReasons: uniqueList(manualReviewReasons),
+  };
+}
+
+function resolveBoraCareSqFt(input, options = {}) {
+  if (typeof input !== 'object' && hasValue(input)) {
+    const parsed = parsePositiveMeasurement(input);
+    if (parsed !== null) {
+      return {
+        value: parsed,
+        source: 'direct_argument',
+        wasDefaulted: false,
+        wasManualOverride: false,
+        requiresMeasurement: false,
+        requiresManualReview: false,
+        manualReviewReasons: [],
+        warnings: [],
+      };
+    }
+    return {
+      value: null,
+      source: 'direct_argument',
+      wasDefaulted: false,
+      wasManualOverride: false,
+      requiresMeasurement: true,
+      requiresManualReview: true,
+      manualReviewReasons: ['invalid_boracare_attic_sqft'],
+      warnings: ['invalid_boracare_attic_sqft'],
+    };
+  }
+  const property = input && typeof input === 'object' ? input : {};
+  const manualValue = collectManualOverride(options, ['atticSqFt', 'atticAreaSqFt', 'rawWoodSqFt', 'woodTreatmentSqFt']);
+  return resolvePositiveMeasurement({
+    manualValue,
+    missingReason: 'missing_boracare_attic_sqft',
+    invalidReason: 'invalid_boracare_attic_sqft',
+    propertySources: [
+      ['property_attic_sqft', property.atticSqFt],
+      ['property_attic_sqft', property.atticAreaSqFt],
+      ['property_alias', property.rawWoodSqFt],
+      ['property_alias', property.woodTreatmentSqFt],
+    ],
+  });
+}
+
+function resolvePreSlabSqFt(input, options = {}) {
+  if (typeof input !== 'object' && hasValue(input)) {
+    const parsed = parsePositiveMeasurement(input);
+    if (parsed !== null) {
+      return {
+        value: parsed,
+        source: 'direct_argument',
+        wasDefaulted: false,
+        wasManualOverride: false,
+        requiresMeasurement: false,
+        requiresManualReview: false,
+        manualReviewReasons: [],
+        warnings: [],
+      };
+    }
+    return {
+      value: null,
+      source: 'direct_argument',
+      wasDefaulted: false,
+      wasManualOverride: false,
+      requiresMeasurement: true,
+      requiresManualReview: true,
+      manualReviewReasons: ['invalid_pre_slab_sqft'],
+      warnings: ['invalid_pre_slab_sqft'],
+    };
+  }
+  const property = input && typeof input === 'object' ? input : {};
+  const manualValue = collectManualOverride(options, ['slabSqFt', 'foundationSqFt', 'buildingSlabSqFt', 'newConstructionSlabSqFt']);
+  return resolvePositiveMeasurement({
+    manualValue,
+    missingReason: 'missing_pre_slab_sqft',
+    invalidReason: 'invalid_pre_slab_sqft',
+    propertySources: [
+      ['property_slab_sqft', property.slabSqFt],
+      ['property_alias', property.foundationSqFt],
+      ['property_alias', property.buildingSlabSqFt],
+      ['property_alias', property.newConstructionSlabSqFt],
+    ],
+  });
+}
+
+function normalizePreSlabVolumeDiscount(value) {
+  const requestedVolumeDiscount = value;
+  const raw = normalizeToken(value || 'none');
+  const aliases = {
+    none: 'none',
+    no_discount: 'none',
+    '5': '5plus',
+    '5plus': '5plus',
+    '5_plus': '5plus',
+    '5+': '5plus',
+    five_plus: '5plus',
+    fiveplus: '5plus',
+    '10': '10plus',
+    '10plus': '10plus',
+    '10_plus': '10plus',
+    '10+': '10plus',
+    ten_plus: '10plus',
+    tenplus: '10plus',
+  };
+  const volumeDiscount = aliases[raw] || 'none';
+  return {
+    requestedVolumeDiscount,
+    volumeDiscount,
+    warnings: raw && !aliases[raw] ? ['invalid_pre_slab_volume_discount_defaulted_to_none'] : [],
+  };
 }
 
 function resolvePestFootprint(property = {}, options = {}) {
@@ -171,6 +670,8 @@ function normalizeRoachType(value) {
     australian: 'regular',
     florida_woods: 'regular',
     native: 'regular',
+    roach: 'regular',
+    cockroach: 'regular',
     german: 'german',
     kitchen: 'german',
     small_indoor: 'german',
@@ -187,6 +688,25 @@ function normalizeRoachType(value) {
     roachType,
     roachTypeWasDefaulted,
     roachWarnings,
+  };
+}
+
+function normalizeRoachSeverity(value) {
+  const raw = normalizeToken(value);
+  const aliases = {
+    light: 'light',
+    low: 'light',
+    moderate: 'moderate',
+    medium: 'moderate',
+    heavy: 'heavy',
+    high: 'heavy',
+    severe: 'severe',
+  };
+  if (!raw) return { severity: null, warnings: [] };
+  const severity = aliases[raw] || null;
+  return {
+    severity,
+    warnings: severity ? [] : ['invalid_roach_severity_ignored'],
   };
 }
 
@@ -721,7 +1241,12 @@ function pricePestControl(property, options = {}) {
 // still available for severe colonies; this is the auto-fire for the
 // everyday "I saw one or two" case.
 function pricePestInitialRoach(property, options = {}) {
-  const { roachType: requestedRoachTypeInput = 'none', standalone = false } = options;
+  const {
+    roachType: requestedRoachTypeInput = 'none',
+    standalone = false,
+    autoFiredFromRecurringPest = false,
+    source,
+  } = options;
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
   const roachType = roachMeta.roachType;
   if (roachType === 'none') return null;
@@ -758,6 +1283,11 @@ function pricePestInitialRoach(property, options = {}) {
     roachTypeWasDefaulted: roachMeta.roachTypeWasDefaulted,
     scaleKey,
     standalone: !!standalone,
+    autoFiredFromRecurringPest: !!autoFiredFromRecurringPest,
+    source: source || (autoFiredFromRecurringPest
+      ? 'recurring_pest_roach_activity'
+      : standalone ? 'standalone_native_cockroach_treatment' : 'pest_initial_roach_selected'),
+    noRecurringDiscount: true,
     oneTime: true,
     footprintBracket: bracket.sqft === Infinity ? '2500+' : `<${bracket.sqft}`,
     footprintUsed: footprint,
@@ -1788,17 +2318,105 @@ function priceTermiteBait(property, options = {}) {
     modifiers = {},
   } = options;
 
-  const footprint = property.footprint;
-  const complexity = (property.features || {}).complexity;
+  property = property || {};
+  const systemResolution = normalizeTermiteSystem(system);
+  const monitoringResolution = normalizeTermiteMonitoringTier(monitoringTier);
+  const selectedSystem = systemResolution.selectedSystem;
+  const selectedMonitoringTier = monitoringResolution.selectedMonitoringTier;
+  const footprintResolution = resolveTermiteFootprint(property, options);
+  const perimeterResolution = resolveTermiteBaitPerimeter(property, options);
+  const complexity = normalizeTermiteComplexity(property, options);
   const perimMult = (complexity === 'complex' || complexity === 'moderate')
     ? TERMITE.perimeterMultiplier.complex
     : TERMITE.perimeterMultiplier.standard;
-  const perimeter = Math.round(4 * Math.sqrt(footprint) * perimMult);
+  const computedPerimeter = footprintResolution.value !== null
+    ? Math.round(4 * Math.sqrt(footprintResolution.value) * perimMult)
+    : null;
+  const footprintRequired = perimeterResolution.source !== 'manual_override';
+  const measurementState = footprintRequired
+    ? mergeMeasurementState(footprintResolution, perimeterResolution)
+    : mergeMeasurementState(perimeterResolution);
+  const constructionMult = normalizePositiveTermiteModifier(
+    modifiers.termiteConstructionMult,
+    1.0,
+    'invalid_termite_construction_multiplier_defaulted_to_1'
+  );
+  const foundationAdj = normalizeFiniteTermiteModifier(
+    modifiers.termiteFoundationAdj,
+    0,
+    'invalid_termite_foundation_adjustment_defaulted_to_0'
+  );
+  const measurementWarnings = uniqueList([
+    ...measurementState.warnings,
+    ...systemResolution.warnings,
+    ...monitoringResolution.warnings,
+    ...constructionMult.warnings,
+    ...foundationAdj.warnings,
+  ]);
+  const manualReviewReasons = uniqueList([
+    ...measurementState.manualReviewReasons,
+    ...constructionMult.warnings,
+    ...foundationAdj.warnings,
+  ]);
+  const mon = TERMITE.monitoring[selectedMonitoringTier] || TERMITE.monitoring.basic;
+
+  if (perimeterResolution.value === null) {
+    return {
+      service: 'termite_bait',
+      system: selectedSystem,
+      selectedSystem,
+      requestedSystem: systemResolution.requestedSystem,
+      monitoringTier: selectedMonitoringTier,
+      selectedMonitoringTier,
+      requestedMonitoringTier: monitoringResolution.requestedMonitoringTier,
+      complexity,
+      footprintSqFt: footprintResolution.value,
+      footprintSource: footprintResolution.source,
+      perimeter: null,
+      computedPerimeter,
+      perimeterSource: perimeterResolution.source,
+      perimeterWasManualOverride: perimeterResolution.wasManualOverride,
+      stations: null,
+      measurements: {
+        footprintSqFt: measurementObject(footprintResolution.value, footprintResolution.source),
+        perimeterLF: measurementObject(null, perimeterResolution.source),
+      },
+      measurementWarnings,
+      requiresMeasurement: true,
+      quoteRequired: true,
+      requiresManualReview: true,
+      manualReviewReasons: uniqueList([
+        ...manualReviewReasons,
+        ...(footprintRequired ? ['termite_quote_requires_field_verification'] : []),
+      ]),
+      inputSourceSummary: {
+        footprintSqFt: footprintResolution.source,
+        perimeterLF: perimeterResolution.source,
+      },
+      installation: {
+        materialCost: 0,
+        laborCost: 0,
+        totalCost: 0,
+        price: null,
+        margin: 0,
+      },
+      monitoring: {
+        monthly: 0,
+        annual: 0,
+        quotedMonthly: mon.monthly,
+        quotedAnnual: mon.monthly * 12,
+      },
+      annual: 0,
+      monthly: 0,
+    };
+  }
+
+  const perimeter = perimeterResolution.value;
   const stations = Math.max(TERMITE.minStations, Math.ceil(perimeter / TERMITE.stationSpacing));
 
-  const sys = TERMITE.systems[system];
-  const conMult = modifiers.termiteConstructionMult || 1.0;
-  const foundAdj = modifiers.termiteFoundationAdj || 0;
+  const sys = TERMITE.systems[selectedSystem] || TERMITE.systems.advance;
+  const conMult = constructionMult.value;
+  const foundAdj = foundationAdj.value;
   const installMaterialCost = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
   // 5 min per station — calibrated Apr 2026 against All U Need invoice
   // (21 Sentricon stations installed in 78 min by one tech = 3.7 min/sta).
@@ -1809,14 +2427,37 @@ function priceTermiteBait(property, options = {}) {
   const installPrice = Math.round(installMaterialCost * TERMITE.installMultiplier * conMult + foundAdj);
   const installMargin = installPrice > 0 ? (installPrice - installCost) / installPrice : 0;
 
-  const mon = TERMITE.monitoring[monitoringTier];
   const monitoringMonthly = mon.monthly;
   const monitoringAnnual = monitoringMonthly * 12;
 
   return {
     service: 'termite_bait',
-    system, monitoringTier,
-    perimeter, stations,
+    system: selectedSystem,
+    selectedSystem,
+    requestedSystem: systemResolution.requestedSystem,
+    monitoringTier: selectedMonitoringTier,
+    selectedMonitoringTier,
+    requestedMonitoringTier: monitoringResolution.requestedMonitoringTier,
+    complexity,
+    footprintSqFt: footprintResolution.value,
+    footprintSource: footprintResolution.source,
+    perimeter,
+    computedPerimeter,
+    perimeterSource: perimeterResolution.source,
+    perimeterWasManualOverride: perimeterResolution.wasManualOverride,
+    stations,
+    measurements: {
+      footprintSqFt: measurementObject(footprintResolution.value, footprintResolution.source),
+      perimeterLF: measurementObject(perimeter, perimeterResolution.source),
+    },
+    measurementWarnings,
+    requiresMeasurement: false,
+    requiresManualReview: measurementState.requiresManualReview || measurementWarnings.length > 0,
+    manualReviewReasons,
+    inputSourceSummary: {
+      footprintSqFt: footprintResolution.source,
+      perimeterLF: perimeterResolution.source,
+    },
     installation: {
       materialCost: Math.round(installMaterialCost),
       laborCost: Math.round(installLabor),
@@ -2347,29 +2988,92 @@ function priceOneTimeMosquito(property, options = {}) {
 // SPECIALTY SERVICES
 // ============================================================
 
-function priceTrenching(property) {
-  const perimeter = property.perimeter;
-  const f = property.features || {};
-  let concretePct = SPECIALTY.trenching.concretePctBase;
-  if (f.poolCage) concretePct = SPECIALTY.trenching.concretePctCage;
-  else if (f.pool) concretePct = SPECIALTY.trenching.concretePctPool;
-  if (f.largeDriveway) concretePct += SPECIALTY.trenching.concretePctDriveway;
-  concretePct = Math.min(concretePct, SPECIALTY.trenching.concretePctCap);
+function priceTrenching(property = {}, options = {}) {
+  const measurements = resolveTrenchingMeasurements(property || {}, options || {});
+  const baseResult = {
+    service: 'trenching',
+    perimeter: measurements.perimeter,
+    perimeterSource: measurements.perimeterSource,
+    perimeterWasManualOverride: measurements.perimeterWasManualOverride,
+    concretePct: measurements.concretePct,
+    concretePctSource: measurements.concretePctSource,
+    dirtLF: measurements.dirtLF,
+    dirtLFSource: measurements.dirtLFSource,
+    concreteLF: measurements.concreteLF,
+    concreteLFSource: measurements.concreteLFSource,
+    measurements: {
+      perimeterLF: measurementObject(measurements.perimeter, measurements.perimeterSource),
+      concreteLF: measurementObject(measurements.concreteLF, measurements.concreteLFSource),
+      dirtLF: measurementObject(measurements.dirtLF, measurements.dirtLFSource),
+      concretePct: measurementObject(measurements.concretePct, measurements.concretePctSource),
+    },
+    measurementWarnings: measurements.measurementWarnings,
+    requiresMeasurement: measurements.requiresMeasurement,
+    requiresManualReview: measurements.requiresManualReview,
+    manualReviewReasons: measurements.manualReviewReasons,
+    inputSourceSummary: {
+      perimeterLF: measurements.perimeterSource,
+      concreteLF: measurements.concreteLFSource,
+      dirtLF: measurements.dirtLFSource,
+      concretePct: measurements.concretePctSource,
+    },
+    renewal: SPECIALTY.trenching.renewal,
+    renewalFrequency: 'annual',
+    renewalLabel: 'Annual trenching renewal',
+  };
 
-  const dirtLF = Math.round(perimeter * (1 - concretePct));
-  const concreteLF = Math.round(perimeter * concretePct);
+  if (measurements.requiresMeasurement) {
+    return {
+      ...baseResult,
+      price: null,
+      quoteRequired: true,
+    };
+  }
+
   const price = Math.max(
     SPECIALTY.trenching.floor,
-    dirtLF * SPECIALTY.trenching.dirtPerLF + concreteLF * SPECIALTY.trenching.concretePerLF
+    measurements.dirtLF * SPECIALTY.trenching.dirtPerLF + measurements.concreteLF * SPECIALTY.trenching.concretePerLF
   );
 
   return {
-    service: 'trenching', perimeter, concretePct, dirtLF, concreteLF,
-    price, renewal: SPECIALTY.trenching.renewal,
+    ...baseResult,
+    price,
+    quoteRequired: false,
   };
 }
 
-function priceBoraCare(atticSqFt) {
+function priceBoraCare(input, options = {}) {
+  const measurement = resolveBoraCareSqFt(input, options);
+  const baseResult = {
+    service: 'bora_care',
+    atticSqFt: measurement.value,
+    atticSqFtSource: measurement.source,
+    atticSqFtWasManualOverride: measurement.wasManualOverride,
+    measurements: {
+      atticSqFt: measurementObject(measurement.value, measurement.source),
+    },
+    measurementWarnings: measurement.warnings,
+    requiresMeasurement: measurement.requiresMeasurement,
+    requiresManualReview: measurement.requiresManualReview,
+    manualReviewReasons: measurement.manualReviewReasons,
+    inputSourceSummary: {
+      atticSqFt: measurement.source,
+    },
+  };
+
+  if (measurement.value === null) {
+    return {
+      ...baseResult,
+      gallons: null,
+      laborHrs: null,
+      isMultiDay: false,
+      cost: null,
+      price: null,
+      quoteRequired: true,
+    };
+  }
+
+  const atticSqFt = measurement.value;
   const gallons = Math.max(3, Math.ceil(atticSqFt / SPECIALTY.boraCare.coverage));
   const isMultiDay = atticSqFt > 4500;
   const laborHrs = isMultiDay
@@ -2378,21 +3082,106 @@ function priceBoraCare(atticSqFt) {
   const cost = gallons * SPECIALTY.boraCare.galCost + laborHrs * GLOBAL.LABOR_RATE + SPECIALTY.boraCare.equipCost;
   const price = Math.round(cost / SPECIALTY.boraCare.marginDivisor);
 
-  return { service: 'bora_care', atticSqFt, gallons, laborHrs: Math.round(laborHrs * 10) / 10, cost: Math.round(cost), price };
+  return {
+    ...baseResult,
+    gallons,
+    laborHrs: Math.round(laborHrs * 10) / 10,
+    isMultiDay,
+    cost: Math.round(cost),
+    price,
+    quoteRequired: false,
+  };
 }
 
-function pricePreSlabTermidor(slabSqFt, volumeDiscount = 'none') {
+function pricePreSlabTermidor(input, volumeDiscount = 'none', extraOptions = {}) {
+  let options = extraOptions || {};
+  let discountInput = volumeDiscount;
+  if (volumeDiscount && typeof volumeDiscount === 'object') {
+    options = volumeDiscount;
+    discountInput = options.volumeDiscount || 'none';
+  } else if (extraOptions && typeof extraOptions === 'object' && hasValue(extraOptions.volumeDiscount)) {
+    discountInput = extraOptions.volumeDiscount;
+  }
+
+  const measurement = resolvePreSlabSqFt(input, options);
+  const volumeResolution = normalizePreSlabVolumeDiscount(discountInput);
+  const volumeDiscountMultiplier = SPECIALTY.preSlabTermidor.volumeDiscounts[volumeResolution.volumeDiscount] || 1.0;
+  const warrantyExtendedSelected = !!(
+    options.includeWarrantyExtended ||
+    options.warrantyExtended ||
+    options.warranty === 'EXTENDED'
+  );
+  const warrantyExtendedPrice = warrantyExtendedSelected ? SPECIALTY.preSlabTermidor.warrantyExtended : 0;
+  const measurementWarnings = uniqueList([
+    ...measurement.warnings,
+    ...volumeResolution.warnings,
+  ]);
+  const manualReviewReasons = uniqueList([
+    ...measurement.manualReviewReasons,
+    ...volumeResolution.warnings,
+  ]);
+  const baseResult = {
+    service: 'pre_slab_termidor',
+    slabSqFt: measurement.value,
+    slabSqFtSource: measurement.source,
+    slabSqFtWasManualOverride: measurement.wasManualOverride,
+    volumeDiscount: volumeResolution.volumeDiscount,
+    requestedVolumeDiscount: volumeResolution.requestedVolumeDiscount,
+    volumeDiscountMultiplier,
+    volumeDiscountWarnings: volumeResolution.warnings,
+    warrantyExtendedSelected,
+    warrantyExtendedPrice,
+    addOns: warrantyExtendedSelected
+      ? [{
+          code: 'pre_slab_extended_warranty',
+          label: 'Extended warranty',
+          price: warrantyExtendedPrice,
+        }]
+      : [],
+    measurements: {
+      slabSqFt: measurementObject(measurement.value, measurement.source),
+    },
+    measurementWarnings,
+    requiresMeasurement: measurement.requiresMeasurement,
+    requiresManualReview: measurement.requiresManualReview || volumeResolution.warnings.length > 0,
+    manualReviewReasons,
+    inputSourceSummary: {
+      slabSqFt: measurement.source,
+    },
+  };
+
+  if (measurement.value === null) {
+    return {
+      ...baseResult,
+      bottles: null,
+      laborHrs: null,
+      cost: null,
+      priceBeforeVolumeDiscount: null,
+      price: null,
+      quoteRequired: true,
+    };
+  }
+
+  const slabSqFt = measurement.value;
   const bottles = Math.max(1, Math.ceil(slabSqFt / SPECIALTY.preSlabTermidor.coverage));
   const laborHrs = Math.min(5, Math.max(1, 0.5 + slabSqFt / 1500));
   const cost = bottles * SPECIALTY.preSlabTermidor.bottleCost + laborHrs * GLOBAL.LABOR_RATE + SPECIALTY.preSlabTermidor.equipCost;
-  let price = Math.round(cost / SPECIALTY.preSlabTermidor.marginDivisor);
-  const volMult = SPECIALTY.preSlabTermidor.volumeDiscounts[volumeDiscount] || 1.0;
-  price = Math.round(price * volMult);
+  const priceBeforeVolumeDiscount = Math.round(cost / SPECIALTY.preSlabTermidor.marginDivisor);
+  const discountedPrice = Math.round(priceBeforeVolumeDiscount * volumeDiscountMultiplier);
+  const price = discountedPrice + warrantyExtendedPrice;
 
-  return { service: 'pre_slab_termidor', slabSqFt, bottles, laborHrs: Math.round(laborHrs * 10) / 10, cost: Math.round(cost), price, volumeDiscount };
+  return {
+    ...baseResult,
+    bottles,
+    laborHrs: Math.round(laborHrs * 10) / 10,
+    cost: Math.round(cost),
+    priceBeforeVolumeDiscount,
+    price,
+    quoteRequired: false,
+  };
 }
 
-function priceGermanRoach(property) {
+function priceGermanRoach(property, options = {}) {
   const footprintResolution = resolvePestFootprint(property);
   const footprint = footprintResolution.footprint;
   const adj = interpolate(footprint, SPECIALTY.germanRoach.footprintAdj);
@@ -2400,8 +3189,12 @@ function priceGermanRoach(property) {
 
   return {
     service: 'german_roach',
+    label: 'German Roach Cleanout — 3 Visit Program',
     price,
-    pricingModel: 'german_roach_multi_visit',
+    source: options.source || 'german_roach_cleanout_selected',
+    pricingModel: 'german_roach_three_visit_cleanout',
+    legacyPricingModel: 'german_roach_multi_visit',
+    noRecurringDiscount: true,
     footprintAdj: Math.round(adj),
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
@@ -3985,6 +4778,12 @@ module.exports = {
   evaluateTreeShrubTierRecommendation,
   resolveTreeShrubBedArea,
   resolvePestFootprint,
+  parsePositiveMeasurement,
+  resolveTermiteFootprint,
+  resolveTermiteBaitPerimeter,
+  resolveTrenchingMeasurements,
+  resolveBoraCareSqFt,
+  resolvePreSlabSqFt,
   normalizePestFrequency,
   normalizePestPricingVersion,
   normalizeRoachType,

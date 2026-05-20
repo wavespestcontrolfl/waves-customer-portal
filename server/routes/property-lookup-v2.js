@@ -18,6 +18,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const MODELS = require('../config/models');
 const { lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
+const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1457,15 +1458,51 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const urgency = rawUrg === 'ROUTINE' ? 'NONE' : rawUrg;
   const afterHours = !!o.afterHours;
   const recurringCustomer = !!o.recurringCustomer;
+  const measurementValue = (...values) => {
+    for (const value of values) {
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return undefined;
+  };
 
   const services = {};
+  const pricingMetadata = {
+    warnings: [],
+    manualReviewReasons: [],
+    skippedServices: [],
+  };
+  const addSkippedService = (skipped) => {
+    pricingMetadata.skippedServices.push(skipped);
+    if (skipped.skippedDuplicateRoachLine) {
+      pricingMetadata.skippedDuplicateRoachLine = true;
+      pricingMetadata.skippedService = skipped.skippedService;
+      pricingMetadata.skippedReason = skipped.skippedReason;
+    }
+  };
+  const termiteBaitMeasurements = {
+    footprintSqFt: measurementValue(o.termiteFootprintSqFt, o.termiteFootprint, o.footprintSqFt),
+    perimeterLF: measurementValue(o.termitePerimeterLF, o.termitePerimeterLf, o.termitePerimeter),
+  };
+  const trenchingMeasurements = {
+    perimeterLF: measurementValue(o.trenchingPerimeterLF, o.trenchingPerimeterLf, o.perimeterLF),
+    concreteLF: measurementValue(o.trenchingConcreteLF, o.trenchingConcreteLf, o.concreteLF),
+    dirtLF: measurementValue(o.trenchingDirtLF, o.trenchingDirtLf, o.dirtLF),
+    concretePct: measurementValue(o.trenchingConcretePct, o.concretePct),
+  };
+  const boraCareMeasurements = {
+    atticSqFt: measurementValue(o.boracareSqft, o.boraCareSqFt, o.atticSqFt, o.rawWoodSqFt),
+  };
+  const preSlabMeasurements = {
+    slabSqFt: measurementValue(o.preslabSqft, o.preSlabSqFt, o.slabSqFt),
+  };
 
-  // Roach modifier (Step 2b-3). v2 options.roachModifier is uppercase
-  // (GERMAN/REGULAR/NONE); v1 service-pricing expects lowercase roachType.
-  const rawRoach = String(o.roachModifier || 'NONE').toUpperCase();
-  const roachType = rawRoach === 'GERMAN' ? 'german'
-                  : rawRoach === 'REGULAR' ? 'regular'
-                  : 'none';
+  // Roach activity on recurring pest initial visit. Keep accepting the legacy
+  // roachModifier field while allowing clearer client aliases.
+  const recurringRoachMeta = normalizeRoachType(o.recurringRoachType ?? o.roachModifier ?? 'NONE');
+  const roachType = recurringRoachMeta.roachType;
+  if (recurringRoachMeta.roachWarnings.length) {
+    pricingMetadata.warnings.push(...recurringRoachMeta.roachWarnings);
+  }
 
   // Recurring
   if (sel.has('PEST')) {
@@ -1518,7 +1555,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       dunkCount: o.mosquitoDunkCount,
     };
   }
-  if (sel.has('TERMITE_BAIT')) services.termite = { system: 'advance', monitoringTier: 'basic' };
+  if (sel.has('TERMITE_BAIT')) {
+    services.termite = {
+      system: o.termiteBaitSystem || 'advance',
+      monitoringTier: o.termiteMonitoringTier || 'basic',
+      complexity: o.termiteBaitComplexity || 'standard',
+      measurements: termiteBaitMeasurements,
+    };
+  }
   if (sel.has('RODENT_BAIT')) services.rodentBait = {};
 
   // One-time — urgency/afterHours threaded through; recurringCustomer perk
@@ -1543,13 +1587,25 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   }
 
   // Specialty
-  if (sel.has('TRENCHING')) services.trenching = {};
-  if (sel.has('BORACARE')) services.boraCare = { atticSqFt: o.boracareSqft };
+  if (sel.has('TRENCHING')) {
+    services.trenching = {
+      measurements: trenchingMeasurements,
+      allowComputedPerimeterFromFootprint: !!o.trenchingEstimateFromFootprint,
+    };
+  }
+  if (sel.has('BORACARE')) {
+    services.boraCare = {
+      atticSqFt: o.boracareSqft,
+      measurements: boraCareMeasurements,
+    };
+  }
   if (sel.has('PRESLAB')) {
     services.preSlab = {
       slabSqFt: o.preslabSqft,
+      measurements: preSlabMeasurements,
       volumeDiscount: o.preslabVolume && o.preslabVolume !== 'NONE' ? o.preslabVolume.toLowerCase() : 'none',
       warranty: o.preslabWarranty || 'BASIC',
+      includeWarrantyExtended: !!o.includePreSlabWarrantyExtended || o.preslabWarranty === 'EXTENDED',
     };
   }
   if (sel.has('FOAM')) {
@@ -1583,12 +1639,29 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Skip the standalone REGULAR fire when recurring pest already auto-fires
   // the same knockdown via roachModifier='REGULAR' so the same service isn't
   // billed twice.
-  const standaloneRoach = String(o.roachType || 'REGULAR').toUpperCase();
-  if (sel.has('ROACH')) {
-    if (standaloneRoach === 'GERMAN') {
+  const roachServiceSelected = sel.has('ROACH') || !!o.standaloneRoachTreatment || !!o.germanRoachCleanoutSelected;
+  const standaloneRoachMeta = normalizeRoachType(
+    o.germanRoachCleanoutSelected
+      ? 'german'
+      : o.standaloneRoachTreatment ? 'regular' : o.roachType || 'REGULAR'
+  );
+  if (standaloneRoachMeta.roachWarnings.length) {
+    pricingMetadata.warnings.push(...standaloneRoachMeta.roachWarnings);
+  }
+  if (roachServiceSelected) {
+    if (standaloneRoachMeta.roachType === 'german') {
       services.germanRoach = {};
-    } else if (!(sel.has('PEST') && rawRoach === 'REGULAR')) {
-      services.pestInitialRoach = { roachType: 'regular' };
+    } else if (sel.has('PEST') && roachType === 'regular') {
+      addSkippedService({
+        skippedDuplicateRoachLine: true,
+        skippedService: 'standalone_native_cockroach_treatment',
+        skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
+      });
+    } else {
+      services.pestInitialRoach = {
+        roachType: 'regular',
+        source: 'standalone_native_cockroach_treatment',
+      };
     }
   }
   if (sel.has('BEDBUG')) {
@@ -1670,6 +1743,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     stories,
     storiesSource: p.storiesSource || null,
     lotSqFt,
+    footprintSqFt: p.footprintSqFt ?? p.footprint,
+    perimeterLF: p.perimeterLF ?? p.perimeterLf ?? p.perimeter,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,
     category: p.category || o.category || null,
     isCommercial: commercialProfile,
@@ -1700,11 +1775,24 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     attachedGarage: p.attachedGarage,
     maintenanceCondition: p.maintenanceCondition,
     overallPestPressure: p.overallPestPressure,
+    atticSqFt: p.atticSqFt,
+    atticAreaSqFt: p.atticAreaSqFt,
+    rawWoodSqFt: p.rawWoodSqFt,
+    woodTreatmentSqFt: p.woodTreatmentSqFt,
+    slabSqFt: p.slabSqFt,
+    foundationSqFt: p.foundationSqFt,
+    buildingSlabSqFt: p.buildingSlabSqFt,
+    newConstructionSlabSqFt: p.newConstructionSlabSqFt,
     recurringCustomer,
     fleaExterior: !!o.fleaExterior,
     fleaExteriorAreaSqFt: o.fleaExteriorAreaSqFt,
     fleaExteriorAreaSource: o.fleaExteriorAreaSource,
     fleaExteriorZones: Array.isArray(o.fleaExteriorZones) ? o.fleaExteriorZones : [],
+    pricingMetadata: {
+      ...pricingMetadata,
+      warnings: [...new Set(pricingMetadata.warnings)],
+      manualReviewReasons: [...new Set(pricingMetadata.manualReviewReasons)],
+    },
     // Step 2b-4: pass-through. v1 engine applies it to recurring annual
     // after WaveGuard, capped at base — exact mirror of v2 calcTotals.
     manualDiscount: o.manualDiscount || null,
