@@ -483,6 +483,7 @@ Search aggressively, in this order:
 Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
+- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "5.99 Acres Lot", "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "5.99 Acres Lot" → 260924 (5.99 × 43560 = 260924).
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
@@ -492,7 +493,7 @@ Output rules:
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
   "squareFootage": <int 500-15000 or null>,
-  "lotSize": <int 1000-200000 or null>,
+  "lotSize": <int 1000-1000000, in SQUARE FEET (convert from acres if needed), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -516,7 +517,7 @@ function parsePropertyJSON(text) {
     const raw = JSON.parse(match[0]);
     const out = {
       squareFootage: coerceInt(raw.squareFootage, 500, 15000),
-      lotSize: coerceInt(raw.lotSize, 1000, 200000),
+      lotSize: coerceLotSize(raw.lotSize),
       yearBuilt: coerceInt(raw.yearBuilt, 1900, new Date().getFullYear() + 1),
       bedrooms: coerceInt(raw.bedrooms, 1, 15),
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
@@ -539,6 +540,78 @@ function coerceInt(raw, min, max) {
   const rounded = Math.round(n);
   if (rounded < min || rounded > max) return null;
   return rounded;
+}
+
+const SQFT_PER_ACRE = 43560;
+const LOT_SQFT_MIN = 1000;
+const LOT_SQFT_MAX = 1_000_000;
+
+// Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
+// or acres ("5.99 Acres Lot", "1/2 acre"). The pricing engine always wants
+// square feet, so we normalize here.
+//   - Strings with "acre" → first number is acres, multiply by 43560.
+//   - Strings with "sqft" / "sq ft" → first number is sqft.
+//   - Bare numbers: small (< LOT_SQFT_MIN) assumed acres, large assumed sqft.
+//   - Strings with BOTH "acre" and "sqft" (e.g. "0.5 acres (21,780 sqft)")
+//     are ambiguous; bail to null so downstream code falls back rather than
+//     accepting a silently-wrong value.
+function coerceLotSize(raw) {
+  if (raw == null) return null;
+
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    const sqft = Math.round(raw < LOT_SQFT_MIN ? raw * SQFT_PER_ACRE : raw);
+    return inLotRange(sqft) ? sqft : null;
+  }
+
+  const str = String(raw).toLowerCase();
+  const hasAcre = /\bacre/.test(str);
+  const hasSqft = /\bsq\.?\s*ft\b|\bsqft\b|\bsquare\s*feet\b/.test(str);
+  if (hasAcre && hasSqft) return null;
+
+  const value = parseFirstLotNumber(str);
+  if (value == null || value <= 0) return null;
+
+  let sqft;
+  if (hasAcre) sqft = value * SQFT_PER_ACRE;
+  else if (hasSqft) sqft = value;
+  else sqft = value < LOT_SQFT_MIN ? value * SQFT_PER_ACRE : value;
+
+  const rounded = Math.round(sqft);
+  return inLotRange(rounded) ? rounded : null;
+}
+
+function inLotRange(n) {
+  return n >= LOT_SQFT_MIN && n <= LOT_SQFT_MAX;
+}
+
+// Pull the FIRST numeric value out of a lot-size string. Supports mixed
+// numbers ("1 1/2"), simple fractions ("1/2"), decimals ("5.99"), and
+// comma-grouped integers ("21,780"). We deliberately do NOT strip all
+// non-digit characters — that would merge "0.5 acres (21,780)" into a
+// single bogus number, or turn "1/2" into "12".
+function parseFirstLotNumber(str) {
+  const mixed = str.match(/(\d+)\s+(\d+)\/(\d+)/);
+  if (mixed) {
+    const whole = Number(mixed[1]);
+    const num = Number(mixed[2]);
+    const den = Number(mixed[3]);
+    if (Number.isFinite(whole) && Number.isFinite(num) && den > 0) {
+      return whole + num / den;
+    }
+  }
+  const frac = str.match(/(\d+)\/(\d+)/);
+  if (frac) {
+    const num = Number(frac[1]);
+    const den = Number(frac[2]);
+    if (Number.isFinite(num) && den > 0) return num / den;
+  }
+  const decimal = str.match(/\d[\d,]*(?:\.\d+)?/);
+  if (decimal) {
+    const n = Number(decimal[0].replace(/,/g, ''));
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
 }
 
 function coerceFloat(raw, min, max) {
