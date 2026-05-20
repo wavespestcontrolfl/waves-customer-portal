@@ -14,6 +14,7 @@
 const sendgrid = require('./sendgrid-mail');
 const { wrapEmail } = require('./email-template');
 const logger = require('./logger');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 // Local HTML escape — wrapEmail() interpolates intro/heading/lines as
 // raw HTML, so any caller that includes user-controlled data (here:
@@ -27,8 +28,7 @@ function escapeHtml(s) {
 }
 
 function confirmationUrl(token) {
-  const baseUrl = process.env.PUBLIC_PORTAL_URL || 'https://portal.wavespestcontrol.com';
-  return `${baseUrl}/api/public/newsletter/confirm/${token}`;
+  return `${publicPortalUrl()}/api/public/newsletter/confirm/${token}`;
 }
 
 /**

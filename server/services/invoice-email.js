@@ -18,6 +18,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatDateOnly } = require('../utils/date-only');
 const { getInvoiceEmailRecipients, getReceiptEmailRecipients } = require('./customer-contact');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -110,7 +111,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (!recipient?.email) return { ok: false, error: 'No invoice recipient email' };
   const recipientPayload = publicRecipient(recipient);
 
-  const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
+  const domain = publicPortalUrl();
   const longPayUrl = `${domain}/pay/${invoice.token}`;
   const payUrl = await shortenOrPassthrough(longPayUrl, {
     kind: 'invoice',
@@ -267,7 +268,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     .first()
     .catch(() => null);
 
-  const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
+  const domain = publicPortalUrl();
   const longReceiptUrl = `${domain}/receipt/${invoice.token}`;
   const receiptUrl = await shortenOrPassthrough(longReceiptUrl, {
     kind: 'receipt',

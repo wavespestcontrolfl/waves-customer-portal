@@ -35,6 +35,7 @@
  */
 
 const logger = require('./logger');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 const API_BASE = 'https://api.sendgrid.com/v3';
 
@@ -199,7 +200,7 @@ async function sendBatch({ recipients, fromEmail, fromName, subject, html, text,
  * to inject into the body and the per-recipient header.
  */
 function unsubscribeUrl(unsubscribeToken) {
-  const baseUrl = process.env.PUBLIC_PORTAL_URL || 'https://portal.wavespestcontrol.com';
+  const baseUrl = publicPortalUrl();
   return `${baseUrl}/api/public/newsletter/unsubscribe/${unsubscribeToken}`;
 }
 

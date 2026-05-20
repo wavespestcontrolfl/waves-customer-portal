@@ -16,6 +16,7 @@ const config = require('../config/invoice-followups');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 /**
  * Load the SMS body from the editable sms_templates table. Returns null if the
@@ -34,7 +35,6 @@ async function resolveBody(step, ctx) {
   });
 }
 
-const DOMAIN = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
 
 /**
  * Compute the timestamp at which step `index` should fire for a given invoice.
@@ -177,7 +177,7 @@ async function fireStep(row) {
     ? new Date(row.service_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
     : '';
 
-  const payUrl = await shortenOrPassthrough(`${DOMAIN}/pay/${row.token}`, {
+  const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${row.token}`, {
     kind: 'invoice', entityType: 'invoices', entityId: row.invoice_id, customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(row),
   });
@@ -269,7 +269,7 @@ async function stopOnPayment(invoiceId) {
       const invoice = await db('invoices').where({ id: invoiceId }).first();
       if (customer?.phone) {
         const payUrl = invoice?.token
-          ? await shortenOrPassthrough(`${DOMAIN}/pay/${invoice.token}`, {
+          ? await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
               kind: 'invoice',
               entityType: 'invoices',
               entityId: invoice.id,

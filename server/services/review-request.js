@@ -10,6 +10,7 @@ const {
 const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
+const { publicPortalUrl } = require("../utils/portal-url");
 
 // GBP review links per location
 const REVIEW_LINKS = {
@@ -296,8 +297,7 @@ const ReviewService = {
     const contact = getServiceContact(customer);
     if (!contact.phone) return;
 
-    const domain =
-      process.env.CLIENT_URL || "https://portal.wavespestcontrol.com";
+    const domain = publicPortalUrl();
     const longReviewUrl = `${domain}/rate/${request.token}`;
     const reviewUrl = await shortenOrPassthrough(longReviewUrl, {
       kind: "review",
@@ -468,8 +468,7 @@ const ReviewService = {
         .where({ service_record_id: serviceRecordId })
         .first();
       if (existing) {
-        const domain =
-          process.env.CLIENT_URL || "https://portal.wavespestcontrol.com";
+        const domain = publicPortalUrl();
         const longUrl = `${domain}/rate/${existing.token}`;
         return shortenOrPassthrough(longUrl, {
           kind: "review",
@@ -548,8 +547,7 @@ const ReviewService = {
       `[review] Created inline request (customerId=${customer.id} requestId=${request.id} bundled-with=completion_sms)`,
     );
 
-    const domain =
-      process.env.CLIENT_URL || "https://portal.wavespestcontrol.com";
+    const domain = publicPortalUrl();
     const longUrl = `${domain}/rate/${request.token}`;
     return shortenOrPassthrough(longUrl, {
       kind: "review",
