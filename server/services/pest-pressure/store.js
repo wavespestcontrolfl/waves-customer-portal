@@ -10,8 +10,51 @@
  * Insert path JSON.stringify()s for consistency with the migration seed.
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const { DEFAULT_CONFIG } = require('./config');
+
+// Fields whose values change what the customer sees on a Pest Pressure
+// surface (card visibility, narrative text, breakdown table, explanation
+// copy). Used to derive a short signature embedded in the PDF storage
+// key — when admin flips any of these, the key changes, cached PDFs
+// become cache-miss, and the next request re-renders against the new
+// config. Anything outside this set (weights, labels, trend thresholds)
+// affects the calculated score, NOT visible rendering, and falls in the
+// next natural pest_pressure_scores recalculation.
+const VISIBILITY_AFFECTING_FIELDS = [
+  'enabled',
+  'showOnCustomerReport',
+  'enabledServiceLines',
+  'requireRecurringFrequency',
+  // Toggles the "How we calculate Pest Pressure" disclosure in the card.
+  'showHowCalculated',
+  // The actual paragraph rendered inside that disclosure — admin-editable.
+  // Hash the verbatim string so a copy edit invalidates caches.
+  'customerExplanationText',
+  // Toggles the per-component breakdown table rendered to customers.
+  'showComponentBreakdownToCustomer',
+];
+
+function pestPressureVisibilitySignature(config) {
+  // Stable hash: sort the allow list so e.g. ['mosquito','pest'] and
+  // ['pest','mosquito'] produce the same signature.
+  const enabledLines = Array.isArray(config && config.enabledServiceLines)
+    ? config.enabledServiceLines.slice().sort()
+    : null;
+  const payload = JSON.stringify({
+    enabled: Boolean(config && config.enabled),
+    showOnCustomerReport: Boolean(config && config.showOnCustomerReport),
+    enabledServiceLines: enabledLines,
+    requireRecurringFrequency: Boolean(config && config.requireRecurringFrequency),
+    showHowCalculated: Boolean(config && config.showHowCalculated),
+    showComponentBreakdownToCustomer: Boolean(config && config.showComponentBreakdownToCustomer),
+    customerExplanationText: (config && typeof config.customerExplanationText === 'string')
+      ? config.customerExplanationText
+      : null,
+  });
+  return crypto.createHash('sha1').update(payload).digest('hex').slice(0, 12);
+}
 
 const CONFIG_COLUMNS = [
   'id', 'scope', 'enabled',
@@ -104,6 +147,28 @@ async function loadScoreForServiceRecord(knex, serviceRecordId) {
 }
 
 /**
+ * Null out service_records.pdf_storage_key so the next /report/:token/pdf
+ * request treats the cached PDF as a miss and re-renders. Called after any
+ * write to pest_pressure_scores that changes the customer-visible score
+ * (persist, override set, override remove). Without this, the cached PDF
+ * shows the old displayed_score even after admin overrides or recalcs.
+ *
+ * Best-effort: a failed UPDATE doesn't block the score write — at worst
+ * the customer sees a stale PDF until the next visibility-config edit
+ * or the next service-record completion writes a new pdf_storage_key.
+ */
+async function invalidatePdfCacheForServiceRecord(knex, serviceRecordId) {
+  if (!serviceRecordId) return;
+  try {
+    await knex('service_records')
+      .where({ id: serviceRecordId })
+      .update({ pdf_storage_key: null });
+  } catch (err) {
+    // Don't propagate — derived/secondary side effect.
+  }
+}
+
+/**
  * Upsert a calculated score for one service_record. UNIQUE(service_record_id)
  * means recalculation on the same report overwrites the prior row; the
  * override fields (overridden_by, overridden_at, override_reason,
@@ -162,9 +227,11 @@ async function persistScore(knex, payload) {
 
   if (existing) {
     await knex('pest_pressure_scores').where({ id: existing.id }).update({ ...row, updated_at: knex.fn.now() });
+    await invalidatePdfCacheForServiceRecord(knex, payload.serviceRecordId);
     return { ...existing, ...row };
   }
   const [inserted] = await knex('pest_pressure_scores').insert(row).returning('*');
+  await invalidatePdfCacheForServiceRecord(knex, payload.serviceRecordId);
   return inserted;
 }
 
@@ -253,7 +320,9 @@ async function applyOverride(knex, { serviceRecordId, displayedScore, reason, ov
     updated_at: knex.fn.now(),
   });
 
-  await knex('service_records').where({ id: serviceRecordId }).update({ pressure_index: rounded });
+  await knex('service_records')
+    .where({ id: serviceRecordId })
+    .update({ pressure_index: rounded, pdf_storage_key: null });
 
   return loadScoreForServiceRecord(knex, serviceRecordId);
 }
@@ -288,7 +357,7 @@ async function removeOverride(knex, { serviceRecordId }) {
   // would continue showing the stale score after the override was cleared.
   await knex('service_records')
     .where({ id: serviceRecordId })
-    .update({ pressure_index: restored ?? null });
+    .update({ pressure_index: restored ?? null, pdf_storage_key: null });
 
   return loadScoreForServiceRecord(knex, serviceRecordId);
 }
@@ -347,4 +416,7 @@ module.exports = {
   listAuditEvents,
   loadHistoryForCustomer,
   rowToConfig,
+  pestPressureVisibilitySignature,
+  invalidatePdfCacheForServiceRecord,
+  VISIBILITY_AFFECTING_FIELDS,
 };

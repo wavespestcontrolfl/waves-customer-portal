@@ -1191,7 +1191,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
   };
 }
 
-async function buildReportV1Data(service, token, knex = db) {
+async function buildReportV1Data(service, token, knex = db, options = {}) {
+  const opts = options && typeof options === 'object' ? options : {};
+  const preloadedPestPressureConfig = Object.prototype.hasOwnProperty.call(opts, 'pestPressureConfig')
+    ? opts.pestPressureConfig
+    : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
   const structured = parseJsonObject(service.structured_notes);
@@ -1257,8 +1261,11 @@ async function buildReportV1Data(service, token, knex = db) {
   // Pest Pressure is computed by the pest-pressure orchestrator on report
   // completion and mirrored back to service_records.pressure_index. Legacy
   // pre-v1 reports without a stored value have no Pest Pressure score.
+  const pestPressureConfigPromise = preloadedPestPressureConfig === undefined
+    ? loadActiveConfig(knex).catch(() => null)
+    : Promise.resolve(preloadedPestPressureConfig);
   const [pestPressureConfig, pestPressureRow] = await Promise.all([
-    loadActiveConfig(knex).catch(() => null),
+    pestPressureConfigPromise,
     loadScoreForServiceRecord(knex, service.id).catch(() => null),
   ]);
   const pestPressure = buildPestPressureCustomerView({

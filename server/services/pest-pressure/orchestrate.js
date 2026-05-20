@@ -177,7 +177,7 @@ async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
   if (persisted && persisted.displayed_score != null) {
     await knex('service_records')
       .where({ id: serviceRecord.id })
-      .update({ pressure_index: persisted.displayed_score });
+      .update({ pressure_index: persisted.displayed_score, pdf_storage_key: null });
   }
 
   return { result, serviceLine, window };

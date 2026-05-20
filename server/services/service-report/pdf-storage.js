@@ -22,9 +22,15 @@ function assertPdfStorageConfigured() {
   if (!config.s3?.bucket) throw new Error('S3/R2 bucket not configured');
 }
 
-function reportPdfStorageKey(serviceRecordId) {
+function reportPdfStorageKey(serviceRecordId, { visibilitySignature = '' } = {}) {
   if (!serviceRecordId) throw new Error('serviceRecordId is required');
-  return `reports/${serviceRecordId}/report-${SERVICE_REPORT_PDF_STORAGE_VERSION}.pdf`;
+  // visibilitySignature embeds a hash of Pest Pressure visibility config so
+  // that flipping enabled / showOnCustomerReport / enabledServiceLines /
+  // requireRecurringFrequency invalidates cached PDFs automatically (the
+  // key changes → cache miss → re-render). When omitted (legacy / non-
+  // pest-pressure callers), the key keeps its pre-Pest-Pressure shape.
+  const sigPart = visibilitySignature ? `-pp${visibilitySignature}` : '';
+  return `reports/${serviceRecordId}/report-${SERVICE_REPORT_PDF_STORAGE_VERSION}${sigPart}.pdf`;
 }
 
 async function streamToBuffer(stream) {
@@ -35,9 +41,9 @@ async function streamToBuffer(stream) {
   return Buffer.concat(chunks);
 }
 
-async function putReportPdf(serviceRecordId, pdf) {
+async function putReportPdf(serviceRecordId, pdf, { visibilitySignature = '' } = {}) {
   assertPdfStorageConfigured();
-  const key = reportPdfStorageKey(serviceRecordId);
+  const key = reportPdfStorageKey(serviceRecordId, { visibilitySignature });
   await s3.send(new PutObjectCommand({
     Bucket: config.s3.bucket,
     Key: key,
