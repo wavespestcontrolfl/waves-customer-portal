@@ -25,7 +25,7 @@ const logger = require('../services/logger');
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
 const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
-const NEWSLETTER_RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed'];
+const NEWSLETTER_RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed', 'sending'];
 
 // Convert SendGrid's base64 SPKI public key to a Node KeyObject.
 // Cached — key is static env input.
@@ -80,8 +80,12 @@ function shouldMarkProcessedNewsletterDeliverySent(delivery, ev = {}) {
   const status = String(delivery?.status || '').toLowerCase();
   if (['queued', 'failed'].includes(status)) return true;
   if (status !== 'sending') return false;
+  return sendAttemptTokenMatches(delivery, ev?.send_attempt_token);
+}
+
+function sendAttemptTokenMatches(delivery, attemptToken = null) {
   const rowToken = delivery?.send_attempt_token ? String(delivery.send_attempt_token) : null;
-  const eventToken = ev?.send_attempt_token ? String(ev.send_attempt_token) : null;
+  const eventToken = attemptToken ? String(attemptToken) : null;
   return !!rowToken && !!eventToken && rowToken === eventToken;
 }
 
@@ -93,16 +97,24 @@ function canUseDeliveryIdFallback(delivery, messageId, attemptToken = null) {
     if (rowToken || eventToken) return !!rowToken && !!eventToken && rowToken === eventToken;
     return String(delivery.status || '').toLowerCase() !== 'sending';
   }
-  return String(delivery.provider_message_id) === String(messageId || '');
+  if (String(delivery.provider_message_id) === String(messageId || '')) return true;
+  return sendAttemptTokenMatches(delivery, attemptToken);
 }
 
 async function bindNewsletterDeliveryMessageId(delivery, messageId, attemptToken = null, client = db) {
-  if (!delivery || !messageId || delivery.provider_message_id) return delivery;
+  if (!delivery || !messageId) return delivery;
+  const providerMatches = delivery.provider_message_id
+    && String(delivery.provider_message_id) === String(messageId);
+  if (providerMatches) return delivery;
+
+  const tokenMatches = sendAttemptTokenMatches(delivery, attemptToken);
+  if (delivery.provider_message_id && !tokenMatches) return delivery;
 
   const bindQuery = client('newsletter_send_deliveries')
     .where({ id: delivery.id })
     .where((q) => {
       q.whereNull('provider_message_id').orWhere({ provider_message_id: messageId });
+      if (tokenMatches) q.orWhere({ send_attempt_token: String(attemptToken) });
     });
   if (delivery.send_attempt_token || attemptToken) {
     bindQuery.where({ send_attempt_token: attemptToken || delivery.send_attempt_token });
@@ -187,11 +199,11 @@ async function handleEvent(ev) {
   // to us (lost-response case: our sendBatch POST timed out before reading
   // the X-Message-Id header, so the row was marked 'failed' with no id),
   // the delivery_id lets the event still find its home and self-heal the
-  // row. Only trust the fallback for unbound rows, or when the row is already
-  // bound to the same message id; otherwise a delayed event from an earlier
-  // resume attempt could mutate the current attempt. Backfill the
-  // provider_message_id while we're here so subsequent events hit the fast
-  // path.
+  // row. Only trust the fallback for unbound rows, rows already bound to the
+  // same message id, or a token-matched resume attempt that needs to replace
+  // an older message id; otherwise a delayed event from an earlier resume
+  // attempt could mutate the current attempt. Backfill the provider_message_id
+  // while we're here so subsequent events hit the fast path.
   let newsletterDelivery = email ? await db('newsletter_send_deliveries')
     .where({ provider_message_id: messageId, email })
     .first() : null;
@@ -208,7 +220,8 @@ async function handleEvent(ev) {
       // an event payload was tampered with.
       logger.warn(deliveryEmailMismatchLogMessage(ev.delivery_id, newsletterDelivery.email, email));
       newsletterDelivery = null;
-    } else if (newsletterDelivery && !newsletterDelivery.provider_message_id && messageId) {
+    } else if (newsletterDelivery && messageId
+        && String(newsletterDelivery.provider_message_id || '') !== String(messageId)) {
       const boundDelivery = await bindNewsletterDeliveryMessageId(newsletterDelivery, messageId, ev.send_attempt_token);
       newsletterDelivery = canUseDeliveryIdFallback(boundDelivery, messageId, ev.send_attempt_token) ? boundDelivery : null;
     }

@@ -28,6 +28,7 @@ const {
   deliveryEmailMismatchLogMessage,
   canUseDeliveryIdFallback,
   bindNewsletterDeliveryMessageId,
+  reconcileNewsletterSendStatus,
 } = sendgridWebhook;
 
 describe('newsletter buildSubscriberQuery', () => {
@@ -352,6 +353,8 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
     expect(canUseDeliveryIdFallback({ provider_message_id: null, status: 'sending', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-2')).toBe(false);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'new-msg' }, 'new-msg')).toBe(true);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg' }, 'new-msg')).toBe(false);
+    expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-1')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-2')).toBe(false);
   });
 
   test('binds provider message id behind an unbound-or-same guard', async () => {
@@ -377,6 +380,30 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
     expect(query.where).toHaveBeenCalledWith({ id: 'delivery-1' });
     expect(nested.whereNull).toHaveBeenCalledWith('provider_message_id');
     expect(nested.orWhere).toHaveBeenCalledWith({ provider_message_id: 'sg-msg-1' });
+  });
+
+  test('rebinds a stale provider message id when the attempt token matches', async () => {
+    const nested = {};
+    nested.whereNull = jest.fn(() => nested);
+    nested.orWhere = jest.fn(() => nested);
+    const query = {};
+    query.where = jest.fn((arg) => {
+      if (typeof arg === 'function') arg(nested);
+      return query;
+    });
+    query.update = jest.fn(async () => 1);
+    const client = jest.fn(() => query);
+
+    const result = await bindNewsletterDeliveryMessageId(
+      { id: 'delivery-1', provider_message_id: 'sg-old', send_attempt_token: 'tok-1' },
+      'sg-new',
+      'tok-1',
+      client,
+    );
+
+    expect(result.provider_message_id).toBe('sg-new');
+    expect(nested.orWhere).toHaveBeenCalledWith({ send_attempt_token: 'tok-1' });
+    expect(query.where).toHaveBeenCalledWith({ send_attempt_token: 'tok-1' });
   });
 
   test('re-reads the delivery row when a concurrent message bind wins', async () => {
@@ -405,6 +432,24 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
 
     expect(result.provider_message_id).toBe('sg-other');
     expect(rereadQuery.where).toHaveBeenCalledWith({ id: 'delivery-1' });
+  });
+
+  test('reconcile treats abandoned sending rows as retryable', async () => {
+    const deliveryQuery = {};
+    deliveryQuery.where = jest.fn(() => deliveryQuery);
+    deliveryQuery.whereIn = jest.fn(() => deliveryQuery);
+    deliveryQuery.whereNull = jest.fn(() => deliveryQuery);
+    deliveryQuery.count = jest.fn(() => deliveryQuery);
+    deliveryQuery.first = jest.fn(async () => ({ c: 1 }));
+    const client = jest.fn((table) => {
+      if (table === 'newsletter_send_deliveries') return deliveryQuery;
+      throw new Error(`unexpected table ${table}`);
+    });
+
+    await reconcileNewsletterSendStatus('send-1', client);
+
+    expect(deliveryQuery.where).toHaveBeenCalledWith({ send_id: 'send-1' });
+    expect(deliveryQuery.whereIn).toHaveBeenCalledWith('status', ['queued', 'failed', 'sending']);
   });
 });
 
