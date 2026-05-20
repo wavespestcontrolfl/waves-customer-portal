@@ -140,6 +140,31 @@ describe('pricing engine DB bridge', () => {
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
   });
 
+  test('restores all constants when pest config validation fails', async () => {
+    const originalLaborRate = constants.GLOBAL.LABOR_RATE;
+    const originalMosquitoSmall = [...constants.MOSQUITO.basePrices.SMALL];
+    const originalPestBase = constants.PEST.base;
+    const db = pricingConfigDb([
+      { config_key: 'global_labor_rate', data: { value: originalLaborRate + 25 } },
+      {
+        config_key: 'mosquito_base_prices',
+        data: { SMALL: { seasonal9: 999, monthly12: 888 } },
+      },
+      { config_key: 'pest_base', data: { base: -1, floor: constants.PEST.floor } },
+    ]);
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await expect(syncConstantsFromDB(db)).resolves.toBe(false);
+
+      expect(constants.GLOBAL.LABOR_RATE).toBe(originalLaborRate);
+      expect(constants.MOSQUITO.basePrices.SMALL).toEqual(originalMosquitoSmall);
+      expect(constants.PEST.base).toBe(originalPestBase);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   test('syncs flea package, exterior tiers, and one-time modifiers from pricing_config', async () => {
     const db = pricingConfigDb([
       {
