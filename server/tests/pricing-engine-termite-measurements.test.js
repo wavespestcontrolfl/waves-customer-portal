@@ -2,7 +2,11 @@ const {
   priceTermiteBait,
   priceTrenching,
   priceBoraCare,
+  pricePreSlabTermiticide,
   pricePreSlabTermidor,
+  normalizeTrenchingTermiticideProduct,
+  normalizeTrenchingApplicationRate,
+  normalizePreSlabTermiticideProduct,
 } = require('../services/pricing-engine/service-pricing');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
@@ -92,6 +96,10 @@ describe('termite measurement overrides and safeguards', () => {
     expect(existing.concreteLF).toBe(96);
     expect(existing.price).toBe(2784);
     expect(existing.renewal).toBe(325);
+    expect(existing.productKey).toBe('taurus_sc');
+    expect(existing.productSurcharge).toBe(0);
+    expect(existing.baseInstallPrice).toBe(2784);
+    expect(existing.finishedGallons).toBe(103.68);
 
     const manual = priceTrenching({}, {
       measurements: { perimeterLF: 240, concreteLF: 120 },
@@ -110,6 +118,110 @@ describe('termite measurement overrides and safeguards', () => {
     expect(allDirt.dirtLF).toBe(240);
     expect(allDirt.price).toBe(2400);
     expect(allDirt.concreteLFSource).toBe('manual_override');
+  });
+
+  test('trenching normalizes products, rates, and chemical cost per LF', () => {
+    expect(normalizeTrenchingTermiticideProduct('termidor sc').productKey).toBe('termidor_sc');
+    expect(normalizeTrenchingTermiticideProduct('basf').productKey).toBe('termidor_sc');
+    expect(normalizeTrenchingTermiticideProduct('fipronil').productKey).toBe('taurus_sc');
+    expect(normalizeTrenchingTermiticideProduct('bifen i/t').productKey).toBe('bifen_it');
+    expect(normalizeTrenchingTermiticideProduct('talstar pro').productKey).toBe('talstar_p');
+    expect(normalizeTrenchingApplicationRate('0.06%').applicationRate).toBe('standard');
+    expect(normalizeTrenchingApplicationRate('problem soil').applicationRate).toBe('high');
+
+    const base = { measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 }, concreteVolumePadPct: 0 };
+    expect(priceTrenching({}, { ...base, productKey: 'termidor_sc' }).chemicalCostPerLF).toBeCloseTo(1.54, 2);
+    expect(priceTrenching({}, { ...base, productKey: 'taurus_sc' }).chemicalCostPerLF).toBeCloseTo(0.35, 2);
+    expect(priceTrenching({}, { ...base, productKey: 'bifen_it' }).chemicalCostPerLF).toBeCloseTo(0.23, 2);
+    expect(priceTrenching({}, { ...base, productKey: 'talstar_p' }).chemicalCostPerLF).toBeCloseTo(0.27, 2);
+  });
+
+  test('trenching Termidor premium surcharges while Bifen never discounts below LF model', () => {
+    const termidor = priceTrenching({}, {
+      measurements: { perimeterLF: 240, dirtLF: 144, concreteLF: 96 },
+      productKey: 'termidor_sc',
+      labelConfirmed: true,
+    });
+    expect(termidor.finishedGallons).toBe(103.68);
+    expect(termidor.productOz).toBeCloseTo(82.94, 2);
+    expect(termidor.allocatedChemicalCost).toBeCloseTo(398.77, 2);
+    expect(termidor.includedChemicalCost).toBeCloseTo(90.39, 2);
+    expect(termidor.chemicalPremiumCost).toBeCloseTo(308.38, 2);
+    expect(termidor.productSurcharge).toBeGreaterThanOrEqual(447);
+    expect(termidor.productSurcharge).toBeLessThanOrEqual(448);
+    expect(termidor.price).toBe(termidor.baseInstallPrice + termidor.productSurcharge);
+
+    const bifen = priceTrenching({}, {
+      measurements: { perimeterLF: 240, dirtLF: 144, concreteLF: 96 },
+      productKey: 'bifen_it',
+      labelConfirmed: true,
+    });
+    expect(bifen.allocatedChemicalCost).toBeLessThan(bifen.includedChemicalCost);
+    expect(bifen.chemicalPremiumCost).toBe(0);
+    expect(bifen.productSurcharge).toBe(0);
+    expect(bifen.price).toBe(2784);
+    expect(bifen.warnings).toContain('Repellent pyrethroid barrier; not equivalent to non-repellent fipronil.');
+  });
+
+  test('trenching high rate and warranty restrictions surface review and quote gates', () => {
+    const highRate = priceTrenching({}, {
+      measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 },
+      productKey: 'taurus_sc',
+      applicationRate: 'high',
+      labelConfirmed: false,
+    });
+    expect(highRate.productOzPerFinishedGallon).toBe(1.6);
+    expect(highRate.requiresManualReview).toBe(true);
+    expect(highRate.manualReviewReasons).toEqual(expect.arrayContaining([
+      'high_rate_termite_trenching_selected',
+      'label_confirmation_required',
+    ]));
+
+    const explicitMissingLabelConfirmation = priceTrenching({}, {
+      measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 },
+      productKey: 'taurus_sc',
+    });
+    expect(explicitMissingLabelConfirmation.requiresManualReview).toBe(true);
+    expect(explicitMissingLabelConfirmation.manualReviewReasons).toContain('label_confirmation_required');
+
+    const legacyPayload = priceTrenching({ perimeter: 100 });
+    expect(legacyPayload.manualReviewReasons || []).not.toContain('label_confirmation_required');
+
+    const depthOverride = priceTrenching({ perimeter: 100 }, {
+      trenchDepthFt: 1.5,
+      labelConfirmed: true,
+    });
+    expect(depthOverride.requiresManualReview).toBe(true);
+    expect(depthOverride.manualReviewReasons).toContain('trench_depth_manual_override_used');
+
+    const taurusFiveYear = priceTrenching({}, {
+      measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 },
+      productKey: 'taurus_sc',
+      warrantyTier: 'five_year_repair_retreat',
+      labelConfirmed: true,
+    });
+    expect(taurusFiveYear.quoteRequired).toBe(false);
+    expect(taurusFiveYear.warrantyAdder).toBe(Math.round(taurusFiveYear.priceBeforeWarranty * 0.25));
+
+    const bifenThreeYear = priceTrenching({}, {
+      measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 },
+      productKey: 'bifen_it',
+      warrantyTier: 'three_year_repair_retreat',
+      labelConfirmed: true,
+    });
+    expect(bifenThreeYear.requiresManualReview).toBe(true);
+    expect(bifenThreeYear.quoteRequired).toBe(false);
+    expect(bifenThreeYear.manualReviewReasons).toContain('long_warranty_on_repellent_termiticide_requires_review');
+
+    const talstarFiveYear = priceTrenching({}, {
+      measurements: { perimeterLF: 100, dirtLF: 100, concreteLF: 0 },
+      productKey: 'talstar_p',
+      warrantyTier: 'five_year_repair_retreat',
+      labelConfirmed: true,
+    });
+    expect(talstarFiveYear.quoteRequired).toBe(true);
+    expect(talstarFiveYear.price).toBeNull();
+    expect(talstarFiveYear.manualReviewReasons).toContain('five_year_warranty_not_allowed_for_repellent_default');
   });
 
   test('trenching does not produce false floor quote from missing or invalid LF data', () => {
@@ -159,34 +271,114 @@ describe('termite measurement overrides and safeguards', () => {
     expect(missing.manualReviewReasons).toContain('missing_boracare_attic_sqft');
   });
 
-  test('Pre-Slab Termidor keeps examples, supports manual slab sqft and extended warranty metadata', () => {
-    const noDiscount = pricePreSlabTermidor(2500, 'none');
-    expect(noDiscount.bottles).toBe(2);
-    expect(noDiscount.laborHrs).toBe(2.2);
-    expect(noDiscount.price).toBe(878);
+  test('Pre-Slab Termiticide normalizes products and aliases', () => {
+    expect(normalizePreSlabTermiticideProduct('termidor_sc').productKey).toBe('termidor_sc');
+    expect(normalizePreSlabTermiticideProduct('termidor sc').productKey).toBe('termidor_sc');
+    expect(normalizePreSlabTermiticideProduct('taurus').productKey).toBe('taurus_sc');
+    expect(normalizePreSlabTermiticideProduct('bifen i/t').productKey).toBe('bifen_it');
+    expect(normalizePreSlabTermiticideProduct('talstar professional').productKey).toBe('talstar_p');
+    expect(normalizePreSlabTermiticideProduct('fipronil', { legacyPayload: true }).productKey).toBe('termidor_sc');
+    expect(normalizePreSlabTermiticideProduct('bifenthrin', { legacyPayload: true }).productKey).toBe('bifen_it');
 
-    const tenPlus = pricePreSlabTermidor(1800, '10plus');
-    expect(tenPlus.bottles).toBe(2);
-    expect(tenPlus.laborHrs).toBe(1.7);
-    expect(tenPlus.priceBeforeVolumeDiscount).toBe(842);
-    expect(tenPlus.price).toBe(716);
-    expect(tenPlus.volumeDiscountMultiplier).toBe(0.85);
+    const unknownNew = normalizePreSlabTermiticideProduct('unknown product');
+    expect(unknownNew.productKey).toBe('termidor_sc');
+    expect(unknownNew.requiresManualReview).toBe(true);
+    expect(unknownNew.manualReviewReasons).toContain('invalid_pre_slab_termiticide_product');
 
-    const override = pricePreSlabTermidor({}, {
+    const unknownLegacy = normalizePreSlabTermiticideProduct('unknown product', { legacyPayload: true });
+    expect(unknownLegacy.productKey).toBe('termidor_sc');
+    expect(unknownLegacy.requiresManualReview).toBe(false);
+    expect(unknownLegacy.warnings).toContain('unknown_legacy_pre_slab_product_defaulted_to_termidor_sc');
+  });
+
+  test('Pre-Slab Termiticide uses product-ounce pricing for 2,500 sqft', () => {
+    const termidor = pricePreSlabTermiticide(2500, { productKey: 'termidor_sc', labelConfirmed: true });
+    expect(termidor.productOz).toBe(200);
+    expect(termidor.units).toBe(3);
+    expect(termidor.productCost).toBe(524.16);
+    expect(termidor.price).toBe(1367);
+
+    const taurus = pricePreSlabTermiticide(2500, { productKey: 'taurus_sc', labelConfirmed: true });
+    expect(taurus.productOz).toBe(200);
+    expect(taurus.units).toBe(3);
+    expect(taurus.productCost).toBe(285);
+    expect(taurus.price).toBe(835);
+
+    const bifen = pricePreSlabTermiticide(2500, { productKey: 'bifen_it', labelConfirmed: true });
+    expect(bifen.productOz).toBe(250);
+    expect(bifen.units).toBe(2);
+    expect(bifen.productCost).toBe(83.06);
+    expect(bifen.rawPrice).toBe(386);
+    expect(bifen.price).toBe(600);
+
+    const talstar = pricePreSlabTermiticide(2500, { productKey: 'talstar_p', labelConfirmed: true });
+    expect(talstar.productOz).toBe(250);
+    expect(talstar.units).toBe(2);
+    expect(talstar.productCost).toBe(77.98);
+    expect(talstar.rawPrice).toBe(375);
+    expect(talstar.price).toBe(600);
+  });
+
+  test('Pre-Slab Termiticide applies volume floors, warranty metadata, and measurement guards', () => {
+    const termidorTenPlus = pricePreSlabTermiticide(1800, {
+      productKey: 'termidor_sc',
+      volumeDiscount: '10plus',
+      labelConfirmed: true,
+    });
+    expect(termidorTenPlus.units).toBe(2);
+    expect(termidorTenPlus.price).toBe(801);
+    expect(termidorTenPlus.volumeDiscountMultiplier).toBe(0.85);
+
+    const taurusTenPlus = pricePreSlabTermiticide(1800, {
+      productKey: 'taurus_sc',
+      volumeDiscount: '10plus',
+      labelConfirmed: true,
+    });
+    expect(taurusTenPlus.price).toBe(510);
+
+    const bifenTenPlus = pricePreSlabTermiticide(1800, {
+      productKey: 'bifen_it',
+      volumeDiscount: '10plus',
+      labelConfirmed: true,
+    });
+    expect(bifenTenPlus.priceBeforeVolumeDiscount).toBe(600);
+    expect(bifenTenPlus.price).toBe(510);
+
+    const talstarTenPlus = pricePreSlabTermiticide(1800, {
+      productKey: 'talstar_p',
+      volumeDiscount: '10plus',
+      labelConfirmed: true,
+    });
+    expect(talstarTenPlus.priceBeforeVolumeDiscount).toBe(600);
+    expect(talstarTenPlus.price).toBe(510);
+
+    const override = pricePreSlabTermiticide({}, {
+      productKey: 'termidor_sc',
       measurements: { slabSqFt: 2500 },
       includeWarrantyExtended: true,
+      labelConfirmed: true,
     });
     expect(override.slabSqFt).toBe(2500);
     expect(override.slabSqFtSource).toBe('manual_override');
-    expect(override.price).toBe(1078);
+    expect(override.price).toBe(1567);
     expect(override.warrantyExtendedSelected).toBe(true);
     expect(override.warrantyExtendedPrice).toBe(200);
     expect(override.addOns[0].code).toBe('pre_slab_extended_warranty');
+    expect(override.certificateOfComplianceRequired).toBe(true);
 
-    const missing = pricePreSlabTermidor({}, {});
+    const missing = pricePreSlabTermiticide({}, {});
     expect(missing.quoteRequired).toBe(true);
     expect(missing.price).toBeNull();
     expect(missing.manualReviewReasons).toContain('missing_pre_slab_sqft');
+
+    const unconfirmed = pricePreSlabTermiticide(2500, { productKey: 'termidor_sc', labelConfirmed: false });
+    expect(unconfirmed.requiresManualReview).toBe(true);
+    expect(unconfirmed.manualReviewReasons).toContain('pre_slab_label_confirmation_required');
+
+    const legacy = pricePreSlabTermidor(2500, 'none');
+    expect(legacy.productKey).toBe('termidor_sc');
+    expect(legacy.legacyService).toBe('pre_slab_termidor');
+    expect(legacy.price).toBe(1367);
   });
 
   test('estimate engine and v1 adapter carry termite measurement metadata', () => {
@@ -198,24 +390,50 @@ describe('termite measurement overrides and safeguards', () => {
         termitePerimeterLF: 300,
         trenchingPerimeterLF: 240,
         trenchingConcretePct: 40,
+        trenchingProductKey: 'termidor_sc',
+        trenchingApplicationRate: 'high',
+        trenchingDepthFt: 1.5,
+        trenchingWarrantyTier: 'five_year_repair_retreat',
+        trenchingLabelConfirmed: true,
         boracareSqft: 2000,
         preslabSqft: 2500,
+        preslabProductKey: 'taurus_sc',
         preslabWarranty: 'EXTENDED',
+        preslabLabelConfirmed: true,
       }
     );
     const estimate = generateEstimate(v1Input);
     const trench = estimate.lineItems.find((item) => item.service === 'trenching');
-    const preslab = estimate.lineItems.find((item) => item.service === 'pre_slab_termidor');
+    const preslab = estimate.lineItems.find((item) => item.service === 'pre_slab_termiticide');
 
     expect(trench.measurements.perimeterLF.source).toBe('manual_override');
     expect(trench.concretePct).toBe(0.4);
+    expect(trench.productKey).toBe('termidor_sc');
+    expect(trench.applicationRate).toBe('high');
+    expect(trench.trenchDepthFt).toBe(1.5);
     expect(preslab.warrantyExtendedSelected).toBe(true);
+    expect(preslab.productKey).toBe('taurus_sc');
     expect(preslab.addOns[0].price).toBe(200);
 
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.results.tmBait.measurements.perimeterLF.source).toBe('manual_override');
-    expect(mapped.oneTime.items.find((item) => item.service === 'trenching').measurements.concretePct.value).toBe(0.4);
-    expect(mapped.oneTime.specItems.find((item) => item.service === 'pre_slab_termidor').addOns[0].price).toBe(200);
+    const mappedTrench = mapped.oneTime.items.find((item) => item.service === 'trenching');
+    expect(mappedTrench.measurements.concretePct.value).toBe(0.4);
+    expect(mappedTrench.productKey).toBe('termidor_sc');
+    expect(mappedTrench.applicationRate).toBe('high');
+    expect(mappedTrench.trenchDepthFt).toBe(1.5);
+    expect(mappedTrench.productSurcharge).toBeGreaterThan(0);
+    expect(mappedTrench.warrantyTier).toBe('five_year_repair_retreat');
+    expect(mappedTrench.warrantyAdder).toBeGreaterThan(0);
+    expect(mappedTrench.labelConfirmed).toBe(true);
+    expect(mappedTrench.certificateOfTreatmentRequired).toBe(true);
+    expect(mappedTrench.detail).toContain('Termidor');
+    const mappedPreSlab = mapped.oneTime.specItems.find((item) => item.service === 'pre_slab_termiticide');
+    expect(mappedPreSlab.productKey).toBe('taurus_sc');
+    expect(mappedPreSlab.labelConfirmed).toBe(true);
+    expect(mappedPreSlab.certificateOfComplianceRequired).toBe(true);
+    expect(mappedPreSlab.detail).toContain('Taurus');
+    expect(mappedPreSlab.addOns[0].price).toBe(200);
   });
 
   test('estimate engine does not silently use computed perimeter for trenching', () => {

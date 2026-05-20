@@ -12,7 +12,7 @@ const {
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
-  priceTrenching, priceBoraCare, pricePreSlabTermidor,
+  priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
@@ -719,10 +719,14 @@ function generateEstimate(input) {
     const result = priceBoraCare(property, serviceOptions(boraCareService));
     lineItems.push(result);
   }
-  const preSlabService = services.preSlab || services.preSlabTermidor || services.pre_slab_termidor;
+  const canonicalPreSlabService = services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab;
+  const legacyPreSlabService = services.preSlabTermidor || services.pre_slab_termidor;
+  const preSlabService = canonicalPreSlabService || legacyPreSlabService;
   if (preSlabService && !useCommercialManualQuote(preSlabService, 'pest_control')) {
     const preSlabOptions = serviceOptions(preSlabService);
-    const result = pricePreSlabTermidor(property, preSlabOptions);
+    const result = legacyPreSlabService && !canonicalPreSlabService
+      ? pricePreSlabTermidor(property, preSlabOptions)
+      : pricePreSlabTermiticide(property, preSlabOptions);
     lineItems.push(result);
   }
   if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control')) {

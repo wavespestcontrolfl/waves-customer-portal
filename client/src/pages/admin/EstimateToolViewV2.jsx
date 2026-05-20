@@ -58,6 +58,58 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
+
+const TRENCHING_PRODUCT_OPTIONS = [
+  { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
+  { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
+  { value: "bifen_it", label: "Bifen I/T - Bifenthrin, standard repellent barrier" },
+  { value: "talstar_p", label: "Talstar P / Pro - Bifenthrin, branded repellent barrier" },
+];
+
+const TRENCHING_PRODUCT_META = {
+  termidor_sc: {
+    warning: "Premium fipronil non-repellent trench treatment. Eligible for longer warranty tiers with product premium surcharge.",
+    config: "78 oz @ $375 | 0.8 oz / finished gal standard",
+  },
+  taurus_sc: {
+    warning: "Default fipronil non-repellent trench treatment. Existing LF pricing includes Taurus standard-rate chemistry.",
+    config: "78 oz @ $85 | 0.8 oz / finished gal standard",
+  },
+  bifen_it: {
+    warning: "Repellent bifenthrin barrier. 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "96 oz @ $55 | 1.0 oz / finished gal standard",
+  },
+  talstar_p: {
+    warning: "Branded bifenthrin repellent barrier. 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "96 oz @ $65 | 1.0 oz / finished gal standard",
+  },
+};
+
+const PRE_SLAB_PRODUCT_OPTIONS = [
+  { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
+  { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
+  { value: "bifen_it", label: "Bifen I/T - Bifenthrin, standard repellent barrier" },
+  { value: "talstar_p", label: "Talstar P - Bifenthrin, branded repellent barrier" },
+];
+
+const PRE_SLAB_PRODUCT_META = {
+  termidor_sc: {
+    warning: "Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.",
+    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | $600 floor",
+  },
+  taurus_sc: {
+    warning: "Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.",
+    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | $600 floor",
+  },
+  bifen_it: {
+    warning: "Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.",
+    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | $600 floor",
+  },
+  talstar_p: {
+    warning: "Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.",
+    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | $600 floor",
+  },
+};
 const COMMERCIAL_WARNING_TEXT =
   "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
 const FLEA_EXTERIOR_SOURCE_OPTIONS = [
@@ -1549,6 +1601,8 @@ export default function EstimateToolViewV2({
     bedbugSubcontractCost: "",
     boracareSqft: "",
     preslabSqft: "",
+    preslabProductKey: "termidor_sc",
+    preslabLabelConfirmed: false,
     preslabWarranty: "BASIC",
     preslabVolume: "NONE",
     termiteFootprintSqFt: "",
@@ -1561,6 +1615,11 @@ export default function EstimateToolViewV2({
     trenchingDirtLF: "",
     trenchingConcretePct: "",
     trenchingEstimateFromFootprint: false,
+    trenchingProductKey: "taurus_sc",
+    trenchingApplicationRate: "standard",
+    trenchingDepthFt: "1",
+    trenchingWarrantyTier: "one_year_retreat",
+    trenchingLabelConfirmed: false,
     foamPoints: "5",
     roachType: "REGULAR",
     svcLawn: true,
@@ -2486,8 +2545,15 @@ export default function EstimateToolViewV2({
         trenchingDirtLF,
         trenchingConcretePct,
         trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint,
+        trenchingProductKey: form.trenchingProductKey || "taurus_sc",
+        trenchingApplicationRate: form.trenchingApplicationRate || "standard",
+        trenchingDepthFt: form.trenchingDepthFt || "1",
+        trenchingWarrantyTier: form.trenchingWarrantyTier || "one_year_retreat",
+        trenchingLabelConfirmed: !!form.trenchingLabelConfirmed,
         boracareSqft,
         preslabSqft,
+        preslabProductKey: form.preslabProductKey || "termidor_sc",
+        preslabLabelConfirmed: !!form.preslabLabelConfirmed,
         preslabWarranty: form.preslabWarranty || "BASIC",
         preslabVolume: form.preslabVolume || "NONE",
         includePreSlabWarrantyExtended: form.preslabWarranty === "EXTENDED",
@@ -2916,6 +2982,8 @@ export default function EstimateToolViewV2({
       fleaExteriorZones: [],
       boracareSqft: "",
       preslabSqft: "",
+      preslabProductKey: "termidor_sc",
+      preslabLabelConfirmed: false,
       termiteFootprintSqFt: "",
       termitePerimeterLF: "",
       termiteBaitComplexity: "",
@@ -2926,6 +2994,11 @@ export default function EstimateToolViewV2({
       trenchingDirtLF: "",
       trenchingConcretePct: "",
       trenchingEstimateFromFootprint: false,
+      trenchingProductKey: "taurus_sc",
+      trenchingApplicationRate: "standard",
+      trenchingDepthFt: "1",
+      trenchingWarrantyTier: "one_year_retreat",
+      trenchingLabelConfirmed: false,
       customerId: "",
       leadId: "",
       customerName: "",
@@ -3081,7 +3154,7 @@ export default function EstimateToolViewV2({
       ? "Bora-Care needs attic/raw wood sqft."
       : null,
     form.svcPreslab && !parsePositiveNumber(form.preslabSqft)
-      ? "Pre-Slab Termidor needs slab sqft."
+      ? "Pre-Slab Termiticide Treatment needs slab sqft."
       : null,
   ].filter(Boolean);
   const formCtx = { form, set, toggle };
@@ -4069,7 +4142,7 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcWdo" label="WDO / Termite Inspection" />{" "}
               <CheckboxV2 k="svcTrenching" label="Termite Trenching" />{" "}
               <CheckboxV2 k="svcBoracare" label="Termite Attic Remediation" />
-              <CheckboxV2 k="svcPreslab" label="Pre-Slab Termite Treatment" />
+              <CheckboxV2 k="svcPreslab" label="Pre-Slab Termiticide Treatment" />
               {hasAnyTermiteSelection && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -4137,6 +4210,44 @@ export default function EstimateToolViewV2({
                   )}
                   {form.svcTrenching && (
                     <>
+                      <FieldV2 label="Trenching Product">
+                        <SelectV2
+                          k="trenchingProductKey"
+                          options={TRENCHING_PRODUCT_OPTIONS}
+                        />
+                      </FieldV2>
+                      <div className="grid grid-cols-3 gap-3">
+                        <FieldV2 label="Application Rate">
+                          <SelectV2
+                            k="trenchingApplicationRate"
+                            options={[
+                              { value: "standard", label: "Standard 0.06%" },
+                              { value: "high", label: "High/problem-soil rate" },
+                            ]}
+                          />
+                        </FieldV2>
+                        <FieldV2 label="Trench Depth">
+                          <SelectV2
+                            k="trenchingDepthFt"
+                            options={[
+                              { value: "0.5", label: "0.5 ft / 6 in" },
+                              { value: "1", label: "1.0 ft / 12 in" },
+                              { value: "1.5", label: "1.5 ft / 18 in" },
+                            ]}
+                          />
+                        </FieldV2>
+                        <FieldV2 label="Warranty">
+                          <SelectV2
+                            k="trenchingWarrantyTier"
+                            options={[
+                              { value: "none", label: "None" },
+                              { value: "one_year_retreat", label: "1-Year Retreat" },
+                              { value: "three_year_repair_retreat", label: "3-Year Repair + Retreat" },
+                              { value: "five_year_repair_retreat", label: "5-Year Repair + Retreat" },
+                            ]}
+                          />
+                        </FieldV2>
+                      </div>
                       <div className="grid grid-cols-2 gap-3">
                         <FieldV2 label="Perimeter LF">
                           <InputV2
@@ -4173,6 +4284,17 @@ export default function EstimateToolViewV2({
                         k="trenchingEstimateFromFootprint"
                         label="Estimate trenching perimeter from footprint"
                       />
+                      <CheckboxV2
+                        k="trenchingLabelConfirmed"
+                        label="Label rate and trench depth confirmed"
+                      />
+                      <div className="text-12 text-zinc-600 leading-snug mb-1">
+                        {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).warning}
+                        {form.trenchingApplicationRate === "high" ? " High rate requires label confirmation." : ""}
+                      </div>
+                      <div className="text-11 text-zinc-500 leading-snug">
+                        Admin config: {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).config}
+                      </div>
                     </>
                   )}
                   {form.svcBoracare && (
@@ -4186,6 +4308,12 @@ export default function EstimateToolViewV2({
                   )}
                   {form.svcPreslab && (
                     <>
+                      <FieldV2 label="Product">
+                        <SelectV2
+                          k="preslabProductKey"
+                          options={PRE_SLAB_PRODUCT_OPTIONS}
+                        />
+                      </FieldV2>
                       <div className="grid grid-cols-2 gap-3">
                         {" "}
                         <FieldV2 label="Slab Sq Ft">
@@ -4214,7 +4342,17 @@ export default function EstimateToolViewV2({
                             { value: "10", label: "10+ homes (-15%)" },
                           ]}
                         />
-                      </FieldV2>{" "}
+                      </FieldV2>
+                      <CheckboxV2
+                        k="preslabLabelConfirmed"
+                        label="Label rate and finished dilution confirmed"
+                      />
+                      <div className="text-12 text-zinc-600 leading-snug mb-1">
+                        Certificate of Compliance required. {(PRE_SLAB_PRODUCT_META[form.preslabProductKey] || PRE_SLAB_PRODUCT_META.termidor_sc).warning}
+                      </div>
+                      <div className="text-11 text-zinc-500 leading-snug">
+                        Admin config: {(PRE_SLAB_PRODUCT_META[form.preslabProductKey] || PRE_SLAB_PRODUCT_META.termidor_sc).config}
+                      </div>
                     </>
                   )}
                 </div>
@@ -5539,12 +5677,33 @@ export default function EstimateToolViewV2({
                                   )}
                                 </SectionTitle>{" "}
                                 <TierGridV2>
+                                  {item.productLabel && (
+                                    <TierRowV2
+                                      name="Product"
+                                      detail={`${item.productLabel} | ${item.applicationRate || "standard"} | ${item.trenchDepthFt || 1} ft`}
+                                      price={item.activeIngredient || ""}
+                                    />
+                                  )}
                                   {" "}
                                   <TierRowV2
                                     name="Treatment"
                                     detail={item.detail}
                                     price={fmtInt(item.price)}
                                   />{" "}
+                                  {item.productSurcharge > 0 && (
+                                    <TierRowV2
+                                      name="Product Premium"
+                                      detail="Premium product/rate surcharge"
+                                      price={`+$${item.productSurcharge}`}
+                                    />
+                                  )}
+                                  {item.warrantyAdder > 0 && (
+                                    <TierRowV2
+                                      name="Warranty"
+                                      detail={item.warrantyTier || "Warranty"}
+                                      price={`+$${item.warrantyAdder}`}
+                                    />
+                                  )}
                                   <TierRowV2
                                     name="Renewal"
                                     detail="Annual warranty"
@@ -5555,6 +5714,17 @@ export default function EstimateToolViewV2({
                                 <div className="text-12 text-ink-secondary italic mt-1">
                                   Best scheduled before rainy season (Apr-May)
                                 </div>{" "}
+                                {item.warningText && (
+                                  <div className="text-11 text-ink-secondary mt-1">
+                                    {item.warningText}
+                                  </div>
+                                )}
+                                {item.allocatedChemicalCost !== undefined && (
+                                  <div className="text-11 text-ink-secondary mt-1">
+                                    Internal: {item.finishedGallons} gal | {item.productOz} oz | Chemical ${item.allocatedChemicalCost}
+                                    {item.labelConfirmed ? " | Label confirmed" : " | Label review required"}
+                                  </div>
+                                )}
                               </div>
                             );
                           }
@@ -5592,12 +5762,19 @@ export default function EstimateToolViewV2({
                               <div key={i} className="mb-6">
                                 {" "}
                                 <SectionTitle>
-                                  Pre-Slab Termidor
+                                  {item.displayName || "Pre-Slab Termiticide Treatment"}
                                   {E.isRecurringCustomer && (
                                     <DiscBadge>-15%</DiscBadge>
                                   )}
                                 </SectionTitle>{" "}
                                 <TierGridV2>
+                                  {item.productLabel && (
+                                    <TierRowV2
+                                      name="Product"
+                                      detail={item.productLabel}
+                                      price={item.activeIngredient || ""}
+                                    />
+                                  )}
                                   {" "}
                                   <TierRowV2
                                     name="Treatment"
@@ -5618,6 +5795,17 @@ export default function EstimateToolViewV2({
                                     renewal after
                                   </div>
                                 )}
+                                {item.warningText && (
+                                  <div className="text-11 text-ink-secondary mt-1">
+                                    {item.warningText}
+                                  </div>
+                                )}
+                                <div className="text-11 text-ink-secondary mt-1">
+                                  Certificate of Compliance required{item.labelConfirmed ? " | Label confirmed" : " | Label review required"}
+                                  {item.productCost !== undefined && item.rawPrice !== undefined
+                                    ? ` | Material $${item.productCost.toFixed(2)} | Raw $${item.rawPrice} | Floor $${item.priceBeforeVolumeDiscount}`
+                                    : ""}
+                                </div>
                               </div>
                             );
                           }

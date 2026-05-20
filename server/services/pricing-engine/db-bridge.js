@@ -188,6 +188,44 @@ function validatePestPricingConfig(snapshot = constants) {
       errors.push(`SPECIALTY.trenching.${key} must be between 0 and 1`);
     }
   }
+  if (!trenching.products?.[trenching.defaultProductKey]) {
+    errors.push('SPECIALTY.trenching.defaultProductKey must reference a configured product');
+  }
+  if (!trenching.products?.[trenching.defaultIncludedProductKey]) {
+    errors.push('SPECIALTY.trenching.defaultIncludedProductKey must reference a configured product');
+  }
+  if (!isPositiveNumber(trenching.finishedGallonsPer10LFPerFtDepth)) {
+    errors.push('SPECIALTY.trenching.finishedGallonsPer10LFPerFtDepth must be positive');
+  }
+  if (!isFiniteNumber(trenching.defaultConcreteVolumePadPct) ||
+    Number(trenching.defaultConcreteVolumePadPct) < 0 ||
+    Number(trenching.defaultConcreteVolumePadPct) > 1) {
+    errors.push('SPECIALTY.trenching.defaultConcreteVolumePadPct must be between 0 and 1');
+  }
+  if (!isPositiveNumber(trenching.productPremiumMultiplier) || Number(trenching.productPremiumMultiplier) < 1) {
+    errors.push('SPECIALTY.trenching.productPremiumMultiplier must be at least 1');
+  }
+  for (const key of ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p']) {
+    const product = trenching.products?.[key] || {};
+    if (!isPositiveNumber(product.containerCost)) {
+      errors.push(`SPECIALTY.trenching.products.${key}.containerCost must be positive`);
+    }
+    if (!isPositiveNumber(product.containerOz)) {
+      errors.push(`SPECIALTY.trenching.products.${key}.containerOz must be positive`);
+    }
+    if (!isPositiveNumber(product.productOzPerFinishedGallonAtStandardRate)) {
+      errors.push(`SPECIALTY.trenching.products.${key}.productOzPerFinishedGallonAtStandardRate must be positive`);
+    }
+    if (!isPositiveNumber(product.productOzPerFinishedGallonAtHighRate) ||
+      Number(product.productOzPerFinishedGallonAtHighRate) < Number(product.productOzPerFinishedGallonAtStandardRate)) {
+      errors.push(`SPECIALTY.trenching.products.${key}.productOzPerFinishedGallonAtHighRate must be at least standard rate`);
+    }
+  }
+  for (const [key, tier] of Object.entries(trenching.warrantyTiers || {})) {
+    if (!isNonNegativeNumber(tier.priceAdderPct)) {
+      errors.push(`SPECIALTY.trenching.warrantyTiers.${key}.priceAdderPct must be non-negative`);
+    }
+  }
 
   const boraCare = SPECIALTY.boraCare || {};
   if (!isPositiveNumber(boraCare.coverage)) errors.push('SPECIALTY.boraCare.coverage must be positive');
@@ -209,6 +247,44 @@ function validatePestPricingConfig(snapshot = constants) {
   }
   if (!isNonNegativeNumber(preSlab.warrantyExtended)) {
     errors.push('SPECIALTY.preSlabTermidor.warrantyExtended must be non-negative');
+  }
+
+  const preSlabTermiticide = SPECIALTY.preSlabTermiticide || {};
+  const products = preSlabTermiticide.products || {};
+  if (!products[preSlabTermiticide.defaultProductKey]) {
+    errors.push('SPECIALTY.preSlabTermiticide.defaultProductKey must reference a configured product');
+  }
+  if (!isPositiveNumber(preSlabTermiticide.equipCost)) {
+    errors.push('SPECIALTY.preSlabTermiticide.equipCost must be positive');
+  }
+  if (!isNonNegativeNumber(preSlabTermiticide.warrantyExtended)) {
+    errors.push('SPECIALTY.preSlabTermiticide.warrantyExtended must be non-negative');
+  }
+  for (const key of ['none', '5plus', '10plus']) {
+    if (!isPositiveNumber(preSlabTermiticide.volumeDiscounts?.[key])) {
+      errors.push(`SPECIALTY.preSlabTermiticide.volumeDiscounts.${key} is required`);
+    }
+  }
+  for (const key of ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p']) {
+    const product = products[key] || {};
+    if (!isPositiveNumber(product.containerCost)) {
+      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.containerCost must be positive`);
+    }
+    if (!isPositiveNumber(product.containerOz)) {
+      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.containerOz must be positive`);
+    }
+    if (!isPositiveNumber(product.productOzPer10SqFt)) {
+      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.productOzPer10SqFt must be positive`);
+    }
+    if (!isPositiveNumber(product.marginDivisor) || Number(product.marginDivisor) >= 1) {
+      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.marginDivisor must be positive and less than 1`);
+    }
+    if (!isNonNegativeNumber(product.floorBeforeVolumeDiscount)) {
+      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorBeforeVolumeDiscount must be non-negative`);
+    }
+    if (!isNonNegativeNumber(product.floorAfterVolumeDiscount)) {
+      errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorAfterVolumeDiscount must be non-negative`);
+    }
   }
 
   return { valid: errors.length === 0, errors };
@@ -853,6 +929,40 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(constants.SPECIALTY.trenching, 'concretePctPool', ot.concretePctPool ?? ot.concrete_pct_pool, Number);
       setNumber(constants.SPECIALTY.trenching, 'concretePctDriveway', ot.concretePctDriveway ?? ot.concrete_pct_driveway, Number);
       setNumber(constants.SPECIALTY.trenching, 'concretePctCap', ot.concretePctCap ?? ot.concrete_pct_cap, Number);
+      setString(constants.SPECIALTY.trenching, 'defaultProductKey', ot.defaultProductKey ?? ot.default_product_key);
+      setString(constants.SPECIALTY.trenching, 'defaultIncludedProductKey', ot.defaultIncludedProductKey ?? ot.default_included_product_key);
+      setString(constants.SPECIALTY.trenching, 'defaultApplicationRate', ot.defaultApplicationRate ?? ot.default_application_rate);
+      setNumber(constants.SPECIALTY.trenching, 'defaultTrenchDepthFt', ot.defaultTrenchDepthFt ?? ot.default_trench_depth_ft, Number);
+      setNumber(constants.SPECIALTY.trenching, 'finishedGallonsPer10LFPerFtDepth', ot.finishedGallonsPer10LFPerFtDepth ?? ot.finished_gallons_per_10_lf_per_ft_depth, Number);
+      setNumber(constants.SPECIALTY.trenching, 'defaultConcreteVolumePadPct', ot.defaultConcreteVolumePadPct ?? ot.default_concrete_volume_pad_pct, Number);
+      setNumber(constants.SPECIALTY.trenching, 'productPremiumMultiplier', ot.productPremiumMultiplier ?? ot.product_premium_multiplier, Number);
+      const trenchingProducts = ot.products || ot.product_costs || {};
+      const applyTrenchingProductOverlay = (key, data = {}) => {
+        const target = constants.SPECIALTY.trenching.products?.[key];
+        if (!target || !data || typeof data !== 'object') return;
+        setString(target, 'label', data.label);
+        setString(target, 'activeIngredient', data.activeIngredient ?? data.active_ingredient);
+        setString(target, 'chemistryType', data.chemistryType ?? data.chemistry_type);
+        setString(target, 'positioning', data.positioning);
+        setString(target, 'defaultWarrantyPositioning', data.defaultWarrantyPositioning ?? data.default_warranty_positioning);
+        setString(target, 'warrantyRisk', data.warrantyRisk ?? data.warranty_risk);
+        setString(target, 'standardConcentrationLabel', data.standardConcentrationLabel ?? data.standard_concentration_label);
+        setString(target, 'highConcentrationLabel', data.highConcentrationLabel ?? data.high_concentration_label);
+        setNumber(target, 'containerCost', data.containerCost ?? data.container_cost, Number);
+        setNumber(target, 'containerOz', data.containerOz ?? data.container_oz, Number);
+        setNumber(target, 'productOzPerFinishedGallonAtStandardRate', data.productOzPerFinishedGallonAtStandardRate ?? data.product_oz_per_finished_gallon_at_standard_rate, Number);
+        setNumber(target, 'productOzPerFinishedGallonAtHighRate', data.productOzPerFinishedGallonAtHighRate ?? data.product_oz_per_finished_gallon_at_high_rate, Number);
+        setStringArray(target, 'warnings', data.warnings);
+      };
+      ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'].forEach((key) => {
+        applyTrenchingProductOverlay(key, trenchingProducts[key] || ot[key]);
+      });
+      if (ot.applicationRates || ot.application_rates) {
+        mergePlainObject(constants.SPECIALTY.trenching.applicationRates, ot.applicationRates || ot.application_rates);
+      }
+      if (ot.warrantyTiers || ot.warranty_tiers) {
+        mergePlainObject(constants.SPECIALTY.trenching.warrantyTiers, ot.warrantyTiers || ot.warranty_tiers);
+      }
     }
     if (config.onetime_boracare) {
       const bc = config.onetime_boracare;
@@ -869,11 +979,46 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(constants.SPECIALTY.preSlabTermidor, 'marginDivisor', ps.marginDivisor ?? ps.margin_divisor, Number);
       if (ps.volumeDiscounts && typeof ps.volumeDiscounts === 'object') {
         Object.assign(constants.SPECIALTY.preSlabTermidor.volumeDiscounts, ps.volumeDiscounts);
+        Object.assign(constants.SPECIALTY.preSlabTermiticide.volumeDiscounts, ps.volumeDiscounts);
       }
       if (ps.volume_discounts && typeof ps.volume_discounts === 'object') {
         Object.assign(constants.SPECIALTY.preSlabTermidor.volumeDiscounts, ps.volume_discounts);
+        Object.assign(constants.SPECIALTY.preSlabTermiticide.volumeDiscounts, ps.volume_discounts);
       }
       setNumber(constants.SPECIALTY.preSlabTermidor, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
+      const termiticide = constants.SPECIALTY.preSlabTermiticide;
+      setString(termiticide, 'defaultProductKey', ps.defaultProductKey ?? ps.default_product_key);
+      setNumber(termiticide, 'equipCost', ps.ps_equip ?? ps.equipCost ?? ps.equip_cost, Number);
+      setNumber(termiticide, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
+      const productOverlays = ps.products || ps.product_costs || {};
+      const productKeys = ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'];
+      const applyPreSlabProductOverlay = (key, data = {}) => {
+        const target = termiticide.products?.[key];
+        if (!target || !data || typeof data !== 'object') return;
+        setString(target, 'label', data.label);
+        setString(target, 'supplierSku', data.supplierSku ?? data.supplier_sku);
+        setString(target, 'packageLabel', data.packageLabel ?? data.package_label);
+        setString(target, 'activeIngredient', data.activeIngredient ?? data.active_ingredient);
+        setString(target, 'chemistryType', data.chemistryType ?? data.chemistry_type);
+        setString(target, 'positioning', data.positioning);
+        setNumber(target, 'containerCost', data.containerCost ?? data.container_cost ?? data.bottleCost ?? data.bottle_cost, Number);
+        setNumber(target, 'containerOz', data.containerOz ?? data.container_oz ?? data.bottleOz ?? data.bottle_oz, Number);
+        setNumber(target, 'productOzPer10SqFt', data.productOzPer10SqFt ?? data.product_oz_per_10_sqft, Number);
+        setNumber(target, 'marginDivisor', data.marginDivisor ?? data.margin_divisor, Number);
+        setNumber(target, 'floorBeforeVolumeDiscount', data.floorBeforeVolumeDiscount ?? data.floor_before_volume_discount, money);
+        setNumber(target, 'floorAfterVolumeDiscount', data.floorAfterVolumeDiscount ?? data.floor_after_volume_discount, money);
+        setBoolean(target, 'requiresLabelConfirmation', data.requiresLabelConfirmation ?? data.requires_label_confirmation);
+        setBoolean(target, 'requiresCertificateOfCompliance', data.requiresCertificateOfCompliance ?? data.requires_certificate_of_compliance);
+        setStringArray(target, 'warnings', data.warnings);
+      };
+      productKeys.forEach((key) => {
+        applyPreSlabProductOverlay(key, productOverlays[key] || ps[key]);
+      });
+      applyPreSlabProductOverlay('termidor_sc', {
+        containerCost: ps.termidor_sc_container_cost ?? ps.termidorContainerCost ?? ps.ps_btl ?? ps.bottleCost,
+        containerOz: ps.termidor_sc_container_oz ?? ps.termidorContainerOz,
+        productOzPer10SqFt: ps.termidor_sc_product_oz_per_10_sqft,
+      });
     }
     if (config.onetime_exclusion) {
       const ex = config.onetime_exclusion;

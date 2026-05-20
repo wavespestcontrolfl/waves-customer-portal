@@ -385,6 +385,195 @@ function resolveFoamDrillTier(points) {
   return { pointCount, tier };
 }
 
+const PRE_SLAB_TERMITICIDE_PRODUCTS = {
+  termidor_sc: {
+    label: 'Termidor SC - Fipronil',
+    shortLabel: 'Termidor SC',
+    activeIngredient: 'fipronil',
+    chemistryType: 'non_repellent',
+    positioning: 'premium_non_repellent',
+    containerCost: 174.72,
+    containerOz: 78,
+    productOzPer10SqFt: 0.8,
+    marginDivisor: 0.45,
+    floorBeforeVolumeDiscount: 600,
+    floorAfterVolumeDiscount: 500,
+    warning: 'Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.',
+  },
+  taurus_sc: {
+    label: 'Taurus SC - Fipronil',
+    shortLabel: 'Taurus SC',
+    activeIngredient: 'fipronil',
+    chemistryType: 'non_repellent',
+    positioning: 'standard_non_repellent',
+    containerCost: 95.00,
+    containerOz: 78,
+    productOzPer10SqFt: 0.8,
+    marginDivisor: 0.45,
+    floorBeforeVolumeDiscount: 600,
+    floorAfterVolumeDiscount: 500,
+    warning: 'Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.',
+  },
+  bifen_it: {
+    label: 'Bifen I/T - Bifenthrin',
+    shortLabel: 'Bifen I/T',
+    activeIngredient: 'bifenthrin',
+    chemistryType: 'repellent_pyrethroid',
+    positioning: 'standard_repellent',
+    containerCost: 41.53,
+    containerOz: 128,
+    productOzPer10SqFt: 1.0,
+    marginDivisor: 0.45,
+    floorBeforeVolumeDiscount: 600,
+    floorAfterVolumeDiscount: 500,
+    warning: 'Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.',
+  },
+  talstar_p: {
+    label: 'Talstar P - Bifenthrin',
+    shortLabel: 'Talstar P',
+    activeIngredient: 'bifenthrin',
+    chemistryType: 'repellent_pyrethroid',
+    positioning: 'branded_repellent',
+    containerCost: 38.99,
+    containerOz: 128,
+    productOzPer10SqFt: 1.0,
+    marginDivisor: 0.45,
+    floorBeforeVolumeDiscount: 600,
+    floorAfterVolumeDiscount: 500,
+    warning: 'Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.',
+  },
+};
+
+const TRENCHING_TERMITICIDE_PRODUCTS = {
+  termidor_sc: {
+    label: 'Termidor SC - Fipronil',
+    shortLabel: 'Termidor SC',
+    activeIngredient: 'fipronil',
+    chemistryType: 'non_repellent',
+    positioning: 'premium_non_repellent',
+    containerCost: 375.00,
+    containerOz: 78,
+    standardOzPerGal: 0.8,
+    highOzPerGal: 1.6,
+    warning: 'Premium fipronil non-repellent trench treatment. Confirm exact label rate, trench depth, and warranty obligation before treatment.',
+  },
+  taurus_sc: {
+    label: 'Taurus SC - Fipronil',
+    shortLabel: 'Taurus SC',
+    activeIngredient: 'fipronil',
+    chemistryType: 'non_repellent',
+    positioning: 'standard_non_repellent',
+    containerCost: 85.00,
+    containerOz: 78,
+    standardOzPerGal: 0.8,
+    highOzPerGal: 1.6,
+    warning: 'Value fipronil non-repellent trench treatment. Good default option for standard trenching when a fipronil barrier is desired.',
+  },
+  bifen_it: {
+    label: 'Bifen I/T - Bifenthrin',
+    shortLabel: 'Bifen I/T',
+    activeIngredient: 'bifenthrin',
+    chemistryType: 'repellent_pyrethroid',
+    positioning: 'standard_repellent',
+    containerCost: 55.00,
+    containerOz: 96,
+    standardOzPerGal: 1.0,
+    highOzPerGal: 2.0,
+    warning: 'Repellent bifenthrin barrier; not equivalent to non-repellent fipronil positioning.',
+  },
+  talstar_p: {
+    label: 'Talstar P / Pro - Bifenthrin',
+    shortLabel: 'Talstar P / Pro',
+    activeIngredient: 'bifenthrin',
+    chemistryType: 'repellent_pyrethroid',
+    positioning: 'branded_repellent',
+    containerCost: 65.00,
+    containerOz: 96,
+    standardOzPerGal: 1.0,
+    highOzPerGal: 2.0,
+    warning: 'Branded bifenthrin repellent barrier. Do not attach long repair-and-retreat warranty without admin approval.',
+  },
+};
+
+function normalizeTrenchingProductKey(value) {
+  const raw = String(value || 'taurus_sc')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/-]+/g, '_')
+    .replace(/_+/g, '_');
+  const aliases = {
+    termidor: 'termidor_sc',
+    termidor_sc: 'termidor_sc',
+    basf: 'termidor_sc',
+    taurus: 'taurus_sc',
+    taurus_sc: 'taurus_sc',
+    fipronil: 'taurus_sc',
+    bifen: 'bifen_it',
+    bifen_it: 'bifen_it',
+    bifen_i_t: 'bifen_it',
+    bifenthrin: 'bifen_it',
+    talstar: 'talstar_p',
+    talstar_p: 'talstar_p',
+    talstar_pro: 'talstar_p',
+    talstar_professional: 'talstar_p',
+  };
+  return aliases[raw] || 'taurus_sc';
+}
+
+function normalizeTrenchingRate(value) {
+  const raw = String(value || 'standard').trim().toLowerCase().replace(/[%\s.-]+/g, '_').replace(/_+/g, '_');
+  if (['high', 'high_rate', '0_125', '0_12', 'problem_soil', 'active_subterranean', 'formosan', 'asian_subterranean'].includes(raw)) return 'high';
+  return 'standard';
+}
+
+function normalizeTrenchingWarranty(value, product) {
+  const raw = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!raw) return product.chemistryType === 'repellent_pyrethroid' ? 'none' : 'one_year_retreat';
+  const aliases = {
+    none: 'none',
+    one_year: 'one_year_retreat',
+    '1_year': 'one_year_retreat',
+    one_year_retreat: 'one_year_retreat',
+    three_year: 'three_year_repair_retreat',
+    '3_year': 'three_year_repair_retreat',
+    three_year_repair_retreat: 'three_year_repair_retreat',
+    five_year: 'five_year_repair_retreat',
+    '5_year': 'five_year_repair_retreat',
+    five_year_repair_retreat: 'five_year_repair_retreat',
+  };
+  return aliases[raw] || (product.chemistryType === 'repellent_pyrethroid' ? 'none' : 'one_year_retreat');
+}
+
+function normalizePreSlabProductKey(value) {
+  const raw = String(value || 'termidor_sc')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/-]+/g, '_')
+    .replace(/_+/g, '_');
+  const aliases = {
+    termidor: 'termidor_sc',
+    termidor_sc: 'termidor_sc',
+    fipronil: 'termidor_sc',
+    taurus: 'taurus_sc',
+    taurus_sc: 'taurus_sc',
+    bifen: 'bifen_it',
+    bifen_it: 'bifen_it',
+    bifen_i_t: 'bifen_it',
+    bifenthrin: 'bifen_it',
+    talstar: 'talstar_p',
+    talstar_p: 'talstar_p',
+    talstar_professional: 'talstar_p',
+  };
+  return aliases[raw] || 'termidor_sc';
+}
+
+function normalizePreSlabVolume(value) {
+  const raw = String(value || 'NONE').trim().toUpperCase();
+  if (raw === '10' || raw === '10PLUS' || raw === '10_PLUS') return { key: '10plus', label: '10+', multiplier: 0.85 };
+  if (raw === '5' || raw === '5PLUS' || raw === '5_PLUS') return { key: '5plus', label: '5+', multiplier: 0.90 };
+  return { key: 'none', label: 'NONE', multiplier: 1.00 };
+}
+
 function resolveLawnFreq(freq) {
   const parsed = Number(freq);
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
@@ -474,10 +663,17 @@ export function calculateEstimate(inputs) {
     trenchingDirtLF: _trenchingDirtLF,
     trenchingConcretePct: _trenchingConcretePct,
     trenchingEstimateFromFootprint,
+    trenchingProductKey,
+    trenchingApplicationRate,
+    trenchingDepthFt,
+    trenchingWarrantyTier,
+    trenchingLabelConfirmed,
     boracareSqft: bcSqft,
     preslabSqft: psSqft,
     preslabWarranty,
     preslabVolume,
+    preslabProductKey,
+    preslabLabelConfirmed,
     foamPoints: _foamPoints,
     roachType,
     // Service selections (booleans)
@@ -1256,9 +1452,65 @@ export function calculateEstimate(inputs) {
         cl = Math.round(perim * cp);
         dl = Math.round(perim - cl);
       }
-      const fp = otP(Math.max(600, dl * 10 + cl * 14));
-      R.trench = { price: fp, ren: 325, dl, cl, perim, cp };
-      otItems.push({ name: 'Trenching', price: fp, detail: dl + ' LF dirt + ' + cl + ' LF concrete' });
+      const productKey = normalizeTrenchingProductKey(trenchingProductKey);
+      const product = TRENCHING_TERMITICIDE_PRODUCTS[productKey];
+      const applicationRate = normalizeTrenchingRate(trenchingApplicationRate);
+      const depth = toPositiveNumber(trenchingDepthFt) || 1;
+      const concretePad = 0.20;
+      const dirtFinishedGallons = dl * 0.4 * depth;
+      const concreteFinishedGallons = cl * 0.4 * depth * (1 + concretePad);
+      const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;
+      const productOzPerFinishedGallon = applicationRate === 'high' ? product.highOzPerGal : product.standardOzPerGal;
+      const productOz = finishedGallons * productOzPerFinishedGallon;
+      const allocatedChemicalCost = productOz * (product.containerCost / product.containerOz);
+      const included = TRENCHING_TERMITICIDE_PRODUCTS.taurus_sc;
+      const includedChemicalCost = finishedGallons * included.standardOzPerGal * (included.containerCost / included.containerOz);
+      const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
+      const productSurcharge = Math.round(chemicalPremiumCost * 1.45);
+      const baseInstallPrice = Math.max(600, dl * 10 + cl * 14);
+      const warrantyTier = normalizeTrenchingWarranty(trenchingWarrantyTier, product);
+      const warrantyPct = warrantyTier === 'five_year_repair_retreat' ? 0.25 : warrantyTier === 'three_year_repair_retreat' ? 0.15 : 0;
+      const warrantyAdder = Math.round((baseInstallPrice + productSurcharge) * warrantyPct);
+      const warrantyBlocked = product.chemistryType === 'repellent_pyrethroid' && warrantyTier === 'five_year_repair_retreat';
+      const fp = warrantyBlocked ? null : otP(baseInstallPrice + productSurcharge + warrantyAdder);
+      const labelConfirmed = trenchingLabelConfirmed === true || trenchingLabelConfirmed === 'true';
+      if (warrantyBlocked) {
+        R.trenchQuoteRequired = {
+          quoteRequired: true,
+          manualReviewReasons: ['five_year_warranty_not_allowed_for_repellent_default'],
+          productKey,
+          productLabel: product.label,
+        };
+      } else {
+        R.trench = { price: fp, ren: 325, dl, cl, perim, cp, productKey, productLabel: product.label };
+      }
+      otItems.push({
+        name: 'Trenching',
+        price: fp,
+        detail: dl + ' LF dirt + ' + cl + ' LF concrete | ' + product.shortLabel,
+        productKey,
+        productLabel: product.label,
+        activeIngredient: product.activeIngredient,
+        chemistryType: product.chemistryType,
+        positioning: product.positioning,
+        applicationRate,
+        trenchDepthFt: depth,
+        dirtFinishedGallons: Math.round(dirtFinishedGallons * 100) / 100,
+        concreteFinishedGallons: Math.round(concreteFinishedGallons * 100) / 100,
+        finishedGallons: Math.round(finishedGallons * 100) / 100,
+        productOz: Math.round(productOz * 100) / 100,
+        allocatedChemicalCost: Math.round(allocatedChemicalCost * 100) / 100,
+        includedChemicalCost: Math.round(includedChemicalCost * 100) / 100,
+        productSurcharge,
+        baseInstallPrice,
+        warrantyTier,
+        warrantyAdder,
+        labelConfirmed,
+        warningText: product.warning,
+        requiresManualReview: !labelConfirmed || applicationRate === 'high' ||
+          (product.chemistryType === 'repellent_pyrethroid' && warrantyTier === 'three_year_repair_retreat'),
+        quoteRequired: warrantyBlocked,
+      });
     } else {
       R.trenchQuoteRequired = { quoteRequired: true, requiresMeasurement: true, manualReviewReasons: ['missing_termite_perimeter_lf'] };
       otItems.push({ name: 'Trenching', price: null, detail: 'Perimeter LF required', quoteRequired: true });
@@ -1283,20 +1535,70 @@ export function calculateEstimate(inputs) {
     otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft required', quoteRequired: true });
   }
 
-  /* ── Pre-Slab Termidor ───────────────────────────────────── */
+  /* ── Pre-Slab Termiticide ────────────────────────────────── */
   if (svcPreslab && !isCommercial && psSqft > 0) {
     hasOT = true;
-    const PS_BTL = 152.10, PS_COV = 1250, PS_EQUIP = 15;
-    const btl = Math.max(1, Math.ceil(psSqft / PS_COV));
+    const productKey = normalizePreSlabProductKey(preslabProductKey);
+    const product = PRE_SLAB_TERMITICIDE_PRODUCTS[productKey];
+    const productOz = psSqft / 10 * product.productOzPer10SqFt;
+    const units = Math.max(1, Math.ceil(productOz / product.containerOz));
+    const productCost = units * product.containerCost;
     const lhr = Math.min(5, Math.max(1, 0.5 + psSqft / 1500));
-    const cost = btl * PS_BTL + lhr * LABOR + PS_EQUIP;
-    let price = Math.round(cost / 0.45);
-    const vol = preslabVolume;
-    if (vol === '10') price = Math.round(price * 0.85);
-    else if (vol === '5') price = Math.round(price * 0.90);
+    const laborCost = lhr * LABOR;
+    const equipCost = 15;
+    const cost = productCost + laborCost + equipCost;
+    const rawPrice = Math.round(cost / product.marginDivisor);
+    const priceBeforeVolumeDiscount = Math.max(rawPrice, product.floorBeforeVolumeDiscount);
+    const vol = normalizePreSlabVolume(preslabVolume);
+    const priceAfterVolumeDiscount = Math.max(
+      Math.round(priceBeforeVolumeDiscount * vol.multiplier),
+      product.floorAfterVolumeDiscount,
+    );
     const warrAdd = preslabWarranty === 'EXTENDED' ? 200 : 0;
-    const fp = otP(price) + warrAdd;
-    otItems.push({ name: 'Pre-Slab', price: fp, detail: psSqft.toLocaleString() + ' sf | ' + btl + ' bottles' + (vol !== 'NONE' ? ' (vol disc)' : ''), psSqft, btl, volDisc: vol !== 'NONE', basePrice: otP(price), warrAdd });
+    const basePreSlabPrice = priceAfterVolumeDiscount;
+    const fp = basePreSlabPrice + warrAdd;
+    const labelConfirmed = preslabLabelConfirmed === true || preslabLabelConfirmed === 'true';
+    const detail = [
+      psSqft.toLocaleString() + ' sf',
+      product.shortLabel,
+      Math.round(productOz * 100) / 100 + ' oz',
+      units + (units === 1 ? ' unit' : ' units'),
+      vol.key !== 'none' ? 'vol disc' : null,
+    ].filter(Boolean).join(' | ');
+    otItems.push({
+      name: 'Pre-Slab',
+      displayName: 'Pre-Slab Termiticide Treatment',
+      price: fp,
+      detail,
+      psSqft,
+      productKey,
+      productLabel: product.label,
+      activeIngredient: product.activeIngredient,
+      chemistryType: product.chemistryType,
+      positioning: product.positioning,
+      productOz: Math.round(productOz * 100) / 100,
+      units,
+      btl: units,
+      containerOz: product.containerOz,
+      containerCost: product.containerCost,
+      productCost: Math.round(productCost * 100) / 100,
+      laborHrs: Math.round(lhr * 100) / 100,
+      laborCost: Math.round(laborCost * 100) / 100,
+      equipCost,
+      rawPrice,
+      priceBeforeVolumeDiscount,
+      priceAfterVolumeDiscount,
+      volDisc: vol.key !== 'none',
+      volumeDiscount: vol.key,
+      volumeDiscountMultiplier: vol.multiplier,
+      basePrice: basePreSlabPrice,
+      warrAdd,
+      labelConfirmed,
+      requiresManualReview: !labelConfirmed,
+      manualReviewReasons: labelConfirmed ? [] : ['pre_slab_label_confirmation_required'],
+      certificateOfComplianceRequired: true,
+      warningText: product.warning,
+    });
   } else if (svcPreslab && !isCommercial) {
     otItems.push({ name: 'Pre-Slab', price: null, detail: 'Slab sqft required', quoteRequired: true });
   }

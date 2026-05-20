@@ -596,6 +596,75 @@ function normalizePreSlabVolumeDiscount(value) {
   };
 }
 
+function normalizePreSlabTermiticideProduct(value, options = {}) {
+  const cfg = SPECIALTY.preSlabTermiticide || {};
+  const requestedProductKey = value;
+  const defaultProductKey = cfg.defaultProductKey || 'termidor_sc';
+  if (!hasValue(value)) {
+    return {
+      requestedProductKey,
+      productKey: defaultProductKey,
+      warnings: [],
+      requiresManualReview: false,
+      manualReviewReasons: [],
+    };
+  }
+
+  const raw = normalizeToken(value).replace(/\//g, '_').replace(/_+/g, '_');
+  const aliases = {
+    termidor: 'termidor_sc',
+    termidor_sc: 'termidor_sc',
+    taurus: 'taurus_sc',
+    taurus_sc: 'taurus_sc',
+    bifen: 'bifen_it',
+    bifen_it: 'bifen_it',
+    bifen_i_t: 'bifen_it',
+    talstar: 'talstar_p',
+    talstar_p: 'talstar_p',
+    talstar_professional: 'talstar_p',
+  };
+  if (options.legacyPayload || options.allowIngredientAliases) {
+    aliases.fipronil = 'termidor_sc';
+    aliases.bifenthrin = 'bifen_it';
+  }
+  const productKey = aliases[raw];
+  if (productKey && cfg.products?.[productKey]) {
+    return {
+      requestedProductKey,
+      productKey,
+      warnings: [],
+      requiresManualReview: false,
+      manualReviewReasons: [],
+    };
+  }
+
+  const warning = options.legacyPayload
+    ? 'unknown_legacy_pre_slab_product_defaulted_to_termidor_sc'
+    : 'unknown_pre_slab_termiticide_product_requires_review';
+  return {
+    requestedProductKey,
+    productKey: defaultProductKey,
+    warnings: [warning],
+    requiresManualReview: !options.legacyPayload,
+    manualReviewReasons: options.legacyPayload ? [] : ['invalid_pre_slab_termiticide_product'],
+  };
+}
+
+function optionPositiveNumber(options = {}, key, fallback) {
+  const parsed = positiveFiniteNumber(options[key]);
+  return parsed !== null ? parsed : fallback;
+}
+
+function optionNonNegativeNumber(options = {}, key, fallback) {
+  if (!hasValue(options[key])) return fallback;
+  const parsed = Number(options[key]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function optionBooleanTrue(value) {
+  return value === true || value === 'true' || value === 'TRUE' || value === 'YES' || value === 'yes';
+}
+
 function resolvePestFootprint(property = {}, options = {}) {
   const fallback = positiveFiniteNumber(options.fallback) || 2000;
   const manualReviewReasons = [];
@@ -3035,10 +3104,238 @@ function priceOneTimeMosquito(property, options = {}) {
 // SPECIALTY SERVICES
 // ============================================================
 
+function normalizeTrenchingTermiticideProduct(value, options = {}) {
+  const cfg = SPECIALTY.trenching || {};
+  const requestedProductKey = value;
+  const defaultProductKey = cfg.defaultProductKey || 'taurus_sc';
+  if (!hasValue(value)) {
+    return {
+      requestedProductKey,
+      productKey: defaultProductKey,
+      warnings: [],
+      requiresManualReview: false,
+      manualReviewReasons: [],
+    };
+  }
+
+  const raw = normalizeToken(value).replace(/\//g, '_').replace(/_+/g, '_');
+  const aliases = {
+    termidor: 'termidor_sc',
+    termidor_sc: 'termidor_sc',
+    basf: 'termidor_sc',
+    taurus: 'taurus_sc',
+    taurus_sc: 'taurus_sc',
+    fipronil: 'taurus_sc',
+    bifen: 'bifen_it',
+    bifen_it: 'bifen_it',
+    bifen_i_t: 'bifen_it',
+    bifenthrin: 'bifen_it',
+    talstar: 'talstar_p',
+    talstar_p: 'talstar_p',
+    talstar_pro: 'talstar_p',
+    talstar_professional: 'talstar_p',
+  };
+  const productKey = aliases[raw];
+  if (productKey && cfg.products?.[productKey]) {
+    return {
+      requestedProductKey,
+      productKey,
+      warnings: [],
+      requiresManualReview: false,
+      manualReviewReasons: [],
+    };
+  }
+
+  const warning = options.legacyPayload
+    ? 'unknown_legacy_trenching_product_defaulted_to_taurus_sc'
+    : 'unknown_trenching_termiticide_product_requires_review';
+  return {
+    requestedProductKey,
+    productKey: defaultProductKey,
+    warnings: [warning],
+    requiresManualReview: !options.legacyPayload,
+    manualReviewReasons: options.legacyPayload ? [] : ['invalid_trenching_termiticide_product'],
+  };
+}
+
+function normalizeTrenchingApplicationRate(value) {
+  const requestedApplicationRate = value;
+  if (!hasValue(value)) {
+    return { requestedApplicationRate, applicationRate: SPECIALTY.trenching.defaultApplicationRate || 'standard', warnings: [] };
+  }
+  const raw = normalizeToken(value)
+    .replace(/%/g, '')
+    .replace(/\./g, '_')
+    .replace(/_+/g, '_');
+  const aliases = {
+    standard: 'standard',
+    regular: 'standard',
+    '0_06': 'standard',
+    standard_0_06: 'standard',
+    high: 'high',
+    high_rate: 'high',
+    '0_125': 'high',
+    '0_12': 'high',
+    problem_soil: 'high',
+    active_subterranean: 'high',
+    formosan: 'high',
+    asian_subterranean: 'high',
+  };
+  const applicationRate = aliases[raw] || 'standard';
+  return {
+    requestedApplicationRate,
+    applicationRate,
+    warnings: raw && !aliases[raw] ? ['invalid_trenching_application_rate_defaulted_to_standard'] : [],
+  };
+}
+
+function defaultTrenchingWarrantyTier(product = {}) {
+  return product.chemistryType === 'repellent_pyrethroid' ? 'none' : 'one_year_retreat';
+}
+
+function normalizeTrenchingWarrantyTier(value, product = {}) {
+  const requestedWarrantyTier = value;
+  if (!hasValue(value)) {
+    return {
+      requestedWarrantyTier,
+      warrantyTier: defaultTrenchingWarrantyTier(product),
+      warnings: [],
+    };
+  }
+  const raw = normalizeToken(value).replace(/_+/g, '_');
+  const aliases = {
+    none: 'none',
+    no_warranty: 'none',
+    standard: 'one_year_retreat',
+    one_year: 'one_year_retreat',
+    '1_year': 'one_year_retreat',
+    one_year_retreat: 'one_year_retreat',
+    retreat: 'one_year_retreat',
+    three_year: 'three_year_repair_retreat',
+    '3_year': 'three_year_repair_retreat',
+    three_year_repair_retreat: 'three_year_repair_retreat',
+    repair_retreat_3_year: 'three_year_repair_retreat',
+    five_year: 'five_year_repair_retreat',
+    '5_year': 'five_year_repair_retreat',
+    five_year_repair_retreat: 'five_year_repair_retreat',
+    repair_retreat_5_year: 'five_year_repair_retreat',
+  };
+  return {
+    requestedWarrantyTier,
+    warrantyTier: aliases[raw] || defaultTrenchingWarrantyTier(product),
+    warnings: raw && !aliases[raw] ? ['invalid_trenching_warranty_tier_defaulted'] : [],
+  };
+}
+
 function priceTrenching(property = {}, options = {}) {
   const measurements = resolveTrenchingMeasurements(property || {}, options || {});
+  const cfg = SPECIALTY.trenching;
+  const hasExplicitTrenchingOptions = [
+    'productKey',
+    'applicationRate',
+    'trenchDepthFt',
+    'concreteVolumePadPct',
+    'warrantyTier',
+    'labelConfirmed',
+    'customProductCost',
+    'customProductOzPerFinishedGallon',
+    'customContainerOz',
+    'customPriceOverride',
+  ].some((key) => hasValue(options[key])) || hasValue(options.measurements);
+  const legacyTrenchingPayload = !hasExplicitTrenchingOptions;
+  const explicitProductPayload = hasValue(options.productKey);
+  const productResolution = normalizeTrenchingTermiticideProduct(options.productKey, {
+    legacyPayload: !explicitProductPayload,
+  });
+  const product = cfg.products?.[productResolution.productKey] || cfg.products?.[cfg.defaultProductKey];
+  const rateResolution = normalizeTrenchingApplicationRate(options.applicationRate);
+  const rateConfig = cfg.applicationRates?.[rateResolution.applicationRate] || cfg.applicationRates?.standard || {};
+  const productOzPerFinishedGallon = optionPositiveNumber(
+    options,
+    'customProductOzPerFinishedGallon',
+    rateResolution.applicationRate === 'high'
+      ? product.productOzPerFinishedGallonAtHighRate
+      : product.productOzPerFinishedGallonAtStandardRate,
+  );
+  const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
+  const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
+  const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', cfg.defaultTrenchDepthFt || 1);
+  const concreteVolumePadPct = optionNonNegativeNumber(
+    options,
+    'concreteVolumePadPct',
+    cfg.defaultConcreteVolumePadPct || 0,
+  );
+  const warrantyResolution = normalizeTrenchingWarrantyTier(options.warrantyTier, product);
+  const warrantyTier = cfg.warrantyTiers?.[warrantyResolution.warrantyTier]
+    ? warrantyResolution.warrantyTier
+    : defaultTrenchingWarrantyTier(product);
+  const warrantyConfig = cfg.warrantyTiers?.[warrantyTier] || cfg.warrantyTiers?.none || {};
+  const labelConfirmed = optionBooleanTrue(options.labelConfirmed);
+  const labelConfirmationRequiredForPayload = !legacyTrenchingPayload;
+  const warningList = [
+    ...(product.warnings || []),
+    ...productResolution.warnings,
+    ...rateResolution.warnings,
+    ...warrantyResolution.warnings,
+  ];
+  if (rateResolution.applicationRate === 'high') {
+    warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
+  }
+  if (product.chemistryType === 'repellent_pyrethroid') {
+    warningList.push('Repellent pyrethroid barrier; not equivalent to non-repellent fipronil.');
+  }
+  if (measurements.concreteLF > 0 && concreteVolumePadPct > 0) {
+    warningList.push('Concrete/slab drilling and rodding can consume additional finished solution; volume pad applied.');
+  }
+  const manualReviewReasons = [
+    ...measurements.manualReviewReasons,
+    ...productResolution.manualReviewReasons,
+    ...rateResolution.warnings,
+    ...warrantyResolution.warnings,
+  ];
+  if (rateConfig.requiresManualReview && rateConfig.manualReviewReason) {
+    manualReviewReasons.push(rateConfig.manualReviewReason);
+  }
+  if (labelConfirmationRequiredForPayload && !labelConfirmed) {
+    manualReviewReasons.push('label_confirmation_required');
+  }
+  if (hasValue(options.customProductCost) || hasValue(options.customProductOzPerFinishedGallon)) {
+    manualReviewReasons.push('product_manual_override_used');
+  }
+  if (hasValue(options.trenchDepthFt) && Number(options.trenchDepthFt) !== Number(cfg.defaultTrenchDepthFt || 1)) {
+    manualReviewReasons.push('trench_depth_manual_override_used');
+  }
+  if (hasValue(options.concreteVolumePadPct) && concreteVolumePadPct > (cfg.defaultConcreteVolumePadPct || 0)) {
+    manualReviewReasons.push('significant_concrete_volume_pad_applied');
+  }
+
+  const chemistryAllowedForWarranty = (warrantyConfig.allowedChemistryTypes || []).includes(product.chemistryType);
+  let warrantyQuoteRequired = false;
+  if (!chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid') {
+    warningList.push('Long repair-and-retreat warranty on bifenthrin is high risk and requires admin approval or custom quote.');
+    if (warrantyConfig.repellentQuoteRequired && !(
+      options.allowWarrantyOverride || options.managerOverride || options.customManagerOverride
+    )) {
+      warrantyQuoteRequired = true;
+    }
+    if (warrantyConfig.manualReviewReason) {
+      manualReviewReasons.push(warrantyConfig.manualReviewReason);
+    }
+  }
+
   const baseResult = {
     service: 'trenching',
+    productKey: productResolution.productKey,
+    productLabel: product.label,
+    activeIngredient: product.activeIngredient,
+    chemistryType: product.chemistryType,
+    positioning: product.positioning,
+    applicationRate: rateResolution.applicationRate,
+    requestedApplicationRate: rateResolution.requestedApplicationRate,
+    concentrationLabel: rateResolution.applicationRate === 'high'
+      ? product.highConcentrationLabel || rateConfig.concentrationLabel
+      : product.standardConcentrationLabel || rateConfig.concentrationLabel,
+    trenchDepthFt,
     perimeter: measurements.perimeter,
     perimeterSource: measurements.perimeterSource,
     perimeterWasManualOverride: measurements.perimeterWasManualOverride,
@@ -3048,23 +3345,61 @@ function priceTrenching(property = {}, options = {}) {
     dirtLFSource: measurements.dirtLFSource,
     concreteLF: measurements.concreteLF,
     concreteLFSource: measurements.concreteLFSource,
+    concreteVolumePadPct,
+    dirtFinishedGallons: null,
+    concreteFinishedGallons: null,
+    finishedGallons: null,
+    productOzPerFinishedGallon,
+    productOz: null,
+    chemicalCostPerOz: null,
+    allocatedChemicalCost: null,
+    includedChemicalCost: null,
+    chemicalPremiumCost: null,
+    productSurcharge: null,
+    chemicalCostPerLF: null,
+    containersRequired: null,
+    baseInstallPrice: null,
+    warrantyTier,
+    requestedWarrantyTier: warrantyResolution.requestedWarrantyTier,
+    warrantyLabel: warrantyConfig.label || warrantyTier,
+    warrantyAdder: null,
+    priceBeforeWarranty: null,
+    price: null,
+    labelConfirmed,
+    requiresLabelConfirmation: true,
+    certificateOfTreatmentRequired: true,
+    warnings: uniqueList(warningList),
     measurements: {
       perimeterLF: measurementObject(measurements.perimeter, measurements.perimeterSource),
       concreteLF: measurementObject(measurements.concreteLF, measurements.concreteLFSource),
       dirtLF: measurementObject(measurements.dirtLF, measurements.dirtLFSource),
       concretePct: measurementObject(measurements.concretePct, measurements.concretePctSource),
     },
-    measurementWarnings: measurements.measurementWarnings,
+    measurementWarnings: uniqueList([
+      ...measurements.measurementWarnings,
+      ...productResolution.warnings,
+      ...rateResolution.warnings,
+      ...warrantyResolution.warnings,
+    ]),
     requiresMeasurement: measurements.requiresMeasurement,
-    requiresManualReview: measurements.requiresManualReview,
-    manualReviewReasons: measurements.manualReviewReasons,
+    requiresManualReview: manualReviewReasons.length > 0 ||
+      measurements.requiresManualReview ||
+      productResolution.requiresManualReview ||
+      !!rateConfig.requiresManualReview ||
+      rateResolution.warnings.length > 0 ||
+      (labelConfirmationRequiredForPayload && !labelConfirmed) ||
+      (!chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid') ||
+      hasValue(options.customProductCost) ||
+      hasValue(options.customProductOzPerFinishedGallon) ||
+      hasValue(options.customPriceOverride),
+    manualReviewReasons: uniqueList(manualReviewReasons),
     inputSourceSummary: {
       perimeterLF: measurements.perimeterSource,
       concreteLF: measurements.concreteLFSource,
       dirtLF: measurements.dirtLFSource,
       concretePct: measurements.concretePctSource,
     },
-    renewal: SPECIALTY.trenching.renewal,
+    renewal: cfg.renewal,
     renewalFrequency: 'annual',
     renewalLabel: 'Annual trenching renewal',
   };
@@ -3077,15 +3412,60 @@ function priceTrenching(property = {}, options = {}) {
     };
   }
 
-  const price = Math.max(
-    SPECIALTY.trenching.floor,
-    measurements.dirtLF * SPECIALTY.trenching.dirtPerLF + measurements.concreteLF * SPECIALTY.trenching.concretePerLF
+  const finishedGallonsPerLFPerFtDepth = (cfg.finishedGallonsPer10LFPerFtDepth || 4) / 10;
+  const dirtFinishedGallons = measurements.dirtLF * finishedGallonsPerLFPerFtDepth * trenchDepthFt;
+  const concreteFinishedGallons = measurements.concreteLF *
+    finishedGallonsPerLFPerFtDepth *
+    trenchDepthFt *
+    (1 + concreteVolumePadPct);
+  const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;
+  const productOz = finishedGallons * productOzPerFinishedGallon;
+  const chemicalCostPerOz = containerCost / containerOz;
+  const allocatedChemicalCost = productOz * chemicalCostPerOz;
+  const includedProduct = cfg.products?.[cfg.defaultIncludedProductKey] || cfg.products?.[cfg.defaultProductKey] || product;
+  const includedChemicalCost = finishedGallons *
+    includedProduct.productOzPerFinishedGallonAtStandardRate *
+    (includedProduct.containerCost / includedProduct.containerOz);
+  const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
+  const productSurcharge = Math.round(chemicalPremiumCost * (cfg.productPremiumMultiplier || 1));
+  const totalLF = Math.max(1, measurements.dirtLF + measurements.concreteLF);
+  const chemicalCostPerLF = allocatedChemicalCost / totalLF;
+  const containersRequired = Math.max(1, Math.ceil(productOz / containerOz));
+  const baseInstallPrice = Math.max(
+    cfg.floor,
+    measurements.dirtLF * cfg.dirtPerLF + measurements.concreteLF * cfg.concretePerLF,
   );
+  const priceBeforeWarranty = baseInstallPrice + productSurcharge;
+  const warrantyAdder = Math.round(priceBeforeWarranty * (Number(warrantyConfig.priceAdderPct) || 0));
+  const calculatedPrice = priceBeforeWarranty + warrantyAdder;
+  const customPrice = positiveFiniteNumber(options.customPriceOverride);
+  const price = warrantyQuoteRequired
+    ? null
+    : (customPrice !== null ? Math.round(customPrice) : calculatedPrice);
+  const finalManualReviewReasons = customPrice !== null
+    ? uniqueList([...manualReviewReasons, 'product_manual_override_used'])
+    : uniqueList(manualReviewReasons);
 
   return {
     ...baseResult,
+    dirtFinishedGallons: roundMoney(dirtFinishedGallons),
+    concreteFinishedGallons: roundMoney(concreteFinishedGallons),
+    finishedGallons: roundMoney(finishedGallons),
+    productOz: roundMoney(productOz),
+    chemicalCostPerOz: roundMoney(chemicalCostPerOz),
+    allocatedChemicalCost: roundMoney(allocatedChemicalCost),
+    includedChemicalCost: roundMoney(includedChemicalCost),
+    chemicalPremiumCost: roundMoney(chemicalPremiumCost),
+    productSurcharge,
+    chemicalCostPerLF: roundMoney(chemicalCostPerLF),
+    containersRequired,
+    baseInstallPrice,
+    warrantyAdder,
+    priceBeforeWarranty,
     price,
-    quoteRequired: false,
+    quoteRequired: warrantyQuoteRequired,
+    requiresManualReview: baseResult.requiresManualReview || finalManualReviewReasons.length > 0,
+    manualReviewReasons: finalManualReviewReasons,
   };
 }
 
@@ -3140,6 +3520,168 @@ function priceBoraCare(input, options = {}) {
   };
 }
 
+function pricePreSlabTermiticide(input, options = {}) {
+  if (options && typeof options !== 'object') {
+    options = { volumeDiscount: options };
+  }
+
+  const cfg = SPECIALTY.preSlabTermiticide;
+  const productResolution = normalizePreSlabTermiticideProduct(options.productKey, {
+    legacyPayload: !!options.legacyPayload,
+  });
+  const product = cfg.products[productResolution.productKey] || cfg.products[cfg.defaultProductKey];
+  const measurement = resolvePreSlabSqFt(input, options);
+  const volumeResolution = normalizePreSlabVolumeDiscount(options.volumeDiscount || 'none');
+  const volumeDiscountMultiplier = cfg.volumeDiscounts[volumeResolution.volumeDiscount] || 1.0;
+  const productOzPer10SqFt = optionPositiveNumber(options, 'customProductOzPer10SqFt', product.productOzPer10SqFt);
+  const containerCost = optionPositiveNumber(options, 'customContainerCost', product.containerCost);
+  const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
+  const floorBeforeVolumeDiscount = optionNonNegativeNumber(
+    options,
+    'customFloorBeforeVolumeDiscount',
+    product.floorBeforeVolumeDiscount || 0,
+  );
+  const floorAfterVolumeDiscount = optionNonNegativeNumber(
+    options,
+    'customFloorAfterVolumeDiscount',
+    product.floorAfterVolumeDiscount || 0,
+  );
+  const laborCfg = cfg.labor || {};
+  const warrantyExtendedSelected = !!(
+    options.includeWarrantyExtended ||
+    options.warrantyExtended ||
+    options.warranty === 'EXTENDED'
+  );
+  const warrantyExtendedPrice = warrantyExtendedSelected ? cfg.warrantyExtended : 0;
+  const labelConfirmed = optionBooleanTrue(options.labelConfirmed);
+  const requiresLabelConfirmation = product.requiresLabelConfirmation === true;
+  const labelManualReviewReasons = requiresLabelConfirmation && !labelConfirmed
+    ? ['pre_slab_label_confirmation_required']
+    : [];
+  const warningList = uniqueList([
+    ...(product.warnings || []),
+    ...measurement.warnings,
+    ...volumeResolution.warnings,
+    ...productResolution.warnings,
+  ]);
+  const manualReviewReasons = uniqueList([
+    ...measurement.manualReviewReasons,
+    ...volumeResolution.warnings,
+    ...productResolution.manualReviewReasons,
+    ...labelManualReviewReasons,
+  ]);
+  const baseResult = {
+    service: 'pre_slab_termiticide',
+    legacyService: productResolution.productKey === 'termidor_sc' ? 'pre_slab_termidor' : null,
+    productKey: productResolution.productKey,
+    requestedProductKey: productResolution.requestedProductKey,
+    productLabel: product.label,
+    activeIngredient: product.activeIngredient,
+    chemistryType: product.chemistryType,
+    positioning: product.positioning,
+    slabSqFt: measurement.value,
+    slabSqFtSource: measurement.source,
+    slabSqFtWasManualOverride: measurement.wasManualOverride,
+    productOzPer10SqFt,
+    productOz: null,
+    units: null,
+    bottles: null,
+    containerOz,
+    containerCost,
+    productCost: null,
+    laborHrs: null,
+    laborCost: null,
+    equipCost: cfg.equipCost,
+    cost: null,
+    marginDivisor: product.marginDivisor,
+    targetMargin: 1 - product.marginDivisor,
+    rawPrice: null,
+    floorBeforeVolumeDiscount,
+    floorAfterVolumeDiscount,
+    priceBeforeVolumeDiscount: null,
+    volumeDiscount: volumeResolution.volumeDiscount,
+    requestedVolumeDiscount: volumeResolution.requestedVolumeDiscount,
+    volumeDiscountMultiplier,
+    volumeDiscountWarnings: volumeResolution.warnings,
+    priceAfterVolumeDiscount: null,
+    treatmentPrice: null,
+    price: null,
+    warrantyExtendedSelected,
+    warrantyExtendedPrice,
+    addOns: warrantyExtendedSelected
+      ? [{
+          code: 'pre_slab_extended_warranty',
+          label: 'Extended warranty',
+          price: warrantyExtendedPrice,
+        }]
+      : [],
+    labelConfirmed,
+    requiresLabelConfirmation,
+    certificateOfComplianceRequired: true,
+    requiresCertificateOfCompliance: true,
+    warnings: warningList,
+    measurementWarnings: uniqueList([
+      ...measurement.warnings,
+      ...volumeResolution.warnings,
+      ...productResolution.warnings,
+    ]),
+    requiresMeasurement: measurement.requiresMeasurement,
+    requiresManualReview: measurement.requiresManualReview ||
+      volumeResolution.warnings.length > 0 ||
+      productResolution.requiresManualReview ||
+      labelManualReviewReasons.length > 0,
+    manualReviewReasons,
+    measurements: {
+      slabSqFt: measurementObject(measurement.value, measurement.source),
+    },
+    inputSourceSummary: {
+      slabSqFt: measurement.source,
+    },
+  };
+
+  if (measurement.value === null) {
+    return {
+      ...baseResult,
+      quoteRequired: true,
+    };
+  }
+
+  const slabSqFt = measurement.value;
+  const productOz = slabSqFt / 10 * productOzPer10SqFt;
+  const units = Math.max(1, Math.ceil(productOz / containerOz));
+  const productCost = units * containerCost;
+  const laborHrs = Math.min(
+    laborCfg.maxHours || 5,
+    Math.max(laborCfg.minHours || 1, (laborCfg.baseHours || 0.5) + slabSqFt * (laborCfg.hoursPerSqFt || (1 / 1500))),
+  );
+  const laborCost = laborHrs * GLOBAL.LABOR_RATE;
+  const cost = productCost + laborCost + cfg.equipCost;
+  const rawPrice = Math.round(cost / product.marginDivisor);
+  const priceBeforeVolumeDiscount = Math.max(rawPrice, floorBeforeVolumeDiscount);
+  const priceAfterVolumeDiscount = Math.max(
+    Math.round(priceBeforeVolumeDiscount * volumeDiscountMultiplier),
+    floorAfterVolumeDiscount,
+  );
+  const price = priceAfterVolumeDiscount + warrantyExtendedPrice;
+
+  return {
+    ...baseResult,
+    productOz: roundMoney(productOz),
+    units,
+    bottles: units,
+    productCost: roundMoney(productCost),
+    laborHrs: roundMoney(laborHrs),
+    laborCost: roundMoney(laborCost),
+    cost: roundMoney(cost),
+    rawPrice,
+    priceBeforeVolumeDiscount,
+    priceAfterVolumeDiscount,
+    treatmentPrice: priceAfterVolumeDiscount,
+    price,
+    quoteRequired: false,
+  };
+}
+
 function pricePreSlabTermidor(input, volumeDiscount = 'none', extraOptions = {}) {
   let options = extraOptions || {};
   let discountInput = volumeDiscount;
@@ -3150,82 +3692,13 @@ function pricePreSlabTermidor(input, volumeDiscount = 'none', extraOptions = {})
     discountInput = extraOptions.volumeDiscount;
   }
 
-  const measurement = resolvePreSlabSqFt(input, options);
-  const volumeResolution = normalizePreSlabVolumeDiscount(discountInput);
-  const volumeDiscountMultiplier = SPECIALTY.preSlabTermidor.volumeDiscounts[volumeResolution.volumeDiscount] || 1.0;
-  const warrantyExtendedSelected = !!(
-    options.includeWarrantyExtended ||
-    options.warrantyExtended ||
-    options.warranty === 'EXTENDED'
-  );
-  const warrantyExtendedPrice = warrantyExtendedSelected ? SPECIALTY.preSlabTermidor.warrantyExtended : 0;
-  const measurementWarnings = uniqueList([
-    ...measurement.warnings,
-    ...volumeResolution.warnings,
-  ]);
-  const manualReviewReasons = uniqueList([
-    ...measurement.manualReviewReasons,
-    ...volumeResolution.warnings,
-  ]);
-  const baseResult = {
-    service: 'pre_slab_termidor',
-    slabSqFt: measurement.value,
-    slabSqFtSource: measurement.source,
-    slabSqFtWasManualOverride: measurement.wasManualOverride,
-    volumeDiscount: volumeResolution.volumeDiscount,
-    requestedVolumeDiscount: volumeResolution.requestedVolumeDiscount,
-    volumeDiscountMultiplier,
-    volumeDiscountWarnings: volumeResolution.warnings,
-    warrantyExtendedSelected,
-    warrantyExtendedPrice,
-    addOns: warrantyExtendedSelected
-      ? [{
-          code: 'pre_slab_extended_warranty',
-          label: 'Extended warranty',
-          price: warrantyExtendedPrice,
-        }]
-      : [],
-    measurements: {
-      slabSqFt: measurementObject(measurement.value, measurement.source),
-    },
-    measurementWarnings,
-    requiresMeasurement: measurement.requiresMeasurement,
-    requiresManualReview: measurement.requiresManualReview || volumeResolution.warnings.length > 0,
-    manualReviewReasons,
-    inputSourceSummary: {
-      slabSqFt: measurement.source,
-    },
-  };
-
-  if (measurement.value === null) {
-    return {
-      ...baseResult,
-      bottles: null,
-      laborHrs: null,
-      cost: null,
-      priceBeforeVolumeDiscount: null,
-      price: null,
-      quoteRequired: true,
-    };
-  }
-
-  const slabSqFt = measurement.value;
-  const bottles = Math.max(1, Math.ceil(slabSqFt / SPECIALTY.preSlabTermidor.coverage));
-  const laborHrs = Math.min(5, Math.max(1, 0.5 + slabSqFt / 1500));
-  const cost = bottles * SPECIALTY.preSlabTermidor.bottleCost + laborHrs * GLOBAL.LABOR_RATE + SPECIALTY.preSlabTermidor.equipCost;
-  const priceBeforeVolumeDiscount = Math.round(cost / SPECIALTY.preSlabTermidor.marginDivisor);
-  const discountedPrice = Math.round(priceBeforeVolumeDiscount * volumeDiscountMultiplier);
-  const price = discountedPrice + warrantyExtendedPrice;
-
-  return {
-    ...baseResult,
-    bottles,
-    laborHrs: Math.round(laborHrs * 10) / 10,
-    cost: Math.round(cost),
-    priceBeforeVolumeDiscount,
-    price,
-    quoteRequired: false,
-  };
+  return pricePreSlabTermiticide(input, {
+    ...options,
+    legacyPayload: true,
+    productKey: options.productKey || 'termidor_sc',
+    volumeDiscount: discountInput,
+    labelConfirmed: hasValue(options.labelConfirmed) ? options.labelConfirmed : true,
+  });
 }
 
 function priceGermanRoach(property, options = {}) {
@@ -4813,7 +5286,7 @@ module.exports = {
   priceRodentInspection,
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
-  priceTrenching, priceBoraCare, pricePreSlabTermidor,
+  priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
   pricePlugging, priceFoamDrill, priceWasp, priceStingingInsect, priceExclusion, priceRodentGuarantee,
@@ -4832,8 +5305,11 @@ module.exports = {
   resolveTermiteFootprint,
   resolveTermiteBaitPerimeter,
   resolveTrenchingMeasurements,
+  normalizeTrenchingTermiticideProduct,
+  normalizeTrenchingApplicationRate,
   resolveBoraCareSqFt,
   resolvePreSlabSqFt,
+  normalizePreSlabTermiticideProduct,
   normalizePestFrequency,
   normalizePestPricingVersion,
   normalizeRoachType,

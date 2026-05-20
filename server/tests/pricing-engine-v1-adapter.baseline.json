@@ -201,18 +201,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 852,
+      "total": 1341,
       "tmInstall": 0,
       "items": [],
       "specItems": [
         {
-          "name": "Pre-Slab Termidor",
-          "price": 852
+          "name": "Pre-Slab Termiticide Treatment",
+          "price": 1341
         }
       ]
     },
     "totals": {
-      "year1": 852,
+      "year1": 1341,
       "year2": 0
     }
   },
