@@ -2,9 +2,9 @@
  * Public slot-availability + reservation routes for the estimate view.
  *
  * GET /api/public/estimates/:token/available-slots
- *   Returns the 3 best route-optimal time slots over the next 14 days
- *   plus an expander list. No auth — token is the only gate. Rate-limited
- *   at 30/min per IP.
+ *   Returns the soonest customer-facing time slots over the next 14 days,
+ *   with route-optimal slots labeled in the payload. No auth — token is
+ *   the only gate. Rate-limited at 30/min per IP.
  *
  * POST /api/public/estimates/:token/reserve
  *   Body: { slotId }. Creates a 15-minute hold on the chosen slot as a
@@ -66,7 +66,7 @@ router.get('/:token/available-slots', async (req, res) => {
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const opts = {};
-    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 30) {
+    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 14) {
       opts.windowDays = windowDays;
     }
     if (req.query.serviceMode === 'one_time') {

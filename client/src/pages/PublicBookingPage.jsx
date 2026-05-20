@@ -296,7 +296,7 @@ export default function PublicBookingPage() {
               {stepTwoSlots.length > 0 && stepTwoSlots.length < 4 ? 'Your best times' : 'Your best 4 times'}
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
-              These are the windows when we'll already be working in your neighborhood — pick whichever fits.
+              These are the best open service windows we can offer. Nearby route days are prioritized when available.
             </p>
 
             {loading && (

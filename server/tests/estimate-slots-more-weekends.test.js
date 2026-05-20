@@ -15,13 +15,70 @@ describe('estimate slot weekend and expander behavior', () => {
     ]);
   });
 
-  test('estimate availability returns three visible slots plus three more slots', () => {
-    const slots = Array.from({ length: 8 }, (_, idx) => ({ slotId: `slot-${idx + 1}` }));
+  test('estimate availability returns six visible slots plus three more slots', () => {
+    const slots = Array.from({ length: 10 }, (_, idx) => ({ slotId: `slot-${idx + 1}` }));
 
-    expect(slotAvailabilityInternals.splitSlotResults(slots, 3, 3)).toEqual({
-      primary: [{ slotId: 'slot-1' }, { slotId: 'slot-2' }, { slotId: 'slot-3' }],
-      expander: [{ slotId: 'slot-4' }, { slotId: 'slot-5' }, { slotId: 'slot-6' }],
+    expect(slotAvailabilityInternals.splitSlotResults(slots, 6, 3)).toEqual({
+      primary: [
+        { slotId: 'slot-1' },
+        { slotId: 'slot-2' },
+        { slotId: 'slot-3' },
+        { slotId: 'slot-4' },
+        { slotId: 'slot-5' },
+        { slotId: 'slot-6' },
+      ],
+      expander: [{ slotId: 'slot-7' }, { slotId: 'slot-8' }, { slotId: 'slot-9' }],
     });
+  });
+
+  test('estimate slot selection prefers soonest dates over future route-optimal slots', () => {
+    const slots = [
+      { slotId: 'future-nearby', date: '2026-06-10', windowStart: '11:00', routeOptimal: true, nearbyJob: { detourMinutes: 1 } },
+      { slotId: 'soon-open', date: '2026-05-24', windowStart: '09:00', routeOptimal: false, nearbyJob: null },
+      { slotId: 'next-open', date: '2026-06-01', windowStart: '10:00', routeOptimal: false, nearbyJob: null },
+    ];
+
+    expect(slotAvailabilityInternals.selectCustomerFacingSlots(slots, 2).map((slot) => slot.slotId))
+      .toEqual(['soon-open', 'next-open']);
+  });
+
+  test('estimate slot selection does not hide earlier same-day windows for date diversity', () => {
+    const slots = [
+      { slotId: 'day-one-9', date: '2026-05-24', windowStart: '09:00', routeOptimal: false },
+      { slotId: 'day-one-10', date: '2026-05-24', windowStart: '10:00', routeOptimal: false },
+      { slotId: 'day-two-9', date: '2026-05-25', windowStart: '09:00', routeOptimal: false },
+    ];
+
+    expect(slotAvailabilityInternals.selectCustomerFacingSlots(slots, 2).map((slot) => slot.slotId))
+      .toEqual(['day-one-9', 'day-one-10']);
+  });
+
+  test('estimate slot spreading happens before the final customer-facing limit', () => {
+    const genericSlots = Array.from({ length: 6 }, (_, idx) => ({
+      slotId: `generic-${idx}`,
+      date: '2026-05-24',
+      windowStart: '09:00',
+      windowEnd: '10:00',
+      routeOptimal: false,
+      techId: `tech-${idx}`,
+    }));
+    const routeSlot = {
+      slotId: 'route-10',
+      date: '2026-05-24',
+      windowStart: '10:00',
+      windowEnd: '11:00',
+      routeOptimal: true,
+      techId: 'tech-route',
+      nearbyJob: { detourMinutes: 1 },
+    };
+
+    const spread = slotAvailabilityInternals.spreadWindowsAcrossDay(
+      [...genericSlots, routeSlot].sort(slotAvailabilityInternals.compareCustomerFacingSlots),
+      60,
+    );
+
+    expect(slotAvailabilityInternals.selectCustomerFacingSlots(spread, 6).map((slot) => slot.slotId))
+      .toContain('route-10');
   });
 
   test('estimate slot profile uses selected per-service treatments for combo first visit duration', () => {
