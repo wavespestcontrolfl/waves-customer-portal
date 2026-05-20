@@ -25,6 +25,11 @@ const {
   computeEmailMessageEventUpdates,
   suppressionForEmailEvent,
   isFreshTimestamp,
+  deliveryEmailMismatchLogMessage,
+  canUseDeliveryIdFallback,
+  canUseProviderMessageMatch,
+  bindNewsletterDeliveryMessageId,
+  reconcileNewsletterSendStatus,
 } = sendgridWebhook;
 
 describe('newsletter buildSubscriberQuery', () => {
@@ -159,6 +164,7 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       expect(u).toEqual({
         delivery: { status: 'delivered', delivered_at: now, updated_at: now },
         sendIncrement: 'delivered_count',
+        reconcileSendStatus: true,
       });
     });
     test('idempotent — already-delivered row is a no-op', () => {
@@ -178,6 +184,7 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       expect(u.delivery.bounced_at).toBe(now);
       expect(u.delivery.bounce_reason).toBe('mailbox does not exist');
       expect(u.sendIncrement).toBe('bounced_count');
+      expect(u.reconcileSendStatus).toBe(true);
       expect(u.subscriberAction).toBe('bounce_increment');
       expect(u.subscriberAt).toBe(now);
     });
@@ -208,11 +215,13 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       expect(u.delivery).toEqual({ opened_at: now, updated_at: now });
       expect(u.delivery.status).toBeUndefined();
       expect(u.sendIncrement).toBe('opened_count');
+      expect(u.reconcileSendStatus).toBe(true);
     });
     test('click stamps timestamp + clicked_count', () => {
       const u = computeNewsletterEventUpdates({ event: 'click' }, fresh(), now);
       expect(u.delivery).toEqual({ clicked_at: now, updated_at: now });
       expect(u.sendIncrement).toBe('clicked_count');
+      expect(u.reconcileSendStatus).toBe(true);
     });
     test('open is idempotent', () => {
       expect(computeNewsletterEventUpdates({ event: 'open' }, fresh({ opened_at: now }), now)).toBeNull();
@@ -227,6 +236,7 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       const u = computeNewsletterEventUpdates({ event: 'spamreport' }, fresh(), now);
       expect(u.delivery).toEqual({ status: 'complained', complained_at: now, updated_at: now });
       expect(u.sendIncrement).toBe('complained_count');
+      expect(u.reconcileSendStatus).toBe(true);
       expect(u.subscriberAction).toBe('force_unsubscribe');
     });
     test('idempotent — already-complained row is a no-op', () => {
@@ -260,6 +270,36 @@ describe('newsletter computeNewsletterEventUpdates', () => {
     test.each(['processed', 'deferred', 'group_resubscribe', 'unknown_future_event'])('%s is a no-op', (e) => {
       expect(computeNewsletterEventUpdates({ event: e }, fresh(), now)).toBeNull();
     });
+
+    test.each(['queued', 'failed'])('processed marks %s delivery rows as sent', (status) => {
+      expect(computeNewsletterEventUpdates({ event: 'processed' }, fresh({ status }), now)).toEqual({
+        delivery: { status: 'sent', sent_at: now, updated_at: now },
+        reconcileSendStatus: true,
+      });
+    });
+
+    test('processed marks token-matched in-flight resume rows as sent', () => {
+      expect(computeNewsletterEventUpdates(
+        { event: 'processed', send_attempt_token: 'attempt-1' },
+        fresh({ status: 'sending', send_attempt_token: 'attempt-1' }),
+        now,
+      )).toEqual({
+        delivery: { status: 'sent', sent_at: now, updated_at: now },
+        reconcileSendStatus: true,
+      });
+    });
+
+    test('processed ignores in-flight resume rows when attempt token is stale', () => {
+      expect(computeNewsletterEventUpdates(
+        { event: 'processed', send_attempt_token: 'old-attempt' },
+        fresh({ status: 'sending', send_attempt_token: 'new-attempt' }),
+        now,
+      )).toBeNull();
+    });
+
+    test('processed stays a no-op after the row is already sent', () => {
+      expect(computeNewsletterEventUpdates({ event: 'processed' }, fresh({ status: 'sent' }), now)).toBeNull();
+    });
   });
 });
 
@@ -289,6 +329,135 @@ describe('email template suppression event mapping', () => {
     });
     expect(suppressionForEmailEvent({ event: 'blocked' })).toBeNull();
     expect(suppressionForEmailEvent({ event: 'dropped' })).toBeNull();
+  });
+});
+
+describe('sendgrid webhook PII-safe diagnostics', () => {
+  test('redacts recipient emails in delivery_id mismatch warnings', () => {
+    const msg = deliveryEmailMismatchLogMessage(
+      'delivery-1',
+      'customer.person@example.com',
+      'tampered.person@example.net',
+    );
+    expect(msg).toContain('cu***@example.com');
+    expect(msg).toContain('ta***@example.net');
+    expect(msg).not.toContain('customer.person@example.com');
+    expect(msg).not.toContain('tampered.person@example.net');
+  });
+});
+
+describe('sendgrid webhook delivery_id fallback guard', () => {
+  test('accepts unbound rows and rejects rows bound to a different provider message id', () => {
+    expect(canUseDeliveryIdFallback({ provider_message_id: null }, 'new-msg')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: null, status: 'sending' }, 'new-msg')).toBe(false);
+    expect(canUseDeliveryIdFallback({ provider_message_id: null, status: 'sending', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-1')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: null, status: 'sending', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-2')).toBe(false);
+    expect(canUseDeliveryIdFallback({ provider_message_id: 'new-msg' }, 'new-msg')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg' }, 'new-msg')).toBe(false);
+    expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-1')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-2')).toBe(false);
+  });
+
+  test('provider message fast path honors active attempt tokens', () => {
+    expect(canUseProviderMessageMatch({ provider_message_id: 'sg-old' }, null)).toBe(true);
+    expect(canUseProviderMessageMatch({ provider_message_id: 'sg-new', send_attempt_token: 'tok-1' }, 'tok-1')).toBe(true);
+    expect(canUseProviderMessageMatch({ provider_message_id: 'sg-old', send_attempt_token: 'tok-1' }, 'tok-2')).toBe(false);
+    expect(canUseProviderMessageMatch({ provider_message_id: 'sg-old', send_attempt_token: 'tok-1' }, null)).toBe(false);
+  });
+
+  test('binds provider message id behind an unbound-or-same guard', async () => {
+    const nested = {};
+    nested.whereNull = jest.fn(() => nested);
+    nested.orWhere = jest.fn(() => nested);
+    const query = {};
+    query.where = jest.fn((arg) => {
+      if (typeof arg === 'function') arg(nested);
+      return query;
+    });
+    query.update = jest.fn(async () => 1);
+    const client = jest.fn(() => query);
+
+    const result = await bindNewsletterDeliveryMessageId(
+      { id: 'delivery-1', provider_message_id: null },
+      'sg-msg-1',
+      null,
+      client,
+    );
+
+    expect(result.provider_message_id).toBe('sg-msg-1');
+    expect(query.where).toHaveBeenCalledWith({ id: 'delivery-1' });
+    expect(nested.whereNull).toHaveBeenCalledWith('provider_message_id');
+    expect(nested.orWhere).toHaveBeenCalledWith({ provider_message_id: 'sg-msg-1' });
+  });
+
+  test('rebinds a stale provider message id when the attempt token matches', async () => {
+    const nested = {};
+    nested.whereNull = jest.fn(() => nested);
+    nested.orWhere = jest.fn(() => nested);
+    const query = {};
+    query.where = jest.fn((arg) => {
+      if (typeof arg === 'function') arg(nested);
+      return query;
+    });
+    query.update = jest.fn(async () => 1);
+    const client = jest.fn(() => query);
+
+    const result = await bindNewsletterDeliveryMessageId(
+      { id: 'delivery-1', provider_message_id: 'sg-old', send_attempt_token: 'tok-1' },
+      'sg-new',
+      'tok-1',
+      client,
+    );
+
+    expect(result.provider_message_id).toBe('sg-new');
+    expect(nested.orWhere).toHaveBeenCalledWith({ send_attempt_token: 'tok-1' });
+    expect(query.where).toHaveBeenCalledWith({ send_attempt_token: 'tok-1' });
+  });
+
+  test('re-reads the delivery row when a concurrent message bind wins', async () => {
+    const nested = {};
+    nested.whereNull = jest.fn(() => nested);
+    nested.orWhere = jest.fn(() => nested);
+    const updateQuery = {};
+    updateQuery.where = jest.fn((arg) => {
+      if (typeof arg === 'function') arg(nested);
+      return updateQuery;
+    });
+    updateQuery.update = jest.fn(async () => 0);
+    const rereadQuery = {};
+    rereadQuery.where = jest.fn(() => rereadQuery);
+    rereadQuery.first = jest.fn(async () => ({ id: 'delivery-1', provider_message_id: 'sg-other' }));
+    const client = jest.fn()
+      .mockReturnValueOnce(updateQuery)
+      .mockReturnValueOnce(rereadQuery);
+
+    const result = await bindNewsletterDeliveryMessageId(
+      { id: 'delivery-1', provider_message_id: null },
+      'sg-msg-1',
+      null,
+      client,
+    );
+
+    expect(result.provider_message_id).toBe('sg-other');
+    expect(rereadQuery.where).toHaveBeenCalledWith({ id: 'delivery-1' });
+  });
+
+  test('reconcile treats abandoned sending rows as retryable', async () => {
+    const deliveryQuery = {};
+    deliveryQuery.where = jest.fn(() => deliveryQuery);
+    deliveryQuery.whereIn = jest.fn(() => deliveryQuery);
+    deliveryQuery.whereNull = jest.fn(() => deliveryQuery);
+    deliveryQuery.count = jest.fn(() => deliveryQuery);
+    deliveryQuery.first = jest.fn(async () => ({ c: 1 }));
+    const client = jest.fn((table) => {
+      if (table === 'newsletter_send_deliveries') return deliveryQuery;
+      throw new Error(`unexpected table ${table}`);
+    });
+
+    await reconcileNewsletterSendStatus('send-1', client);
+
+    expect(deliveryQuery.where).toHaveBeenCalledWith({ send_id: 'send-1' });
+    expect(deliveryQuery.whereIn).toHaveBeenCalledWith('status', ['queued', 'failed', 'sending']);
   });
 });
 

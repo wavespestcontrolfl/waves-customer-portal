@@ -793,7 +793,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     durationMinutes: serviceProfile.durationMinutes,
     dateFrom,
     dateTo,
-    topN: 200,
+    topN: Number.MAX_SAFE_INTEGER,
     includeWeekends: opts.includeWeekends,
   });
 

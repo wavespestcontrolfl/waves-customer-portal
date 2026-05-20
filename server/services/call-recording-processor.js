@@ -2,7 +2,7 @@
  * Call Recording Processor.
  *
  * Processes Twilio call recordings end-to-end:
- *   1. Transcribe audio (Gemini or Twilio built-in)
+ *   1. Transcribe audio (OpenAI, Gemini fallback, or Twilio built-in)
  *   2. AI extraction: customer info, appointment details, pain points, sentiment
  *   3. Create/update customer in portal DB
  *   4. If appointment detected → create calendar row, register reminders, send confirmation SMS + log
@@ -32,6 +32,17 @@ const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('.
 const { renderSmsTemplate } = require('./sms-template-renderer');
 
 const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam B.';
+const OPENAI_TRANSCRIPTIONS_API = 'https://api.openai.com/v1/audio/transcriptions';
+const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
+const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe-diarize';
+const OPENAI_TRANSCRIPT_LABEL_MODEL = process.env.OPENAI_TRANSCRIPT_LABEL_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
+const OPENAI_COMPLETENESS_FALLBACK_SECONDS = Number(process.env.OPENAI_COMPLETENESS_FALLBACK_SECONDS) || 600;
+const OPENAI_COMPLETENESS_FALLBACK_CHARS = Number(process.env.OPENAI_COMPLETENESS_FALLBACK_CHARS) || 7000;
+const OPENAI_TRANSCRIPTION_PROMPT = `Transcribe this phone call recording for Waves Pest Control (pest control and lawn care, Southwest Florida).
+
+Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and proper nouns exactly as spoken.
+Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
+const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
 
 function twilioClient() {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
@@ -55,6 +66,107 @@ function maskSid(sid) {
   const value = String(sid);
   if (value.length <= 8) return `${value.slice(0, 2)}...`;
   return `${value.slice(0, 2)}...${value.slice(-6)}`;
+}
+
+function isOutboundCall(call = {}) {
+  return String(call.direction || '').toLowerCase().startsWith('outbound');
+}
+
+function phoneDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function phoneKey(value) {
+  const digits = phoneDigits(value);
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  return digits;
+}
+
+function samePhone(a, b) {
+  const aKey = phoneKey(a);
+  const bKey = phoneKey(b);
+  return !!aKey && !!bKey && aKey === bKey;
+}
+
+function maskPhone(value) {
+  const digits = phoneDigits(value);
+  return digits ? `***${digits.slice(-4)}` : 'unknown';
+}
+
+function resolveCallContactPhone(call = {}, extractedPhone = null) {
+  const extracted = String(extractedPhone || '').trim();
+  if (isOutboundCall(call)) {
+    if (extracted && !samePhone(extracted, call.from_phone)) return extracted;
+    return call.to_phone || extracted || call.from_phone || null;
+  }
+
+  if (extracted && !samePhone(extracted, call.to_phone)) return extracted;
+  return call.from_phone || extracted || call.to_phone || null;
+}
+
+function normalizeNamePart(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
+  const extractedFirst = normalizeNamePart(extracted.first_name);
+  const customerFirst = normalizeNamePart(customer.first_name);
+  if (!extractedFirst || !customerFirst) return true;
+  if (extractedFirst !== customerFirst) return false;
+
+  const extractedLast = normalizeNamePart(extracted.last_name);
+  const customerLast = normalizeNamePart(customer.last_name);
+  if (extractedLast && customerLast && extractedLast !== customerLast) return false;
+  return true;
+}
+
+function customerPhoneMatches(phone, customer = {}) {
+  return samePhone(phone, customer.phone);
+}
+
+async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
+  const contactKey = phoneKey(phone);
+  if (!contactKey) return null;
+
+  const base = () => {
+    const query = db('customers').whereNull('deleted_at');
+    if (contactKey.length === 10) {
+      return query.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [contactKey]);
+    }
+    return query.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [contactKey]);
+  };
+
+  if (opts.preferredCustomerId) {
+    const preferred = await db('customers')
+      .where({ id: opts.preferredCustomerId })
+      .whereNull('deleted_at')
+      .first();
+    if (preferred && customerPhoneMatches(phone, preferred)) return preferred;
+  }
+
+  const firstName = normalizeNamePart(extracted.first_name);
+  if (firstName) {
+    let namedQuery = base()
+      .whereRaw("LOWER(regexp_replace(COALESCE(first_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [firstName]);
+
+    const lastName = normalizeNamePart(extracted.last_name);
+    if (lastName) {
+      namedQuery = namedQuery.orderByRaw(
+        "CASE WHEN LOWER(regexp_replace(COALESCE(last_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ? THEN 0 ELSE 1 END",
+        [lastName]
+      );
+    }
+
+    const [named] = await namedQuery.orderBy('updated_at', 'desc').limit(1);
+    return named && extractedNameMatchesCustomer(extracted, named) ? named : null;
+  }
+
+  const matches = await base().orderBy('updated_at', 'desc').limit(2);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    logger.warn(`[call-proc] ${matches.length} customers share call contact phone ${maskPhone(phone)}; not auto-linking without name match`);
+  }
+  return null;
 }
 
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType }) {
@@ -605,24 +717,164 @@ async function downloadRecording(mp3Url) {
     redirect: 'follow',
   });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-  const buffer = Buffer.from(await res.arrayBuffer());
-  return buffer.toString('base64');
+  return Buffer.from(await res.arrayBuffer());
 }
 
-// ── Transcribe audio via Gemini (download + inline base64) ──
-async function transcribeWithGemini(mp3Url) {
+function normalizeOpenAITranscript(data) {
+  if (!data) return null;
+  if (typeof data === 'string') return data.trim() || null;
+
+  if (Array.isArray(data.segments)) {
+    const speakerLabels = new Map();
+    const text = data.segments
+      .map((segment) => {
+        const speaker = segment.speaker || segment.speaker_id || segment.speaker_label;
+        const body = String(segment.text || '').trim();
+        if (!body) return null;
+        if (!speaker) return body;
+        if (!speakerLabels.has(speaker)) speakerLabels.set(speaker, `Speaker ${speakerLabels.size + 1}`);
+        return `${speakerLabels.get(speaker)}: ${body}`;
+      })
+      .filter(Boolean)
+      .join('\n');
+    return text.trim() || null;
+  }
+
+  if (typeof data.text === 'string') return data.text.trim() || null;
+  return null;
+}
+
+function transcriptHasAgentCallerLabels(transcript) {
+  return /(^|\n)\s*(Agent|Caller)\s*:/i.test(String(transcript || ''));
+}
+
+function recordingDurationSeconds(call = {}) {
+  return Number(call.recording_duration_seconds || call.duration_seconds || call.duration || 0) || 0;
+}
+
+function shouldTryGeminiBeforeAcceptingOpenAI(transcript, opts = {}) {
+  const text = String(transcript || '');
+  const durationSeconds = recordingDurationSeconds(opts.call || {});
+  return durationSeconds >= OPENAI_COMPLETENESS_FALLBACK_SECONDS
+    || text.length >= OPENAI_COMPLETENESS_FALLBACK_CHARS;
+}
+
+function extractOpenAIText(data) {
+  if (typeof data?.output_text === 'string') return data.output_text;
+  const parts = [];
+  for (const item of data?.output || []) {
+    for (const content of item?.content || []) {
+      if (content?.type === 'output_text' && content.text) parts.push(content.text);
+      if (content?.type === 'text' && content.text) parts.push(content.text);
+    }
+  }
+  return parts.join('');
+}
+
+async function labelTranscriptWithOpenAI(transcript, opts = {}) {
+  const text = String(transcript || '').trim();
+  if (!text || transcriptHasAgentCallerLabels(text)) return text || null;
+  if (!process.env.OPENAI_API_KEY) return null;
+
+  const direction = isOutboundCall(opts.call) ? 'outbound' : 'inbound';
+  const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
+
+  try {
+    const res = await fetch(OPENAI_RESPONSES_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_TRANSCRIPT_LABEL_MODEL,
+        input: `Relabel this Waves Pest Control phone transcript for downstream extraction.
+
+Call direction: ${direction}
+External customer/contact phone: ${contactPhone || 'unknown'}
+
+Rules:
+- Preserve every spoken word exactly. Do not summarize, add facts, omit turns, or rewrite meaning.
+- Rewrite only speaker prefixes so each turn starts with exactly "Agent:" or "Caller:".
+- "Agent" means Waves staff. "Caller" means the external customer/contact, including on outbound calls placed by Waves.
+- If a speaker identity is unclear, infer from context such as greetings, scheduling role, company references, and whether the speaker provides customer contact/service details.
+- Return the relabeled transcript only.
+
+Transcript:
+${text}`,
+      }),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      logger.warn(`[call-proc] OpenAI transcript labeling failed: ${res.status} ${errBody.slice(0, 200)}`);
+      return null;
+    }
+
+    const data = await res.json();
+    const labeled = extractOpenAIText(data).trim();
+    if (!transcriptHasAgentCallerLabels(labeled)) {
+      logger.warn('[call-proc] OpenAI transcript labeling returned no Agent/Caller labels');
+      return null;
+    }
+    return labeled;
+  } catch (err) {
+    logger.error(`[call-proc] OpenAI transcript labeling error: ${err.message}`);
+    return null;
+  }
+}
+
+// ── Primary transcription via OpenAI (multipart upload) ──
+async function transcribeWithOpenAI(audioBuffer) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const form = new FormData();
+    form.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'call-recording.mp3');
+    form.append('model', OPENAI_TRANSCRIPTION_MODEL);
+    form.append('language', 'en');
+    const diarized = OPENAI_TRANSCRIPTION_MODEL.includes('diarize');
+    form.append('response_format', diarized ? 'diarized_json' : 'json');
+    if (diarized) {
+      form.append('chunking_strategy', 'auto');
+    } else {
+      form.append('prompt', OPENAI_TRANSCRIPTION_PROMPT);
+    }
+    form.append('temperature', '0');
+
+    const res = await fetch(OPENAI_TRANSCRIPTIONS_API, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      logger.warn(`[call-proc] OpenAI transcription failed: ${res.status} ${errBody.slice(0, 200)}`);
+      return null;
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    const data = contentType.includes('application/json') ? await res.json() : await res.text();
+    return normalizeOpenAITranscript(data);
+  } catch (err) {
+    logger.error(`[call-proc] OpenAI transcription error: ${err.message}`);
+    return null;
+  }
+}
+
+// ── Secondary fallback transcription via Gemini (inline base64) ──
+async function transcribeWithGemini(audioBuffer, opts = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
   try {
-    // Download audio from Twilio (requires auth)
-    logger.info(`[call-proc] Downloading recording: ${mp3Url}`);
-    const audioBase64 = await downloadRecording(mp3Url);
-    logger.info(`[call-proc] Downloaded ${Math.round(audioBase64.length / 1024)}KB audio`);
-
-    const model = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
+    const audioBase64 = audioBuffer.toString('base64');
+    const direction = isOutboundCall(opts.call) ? 'outbound' : 'inbound';
+    const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -631,9 +883,12 @@ async function transcribeWithGemini(mp3Url) {
             parts: [
               { inlineData: { mimeType: 'audio/mpeg', data: audioBase64 } },
               { text: `Transcribe this phone call recording for Waves Pest Control (pest control + lawn care, SW Florida).
+Call direction: ${direction}.
+External customer/contact phone: ${contactPhone || 'unknown'}.
 
 Rules:
 - Label every turn "Agent:" or "Caller:" on its own line.
+- "Agent" means Waves staff. "Caller" means the external customer/contact, including on outbound calls placed by Waves.
 - Transcribe verbatim — preserve fillers ("um", "uh"), numbers, addresses, phone numbers, and proper nouns exactly as spoken.
 - If audio is silent, unintelligible, or only voicemail tones, output exactly: [VOICEMAIL] or [NO SPEECH].
 - Do NOT summarize, translate, or add commentary. Output the transcript only, nothing before or after.` },
@@ -645,17 +900,54 @@ Rules:
     );
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
-      logger.warn(`[call-proc] Gemini transcription failed: ${res.status} ${errBody.slice(0, 200)}`);
+      logger.warn(`[call-proc] Gemini fallback transcription failed: ${res.status} ${errBody.slice(0, 200)}`);
       return null;
     }
     const data = await res.json();
     // Gemini 2.5 may return thinking parts — skip those
     const parts = data.candidates?.[0]?.content?.parts || [];
     const textPart = parts.find(p => p.text && !p.thought);
-    return textPart?.text || parts[0]?.text || null;
+    return (textPart?.text || parts[0]?.text || '').trim() || null;
   } catch (err) {
-    logger.error(`[call-proc] Gemini transcription error: ${err.message}`);
+    logger.error(`[call-proc] Gemini fallback transcription error: ${err.message}`);
     return null;
+  }
+}
+
+async function transcribeRecording(mp3Url, opts = {}) {
+  try {
+    logger.info(`[call-proc] Downloading recording for transcription: ${mp3Url}`);
+    const audioBuffer = await downloadRecording(mp3Url);
+    logger.info(`[call-proc] Downloaded ${Math.round(audioBuffer.length / 1024)}KB audio`);
+
+    const openaiTranscript = await transcribeWithOpenAI(audioBuffer);
+    const openaiNeedsCompletenessFallback = openaiTranscript
+      && shouldTryGeminiBeforeAcceptingOpenAI(openaiTranscript, opts);
+
+    if (openaiNeedsCompletenessFallback) {
+      logger.warn('[call-proc] OpenAI transcript is long/near limit; trying Gemini before accepting it');
+    }
+
+    if (openaiTranscript && !openaiNeedsCompletenessFallback) {
+      const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
+      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai' };
+      logger.warn('[call-proc] OpenAI transcript missing usable Agent/Caller labels; trying Gemini fallback');
+    }
+
+    const geminiTranscript = await transcribeWithGemini(audioBuffer, opts);
+    if (geminiTranscript) return { transcription: geminiTranscript, provider: 'gemini_fallback' };
+
+    if (openaiTranscript) {
+      const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
+      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai_post_gemini_fallback' };
+      logger.warn('[call-proc] Using raw OpenAI transcript because labeling and Gemini fallback failed');
+      return { transcription: openaiTranscript, provider: 'openai_unlabeled_fallback' };
+    }
+
+    return { transcription: null, provider: null };
+  } catch (err) {
+    logger.error(`[call-proc] Recording transcription download/setup error: ${err.message}`);
+    return { transcription: null, provider: null };
   }
 }
 
@@ -905,30 +1197,33 @@ const CallRecordingProcessor = {
     // the lock to a recoverable terminal state so manual retry works
     // immediately and the real error reaches the caller.
     try {
-    // Step 1: Transcribe — Gemini is the source of truth. Twilio's built-in is fallback only.
+    const contactPhone = resolveCallContactPhone(call);
+
+    // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;
 
     if (call.recording_url) {
-      transcription = await transcribeWithGemini(call.recording_url);
+      const result = await transcribeRecording(call.recording_url, { call, contactPhone });
+      transcription = result.transcription;
       if (transcription) {
         await db('call_log').where({ id: call.id }).update({
           transcription,
           transcription_status: 'completed',
           updated_at: new Date(),
         });
-        logger.info(`[call-proc] Gemini transcription complete: ${transcription.length} chars`);
+        logger.info(`[call-proc] ${result.provider} transcription complete: ${transcription.length} chars`);
       }
     }
 
-    // Fallback: use Twilio's built-in transcription if Gemini failed or no recording URL
+    // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL
     if (!transcription) {
       const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
       if (freshCall?.transcription) {
         transcription = freshCall.transcription;
-        logger.info(`[call-proc] Gemini unavailable — falling back to Twilio transcription: ${transcription.length} chars`);
+        logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
       } else if (call.transcription) {
         transcription = call.transcription;
-        logger.info(`[call-proc] Gemini unavailable — using cached Twilio transcription: ${transcription.length} chars`);
+        logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
 
@@ -946,7 +1241,7 @@ const CallRecordingProcessor = {
     // Step 2: AI extraction
     let extracted;
     try {
-      extracted = await extractCallData(transcription, call.from_phone, { callStartedAt: call.created_at });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
@@ -973,13 +1268,32 @@ const CallRecordingProcessor = {
 
     // Step 3: Create or update customer
     let customerId = call.customer_id;
-    const phone = extracted.phone || call.from_phone;
+    const phone = resolveCallContactPhone(call, extracted.phone);
     let newsletterResult = null;
     let newsletterCandidate = null;
 
+    if (customerId && extracted.first_name && phone) {
+      const currentCustomer = await db('customers').where({ id: customerId }).first().catch(() => null);
+      if (currentCustomer && customerPhoneMatches(phone, currentCustomer) && !extractedNameMatchesCustomer(extracted, currentCustomer)) {
+        const namedCustomer = await findCustomerForCallContact(phone, extracted).catch((e) => {
+          logger.warn(`[call-proc] Name-based customer reconciliation failed for ${maskSid(callSid)}: ${e.message}`);
+          return null;
+        });
+        if (namedCustomer && namedCustomer.id !== customerId) {
+          logger.warn(
+            `[call-proc] Reassigning call ${maskSid(callSid)} from customer ${customerId} to ${namedCustomer.id}; ` +
+            'transcript name matched alternate customer'
+          );
+          customerId = namedCustomer.id;
+        }
+      }
+    }
+
     if (!customerId && phone) {
-      // Try to find existing customer by phone
-      const existing = await db('customers').where({ phone }).first();
+      // Try to find an existing customer by the external contact phone.
+      // Name match wins; phone-only matching is allowed only when the number
+      // maps to a single active customer.
+      const existing = await findCustomerForCallContact(phone, extracted);
       if (existing) {
         customerId = existing.id;
         // Update with any new info
@@ -1229,8 +1543,8 @@ const CallRecordingProcessor = {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
-          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, call.from_phone);
-          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, call.from_phone);
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone);
+          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           if (!customerValidation.ok) {
             appointmentResult = {
               service: serviceResolution.service,
@@ -1836,9 +2150,11 @@ CallRecordingProcessor._test = {
   canonicalWavesService,
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
+  resolveCallContactPhone,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   validatePhoneCallAppointmentCustomer,
+  extractedNameMatchesCustomer,
 };
 
 module.exports = CallRecordingProcessor;
