@@ -81,6 +81,7 @@ function buildDb({ send, deliveries = [], subscribers = [] }) {
       chain({}),                                            // insert onConflict
       chain({ result: deliveries }),                        // SELECT after insert
       chain({ updated: subscribers.length }),               // bulk update post-send
+      chain({ count: 0 }),                                  // final retryable ledger count
     ],
   };
   db.mockImplementation((table) => {
@@ -264,6 +265,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
           { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
         ] }),
         failureUpdate,
+        chain({ count: 0 }),
       ],
     };
     db.mockImplementation((table) => {
@@ -373,6 +375,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({}),                                            // insert onConflict
         chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }] }),
         chain({ updated: 1 }),                                // post-send bulk update
+        chain({ count: 0 }),                                  // final retryable ledger count
       ],
       newsletter_subscribers: [
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
@@ -423,6 +426,7 @@ describe('resumeCampaign — preconditions', () => {
           { id: 'd-2', subscriber_id: 2, status: 'failed', ab_variant: null },
         ] }),
         chain({ updated: 1 }),                                // post-send bulk update
+        chain({ count: 0 }),                                  // final retryable ledger count
       ],
       newsletter_subscribers: [
         chain({
@@ -506,6 +510,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ count: 1 }),                                  // one outstanding
         chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'failed', ab_variant: null }] }),
         chain({ updated: 1 }),                                // post-send bulk update
+        chain({ count: 0 }),                                  // final retryable ledger count
       ],
       newsletter_subscribers: [
         chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),

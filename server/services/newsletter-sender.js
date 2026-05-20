@@ -321,7 +321,15 @@ async function sendCampaign(sendId, opts = {}) {
   // is 'failed' (operator can resume after fixing the cause). Otherwise we
   // call it 'sent' — partial failures live on as 'failed' deliveries that
   // resumeCampaign() can re-send without double-emailing the successes.
-  const allFailed = failed === subscribersToSend.length && subscribersToSend.length > 0 && successfulDeliveryCount === 0;
+  const retryableRemaining = await applyRetryableDeliveryFilter(
+    db('newsletter_send_deliveries').where({ send_id: send.id }),
+  )
+    .count('* as c')
+    .first();
+  const allFailed = Number(retryableRemaining?.c || 0) > 0
+    && failed === subscribersToSend.length
+    && subscribersToSend.length > 0
+    && successfulDeliveryCount === 0;
   const finalSendUpdate = {
     status: allFailed ? 'failed' : 'sent',
     recipient_count: recipientCount,

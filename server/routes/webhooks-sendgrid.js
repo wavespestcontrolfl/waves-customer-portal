@@ -8,8 +8,8 @@
  * Setup (one-time, SendGrid UI):
  *   Settings → Mail Settings → Event Webhook
  *     POST URL: https://portal.wavespestcontrol.com/api/webhooks/sendgrid/events
- *     Enable: Delivered, Bounced, Blocked, Deferred, Dropped, Opened,
- *             Clicked, Spam Reports, Unsubscribe
+ *     Enable: Processed, Delivered, Bounced, Blocked, Deferred, Dropped,
+ *             Opened, Clicked, Spam Reports, Unsubscribe
  *     Signed Event Webhook: ON
  *   Copy the generated "Verification Key" → Railway env SENDGRID_WEBHOOK_PUBLIC_KEY
  *
