@@ -656,7 +656,9 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
   const hasFollowingOtherUnit = unitKind === 'acre'
     ? SQFT_UNIT_RE.test(trailing)
     : ACRE_UNIT_RE.test(trailing);
-  if (hasFollowingOtherUnit) return false;
+  if (hasFollowingOtherUnit) {
+    return unitKind === 'acre' && Number.isInteger(beforeValue) && afterValue > 0 && afterValue < LOT_SQFT_MIN;
+  }
 
   const separator = afterMatch[1] || '';
   if (/[:=]/.test(separator)) return true;
