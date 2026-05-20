@@ -23,6 +23,7 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('1 / 2 acre')).toBe(21780);
     expect(coerceLotSize('Lot 13 - 1/2 acre')).toBe(21780);
     expect(coerceLotSize('Lot 13-1/2 acre')).toBe(21780);
+    expect(coerceLotSize('Lot #13 1/2 acre')).toBe(21780);
   });
 
   test('recognizes acre and square-foot abbreviations without using unrelated numbers', () => {

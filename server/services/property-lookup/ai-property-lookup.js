@@ -675,8 +675,8 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
 function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex) {
   const value = String(rawNumber || '').trim();
   const lotPrefix = /\blot\s*(?:#|no\.?|number)?\s*$/i.test(fullStr.slice(0, matchIndex));
-  const lotHyphenFraction = value.match(/^\d+\s*-\s*(\d+\s*\/\s*\d+)$/);
-  if (lotPrefix && lotHyphenFraction) return parseFirstLotNumber(lotHyphenFraction[1]);
+  const lotMixedFraction = value.match(/^\d+\s*(?:-|\s)\s*(\d+\s*\/\s*\d+)$/);
+  if (lotPrefix && lotMixedFraction) return parseFirstLotNumber(lotMixedFraction[1]);
   return parseFirstLotNumber(value);
 }
 
