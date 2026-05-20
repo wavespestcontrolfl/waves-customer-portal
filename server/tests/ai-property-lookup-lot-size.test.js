@@ -7,6 +7,7 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot 13, Block 2, 0.23 acres')).toBe(10019);
     expect(coerceLotSize('.2 acres')).toBe(8712);
     expect(coerceLotSize('AC 0.25')).toBe(10890);
+    expect(coerceLotSize('Lot Size Acres: 0.25')).toBe(10890);
   });
 
   test('parses fractional acreage formats before decimal fallback', () => {

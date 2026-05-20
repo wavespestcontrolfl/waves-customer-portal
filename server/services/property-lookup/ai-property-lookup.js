@@ -633,7 +633,7 @@ function parseUnitQualifiedLotNumber(str, unitPattern) {
   const beforeMatch = str.match(beforeUnit);
   if (beforeMatch) return parseFirstLotNumber(beforeMatch[1]);
 
-  const afterUnit = new RegExp(`(?:${unitPattern.source})\\s*(?:of\\s*)?${LOT_NUMBER_PATTERN}`, 'i');
+  const afterUnit = new RegExp(`(?:${unitPattern.source})\\s*(?:[:=,-]\\s*)?(?:of\\s*)?${LOT_NUMBER_PATTERN}`, 'i');
   const afterMatch = str.match(afterUnit);
   return afterMatch ? parseFirstLotNumber(afterMatch[1]) : null;
 }
