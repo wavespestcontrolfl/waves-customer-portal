@@ -20,8 +20,6 @@
  * Query params on GET:
  *   ?windowDays=14    override lookahead window
  *   ?expand=true      include full expander list (default true anyway)
- *   ?serviceMode=recurring|one_time
- *   ?selectedFrequency=quarterly|bi_monthly|monthly
  *
  * Errors:
  *   404 — token not found, or estimate expired (expires_at in past)
@@ -68,14 +66,6 @@ router.get('/:token/available-slots', async (req, res) => {
     const opts = {};
     if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 30) {
       opts.windowDays = windowDays;
-    }
-    if (req.query.serviceMode === 'one_time') {
-      opts.serviceMode = 'one_time';
-    } else if (req.query.serviceMode === 'recurring') {
-      opts.serviceMode = 'recurring';
-    }
-    if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
-      opts.selectedFrequency = req.query.selectedFrequency.trim();
     }
 
     try {
@@ -133,12 +123,6 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   if (!slotId) {
     return res.status(400).json({ error: 'slotId required' });
   }
-  const serviceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
-  const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
-    ? req.body.selectedFrequency.trim()
-    : '';
-  const slotOpts = { serviceMode };
-  if (selectedFrequency) slotOpts.selectedFrequency = selectedFrequency;
 
   try {
     const estimate = await db('estimates').where({ token }).first('id', 'status', 'expires_at');
@@ -150,7 +134,6 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
         estimateId: estimate.id,
         slotId,
-        ...slotOpts,
       });
       return res.status(201).json({
         scheduledServiceId,
@@ -172,7 +155,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // re-render without another round trip.
         let fresh = null;
         try {
-          fresh = await getAvailableSlots(estimate.id, slotOpts);
+          fresh = await getAvailableSlots(estimate.id);
         } catch (freshErr) {
           logger.warn(`[estimate-slots-public] fresh slots lookup failed: ${freshErr.message}`);
         }

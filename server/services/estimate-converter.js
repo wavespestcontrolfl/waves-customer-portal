@@ -122,20 +122,6 @@ function calculateAnnualPrepayAmount(monthlyRate) {
   return Math.round((parseFloat(monthlyRate || 0) || 0) * 12 * 100) / 100;
 }
 
-function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, monthlyRate } = {}) {
-  const explicit = parseFloat(prepayInvoiceAmount);
-  if (Number.isFinite(explicit) && explicit > 0) return Math.round(explicit * 100) / 100;
-  const annual = parseFloat(annualTotal);
-  if (Number.isFinite(annual) && annual > 0) return Math.round(annual * 100) / 100;
-  return calculateAnnualPrepayAmount(monthlyRate);
-}
-
-function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
-  if (!Array.isArray(recurringServices) || recurringServices.length === 0) return false;
-  if (billingTerm === 'prepay_annual') return true;
-  return hasWaveGuardSetupService(recurringServices);
-}
-
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -187,10 +173,7 @@ const EstimateConverter = {
       || estimateData.services?.filter(s => s.recurring || s.frequency)
       || [];
     const serviceCount = countTierQualifyingRecurringServices(recurringServices);
-    const shouldCreateDraftInvoice = shouldCreateDraftInvoiceForRecurring({
-      billingTerm,
-      recurringServices,
-    });
+    const shouldCreateSetupInvoice = hasWaveGuardSetupService(recurringServices);
 
     // Determine tier
     const { tier, discount } = determineTier(serviceCount, recurringServices.length > 0);
@@ -297,27 +280,16 @@ const EstimateConverter = {
 
     // 4. Create draft setup/prepay invoice so Virginia sees it in
     //    /admin/invoices and can review + send. Nothing auto-charges.
-    //    Standard setup invoices stay scoped to recurring pest. Annual
-    //    prepay invoices are created for any recurring plan that offered
-    //    annual prepay on the public estimate, including lawn-only.
+    //    Scoped to estimates with recurring pest — other recurring services,
+    //    including excluded rows such as palm/rodent bait, do not show this
+    //    setup charge on the public estimate and should not receive it here.
     let draftInvoiceId = null;
     let draftInvoiceAmount = null;
     try {
-      const annualPrepayAmount = resolveAnnualPrepayDraftAmount({
-        prepayInvoiceAmount: opts.prepayInvoiceAmount,
-        annualTotal: estimate.annual_total,
-        monthlyRate,
-      });
-      const hasDraftAmount = billingTerm === 'prepay_annual'
-        ? annualPrepayAmount > 0
-        : monthlyRate > 0;
-      if (hasDraftAmount && !skipSetupInvoice && shouldCreateDraftInvoice) {
+      if (monthlyRate > 0 && !skipSetupInvoice && shouldCreateSetupInvoice) {
         const InvoiceService = require('./invoice');
         if (billingTerm === 'prepay_annual') {
-          const annualAmount = annualPrepayAmount;
-          const termMonthlyRate = monthlyRate > 0
-            ? monthlyRate
-            : Math.round((annualAmount / 12) * 100) / 100;
+          const annualAmount = calculateAnnualPrepayAmount(monthlyRate);
           const inv = await InvoiceService.create({
             customerId,
             title: `WaveGuard ${tier || 'Bronze'} — Annual Prepay (12 months)`,
@@ -338,7 +310,7 @@ const EstimateConverter = {
               sourceEstimateId: estimateId,
               prepayInvoiceId: draftInvoiceId,
               planLabel: `WaveGuard ${tier || 'Bronze'} Annual Prepay`,
-              monthlyRate: termMonthlyRate,
+              monthlyRate,
               prepayAmount: annualAmount,
               termStart: termStartDate || null,
             });
@@ -378,6 +350,4 @@ module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurri
 module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.recurringServiceKey = recurringServiceKey;
-module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
-module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;

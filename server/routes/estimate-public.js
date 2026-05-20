@@ -39,9 +39,6 @@ const {
   WAVES_SUPPORT_PHONE_TEL,
   WAVES_SUPPORT_SMS_TEL,
 } = require('../constants/business');
-const {
-  pricingBundleMatchesEstimateTotals,
-} = require('../services/estimate-pricing-bundle-utils');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
@@ -785,87 +782,6 @@ function firstPositiveNumber(...values) {
   return null;
 }
 
-function treatmentVisitsForPricingRow(row = {}) {
-  return firstPositiveNumber(
-    row?.visitsPerYear,
-    row?.appsPerYear,
-    row?.visits,
-    row?.apps,
-    row?.frequency,
-  );
-}
-
-function displayedTreatmentAmountForPricingRow(row = {}) {
-  return firstPositiveNumber(
-    row?.displayPrice,
-    row?.netPerTreatment,
-    row?.price,
-    row?.perTreatment,
-  );
-}
-
-function baseTreatmentAmountForPricingRow(row = {}) {
-  return firstPositiveNumber(
-    row?.perTreatment,
-    row?.rawPerTreatment,
-    row?.anchorPrice,
-    row?.displayPrice,
-    row?.netPerTreatment,
-    row?.price,
-  );
-}
-
-function pestRecurringForPricingRows(rows = []) {
-  const pestRows = rows.filter((row) => recurringServiceKey(row) === 'pest_control');
-  if (!pestRows.length) return null;
-  const visitsPerYear = pestRows.reduce((max, row) => {
-    const visits = treatmentVisitsForPricingRow(row);
-    return visits && visits > max ? visits : max;
-  }, 0) || 4;
-  const monthlyBase = pestRows.reduce((sum, row) => {
-    const amount = baseTreatmentAmountForPricingRow(row);
-    const visits = treatmentVisitsForPricingRow(row) || visitsPerYear;
-    return amount && visits ? sum + ((amount * visits) / 12) : sum;
-  }, 0);
-  return { count: pestRows.length, visitsPerYear, monthlyBase };
-}
-
-function sameDayVisitTotalForPricingFrequency(frequency = {}, opts = {}) {
-  const rows = Array.isArray(frequency?.perServiceTreatments)
-    ? frequency.perServiceTreatments
-    : [];
-  const fallback = Number(frequency?.sameDayTreatmentTotal);
-  const prefMonthlyOff = opts.preferences
-    ? computePrefDiscount(opts.preferences, pestRecurringForPricingRows(rows), false, 0).monthlyOff
-    : 0;
-  const pestRowWeights = rows.map((row) => {
-    if (recurringServiceKey(row) !== 'pest_control') return 0;
-    const amount = displayedTreatmentAmountForPricingRow(row);
-    const visits = treatmentVisitsForPricingRow(row);
-    return amount && visits ? (amount * visits) / 12 : 0;
-  });
-  const pestWeightTotal = pestRowWeights.reduce((sum, weight) => sum + weight, 0);
-  let missingTreatmentAmount = false;
-  const total = rows.reduce((sum, row, index) => {
-    let amount = displayedTreatmentAmountForPricingRow(row);
-    if (!(amount > 0)) {
-      missingTreatmentAmount = true;
-      return sum;
-    }
-    if (amount && prefMonthlyOff > 0 && pestWeightTotal > 0 && recurringServiceKey(row) === 'pest_control') {
-      const visits = treatmentVisitsForPricingRow(row);
-      const rowMonthlyOff = prefMonthlyOff * (pestRowWeights[index] / pestWeightTotal);
-      const perTreatmentOff = visits ? (rowMonthlyOff * 12) / visits : 0;
-      amount = Math.max(0, amount - perTreatmentOff);
-    }
-    return amount ? sum + amount : sum;
-  }, 0);
-  if (!missingTreatmentAmount && total > 0) return Math.round(total * 100) / 100;
-
-  if (Number.isFinite(fallback) && fallback > 0) return Math.round(fallback * 100) / 100;
-  return null;
-}
-
 function recurringServiceKey(svc = {}) {
   const raw = String(svc.service || svc.key || svc.name || svc.label || svc.displayName || '').toLowerCase();
   const words = raw.replace(/[_-]+/g, ' ');
@@ -911,32 +827,6 @@ function recurringServiceDisplayName(key) {
     case 'rodent_bait': return 'Rodent Bait Stations';
     default: return null;
   }
-}
-
-function isLawnCareOneTimeItem(item = {}) {
-  const raw = [item.service, item.name, item.label]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
-    .replace(/[_-]+/g, ' ');
-  if (!raw || raw.includes('waveguard setup') || raw.includes('membership')) return true;
-  return /\blawn|turf|weed|fertili[sz]|chinch|fung/.test(raw);
-}
-
-function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
-  const recurringRows = Array.isArray(recurring) ? recurring : [];
-  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
-  return recurringRows.length > 0
-    && recurringRows.every((svc) => recurringServiceKey(svc) === 'lawn_care')
-    && !detectPestOneTime(oneTimeRows)
-    && oneTimeRows.every(isLawnCareOneTimeItem);
-}
-
-function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
-  const recurringRows = Array.isArray(recurring) ? recurring : [];
-  if (!recurringRows.length) return false;
-  if (recurringRows.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) return true;
-  return hasOnlyLawnCareServiceMix(recurringRows, oneTimeItems);
 }
 
 function mergeSupplementalRecurringRow(existing = {}, supplemental = {}) {
@@ -1237,7 +1127,15 @@ function renderPage(token, estimate, estData) {
   const showPrefs = !!(pestRecurring || hasPestOneTime);
   const prefs = normalizePrefs(estData?.preferences);
   const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
-  const hasOnlyLawnCareServices = hasOnlyLawnCareServiceMix(recurring, oneTimeItems);
+  const isLawnCareOneTimeItem = (item = {}) => {
+    const raw = String(item.service || item.name || item.label || '').toLowerCase();
+    if (!raw || raw.includes('waveguard setup') || raw.includes('membership')) return true;
+    return /\blawn|turf|weed|fertili[sz]|chinch|fung/.test(raw);
+  };
+  const hasOnlyLawnCareServices = recurring.length > 0
+    && recurring.every((svc) => recurringServiceKey(svc) === 'lawn_care')
+    && !hasPestOneTime
+    && oneTimeItems.every(isLawnCareOneTimeItem);
   const pageCopy = hasOnlyLawnCareServices
     ? {
         heroSuffix: "here's your lawn care estimate.",
@@ -1483,32 +1381,19 @@ function renderPage(token, estimate, estData) {
         tierLabel: svc?.tierLabel || `WaveGuard ${tier}`,
       };
     });
-  const allBillingRowsHaveVisitPrice = billingServiceRows.length > 0
-    && billingServiceRows.every((row) => {
-      const price = Number(row.price);
-      return Number.isFinite(price) && price > 0;
-    });
-  const resolvedFirstServiceVisitTotal = resolveRecurringFirstVisitAmount(billingRecurring, {
+  const firstServiceVisitTotal = resolveRecurringFirstVisitAmount(billingRecurring, {
     estData,
     tierDiscount: estimateTierDiscount,
     prefMonthlyOff,
     pestRecurring,
     selectedPestTier,
   }) || 0;
-  const firstServiceVisitTotal = allBillingRowsHaveVisitPrice
-    ? (resolvedFirstServiceVisitTotal || billingServiceRows.reduce((sum, row) => sum + Number(row.price), 0))
-    : null;
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
   const showAnnualPrepayOption = showMembershipFee;
   const annualPrepayWaivesMembership = showMembershipFee;
   const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
   const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal + prepayMembershipDue) * 100) / 100);
-  const prepayMembershipSummaryHtml = showMembershipFee
-    ? (annualPrepayWaivesMembership
-      ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
-      : `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(membershipFee)}</strong></div>`)
-    : '';
   const showBillingCard = !quoteRequired && !locked && billingRecurring.length > 0;
   const requirePaymentSetupBeforeSlots = showBillingCard;
   const billingLede = pageCopy.billingLede || (showAnnualPrepayOption
@@ -1528,7 +1413,7 @@ function renderPage(token, estimate, estData) {
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Today</span><strong>$0</strong></div>
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
-          <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
+          <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal > 0 ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
         </div>
         <p class="billing-small">${showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy)}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Choose pay-after-visit setup</button>
@@ -1543,8 +1428,9 @@ function renderPage(token, estimate, estData) {
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Today</span><strong>$0</strong></div>
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
-          ${prepayMembershipSummaryHtml}
-          <div class="payment-summary-row total"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+          ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(membershipFee)}</strong></div>
+          ${annualPrepayWaivesMembership ? `<div class="payment-summary-row discount"><span>Annual Pay-in-Full Waiver</span><strong>-${fmtMoney(membershipFee)}</strong></div>` : ''}` : ''}
+          <div class="payment-summary-row"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">No payment is charged on this page. The annual prepay invoice is prepared after approval.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
@@ -1860,7 +1746,6 @@ function renderPage(token, estimate, estData) {
   .payment-summary-row span{font-size:12px;color:#6B7280;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
   .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}
   .payment-summary-row.discount strong,.payment-summary-row.discount span{color:${BRAND.green}}
-  .payment-summary-row strong s{color:#9CA3AF;text-decoration-color:${BRAND.red};text-decoration-thickness:2px;margin-right:6px}
   .payment-choice-cta{margin-top:auto;width:100%;border:1px solid #1B2C5B;background:#fff;color:#1B2C5B;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
   .payment-choice-cta:hover:not([disabled]),.payment-choice-cta[aria-pressed="true"]{background:#1B2C5B;color:#fff}
   .payment-choice-cta.primary{background:${ESTIMATE_BUTTON_BLUE};border-color:${ESTIMATE_BUTTON_BLUE};color:#fff}
@@ -2151,7 +2036,6 @@ ${shellQuestionsBar()}
   const RECURRING_PAY_PREF_HEADING = ${JSON.stringify(pageCopy.payPrefHeading)};
   const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
   const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
-  const ANNUAL_PREPAY_INVOICE_TOTAL = ${JSON.stringify(prepayInvoiceTotal)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
@@ -2339,19 +2223,10 @@ ${shellQuestionsBar()}
     isReserving: false,
     countdownTimer: null,
     serviceMode: INITIAL_SERVICE_MODE,
-    reserveAttemptId: 0,
   };
 
   function bookingRequiresPaymentSetup() {
     return REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS && bookingState.serviceMode !== 'one_time';
-  }
-
-  function buildSlotContext() {
-    const context = { serviceMode: bookingState.serviceMode || INITIAL_SERVICE_MODE };
-    if (context.serviceMode === 'recurring' && DEFAULT_RECURRING_FREQUENCY) {
-      context.selectedFrequency = DEFAULT_RECURRING_FREQUENCY;
-    }
-    return context;
   }
 
   function syncPaymentSetupCards() {
@@ -2362,16 +2237,6 @@ ${shellQuestionsBar()}
       const card = btn.closest('.payment-choice');
       if (card) card.classList.toggle('is-selected', selected);
     });
-  }
-
-  function setBookingChoiceControlsDisabled(disabled) {
-    document.querySelectorAll('[data-pay-pref], .slot-btn').forEach((b) => { b.disabled = !!disabled; });
-  }
-
-  function currentAnnualPrepayInvoiceText() {
-    const el = document.querySelector('[data-prepay-invoice-total]');
-    const text = el && String(el.textContent || '').trim();
-    return text || fmt(ANNUAL_PREPAY_INVOICE_TOTAL);
   }
 
   function ensureBookingCardVisible() {
@@ -2451,16 +2316,9 @@ ${shellQuestionsBar()}
     if (changed && bookingState.reservation) {
       cancelReservation();
     } else if (changed) {
-      bookingState.reserveAttemptId += 1;
-      bookingState.isReserving = false;
       bookingState.pendingPref = null;
       bookingState.pickedPref = null;
-      bookingState.selectedSlotId = null;
-      bookingState.selectedSlotLabel = null;
-      const bookingCard = document.getElementById('booking-card');
-      if (bookingCard) bookingCard.dataset.slotsLoaded = 'false';
       syncPaymentSetupCards();
-      setBookingChoiceControlsDisabled(false);
       if (bookingRequiresPaymentSetup()) {
         hideBookingCardUntilSetup();
       } else {
@@ -2548,14 +2406,7 @@ ${shellQuestionsBar()}
     const area = document.getElementById('slot-area');
     if (!area) return;
     try {
-      const slotContext = buildSlotContext();
-      const slotParams = new URLSearchParams();
-      slotParams.set('serviceMode', slotContext.serviceMode);
-      if (slotContext.selectedFrequency) {
-        slotParams.set('selectedFrequency', slotContext.selectedFrequency);
-      }
-      const slotUrl = '/api/public/estimates/' + TOKEN + '/available-slots?' + slotParams.toString();
-      const r = await fetch(slotUrl);
+      const r = await fetch('/api/public/estimates/' + TOKEN + '/available-slots');
       if (!r.ok) throw new Error('slot fetch failed');
       const body = await r.json();
       const primary = body.primary || [];
@@ -2618,24 +2469,20 @@ ${shellQuestionsBar()}
     if (bookingState.serviceMode === 'one_time') {
       pref = 'pay_at_visit';
     }
-    const attemptId = bookingState.reserveAttemptId + 1;
-    bookingState.reserveAttemptId = attemptId;
+    const buttons = document.querySelectorAll('[data-pay-pref]');
     bookingState.isReserving = true;
+    buttons.forEach((b) => { b.disabled = true; });
     bookingState.pendingPref = pref;
     bookingState.pickedPref = pref;
     syncPaymentSetupCards();
-    setBookingChoiceControlsDisabled(true);
     try {
-      const reservePayload = buildSlotContext();
-      reservePayload.slotId = bookingState.selectedSlotId;
       const r = await fetch('/api/public/estimates/' + TOKEN + '/reserve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(reservePayload),
+        body: JSON.stringify({ slotId: bookingState.selectedSlotId, serviceMode: bookingState.serviceMode }),
       });
       if (r.status === 409) {
         const data = await r.json().catch(() => ({}));
-        if (attemptId !== bookingState.reserveAttemptId || bookingState.reservation) return;
         const message = data.error || 'Could not reserve this slot.';
         if (/slot no longer available/i.test(message)) {
           toast('That slot was just taken. Pick another.');
@@ -2646,8 +2493,8 @@ ${shellQuestionsBar()}
             setTimeout(() => location.reload(), 900);
           }
         }
+        buttons.forEach((b) => { b.disabled = false; });
         bookingState.isReserving = false;
-        setBookingChoiceControlsDisabled(false);
         bookingState.pendingPref = null;
         bookingState.pickedPref = null;
         syncPaymentSetupCards();
@@ -2655,14 +2502,8 @@ ${shellQuestionsBar()}
       }
       if (!r.ok) throw new Error('reserve failed');
       const body = await r.json();
-      if (attemptId !== bookingState.reserveAttemptId) {
-        if (body.scheduledServiceId) {
-          fetch('/api/public/estimates/' + TOKEN + '/reserve/' + encodeURIComponent(body.scheduledServiceId), { method: 'DELETE' }).catch(function () {});
-        }
-        return;
-      }
-      bookingState.isReserving = false;
       bookingState.reservation = { scheduledServiceId: body.scheduledServiceId, expiresAt: body.expiresAt };
+      bookingState.isReserving = false;
       syncPaymentSetupCards();
       // Swap UI: hide slot list + pay pref, show review
       document.getElementById('slot-area').style.display = 'none';
@@ -2678,7 +2519,7 @@ ${shellQuestionsBar()}
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · ' + CARD_CONFIRM_SUB;
       } else if (pref === 'prepay_annual') {
         if (title) title.textContent = 'Confirm annual prepay';
-        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.';
+        if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · annual prepay invoice will be reviewed and sent after approval.';
       } else {
         if (title) title.textContent = 'Confirm and book';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · pay at the visit, no card needed now.';
@@ -2686,10 +2527,9 @@ ${shellQuestionsBar()}
       startReservationCountdown(body.expiresAt);
       reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } catch (e) {
-      if (attemptId !== bookingState.reserveAttemptId || bookingState.reservation) return;
       toast('Could not reserve. Try again or call ${COMPANY.phone}.');
+      buttons.forEach((b) => { b.disabled = false; });
       bookingState.isReserving = false;
-      setBookingChoiceControlsDisabled(false);
       bookingState.pendingPref = null;
       bookingState.pickedPref = null;
       syncPaymentSetupCards();
@@ -2720,8 +2560,6 @@ ${shellQuestionsBar()}
 
   function cancelReservation() {
     if (bookingState.countdownTimer) { clearInterval(bookingState.countdownTimer); bookingState.countdownTimer = null; }
-    bookingState.reserveAttemptId += 1;
-    bookingState.isReserving = false;
     // Fire-and-forget DELETE to release the server-side hold. If the
     // request fails (offline, etc.) the 15-min expiry will reclaim the
     // row anyway, so we don't await or block the UI.
@@ -2730,12 +2568,12 @@ ${shellQuestionsBar()}
       fetch('/api/public/estimates/' + TOKEN + '/reserve/' + encodeURIComponent(res.scheduledServiceId), { method: 'DELETE' }).catch(function () {});
     }
     bookingState.reservation = null;
+    bookingState.isReserving = false;
     bookingState.selectedSlotId = null;
     bookingState.selectedSlotLabel = null;
     bookingState.pendingPref = null;
     bookingState.pickedPref = null;
     syncPaymentSetupCards();
-    setBookingChoiceControlsDisabled(false);
     document.getElementById('review-area').style.display = 'none';
     document.getElementById('slot-area').style.display = '';
     const payArea = document.getElementById('pay-pref-area');
@@ -2780,16 +2618,14 @@ ${shellQuestionsBar()}
       }
       if (!r.ok) throw new Error(data.error || 'accept failed');
       if (bookingState.countdownTimer) clearInterval(bookingState.countdownTimer);
-      // Card-on-file continues in /onboard/:token for the Stripe setup step.
-      // Annual prepay stops here; the office reviews and sends the prepared
-      // annual invoice after approval.
+      // Everything continues in /onboard/:token — the payment preference
+      // we submitted on accept is persisted on the customer row, and
+      // onboarding handles the Stripe step for card_on_file and the
+      // scheduling confirmation for pay_at_visit.
       if (data.onboardingToken) {
         window.location.href = '/onboard/' + data.onboardingToken;
       } else {
-        const prepayAmount = data.prepayInvoiceAmount != null ? fmt(Number(data.prepayInvoiceAmount)) : null;
-        toast(data.nextStep === 'prepay_invoice'
-          ? 'Approved! Annual prepay invoice' + (prepayAmount ? ' for ' + prepayAmount : '') + ' will be reviewed and sent.'
-          : 'Booked! We will be in touch shortly.');
+        toast('Booked! We will be in touch shortly.');
         setTimeout(() => location.reload(), 1200);
       }
     } catch (e) {
@@ -3129,7 +2965,6 @@ router.put('/:token/accept', async (req, res, next) => {
     // $99 WaveGuard setup fee. The converter reads this to decide what kind
     // of draft invoice to create at accept time.
     const billingTerm = paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : 'standard';
-    const annualPrepaySelected = billingTerm === 'prepay_annual';
     // serviceMode — 'recurring' (default) | 'one_time'. When one_time, the
     // customer picked the inline toggle on the v2 estimate view and
     // explicitly asked for a single visit instead of a recurring plan.
@@ -3137,12 +2972,13 @@ router.put('/:token/accept', async (req, res, next) => {
     // upgrade, no EstimateConverter recurring schedule creation.
     const requestedOneTime = req.body?.serviceMode === 'one_time';
     const serviceMode = requestedOneTime ? 'one_time' : 'recurring';
-    // Card-on-file and annual prepay are only meaningful for recurring accepts: the
+    // Card-on-file is only meaningful for recurring accepts: the
     // post-commit branch that creates the SetupIntent / onboarding session
-    // and the converter's annual-prepay invoice are gated on !treatAsOneTime.
-    // Reject up front rather than fulfill the request half-way.
-    if (requestedOneTime && ['card_on_file', 'prepay_annual'].includes(paymentMethodPreference)) {
-      return res.status(400).json({ error: `${paymentMethodPreference} is not available for one-time visits — pick pay_at_visit instead` });
+    // is gated on !treatAsOneTime, so accepting one-time + card_on_file
+    // would silently book the visit without ever capturing a card. Reject
+    // up front rather than fulfill the request half-way.
+    if (requestedOneTime && paymentMethodPreference === 'card_on_file') {
+      return res.status(400).json({ error: 'card_on_file is not available for one-time visits — pick pay_at_visit instead' });
     }
     const selectedFrequencyKey = (() => {
       const raw = req.body?.selectedFrequency;
@@ -3153,9 +2989,6 @@ router.put('/:token/accept', async (req, res, next) => {
     // immediately) for the first visit's amount and send SMS + email
     // with the pay link.
     const billByInvoice = !!estimate.bill_by_invoice;
-    if (annualPrepaySelected && billByInvoice) {
-      return res.status(400).json({ error: 'annual prepay is not available for invoice-mode estimates' });
-    }
 
     let reservationRow = null;
     if (slotId) {
@@ -3213,9 +3046,6 @@ router.put('/:token/accept', async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
-    if (treatAsOneTime && ['card_on_file', 'prepay_annual'].includes(paymentMethodPreference)) {
-      return res.status(400).json({ error: `${paymentMethodPreference} is not available for one-time visits — pick pay_at_visit instead` });
-    }
     const paymentPreferenceError = validateRecurringSlotPaymentPreference({
       slotId,
       treatAsOneTime,
@@ -3225,15 +3055,9 @@ router.put('/:token/accept', async (req, res, next) => {
     if (paymentPreferenceError) {
       return res.status(400).json({ error: paymentPreferenceError });
     }
-    if (annualPrepaySelected && !isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList)) {
-      return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
-    }
     const selectedFrequency = !treatAsOneTime && pricingBundle?.frequencies?.length
       ? pricingBundle.frequencies.find((f) => f.key === selectedFrequencyKey)
       : null;
-    const pricingVisitFrequency = selectedFrequency
-      || (!selectedFrequencyKey && pricingBundle?.frequencies?.[0])
-      || null;
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
     }
@@ -3243,9 +3067,6 @@ router.put('/:token/accept', async (req, res, next) => {
     const effectiveAnnualTotal = selectedFrequency?.annual != null
       ? Number(selectedFrequency.annual)
       : Number(estimate.annual_total || 0);
-    const annualPrepayInvoiceAmount = annualPrepaySelected
-      ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
-      : null;
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
     const effectiveBillingCadence = !treatAsOneTime
       ? BillingCadence.resolveBillingCadence({
@@ -3283,12 +3104,9 @@ router.put('/:token/accept', async (req, res, next) => {
           pestRecurring: acceptPestRecurring,
         })
       : null;
-    const sameDayVisitTotal = !treatAsOneTime
-      ? sameDayVisitTotalForPricingFrequency(pricingVisitFrequency, { preferences: acceptPrefs })
-      : null;
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
-      : (billingTerm === 'prepay_annual' ? null : (sameDayVisitTotal || recurringFirstVisitAmount || effectiveBillingCadence?.amount));
+      : (billingTerm === 'prepay_annual' ? null : (recurringFirstVisitAmount || effectiveBillingCadence?.amount));
 
     // All DB mutations run atomically so a mid-flight failure can't leave a
     // half-created customer without an onboarding session (or vice versa).
@@ -3401,20 +3219,15 @@ router.put('/:token/accept', async (req, res, next) => {
             customerId,
             paymentMethodPreference,
             estimatedPrice: visitEstimatedPrice,
-            estimate: estimateForPricing,
-            serviceMode,
-            selectedFrequency: selectedFrequency?.key || selectedFrequencyKey,
             trx,
           });
           reservationCommitted = true;
         } catch (commitErr) {
+          // Only RESERVATION_EXPIRED is interesting here — race between
+          // our 15-min window and the final tap. Let the outer catch
+          // translate it into a user-facing 409.
           if (commitErr.code === 'RESERVATION_EXPIRED') {
             const err = new Error('reservation expired — re-pick a slot');
-            err.status = 409;
-            throw err;
-          }
-          if (commitErr.code === 'SLOT_UNAVAILABLE') {
-            const err = new Error('slot no longer available — re-pick a slot');
             err.status = 409;
             throw err;
           }
@@ -3426,7 +3239,7 @@ router.put('/:token/accept', async (req, res, next) => {
       // Invoice-mode skips onboarding entirely — the payment method gets
       // captured on the /pay page when they click the invoice link, not
       // through a SetupIntent up front.
-      if (customerId && !treatAsOneTime && !billByInvoice && !annualPrepaySelected) {
+      if (customerId && !treatAsOneTime && !billByInvoice) {
         const obToken = crypto.randomUUID();
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 7);
@@ -3484,12 +3297,8 @@ router.put('/:token/accept', async (req, res, next) => {
           treatAsOneTime,
           billByInvoice,
           reservationCommitted,
-          billingTerm,
-          annualPrepayAmount: annualPrepayInvoiceAmount,
         });
-        const officeBody = annualPrepaySelected
-          ? officeFallback
-          : await renderTemplate('estimate_accepted_office', officeVars, officeFallback);
+        const officeBody = await renderTemplate('estimate_accepted_office', officeVars, officeFallback);
         await TwilioService.sendSMS(WAVES_OFFICE_PHONE, officeBody);
       } catch (e) { logger.error(`Estimate accept SMS failed: ${e.message}`); }
     }
@@ -3579,28 +3388,6 @@ router.put('/:token/accept', async (req, res, next) => {
               logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
             }
           }
-        } else if (annualPrepaySelected) {
-          const amountText = annualPrepayInvoiceAmount != null ? ` for ${fmtMoney(annualPrepayInvoiceAmount)}` : '';
-          const customerBody = `Hi ${firstName}, your ${estimate.waveguard_tier || 'Bronze'} WaveGuard plan is approved. Our team will review and send your annual prepay invoice${amountText}.`;
-          const sendResult = await sendCustomerMessage({
-            to: estimate.customer_phone,
-            body: customerBody,
-            channel: 'sms',
-            audience: customerId ? 'customer' : 'lead',
-            purpose: 'estimate_followup',
-            customerId: customerId || undefined,
-            estimateId: estimate.id,
-            identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-            consentBasis: customerId ? undefined : {
-              status: 'transactional_allowed',
-              source: 'estimate_token_acceptance',
-              capturedAt: new Date().toISOString(),
-            },
-            entryPoint: 'estimate_accept_annual_prepay',
-            metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
-          });
-          if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-          logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
         } else {
           const longObUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
           const obUrl = longObUrl
@@ -3656,7 +3443,6 @@ router.put('/:token/accept', async (req, res, next) => {
         await EstimateConverter.convertEstimate(estimate.id, {
           billingTerm,
           skipSetupInvoice: billByInvoice,
-          prepayInvoiceAmount: annualPrepayInvoiceAmount,
         });
         logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm}, invoiceMode=${billByInvoice})`);
       } catch (e) { logger.error(`[estimate-accept] Auto-conversion failed: ${e.message}`); }
@@ -3756,8 +3542,6 @@ router.put('/:token/accept', async (req, res, next) => {
         invoiceLinkDelivered,
         reservationCommitted,
         bookingUrl,
-        billingTerm,
-        annualPrepayAmount: annualPrepayInvoiceAmount,
       });
       await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
@@ -3771,8 +3555,6 @@ router.put('/:token/accept', async (req, res, next) => {
       invoiceLinkDelivered,
       invoiceId,
       invoiceAmount,
-      billingTerm,
-      prepayInvoiceAmount: annualPrepayInvoiceAmount,
       bookingUrl,
       treatAsOneTime,
       reservationCommitted,
@@ -3827,20 +3609,15 @@ router.put('/:token/select-tier', async (req, res, next) => {
     // engine result or summed services. Doesn't write when source is
     // 'explicit' (no change) or 'fallback-discounted' (unsafe to persist
     // a discounted value as if it were a base).
-    const shouldPersistPricingBlob = invalidateSendSnapshotPricingBundle(parsedData);
     const writes = {
       waveguard_tier: selectedTier,
       monthly_total: monthlyTotal,
       annual_total: annualTotal,
       updated_at: db.fn.now(),
     };
-    let shouldPersistEstimateData = shouldPersistPricingBlob;
     if ((baseSource === 'engine' || baseSource === 'summed') && baseMonthly > 0
         && Number(parsedData.baseMonthly || 0) !== baseMonthly) {
       parsedData.baseMonthly = baseMonthly;
-      shouldPersistEstimateData = true;
-    }
-    if (shouldPersistEstimateData) {
       writes.estimate_data = JSON.stringify(parsedData);
     }
     await db('estimates').where({ id: estimate.id }).update(writes);
@@ -3928,7 +3705,6 @@ router.put('/:token/preferences', async (req, res, next) => {
     // Persist — merge new prefs + self-healed baseMonthly back onto the blob.
     parsedData.preferences = nextPrefs;
     if (baseMonthly > 0) parsedData.baseMonthly = baseMonthly;
-    invalidateSendSnapshotPricingBundle(parsedData);
     await db('estimates').where({ id: estimate.id }).update({
       estimate_data: JSON.stringify(parsedData),
       monthly_total: monthlyTotal,
@@ -4064,7 +3840,6 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
               appliedAt: new Date().toISOString(),
             },
           };
-          invalidateSendSnapshotPricingBundle(newEstimateData);
 
           await db('estimates').where({ id: estimate.id }).update({
             estimate_data: JSON.stringify(newEstimateData),
@@ -4512,17 +4287,10 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   };
 }
 
-function annualPrepayEligibleForEstimateData(estData) {
-  if (!estData || typeof estData !== 'object') return false;
-  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
-  return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
-}
-
-function attachQuoteRequirement(payload, estData = null) {
+function attachQuoteRequirement(payload) {
   const quoteState = resolveEstimateQuoteRequirement(payload);
   return {
     ...payload,
-    annualPrepayEligible: annualPrepayEligibleForEstimateData(estData),
     quoteRequired: quoteState.quoteRequired,
     quoteRequiredReason: quoteState.reason,
     quoteRequiredItems: quoteState.items,
@@ -4706,8 +4474,6 @@ function buildAcceptSuccessPayload({
   invoiceLinkDelivered = false,
   invoiceId = null,
   invoiceAmount = null,
-  billingTerm = 'standard',
-  prepayInvoiceAmount = null,
   bookingUrl = null,
   treatAsOneTime = false,
   reservationCommitted = false,
@@ -4715,7 +4481,6 @@ function buildAcceptSuccessPayload({
   let nextStep = 'confirmed';
   if (invoiceMode) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
-  else if (!treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
   else if (onboardingToken) nextStep = 'complete_onboarding';
 
   return {
@@ -4728,8 +4493,6 @@ function buildAcceptSuccessPayload({
     invoiceLinkDelivered,
     invoiceId,
     invoiceAmount,
-    billingTerm,
-    prepayInvoiceAmount,
     bookingUrl,
   };
 }
@@ -4743,8 +4506,6 @@ function buildAcceptOfficeFallback({
   treatAsOneTime = false,
   billByInvoice = false,
   reservationCommitted = false,
-  billingTerm = 'standard',
-  annualPrepayAmount = null,
 } = {}) {
   if (billByInvoice) {
     const label = treatAsOneTime
@@ -4755,10 +4516,6 @@ function buildAcceptOfficeFallback({
   if (treatAsOneTime) {
     const nextStep = reservationCommitted ? 'Appointment confirmed.' : 'Booking link sent.';
     return `One-time estimate accepted by ${customerName} at ${address} - ${serviceLabel}. ${nextStep}`;
-  }
-  if (billingTerm === 'prepay_annual') {
-    const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
-    return `Estimate accepted by ${customerName} at ${address} - ${waveguardTier} WaveGuard annual prepay${amountText}. Invoice follow-up needed.`;
   }
   return `Estimate accepted by ${customerName} at ${address} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Onboarding link sent.`;
 }
@@ -4774,8 +4531,6 @@ function buildAcceptNotificationPayload({
   invoiceLinkDelivered = false,
   reservationCommitted = false,
   bookingUrl = null,
-  billingTerm = 'standard',
-  annualPrepayAmount = null,
 } = {}) {
   if (billByInvoice) {
     if (treatAsOneTime) {
@@ -4829,17 +4584,6 @@ function buildAcceptNotificationPayload({
       customerTitle: 'One-time service approved',
       customerBody,
       customerLink: bookingUrl || '/?tab=schedule',
-    };
-  }
-
-  if (billingTerm === 'prepay_annual') {
-    const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
-    return {
-      adminTitle: `Estimate accepted: ${customerName}`,
-      adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved. Invoice follow-up needed.`,
-      customerTitle: 'Estimate accepted',
-      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the annual prepay invoice details.`,
-      customerLink: '/?tab=billing',
     };
   }
 
@@ -5034,47 +4778,23 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   };
 }
 
-function invalidateSendSnapshotPricingBundle(estData = {}) {
-  if (!estData || typeof estData !== 'object' || !estData.sendSnapshot?.pricingBundle) return false;
-  estData.sendSnapshot = { ...estData.sendSnapshot };
-  delete estData.sendSnapshot.pricingBundle;
-  delete estData.sendSnapshot.pricingBundleError;
-  return true;
-}
-
-function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
-  const annual = Number(annualTotal);
-  if (Number.isFinite(annual) && annual > 0) {
-    return Math.max(0, Math.round(annual * 100) / 100);
-  }
-  const monthly = Number(monthlyTotal);
-  if (Number.isFinite(monthly) && monthly > 0) {
-    return Math.max(0, Math.round(monthly * 12 * 100) / 100);
-  }
-  return 0;
-}
-
 async function buildPricingBundle(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
   const snapshotBundle = estData?.sendSnapshot?.pricingBundle;
-  if (
-    snapshotBundle
-    && Array.isArray(snapshotBundle.frequencies)
-    && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
-  ) {
-    return attachQuoteRequirement({
+  if (snapshotBundle && Array.isArray(snapshotBundle.frequencies)) {
+    return {
       ...snapshotBundle,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
-    }, estData);
+    };
   }
 
   const cached = getEstimatePricingCache(estimate);
   if (cached) {
-    return attachQuoteRequirement({ ...cached, cacheHit: true }, estData);
+    return { ...cached, cacheHit: true };
   }
 
   const prefs = normalizePrefs(estData?.preferences);
@@ -5095,7 +4815,6 @@ async function buildPricingBundle(estimate) {
     // without a pest cadence to vary. Keep Quarterly as the single surface.
     const hasPest = v1.pestTiers.length > 0;
     const finalFreqs = hasPest ? frequencies : frequencies.slice(0, 1);
-    const annualPrepayEligible = annualPrepayEligibleForEstimateData(estData);
 
     // First-visit fees stack — non-recurring charges shown to the customer
     // alongside their monthly price. WaveGuard membership is waivable with
@@ -5103,10 +4822,10 @@ async function buildPricingBundle(estimate) {
     // pest carries a roach type) is NOT waivable — it covers the heavier
     // visit-1 cost regardless of customer churn.
     const firstVisitFees = [];
-    if (annualPrepayEligible) {
+    if (hasPest) {
       firstVisitFees.push({
         service: 'waveguard_setup',
-        amount: Number(v1.membershipFee || PEST.initialFee || 99) || 99,
+        amount: 99,
         label: 'WaveGuard setup',
         waivedWithPrepay: true,
       });
@@ -5140,7 +4859,7 @@ async function buildPricingBundle(estimate) {
       firstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       source: 'v1_engine_shape',
-    }, estData);
+    });
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
@@ -5169,7 +4888,7 @@ async function buildPricingBundle(estimate) {
       anchorOneTimePrice: Number(estimate.onetime_total || 0) || null,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
-    }, estData);
+    });
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
@@ -5222,7 +4941,7 @@ async function buildPricingBundle(estimate) {
     anchorOneTimePrice,
     oneTimeBreakdown,
     source: 'engine_invocation',
-  }, estData);
+  });
   setEstimatePricingCache(estimate, payload);
   return payload;
 }
@@ -5443,13 +5162,10 @@ module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePay
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
-module.exports.sameDayVisitTotalForPricingFrequency = sameDayVisitTotalForPricingFrequency;
-module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmount;
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
-module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
