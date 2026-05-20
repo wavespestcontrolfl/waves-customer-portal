@@ -46,7 +46,6 @@ router.post('/', async (req, res) => {
     const body = req.body;
 
     // Map raw form field names (garbled → clean)
-    const rawName = body.first_name || body['First Things First Whats Your Name'] || body.name || body.full_name || findField(body, /name/i) || '';
     const email = body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '';
     const rawPhone = body.phone || body['Got A Number We Can Call Or Text'] || findField(body, /number|phone|call|text/i) || '';
     const rawAddress = body.address || body['And Whats Your Address'] || findField(body, /address/i) || '';
@@ -95,9 +94,10 @@ router.post('/', async (req, res) => {
     const gclid = body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '';
 
     // Parse name
-    const nameParts = rawName.trim().split(/\s+/);
-    const firstName = capitalizeName(nameParts[0] || 'Unknown');
-    const lastName = capitalizeName(nameParts.slice(1).join(' ') || '');
+    const normalizedName = normalizeLeadName(body);
+    const firstName = capitalizeName(normalizedName.first_name || 'Unknown');
+    const lastName = capitalizeName(normalizedName.last_name || '');
+    const serviceInterest = normalizeLeadServiceInterest(body);
 
     // Clean phone
     const phone = cleanPhone(rawPhone);
@@ -451,7 +451,6 @@ router.post('/', async (req, res) => {
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     try {
-      const serviceInterest = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
       await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
         const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
 
@@ -483,7 +482,6 @@ router.post('/', async (req, res) => {
     // Create leads table record for pipeline tracking
     let leadRecord = null;
     try {
-      const serviceInterestField = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
       const [newLead] = await db('leads').insert({
         first_name: firstName, last_name: lastName,
         phone: phoneFormatted, email: email || null,
@@ -491,7 +489,7 @@ router.post('/', async (req, res) => {
         city: normalizedAddress.city || leadSource.area || '',
         lead_source_id: leadSourceId,
         lead_type: 'form_submission',
-        service_interest: serviceInterestField || null,
+        service_interest: serviceInterest || null,
         first_contact_at: new Date(),
         first_contact_channel: 'form',
         status: 'new',
@@ -506,7 +504,7 @@ router.post('/', async (req, res) => {
 
     // Fire-and-forget AI triage
     if (leadRecord) {
-      const messageText = body.message || body['Message'] || body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn|message/i) || '';
+      const messageText = body.message || body['Message'] || serviceInterest || findField(body, /service|help|pest|lawn|message/i) || '';
       aiTriageLead({ name: `${firstName} ${lastName}`, phone: phoneFormatted, message: messageText, address: fullAddress, pageUrl, formName })
         .then(async (triageResult) => {
           if (!triageResult) return;
@@ -543,7 +541,7 @@ router.post('/', async (req, res) => {
     // The generic auto-reply above is the safety net; this replaces it with something specific
     try {
       const LeadResponseAgent = require('../services/lead-response-agent');
-      const messageText = body.message || body['Message'] || body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn|message/i) || '';
+      const messageText = body.message || body['Message'] || serviceInterest || findField(body, /service|help|pest|lawn|message/i) || '';
       LeadResponseAgent.processLead({
         leadId: leadRecord?.id,
         customerId: customer.id,
@@ -571,7 +569,6 @@ router.post('/', async (req, res) => {
 
     // Ad service attribution — track the full funnel from lead onward
     try {
-      const serviceInterest = body.service_interest || body['What Can We Help You With'] || findField(body, /service|help|pest|lawn/i) || '';
       await db('ad_service_attribution').insert({
         customer_id: customer.id,
         service_line: inferServiceLine(serviceInterest),
@@ -605,6 +602,127 @@ function findField(body, pattern) {
     if (pattern.test(key) && value) return String(value);
   }
   return null;
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    const str = String(value).trim();
+    if (str) return str;
+  }
+  return '';
+}
+
+function normalizeLeadName(body = {}) {
+  const explicitFirst = firstNonEmpty(body.first_name, body.firstName);
+  const explicitLast = firstNonEmpty(body.last_name, body.lastName);
+
+  if (explicitFirst || explicitLast) {
+    if (explicitFirst && !explicitLast) {
+      const firstParts = explicitFirst.split(/\s+/).filter(Boolean);
+      if (firstParts.length > 1) {
+        return {
+          first_name: firstParts[0],
+          last_name: firstParts.slice(1).join(' '),
+        };
+      }
+    }
+    return {
+      first_name: explicitFirst || null,
+      last_name: explicitLast || null,
+    };
+  }
+
+  const rawName = firstNonEmpty(
+    body.name,
+    body.full_name,
+    body.fullName,
+    body['First Things First Whats Your Name'],
+    findField(body, /name/i)
+  );
+  const parts = rawName.split(/\s+/).filter(Boolean);
+
+  return {
+    first_name: parts[0] || null,
+    last_name: parts.length > 1 ? parts.slice(1).join(' ') : null,
+  };
+}
+
+const SERVICE_INTEREST_LABELS = {
+  pest: 'Pest Control',
+  pest_control: 'Pest Control',
+  pest_control_lawn_care: 'Pest Control + Lawn Care',
+  lawn: 'Lawn Care',
+  lawn_care: 'Lawn Care',
+  both: 'Pest Control + Lawn Care',
+  mosquito: 'Mosquito Control',
+  termite: 'Termite',
+  rodent: 'Rodent Control',
+  rodent_control: 'Rodent Control',
+  tree_shrub: 'Tree & Shrub Care',
+  flea: 'Flea Control',
+  cockroach: 'Cockroach Control',
+  bed_bug: 'Bed Bug',
+  bedbug: 'Bed Bug',
+  dethatching: 'Dethatching',
+  top_dressing: 'Top Dressing',
+  overseeding: 'Overseeding',
+  other: 'Other Services',
+};
+
+const FREQUENCY_LABELS = {
+  ongoing: '',
+  'one-time': 'One-Time',
+  one_time: 'One-Time',
+  'not-sure': 'Consult',
+  not_sure: 'Consult',
+};
+
+function titleizeServiceValue(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function serviceLabelFor(value) {
+  const raw = firstNonEmpty(value);
+  if (!raw) return '';
+  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (SERVICE_INTEREST_LABELS[key]) return SERVICE_INTEREST_LABELS[key];
+  return /^[a-z0-9_-]+$/i.test(raw) ? titleizeServiceValue(raw) : raw;
+}
+
+function normalizeLeadServiceInterest(body = {}) {
+  const explicit = firstNonEmpty(
+    body.service_interest,
+    body.serviceInterest,
+    body.service,
+    body.service_type,
+    body.serviceType,
+    body['What Can We Help You With'],
+    body['Selected Service'],
+    body['Service']
+  );
+  if (explicit) return serviceLabelFor(explicit);
+
+  const interest = firstNonEmpty(body.interest, body.Interest);
+  const otherService = firstNonEmpty(body.otherService, body.other_service, body['Other Service']);
+  if (!interest) {
+    const legacyField = firstNonEmpty(findField(body, /service|help|pest|lawn/i));
+    return legacyField ? serviceLabelFor(legacyField) : '';
+  }
+
+  const serviceLabel = interest.toLowerCase() === 'other'
+    ? serviceLabelFor(otherService || interest)
+    : serviceLabelFor(interest);
+  if (!serviceLabel) return '';
+
+  const frequency = firstNonEmpty(body.frequency, body.Frequency);
+  const frequencyKey = frequency.toLowerCase().replace(/\s+/g, '-');
+  const frequencyLabel = FREQUENCY_LABELS[frequencyKey] ?? titleizeServiceValue(frequency);
+  return frequencyLabel ? `${serviceLabel} (${frequencyLabel})` : serviceLabel;
 }
 
 function cleanPhone(value) {

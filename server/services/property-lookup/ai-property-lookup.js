@@ -483,7 +483,8 @@ Search aggressively, in this order:
 Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
-- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "5.99 Acres Lot", "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "5.99 Acres Lot" → 260924 (5.99 × 43560 = 260924).
+- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
+- If the converted lot size is above 200000 square feet, output 200000 so the public quote flow prices at its maximum lot-size cap instead of defaulting to a small lot.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
@@ -493,7 +494,7 @@ Output rules:
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
   "squareFootage": <int 500-15000 or null>,
-  "lotSize": <int 1000-1000000, in SQUARE FEET (convert from acres if needed), or null>,
+  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed; cap verified oversized lots at 200000), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -544,45 +545,97 @@ function coerceInt(raw, min, max) {
 
 const SQFT_PER_ACRE = 43560;
 const LOT_SQFT_MIN = 1000;
-const LOT_SQFT_MAX = 1_000_000;
+const LOT_SQFT_MAX = 200_000;
+const ACRE_UNIT_RE = /\b(?:acres?|acs?|ac)\b\.?/i;
+const SQFT_UNIT_RE = /\b(?:sq\.?\s*ft\.?|sqft|square\s*feet|sf)\b\.?/i;
+const LOT_NUMBER_PATTERN = String.raw`(\d+\s*(?:-|\s)\s*\d+\s*\/\s*\d+|\d+\s*\/\s*\d+|(?:\d[\d,]*|\.\d+)(?:\.\d+)?)`;
 
 // Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
 // or acres ("5.99 Acres Lot", "1/2 acre"). The pricing engine always wants
 // square feet, so we normalize here.
-//   - Strings with "acre" → first number is acres, multiply by 43560.
-//   - Strings with "sqft" / "sq ft" → first number is sqft.
-//   - Bare numbers: small (< LOT_SQFT_MIN) assumed acres, large assumed sqft.
+//   - Strings with acre units → unit-qualified number is acres, multiply by 43560.
+//   - Strings with sqft units → unit-qualified number is sqft.
+//   - Bare numbers: small (< LOT_SQFT_MIN) are treated as acres only when
+//     conversion stays within the public quote cap; larger ambiguous values
+//     remain null.
+//   - Verified values above the public quote max are capped, not discarded.
 //   - Strings with BOTH "acre" and "sqft" (e.g. "0.5 acres (21,780 sqft)")
-//     are ambiguous; bail to null so downstream code falls back rather than
-//     accepting a silently-wrong value.
+//     are accepted only when the unit-qualified values agree.
 function coerceLotSize(raw) {
   if (raw == null) return null;
 
   if (typeof raw === 'number') {
     if (!Number.isFinite(raw) || raw <= 0) return null;
-    const sqft = Math.round(raw < LOT_SQFT_MIN ? raw * SQFT_PER_ACRE : raw);
-    return inLotRange(sqft) ? sqft : null;
+    const sqft = coerceUnqualifiedLotSqft(raw);
+    return sqft == null ? null : clampLotSqft(Math.round(sqft));
   }
 
   const str = String(raw).toLowerCase();
-  const hasAcre = /\bacre/.test(str);
-  const hasSqft = /\bsq\.?\s*ft\b|\bsqft\b|\bsquare\s*feet\b/.test(str);
-  if (hasAcre && hasSqft) return null;
+  const hasAcre = ACRE_UNIT_RE.test(str);
+  const hasSqft = SQFT_UNIT_RE.test(str);
+  if (hasAcre && hasSqft) {
+    return coerceDualUnitLotSize(str);
+  }
 
-  const value = parseFirstLotNumber(str);
+  const value = hasAcre
+    ? parseUnitQualifiedLotNumber(str, ACRE_UNIT_RE)
+    : hasSqft
+      ? parseUnitQualifiedLotNumber(str, SQFT_UNIT_RE)
+      : parseFirstLotNumber(str);
   if (value == null || value <= 0) return null;
 
   let sqft;
   if (hasAcre) sqft = value * SQFT_PER_ACRE;
   else if (hasSqft) sqft = value;
-  else sqft = value < LOT_SQFT_MIN ? value * SQFT_PER_ACRE : value;
+  else sqft = coerceUnqualifiedLotSqft(value);
+  if (sqft == null) return null;
 
   const rounded = Math.round(sqft);
-  return inLotRange(rounded) ? rounded : null;
+  return clampLotSqft(rounded);
 }
 
-function inLotRange(n) {
-  return n >= LOT_SQFT_MIN && n <= LOT_SQFT_MAX;
+function coerceUnqualifiedLotSqft(value) {
+  if (value < LOT_SQFT_MIN) {
+    const converted = value * SQFT_PER_ACRE;
+    return converted <= LOT_SQFT_MAX ? converted : null;
+  }
+  return value;
+}
+
+function clampLotSqft(n) {
+  if (!Number.isFinite(n) || n < LOT_SQFT_MIN) return null;
+  return Math.min(n, LOT_SQFT_MAX);
+}
+
+function coerceDualUnitLotSize(str) {
+  const acres = parseUnitQualifiedLotNumber(str, ACRE_UNIT_RE);
+  const sqft = parseUnitQualifiedLotNumber(str, SQFT_UNIT_RE);
+
+  const acreSqft = acres == null ? null : Math.round(acres * SQFT_PER_ACRE);
+  const roundedSqft = sqft == null ? null : Math.round(sqft);
+
+  if (acreSqft != null && roundedSqft != null) {
+    if (!lotValuesAgree(acreSqft, roundedSqft)) return null;
+    return clampLotSqft(roundedSqft);
+  }
+
+  const candidate = roundedSqft ?? acreSqft;
+  return candidate != null ? clampLotSqft(candidate) : null;
+}
+
+function lotValuesAgree(a, b) {
+  const tolerance = Math.max(250, Math.round(Math.max(a, b) * 0.02));
+  return Math.abs(a - b) <= tolerance;
+}
+
+function parseUnitQualifiedLotNumber(str, unitPattern) {
+  const beforeUnit = new RegExp(`${LOT_NUMBER_PATTERN}\\s*-?\\s*(?:${unitPattern.source})`, 'i');
+  const beforeMatch = str.match(beforeUnit);
+  if (beforeMatch) return parseFirstLotNumber(beforeMatch[1]);
+
+  const afterUnit = new RegExp(`(?:${unitPattern.source})\\s*(?:of\\s*)?${LOT_NUMBER_PATTERN}`, 'i');
+  const afterMatch = str.match(afterUnit);
+  return afterMatch ? parseFirstLotNumber(afterMatch[1]) : null;
 }
 
 // Pull the FIRST numeric value out of a lot-size string. Supports mixed
@@ -591,7 +644,7 @@ function inLotRange(n) {
 // non-digit characters — that would merge "0.5 acres (21,780)" into a
 // single bogus number, or turn "1/2" into "12".
 function parseFirstLotNumber(str) {
-  const mixed = str.match(/(\d+)\s+(\d+)\/(\d+)/);
+  const mixed = str.match(/(\d+)\s*(?:-|\s)\s*(\d+)\s*\/\s*(\d+)/);
   if (mixed) {
     const whole = Number(mixed[1]);
     const num = Number(mixed[2]);
@@ -600,13 +653,13 @@ function parseFirstLotNumber(str) {
       return whole + num / den;
     }
   }
-  const frac = str.match(/(\d+)\/(\d+)/);
+  const frac = str.match(/(^|[^\d])(\d+)\s*\/\s*(\d+)/);
   if (frac) {
-    const num = Number(frac[1]);
-    const den = Number(frac[2]);
+    const num = Number(frac[2]);
+    const den = Number(frac[3]);
     if (Number.isFinite(num) && den > 0) return num / den;
   }
-  const decimal = str.match(/\d[\d,]*(?:\.\d+)?/);
+  const decimal = str.match(/(?:\d[\d,]*|\.\d+)(?:\.\d+)?/);
   if (decimal) {
     const n = Number(decimal[0].replace(/,/g, ''));
     if (Number.isFinite(n)) return n;
@@ -965,4 +1018,9 @@ module.exports = {
   lookupPropertyFromOpenAI,
   lookupPropertyFromGemini,
   lookupPropertyFromAITrio,
+  _test: {
+    coerceLotSize,
+    parseFirstLotNumber,
+    parseUnitQualifiedLotNumber,
+  },
 };

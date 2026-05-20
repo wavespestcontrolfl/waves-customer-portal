@@ -29,6 +29,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
+const {
+  pricingBundleMatchesEstimateTotals,
+} = require('./estimate-pricing-bundle-utils');
 
 const BLOCKED_STATES_FOR_SLOTS = new Set(['accepted', 'declined', 'expired']);
 
@@ -40,6 +43,19 @@ const DEFAULT_OPTS = {
   durationMinutes: 60,
   includeWeekends: true,
 };
+
+const SERVICE_LABELS = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  mosquito: 'Mosquito',
+  tree_shrub: 'Tree & Shrub',
+  termite_bait: 'Termite Bait',
+  palm_injection: 'Palm Injection',
+  rodent_bait: 'Rodent Bait Stations',
+};
+
+const MAX_ESTIMATE_SLOT_DURATION_MINUTES = 180;
+const SLOT_DAY_END_MINUTES = 17 * 60;
 
 // ---------- in-memory caches ----------
 
@@ -58,6 +74,316 @@ function cleanupCache(cache) {
   for (const [k, v] of cache.entries()) {
     if (v.expiresAt < now) cache.delete(k);
   }
+}
+
+// ---------- estimate service profile ----------
+
+function parseEstimateData(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === 'object' ? value : {};
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function normalizeFrequencyKey(value) {
+  if (value == null) return '';
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) return '';
+  const compact = raw.replace(/[^a-z0-9]/g, '');
+  if (['monthly', 'month', 'everymonth', '12x', '12xperyear'].includes(compact)) return 'monthly';
+  if (['bimonthly', 'bimonth', 'everyothermonth', 'everytwomonths', 'every2months', '6x', '6xperyear'].includes(compact)) return 'bi_monthly';
+  if (['quarterly', 'quarter', 'everyquarter', 'everythreemonths', 'every3months', '4x', '4xperyear'].includes(compact)) return 'quarterly';
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    if (numeric >= 12) return 'monthly';
+    if (numeric >= 6) return 'bi_monthly';
+    return 'quarterly';
+  }
+  return raw;
+}
+
+function serviceKeyFor(value = {}) {
+  const raw = String(
+    value.service || value.service_key || value.key || value.kind
+    || value.name || value.label || value.displayName || ''
+  ).toLowerCase();
+  if (/lawn|turf|fertili[sz]|weed|fungus|chinch/.test(raw)) return 'lawn_care';
+  if (/mosquito/.test(raw)) return 'mosquito';
+  if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
+  if (/palm/.test(raw)) return 'palm_injection';
+  if (/rodent|rat|mouse|mice/.test(raw)) return 'rodent_bait';
+  if (/termite/.test(raw)) return 'termite_bait';
+  if (/pest|roach|ant|spider|perimeter|general/.test(raw)) return 'pest_control';
+  return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'service';
+}
+
+function labelForService(row = {}) {
+  const key = serviceKeyFor(row);
+  return row.displayName || row.label || row.name || SERVICE_LABELS[key] || 'Service';
+}
+
+function visitsForService(row = {}) {
+  return firstPositiveNumber(
+    row.visitsPerYear,
+    row.appsPerYear,
+    row.visits,
+    row.apps,
+    row.frequency,
+  );
+}
+
+function estimatePropertyNumbers(estData = {}) {
+  const inputs = estData.inputs || estData.engineInputs || estData.result?.inputs || {};
+  const services = inputs.services || {};
+  return {
+    homeSqFt: firstPositiveNumber(inputs.homeSqFt, inputs.sqft, inputs.propertySqft, estData.homeSqFt),
+    lotSqFt: firstPositiveNumber(inputs.lotSqFt, inputs.lot_size, estData.lotSqFt),
+    lawnSqFt: firstPositiveNumber(
+      inputs.lawnSqFt,
+      inputs.turfSqFt,
+      services.lawn?.lawnSqFt,
+      services.lawn?.turfSqFt,
+      estData.lawnSqFt,
+    ),
+  };
+}
+
+function clampDuration(minutes) {
+  const n = Number(minutes);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_OPTS.durationMinutes;
+  const rounded = Math.ceil(n / 15) * 15;
+  return Math.max(30, Math.min(MAX_ESTIMATE_SLOT_DURATION_MINUTES, rounded));
+}
+
+function durationForService(row = {}, estData = {}) {
+  const key = serviceKeyFor(row);
+  const visits = visitsForService(row);
+  const { homeSqFt, lotSqFt, lawnSqFt } = estimatePropertyNumbers(estData);
+
+  if (key === 'pest_control') {
+    if (/interior|initial|roach|cockroach/i.test(String(row.label || row.name || row.displayName || ''))) return 60;
+    if (visits >= 12) return 30;
+    if (visits >= 6) return 40;
+    return 45;
+  }
+  if (key === 'lawn_care') {
+    const turf = lawnSqFt || lotSqFt;
+    if (turf) return Math.max(45, Math.round(25 + (turf / 1000) * 4));
+    return 45;
+  }
+  if (key === 'mosquito') return 30;
+  if (key === 'tree_shrub') return Math.max(45, Math.round(25 + ((lotSqFt || 5000) / 1000) * 2));
+  if (key === 'termite_bait') return 45;
+  if (key === 'palm_injection') return 30;
+  if (key === 'rodent_bait') return 45;
+  if (homeSqFt || lotSqFt) return 45;
+  return 30;
+}
+
+const FREQUENCY_LABELS = {
+  quarterly: 'Quarterly',
+  bi_monthly: 'Bi-monthly',
+  monthly: 'Monthly',
+};
+
+function visitsForFrequencyKey(key) {
+  switch (normalizeFrequencyKey(key)) {
+    case 'monthly': return 12;
+    case 'bi_monthly': return 6;
+    case 'quarterly': return 4;
+    default: return null;
+  }
+}
+
+function pestTiersForEstimateData(estData = {}) {
+  const result = estData.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : {});
+  const inner = result.results && typeof result.results === 'object' ? result.results : {};
+  if (Array.isArray(inner.pestTiers)) return inner.pestTiers;
+  if (Array.isArray(result.pestTiers)) return result.pestTiers;
+  return [];
+}
+
+function frequencyKeyForPestTier(tier = {}) {
+  return normalizeFrequencyKey(
+    tier.key
+    || tier.label
+    || tier.frequency
+    || tier.cadence
+    || tier.apps
+    || tier.v
+  );
+}
+
+function storedRecurringRowsForEstimate(estimate = {}, estData = {}) {
+  const lists = [
+    estData.result?.recurring?.services,
+    estData.recurring?.services,
+    Array.isArray(estData.services) ? estData.services.filter((svc) => svc.recurring || svc.frequency || svc.visitsPerYear || svc.visits) : null,
+  ];
+  const rows = lists.find((list) => Array.isArray(list) && list.length) || [];
+  if (rows.length) return rows.map((row) => ({ ...row }));
+
+  if (estimate.service_interest) {
+    return String(estimate.service_interest)
+      .split(/\s*\+\s*|\s*,\s*/)
+      .map((label) => label.trim())
+      .filter(Boolean)
+      .map((label) => ({ label, name: label }));
+  }
+  return [];
+}
+
+function selectedGeneratedPricingFrequency(estimate = {}, estData = {}, selectedFrequency = '') {
+  const requested = normalizeFrequencyKey(selectedFrequency)
+    || normalizeFrequencyKey(estData.customerSelection?.frequency);
+  if (!requested) return null;
+
+  const pestTiers = pestTiersForEstimateData(estData);
+  const recurringRows = storedRecurringRowsForEstimate(estimate, estData);
+  const hasPestSignal = pestTiers.length > 0
+    || recurringRows.some((row) => serviceKeyFor(row) === 'pest_control')
+    || /pest/i.test(String(estimate.service_interest || ''))
+    || !!estData.inputs?.services?.pest
+    || !!estData.engineInputs?.services?.pest;
+  if (!hasPestSignal) return null;
+
+  const pestTier = pestTiers.find((tier) => frequencyKeyForPestTier(tier) === requested) || null;
+  const pestVisits = firstPositiveNumber(
+    pestTier?.apps,
+    pestTier?.v,
+    pestTier?.visitsPerYear,
+    pestTier?.visits,
+    visitsForFrequencyKey(requested),
+  );
+  const pestPerTreatment = firstPositiveNumber(
+    pestTier?.pa,
+    pestTier?.perTreatment,
+    pestTier?.perApp,
+    pestTier?.perVisit,
+  );
+  const perServiceTreatments = [{
+    service: 'pest_control',
+    label: `Pest Control (${pestTier?.label || FREQUENCY_LABELS[requested] || requested})`,
+    visitsPerYear: pestVisits,
+    perTreatment: pestPerTreatment,
+  }];
+
+  const seen = new Set(['pest_control']);
+  for (const row of recurringRows) {
+    const key = serviceKeyFor(row);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    perServiceTreatments.push({
+      ...row,
+      service: key,
+      label: labelForService(row),
+      visitsPerYear: visitsForService(row),
+      perTreatment: firstPositiveNumber(row.perTreatment, row.perApp, row.perVisit),
+    });
+  }
+
+  return {
+    key: requested,
+    label: FREQUENCY_LABELS[requested] || selectedFrequency || requested,
+    perServiceTreatments,
+  };
+}
+
+function selectedPricingFrequency(estimate = {}, estData = {}, selectedFrequency = '') {
+  const bundle = estData.sendSnapshot?.pricingBundle;
+  const frequencies = Array.isArray(bundle?.frequencies) ? bundle.frequencies : [];
+  if (frequencies.length && pricingBundleMatchesEstimateTotals(bundle, estimate)) {
+    const requested = normalizeFrequencyKey(selectedFrequency)
+      || normalizeFrequencyKey(estData.customerSelection?.frequency);
+    return frequencies.find((frequency) => normalizeFrequencyKey(frequency.key || frequency.label) === requested)
+      || frequencies[0];
+  }
+  return selectedGeneratedPricingFrequency(estimate, estData, selectedFrequency);
+}
+
+function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency = '') {
+  const frequency = selectedPricingFrequency(estimate, estData, selectedFrequency);
+  if (Array.isArray(frequency?.perServiceTreatments) && frequency.perServiceTreatments.length) {
+    return frequency.perServiceTreatments.map((row) => ({ ...row }));
+  }
+
+  return storedRecurringRowsForEstimate(estimate, estData);
+}
+
+function compactServiceLabel(label) {
+  return String(label || 'Service')
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || 'Service';
+}
+
+function formatServiceProfileLabel(services) {
+  const parts = [];
+  const seen = new Set();
+  for (const svc of services) {
+    const base = compactServiceLabel(svc.label);
+    const visits = Number(svc.visitsPerYear);
+    const label = Number.isFinite(visits) && visits > 0
+      ? `${Math.round(visits)}x ${base}`
+      : base;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parts.push(label);
+  }
+  return parts.join(' + ');
+}
+
+function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
+  const estData = parseEstimateData(estimate.estimate_data);
+  const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
+  const selectedFrequency = userOpts.selectedFrequency || '';
+  const rawRows = serviceMode === 'one_time'
+    ? []
+    : recurringRowsForEstimate(estimate, estData, selectedFrequency);
+
+  const services = rawRows
+    .map((row) => {
+      const key = serviceKeyFor(row);
+      const label = labelForService(row);
+      return {
+        service: key,
+        label,
+        visitsPerYear: visitsForService(row),
+        durationMinutes: durationForService(row, estData),
+      };
+    })
+    .filter((row) => row.service && row.label);
+
+  const totalDuration = services.reduce((sum, svc) => sum + (Number(svc.durationMinutes) || 0), 0);
+  const durationMinutes = clampDuration(userOpts.durationMinutes || totalDuration || DEFAULT_OPTS.durationMinutes);
+  const serviceLabel = formatServiceProfileLabel(services)
+    || estimate.service_interest
+    || (serviceMode === 'one_time' ? 'One-time service' : 'Estimate service');
+
+  return {
+    serviceMode,
+    selectedFrequency: normalizeFrequencyKey(selectedFrequency) || null,
+    durationMinutes,
+    serviceLabel,
+    services,
+  };
 }
 
 // ---------- geocoding ----------
@@ -219,13 +545,22 @@ function roundUpToHour(hhmm) {
   return `${String(nextH).padStart(2, '0')}:00`;
 }
 
-function addOneHour(hhmm) {
+function addMinutesToHHMM(hhmm, minutes) {
   const parts = String(hhmm).split(':');
   const h = Number(parts[0]);
   const m = Number(parts[1] || 0);
   if (!Number.isFinite(h)) return hhmm;
-  const nextH = (h + 1) % 24;
-  return `${String(nextH).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  const total = h * 60 + (Number.isFinite(m) ? m : 0) + (Number(minutes) || 0);
+  const nextH = Math.floor(total / 60) % 24;
+  const nextM = ((total % 60) + 60) % 60;
+  return `${String(nextH).padStart(2, '0')}:${String(nextM).padStart(2, '0')}`;
+}
+
+function slotWindowFitsDay(windowStart, windowEnd) {
+  const startMin = timeToMinutes(windowStart);
+  const endMin = timeToMinutes(windowEnd);
+  if (startMin == null || endMin == null) return true;
+  return endMin > startMin && endMin <= SLOT_DAY_END_MINUTES;
 }
 
 // Customer-facing window rotation for slots on sparse days. find-time
@@ -238,20 +573,23 @@ function addOneHour(hhmm) {
 // of route optimization. Skips noon for lunch.
 const PREFERRED_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
 
-function spreadWindowsAcrossDay(slots) {
+function spreadWindowsAcrossDay(slots, durationMinutes = DEFAULT_OPTS.durationMinutes) {
   if (!Array.isArray(slots) || slots.length <= 1) return slots;
+  const windows = PREFERRED_WINDOWS.filter((win) =>
+    slotWindowFitsDay(win, addMinutesToHHMM(win, durationMinutes)));
+  if (!windows.length) return slots;
   let nonOptimalIdx = 0;
   return slots.map((s) => {
     // Preserve the route-optimized time for slots placed near another
     // customer — moving them to a different hour would destroy the
     // routing benefit that earned them the "Nearby" tag.
     if (s.routeOptimal) return s;
-    const win = PREFERRED_WINDOWS[nonOptimalIdx % PREFERRED_WINDOWS.length];
+    const win = windows[nonOptimalIdx % windows.length];
     nonOptimalIdx += 1;
     return {
       ...s,
       windowStart: win,
-      windowEnd: addOneHour(win),
+      windowEnd: addMinutesToHHMM(win, durationMinutes),
       slotId: `${s.date}_${win.replace(':', '-')}_${s.techId || 'unassigned'}`,
     };
   });
@@ -282,7 +620,7 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo }) {
     .andWhere((q) => {
       q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
     })
-    .select('technician_id', 'scheduled_date', 'window_start', 'window_end');
+    .select('technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
 
   const byTechDate = new Map();
   for (const row of rows) {
@@ -291,19 +629,25 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo }) {
       : row.scheduled_date.toISOString()).slice(0, 10);
     const key = `${row.technician_id || 'unassigned'}|${date}`;
     if (!byTechDate.has(key)) byTechDate.set(key, []);
+    const startMin = timeToMinutes(String(row.window_start || '').slice(0, 5));
+    const explicitEndMin = timeToMinutes(String(row.window_end || '').slice(0, 5));
+    const fallbackDuration = Number(row.estimated_duration_minutes) > 0
+      ? Number(row.estimated_duration_minutes)
+      : DEFAULT_OPTS.durationMinutes;
     byTechDate.get(key).push({
-      startMin: timeToMinutes(String(row.window_start || '').slice(0, 5)),
-      endMin: timeToMinutes(String(row.window_end || '').slice(0, 5)),
+      startMin,
+      endMin: explicitEndMin ?? (startMin != null ? startMin + fallbackDuration : null),
     });
   }
 
   return slots.filter((s) => {
     const key = `${s.techId || 'unassigned'}|${s.date}`;
     const existing = byTechDate.get(key) || [];
-    if (existing.length === 0) return true;
     const slotStart = timeToMinutes(s.windowStart);
     const slotEnd = timeToMinutes(s.windowEnd);
     if (slotStart == null || slotEnd == null) return true;
+    if (!slotWindowFitsDay(s.windowStart, s.windowEnd)) return false;
+    if (existing.length === 0) return true;
     return !existing.some((b) => {
       if (b.startMin == null || b.endMin == null) return false;
       return slotStart < b.endMin && slotEnd > b.startMin;
@@ -320,7 +664,7 @@ function timeToMinutes(hhmm) {
   return h * 60 + m;
 }
 
-function classifySlot(slot, proximityDriveMinutes) {
+function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
   // Round display times to clean hour boundaries. slotId still uses the
@@ -328,12 +672,13 @@ function classifySlot(slot, proximityDriveMinutes) {
   // same hour (possible at the edge of find-time's range) don't both
   // generate identical IDs — techId differentiates.
   const windowStart = roundUpToHour(slot.start_time);
-  const windowEnd = addOneHour(windowStart);
+  const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
   return {
     slotId: `${slot.date}_${windowStart.replace(':', '-')}_${slot.technician?.id || 'unassigned'}`,
     date: slot.date,
     windowStart,
     windowEnd,
+    durationMinutes,
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,
     routeOptimal,
@@ -365,9 +710,21 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     throw err;
   }
 
+  const serviceProfile = resolveEstimateSlotProfile(estimate, userOpts);
+
   // Cache check — keyed per (estimateId, hour bucket).
   cleanupCache(wrapperCache);
-  const cacheKey = `${estimateId}:${cacheHour()}`;
+  const cacheKey = [
+    estimateId,
+    cacheHour(),
+    opts.windowDays,
+    opts.maxResults,
+    opts.expanderMaxResults,
+    opts.includeWeekends ? 'weekends' : 'weekdays',
+    serviceProfile.serviceMode,
+    serviceProfile.selectedFrequency || 'default',
+    serviceProfile.durationMinutes,
+  ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached) {
     return { ...cached.result, metadata: { ...cached.result.metadata, cacheHit: true } };
@@ -387,6 +744,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         estimateCoords: null,
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
+        serviceProfile,
         generatedAt: new Date().toISOString(),
         cacheHit: false,
         coordsSource: 'none',
@@ -407,14 +765,15 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const raw = await findAvailableSlots({
     lat: coords.lat,
     lng: coords.lng,
-    durationMinutes: opts.durationMinutes,
+    durationMinutes: serviceProfile.durationMinutes,
     dateFrom,
     dateTo,
     topN: 50,
     includeWeekends: opts.includeWeekends,
   });
 
-  const classifiedRaw = (raw?.slots || []).map((s) => classifySlot(s, opts.proximityDriveMinutes));
+  const classifiedRaw = (raw?.slots || [])
+    .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
   const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo });
@@ -461,7 +820,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   }
 
   const combined = [...routeOptimalSlots, ...interleaved].slice(0, TARGET_TOTAL);
-  const spread = spreadWindowsAcrossDay(combined);
+  const spread = spreadWindowsAcrossDay(combined, serviceProfile.durationMinutes);
   // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
   // slots; that can land them on an existing booking, so re-filter once
   // more before returning.
@@ -478,6 +837,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,
+      serviceProfile,
       generatedAt: new Date().toISOString(),
       cacheHit: false,
       // TODO: PR B's accept-handler invalidates this cache on every new
@@ -503,6 +863,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
 
   const startedAt = Date.now();
   const geocodeBefore = geocodeCache.size;
+  const serviceProfile = resolveEstimateSlotProfile(estimate, userOpts);
   const coords = await resolveEstimateCoords(estimate);
   const geocodeAfter = geocodeCache.size;
 
@@ -522,7 +883,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
   const raw = await findAvailableSlots({
     lat: coords.lat,
     lng: coords.lng,
-    durationMinutes: opts.durationMinutes,
+    durationMinutes: serviceProfile.durationMinutes,
     dateFrom,
     dateTo,
     topN: 200, // broad — debug surface wants everything
@@ -530,7 +891,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
   });
 
   const classified = (raw?.slots || []).map((s) => ({
-    ...classifySlot(s, opts.proximityDriveMinutes),
+    ...classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes),
     raw: {
       score: s.score,
       detour_minutes: s.detour_minutes,
@@ -550,7 +911,8 @@ async function getSlotDebug(estimateId, userOpts = {}) {
       customerId: estimate.customer_id,
     },
     coords,
-    window: { dateFrom, dateTo, durationMinutes: opts.durationMinutes },
+    window: { dateFrom, dateTo, durationMinutes: serviceProfile.durationMinutes },
+    serviceProfile,
     proximityDriveMinutes: opts.proximityDriveMinutes,
     rawEvaluated: raw?.evaluated || 0,
     rawTotalFeasible: raw?.total_feasible || 0,
@@ -583,12 +945,17 @@ module.exports = {
   getAvailableSlots,
   getSlotDebug,
   invalidateEstimate,
+  resolveEstimateSlotProfile,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
     parseAnchorTime,
     pickNearbyAnchor,
     classifySlot,
     splitSlotResults,
+    resolveEstimateSlotProfile,
+    durationForService,
+    addMinutesToHHMM,
+    slotWindowFitsDay,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); },
   },
 };

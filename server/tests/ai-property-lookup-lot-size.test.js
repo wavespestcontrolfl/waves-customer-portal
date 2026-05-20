@@ -1,0 +1,21 @@
+const { _test } = require('../services/property-lookup/ai-property-lookup');
+
+describe('AI property lookup lot-size normalization', () => {
+  const { coerceLotSize } = _test;
+
+  test('parses acreage values tied to acre units', () => {
+    expect(coerceLotSize('Lot 13, Block 2, 0.23 acres')).toBe(10019);
+    expect(coerceLotSize('.2 acres')).toBe(8712);
+    expect(coerceLotSize('AC 0.25')).toBe(10890);
+  });
+
+  test('parses fractional acreage formats before decimal fallback', () => {
+    expect(coerceLotSize('1-1/2 acres')).toBe(65340);
+    expect(coerceLotSize('1 / 2 acre')).toBe(21780);
+  });
+
+  test('recognizes acre and square-foot abbreviations without using unrelated numbers', () => {
+    expect(coerceLotSize('LOT 13 (0.23 AC - 10,000 SF)')).toBe(10000);
+    expect(coerceLotSize('SECTION 22 LOT 13')).toBeNull();
+  });
+});
