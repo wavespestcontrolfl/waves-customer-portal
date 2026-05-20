@@ -653,12 +653,12 @@ function parseUnitQualifiedLotNumber(str, unitPattern, unitKind) {
   if (afterValue != null && shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, unitKind, beforeMatch)) {
     return afterValue;
   }
-  return beforeValue ?? afterValue;
+  return beforeValue;
 }
 
 function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, unitKind, beforeMatch = null) {
   if (!afterMatch || afterValue == null) return false;
-  if (beforeValue == null) return true;
+  if (beforeValue == null) return isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind);
 
   const beforeHasLotPrefix = hasLotIdentifierPrefix(str, beforeMatch?.index);
   const rawNumber = afterMatch[2];
@@ -683,16 +683,38 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
     && afterSqft >= LOT_SQFT_MIN;
 }
 
+function isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind) {
+  const separator = afterMatch[1] || '';
+  if (/[:=]|\bof\b/i.test(separator)) return true;
+  if (unitKind !== 'acre') return true;
+
+  const unitToken = (afterMatch[0].match(ACRE_UNIT_RE)?.[0] || '').replace(/\./g, '').toLowerCase();
+  if (/^acs?$/.test(unitToken)) return true;
+
+  return !(Number.isInteger(afterValue) && afterValue >= 1000);
+}
+
 function hasLotIdentifierPrefix(str, matchIndex) {
   if (!Number.isInteger(matchIndex) || matchIndex < 0) return false;
   return /\b(?:lot|parcel|tract)\s*(?:#|no\.?|number)?\s*$/i.test(str.slice(0, matchIndex));
 }
 
+function hasExplicitLotIdentifierPrefix(str, matchIndex) {
+  if (!Number.isInteger(matchIndex) || matchIndex < 0) return false;
+  return /\b(?:lot|parcel|tract)\s*(?:#|no\.?|number)\s*$/i.test(str.slice(0, matchIndex));
+}
+
 function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex, unitKind) {
   const value = String(rawNumber || '').trim();
   const lotPrefix = hasLotIdentifierPrefix(fullStr, matchIndex);
-  const lotMixedFraction = value.match(/^\d+\s*(?:-|\s)\s*(\d+\s*\/\s*\d+)$/);
-  if (lotPrefix && lotMixedFraction) return parseFirstLotNumber(lotMixedFraction[1]);
+  const lotMixedFraction = value.match(/^(\d+)\s*(-|\s)\s*(\d+\s*\/\s*\d+)$/);
+  if (lotPrefix && lotMixedFraction) {
+    const whole = Number(lotMixedFraction[1]);
+    const explicitLotPrefix = hasExplicitLotIdentifierPrefix(fullStr, matchIndex);
+    if (explicitLotPrefix || lotMixedFraction[2] === '-' || whole > LOT_SQFT_MAX / SQFT_PER_ACRE) {
+      return parseFirstLotNumber(lotMixedFraction[3]);
+    }
+  }
   if (unitKind === 'acre' && lotPrefix && /^\d+$/.test(value)) return null;
   return parseFirstLotNumber(value);
 }

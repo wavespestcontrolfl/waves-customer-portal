@@ -16,6 +16,7 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot 4 AC 5')).toBe(200000);
     expect(coerceLotSize('Lot 13 AC 0.02')).toBeNull();
     expect(coerceLotSize('Acreage: 5')).toBe(200000);
+    expect(coerceLotSize('Acreage 2024 tax year')).toBeNull();
     expect(coerceLotSize('4 acres 2 parcels')).toBe(174240);
     expect(coerceLotSize('1 acre 2024 tax record')).toBe(43560);
   });
@@ -26,6 +27,7 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot 13 - 1/2 acre')).toBe(21780);
     expect(coerceLotSize('Lot 13-1/2 acre')).toBe(21780);
     expect(coerceLotSize('Lot #13 1/2 acre')).toBe(21780);
+    expect(coerceLotSize('Lot 2 1/4 acres')).toBe(98010);
   });
 
   test('recognizes acre and square-foot abbreviations without using unrelated numbers', () => {
