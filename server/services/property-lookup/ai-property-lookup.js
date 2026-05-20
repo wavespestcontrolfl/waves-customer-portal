@@ -578,9 +578,9 @@ function coerceLotSize(raw) {
   }
 
   const value = hasAcre
-    ? parseUnitQualifiedLotNumber(str, ACRE_UNIT_RE)
+    ? parseUnitQualifiedLotNumber(str, ACRE_UNIT_RE, 'acre')
     : hasSqft
-      ? parseUnitQualifiedLotNumber(str, SQFT_UNIT_RE)
+      ? parseUnitQualifiedLotNumber(str, SQFT_UNIT_RE, 'sqft')
       : parseFirstLotNumber(str);
   if (value == null || value <= 0) return null;
 
@@ -608,8 +608,8 @@ function clampLotSqft(n) {
 }
 
 function coerceDualUnitLotSize(str) {
-  const acres = parseUnitQualifiedLotNumber(str, ACRE_UNIT_RE);
-  const sqft = parseUnitQualifiedLotNumber(str, SQFT_UNIT_RE);
+  const acres = parseUnitQualifiedLotNumber(str, ACRE_UNIT_RE, 'acre');
+  const sqft = parseUnitQualifiedLotNumber(str, SQFT_UNIT_RE, 'sqft');
 
   const acreSqft = acres == null ? null : Math.round(acres * SQFT_PER_ACRE);
   const roundedSqft = sqft == null ? null : Math.round(sqft);
@@ -628,14 +628,39 @@ function lotValuesAgree(a, b) {
   return Math.abs(a - b) <= tolerance;
 }
 
-function parseUnitQualifiedLotNumber(str, unitPattern) {
-  const afterUnit = new RegExp(`(?:${unitPattern.source})\\s*(?:[:=]\\s*)?(?:of\\s*)?${LOT_NUMBER_PATTERN}`, 'i');
+function parseUnitQualifiedLotNumber(str, unitPattern, unitKind) {
+  const afterUnit = new RegExp(`(?:${unitPattern.source})(\\s*(?:[:=]\\s*)?(?:of\\s*)?)${LOT_NUMBER_PATTERN}`, 'i');
   const afterMatch = str.match(afterUnit);
-  if (afterMatch) return parseFirstLotNumber(afterMatch[1]);
+  const afterValue = afterMatch ? parseFirstLotNumber(afterMatch[2]) : null;
 
   const beforeUnit = new RegExp(`${LOT_NUMBER_PATTERN}\\s*-?\\s*(?:${unitPattern.source})`, 'i');
   const beforeMatch = str.match(beforeUnit);
-  return beforeMatch ? parseFirstLotNumber(beforeMatch[1]) : null;
+  const beforeValue = beforeMatch ? parseFirstLotNumber(beforeMatch[1]) : null;
+
+  if (afterValue != null && shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, unitKind)) {
+    return afterValue;
+  }
+  return beforeValue ?? afterValue;
+}
+
+function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, unitKind) {
+  if (!afterMatch || afterValue == null) return false;
+  if (beforeValue == null) return true;
+
+  const rawNumber = afterMatch[2];
+  const numberOffset = afterMatch[0].lastIndexOf(rawNumber);
+  const numberEnd = afterMatch.index + numberOffset + rawNumber.length;
+  const trailing = str.slice(numberEnd, numberEnd + 24);
+  if (ACRE_UNIT_RE.test(trailing) || SQFT_UNIT_RE.test(trailing)) return false;
+
+  const separator = afterMatch[1] || '';
+  if (/[:=]/.test(separator)) return true;
+
+  const beforeSqft = unitKind === 'acre' ? beforeValue * SQFT_PER_ACRE : beforeValue;
+  const afterSqft = unitKind === 'acre' ? afterValue * SQFT_PER_ACRE : afterValue;
+  return (beforeSqft < LOT_SQFT_MIN || beforeSqft > LOT_SQFT_MAX)
+    && afterSqft >= LOT_SQFT_MIN
+    && afterSqft <= LOT_SQFT_MAX;
 }
 
 // Pull the FIRST numeric value out of a lot-size string. Supports mixed
