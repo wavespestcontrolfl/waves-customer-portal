@@ -680,18 +680,43 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
   if (unitKind === 'acre' && beforeHasLotPrefix && Number.isInteger(beforeValue)) return true;
 
   return (beforeSqft < LOT_SQFT_MIN || beforeSqft > LOT_SQFT_MAX)
-    && afterSqft >= LOT_SQFT_MIN;
+    && afterSqft >= LOT_SQFT_MIN
+    && isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind);
 }
 
 function isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind) {
   const separator = afterMatch[1] || '';
   if (/[:=]|\bof\b/i.test(separator)) return true;
+
+  const { rawNumber, trailing } = getAfterUnitNumberContext(afterMatch);
+  if (isMetadataAfterUnitNumber(rawNumber, afterValue, trailing)) return false;
   if (unitKind !== 'acre') return true;
 
   const unitToken = (afterMatch[0].match(ACRE_UNIT_RE)?.[0] || '').replace(/\./g, '').toLowerCase();
   if (/^acs?$/.test(unitToken)) return true;
 
-  return !(Number.isInteger(afterValue) && afterValue >= 1000);
+  return !isPlainIntegerString(rawNumber) || afterValue < 1000;
+}
+
+function getAfterUnitNumberContext(afterMatch) {
+  const rawNumber = afterMatch[2] || '';
+  const numberOffset = afterMatch[0].lastIndexOf(rawNumber);
+  const numberEnd = afterMatch.index + numberOffset + rawNumber.length;
+  return {
+    rawNumber,
+    trailing: String(afterMatch.input || '').slice(numberEnd, numberEnd + 32),
+  };
+}
+
+function isMetadataAfterUnitNumber(rawNumber, value, trailing) {
+  if (/^\s*(?:tax|year|record|plat|ref|reference|parcel|id|identifier|block|book|page)\b/i.test(trailing)) {
+    return true;
+  }
+  return isPlainIntegerString(rawNumber) && Number.isInteger(value) && value >= 1000;
+}
+
+function isPlainIntegerString(rawNumber) {
+  return /^\d+$/.test(String(rawNumber || '').trim());
 }
 
 function hasLotIdentifierPrefix(str, matchIndex) {

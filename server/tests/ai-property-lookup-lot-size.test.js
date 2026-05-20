@@ -17,6 +17,9 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot 13 AC 0.02')).toBeNull();
     expect(coerceLotSize('Acreage: 5')).toBe(200000);
     expect(coerceLotSize('Acreage 2024 tax year')).toBeNull();
+    expect(coerceLotSize('0.02 acres 2024 tax record')).toBeNull();
+    expect(coerceLotSize('AC 2024 tax year')).toBeNull();
+    expect(coerceLotSize('AC 13 plat')).toBeNull();
     expect(coerceLotSize('4 acres 2 parcels')).toBe(174240);
     expect(coerceLotSize('1 acre 2024 tax record')).toBe(43560);
   });
@@ -36,6 +39,7 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot 13 AC 0.25 SF 10,890')).toBe(10890);
     expect(coerceLotSize('AC 5 SF 217,800')).toBe(200000);
     expect(coerceLotSize('lot 10000 sqft')).toBe(10000);
+    expect(coerceLotSize('500 sqft 2024 tax record')).toBeNull();
     expect(coerceLotSize('SECTION 22 LOT 13')).toBeNull();
     expect(coerceLotSize('BLOCK 30 LOT 13 AC ADJ REF PLAT')).toBeNull();
     expect(coerceLotSize('Lot size 999999')).toBeNull();
