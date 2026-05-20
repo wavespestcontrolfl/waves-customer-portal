@@ -23,6 +23,7 @@ import {
   FONTS,
 } from '../theme-brand';
 import BrandFooter from '../components/BrandFooter';
+import PestPressureCard from '../components/PestPressureCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -2856,24 +2857,10 @@ function SupportingDetailsSection({
           </div>
         </details>
 
-        {pressureTrend && (
-          <details className="report-accordion" open={pressureOpen}>
-            <summary>
-              <span>Pest Pressure</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              <PressureTrendCard
-                context={pressureTrend}
-                neighborhood={data.dynamicContext?.neighborhoodPressure}
-                mode={mode}
-                token={token}
-                embedded
-              />
-              <PressureMethodologyDropdown />
-            </div>
-          </details>
-        )}
+        {/* The standalone PestPressureCard above is the primary surface
+            for Pest Pressure (built from the new engine's customer-view).
+            The legacy multi-visit trend chart + neighborhood comparison
+            still render inside the AI summary cards above. */}
 
         {(interaction || arrival || completion) && (
           <details className="report-accordion" open={mode !== 'live'}>
@@ -5884,6 +5871,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         </section>
+
+        <PestPressureCard data={data.pestPressure} />
 
         <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} hasProducts={hasApplications} />
 
