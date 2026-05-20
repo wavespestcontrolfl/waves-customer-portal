@@ -290,6 +290,38 @@ describe('estimate v2 service toggle adapter', () => {
     expect(estimate.pricingMetadata.manualReviewReasons).toContain('german_roach_initial_and_cleanout_both_selected');
   });
 
+  test('maps German Roach Cleanout total through the legacy adapter', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        homeSqFt: 2800,
+        footprint: 2800,
+      },
+      ['ROACH'],
+      {
+        roachType: 'GERMAN',
+      }
+    );
+
+    const estimate = generateEstimate(input);
+    const mapped = mapV1ToLegacyShape(estimate);
+    const cleanout = mapped.oneTime.specItems.find((line) => line.service === 'german_roach');
+
+    expect(estimate.summary.specialtyTotal).toBe(574);
+    expect(cleanout).toEqual(expect.objectContaining({
+      name: 'German Roach Cleanout — 3 Visit Program',
+      price: 574,
+      source: 'german_roach_cleanout_selected',
+      pricingModel: 'german_roach_three_visit_cleanout',
+      visits: 3,
+      setupCharge: 100,
+      total: 574,
+      noRecurringDiscount: true,
+    }));
+    expect(mapped.oneTime.total).toBe(574);
+    expect(mapped.totals.year1).toBe(574);
+  });
+
   test('does not double-bill regular roach when recurring pest already includes regular knockdown', () => {
     const input = translateV2CallToV1Input(
       baseProfile(),

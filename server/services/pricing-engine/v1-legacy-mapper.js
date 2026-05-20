@@ -34,13 +34,24 @@ const finiteMoney = value => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 };
-const effectiveOneTimePrice = li => (
-  finiteMoney(li.priceAfterDiscount)
-  ?? finiteMoney(li.totalAfterDiscount)
-  ?? finiteMoney(li.price)
-  ?? finiteMoney(li.total)
-  ?? 0
-);
+const effectiveOneTimePrice = (li = {}) => {
+  if (li.service === 'german_roach') {
+    return (
+      finiteMoney(li.totalAfterDiscount)
+      ?? finiteMoney(li.total)
+      ?? finiteMoney(li.priceAfterDiscount)
+      ?? finiteMoney(li.price)
+      ?? 0
+    );
+  }
+  return (
+    finiteMoney(li.priceAfterDiscount)
+    ?? finiteMoney(li.totalAfterDiscount)
+    ?? finiteMoney(li.price)
+    ?? finiteMoney(li.total)
+    ?? 0
+  );
+};
 
 const SERVICE_LABEL = {
   commercial_pest: 'Commercial Pest Control',
@@ -111,6 +122,25 @@ function measurementMetadataFields(li = {}) {
   if (li.manualReviewReasons !== undefined) {
     fields.manualReviewReasons = Array.isArray(li.manualReviewReasons) ? li.manualReviewReasons : [];
   }
+  [
+    'source',
+    'standalone',
+    'autoFiredFromRecurringPest',
+    'requestedRoachType',
+    'roachType',
+    'roachTypeWasDefaulted',
+    'severity',
+    'severitySource',
+    'pricingModel',
+    'legacyPricingModel',
+    'noRecurringDiscount',
+    'visits',
+    'setupCharge',
+    'total',
+    'scaleKey',
+  ].forEach((field) => {
+    if (li[field] !== undefined) fields[field] = li[field];
+  });
   if (li.inputSourceSummary !== undefined) fields.inputSourceSummary = li.inputSourceSummary;
   return fields;
 }
@@ -276,9 +306,11 @@ function mapV1ToLegacyShape(v1Result) {
   if (tbLI) {
     const installPrice = tbLI.installation?.price || 0;
     const monMonthly = tbLI.monitoring?.monthly || 0;
+    const selectedSystem = tbLI.selectedSystem || tbLI.system || null;
     R.tmBait = {
-      ai: tbLI.system === 'advance' ? installPrice : 0,
-      ti: tbLI.system === 'trelona' ? installPrice : 0,
+      selectedSystem,
+      ai: selectedSystem === 'advance' ? installPrice : null,
+      ti: selectedSystem === 'trelona' ? installPrice : null,
       bmo: tbLI.monitoringTier === 'basic' ? monMonthly : 35,
       pmo: tbLI.monitoringTier === 'premier' ? monMonthly : 65,
       perim: tbLI.perimeter || 0,
@@ -366,10 +398,10 @@ function mapV1ToLegacyShape(v1Result) {
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;
       if (li.addOns !== undefined) item.addOns = li.addOns;
-      if (li.renewal !== undefined) item.renewal = li.renewal;
-      if (li.renewalLabel !== undefined) item.renewalLabel = li.renewalLabel;
+      if (!quoteRequired && li.renewal !== undefined) item.renewal = li.renewal;
+      if (!quoteRequired && li.renewalLabel !== undefined) item.renewalLabel = li.renewalLabel;
       v1OtItems.push(item);
-      if (li.service === 'trenching') R.trench = true;
+      if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
       v1SpecItems.push({
         service: li.service, name, price, det: detail,
@@ -547,6 +579,17 @@ function mapV1ToLegacyShape(v1Result) {
           requiresCustomQuote: !!s.requiresCustomQuote,
           customQuoteReason: s.customQuoteReason,
           fleaExteriorZones: s.fleaExteriorZones,
+          source: s.source,
+          pricingModel: s.pricingModel,
+          legacyPricingModel: s.legacyPricingModel,
+          visits: s.visits,
+          setupCharge: s.setupCharge,
+          total: s.total,
+          noRecurringDiscount: s.noRecurringDiscount,
+          standalone: s.standalone,
+          autoFiredFromRecurringPest: s.autoFiredFromRecurringPest,
+          requestedRoachType: s.requestedRoachType,
+          roachType: s.roachType,
           measurements: s.measurements,
           measurementWarnings: s.measurementWarnings,
           requiresMeasurement: !!s.requiresMeasurement,

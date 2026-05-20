@@ -2868,14 +2868,14 @@ function EstimateToolView() {
               <Checkbox k="svcOnetimePest" label="Pest Treatment" />{" "}
               <Checkbox k="svcOnetimeMosquito" label="Mosquito Treatment" />{" "}
               <Checkbox k="svcFlea" label="Flea Treatment" />{" "}
-              <Checkbox k="svcRoach" label="Standalone Roach Treatment" />
+              <Checkbox k="svcRoach" label="Cockroach Specialty Service" />
               {form.svcRoach && (
                 <div style={sSubOpts}>
                   {" "}
                   <div style={{ fontSize: 12, fontWeight: 700, color: C.ink, marginBottom: 8 }}>
-                    Standalone Services
+                    Standalone / Specialty Services
                   </div>
-                  <Field label="Selected Service" style={{ marginBottom: 0 }}>
+                  <Field label="Service Type" style={{ marginBottom: 0 }}>
                     {" "}
                     <Select
                       k="roachType"
@@ -4066,18 +4066,24 @@ function EstimateToolView() {
                             </div>{" "}
                             <TierGrid>
                               {" "}
-                              <TierRow
-                                name="Advance"
-                                detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
-                                price="$35-65"
-                                dimmed
-                              />{" "}
-                              <TierRow
-                                name="Trelona"
-                                detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
-                                price="$35-65"
-                                recommended
-                              />{" "}
+                              {R.tmBait.ai != null && (
+                                <TierRow
+                                  name="Advance"
+                                  detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
+                                  price="$35-65"
+                                  recommended={R.tmBait.selectedSystem === "advance"}
+                                  dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
+                                />
+                              )}{" "}
+                              {R.tmBait.ti != null && (
+                                <TierRow
+                                  name="Trelona"
+                                  detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
+                                  price="$35-65"
+                                  recommended={R.tmBait.selectedSystem === "trelona"}
+                                  dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
+                                />
+                              )}{" "}
                             </TierGrid>{" "}
                             <div style={sModNote}>
                               Install cost is a one-time setup fee, not a

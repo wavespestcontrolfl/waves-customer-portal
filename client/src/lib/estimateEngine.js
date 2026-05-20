@@ -559,6 +559,27 @@ export function calculateEstimate(inputs) {
 
   let R = {}, wgServices = [];
   let notes = [];
+  const pricingMetadata = {
+    warnings: [],
+    manualReviewReasons: [],
+    skippedServices: [],
+  };
+  const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
+  const addRoutingWarning = warning => {
+    pricingMetadata.warnings = uniqueStrings([...pricingMetadata.warnings, warning]);
+  };
+  const addManualReviewReason = reason => {
+    pricingMetadata.manualReviewReasons = uniqueStrings([...pricingMetadata.manualReviewReasons, reason]);
+  };
+  const addSkippedService = skipped => {
+    if (!skipped) return;
+    pricingMetadata.skippedServices.push(skipped);
+    if (skipped.skippedDuplicateRoachLine) {
+      pricingMetadata.skippedDuplicateRoachLine = true;
+      pricingMetadata.skippedService = skipped.skippedService;
+      pricingMetadata.skippedReason = skipped.skippedReason;
+    }
+  };
   const isCommercial = isCommercialEstimateInput(inputs);
   const commercialManualSpecItems = [];
   if (isCommercial && hasAnySelectedFlag(inputs, COMMERCIAL_PEST_FALLBACK_FLAGS)) {
@@ -1204,7 +1225,7 @@ export function calculateEstimate(inputs) {
       R.trench = { price: fp, ren: 325, dl, cl, perim, cp };
       otItems.push({ name: 'Trenching', price: fp, detail: dl + ' LF dirt + ' + cl + ' LF concrete' });
     } else {
-      R.trench = { quoteRequired: true, requiresMeasurement: true, manualReviewReasons: ['missing_termite_perimeter_lf'] };
+      R.trenchQuoteRequired = { quoteRequired: true, requiresMeasurement: true, manualReviewReasons: ['missing_termite_perimeter_lf'] };
       otItems.push({ name: 'Trenching', price: null, detail: 'Perimeter LF required', quoteRequired: true });
     }
   }
@@ -1281,6 +1302,11 @@ export function calculateEstimate(inputs) {
       name: roachMod === 'GERMAN' ? 'Initial German Roach Knockdown' : 'Initial Native Roach Knockdown',
       price: fp,
       detail: roachMod === 'GERMAN' ? 'First-visit gel bait + IGR' : 'First-visit knockdown',
+      requestedRoachType: roachMod,
+      roachType: roachMod === 'GERMAN' ? 'german' : 'regular',
+      standalone: false,
+      autoFiredFromRecurringPest: true,
+      source: 'recurring_pest_roach_activity',
       noRecurringDiscount: true,
     });
   }
@@ -1342,7 +1368,22 @@ export function calculateEstimate(inputs) {
     if (rt === 'REGULAR') {
       if (R.pestRoachMod !== 'REGULAR') {
         const fpEff = footprint > 0 ? footprint : 2500;
-        specItems.push({ name: 'Regular Roach', price: initialRoachPrice(rt, fpEff, true), det: 'Standalone knockdown' });
+        specItems.push({
+          service: 'pest_initial_roach',
+          name: 'Standalone Native Cockroach Treatment',
+          price: initialRoachPrice(rt, fpEff, true),
+          det: 'Standalone knockdown',
+          source: 'standalone_native_cockroach_treatment',
+          standalone: true,
+          roachType: 'regular',
+          noRecurringDiscount: true,
+        });
+      } else {
+        addSkippedService({
+          skippedDuplicateRoachLine: true,
+          skippedService: 'standalone_native_cockroach_treatment',
+          skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
+        });
       }
     } else {
       let gp = 450 + interpolate(footprint, [
@@ -1350,7 +1391,31 @@ export function calculateEstimate(inputs) {
         { at: 2000, adj: 0 }, { at: 2500, adj: 25 }, { at: 3000, adj: 50 },
         { at: 4000, adj: 85 },
       ]);
-      specItems.push({ name: 'German Roach (3-visit)', price: otP(Math.max(400, gp)), det: 'Gel+IGR+monitoring' });
+      const basePrice = Math.round(Math.max(400, gp));
+      const setupCharge = 100;
+      const price = basePrice + setupCharge;
+      const warning = 'German initial knockdown and German Roach 3-visit cleanout are both selected. Verify this is intentional.';
+      if (R.pestRoachMod === 'GERMAN') {
+        addManualReviewReason('german_roach_initial_and_cleanout_both_selected');
+        addRoutingWarning(warning);
+      }
+      specItems.push({
+        service: 'german_roach',
+        name: 'German Roach Cleanout — 3 Visit Program',
+        price,
+        det: 'Gel+IGR+monitoring',
+        source: 'german_roach_cleanout_selected',
+        pricingModel: 'german_roach_three_visit_cleanout',
+        visits: 3,
+        setupCharge,
+        total: price,
+        noRecurringDiscount: true,
+        requiresManualReview: R.pestRoachMod === 'GERMAN',
+        manualReviewReasons: R.pestRoachMod === 'GERMAN'
+          ? ['german_roach_initial_and_cleanout_both_selected']
+          : [],
+        warnings: R.pestRoachMod === 'GERMAN' ? [warning] : [],
+      });
     }
   }
 
@@ -1509,7 +1574,7 @@ export function calculateEstimate(inputs) {
   const palmMo = R.injection ? R.injection.mo : 0;
   const totalOT = ot + tmInstall;
   const y1 = Math.round((ad + rba + palmAnn + totalOT) * 100) / 100;
-  const y2 = Math.round((ad + rba + palmAnn + (R.trench ? 325 : 0)) * 100) / 100;
+  const y2 = Math.round((ad + rba + palmAnn + (R.trench && !R.trench.quoteRequired && !R.trench.requiresMeasurement ? 325 : 0)) * 100) / 100;
   const y2mo = Math.round(y2 / 12 * 100) / 100;
 
   return {
@@ -1571,6 +1636,17 @@ export function calculateEstimate(inputs) {
           requiresManualReview: !!s.requiresManualReview,
           autoQuoteRequiresAdminApproval: !!s.autoQuoteRequiresAdminApproval,
           manualReviewReasons: s.manualReviewReasons || [],
+          warnings: s.warnings || [],
+          source: s.source,
+          pricingModel: s.pricingModel,
+          visits: s.visits,
+          setupCharge: s.setupCharge,
+          total: s.total,
+          standalone: s.standalone,
+          autoFiredFromRecurringPest: s.autoFiredFromRecurringPest,
+          requestedRoachType: s.requestedRoachType,
+          roachType: s.roachType,
+          noRecurringDiscount: s.noRecurringDiscount,
           taxable: s.taxable,
           taxCategory: s.taxCategory || null,
           pricingConfidence: s.pricingConfidence || null,
@@ -1582,6 +1658,8 @@ export function calculateEstimate(inputs) {
     totals: { year1: y1, year2: y2, year2mo: y2mo },
     results: R,
     specItems, // full array including onProg items for display
+    pricingMetadata,
+    routingMetadata: pricingMetadata,
     fieldVerify,
     notes,
     urgency,

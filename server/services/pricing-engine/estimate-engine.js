@@ -853,7 +853,7 @@ function generateEstimate(input) {
 
   // ── 6. Calculate totals ────────────────────────────────────
   const recurringItems = lineItems.filter(i => i.annual);
-  const oneTimeItems = lineItems.filter(i => i.price && !i.annual);
+  const oneTimeItems = lineItems.filter(i => i.price && !i.annual && !i.total);
   const specialtyItems = lineItems.filter(i => i.total && !i.annual);
 
   const recurringAnnualBefore = recurringItems.reduce((sum, i) => sum + (i.annualBeforeDiscount || 0), 0);

@@ -266,6 +266,32 @@ function resolveTermiteBaitPerimeter(property = {}, options = {}) {
     });
   }
 
+  const propertyPerimeterWarnings = [];
+  const propertyPerimeterReasons = [];
+  const propertyPerimeterSources = [
+    ['property_perimeter', property.perimeterLF],
+    ['property_perimeter', property.perimeterLf],
+    [property.perimeterSource || 'property_perimeter', property.perimeter],
+  ];
+  for (const [source, rawValue] of propertyPerimeterSources) {
+    if (!hasValue(rawValue) || source === 'computed_from_footprint') continue;
+    const parsed = parsePositiveMeasurement(rawValue);
+    if (parsed !== null) {
+      return {
+        value: parsed,
+        source: 'property_perimeter',
+        wasDefaulted: false,
+        wasManualOverride: false,
+        requiresMeasurement: false,
+        requiresManualReview: false,
+        manualReviewReasons: [],
+        warnings: [],
+      };
+    }
+    propertyPerimeterWarnings.push('invalid_termite_perimeter_lf');
+    propertyPerimeterReasons.push('invalid_termite_perimeter_lf');
+  }
+
   const footprintResolution = resolveTermiteFootprint(property, options);
   if (footprintResolution.value === null) return footprintResolution;
 
@@ -279,9 +305,9 @@ function resolveTermiteBaitPerimeter(property = {}, options = {}) {
     wasDefaulted: false,
     wasManualOverride: false,
     requiresMeasurement: false,
-    requiresManualReview: footprintResolution.requiresManualReview,
-    manualReviewReasons: [...footprintResolution.manualReviewReasons],
-    warnings: [...footprintResolution.warnings],
+    requiresManualReview: footprintResolution.requiresManualReview || propertyPerimeterReasons.length > 0,
+    manualReviewReasons: uniqueList([...footprintResolution.manualReviewReasons, ...propertyPerimeterReasons]),
+    warnings: uniqueList([...footprintResolution.warnings, ...propertyPerimeterWarnings]),
     computedFromFootprintSqFt: footprintResolution.value,
   };
 }
@@ -366,6 +392,7 @@ function resolveTrenchingMeasurements(property = {}, options = {}) {
   let concretePct = null;
   let concretePctSource = 'missing';
   let invalidConcreteLF = false;
+  let invalidDirtLF = false;
 
   if (hasValue(manualConcreteLF)) {
     const parsedConcreteLF = parseNonNegativeMeasurement(manualConcreteLF);
@@ -396,6 +423,7 @@ function resolveTrenchingMeasurements(property = {}, options = {}) {
     if (parsedDirtLF === null || parsedDirtLF > perimeter) {
       warnings.push('invalid_trenching_dirt_lf');
       manualReviewReasons.push('invalid_trenching_dirt_lf');
+      invalidDirtLF = true;
     } else {
       dirtLF = parsedDirtLF;
       dirtLFSource = 'manual_override';
@@ -408,7 +436,7 @@ function resolveTrenchingMeasurements(property = {}, options = {}) {
     }
   }
 
-  if (!invalidConcreteLF && hasValue(manualConcreteLF) && hasValue(manualDirtLF)) {
+  if (!invalidConcreteLF && !invalidDirtLF && hasValue(manualConcreteLF) && hasValue(manualDirtLF)) {
     const parsedConcreteLF = parseNonNegativeMeasurement(manualConcreteLF);
     const parsedDirtLF = parseNonNegativeMeasurement(manualDirtLF);
     if (parsedConcreteLF !== null && parsedDirtLF !== null && Math.abs((parsedConcreteLF + parsedDirtLF) - perimeter) > 5) {
@@ -417,7 +445,7 @@ function resolveTrenchingMeasurements(property = {}, options = {}) {
     }
   }
 
-  if (!invalidConcreteLF && concreteLF === null) {
+  if (!invalidConcreteLF && !invalidDirtLF && concreteLF === null) {
     const normalizedPct = normalizeConcretePct(manualConcretePct);
     if (normalizedPct && normalizedPct.value !== null) {
       concretePct = normalizedPct.value;
@@ -440,7 +468,7 @@ function resolveTrenchingMeasurements(property = {}, options = {}) {
     dirtLFSource = concretePctSource === 'manual_override' ? 'derived_from_manual_pct' : 'feature_estimate';
   }
 
-  const requiresMeasurement = invalidConcreteLF || perimeterResolution.requiresMeasurement;
+  const requiresMeasurement = invalidConcreteLF || invalidDirtLF || perimeterResolution.requiresMeasurement;
   const requiresManualReview = requiresMeasurement || warnings.length > 0 || perimeterResolution.requiresManualReview;
   return {
     perimeter,
@@ -1243,11 +1271,14 @@ function pricePestControl(property, options = {}) {
 function pricePestInitialRoach(property, options = {}) {
   const {
     roachType: requestedRoachTypeInput = 'none',
+    severity: requestedSeverityInput,
+    severitySource,
     standalone = false,
     autoFiredFromRecurringPest = false,
     source,
   } = options;
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
+  const severityMeta = normalizeRoachSeverity(requestedSeverityInput);
   const roachType = roachMeta.roachType;
   if (roachType === 'none') return null;
   const footprintResolution = resolvePestFootprint(property);
@@ -1271,6 +1302,20 @@ function pricePestInitialRoach(property, options = {}) {
   const margin = price > 0 ? (price - incrementalCost) / price : 0;
 
   const isGerman = roachType === 'german';
+  const manualReviewReasons = uniqueList([
+    ...footprintResolution.manualReviewReasons,
+    ...(severityMeta.severity === 'severe' && !isGerman
+      ? ['severe_native_roach_activity_manual_review']
+      : []),
+  ]);
+  const warnings = uniqueList([
+    ...footprintResolution.warnings,
+    ...roachMeta.roachWarnings,
+    ...severityMeta.warnings,
+    ...(severityMeta.severity === 'severe' && isGerman
+      ? ['Severe German roach activity should use German Roach Cleanout, not only Initial German Roach Knockdown.']
+      : []),
+  ]);
   return {
     service: 'pest_initial_roach',
     label: isGerman ? 'Initial German Roach Knockdown' : 'Initial Native Roach Knockdown',
@@ -1281,6 +1326,8 @@ function pricePestInitialRoach(property, options = {}) {
     requestedRoachType: roachMeta.requestedRoachType,
     roachType,
     roachTypeWasDefaulted: roachMeta.roachTypeWasDefaulted,
+    severity: severityMeta.severity,
+    severitySource: severitySource || (severityMeta.severity ? 'admin' : undefined),
     scaleKey,
     standalone: !!standalone,
     autoFiredFromRecurringPest: !!autoFiredFromRecurringPest,
@@ -1293,9 +1340,9 @@ function pricePestInitialRoach(property, options = {}) {
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
-    requiresManualReview: footprintResolution.requiresManualReview,
-    manualReviewReasons: footprintResolution.manualReviewReasons,
-    warnings: uniqueList([...footprintResolution.warnings, ...roachMeta.roachWarnings]),
+    requiresManualReview: footprintResolution.requiresManualReview || manualReviewReasons.length > 0,
+    manualReviewReasons,
+    warnings,
     costs: {
       extraMaterial,
       extraLaborMin: extraOnSiteMin,
@@ -3184,6 +3231,7 @@ function pricePreSlabTermidor(input, volumeDiscount = 'none', extraOptions = {})
 function priceGermanRoach(property, options = {}) {
   const footprintResolution = resolvePestFootprint(property);
   const footprint = footprintResolution.footprint;
+  const severityMeta = normalizeRoachSeverity(options.severity);
   const adj = interpolate(footprint, SPECIALTY.germanRoach.footprintAdj);
   const price = Math.max(SPECIALTY.germanRoach.floor, SPECIALTY.germanRoach.base + Math.round(adj));
 
@@ -3194,6 +3242,8 @@ function priceGermanRoach(property, options = {}) {
     source: options.source || 'german_roach_cleanout_selected',
     pricingModel: 'german_roach_three_visit_cleanout',
     legacyPricingModel: 'german_roach_multi_visit',
+    severity: severityMeta.severity,
+    severitySource: options.severitySource || (severityMeta.severity ? 'admin' : undefined),
     noRecurringDiscount: true,
     footprintAdj: Math.round(adj),
     footprintUsed: footprint,
@@ -3201,7 +3251,7 @@ function priceGermanRoach(property, options = {}) {
     footprintWasDefaulted: footprintResolution.wasDefaulted,
     requiresManualReview: footprintResolution.requiresManualReview,
     manualReviewReasons: footprintResolution.manualReviewReasons,
-    warnings: footprintResolution.warnings,
+    warnings: uniqueList([...footprintResolution.warnings, ...severityMeta.warnings]),
     setupCharge: SPECIALTY.germanRoach.setupCharge,
     total: price + SPECIALTY.germanRoach.setupCharge,
     visits: 3,
@@ -4787,6 +4837,7 @@ module.exports = {
   normalizePestFrequency,
   normalizePestPricingVersion,
   normalizeRoachType,
+  normalizeRoachSeverity,
   normalizePestDensity,
   normalizePestComplexity,
   normalizePestPropertyType,

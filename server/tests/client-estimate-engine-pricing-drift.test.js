@@ -120,6 +120,56 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(source).not.toMatch(/basePrice\s*\*\s*0\.15|pp\s*\*\s*0\.15|117\s*\*\s*0\.15/);
   });
 
+  test('client fallback quotes German Roach Cleanout as a no-discount total', () => {
+    const baseInput = {
+      homeSqFt: 2800,
+      stories: 1,
+      lotSqFt: 10000,
+      propertyType: 'single_family',
+      svcRoach: true,
+      roachType: 'GERMAN',
+      urgency: 'NONE',
+      isAfterHours: false,
+    };
+    const standard = calculateEstimate({ ...baseInput, isRecurringCustomer: false });
+    const recurringCustomer = calculateEstimate({ ...baseInput, isRecurringCustomer: true });
+    const cleanout = standard.oneTime.specItems.find((line) => line.service === 'german_roach');
+    const discountedCleanout = recurringCustomer.oneTime.specItems.find((line) => line.service === 'german_roach');
+
+    expect(cleanout).toEqual(expect.objectContaining({
+      name: 'German Roach Cleanout — 3 Visit Program',
+      setupCharge: 100,
+      total: cleanout.price,
+      noRecurringDiscount: true,
+    }));
+    expect(standard.oneTime.total).toBe(cleanout.price);
+    expect(discountedCleanout.price).toBe(cleanout.price);
+    expect(recurringCustomer.oneTime.total).toBe(cleanout.price);
+  });
+
+  test('client fallback quote-required trenching does not add renewal', () => {
+    const estimate = calculateEstimate({
+      homeSqFt: 2400,
+      stories: 1,
+      lotSqFt: 9000,
+      propertyType: 'single_family',
+      svcTrenching: true,
+      urgency: 'NONE',
+      isAfterHours: false,
+    });
+
+    expect(estimate.results.trench).toBeUndefined();
+    expect(estimate.results.trenchQuoteRequired).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      requiresMeasurement: true,
+    }));
+    expect(estimate.oneTime.items.find((item) => item.name === 'Trenching')).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      price: null,
+    }));
+    expect(estimate.totals.year2).toBe(0);
+  });
+
   test('keeps one-time pest floor as a final customer-facing floor', () => {
     expect(source).toContain('const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));');
   });

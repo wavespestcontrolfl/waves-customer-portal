@@ -1509,6 +1509,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     services.pest = {
       frequency: pestFreq,
       roachType,
+      ...(o.recurringRoachSeverity || o.roachSeverity
+        ? { roachSeverity: o.recurringRoachSeverity || o.roachSeverity, severitySource: 'admin' }
+        : {}),
       ...(commercialProfile && o.commercialPricingMode
         ? { commercialPricingMode: o.commercialPricingMode }
         : {}),
@@ -1650,7 +1653,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   }
   if (roachServiceSelected) {
     if (standaloneRoachMeta.roachType === 'german') {
-      services.germanRoach = {};
+      services.germanRoach = {
+        ...(o.germanRoachSeverity || o.roachSeverity
+          ? { severity: o.germanRoachSeverity || o.roachSeverity, severitySource: 'admin' }
+          : {}),
+      };
     } else if (sel.has('PEST') && roachType === 'regular') {
       addSkippedService({
         skippedDuplicateRoachLine: true,
@@ -1661,6 +1668,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       services.pestInitialRoach = {
         roachType: 'regular',
         source: 'standalone_native_cockroach_treatment',
+        ...(o.standaloneRoachSeverity || o.roachSeverity
+          ? { severity: o.standaloneRoachSeverity || o.roachSeverity, severitySource: 'admin' }
+          : {}),
       };
     }
   }

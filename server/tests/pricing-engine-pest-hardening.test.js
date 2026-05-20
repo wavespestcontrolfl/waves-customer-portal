@@ -14,6 +14,7 @@ const {
   normalizeRoachType,
   normalizePestPropertyType,
   resolvePestFootprint,
+  determineWaveGuardTier,
   getEffectiveDiscount,
   applyDiscount,
   constants,
@@ -203,6 +204,9 @@ describe('pest-control pricing hardening', () => {
     expect(specialty.lineItems.filter(line => line.service === 'german_roach')).toHaveLength(1);
     expect(specialty.lineItems.filter(line => line.service === 'pest_initial_roach')).toHaveLength(0);
     expect(specialty.lineItems.filter(line => line.service === 'german_roach_initial')).toHaveLength(0);
+    expect(specialty.summary.oneTimeTotal).toBe(0);
+    expect(specialty.summary.specialtyTotal).toBe(574);
+    expect(specialty.summary.year1Total).toBe(574);
 
     const directDuplicate = generateEstimate({
       homeSqFt: 1800,
@@ -233,6 +237,44 @@ describe('pest-control pricing hardening', () => {
       requiresManualReview: true,
       manualReviewReasons: expect.arrayContaining(['german_roach_initial_and_cleanout_both_selected']),
     }));
+  });
+
+  test('roach specialty and initial lines are excluded from percentage discounts', () => {
+    const silver = determineWaveGuardTier(['pest_control', 'lawn_care']);
+    ['pest_initial_roach', 'german_roach', 'german_roach_initial'].forEach((serviceKey) => {
+      const discount = getEffectiveDiscount(serviceKey, silver, {
+        isRecurringCustomer: true,
+        isOneTimeService: true,
+      });
+      expect(discount.effectiveDiscount).toBe(0);
+      expect(discount.appliedDiscounts).toContainEqual(expect.objectContaining({ type: 'exclusion' }));
+      expect(discount.appliedDiscounts).not.toContainEqual(expect.objectContaining({ type: 'waveguard' }));
+      expect(discount.appliedDiscounts).not.toContainEqual(expect.objectContaining({ type: 'recurring_customer_one_time_perk' }));
+    });
+
+    const recurringRoach = generateEstimate({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      recurringCustomer: true,
+      services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+    });
+    const initialRoach = recurringRoach.lineItems.find(line => line.service === 'pest_initial_roach');
+    expect(initialRoach.priceAfterDiscount).toBe(initialRoach.price);
+    expect(initialRoach.discount.appliedDiscounts).toContainEqual(expect.objectContaining({ type: 'exclusion' }));
+
+    const germanCleanout = generateEstimate({
+      homeSqFt: 2800,
+      stories: 1,
+      lotSqFt: 10000,
+      recurringCustomer: true,
+      services: { germanRoach: true },
+    });
+    const germanLine = germanCleanout.lineItems.find(line => line.service === 'german_roach');
+    expect(germanLine.priceAfterDiscount).toBe(germanLine.price);
+    expect(germanLine.totalAfterDiscount ?? germanLine.total).toBe(574);
+    expect(germanLine.discount.appliedDiscounts).toContainEqual(expect.objectContaining({ type: 'exclusion' }));
+    expect(germanCleanout.summary.specialtyTotal).toBe(574);
   });
 
   test('one-time pest protocol example and invalid recurring baseline guard are stable', () => {

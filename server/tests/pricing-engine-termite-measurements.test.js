@@ -36,6 +36,14 @@ describe('termite measurement overrides and safeguards', () => {
     expect(override.installation.price).toBeGreaterThan(639);
     expect(override.manualReviewReasons).toContain('termite_perimeter_manual_override_used');
 
+    const propertyPerimeter = priceTermiteBait(
+      { footprint: 2000, perimeter: 300, perimeterSource: 'property_perimeter' },
+      { system: 'advance' }
+    );
+    expect(propertyPerimeter.perimeter).toBe(300);
+    expect(propertyPerimeter.perimeterSource).toBe('property_perimeter');
+    expect(propertyPerimeter.stations).toBe(30);
+
     const missing = priceTermiteBait({}, { system: 'unknown' });
     expect(missing.quoteRequired).toBe(true);
     expect(missing.requiresMeasurement).toBe(true);
@@ -89,6 +97,14 @@ describe('termite measurement overrides and safeguards', () => {
     expect(invalid.quoteRequired).toBe(true);
     expect(invalid.requiresManualReview).toBe(true);
     expect(invalid.manualReviewReasons).toContain('concrete_lf_exceeds_perimeter');
+
+    const invalidDirt = priceTrenching({}, {
+      measurements: { perimeterLF: 240, dirtLF: 300 },
+    });
+    expect(invalidDirt.quoteRequired).toBe(true);
+    expect(invalidDirt.requiresMeasurement).toBe(true);
+    expect(invalidDirt.price).toBeNull();
+    expect(invalidDirt.manualReviewReasons).toContain('invalid_trenching_dirt_lf');
   });
 
   test('BoraCare keeps valid examples, accepts manual override, and guards missing attic sqft', () => {
@@ -188,5 +204,12 @@ describe('termite measurement overrides and safeguards', () => {
     expect(trench.price).toBeNull();
     expect(trench.manualReviewReasons).toContain('missing_termite_perimeter_lf');
     expect(estimate.summary.year2Annual).toBe(0);
+
+    const mapped = mapV1ToLegacyShape(estimate);
+    const mappedTrench = mapped.oneTime.items.find((item) => item.service === 'trenching');
+    expect(mappedTrench.quoteRequired).toBe(true);
+    expect(mappedTrench.price).toBeNull();
+    expect(mappedTrench.renewal).toBeUndefined();
+    expect(mapped.results.trench).toBeUndefined();
   });
 });
