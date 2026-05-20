@@ -185,7 +185,13 @@ router.get('/admin/calls', adminAuthenticate, requireTechOrAdmin, async (req, re
 
     let q = db('call_log as cl')
       .leftJoin('customers as c', 'cl.customer_id', 'c.id')
-      .select('cl.*', 'c.first_name', 'c.last_name', 'c.waveguard_tier')
+      .select(
+        'cl.*',
+        'c.first_name',
+        'c.last_name',
+        'c.phone as customer_phone',
+        'c.waveguard_tier'
+      )
       .orderBy('cl.created_at', 'desc');
 
     if (!searchTerm) {

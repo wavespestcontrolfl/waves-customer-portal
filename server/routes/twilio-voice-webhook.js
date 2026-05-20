@@ -6,6 +6,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
+const { recordTouchpoint, syncVoiceMessageForCall } = require('../services/conversations');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
@@ -48,6 +49,64 @@ function maskSid(sid) {
   const value = String(sid);
   if (value.length <= 8) return `${value.slice(0, 2)}…`;
   return `${value.slice(0, 2)}…${value.slice(-6)}`;
+}
+
+let warnedForwardNumberFallback = false;
+
+function parseForwardNumbers(value) {
+  const seen = new Set();
+  return String(value || '')
+    .split(',')
+    .map(n => toE164(n.trim()))
+    .filter(Boolean)
+    .filter((n) => {
+      if (seen.has(n)) return false;
+      seen.add(n);
+      return true;
+    });
+}
+
+function getFallbackForwardNumbers() {
+  const explicit = parseForwardNumbers(process.env.WAVES_FALLBACK_FORWARD_NUMBERS);
+  if (explicit.length || String(process.env.WAVES_FALLBACK_FORWARD_NUMBERS || '').trim()) return explicit;
+
+  const envFallback = parseForwardNumbers([
+    process.env.OWNER_PHONE,
+    process.env.ADAM_PHONE,
+    process.env.VIRGINIA_PHONE,
+    process.env.OFFICE_MANAGER_PHONE,
+    process.env.WAVES_OFFICE_MANAGER_PHONE,
+  ].filter(Boolean).join(','));
+
+  if (envFallback.length && !warnedForwardNumberFallback) {
+    logger.warn('[voice] WAVES_FALLBACK_FORWARD_NUMBERS is not configured; using staff phone env fallback for inbound forwarding');
+    warnedForwardNumberFallback = true;
+  }
+
+  return envFallback;
+}
+
+const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
+
+function appendVoicemailRecording(twiml) {
+  const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
+  twiml.play(voicemailAudio);
+  twiml.say({ voice: 'alice' }, 'Your message will be recorded and transcribed.');
+  twiml.record({
+    maxLength: 120,
+    action: VOICEMAIL_COMPLETE_ACTION,
+    method: 'POST',
+    transcribe: true,
+    transcribeCallback: '/api/webhooks/twilio/transcription',
+    playBeep: true,
+    recordingStatusCallback: '/api/webhooks/twilio/recording-status',
+    recordingStatusCallbackEvent: 'completed',
+  });
+}
+
+function queueVoiceMessageSync(callSid) {
+  if (!callSid) return;
+  void syncVoiceMessageForCall(callSid);
 }
 
 // =========================================================================
@@ -112,7 +171,7 @@ router.post('/voice', async (req, res) => {
 
     // Dual-write to unified messages table. Recording + transcription
     // arrive in later webhooks and update this row via twilio_sid.
-    require('../services/conversations').recordTouchpoint({
+    void recordTouchpoint({
       customerId: customer?.id,
       channel: 'voice',
       ourEndpointId: To,
@@ -125,7 +184,9 @@ router.post('/voice', async (req, res) => {
         numberType: numberConfig?.type || 'unknown',
         domain: numberConfig?.domain || null,
       },
-    }).catch(() => {});
+    }).catch((err) => {
+      logger.error(`recordTouchpoint failed for inbound CallSid=${CallSid}: ${err.message}`);
+    });
 
     logger.info(`Inbound call: ${From} → ${To} (${CallSid}) customer=${customer?.first_name || 'unknown'}`);
 
@@ -152,27 +213,41 @@ router.post('/voice', async (req, res) => {
     const greetingUrl = process.env.WAVES_GREETING_URL
       || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
 
-    // Mirror the Studio Flow's `forward_call` widget: simul-ring Adam +
-    // Virginia. Comma-separated env override lets ops add/remove
-    // numbers without a code change.
-    const fallbackForwardCsv = process.env.WAVES_FALLBACK_FORWARD_NUMBERS
-      || '+19415993489,+17206334021';
-    const numberXml = fallbackForwardCsv
-      .split(',')
-      .map(n => n.trim())
-      .filter(Boolean)
-      .map(n => `<Number>${n}</Number>`)
-      .join('');
+    // Mirror the Studio Flow's `forward_call` widget, but add callee
+    // screening. Without "press 1 to accept", carrier voicemail can answer
+    // Adam/Virginia's cell and steal the caller before Twilio reaches the
+    // Waves-owned voicemail recorder.
+    const twiml = new VoiceResponse();
+    twiml.play(greetingUrl);
+    const forwardNumbers = getFallbackForwardNumbers();
+    if (forwardNumbers.length === 0) {
+      logger.error('[voice] No inbound staff forward numbers configured; sending caller to Waves voicemail');
+      await db('call_log').where('twilio_call_sid', CallSid).update({
+        answered_by: 'voicemail',
+        call_outcome: 'voicemail',
+        updated_at: new Date(),
+      });
+      appendVoicemailRecording(twiml);
+      return res.type('text/xml').send(twiml.toString());
+    }
 
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>${greetingUrl}</Play>
-  <Dial record="record-from-answer-dual" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" timeout="30" action="/api/webhooks/twilio/call-complete">
-    ${numberXml}
-  </Dial>
-</Response>`;
+    const dial = twiml.dial({
+      record: 'record-from-answer-dual',
+      recordingStatusCallback: '/api/webhooks/twilio/recording-status',
+      recordingStatusCallbackEvent: 'completed',
+      timeout: 30,
+      action: '/api/webhooks/twilio/call-complete',
+      answerOnBridge: true,
+    });
 
-    res.type('text/xml').send(twiml);
+    for (const number of forwardNumbers) {
+      dial.number({
+        url: '/api/webhooks/twilio/inbound-forward-screen',
+        method: 'POST',
+      }, number);
+    }
+
+    res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Voice webhook error: ${err.message}`);
     notifyTwilioFailure({
@@ -199,18 +274,24 @@ router.post('/call-complete', async (req, res) => {
 
     const duration = parseInt(DialCallDuration || CallDuration || 0);
     const status = DialCallStatus || 'completed';
+    const shouldRecordVoicemail = ['no-answer', 'busy', 'failed'].includes(status);
 
     // Determine if answered
     let answeredBy = 'unknown';
     if (status === 'completed' && duration > 0) answeredBy = 'human';
     else if (status === 'no-answer' || status === 'busy') answeredBy = 'missed';
+    if (shouldRecordVoicemail) answeredBy = 'voicemail';
 
-    await db('call_log').where('twilio_call_sid', CallSid).update({
+    const callUpdate = {
       status,
       duration_seconds: duration,
       answered_by: answeredBy,
       updated_at: new Date(),
-    });
+    };
+    if (shouldRecordVoicemail) callUpdate.call_outcome = 'voicemail';
+
+    await db('call_log').where('twilio_call_sid', CallSid).update(callUpdate);
+    queueVoiceMessageSync(CallSid);
 
     if (isFailureStatus(status)) {
       notifyTwilioFailure({
@@ -237,16 +318,10 @@ router.post('/call-complete', async (req, res) => {
     // and to cover the edge case where WAVES_VOICEMAIL_URL doesn't
     // include disclosure language (asset content is opaque to repo —
     // tracked as a separate audit item).
-    if (['no-answer', 'busy', 'failed'].includes(status)) {
-      const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
-      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>${voicemailAudio}</Play>
-  <Say voice="alice">Your message will be recorded and transcribed.</Say>
-  <Record maxLength="120" transcribe="true" transcribeCallback="/api/webhooks/twilio/transcription" playBeep="true" recordingStatusCallback="/api/webhooks/twilio/recording-status" recordingStatusCallbackEvent="completed" />
-  <Say voice="alice">Thank you. We'll get back to you soon. Goodbye.</Say>
-</Response>`;
-      return res.type('text/xml').send(twiml);
+    if (shouldRecordVoicemail) {
+      const twiml = new VoiceResponse();
+      appendVoicemailRecording(twiml);
+      return res.type('text/xml').send(twiml.toString());
     }
 
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
@@ -264,6 +339,67 @@ router.post('/call-complete', async (req, res) => {
       link: '/admin/communications',
     });
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+  }
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/voicemail-complete — Terminal <Record> action
+// =========================================================================
+router.post('/voicemail-complete', (req, res) => {
+  res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/inbound-forward-screen — press-1 screen for staff
+//
+// Runs on the forwarded staff leg before Twilio bridges the customer. This
+// keeps Adam/Virginia's carrier voicemail from answering the customer call.
+// A human must press 1; voicemail systems time out and hang up, allowing the
+// parent <Dial> to continue or fall through to the Waves-owned voicemail path.
+// =========================================================================
+router.post('/inbound-forward-screen', async (req, res) => {
+  try {
+    const twiml = new VoiceResponse();
+    const gather = twiml.gather({
+      numDigits: 1,
+      action: '/api/webhooks/twilio/inbound-forward-accept',
+      method: 'POST',
+      timeout: 7,
+    });
+
+    gather.say(
+      { voice: 'Polly.Joanna' },
+      'Waves inbound call. Press 1 to accept.'
+    );
+    twiml.say({ voice: 'Polly.Joanna' }, 'No input received. Goodbye.');
+    twiml.hangup();
+
+    res.type('text/xml').send(twiml.toString());
+  } catch (err) {
+    logger.error(`Inbound forward screen error: ${err.message}`);
+    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+  }
+});
+
+// =========================================================================
+// POST /api/webhooks/twilio/inbound-forward-accept — accept/reject staff leg
+// =========================================================================
+router.post('/inbound-forward-accept', async (req, res) => {
+  try {
+    const digits = String(req.body?.Digits || '').trim();
+    const twiml = new VoiceResponse();
+
+    if (digits === '1') {
+      twiml.say({ voice: 'Polly.Joanna' }, 'Connecting.');
+    } else {
+      twiml.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
+      twiml.hangup();
+    }
+
+    res.type('text/xml').send(twiml.toString());
+  } catch (err) {
+    logger.error(`Inbound forward accept error: ${err.message}`);
+    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
   }
 });
 
@@ -376,10 +512,10 @@ router.post('/recording-status', async (req, res) => {
         // No parent row found by either SID. The previous fallback inserted
         // a synthetic row using req.body.To/From, but on the dial-leg
         // callback those are the *forwarding* leg — the Twilio number ↔ the
-        // forwarded-to destination (e.g. Adam's cell). Inserting that row
+        // forwarded-to destination (for example, a staff cell). Inserting that row
         // attributed every forwarded call to the destination number, which
         // polluted the dashboard's calls-by-source JOIN with phantom
-        // "Unmapped — +19415993489" rows. Match the status_callback
+        // staff-cell rows. Match the status_callback
         // handler's defensive pattern: log and skip rather than synthesize
         // a wrongly-attributed row.
         logger.warn(
@@ -402,6 +538,7 @@ router.post('/recording-status', async (req, res) => {
       // backstop if this in-memory timer is lost — it applies the same
       // age gate, so it will not fire ahead of the window.
       if (matchedSid) {
+        queueVoiceMessageSync(matchedSid);
         try {
           const processor = require('../services/call-recording-processor');
           setTimeout(async () => {
@@ -441,14 +578,18 @@ router.post('/transcription', async (req, res) => {
       };
 
       let updated = 0;
+      let matchedSid = null;
       if (ParentCallSid) {
         updated = await db('call_log').where('twilio_call_sid', ParentCallSid).update(update);
+        if (updated > 0) matchedSid = ParentCallSid;
       }
       if (updated === 0) {
         updated = await db('call_log').where('twilio_call_sid', CallSid).update(update);
+        if (updated > 0) matchedSid = CallSid;
       }
 
       if (updated > 0) {
+        queueVoiceMessageSync(matchedSid);
         logger.info(`Transcription received: ${CallSid} (${TranscriptionText.length} chars)`);
       } else {
         logger.warn(
@@ -655,7 +796,7 @@ router.post('/call-status', async (req, res) => {
       // Touchpoint is best-effort enrichment — fire-and-forget so a slow
       // unified-messages write can't block Twilio's webhook timeout. Failures
       // are logged with CallSid for recovery, not silently swallowed.
-      void require('../services/conversations').recordTouchpoint({
+      void recordTouchpoint({
         customerId: customer?.id,
         channel: 'voice',
         ourEndpointId: To,

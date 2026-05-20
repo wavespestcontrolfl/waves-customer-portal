@@ -30,6 +30,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const { syncVoiceMessageForCall } = require('./conversations');
 
 const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam B.';
 const OPENAI_TRANSCRIPTIONS_API = 'https://api.openai.com/v1/audio/transcriptions';
@@ -66,6 +67,31 @@ function maskSid(sid) {
   const value = String(sid);
   if (value.length <= 8) return `${value.slice(0, 2)}...`;
   return `${value.slice(0, 2)}...${value.slice(-6)}`;
+}
+
+async function updateUnifiedVoiceMessage(call, patch = {}) {
+  if (!call?.twilio_call_sid) return null;
+  const media = call.recording_url
+    ? [{
+        type: 'recording',
+        url: call.recording_url,
+        sid: call.recording_sid || null,
+        duration_seconds: call.recording_duration_seconds || call.duration_seconds || null,
+      }]
+    : null;
+
+  const update = {
+    updated_at: new Date(),
+    ...patch,
+  };
+  if (media) update.media = JSON.stringify(media);
+
+  try {
+    return await syncVoiceMessageForCall(call.twilio_call_sid, update);
+  } catch (err) {
+    logger.warn(`[call-proc] Unified voice message update failed for ${maskSid(call.twilio_call_sid)}: ${err.message}`);
+    return null;
+  }
 }
 
 function isOutboundCall(call = {}) {
@@ -1211,6 +1237,10 @@ const CallRecordingProcessor = {
           transcription_status: 'completed',
           updated_at: new Date(),
         });
+        await updateUnifiedVoiceMessage(
+          { ...call, transcription },
+          { body: transcription }
+        );
         logger.info(`[call-proc] ${result.provider} transcription complete: ${transcription.length} chars`);
       }
     }
@@ -1225,6 +1255,12 @@ const CallRecordingProcessor = {
         transcription = call.transcription;
         logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
+    }
+    if (transcription) {
+      await updateUnifiedVoiceMessage(
+        { ...call, transcription },
+        { body: transcription }
+      );
     }
 
     if (!transcription) {
@@ -1255,13 +1291,29 @@ const CallRecordingProcessor = {
 
     // Skip voicemail/spam
     if (extracted.is_voicemail || extracted.is_spam) {
-      await db('call_log').where({ id: call.id }).update({
+      const terminalUpdate = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
         processing_token: null,
         processing_started_at: null,
         updated_at: new Date(),
-      });
+      };
+      if (extracted.is_voicemail) {
+        terminalUpdate.answered_by = 'voicemail';
+        terminalUpdate.call_outcome = 'voicemail';
+      }
+      await db('call_log').where({ id: call.id }).update(terminalUpdate);
+      await updateUnifiedVoiceMessage(
+        {
+          ...call,
+          transcription,
+          answered_by: extracted.is_voicemail ? 'voicemail' : call.answered_by,
+        },
+        {
+          body: transcription,
+          answered_by: extracted.is_voicemail ? 'voicemail' : call.answered_by || null,
+        }
+      );
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }
@@ -1852,6 +1904,7 @@ const CallRecordingProcessor = {
         synopsis = await generateLeadSynopsis(transcription);
         if (synopsis) {
           await db('call_log').where({ id: call.id }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));
+          await updateUnifiedVoiceMessage(call, { ai_summary: synopsis });
           // Also write to lead if one was created
           if (leadId) {
             await db('leads').where({ id: leadId }).update({ lead_synopsis: synopsis }).catch(e => logger.warn(`[call-proc] Non-critical op failed: ${e.message}`));

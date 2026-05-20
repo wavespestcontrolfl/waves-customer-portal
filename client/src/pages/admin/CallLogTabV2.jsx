@@ -22,6 +22,7 @@
 // - Disposition gap: missed calls that lack an operator-set
 //   disposition should surface in a clear "needs review" state.
 import { useState, useEffect, useRef } from "react";
+import { PhoneCall } from "lucide-react";
 import {
   Badge,
   Button,
@@ -101,6 +102,22 @@ function getCallDisplayName(call) {
     : call.from_phone || call.to_phone || "Unknown";
 }
 
+function getCallBackTarget(call) {
+  if (!call) return "";
+  return call.direction === "outbound"
+    ? call.to_phone || call.from_phone || ""
+    : call.from_phone || call.to_phone || "";
+}
+
+function getCallBackFromNumber(call, fallbackFrom) {
+  const preferred =
+    call?.direction === "outbound" ? call.from_phone : call?.to_phone;
+  const knownNumbers = ALL_NUMBERS.flatMap((group) =>
+    group.numbers.map((n) => n.number),
+  );
+  return knownNumbers.includes(preferred) ? preferred : fallbackFrom;
+}
+
 function StatButton({ label, value, filter, active, onClick, alert }) {
   return (
     <button
@@ -137,6 +154,8 @@ export default function CallLogTabV2() {
   const [callFrom, setCallFrom] = useState("+19412975749");
   const [calling, setCalling] = useState(false);
   const [callResult, setCallResult] = useState(null);
+  const [callbackCallingId, setCallbackCallingId] = useState(null);
+  const [callbackResult, setCallbackResult] = useState(null);
   const [callFilter, setCallFilter] = useState("all");
   const [callLogSearch, setCallLogSearch] = useState("");
   const [processingCallSid, setProcessingCallSid] = useState(null);
@@ -247,6 +266,49 @@ export default function CallLogTabV2() {
       setCallResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
       setCalling(false);
+    }
+  };
+
+  const handleCallBack = async (call) => {
+    const to = getCallBackTarget(call);
+    if (!to || callbackCallingId) return;
+
+    const displayName = getCallDisplayName(call);
+    if (
+      !window.confirm(
+        `Call ${displayName} at ${to}?\n\nWaves will call your phone first — press 1 to connect.`,
+      )
+    ) {
+      return;
+    }
+
+    setCallbackCallingId(call.id);
+    setCallbackResult(null);
+    try {
+      await adminFetch("/admin/communications/call", {
+        method: "POST",
+        body: JSON.stringify({
+          to,
+          fromNumber: getCallBackFromNumber(call, callFrom),
+          customerId: call.customer_id || undefined,
+          source: "call-log-callback",
+          relatedCallId: call.id,
+        }),
+      });
+      setCallbackResult({
+        ok: true,
+        callId: call.id,
+        text: "Callback initiated. Your phone will ring shortly.",
+      });
+      setTimeout(() => loadCalls(callLogSearch.trim()), 3000);
+    } catch (e) {
+      setCallbackResult({
+        ok: false,
+        callId: call.id,
+        text: `Callback failed: ${e.message}`,
+      });
+    } finally {
+      setCallbackCallingId(null);
     }
   };
 
@@ -639,8 +701,29 @@ export default function CallLogTabV2() {
                         in the background; a discreet Reprocess link is kept
                         so admins can re-run extraction on already-processed
                         rows. */}
-                    {((isUnknown && c.from_phone) || c.twilio_call_sid) && (
+                    {((isUnknown && c.from_phone) ||
+                      c.twilio_call_sid ||
+                      getCallBackTarget(c)) && (
                       <div className="mt-2 ml-8 flex gap-2 flex-wrap items-center">
+                        {getCallBackTarget(c) && (
+                          <Button
+                            variant={isMissed ? "primary" : "secondary"}
+                            size="sm"
+                            onClick={() => handleCallBack(c)}
+                            disabled={!!callbackCallingId}
+                            title="Call via Waves — rings your phone first, press 1 to connect"
+                          >
+                            <PhoneCall
+                              size={13}
+                              strokeWidth={1.75}
+                              className="mr-1.5"
+                              aria-hidden
+                            />
+                            {callbackCallingId === c.id
+                              ? "Calling…"
+                              : "Call back"}
+                          </Button>
+                        )}
                         {isUnknown && c.from_phone && (
                           <Button
                             variant="secondary"
@@ -725,6 +808,19 @@ export default function CallLogTabV2() {
                               )}
                             >
                               {processResult.text}
+                            </span>
+                          )}
+                        {callbackResult &&
+                          callbackResult.callId === c.id && (
+                            <span
+                              className={cn(
+                                "text-12",
+                                callbackResult.ok
+                                  ? "text-ink-secondary"
+                                  : "text-alert-fg",
+                              )}
+                            >
+                              {callbackResult.text}
                             </span>
                           )}
                       </div>
