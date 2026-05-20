@@ -1510,6 +1510,9 @@ function renderPage(token, estimate, estData) {
   const annualPrepayWaivesMembership = showMembershipFee;
   const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
   const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal + prepayMembershipDue) * 100) / 100);
+  const firstVisitInvoiceTotal = showMembershipFee && firstServiceVisitTotal > 0
+    ? Math.round((membershipFee + firstServiceVisitTotal) * 100) / 100
+    : null;
   const prepayMembershipSummaryHtml = showMembershipFee
     ? (annualPrepayWaivesMembership
       ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
@@ -1533,9 +1536,9 @@ function renderPage(token, estimate, estData) {
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
-          ${showMembershipFee && firstServiceVisitTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>First visit invoice total</span><strong data-first-visit-grand-total data-setup-fee="${Number(membershipFee || 0)}">${fmtMoney(Math.round((membershipFee + firstServiceVisitTotal) * 100) / 100)}</strong></div>` : ''}
+          ${showMembershipFee && firstVisitInvoiceTotal != null ? `<div class="payment-summary-row payment-summary-total"><span>First visit invoice total</span><strong data-first-visit-grand-total data-setup-fee="${Number(membershipFee || 0)}">${fmtMoney(firstVisitInvoiceTotal)}</strong></div>` : ''}
         </div>
-        <p class="billing-small">${showMembershipFee && firstServiceVisitTotal > 0 ? `No payment is charged on this page. Your first invoice totals ${fmtMoney(Math.round((membershipFee + firstServiceVisitTotal) * 100) / 100)} (${fmtMoney(membershipFee)} setup + first visit) and is billed after that visit completes.` : (showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy))}</p>
+        <p class="billing-small">${showMembershipFee && firstVisitInvoiceTotal != null ? `No payment is charged on this page. Your first invoice totals <span data-first-visit-copy-total data-setup-fee="${Number(membershipFee || 0)}">${fmtMoney(firstVisitInvoiceTotal)}</span> (${fmtMoney(membershipFee)} setup + first visit) and is billed after that visit completes.` : (showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy))}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Choose pay-after-visit setup</button>
       </div>
       ${showAnnualPrepayOption ? `
@@ -1550,7 +1553,7 @@ function renderPage(token, estimate, estData) {
           ${prepayMembershipSummaryHtml}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">No payment is charged on this page. Your annual prepay invoice totals ${fmtMoney(prepayInvoiceTotal)} and is prepared after approval.</p>
+        <p class="billing-small">No payment is charged on this page. Your annual prepay invoice totals <span data-prepay-copy-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</span> and is prepared after approval.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Choose annual prepay setup</button>
       </div>` : ''}
@@ -1675,7 +1678,7 @@ function renderPage(token, estimate, estData) {
   // a safety chip for any chemical service, then 1 universal billing chip —
   // capped at 4 so the prompt row stays scannable.
   const askPrompts = (() => {
-    const prompts = [];
+    const servicePrompts = [];
     const hasLawn = recurring.some((s) => /lawn|turf/i.test(s?.name || s?.label || s?.service || ''));
     const hasMosquito = recurring.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''));
     const hasTermite = recurring.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''));
@@ -1683,17 +1686,22 @@ function renderPage(token, estimate, estData) {
     const hasRodent = recurring.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
     const hasPalm = recurring.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
     const hasPestAny = !!pestRecurring || hasPestOneTime;
-    if (hasPestAny) prompts.push('What products do you use?');
-    if (hasLawn) prompts.push('What gets applied each visit?');
-    if (hasMosquito) prompts.push('How long does it last?');
-    if (hasTermite) prompts.push('How does the bait work?');
-    if (hasTreeShrub) prompts.push('Which trees get treated?');
-    if (hasRodent) prompts.push('Where do bait stations go?');
-    if (hasPalm) prompts.push('Why injections vs. spray?');
-    if (hasPestAny || hasLawn || hasMosquito) prompts.push('Are pets and kids safe?');
-    prompts.push('When am I charged?');
-    prompts.push('What happens after approval?');
-    return prompts.slice(0, 4);
+    if (hasPestAny) servicePrompts.push('What products do you use?');
+    if (hasLawn) servicePrompts.push('What gets applied each visit?');
+    if (hasMosquito) servicePrompts.push('How long does it last?');
+    if (hasTermite) servicePrompts.push('How does the bait work?');
+    if (hasTreeShrub) servicePrompts.push('Which trees get treated?');
+    if (hasRodent) servicePrompts.push('Where do bait stations go?');
+    if (hasPalm) servicePrompts.push('Why injections vs. spray?');
+
+    const hasChemicalService = hasPestAny || hasLawn || hasMosquito || hasTermite || hasTreeShrub || hasRodent || hasPalm;
+    const prompts = servicePrompts.slice(0, 2);
+    if (hasChemicalService) prompts.push('Are pets and kids safe?');
+    for (const prompt of ['When am I charged?', 'What happens after approval?']) {
+      if (prompts.length >= 4) break;
+      prompts.push(prompt);
+    }
+    return prompts;
   })();
   const estimateAskEnabled = isEstimateAskAnswerable({
     status: est.status,
@@ -2187,7 +2195,9 @@ ${shellQuestionsBar()}
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
   // Subtle click pulse on any button — fires once per click, self-removes after animation
   document.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('button, .cta, .upsell, .review-card-link');
+    const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;
+    if (!target) return;
+    const btn = target.closest('button, .cta, .upsell, .review-card-link');
     if (!btn || btn.disabled) return;
     btn.classList.remove('is-click-pulse');
     void btn.offsetWidth;
@@ -2205,7 +2215,13 @@ ${shellQuestionsBar()}
     });
     document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
       const membershipDue = Number(el.dataset.prepayMembershipDue || 0);
-      el.textContent = fmt(Math.max(0, Math.round((annual + membershipDue) * 100) / 100));
+      const invoiceTotal = Math.max(0, Math.round((annual + membershipDue) * 100) / 100);
+      el.textContent = fmt(invoiceTotal);
+    });
+    document.querySelectorAll('[data-prepay-copy-total]').forEach((el) => {
+      const membershipDue = Number(el.dataset.prepayMembershipDue || 0);
+      const invoiceTotal = Math.max(0, Math.round((annual + membershipDue) * 100) / 100);
+      el.textContent = fmt(invoiceTotal);
     });
     let firstVisitTotal = 0;
     document.querySelectorAll('[data-service-card-price]').forEach((el) => {
@@ -2223,6 +2239,10 @@ ${shellQuestionsBar()}
       if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
     });
     document.querySelectorAll('[data-first-visit-grand-total]').forEach((el) => {
+      const setup = Number(el.dataset.setupFee || 0);
+      if (firstVisitTotal > 0) el.textContent = fmt(Math.round((firstVisitTotal + setup) * 100) / 100);
+    });
+    document.querySelectorAll('[data-first-visit-copy-total]').forEach((el) => {
       const setup = Number(el.dataset.setupFee || 0);
       if (firstVisitTotal > 0) el.textContent = fmt(Math.round((firstVisitTotal + setup) * 100) / 100);
     });
