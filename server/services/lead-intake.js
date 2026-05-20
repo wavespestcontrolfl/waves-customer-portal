@@ -27,6 +27,7 @@ const TwilioService = require('./twilio');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { classifyServiceIntent } = require('./sms-service-intent');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { publicPortalUrl } = require('../utils/portal-url');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -197,7 +198,7 @@ async function notifyAdam(customer, interest, estimate) {
   const serviceLabel = SERVICE_LABEL[interest] || interest;
   const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Lead';
   const address = customer.address_line1 || '(no address)';
-  const portalUrl = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+  const portalUrl = publicPortalUrl();
   const estimateUrl = estimate ? `${portalUrl}/admin/estimates` : portalUrl;
 
   const message = estimate?.automationBlockedDuplicate

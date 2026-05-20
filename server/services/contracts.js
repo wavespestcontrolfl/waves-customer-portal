@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { CONSENT_TEXT, CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 const BUSINESS_NAME = 'Waves Pest Control, LLC';
 const BUSINESS_EMAIL = 'billing@wavespestcontrol.com';
@@ -88,11 +89,7 @@ function contractExpiresAt(now = new Date()) {
 }
 
 function publicContractUrl(token) {
-  const base = process.env.PUBLIC_PORTAL_URL
-    || process.env.PORTAL_URL
-    || process.env.CLIENT_URL
-    || 'https://portal.wavespestcontrol.com';
-  return `${base.replace(/\/$/, '')}/contract/${encodeURIComponent(token)}`;
+  return `${publicPortalUrl()}/contract/${encodeURIComponent(token)}`;
 }
 
 function isoDate(value) {

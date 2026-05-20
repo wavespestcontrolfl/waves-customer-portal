@@ -5,6 +5,7 @@ const { etDateString, addETDays } = require("../../utils/datetime-et");
 const { shortenOrPassthrough } = require("../short-url");
 const { sendCustomerMessage } = require("../messaging/send-customer-message");
 const { renderSmsTemplate } = require("../sms-template-renderer");
+const { publicPortalUrl } = require("../../utils/portal-url");
 
 class BalanceReminder {
   async dailyCheck() {
@@ -107,8 +108,8 @@ class BalanceReminder {
       invoiceCount: outstanding.length,
       oldestInvoiceId: oldestInvoice?.id || null,
       oldestInvoiceUrl: oldestInvoice?.token
-        ? `${process.env.CLIENT_URL || "https://portal.wavespestcontrol.com"}/pay/${oldestInvoice.token}`
-        : `${process.env.CLIENT_URL || "https://portal.wavespestcontrol.com"}/pay/${customerId}`,
+        ? `${publicPortalUrl()}/pay/${oldestInvoice.token}`
+        : `${publicPortalUrl()}/pay/${customerId}`,
       oldestDueDate: oldest.payment_date,
       daysOverdue,
     };
@@ -224,7 +225,7 @@ class BalanceReminder {
         continue;
       }
       const link = await shortenOrPassthrough(
-        `${process.env.CLIENT_URL || "https://portal.wavespestcontrol.com"}/pay/${oldestInvoice.token}`,
+        `${publicPortalUrl()}/pay/${oldestInvoice.token}`,
         {
           kind: "invoice",
           entityType: "invoices",

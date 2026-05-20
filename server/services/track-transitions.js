@@ -27,14 +27,13 @@ const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 const EN_ROUTE_GEOCODE_TIMEOUT_MS = 1200;
 const CUSTOMER_EVENT = 'customer:job_update';
 
 function portalOrigin() {
-  return process.env.CLIENT_URL
-    || process.env.PUBLIC_PORTAL_URL
-    || 'https://portal.wavespestcontrol.com';
+  return publicPortalUrl();
 }
 
 async function loadService(serviceId) {

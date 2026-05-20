@@ -13,6 +13,7 @@ const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients } = require('../customer-contact');
+const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 
 const SERVICE_REPORT_FROM_EMAIL = 'contact@wavespestcontrol.com';
@@ -28,8 +29,7 @@ function escapeHtml(value) {
 }
 
 function portalBaseUrl() {
-  return (process.env.PORTAL_URL || process.env.PUBLIC_PORTAL_URL || 'https://portal.wavespestcontrol.com')
-    .replace(/\/+$/, '');
+  return publicPortalUrl();
 }
 
 function minutes(value) {

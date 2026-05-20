@@ -13,6 +13,7 @@ const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
@@ -2184,7 +2185,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (!recapReviewOnly) {
           payUrl = existingCompletionInvoice.token
             ? await shortenOrPassthrough(
-                `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/pay/${existingCompletionInvoice.token}`,
+                `${publicPortalUrl()}/pay/${existingCompletionInvoice.token}`,
                 {
                   kind: 'invoice',
                   entityType: 'invoices',
@@ -2219,9 +2220,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const shouldInvoice = !recapReviewOnly && !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice
       && (!!svc.create_invoice_on_complete || !!svc.cust_waveguard_tier) && invoiceAmount > 0;
     // Customer-facing SMS URL must be the canonical portal domain, not
-    // the raw Railway URL (CLIENT_URL is set to the Railway hostname on
-    // prod for app-internal redirects). PORTAL_URL can override for dev.
-    const portalUrl = process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com';
+    // the raw Railway URL (CLIENT_URL was set to the Railway hostname on
+    // prod for app-internal redirects). publicPortalUrl() reads
+    // PUBLIC_PORTAL_URL first which is the canonical public origin.
+    const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
     let reportToken = null;
     try {

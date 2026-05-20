@@ -17,6 +17,7 @@ const {
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
+const { publicPortalUrl } = require('../utils/portal-url');
 const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(s => s !== 'processing');
 
 // Build a "First Last" string from a customer row, falling back to phone
@@ -1170,7 +1171,7 @@ async function handleAchFailure(paymentIntent, failureReason) {
       if (customer.phone) {
         let body;
         let messageType;
-        const billingUrl = `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing`;
+        const billingUrl = `${publicPortalUrl()}/billing`;
         if (recentFailures >= 3) {
           messageType = 'ach_suspended';
         } else if (recentFailures >= 2) {
@@ -1357,7 +1358,7 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
       if (customer?.phone) {
         const body = await renderRequiredSmsTemplate('bank_verification_incomplete', {
           first_name: customer.first_name || 'there',
-          billing_url: `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing`,
+          billing_url: `${publicPortalUrl()}/billing`,
         });
         const smsResult = await sendBillingSms(
           customer,
@@ -1514,7 +1515,7 @@ async function handleSetupIntentFailed(setupIntent) {
       if (customer?.phone) {
         const body = await renderRequiredSmsTemplate('bank_verification_failed', {
           first_name: customer.first_name || 'there',
-          billing_url: `${process.env.PORTAL_URL || 'https://portal.wavespestcontrol.com'}/billing`,
+          billing_url: `${publicPortalUrl()}/billing`,
         });
         const smsResult = await sendBillingSms(
           customer,

@@ -5,6 +5,7 @@ const logger = require("./logger");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const { shortenOrPassthrough } = require("./short-url");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
+const { publicPortalUrl } = require("../utils/portal-url");
 
 // Owner-SMS kill switch.
 //
@@ -426,11 +427,7 @@ const TwilioService = {
     const contacts = getAppointmentContacts(customer, prefs);
     if (!contacts.length) return;
 
-    const origin =
-      process.env.PUBLIC_PORTAL_URL ||
-      process.env.PORTAL_URL ||
-      process.env.CLIENT_URL ||
-      "https://portal.wavespestcontrol.com";
+    const origin = publicPortalUrl();
     const longTrackUrl = trackToken ? `${origin}/track/${trackToken}` : null;
     const trackUrl = longTrackUrl
       ? await shortenOrPassthrough(longTrackUrl, {
