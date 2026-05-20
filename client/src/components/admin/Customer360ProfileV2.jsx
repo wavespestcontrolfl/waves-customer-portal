@@ -1672,6 +1672,12 @@ export default function Customer360ProfileV2({
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [editErr, setEditErr] = useState("");
+  const [recipientPrefsDraft, setRecipientPrefsDraft] = useState({
+    billingContactName: "",
+    billingEmail: "",
+  });
+  const [recipientPrefsSaving, setRecipientPrefsSaving] = useState(false);
+  const [recipientPrefsErr, setRecipientPrefsErr] = useState("");
   const [deletingCustomer, setDeletingCustomer] = useState(false);
   const panelRef = useRef(null);
   const menuRef = useRef(null);
@@ -1760,6 +1766,19 @@ export default function Customer360ProfileV2({
     };
   }, [menuOpen]);
 
+  useEffect(() => {
+    const prefs = data?.notificationPrefs || {};
+    setRecipientPrefsDraft({
+      billingContactName: prefs.billing_contact_name || "",
+      billingEmail: prefs.billing_email || "",
+    });
+    setRecipientPrefsErr("");
+  }, [
+    data?.customer?.id,
+    data?.notificationPrefs?.billing_contact_name,
+    data?.notificationPrefs?.billing_email,
+  ]);
+
   if (loading)
     return (
       <div
@@ -1799,6 +1818,7 @@ export default function Customer360ProfileV2({
     );
 
   const c = data.customer;
+  const notificationPrefs = data.notificationPrefs || {};
   const prefs = data.preferences || {};
   const hs = data.healthScore || {};
   const score = hs.overall_score ?? hs.health_score ?? hs.score ?? null;
@@ -1819,6 +1839,75 @@ export default function Customer360ProfileV2({
   const accountProperties = data.accountProperties || [];
   const annualPrepayTerms = data.annualPrepayTerms || [];
   const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || annualPrepayTerms[0] || null;
+
+  const updateNotificationPrefs = async (patch) => {
+    const previous = data.notificationPrefs || {};
+    const patchKeys = Object.keys(patch);
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            notificationPrefs: {
+              ...(prev.notificationPrefs || {}),
+              ...patch,
+            },
+          }
+        : prev,
+    );
+    try {
+      const response = await adminFetch(
+        `/admin/customers/${customerId}/notification-prefs`,
+        {
+          method: "PUT",
+          body: JSON.stringify(patch),
+        },
+      );
+      if (response?.notificationPrefs) {
+        setData((prev) =>
+          prev ? { ...prev, notificationPrefs: response.notificationPrefs } : prev,
+        );
+      }
+    } catch {
+      setData((prev) => {
+        if (!prev) return prev;
+        const notificationPrefs = { ...(prev.notificationPrefs || {}) };
+        patchKeys.forEach((key) => {
+          if (Object.prototype.hasOwnProperty.call(previous, key)) {
+            notificationPrefs[key] = previous[key];
+          } else {
+            delete notificationPrefs[key];
+          }
+        });
+        return { ...prev, notificationPrefs };
+      });
+    }
+  };
+
+  const saveRecipientPrefs = async () => {
+    setRecipientPrefsSaving(true);
+    setRecipientPrefsErr("");
+    try {
+      const response = await adminFetch(
+        `/admin/customers/${customerId}/notification-prefs`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            billingContactName: recipientPrefsDraft.billingContactName,
+            billingEmail: recipientPrefsDraft.billingEmail,
+          }),
+        },
+      );
+      if (response?.notificationPrefs) {
+        setData((prev) =>
+          prev ? { ...prev, notificationPrefs: response.notificationPrefs } : prev,
+        );
+      }
+    } catch (err) {
+      setRecipientPrefsErr(err.message || "Recipient preferences failed to save");
+    } finally {
+      setRecipientPrefsSaving(false);
+    }
+  };
 
   const balanceOwed = invoices
     .filter((i) => i.status !== "paid")
@@ -3083,6 +3172,8 @@ export default function Customer360ProfileV2({
                   <div className="flex gap-2">
                     {" "}
                     <input
+                      id="c360-sms-reply"
+                      name="smsReply"
                       value={smsReply}
                       onChange={(e) => {
                         setSmsReply(e.target.value);
@@ -3109,59 +3200,178 @@ export default function Customer360ProfileV2({
                   )}
                 </div>
               )}
-              {/* Notification preferences — admin override only.
-                  Customers manage everything else via the customer-
-                  facing /api/notifications/preferences endpoint
-                  themselves. Today this exposes only the per-customer
-                  auto-flip opt-out (Phase 2E). Add more rows here only
-                  when ops genuinely needs to override on a customer's
-                  behalf. */}
+              {/* Notification preferences — admin override for routing fields
+                  ops needs to manage landlord / tenant / AP-contact accounts. */}
               <div className="mt-4">
                 {" "}
-                <SectionTitle>Notification preferences</SectionTitle>{" "}
+                <SectionTitle>Contacts &amp; Recipients</SectionTitle>{" "}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      Account owner / payer
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {[c.firstName, c.lastName].filter(Boolean).join(" ") ||
+                        c.companyName ||
+                        "Customer"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {c.email || "No email"}
+                    </div>
+                  </div>
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      On-location contact
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {c.serviceContactName || "Primary customer"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {c.serviceContactEmail ||
+                        c.serviceContactPhone ||
+                        c.email ||
+                        "No contact"}
+                    </div>
+                  </div>
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      Invoice email
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {recipientPrefsDraft.billingContactName || "Billing recipient"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {recipientPrefsDraft.billingEmail || c.email || "No email"}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+                  <label className="block">
+                    <span className="u-label text-ink-tertiary block mb-1">
+                      Billing contact name
+                    </span>
+                    <input
+                      id="c360-billing-contact-name"
+                      name="billingContactName"
+                      value={recipientPrefsDraft.billingContactName}
+                      onChange={(e) =>
+                        setRecipientPrefsDraft((prev) => ({
+                          ...prev,
+                          billingContactName: e.target.value,
+                        }))
+                      }
+                      placeholder="Landlord, AP contact, property manager"
+                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="u-label text-ink-tertiary block mb-1">
+                      Billing recipient email
+                    </span>
+                    <input
+                      id="c360-billing-recipient-email"
+                      name="billingEmail"
+                      value={recipientPrefsDraft.billingEmail}
+                      onChange={(e) =>
+                        setRecipientPrefsDraft((prev) => ({
+                          ...prev,
+                          billingEmail: e.target.value,
+                        }))
+                      }
+                      type="email"
+                      placeholder={c.email || "billing@example.com"}
+                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+                    />
+                  </label>
+                </div>
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <div className="text-12 text-ink-secondary">
+                    Invoices and receipts use the billing email when set.
+                    Appointment reminders and service reports use the
+                    on-location contact when present.
+                  </div>
+                  <Button
+                    onClick={saveRecipientPrefs}
+                    disabled={recipientPrefsSaving}
+                    className="shrink-0"
+                  >
+                    {recipientPrefsSaving ? "Saving..." : "Save Recipients"}
+                  </Button>
+                </div>
+                {recipientPrefsErr && (
+                  <div className="mb-3 text-12 text-alert-fg">
+                    {recipientPrefsErr}
+                  </div>
+                )}
                 <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
                   {" "}
                   <input
+                    id="c360-appointment-notify-primary"
+                    name="appointmentNotifyPrimary"
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={notificationPrefs.appointment_notify_primary === true}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        appointmentNotifyPrimary: e.target.checked,
+                        appointment_notify_primary: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also send appointment SMS to the account owner
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      When an on-location contact has a different phone, they
+                      receive appointment reminders by default. Turn this on to
+                      copy the payer too.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-service-report-notify-primary"
+                    name="serviceReportNotifyPrimary"
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={notificationPrefs.service_report_notify_primary === true}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        serviceReportNotifyPrimary: e.target.checked,
+                        service_report_notify_primary: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also email service reports to the account owner
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      If off, a distinct service-contact email receives the
+                      report and the payer stays on billing-only messages.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-auto-flip-en-route"
+                    name="autoFlipEnRoute"
                     type="checkbox"
                     className="mt-0.5"
                     checked={
-                      data.notificationPrefs?.auto_flip_en_route !== false
+                      notificationPrefs.auto_flip_en_route !== false
                     }
-                    onChange={async (e) => {
+                    onChange={(e) => {
                       const next = e.target.checked;
-                      setData((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              notificationPrefs: {
-                                ...(prev.notificationPrefs || {}),
-                                auto_flip_en_route: next,
-                              },
-                            }
-                          : prev,
-                      );
-                      try {
-                        await adminFetch(
-                          `/admin/customers/${customerId}/notification-prefs`,
-                          {
-                            method: "PUT",
-                            body: JSON.stringify({ autoFlipEnRoute: next }),
-                          },
-                        );
-                      } catch {
-                        // Revert on error so the toggle reflects DB truth.
-                        setData((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                notificationPrefs: {
-                                  ...(prev.notificationPrefs || {}),
-                                  auto_flip_en_route: !next,
-                                },
-                              }
-                            : prev,
-                        );
-                      }
+                      updateNotificationPrefs({
+                        autoFlipEnRoute: next,
+                        auto_flip_en_route: next,
+                      });
                     }}
                   />{" "}
                   <div>

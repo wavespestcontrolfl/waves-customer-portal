@@ -1273,6 +1273,8 @@ export default function CustomersPageV2() {
         <div className="hidden sm:flex items-center justify-between gap-3 mb-4">
           {" "}
           <input
+            id="customers-search-desktop"
+            name="customerSearch"
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -1302,6 +1304,8 @@ export default function CustomersPageV2() {
           <>
             {" "}
             <input
+              id="customers-search-mobile"
+              name="customerSearchMobile"
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}

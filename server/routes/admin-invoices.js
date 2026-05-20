@@ -10,8 +10,11 @@ const MODELS = require('../config/models');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
+const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+const BILLING_RECIPIENT_EMAIL_MAX_LENGTH = 200;
 
 function aggregateAttachmentMemoryStorage() {
   return {
@@ -144,6 +147,118 @@ function parseScheduledReviewDelayMinutes(body = {}, scheduledSendAt = new Date(
     }
   }
   return parseReviewDelayMinutes(body);
+}
+
+function cleanOptionalText(value, max = 120) {
+  if (value == null) return null;
+  const trimmed = String(value).trim().replace(/\s+/g, ' ');
+  return trimmed ? trimmed.slice(0, max) : null;
+}
+
+function cleanEmail(value) {
+  if (value == null) return '';
+  return String(value).trim().toLowerCase();
+}
+
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
+}
+
+function invoiceRecipientOverrideError(email, saveBillingRecipient = false) {
+  if (saveBillingRecipient !== undefined && typeof saveBillingRecipient !== 'boolean') {
+    return 'saveBillingRecipient must be true or false.';
+  }
+  if (!email) return null;
+  if (!isEmailLike(email)) {
+    return 'Enter a valid invoice recipient email.';
+  }
+  if (cleanEmail(email).length > BILLING_RECIPIENT_EMAIL_MAX_LENGTH) {
+    return saveBillingRecipient
+      ? 'Billing recipient email must be 200 characters or fewer.'
+      : 'Invoice recipient email must be 200 characters or fewer.';
+  }
+  return null;
+}
+
+function fullName(customer = {}) {
+  return [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim()
+    || customer.company_name
+    || customer.first_name
+    || '';
+}
+
+function publicEmailRecipient(recipient) {
+  if (!recipient?.email) return null;
+  return {
+    email: recipient.email,
+    name: recipient.name || '',
+    role: recipient.role || 'recipient',
+  };
+}
+
+async function getInvoiceDeliveryRecipients(invoiceId) {
+  const invoice = await db('invoices')
+    .where({ id: invoiceId })
+    .select('id', 'customer_id', 'invoice_number')
+    .first();
+  if (!invoice) return null;
+
+  const customer = await db('customers')
+    .where({ id: invoice.customer_id })
+    .select('id', 'first_name', 'last_name', 'company_name', 'email', 'phone')
+    .first();
+  if (!customer) return null;
+
+  const prefs = await db('notification_prefs')
+    .where({ customer_id: invoice.customer_id })
+    .first()
+    .catch(() => null);
+  const primary = getPrimaryContact(customer);
+  const [emailRecipient] = getInvoiceEmailRecipients(customer, prefs || {});
+
+  return {
+    invoiceId: invoice.id,
+    invoiceNumber: invoice.invoice_number,
+    customerId: customer.id,
+    customerName: fullName(customer),
+    primaryContact: {
+      name: fullName(customer) || primary.name || '',
+      email: customer.email || '',
+      phone: customer.phone || '',
+      role: 'primary',
+    },
+    smsRecipient: primary.phone ? {
+      name: fullName(customer) || primary.name || '',
+      phone: primary.phone,
+      role: 'primary',
+    } : null,
+    emailRecipient: publicEmailRecipient(emailRecipient),
+    billingPreference: {
+      name: prefs?.billing_contact_name || '',
+      email: prefs?.billing_email || '',
+    },
+  };
+}
+
+async function saveBillingRecipientPreference(customerId, { email, name }) {
+  const updates = {
+    billing_email: email,
+    billing_contact_name: name || null,
+    updated_at: new Date(),
+  };
+  const existing = await db('notification_prefs')
+    .where({ customer_id: customerId })
+    .first('id');
+  if (existing) {
+    await db('notification_prefs')
+      .where({ customer_id: customerId })
+      .update(updates);
+  } else {
+    await db('notification_prefs').insert({
+      customer_id: customerId,
+      ...updates,
+    });
+  }
 }
 
 // GET /stats
@@ -280,6 +395,15 @@ ${rawInput || '[none provided]'}`;
     logger.error(`[invoices] ai-notes failed: ${err.message}`);
     next(err);
   }
+});
+
+// GET /:id/recipients — preview invoice delivery recipients before sending
+router.get('/:id/recipients', requireAdmin, async (req, res, next) => {
+  try {
+    const recipients = await getInvoiceDeliveryRecipients(req.params.id);
+    if (!recipients) return res.status(404).json({ error: 'Invoice not found' });
+    res.json(recipients);
+  } catch (err) { next(err); }
 });
 
 // GET /:id — single invoice with full details
@@ -592,10 +716,46 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { requestReview } = req.body || {};
+    const {
+      requestReview,
+      invoiceRecipientEmail,
+      invoiceRecipientName,
+      saveBillingRecipient,
+    } = req.body || {};
     const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
+    const overrideEmail = cleanEmail(invoiceRecipientEmail);
+    const overrideName = cleanOptionalText(invoiceRecipientName);
+    const shouldSaveBillingRecipient = saveBillingRecipient === true;
+    let emailRecipientOverride = null;
 
-    const result = await InvoiceService.sendViaSMSAndEmail(id, { requestReview, reviewDelayMinutes });
+    if (overrideEmail) {
+      const recipientError = invoiceRecipientOverrideError(overrideEmail, saveBillingRecipient);
+      if (recipientError) {
+        return res.status(400).json({ error: recipientError });
+      }
+      emailRecipientOverride = {
+        email: overrideEmail,
+        name: overrideName || undefined,
+      };
+
+      if (shouldSaveBillingRecipient) {
+        const invoice = await db('invoices')
+          .where({ id })
+          .select('customer_id')
+          .first();
+        if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+        await saveBillingRecipientPreference(invoice.customer_id, {
+          email: overrideEmail,
+          name: overrideName,
+        });
+      }
+    }
+
+    const result = await InvoiceService.sendViaSMSAndEmail(id, {
+      requestReview,
+      reviewDelayMinutes,
+      emailRecipientOverride,
+    });
     if (!result.ok) {
       return res.status(400).json(result);
     }
@@ -1004,5 +1164,9 @@ router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
+
+router._private = {
+  invoiceRecipientOverrideError,
+};
 
 module.exports = router;

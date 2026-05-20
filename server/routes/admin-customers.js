@@ -498,6 +498,61 @@ function cleanEmail(value) {
   return cleaned || null;
 }
 
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value) || '');
+}
+
+function comparableEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
+  ['autoFlipEnRoute', 'auto_flip_en_route'],
+  ['paymentConfirmationSms', 'payment_confirmation_sms'],
+  ['appointmentNotifyPrimary', 'appointment_notify_primary'],
+  ['serviceReportNotifyPrimary', 'service_report_notify_primary'],
+];
+
+function adminNotificationPrefsDbUpdates(body = {}, existing = {}) {
+  const dbUpdates = {};
+
+  for (const [bodyField, dbField] of ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS) {
+    if (body[bodyField] === undefined) continue;
+    if (typeof body[bodyField] !== 'boolean') {
+      return { error: `${bodyField} must be true or false.` };
+    }
+    dbUpdates[dbField] = body[bodyField];
+  }
+
+  if (body.billingEmail !== undefined) {
+    const billingEmail = cleanEmail(body.billingEmail);
+    if (billingEmail && !isEmailLike(billingEmail)) {
+      return { error: 'Enter a valid billing recipient email.' };
+    }
+    if (billingEmail && billingEmail.length > 200) {
+      return { error: 'Billing recipient email must be 200 characters or fewer.' };
+    }
+    dbUpdates.billing_email = billingEmail || null;
+    const emailChanged = comparableEmail(billingEmail) !== comparableEmail(existing.billing_email);
+    if (!billingEmail || (emailChanged && body.billingContactName === undefined)) {
+      dbUpdates.billing_contact_name = null;
+    }
+  }
+  if (body.billingContactName !== undefined) {
+    const billingContactName = cleanOptionalText(body.billingContactName);
+    const effectiveBillingEmail = dbUpdates.billing_email !== undefined
+      ? dbUpdates.billing_email
+      : cleanEmail(existing.billing_email);
+    if (effectiveBillingEmail) {
+      dbUpdates.billing_contact_name = billingContactName
+        ? billingContactName.slice(0, 120)
+        : null;
+    }
+  }
+
+  return { dbUpdates };
+}
+
 function cleanState(value) {
   const cleaned = cleanText(value).toUpperCase();
   return cleaned ? cleaned.slice(0, 2) : 'FL';
@@ -1748,28 +1803,25 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
 // PUT /api/admin/customers/:id/notification-prefs
 //
-// Admin override for a customer's notification_prefs row. Today this
-// only exposes auto_flip_en_route (Phase 2E per-customer opt-out for
-// the geofence EXIT auto-flip pipeline) — customers manage everything
-// else through the customer-facing /api/notifications/preferences
-// endpoint themselves. Add new fields here only when ops genuinely
-// needs to override on a customer's behalf.
+// Admin override for a customer's notification_prefs row. Keep this narrow:
+// ops needs auto-flip control and recipient-routing fields for landlord /
+// tenant / AP-contact workflows.
 //
 // Creates the prefs row if it doesn't exist (defaults to all TRUE).
 router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
   try {
-    const dbUpdates = {};
-    if (req.body.autoFlipEnRoute !== undefined) {
-      dbUpdates.auto_flip_en_route = !!req.body.autoFlipEnRoute;
+    const existing = await db('notification_prefs')
+      .where({ customer_id: req.params.id })
+      .first();
+    const { dbUpdates, error } = adminNotificationPrefsDbUpdates(req.body, existing || {});
+    if (error) {
+      return res.status(400).json({ error });
     }
     if (Object.keys(dbUpdates).length === 0) {
       return res.status(400).json({ error: 'No supported fields provided.' });
     }
     dbUpdates.updated_at = new Date();
 
-    const existing = await db('notification_prefs')
-      .where({ customer_id: req.params.id })
-      .first();
     if (existing) {
       await db('notification_prefs')
         .where({ customer_id: req.params.id })
@@ -1784,13 +1836,10 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
     const prefs = await db('notification_prefs')
       .where({ customer_id: req.params.id })
       .first();
-    // Log only normalized fields persisted (not raw req.body) — the
-    // endpoint accepts arbitrary JSON and a future caller could put
-    // phone/email/address-like fields into plaintext logs (Railway,
-    // errors.log) and create avoidable PII exposure. Drop updated_at
-    // from the payload — timestamp noise that adds nothing forensically.
-    const { updated_at: _drop, ...logPayload } = dbUpdates;
-    logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify(logPayload)}`);
+    const loggedFields = Object.keys(dbUpdates)
+      .filter((field) => field !== 'updated_at')
+      .sort();
+    logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify({ fields: loggedFields })}`);
     res.json({ success: true, notificationPrefs: prefs });
   } catch (err) { next(err); }
 });
@@ -1942,6 +1991,7 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  adminNotificationPrefsDbUpdates,
   cadenceFromEstimateLine,
   customerSearchTerms,
   isSchedulableOneTimeEstimateLine,

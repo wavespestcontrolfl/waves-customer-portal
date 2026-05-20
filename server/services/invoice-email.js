@@ -17,6 +17,7 @@ const sendgrid = require('./sendgrid-mail');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { formatDateOnly } = require('../utils/date-only');
+const { getInvoiceEmailRecipients, getReceiptEmailRecipients } = require('./customer-contact');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -48,13 +49,57 @@ function pdfAttachment(filename, buffer) {
   };
 }
 
-async function sendInvoiceEmail(invoiceId) {
+function clean(value) {
+  if (value == null) return '';
+  return String(value).trim();
+}
+
+function cleanEmail(value) {
+  return clean(value).toLowerCase();
+}
+
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
+}
+
+function publicRecipient(recipient = {}) {
+  return {
+    email: recipient.email || '',
+    name: recipient.name || '',
+    role: recipient.role || 'recipient',
+  };
+}
+
+function invoiceRecipientFor(customer, prefs, recipientOverride) {
+  const overrideEmail = cleanEmail(recipientOverride?.email);
+  if (overrideEmail) {
+    if (!isEmailLike(overrideEmail)) {
+      return { error: 'Invalid invoice recipient email' };
+    }
+    return {
+      recipient: {
+        email: overrideEmail,
+        name: clean(recipientOverride?.name).slice(0, 120),
+        role: 'invoice_override',
+      },
+    };
+  }
+  const [recipient] = getInvoiceEmailRecipients(customer, prefs || {});
+  return { recipient };
+}
+
+async function sendInvoiceEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
-  if (!customer?.email) return { ok: false, error: 'No customer email' };
+  if (!customer) return { ok: false, error: 'Customer not found' };
+  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
+  const { recipient, error: recipientError } = invoiceRecipientFor(customer, prefs, options.recipientOverride);
+  if (recipientError) return { ok: false, error: recipientError };
+  if (!recipient?.email) return { ok: false, error: 'No invoice recipient email' };
+  const recipientPayload = publicRecipient(recipient);
 
   const domain = process.env.PORTAL_DOMAIN || 'https://portal.wavespestcontrol.com';
   const longPayUrl = `${domain}/pay/${invoice.token}`;
@@ -80,7 +125,7 @@ async function sendInvoiceEmail(invoiceId) {
     .catch(() => ({ count: 0 }));
   const extraAttachmentCount = Number(attachmentCountRow?.count || 0);
 
-  const first = customer.first_name || 'there';
+  const first = recipient.name || customer.first_name || 'there';
   const svcType = invoice.service_type || 'your recent service';
   const heading = 'Your invoice from Waves';
   const attachmentNote = extraAttachmentCount > 0
@@ -126,7 +171,7 @@ async function sendInvoiceEmail(invoiceId) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'invoice.sent',
-        to: customer.email,
+        to: recipient.email,
         payload: {
           first_name: first,
           invoice_url: payUrl,
@@ -145,24 +190,24 @@ async function sendInvoiceEmail(invoiceId) {
         categories: ['invoice_sent'],
         attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
       });
-      logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to customer ${invoice.customer_id || 'unknown'}`);
-      return { ok: true, messageId: result.message?.provider_message_id || null };
+      logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
+      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload };
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);
-        return { ok: false, error: err.message };
+        return { ok: false, error: err.message, recipient: recipientPayload };
       }
       logger.warn(`[invoice-email] Template unavailable for ${invoice.invoice_number}; falling back to SMTP: ${err.message}`);
     }
   }
 
   const transporter = getTransporter();
-  if (!transporter) return { ok: false, error: 'Email not configured' };
+  if (!transporter) return { ok: false, error: 'Email not configured', recipient: recipientPayload };
 
   try {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
-      to: customer.email,
+      to: recipient.email,
       subject: `Invoice ${invoice.invoice_number} — ${currency(invoice.total)}`,
       html,
       text,
@@ -172,11 +217,11 @@ async function sendInvoiceEmail(invoiceId) {
         contentType: 'application/pdf',
       }],
     });
-    logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to customer ${invoice.customer_id || 'unknown'}`);
-    return { ok: true };
+    logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
+    return { ok: true, recipient: recipientPayload };
   } catch (err) {
     logger.error(`[invoice-email] Send failed for ${invoice.invoice_number}: ${err.message}`);
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.message, recipient: recipientPayload };
   }
 }
 
@@ -189,7 +234,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
-  if (!customer?.email) return { ok: false, error: 'No customer email' };
+  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
+  const [recipient] = getReceiptEmailRecipients(customer, prefs || {});
+  if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
 
   const payment = await db('payments')
     .where({ customer_id: invoice.customer_id })
@@ -217,7 +264,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     return { ok: false, error: 'PDF generation failed' };
   }
 
-  const first = customer.first_name || 'there';
+  const first = recipient.name || customer.first_name || 'there';
   const heading = 'Payment received — thank you';
   const memoEscaped = memo
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -268,7 +315,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'invoice.receipt',
-        to: customer.email,
+        to: recipient.email,
         payload: {
           first_name: first,
           receipt_url: receiptUrl,
@@ -285,7 +332,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
       });
-      logger.info(`[invoice-email] Template receipt email sent for ${invoice.invoice_number} to customer ${invoice.customer_id || 'unknown'}`);
+      logger.info(`[invoice-email] Template receipt email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
       return { ok: true, messageId: result.message?.provider_message_id || null };
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
@@ -302,7 +349,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   try {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
-      to: customer.email,
+      to: recipient.email,
       subject: `Receipt for ${invoice.invoice_number} — ${currency(invoice.total)}`,
       html,
       text,
@@ -312,7 +359,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         contentType: 'application/pdf',
       }],
     });
-    logger.info(`[invoice-email] Receipt email sent for ${invoice.invoice_number} to customer ${invoice.customer_id || 'unknown'}`);
+    logger.info(`[invoice-email] Receipt email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
     return { ok: true };
   } catch (err) {
     logger.error(`[invoice-email] Receipt send failed for ${invoice.invoice_number}: ${err.message}`);
@@ -320,4 +367,11 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   }
 }
 
-module.exports = { sendInvoiceEmail, sendReceiptEmail };
+module.exports = {
+  sendInvoiceEmail,
+  sendReceiptEmail,
+  _private: {
+    invoiceRecipientFor,
+    isEmailLike,
+  },
+};
