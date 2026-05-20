@@ -82,6 +82,12 @@ async function gatherInputs(knex, serviceRecord, config) {
       customerId: serviceRecord.customer_id,
       serviceRecordId: serviceRecord.id,
       serviceLine,
+      // Pass the current service_date so the extractor can restrict the
+      // prior-cycle window to visits strictly before this one. Without
+      // this, the extractor falls back to a service_records lookup; the
+      // result is identical but the explicit pass saves a round-trip per
+      // score calculation.
+      serviceDate: serviceRecord.service_date,
     }),
     extractRiskFactorRating({ knex, serviceRecordId: serviceRecord.id }),
     loadPreviousScore(knex, {
