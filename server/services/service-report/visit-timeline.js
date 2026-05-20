@@ -406,6 +406,13 @@ function buildVisitTimeline({
     durationMinutes: resolvedConfig.showDuration ? durationMinutes : null,
     reportGeneratedAt: reportGeneratedAt || null,
     config: {
+      enabled: resolvedConfig.enabled,
+      showOnCustomerReports: resolvedConfig.showOnCustomerReports,
+      title: resolvedConfig.title,
+      showTechnicianEnRoute: resolvedConfig.showTechnicianEnRoute,
+      showTechnicianOnSite: resolvedConfig.showTechnicianOnSite,
+      showServiceCompleted: resolvedConfig.showServiceCompleted,
+      serviceCompletedRequiredWhenReportCompleted: resolvedConfig.serviceCompletedRequiredWhenReportCompleted,
       showCustomerContact: resolvedConfig.showCustomerContact,
       showCustomerContactAsTimelineEvent: resolvedConfig.showCustomerContactAsTimelineEvent,
       showReportGenerated: resolvedConfig.showReportGenerated,
