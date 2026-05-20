@@ -1,4 +1,6 @@
-const { pressureFromFindings } = require('../services/service-report/pressure-index');
+// Legacy pressureFromFindings + computePressureIndex have been replaced by
+// the pest-pressure engine. See server/tests/pest-pressure-*.test.js for
+// the equivalent coverage against the new 5-component weighted formula.
 const { renderTreatmentMap } = require('../services/service-report/treatment-map');
 const { buildSatelliteTreatmentMapContext } = require('../services/service-report/satellite-treatment-map');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
@@ -59,35 +61,6 @@ describe('service report v1', () => {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
-
-  test('pressure index uses weighted current findings and prior smoothing', () => {
-    const currentOnly = pressureFromFindings([
-      { severity: 'low' },
-      { severity: 'medium' },
-      { severity: 'high' },
-    ]);
-    const smoothed = pressureFromFindings([
-      { severity: 'low' },
-      { severity: 'medium' },
-      { severity: 'high' },
-    ], 1.2);
-
-    expect(currentOnly).toBe(3.6);
-    expect(smoothed).toBe(3.0);
-  });
-
-  test('pressure index treats callbacks as a negative pressure signal', () => {
-    const routine = pressureFromFindings([{ severity: 'low' }]);
-    const callback = pressureFromFindings([{ severity: 'low' }], null, { hasCallback: true });
-
-    expect(routine).toBe(0.6);
-    expect(callback).toBeGreaterThan(routine);
-    expect(callback).toBe(2.0);
-  });
-
-  test('pressure index floors clean first visits at 0.3', () => {
-    expect(pressureFromFindings([])).toBe(0.3);
-  });
 
   test('dynamic pressure trend floors persisted zero values at 0.3', () => {
     const context = buildPressureTrendContextFromRows({

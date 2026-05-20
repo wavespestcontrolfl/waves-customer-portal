@@ -1,7 +1,9 @@
 const db = require('../../models/db');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig } = require('./service-line-configs');
-const { customerVisiblePressureIndex, pressureFromFindings } = require('./pressure-index');
+const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { loadActiveConfig, loadScoreForServiceRecord } = require('../pest-pressure/store');
+const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
@@ -1252,9 +1254,21 @@ async function buildReportV1Data(service, token, knex = db) {
     });
   }
 
+  // Pest Pressure is computed by the pest-pressure orchestrator on report
+  // completion and mirrored back to service_records.pressure_index. Legacy
+  // pre-v1 reports without a stored value have no Pest Pressure score.
   const pressureIndex = service.pressure_index != null
     ? customerVisiblePressureIndex(service.pressure_index)
-    : pressureFromFindings(findings);
+    : null;
+
+  const [pestPressureConfig, pestPressureRow] = await Promise.all([
+    loadActiveConfig(knex).catch(() => null),
+    loadScoreForServiceRecord(knex, service.id).catch(() => null),
+  ]);
+  const pestPressure = buildPestPressureCustomerView({
+    config: pestPressureConfig,
+    scoreRow: pestPressureRow,
+  });
 
   const applications = products.map((product, index) => {
     const method = methodFromProduct(product, serviceLine);
@@ -1449,6 +1463,7 @@ async function buildReportV1Data(service, token, knex = db) {
       moisture: service.soil_moisture,
     },
     pressureIndex,
+    pestPressure,
     metrics,
     mapSvg,
     mapSvgUrl: `/api/reports/${token}/map.svg`,
