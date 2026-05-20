@@ -40,7 +40,6 @@ import {
   Receipt,
   Calculator,
   Activity,
-  Radio,
   Settings,
   LogOut,
   Menu,
@@ -137,7 +136,6 @@ const NAV_SECTIONS = [
     section: "System",
     items: [
       { path: "/admin/tool-health", icon: Activity, label: "Tool Health" },
-      { path: "/admin/geofence-events", icon: Radio, label: "Geofence" },
       { path: "/admin/settings", icon: Settings, label: "Settings" },
     ],
   },

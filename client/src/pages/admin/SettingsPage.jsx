@@ -2,14 +2,12 @@ import { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Building2,
-  MapPinned,
   Plug,
   Server,
   Settings as SettingsIcon,
   ToggleLeft,
   Users,
 } from "lucide-react";
-import GeofenceSettings from "../../components/admin/GeofenceSettings";
 import MobileSettingsPage from "../../components/admin/MobileSettingsPage";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -118,7 +116,6 @@ function Toggle({ checked, onChange, label, description }) {
 const VALID_TABS = [
   "general",
   "integrations",
-  "geofence",
   "gates",
   "team",
   "system",
@@ -165,7 +162,6 @@ export default function SettingsPage() {
   const TABS = [
     { key: "general", label: "General", Icon: Building2 },
     { key: "integrations", label: "Integrations", Icon: Plug },
-    { key: "geofence", label: "Geofence Timers", Icon: MapPinned },
     { key: "gates", label: "Feature Gates", Icon: ToggleLeft },
     { key: "team", label: "Team", Icon: Users },
     { key: "system", label: "System", Icon: Server },
@@ -339,8 +335,6 @@ export default function SettingsPage() {
       )}
       {/* ── INTEGRATIONS ── */}
       {tab === "integrations" && <IntegrationsTab gates={gates} />}
-      {/* ── GEOFENCE TIMERS ── */}
-      {tab === "geofence" && <GeofenceSettings />}
       {/* ── FEATURE GATES ── */}
       {tab === "gates" && (
         <Card>

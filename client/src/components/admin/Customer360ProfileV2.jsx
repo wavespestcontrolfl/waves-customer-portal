@@ -3380,7 +3380,7 @@ export default function Customer360ProfileV2({
                       Auto-flip en route SMS
                     </div>{" "}
                     <div className="text-12 text-ink-secondary">
-                      When the tech&apos;s vehicle leaves a previous geofence
+                      When the tech&apos;s vehicle leaves a previous job area
                       and the next job is this customer, fire the &quot;on the
                       way&quot; SMS automatically. Off here = customer keeps
                       manual en-route SMS but skips auto-flip.
