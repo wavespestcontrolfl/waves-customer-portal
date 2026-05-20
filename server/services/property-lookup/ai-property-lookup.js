@@ -566,7 +566,7 @@ function coerceLotSize(raw) {
 
   if (typeof raw === 'number') {
     if (!Number.isFinite(raw) || raw <= 0) return null;
-    const sqft = coerceUnqualifiedLotSqft(raw);
+    const sqft = coerceUnqualifiedLotSqft(raw, { allowOversizedSqft: true });
     return sqft == null ? null : clampLotSqft(Math.round(sqft));
   }
 
@@ -594,11 +594,12 @@ function coerceLotSize(raw) {
   return clampLotSqft(rounded);
 }
 
-function coerceUnqualifiedLotSqft(value) {
+function coerceUnqualifiedLotSqft(value, options = {}) {
   if (value < LOT_SQFT_MIN) {
     const converted = value * SQFT_PER_ACRE;
     return converted <= LOT_SQFT_MAX ? converted : null;
   }
+  if (!options.allowOversizedSqft && value > LOT_SQFT_MAX) return null;
   return value;
 }
 
@@ -651,7 +652,10 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
   const numberOffset = afterMatch[0].lastIndexOf(rawNumber);
   const numberEnd = afterMatch.index + numberOffset + rawNumber.length;
   const trailing = str.slice(numberEnd, numberEnd + 24);
-  if (ACRE_UNIT_RE.test(trailing) || SQFT_UNIT_RE.test(trailing)) return false;
+  const hasFollowingOtherUnit = unitKind === 'acre'
+    ? SQFT_UNIT_RE.test(trailing)
+    : ACRE_UNIT_RE.test(trailing);
+  if (hasFollowingOtherUnit) return false;
 
   const separator = afterMatch[1] || '';
   if (/[:=]/.test(separator)) return true;

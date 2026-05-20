@@ -10,6 +10,7 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot Size Acres: 0.25')).toBe(10890);
     expect(coerceLotSize('Lot 13, Block 2, Acres: 0.25')).toBe(10890);
     expect(coerceLotSize('Lot 13 AC 0.25')).toBe(10890);
+    expect(coerceLotSize('Lot 13 AC 0.25 acres')).toBe(10890);
   });
 
   test('parses fractional acreage formats before decimal fallback', () => {
@@ -21,5 +22,7 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('LOT 13 (0.23 AC - 10,000 SF)')).toBe(10000);
     expect(coerceLotSize('0.25 acres 10,890 sqft')).toBe(10890);
     expect(coerceLotSize('SECTION 22 LOT 13')).toBeNull();
+    expect(coerceLotSize('Lot size 999999')).toBeNull();
+    expect(coerceLotSize(260924)).toBe(200000);
   });
 });
