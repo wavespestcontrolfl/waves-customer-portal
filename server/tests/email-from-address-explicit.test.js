@@ -52,11 +52,15 @@ describe('service-report email delivery from-address (regression guard)', () => 
     'utf8',
   );
 
-  test("passes fromEmail: 'contact@wavespestcontrol.com' to sendgrid.sendOne", () => {
-    expect(src).toMatch(/fromEmail:\s*['"]contact@wavespestcontrol\.com['"]/);
+  test("defines contact@ as the service-report sender", () => {
+    expect(src).toMatch(/SERVICE_REPORT_FROM_EMAIL\s*=\s*['"]contact@wavespestcontrol\.com['"]/);
+    expect(src).toMatch(/SERVICE_REPORT_FROM_NAME\s*=\s*['"]Waves Pest Control['"]/);
   });
 
-  test("passes fromName: 'Waves Pest Control' to sendgrid.sendOne", () => {
-    expect(src).toMatch(/fromName:\s*['"]Waves Pest Control['"]/);
+  test('uses the service-report sender for SendGrid and the ledger snapshot', () => {
+    expect(src).toMatch(/fromEmail:\s*SERVICE_REPORT_FROM_EMAIL/);
+    expect(src).toMatch(/fromName:\s*SERVICE_REPORT_FROM_NAME/);
+    expect(src).toMatch(/from_email_snapshot:\s*SERVICE_REPORT_FROM_EMAIL/);
+    expect(src).toMatch(/from_name_snapshot:\s*SERVICE_REPORT_FROM_NAME/);
   });
 });

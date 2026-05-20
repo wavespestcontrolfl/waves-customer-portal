@@ -14,6 +14,9 @@ const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients } = require('../customer-contact');
 
+const SERVICE_REPORT_FROM_EMAIL = 'contact@wavespestcontrol.com';
+const SERVICE_REPORT_FROM_NAME = 'Waves Pest Control';
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -130,9 +133,9 @@ async function sendLegacyServiceReportEmail({
       recipient_type: 'customer',
       recipient_id: customerId || null,
       recipient_email_snapshot: recipient.email,
-      from_name_snapshot: process.env.SENDGRID_FROM_NAME || 'Waves Pest Control',
-      from_email_snapshot: process.env.SENDGRID_FROM_EMAIL || 'newsletter@wavespestcontrol.com',
-      reply_to_snapshot: 'contact@wavespestcontrol.com',
+      from_name_snapshot: SERVICE_REPORT_FROM_NAME,
+      from_email_snapshot: SERVICE_REPORT_FROM_EMAIL,
+      reply_to_snapshot: SERVICE_REPORT_FROM_EMAIL,
       subject_snapshot: email.subject,
       html_snapshot: email.html,
       text_snapshot: email.text,
@@ -160,8 +163,8 @@ async function sendLegacyServiceReportEmail({
       // Service reports are transactional — name the sender explicitly
       // instead of inheriting sendgrid-mail's `newsletter@` default, which
       // was the wrong identity for billing-adjacent customer correspondence.
-      fromEmail: 'contact@wavespestcontrol.com',
-      fromName: 'Waves Pest Control',
+      fromEmail: SERVICE_REPORT_FROM_EMAIL,
+      fromName: SERVICE_REPORT_FROM_NAME,
       subject: email.subject,
       html: email.html,
       text: email.text,
