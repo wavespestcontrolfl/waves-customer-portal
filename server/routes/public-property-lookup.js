@@ -35,6 +35,65 @@ function publicPropertySummary(record) {
   };
 }
 
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    const str = String(value).trim();
+    if (str) return str;
+  }
+  return '';
+}
+
+const SERVICE_INTEREST_LABELS = {
+  pest: 'Pest Control',
+  pest_control: 'Pest Control',
+  pest_control_lawn_care: 'Pest Control + Lawn Care',
+  lawn: 'Lawn Care',
+  lawn_care: 'Lawn Care',
+  both: 'Pest Control + Lawn Care',
+  mosquito: 'Mosquito Control',
+  termite: 'Termite',
+  rodent: 'Rodent Control',
+  rodent_control: 'Rodent Control',
+  tree_shrub: 'Tree & Shrub Care',
+  flea: 'Flea Control',
+  cockroach: 'Cockroach Control',
+  bed_bug: 'Bed Bug',
+  bedbug: 'Bed Bug',
+  dethatching: 'Dethatching',
+  top_dressing: 'Top Dressing',
+  overseeding: 'Overseeding',
+  other: 'Other Services',
+};
+
+function titleizeServiceValue(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function serviceLabelFor(value) {
+  const raw = firstNonEmpty(value);
+  if (!raw) return '';
+  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (SERVICE_INTEREST_LABELS[key]) return SERVICE_INTEREST_LABELS[key];
+  return /^[a-z0-9_-]+$/i.test(raw) ? titleizeServiceValue(raw) : raw;
+}
+
+function normalizeServiceInterest(body = {}) {
+  const explicit = firstNonEmpty(body.service_interest, body.serviceInterest, body.service);
+  if (explicit) return serviceLabelFor(explicit);
+
+  const interest = firstNonEmpty(body.interest);
+  const otherService = firstNonEmpty(body.otherService, body.other_service);
+  if (!interest) return '';
+  return interest.toLowerCase() === 'other'
+    ? serviceLabelFor(otherService || interest)
+    : serviceLabelFor(interest);
+}
+
 router.post('/property-lookup', lookupLimiter, async (req, res) => {
   try {
     const { firstName, lastName, email, phone, address, attribution } = req.body || {};
@@ -65,6 +124,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
     const sourceMeta = await resolveLeadSource(attr);
+    const serviceInterest = normalizeServiceInterest(req.body || {});
 
     // Capture the lead BEFORE firing the expensive API chain. Abuse-protection
     // + marketing attribution + recovery if the user bails mid-flow.
@@ -81,8 +141,10 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       lead_source_id: sourceMeta.leadSourceId,
       status: 'new',
       gclid,
+      service_interest: serviceInterest || null,
       extracted_data: JSON.stringify({
         stage: 'property_lookup_started',
+        service_interest: serviceInterest || null,
         utm: attr?.utm || null,
         referrer: attr?.referrer || null,
         landing_url: attr?.landing_url || null,
@@ -109,6 +171,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
           rentcast: propertyRecord,
           avm: result.avm || null,
           ai_sources: result.aiAnalysis?._sources || null,
+          service_interest: serviceInterest || null,
           utm: attr?.utm || null,
           referrer: attr?.referrer || null,
           landing_url: attr?.landing_url || null,
