@@ -720,12 +720,12 @@ function isPlainIntegerString(rawNumber) {
 
 function hasLotIdentifierPrefix(str, matchIndex) {
   if (!Number.isInteger(matchIndex) || matchIndex < 0) return false;
-  return /\b(?:lot|parcel|tract)\s*(?:#|no\.?|number)?\s*$/i.test(str.slice(0, matchIndex));
+  return /\b(?:lot|parcel|tract|block|section)\s*(?:#|no\.?|number)?\s*$/i.test(str.slice(0, matchIndex));
 }
 
 function hasExplicitLotIdentifierPrefix(str, matchIndex) {
   if (!Number.isInteger(matchIndex) || matchIndex < 0) return false;
-  return /\b(?:lot|parcel|tract)\s*(?:#|no\.?|number)\s*$/i.test(str.slice(0, matchIndex));
+  return /\b(?:lot|parcel|tract|block|section)\s*(?:#|no\.?|number)\s*$/i.test(str.slice(0, matchIndex));
 }
 
 function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex, unitKind) {

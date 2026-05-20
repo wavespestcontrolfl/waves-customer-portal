@@ -11,6 +11,8 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot 13, Block 2, Acres: 0.25')).toBe(10890);
     expect(coerceLotSize('Lot 13 AC 0.25')).toBe(10890);
     expect(coerceLotSize('Lot 13 AC 0.25 acres')).toBe(10890);
+    expect(coerceLotSize('Block 2 AC 0.25')).toBe(10890);
+    expect(coerceLotSize('Section 22 AC 0.25')).toBe(10890);
     expect(coerceLotSize('Lot 4 AC 0.25')).toBe(10890);
     expect(coerceLotSize('Lot 1 AC 2')).toBe(87120);
     expect(coerceLotSize('Lot 4 AC 5')).toBe(200000);
