@@ -677,6 +677,7 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
 
   const beforeSqft = unitKind === 'acre' ? beforeValue * SQFT_PER_ACRE : beforeValue;
   const afterSqft = unitKind === 'acre' ? afterValue * SQFT_PER_ACRE : afterValue;
+  if (beforeSqft > LOT_SQFT_MAX) return false;
   if (unitKind === 'acre' && beforeHasLotPrefix && Number.isInteger(beforeValue)) return true;
 
   return (beforeSqft < LOT_SQFT_MIN || beforeSqft > LOT_SQFT_MAX)
@@ -689,7 +690,7 @@ function isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind) {
   if (/[:=]|\bof\b/i.test(separator)) return true;
 
   const { rawNumber, trailing } = getAfterUnitNumberContext(afterMatch);
-  if (isMetadataAfterUnitNumber(rawNumber, afterValue, trailing)) return false;
+  if (hasMetadataAfterUnitTrailing(trailing)) return false;
   if (unitKind !== 'acre') return true;
 
   const unitToken = (afterMatch[0].match(ACRE_UNIT_RE)?.[0] || '').replace(/\./g, '').toLowerCase();
@@ -708,11 +709,8 @@ function getAfterUnitNumberContext(afterMatch) {
   };
 }
 
-function isMetadataAfterUnitNumber(rawNumber, value, trailing) {
-  if (/^\s*(?:tax|year|record|plat|ref|reference|parcel|id|identifier|block|book|page)\b/i.test(trailing)) {
-    return true;
-  }
-  return isPlainIntegerString(rawNumber) && Number.isInteger(value) && value >= 1000;
+function hasMetadataAfterUnitTrailing(trailing) {
+  return /^\s*(?:tax|years?|records?|plats?|refs?|references?|parcels?|ids?|identifiers?|blocks?|books?|pages?)\b/i.test(trailing);
 }
 
 function isPlainIntegerString(rawNumber) {
