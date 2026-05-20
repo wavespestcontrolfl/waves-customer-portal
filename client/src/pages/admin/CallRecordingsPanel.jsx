@@ -3,14 +3,14 @@
 // Call recordings + transcription panel. Lists Twilio recordings by
 // callSid, surfaces classification (spam / voicemail / new lead),
 // renders the AI synopsis, plays audio via the JWT-on-querystring
-// proxy, and lets the operator manually trigger Gemini transcription
+// proxy, and lets the operator manually trigger OpenAI transcription
 // for any call missing one.
 //
 // Endpoints:
 //   GET  /api/admin/call-recordings/audio/:id?token=…  (JWT in URL!)
 //   GET  /api/admin/call-recordings/stats
 //   GET  /api/admin/call-recordings/recordings
-//   POST /api/admin/call-recordings/process/:callSid    (Gemini txn)
+//   POST /api/admin/call-recordings/process/:callSid    (OpenAI transcript + Gemini extraction)
 //   POST /api/admin/call-recordings/process-all
 //   POST /api/admin/call-recordings/synopsis/:callSid
 //   PUT  /api/admin/call-recordings/calls/:id/disposition
@@ -24,9 +24,9 @@
 //   embed it in DOM (audio src=…). Confirm: short token TTL, no
 //   server-side logging that captures the full URL, no leakage in
 //   referer headers when audio plays cross-origin (S3 / Twilio).
-// - process-all: bulk Gemini transcription. Confirm rate-limit /
+// - process-all: bulk OpenAI transcription. Confirm rate-limit /
 //   confirmation gate so an accidental click doesn't run hundreds
-//   of paid Gemini calls.
+//   of paid transcription calls.
 // - Manual disposition PUT: operator-edited classification. Audit
 //   that previous classification is preserved in history (don't
 //   silently overwrite ML's prior label without trail).
