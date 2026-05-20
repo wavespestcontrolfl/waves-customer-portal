@@ -1528,7 +1528,6 @@ function renderPage(token, estimate, estData) {
       <div class="payment-choice">
         <div class="payment-choice-head">
           <h3>${escapeHtml(pageCopy.payAfterTitle)}</h3>
-          <span class="payment-choice-badge">$0 today</span>
         </div>
         <p class="payment-choice-body">${escapeHtml(pageCopy.payAfterBody)}</p>
         <div class="payment-summary-list">
@@ -1543,7 +1542,7 @@ function renderPage(token, estimate, estData) {
       <div class="payment-choice">
         <div class="payment-choice-head">
           <h3>${escapeHtml(pageCopy.prepayTitle)}</h3>
-          <span class="payment-choice-badge primary">${annualPrepayWaivesMembership ? 'Setup waived' : '$0 today'}</span>
+          ${annualPrepayWaivesMembership ? `<span class="payment-choice-badge primary">Setup waived</span>` : ''}
         </div>
         <p class="payment-choice-body">${escapeHtml(pageCopy.prepayBody)}</p>
         <div class="payment-summary-list">
