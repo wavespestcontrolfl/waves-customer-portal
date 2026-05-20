@@ -1,6 +1,6 @@
 const { mapFindingsToRating } = require('../services/pest-pressure/components/technician-rating');
 const { mapCountToRating, extractReServiceImpact } = require('../services/pest-pressure/components/re-service-impact');
-const { mapPriorCycleCountToRating, buildSignatureSet } = require('../services/pest-pressure/components/recurring-issue');
+const { mapPriorCycleCountToRating, buildSignatureSet, extractRecurringIssue } = require('../services/pest-pressure/components/recurring-issue');
 const { mapRiskFindingsToRating } = require('../services/pest-pressure/components/risk-factor');
 
 describe('technician-rating: mapFindingsToRating', () => {
@@ -164,5 +164,146 @@ describe('risk-factor: mapRiskFindingsToRating', () => {
       { category: 'entry_point', severity: 'low' },
       { category: 'moisture', severity: 'critical' },
     ])).toBe(5);
+  });
+});
+
+describe('recurring-issue: extractRecurringIssue cutoff date (codex P1 regression guard)', () => {
+  // Before the fix, the prior-records query had no service_date filter,
+  // so recalculating an older record after newer visits existed would
+  // surface those newer records as "prior cycles" and inflate the
+  // recurringIssueRating. The fix adds a `service_date < cutoff` filter
+  // — either from the caller-passed serviceDate or by looking up the
+  // current record's date from service_records.
+
+  function buildKnex({ currentFindings = [], currentRecord = null, priorRecords = [], priorFindings = [], expectLookup = true } = {}) {
+    const calls = { priorRecordsQuery: { whereCalls: [], orderBy: null, limit: null } };
+
+    function priorRecordsChain() {
+      // Capture .where(...) and .whereNot(...) invocations so the test
+      // can assert the cutoff filter was applied.
+      const chain = {};
+      chain.where = jest.fn((...args) => { calls.priorRecordsQuery.whereCalls.push(['where', args]); return chain; });
+      chain.whereNot = jest.fn((...args) => { calls.priorRecordsQuery.whereCalls.push(['whereNot', args]); return chain; });
+      chain.orderBy = jest.fn((col, dir) => { calls.priorRecordsQuery.orderBy = [col, dir]; return chain; });
+      chain.limit = jest.fn((n) => { calls.priorRecordsQuery.limit = n; return chain; });
+      chain.select = jest.fn(() => chain);
+      chain.then = (resolve, reject) => Promise.resolve(priorRecords).then(resolve, reject);
+      chain.catch = (reject) => Promise.resolve(priorRecords).catch(reject);
+      return chain;
+    }
+
+    function currentFindingsChain() {
+      const chain = {
+        where: jest.fn(() => chain),
+        select: jest.fn(async () => currentFindings),
+      };
+      return chain;
+    }
+
+    function currentRecordLookupChain() {
+      const chain = {
+        where: jest.fn(() => chain),
+        select: jest.fn(() => chain),
+        first: jest.fn(async () => currentRecord),
+      };
+      return chain;
+    }
+
+    function priorFindingsChain() {
+      const chain = {
+        whereIn: jest.fn(() => chain),
+        select: jest.fn(async () => priorFindings),
+      };
+      return chain;
+    }
+
+    // service_findings is hit twice (current + prior). service_records
+    // is hit once (priorRecordsQuery) when serviceDate is passed by the
+    // caller, or twice (current lookup + priorRecordsQuery) when omitted.
+    const findingsCallSeq = [currentFindingsChain(), priorFindingsChain()];
+    const recordsCallSeq = expectLookup
+      ? [currentRecordLookupChain(), priorRecordsChain()]
+      : [priorRecordsChain()];
+
+    const knex = jest.fn((table) => {
+      if (table === 'service_findings') {
+        if (findingsCallSeq.length === 0) throw new Error('unexpected service_findings call');
+        return findingsCallSeq.shift();
+      }
+      if (table === 'service_records') {
+        if (recordsCallSeq.length === 0) throw new Error('unexpected service_records call');
+        return recordsCallSeq.shift();
+      }
+      throw new Error(`unexpected table: ${table}`);
+    });
+
+    return { knex, calls };
+  }
+
+  test('applies service_date < cutoff filter when serviceDate is passed by caller', async () => {
+    const { knex, calls } = buildKnex({
+      currentFindings: [{ category: 'roach', zone_id: 'kitchen' }],
+      priorRecords: [{ id: 'rec-old-1', service_date: '2026-03-01' }],
+      priorFindings: [],
+      expectLookup: false, // serviceDate passed → no fallback DB lookup
+    });
+
+    await extractRecurringIssue({
+      knex,
+      customerId: 'cust-1',
+      serviceRecordId: 'rec-current',
+      serviceDate: '2026-05-15',
+    });
+
+    const cutoffFilter = calls.priorRecordsQuery.whereCalls.find(
+      ([, args]) => args[0] === 'service_date' && args[1] === '<',
+    );
+    expect(cutoffFilter).toBeDefined();
+    expect(cutoffFilter[1][2]).toBe('2026-05-15');
+  });
+
+  test('looks up cutoff from service_records when serviceDate is not passed', async () => {
+    const { knex, calls } = buildKnex({
+      currentFindings: [{ category: 'ant', zone_id: 'patio' }],
+      currentRecord: { service_date: '2026-04-10' },
+      priorRecords: [],
+      priorFindings: [],
+    });
+
+    await extractRecurringIssue({
+      knex,
+      customerId: 'cust-1',
+      serviceRecordId: 'rec-current',
+    });
+
+    const cutoffFilter = calls.priorRecordsQuery.whereCalls.find(
+      ([, args]) => args[0] === 'service_date' && args[1] === '<',
+    );
+    expect(cutoffFilter).toBeDefined();
+    expect(cutoffFilter[1][2]).toBe('2026-04-10');
+  });
+
+  test('skips cutoff filter when neither caller-passed nor DB-resolvable date is available', async () => {
+    // currentRecord intentionally null — service_records lookup returns null.
+    // Defensive behavior: don't add a `service_date < null` filter that
+    // would silently drop everything; let the query run unfiltered and
+    // rely on the existing MAX_LOOKBACK limit to bound results.
+    const { knex, calls } = buildKnex({
+      currentFindings: [{ category: 'roach', zone_id: 'kitchen' }],
+      currentRecord: null,
+      priorRecords: [],
+      priorFindings: [],
+    });
+
+    await extractRecurringIssue({
+      knex,
+      customerId: 'cust-1',
+      serviceRecordId: 'rec-current',
+    });
+
+    const cutoffFilter = calls.priorRecordsQuery.whereCalls.find(
+      ([, args]) => args[0] === 'service_date' && args[1] === '<',
+    );
+    expect(cutoffFilter).toBeUndefined();
   });
 });

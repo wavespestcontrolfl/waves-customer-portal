@@ -310,3 +310,92 @@ describe('calculatePestPressureScore', () => {
     expect(moderateStable.summary).toMatch(/stable compared/);
   });
 });
+
+describe('componentWeights audit field (codex P2 regression guard)', () => {
+  // Before the fix, componentWeights was a copy of config.weights, taken
+  // before the missing-data behavior could renormalize anything. In
+  // partial-data cases the stored map said "this score used weight 25
+  // for client" when in fact the engine had renormalized client out of
+  // the calculation entirely. The audit field now reports the EFFECTIVE
+  // weights — what the engine actually applied per component on this run.
+
+  test('complete data: effective weights == raw configured weights', () => {
+    const result = calculatePestPressureScore({
+      clientRating: 3,
+      technicianRating: 3,
+      reServiceImpact: 3,
+      recurringIssueRating: 3,
+      riskFactorRating: 3,
+      previousScore: null,
+    }, DEFAULT_CONFIG);
+    expect(result.componentWeights).toEqual({
+      client: 25,
+      technician: 30,
+      reService: 20,
+      recurring: 15,
+      risk: 10,
+    });
+  });
+
+  test('missing client (recalculate_available_components): client weight = 0, others renormalize to 100', () => {
+    const result = calculatePestPressureScore({
+      clientRating: null,
+      technicianRating: 4,
+      reServiceImpact: 2,
+      recurringIssueRating: 0,
+      riskFactorRating: 1,
+      previousScore: null,
+    }, DEFAULT_CONFIG);
+    // Raw: technician 30, reService 20, recurring 15, risk 10 → sum 75
+    // Renormalized: 30/75=40%, 20/75=26.67→26.7%, 15/75=20%, 10/75=13.33→13.3%
+    expect(result.componentWeights.client).toBe(0);
+    expect(result.componentWeights.technician).toBeCloseTo(40, 1);
+    expect(result.componentWeights.reService).toBeCloseTo(26.7, 1);
+    expect(result.componentWeights.recurring).toBeCloseTo(20, 1);
+    expect(result.componentWeights.risk).toBeCloseTo(13.3, 1);
+    // Sum must be ~100 — the post-renorm contract.
+    const sum = Object.values(result.componentWeights).reduce((a, b) => a + b, 0);
+    expect(sum).toBeCloseTo(100, 0);
+  });
+
+  test('treat_missing_as_zero: effective weights == raw config weights even when components missing', () => {
+    const cfg = { ...DEFAULT_CONFIG, missingDataBehavior: 'treat_missing_as_zero' };
+    const result = calculatePestPressureScore({
+      clientRating: null,
+      technicianRating: 3,
+      reServiceImpact: 3,
+      recurringIssueRating: 3,
+      riskFactorRating: 3,
+      previousScore: null,
+    }, cfg);
+    expect(result.componentWeights).toEqual({
+      client: 25,
+      technician: 30,
+      reService: 20,
+      recurring: 15,
+      risk: 10,
+    });
+  });
+
+  test('insufficient data: effective weights are all zero (score was not computed)', () => {
+    const result = calculatePestPressureScore({
+      clientRating: null,
+      technicianRating: null,
+      reServiceImpact: null,
+      recurringIssueRating: null,
+      riskFactorRating: null,
+      previousScore: null,
+    }, DEFAULT_CONFIG);
+    expect(result.score).toBeNull();
+    expect(result.componentWeights).toEqual({
+      client: 0,
+      technician: 0,
+      reService: 0,
+      recurring: 0,
+      risk: 0,
+    });
+    // Raw config weights remain recoverable from the snapshot for any
+    // consumer that needs them.
+    expect(result.configSnapshot.weights).toEqual(DEFAULT_CONFIG.weights);
+  });
+});

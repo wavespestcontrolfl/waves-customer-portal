@@ -113,6 +113,37 @@ function summarizeComponents(components) {
   return out;
 }
 
+/**
+ * The weights that were actually used to compute the score, after the
+ * configured missingDataBehavior was applied.
+ *
+ * - `recalculate_available_components` (default): missing-component weights
+ *   get redistributed across the present ones so they sum to 100. A
+ *   client component with raw weight 25 will read as a different effective
+ *   weight when the technician component is missing.
+ * - `treat_missing_as_zero`: every component contributes; effective ==
+ *   raw config weights.
+ * - `require_minimum`: same renormalization as recalculate when the
+ *   minimum is met; otherwise score is null and effective weights are
+ *   all zero (the score wasn't actually computed).
+ *
+ * The raw configured weights remain on `configSnapshot.weights` for
+ * anyone reconstructing the unmodified config; this map captures what
+ * the engine actually applied per component on this run, which is what
+ * "how was this score calculated" explainability needs.
+ */
+function computeEffectiveWeights(scoringComponents, weightDenominator) {
+  const out = {};
+  for (const key of Object.values(INPUT_KEY_TO_WEIGHT_KEY)) {
+    out[key] = 0;
+  }
+  if (!weightDenominator || weightDenominator <= 0) return out;
+  for (const c of scoringComponents) {
+    out[c.weightKey] = roundToOneDecimal((c.weight / weightDenominator) * 100);
+  }
+  return out;
+}
+
 function calculatePestPressureScore(input, config) {
   if (!input || typeof input !== 'object') {
     throw new TypeError('calculatePestPressureScore: input is required');
@@ -131,13 +162,19 @@ function calculatePestPressureScore(input, config) {
   const missingComponents = allComponents.filter((c) => !c.present).map((c) => c.key);
   const present = allComponents.filter((c) => c.present);
   const baseSnapshot = snapshotConfig(config);
-  const sharedAudit = {
+
+  // Effective weights depend on missingDataBehavior — see
+  // computeEffectiveWeights doc. We default to an all-zero map for the
+  // insufficient-data / null-score paths so callers reading
+  // componentWeights never see stale raw config values when the score
+  // wasn't actually computed.
+  const buildSharedAudit = (scoringComponents, weightDenominator) => ({
     componentScores: summarizeComponents(allComponents),
-    componentWeights: { ...config.weights },
+    componentWeights: computeEffectiveWeights(scoringComponents, weightDenominator),
     missingComponents,
     calculationVersion: config.calculationVersion,
     configSnapshot: baseSnapshot,
-  };
+  });
 
   if (!meetsMinimum(allComponents, config.minimumDataRequired)) {
     const summary = resolveCustomerSummary({ trend: 'insufficient_data', label: null, dataCompleteness: 'insufficient' });
@@ -149,7 +186,7 @@ function calculatePestPressureScore(input, config) {
       trendDelta: null,
       dataCompleteness: 'insufficient',
       summary,
-      ...sharedAudit,
+      ...buildSharedAudit([], 0),
     };
   }
 
@@ -171,7 +208,7 @@ function calculatePestPressureScore(input, config) {
       trendDelta: null,
       dataCompleteness: 'insufficient',
       summary,
-      ...sharedAudit,
+      ...buildSharedAudit([], 0),
     };
   }
 
@@ -188,7 +225,7 @@ function calculatePestPressureScore(input, config) {
     trendDelta: delta,
     dataCompleteness,
     summary,
-    ...sharedAudit,
+    ...buildSharedAudit(scoringComponents, weightDenominator),
   };
 }
 
@@ -202,6 +239,7 @@ module.exports = {
     meetsMinimum,
     applyMissingDataBehavior,
     computeWeightedScore,
+    computeEffectiveWeights,
     roundToOneDecimal,
     clamp,
   },
