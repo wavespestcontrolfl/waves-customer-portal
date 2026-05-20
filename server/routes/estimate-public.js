@@ -1791,8 +1791,7 @@ function renderPage(token, estimate, estData) {
   .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#6B7280;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
   .hero .prop-meta{color:#6B7280;font-size:16px;margin-top:4px}
   .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
-  .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#F7F5EE;box-shadow:0 1px 3px rgba(15,23,42,.04);display:flex;flex-direction:column;transition:background .15s,border-color .15s}
-  .service-price-card:hover{background:#F2EEE0;border-color:#D9D3C4}
+  .service-price-card{padding:18px 20px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06);display:flex;flex-direction:column}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
   .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px;min-height:18px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
@@ -1834,8 +1833,7 @@ function renderPage(token, estimate, estData) {
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
   @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}.supplemental-service-row{grid-template-columns:1fr}.supplemental-service-row strong{white-space:normal}}
-  .card{background:#F7F5EE;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #E7E2D7;transition:background .15s,border-color .15s}
-  .card:hover{background:#F2EEE0;border-color:#D9D3C4}
+  .card{background:#F2EEE0;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #D9D3C4;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06)}
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
   .card-sub{color:#6B7280;font-size:14px;margin:0 0 14px}
@@ -1960,8 +1958,8 @@ function renderPage(token, estimate, estData) {
   .cta:hover:not([disabled]){background:#121E3D}
   .cta.secondary{background:transparent;color:#1B2C5B;border:1px solid #1B2C5B}
   .cta[disabled]{opacity:.6;cursor:not-allowed}
-  .upsell{background:#F7F5EE;border:1px solid #E7E2D7;border-radius:12px;padding:18px;margin-bottom:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;cursor:pointer;transition:background .15s,border-color .15s;width:100%;text-align:left;font:inherit;color:inherit;-webkit-tap-highlight-color:rgba(27,44,91,.12)}
-  .upsell:hover{background:#F2EEE0;border-color:#D9D3C4}
+  .upsell{background:#F2EEE0;border:1px solid #D9D3C4;border-radius:12px;padding:18px;margin-bottom:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;cursor:pointer;transition:background .15s,border-color .15s,box-shadow .15s;width:100%;text-align:left;font:inherit;color:inherit;-webkit-tap-highlight-color:rgba(27,44,91,.12);box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06)}
+  .upsell:hover{background:#EDE8D8;border-color:#C9C0AA;box-shadow:0 8px 22px rgba(15,23,42,.14),0 3px 6px rgba(15,23,42,.08)}
   .upsell:active{background:#EDE8D8}
   .upsell:disabled{opacity:.7;cursor:wait}
   .upsell .txt{flex:1;min-width:200px}
