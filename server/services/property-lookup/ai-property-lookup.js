@@ -648,7 +648,7 @@ function parseUnitQualifiedLotNumber(str, unitPattern, unitKind) {
 
   const beforeUnit = new RegExp(`${LOT_NUMBER_PATTERN}\\s*-?\\s*(?:${unitPattern.source})`, 'i');
   const beforeMatch = str.match(beforeUnit);
-  const beforeValue = beforeMatch ? parseUnitPrefixLotNumber(beforeMatch[1], str, beforeMatch.index) : null;
+  const beforeValue = beforeMatch ? parseUnitPrefixLotNumber(beforeMatch[1], str, beforeMatch.index, unitKind) : null;
 
   if (afterValue != null && shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, unitKind, beforeMatch)) {
     return afterValue;
@@ -688,12 +688,12 @@ function hasLotIdentifierPrefix(str, matchIndex) {
   return /\b(?:lot|parcel|tract)\s*(?:#|no\.?|number)?\s*$/i.test(str.slice(0, matchIndex));
 }
 
-function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex) {
+function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex, unitKind) {
   const value = String(rawNumber || '').trim();
   const lotPrefix = hasLotIdentifierPrefix(fullStr, matchIndex);
   const lotMixedFraction = value.match(/^\d+\s*(?:-|\s)\s*(\d+\s*\/\s*\d+)$/);
   if (lotPrefix && lotMixedFraction) return parseFirstLotNumber(lotMixedFraction[1]);
-  if (lotPrefix && /^\d+$/.test(value)) return null;
+  if (unitKind === 'acre' && lotPrefix && /^\d+$/.test(value)) return null;
   return parseFirstLotNumber(value);
 }
 
