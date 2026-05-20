@@ -548,7 +548,7 @@ const LOT_SQFT_MIN = 1000;
 const LOT_SQFT_MAX = 200_000;
 const ACRE_UNIT_RE = /\b(?:acres?|acs?|ac)\b\.?/i;
 const SQFT_UNIT_RE = /\b(?:sq\.?\s*ft\.?|sqft|square\s*feet|sf)\b\.?/i;
-const LOT_NUMBER_PATTERN = String.raw`(\d+\s*(?:-|\s)\s*\d+\s*\/\s*\d+|\d+\s*\/\s*\d+|(?:\d[\d,]*|\.\d+)(?:\.\d+)?)`;
+const LOT_NUMBER_PATTERN = String.raw`(\d+\s*(?:-|\s)\s*\d+\s*\/\s*\d+|\d+\s*\/\s*\d+|(?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)(?:\.\d+)?)`;
 
 // Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
 // or acres ("5.99 Acres Lot", "1/2 acre"). The pricing engine always wants
@@ -629,13 +629,13 @@ function lotValuesAgree(a, b) {
 }
 
 function parseUnitQualifiedLotNumber(str, unitPattern) {
+  const afterUnit = new RegExp(`(?:${unitPattern.source})\\s*(?:[:=]\\s*)?(?:of\\s*)?${LOT_NUMBER_PATTERN}`, 'i');
+  const afterMatch = str.match(afterUnit);
+  if (afterMatch) return parseFirstLotNumber(afterMatch[1]);
+
   const beforeUnit = new RegExp(`${LOT_NUMBER_PATTERN}\\s*-?\\s*(?:${unitPattern.source})`, 'i');
   const beforeMatch = str.match(beforeUnit);
-  if (beforeMatch) return parseFirstLotNumber(beforeMatch[1]);
-
-  const afterUnit = new RegExp(`(?:${unitPattern.source})\\s*(?:[:=,-]\\s*)?(?:of\\s*)?${LOT_NUMBER_PATTERN}`, 'i');
-  const afterMatch = str.match(afterUnit);
-  return afterMatch ? parseFirstLotNumber(afterMatch[1]) : null;
+  return beforeMatch ? parseFirstLotNumber(beforeMatch[1]) : null;
 }
 
 // Pull the FIRST numeric value out of a lot-size string. Supports mixed
