@@ -12,7 +12,7 @@
 //      services never see the perk).
 //
 // Excluded services: rodent_bait, palm_injection, bed_bug*, bora_care,
-//   pre_slab_termidor. No % discount. Flat credits only where explicitly
+//   pre_slab_termiticide/pre_slab_termidor. No % discount. Flat credits only where explicitly
 //   allowed. Rodent bait receives no WaveGuard credit or tier benefit.
 //
 // Removed in v4.3 Session 6:

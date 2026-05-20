@@ -30,6 +30,7 @@ describe('pricing engine DB bridge', () => {
   const originalTrenching = JSON.parse(JSON.stringify(constants.SPECIALTY.trenching));
   const originalBoraCare = JSON.parse(JSON.stringify(constants.SPECIALTY.boraCare));
   const originalPreSlabTermidor = JSON.parse(JSON.stringify(constants.SPECIALTY.preSlabTermidor));
+  const originalPreSlabTermiticide = JSON.parse(JSON.stringify(constants.SPECIALTY.preSlabTermiticide));
   const originalUrgency = JSON.parse(JSON.stringify(constants.URGENCY));
   const originalPalm = {
     minPerVisit: constants.PALM.minPerVisit,
@@ -64,6 +65,8 @@ describe('pricing engine DB bridge', () => {
     Object.assign(constants.SPECIALTY.boraCare, JSON.parse(JSON.stringify(originalBoraCare)));
     for (const key of Object.keys(constants.SPECIALTY.preSlabTermidor)) delete constants.SPECIALTY.preSlabTermidor[key];
     Object.assign(constants.SPECIALTY.preSlabTermidor, JSON.parse(JSON.stringify(originalPreSlabTermidor)));
+    for (const key of Object.keys(constants.SPECIALTY.preSlabTermiticide)) delete constants.SPECIALTY.preSlabTermiticide[key];
+    Object.assign(constants.SPECIALTY.preSlabTermiticide, JSON.parse(JSON.stringify(originalPreSlabTermiticide)));
     for (const key of Object.keys(constants.URGENCY)) delete constants.URGENCY[key];
     Object.assign(constants.URGENCY, JSON.parse(JSON.stringify(originalUrgency)));
     Object.assign(constants.PALM, originalPalm);
@@ -175,6 +178,68 @@ describe('pricing engine DB bridge', () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+
+  test('syncs Pre-Slab Termiticide product cost table from pricing_config', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'onetime_preslab',
+      data: {
+        default_product_key: 'taurus_sc',
+        ps_equip: 18,
+        warranty_extended: 225,
+        volume_discounts: { none: 1, '5plus': 0.88, '10plus': 0.82 },
+        products: {
+          termidor_sc: { container_cost: 180, container_oz: 78, product_oz_per_10_sqft: 0.8 },
+          taurus_sc: { container_cost: 99, container_oz: 78, product_oz_per_10_sqft: 0.8 },
+          bifen_it: { container_cost: 45, container_oz: 128, product_oz_per_10_sqft: 1.0 },
+          talstar_p: { container_cost: 40, container_oz: 128, product_oz_per_10_sqft: 1.0 },
+        },
+      },
+    }]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    expect(constants.SPECIALTY.preSlabTermiticide.defaultProductKey).toBe('taurus_sc');
+    expect(constants.SPECIALTY.preSlabTermiticide.equipCost).toBe(18);
+    expect(constants.SPECIALTY.preSlabTermiticide.warrantyExtended).toBe(225);
+    expect(constants.SPECIALTY.preSlabTermiticide.volumeDiscounts['10plus']).toBe(0.82);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.containerCost).toBe(180);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost).toBe(99);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.bifen_it.containerCost).toBe(45);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).toBe(40);
+  });
+
+  test('syncs trenching product/rate metadata from pricing_config', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'onetime_trenching',
+      data: {
+        per_lf_dirt: 11,
+        per_lf_concrete: 15,
+        default_product_key: 'termidor_sc',
+        default_included_product_key: 'taurus_sc',
+        default_application_rate: 'standard',
+        default_trench_depth_ft: 1.5,
+        finished_gallons_per_10_lf_per_ft_depth: 4.5,
+        default_concrete_volume_pad_pct: 0.25,
+        product_premium_multiplier: 1.5,
+        products: {
+          termidor_sc: { container_cost: 390, container_oz: 78, product_oz_per_finished_gallon_at_standard_rate: 0.9, product_oz_per_finished_gallon_at_high_rate: 1.8 },
+          taurus_sc: { container_cost: 90, container_oz: 78, product_oz_per_finished_gallon_at_standard_rate: 0.9, product_oz_per_finished_gallon_at_high_rate: 1.8 },
+        },
+      },
+    }]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    expect(constants.SPECIALTY.trenching.dirtPerLF).toBe(11);
+    expect(constants.SPECIALTY.trenching.concretePerLF).toBe(15);
+    expect(constants.SPECIALTY.trenching.defaultProductKey).toBe('termidor_sc');
+    expect(constants.SPECIALTY.trenching.defaultTrenchDepthFt).toBe(1.5);
+    expect(constants.SPECIALTY.trenching.finishedGallonsPer10LFPerFtDepth).toBe(4.5);
+    expect(constants.SPECIALTY.trenching.defaultConcreteVolumePadPct).toBe(0.25);
+    expect(constants.SPECIALTY.trenching.productPremiumMultiplier).toBe(1.5);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(390);
+    expect(constants.SPECIALTY.trenching.products.taurus_sc.productOzPerFinishedGallonAtHighRate).toBe(1.8);
   });
 
   test('syncs flea package, exterior tiers, and one-time modifiers from pricing_config', async () => {
@@ -320,6 +385,7 @@ describe('pricing engine DB bridge', () => {
         trenching: JSON.parse(JSON.stringify(originalTrenching)),
         boraCare: JSON.parse(JSON.stringify(originalBoraCare)),
         preSlabTermidor: JSON.parse(JSON.stringify(originalPreSlabTermidor)),
+        preSlabTermiticide: JSON.parse(JSON.stringify(originalPreSlabTermiticide)),
       },
     };
 
@@ -327,10 +393,16 @@ describe('pricing engine DB bridge', () => {
     snapshot.TERMITE.systems.advance.stationCost = -1;
     snapshot.TERMITE.monitoring.basic.monthly = 0;
     snapshot.SPECIALTY.trenching.concretePctCap = 1.2;
+    snapshot.SPECIALTY.trenching.products.termidor_sc.containerCost = 0;
+    snapshot.SPECIALTY.trenching.products.taurus_sc.productOzPerFinishedGallonAtHighRate = 0.4;
+    snapshot.SPECIALTY.trenching.productPremiumMultiplier = 0.9;
     snapshot.SPECIALTY.boraCare.coverage = 0;
     snapshot.SPECIALTY.preSlabTermidor.marginDivisor = 1;
     delete snapshot.SPECIALTY.preSlabTermidor.volumeDiscounts['10plus'];
     snapshot.SPECIALTY.preSlabTermidor.warrantyExtended = -1;
+    snapshot.SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost = 0;
+    snapshot.SPECIALTY.preSlabTermiticide.products.bifen_it.productOzPer10SqFt = -1;
+    snapshot.SPECIALTY.preSlabTermiticide.products.talstar_p.marginDivisor = 1;
 
     const result = validatePestPricingConfig(snapshot);
 
@@ -340,10 +412,16 @@ describe('pricing engine DB bridge', () => {
       'TERMITE.systems.advance.stationCost must be non-negative',
       'TERMITE.monitoring.basic.monthly must be positive',
       'SPECIALTY.trenching.concretePctCap must be between 0 and 1',
+      'SPECIALTY.trenching.productPremiumMultiplier must be at least 1',
+      'SPECIALTY.trenching.products.termidor_sc.containerCost must be positive',
+      'SPECIALTY.trenching.products.taurus_sc.productOzPerFinishedGallonAtHighRate must be at least standard rate',
       'SPECIALTY.boraCare.coverage must be positive',
       'SPECIALTY.preSlabTermidor.marginDivisor must be positive and less than 1',
       'SPECIALTY.preSlabTermidor.volumeDiscounts.10plus is required',
       'SPECIALTY.preSlabTermidor.warrantyExtended must be non-negative',
+      'SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost must be positive',
+      'SPECIALTY.preSlabTermiticide.products.bifen_it.productOzPer10SqFt must be positive',
+      'SPECIALTY.preSlabTermiticide.products.talstar_p.marginDivisor must be positive and less than 1',
     ]));
   });
 

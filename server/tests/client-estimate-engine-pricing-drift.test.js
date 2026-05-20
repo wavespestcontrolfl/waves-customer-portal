@@ -199,6 +199,32 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(estimate.totals.year2).toBe(0);
   });
 
+  test('client fallback quote-required trenching warranty block does not add renewal', () => {
+    const estimate = calculateEstimate({
+      homeSqFt: 2400,
+      stories: 1,
+      lotSqFt: 9000,
+      propertyType: 'single_family',
+      svcTrenching: true,
+      trenchingPerimeterLF: 240,
+      trenchingProductKey: 'bifen_it',
+      trenchingWarrantyTier: 'five_year_repair_retreat',
+      urgency: 'NONE',
+      isAfterHours: false,
+    });
+
+    expect(estimate.results.trench).toBeUndefined();
+    expect(estimate.results.trenchQuoteRequired).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      productKey: 'bifen_it',
+    }));
+    expect(estimate.oneTime.items.find((item) => item.name === 'Trenching')).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      price: null,
+    }));
+    expect(estimate.totals.year2).toBe(0);
+  });
+
   test('keeps one-time pest floor as a final customer-facing floor', () => {
     expect(source).toContain('const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));');
   });

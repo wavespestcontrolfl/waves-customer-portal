@@ -64,6 +64,7 @@ const SERVICE_LABEL = {
   plugging: 'Plugging',
   trenching: 'Trenching',
   bora_care: 'Bora-Care',
+  pre_slab_termiticide: 'Pre-Slab Termiticide Treatment',
   pre_slab_termidor: 'Pre-Slab Termidor',
   bed_bug_chemical: 'Bed Bug (Chemical)',
   bed_bug_heat: 'Bed Bug (Heat)',
@@ -143,6 +144,84 @@ function measurementMetadataFields(li = {}) {
   });
   if (li.inputSourceSummary !== undefined) fields.inputSourceSummary = li.inputSourceSummary;
   return fields;
+}
+
+const TERMITICIDE_METADATA_FIELDS = [
+  'legacyService',
+  'displayName',
+  'productKey',
+  'productLabel',
+  'activeIngredient',
+  'chemistryType',
+  'positioning',
+  'applicationRate',
+  'requestedApplicationRate',
+  'concentrationLabel',
+  'trenchDepthFt',
+  'concreteVolumePadPct',
+  'productSurcharge',
+  'baseInstallPrice',
+  'warrantyTier',
+  'requestedWarrantyTier',
+  'warrantyLabel',
+  'warrantyAdder',
+  'priceBeforeWarranty',
+  'labelConfirmed',
+  'requiresLabelConfirmation',
+  'certificateOfTreatmentRequired',
+  'slabSqFt',
+  'slabSqFtSource',
+  'productOzPer10SqFt',
+  'productOz',
+  'units',
+  'containerOz',
+  'rawPrice',
+  'floorBeforeVolumeDiscount',
+  'floorAfterVolumeDiscount',
+  'priceBeforeVolumeDiscount',
+  'volumeDiscount',
+  'volumeDiscountMultiplier',
+  'priceAfterVolumeDiscount',
+  'warrantyExtendedSelected',
+  'warrantyExtendedPrice',
+  'certificateOfComplianceRequired',
+  'addOns',
+];
+
+function termiticideMetadataFields(li = {}) {
+  const fields = {};
+  if (!['trenching', 'pre_slab_termiticide', 'pre_slab_termidor'].includes(li.service)) return fields;
+  TERMITICIDE_METADATA_FIELDS.forEach((field) => {
+    if (li[field] !== undefined) fields[field] = li[field];
+  });
+  if (fields.warningText === undefined && Array.isArray(li.warnings) && li.warnings.length > 0) {
+    fields.warningText = li.warnings[0];
+  }
+  return fields;
+}
+
+function termiticideDetail(li = {}, fallback = '') {
+  if (li.service === 'trenching') {
+    const lfDetail = li.dirtLF !== undefined && li.concreteLF !== undefined
+      ? `${li.dirtLF} LF dirt + ${li.concreteLF} LF concrete`
+      : fallback;
+    const productDetail = [
+      li.productLabel,
+      li.applicationRate,
+      li.trenchDepthFt ? `${li.trenchDepthFt} ft` : null,
+    ].filter(Boolean).join(' | ');
+    return [lfDetail, productDetail].filter(Boolean).join(' | ') || fallback;
+  }
+  if (li.service === 'pre_slab_termiticide' || li.service === 'pre_slab_termidor') {
+    const slabDetail = li.slabSqFt ? `${Number(li.slabSqFt).toLocaleString()} sf` : fallback;
+    const productDetail = [
+      li.productLabel,
+      li.productOz ? `${li.productOz} oz` : null,
+      li.units ? `${li.units} unit${li.units === 1 ? '' : 's'}` : null,
+    ].filter(Boolean).join(' | ');
+    return [slabDetail, productDetail].filter(Boolean).join(' | ') || fallback;
+  }
+  return fallback;
 }
 
 function describeMosquitoAddOns(addOns = {}, multiplier = 1) {
@@ -395,12 +474,13 @@ function mapV1ToLegacyShape(v1Result) {
       li.warning || '',
     ].filter(Boolean).join(' · ');
     if (ONE_TIME_SERVICES.has(li.service)) {
+      const mappedDetail = termiticideDetail(li, detail);
       if (quoteRequired) {
         v1SpecItems.push({
           service: li.service,
           name,
           price: null,
-          det: detail,
+          det: mappedDetail,
           quoteRequired: true,
           reason: li.reason,
           warning: li.warning || null,
@@ -409,6 +489,7 @@ function mapV1ToLegacyShape(v1Result) {
           customQuoteReason: li.customQuoteReason || null,
           requiresMeasurement: !!li.requiresMeasurement,
           ...measurementMetadataFields(li),
+          ...termiticideMetadataFields(li),
           ...commercialManualQuoteFields(li),
         });
         return;
@@ -416,7 +497,14 @@ function mapV1ToLegacyShape(v1Result) {
       // Preserve `service` on the mapped item so consumers can match by
       // canonical key (e.g. estimate-public's findInitialRoachItem) without
       // depending on display labels that may be re-translated downstream.
-      const item = { service: li.service, name, price, detail, ...measurementMetadataFields(li) };
+      const item = {
+        service: li.service,
+        name,
+        price,
+        detail: mappedDetail,
+        ...measurementMetadataFields(li),
+        ...termiticideMetadataFields(li),
+      };
       if (li.spacing !== undefined) item.spacing = li.spacing;
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;
@@ -428,8 +516,9 @@ function mapV1ToLegacyShape(v1Result) {
       v1OtItems.push(item);
       if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
+      const mappedDetail = termiticideDetail(li, detail);
       v1SpecItems.push({
-        service: li.service, name, price, det: detail,
+        service: li.service, name, price, det: mappedDetail,
         onProg: !!li.includedOnProgram,
         quoteRequired,
         reason: li.reason,
@@ -446,6 +535,7 @@ function mapV1ToLegacyShape(v1Result) {
         warrantyExtendedPrice: li.warrantyExtendedPrice,
         warrantyAdd: li.warrantyAdd,
         ...measurementMetadataFields(li),
+        ...termiticideMetadataFields(li),
         ...commercialManualQuoteFields(li),
       });
     }
@@ -480,6 +570,7 @@ function mapV1ToLegacyShape(v1Result) {
       name: li.display?.name || li.label || labelFor(li.service),
       reason: li.reason || li.customQuoteReason || null,
       ...measurementMetadataFields(li),
+      ...termiticideMetadataFields(li),
       ...commercialManualQuoteFields(li),
       quoteRequired: true,
     }));
@@ -626,6 +717,7 @@ function mapV1ToLegacyShape(v1Result) {
           serviceSpecificDiscounts: s.serviceSpecificDiscounts || [],
           warrantyExtendedSelected: s.warrantyExtendedSelected,
           warrantyExtendedPrice: s.warrantyExtendedPrice,
+          ...termiticideMetadataFields(s),
         })),
       total: oneTimeTotal,
       tmInstall,

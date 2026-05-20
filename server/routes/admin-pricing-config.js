@@ -207,15 +207,44 @@ async function ensureTable() {
       { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, multiplier: 1.75 }) },
       { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 115, fungicide_floor: 115, recurringPerAppMultiplier: 1.50, treatment_multipliers: { fert: 1.00, fertilization: 1.00, weed: 1.12, pest: 1.30, fungicide: 1.38 } }) },
       { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 225, STANDARD: 275, LARGE: 325, XL: 385, ESTATE: 425, ACRE_CLASS: 475, OVER_ACRE: 475, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 75, stationAddOn: 75, dunkAddOn: 15 }) },
-      { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 6, data: JSON.stringify({ per_lf_dirt: 10, per_lf_concrete: 14, floor: 600, renewal: 325 }) },
+      { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 6, data: JSON.stringify({
+        per_lf_dirt: 10,
+        per_lf_concrete: 14,
+        floor: 600,
+        renewal: 325,
+        default_product_key: 'taurus_sc',
+        default_included_product_key: 'taurus_sc',
+        default_application_rate: 'standard',
+        default_trench_depth_ft: 1.0,
+        finished_gallons_per_10_lf_per_ft_depth: 4,
+        default_concrete_volume_pad_pct: 0.20,
+        product_premium_multiplier: 1.45,
+        products: {
+          termidor_sc: { container_cost: 375.00, container_oz: 78, product_oz_per_finished_gallon_at_standard_rate: 0.8, product_oz_per_finished_gallon_at_high_rate: 1.6 },
+          taurus_sc: { container_cost: 85.00, container_oz: 78, product_oz_per_finished_gallon_at_standard_rate: 0.8, product_oz_per_finished_gallon_at_high_rate: 1.6 },
+          bifen_it: { container_cost: 55.00, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
+          talstar_p: { container_cost: 65.00, container_oz: 96, product_oz_per_finished_gallon_at_standard_rate: 1.0, product_oz_per_finished_gallon_at_high_rate: 2.0 },
+        },
+      }) },
       { config_key: 'onetime_boracare', name: 'Bora-Care Constants', category: 'one_time', sort_order: 7, data: JSON.stringify({ bc_gal: 91.98, bc_cov: 275, bc_equip: 17.50 }) },
-      { config_key: 'onetime_preslab', name: 'Pre-Slab Termidor', category: 'one_time', sort_order: 8, data: JSON.stringify({ ps_btl: 174.72, ps_cov: 1250, ps_equip: 15, warranty_extended: 206 }) },
+      { config_key: 'onetime_preslab', name: 'Pre-Slab Termiticide Treatment', category: 'one_time', sort_order: 8, data: JSON.stringify({
+        default_product_key: 'termidor_sc',
+        ps_equip: 15,
+        warranty_extended: 200,
+        volume_discounts: { none: 1.00, '5plus': 0.90, '10plus': 0.85 },
+        products: {
+          termidor_sc: { container_cost: 174.72, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.45, floor_before_volume_discount: 600, floor_after_volume_discount: 500 },
+          taurus_sc: { container_cost: 95.00, container_oz: 78, product_oz_per_10_sqft: 0.8, margin_divisor: 0.45, floor_before_volume_discount: 600, floor_after_volume_discount: 500 },
+          bifen_it: { container_cost: 41.53, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.45, floor_before_volume_discount: 600, floor_after_volume_discount: 500 },
+          talstar_p: { container_cost: 38.99, container_oz: 128, product_oz_per_10_sqft: 1.0, margin_divisor: 0.45, floor_before_volume_discount: 600, floor_after_volume_discount: 500 },
+        },
+      }) },
       { config_key: 'onetime_exclusion', name: 'Exclusion Point Pricing + Access Multipliers', category: 'one_time', sort_order: 9, data: JSON.stringify({ simple: 50, moderate: 95, advanced: 195, specialty_minimum: 275, inspection: 125, inspection_waived_with_service_optin: true, minimums_by_home_sqft: [{max_sqft:1500,minimum:395},{max_sqft:2500,minimum:595},{max_sqft:4000,minimum:895},{max_sqft:'Infinity',minimum:1295,custom_recommended:true}], story_multipliers: { one: 1.00, two: 1.15, three: 1.30 }, roof_multipliers: { shingle: 1.00, flat: 1.00, metal: 1.15, tile: 1.25, steep_or_fragile: 1.35 }, construction_multipliers: { block: 1.00, stucco: 1.05, frame: 1.10, mixed: 1.10 } }) },
       { config_key: 'onetime_flea', name: 'Flea Treatment', category: 'one_time', sort_order: 10, data: JSON.stringify({ initial: { base: 225, floor: 185 }, followUp: { base: 125, floor: 95 }, exterior: { enabled: true, maxSqFt: 20000, tiers: [{ min: 1, max: 2500, initial: 55, followUp: 35 }, { min: 2501, max: 5000, initial: 75, followUp: 45 }, { min: 5001, max: 7500, initial: 95, followUp: 60 }, { min: 7501, max: 10000, initial: 115, followUp: 75 }, { min: 10001, max: 15000, initial: 155, followUp: 100 }, { min: 15001, max: 20000, initial: 195, followUp: 125 }] } }) },
       { config_key: 'onetime_bed_bug', name: 'Bed Bug Specialty Pricing', category: 'one_time', sort_order: 11, data: JSON.stringify(BED_BUG), description: 'Complete bed bug specialty pricing protocol: chemical/IPM, heat, hybrid, risk modifiers, and heat protocol fields.' },
 
       // WaveGuard discount caps & ACH
-      { config_key: 'waveguard_discount_caps', name: 'Service Discount Caps', category: 'waveguard', sort_order: 12, data: JSON.stringify({ lawn_care_enhanced: 0.15, lawn_care_premium: 0.15, rodent_bait: 0, palm_injection: 0, bed_bug_chemical: 0, bed_bug_heat: 0, bora_care: 0, pre_slab_termidor: 0, composite_cap: 0.25 }) },
+      { config_key: 'waveguard_discount_caps', name: 'Service Discount Caps', category: 'waveguard', sort_order: 12, data: JSON.stringify({ lawn_care_enhanced: 0.15, lawn_care_premium: 0.15, rodent_bait: 0, palm_injection: 0, bed_bug_chemical: 0, bed_bug_heat: 0, bora_care: 0, pre_slab_termiticide: 0, pre_slab_termidor: 0, composite_cap: 0.25 }) },
       { config_key: 'ach_discount', name: 'ACH Payment Discount (retired)', category: 'waveguard', sort_order: 13, data: JSON.stringify({ percentage: 0, exempt_from_composite_cap: true, payment_method: 'us_bank_account', note: 'Retired — card surcharge now applied at checkout' }) },
     ];
     for (const c of configs) { await db('pricing_config').insert(c).onConflict('config_key').ignore(); }

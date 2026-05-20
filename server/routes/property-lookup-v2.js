@@ -1592,6 +1592,13 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Specialty
   if (sel.has('TRENCHING')) {
     services.trenching = {
+      productKey: o.trenchingProductKey || o.trenchingTermiticideProductKey || o.productKey || 'taurus_sc',
+      applicationRate: o.trenchingApplicationRate || o.applicationRate || 'standard',
+      trenchDepthFt: o.trenchingDepthFt || o.trenchDepthFt || 1.0,
+      concreteVolumePadPct: o.trenchingConcreteVolumePadPct || o.concreteVolumePadPct,
+      warrantyTier: o.trenchingWarrantyTier || o.warrantyTier || 'one_year_retreat',
+      labelConfirmed: o.trenchingLabelConfirmed === true || o.labelConfirmed === true ||
+        o.trenchingLabelConfirmed === 'true' || o.labelConfirmed === 'true',
       measurements: trenchingMeasurements,
       allowComputedPerimeterFromFootprint: !!o.trenchingEstimateFromFootprint,
     };
@@ -1603,12 +1610,15 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('PRESLAB')) {
-    services.preSlab = {
+    services.preSlabTermiticide = {
+      productKey: o.preslabProductKey || o.preSlabProductKey || o.productKey || 'termidor_sc',
       slabSqFt: o.preslabSqft,
       measurements: preSlabMeasurements,
       volumeDiscount: o.preslabVolume && o.preslabVolume !== 'NONE' ? o.preslabVolume.toLowerCase() : 'none',
       warranty: o.preslabWarranty || 'BASIC',
       includeWarrantyExtended: !!o.includePreSlabWarrantyExtended || o.preslabWarranty === 'EXTENDED',
+      labelConfirmed: o.preslabLabelConfirmed === true || o.preSlabLabelConfirmed === true ||
+        o.preslabLabelConfirmed === 'true' || o.preSlabLabelConfirmed === 'true',
     };
   }
   if (sel.has('FOAM')) {

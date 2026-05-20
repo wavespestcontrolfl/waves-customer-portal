@@ -63,6 +63,11 @@ const SERVICE_MAP = {
     serviceTypes: ['Pre-Slab Termidor', 'Termidor Trench'],
     areaField: 'homeSqFt',
   },
+  pre_slab_termiticide: {
+    label: 'Pre-Slab Termiticide Treatment',
+    serviceTypes: ['Pre-Slab Termiticide Treatment', 'Pre-Slab Termidor', 'Termidor Trench'],
+    areaField: 'homeSqFt',
+  },
   trenching: {
     label: 'Termidor Trench',
     serviceTypes: ['Termidor Trench', 'Termite Trench'],

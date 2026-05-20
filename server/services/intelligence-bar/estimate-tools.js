@@ -47,10 +47,10 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
         footprintSqFt: { type: 'number', description: 'Optional termite bait footprint sqft override' },
         perimeterLF: { type: 'number', description: 'Optional trenching/termite perimeter linear-foot override' },
         atticSqFt: { type: 'number', description: 'Optional Bora-Care attic/raw wood sqft override' },
-        slabSqFt: { type: 'number', description: 'Optional Pre-Slab Termidor slab sqft override' },
+        slabSqFt: { type: 'number', description: 'Optional Pre-Slab Termiticide slab sqft override' },
         services: {
           type: 'object',
-              description: 'Which services to include. Each key optional. Pest: { frequency: "quarterly"|"bimonthly"|"monthly" }. Lawn: { track: "st_augustine"|"bermuda"|"zoysia"|"bahia", tier: "basic"|"enhanced"|"premium" }. Mosquito: { tier: "seasonal9"|"monthly12" }. Termite bait: { system, monitoringTier, measurements: { footprintSqFt, perimeterLF } }. Trenching: { measurements: { perimeterLF, concreteLF, dirtLF, concretePct } }. Bora-Care: { measurements: { atticSqFt } }. Pre-Slab: { measurements: { slabSqFt }, volumeDiscount, includeWarrantyExtended }.',
+              description: 'Which services to include. Each key optional. Pest: { frequency: "quarterly"|"bimonthly"|"monthly" }. Lawn: { track: "st_augustine"|"bermuda"|"zoysia"|"bahia", tier: "basic"|"enhanced"|"premium" }. Mosquito: { tier: "seasonal9"|"monthly12" }. Termite bait: { system, monitoringTier, measurements: { footprintSqFt, perimeterLF } }. Trenching: { productKey, applicationRate, trenchDepthFt, warrantyTier, labelConfirmed, measurements: { perimeterLF, concreteLF, dirtLF, concretePct } }. Bora-Care: { measurements: { atticSqFt } }. Pre-Slab Termiticide: { productKey, measurements: { slabSqFt }, volumeDiscount, includeWarrantyExtended, labelConfirmed }.',
           properties: {
             pest: { type: 'object' },
             lawn: { type: 'object' },
@@ -60,6 +60,7 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
             termiteBait: { type: 'object' },
             trenching: { type: 'object' },
             boraCare: { type: 'object' },
+            preSlabTermiticide: { type: 'object' },
             preSlabTermidor: { type: 'object' },
             rodent: { type: 'object' },
           },

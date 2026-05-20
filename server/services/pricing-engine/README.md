@@ -264,7 +264,7 @@ Qualifies off count of **qualifying recurring services** bundled together:
 - `rodent_bait` — no WaveGuard credit, coupon, setup credit, discount, or tier benefit
 - `palm_injection` — $10/palm/year credit (Gold+ only), applied after billable annual pricing and capped at net $0
 - `bed_bug`, `bed_bug_chemical`, `bed_bug_heat` — excluded from all blanket recurring-customer bed bug discounts; no flat credit
-- `bora_care`, `pre_slab_termidor` — fully excluded, no discount
+- `bora_care`, `pre_slab_termiticide`, `pre_slab_termidor` — fully excluded, no discount
 - `german_roach_initial` — excluded to avoid double-dip with baked urgency/rc
 
 **Recurring customer perk on one-time services:** flat 15% off. Does NOT stack with tier discount (recurring lines get tier; one-time lines get this perk; no line sees both). Bora-Care and pre-slab Termidor excluded from this perk too.
