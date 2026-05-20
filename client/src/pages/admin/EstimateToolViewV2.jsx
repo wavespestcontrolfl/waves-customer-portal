@@ -71,6 +71,46 @@ function fleaExteriorSourceLabel(source) {
   return FLEA_EXTERIOR_SOURCE_OPTIONS.find((option) => option.value === source)?.label || "Unknown";
 }
 
+const AI_SOURCE_LABELS = {
+  claude: "Claude",
+  openai: "ChatGPT",
+  gemini: "Gemini",
+};
+
+function normalizeAiSources(sources) {
+  const raw = Array.isArray(sources)
+    ? sources
+    : typeof sources === "string"
+      ? sources.split(/[+,]/)
+      : [];
+  return raw
+    .map((source) => String(source || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function formatAiSources(sources) {
+  return normalizeAiSources(sources)
+    .map((source) => AI_SOURCE_LABELS[source] || source)
+    .join(" + ");
+}
+
+function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } = {}) {
+  const normalizedSources = normalizeAiSources(sources);
+  const warnings = [];
+  if (!normalizedSources.includes("openai")) {
+    const openaiError = errors.find((error) => error?.source === "openai");
+    const openaiStatus = providerStatus.openai;
+    if (openaiError?.message) {
+      warnings.push(`ChatGPT skipped: ${openaiError.message}`);
+    } else if (openaiStatus === false || openaiStatus?.configured === false) {
+      warnings.push("ChatGPT skipped: OPENAI_API_KEY is not configured");
+    } else if (openaiStatus?.available === false) {
+      warnings.push("ChatGPT skipped: OpenAI returned no usable analysis");
+    }
+  }
+  return warnings;
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
@@ -2065,6 +2105,9 @@ export default function EstimateToolViewV2({
       }
 
       if (data.satellite) {
+        const aiSources = normalizeAiSources(
+          data.aiAnalysis?.aiSources || data.aiAnalysis?._sources,
+        );
         setSatelliteData({
           imageUrl: data.satellite.closeUrl,
           microCloseUrl: data.satellite.microCloseUrl,
@@ -2073,7 +2116,12 @@ export default function EstimateToolViewV2({
           closeUrl: data.satellite.closeUrl,
           wideUrl: data.satellite.wideUrl,
           inServiceArea: data.satellite.inServiceArea,
-          aiSources: data.aiAnalysis?._sources,
+          aiSources,
+          aiWarnings: buildAiProviderWarnings({
+            sources: aiSources,
+            errors: data.errors || [],
+            providerStatus: data.meta?.providerStatus?.satelliteVision,
+          }),
         });
       }
 
@@ -2146,7 +2194,18 @@ export default function EstimateToolViewV2({
         return;
       }
 
-      setSatelliteData(data);
+      const aiSources = normalizeAiSources(
+        data.aiSources || data._sources || data.source,
+      );
+      setSatelliteData({
+        ...data,
+        aiSources,
+        aiWarnings: buildAiProviderWarnings({
+          sources: aiSources,
+          errors: data.errors || [],
+          providerStatus: data.providerStatus,
+        }),
+      });
 
       const upd = {};
       if (data.lot_sqft) upd.lotSqFt = String(Math.round(data.lot_sqft));
@@ -3129,12 +3188,17 @@ export default function EstimateToolViewV2({
                         </div>
                       )}
                     </div>
-                    {satelliteData.aiSources && (
+                    {satelliteData.aiSources?.length > 0 && (
                       <div className="text-11 text-ink-secondary mb-1">
-                        AI Analysis: {satelliteData.aiSources.join(" + ")}{" "}
+                        AI Analysis: {formatAiSources(satelliteData.aiSources)}{" "}
                         {satelliteData.aiSources.length > 1
                           ? "(multi-model)"
                           : ""}
+                      </div>
+                    )}
+                    {satelliteData.aiWarnings?.length > 0 && (
+                      <div className="text-11 text-alert-fg mb-1">
+                        {satelliteData.aiWarnings.join(" ")}
                       </div>
                     )}
                     {satelliteData.fieldVerify?.length > 0 && (

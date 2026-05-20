@@ -15,7 +15,6 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
@@ -101,6 +100,12 @@ class SatelliteAnalyzer {
       imageUrl,
       microCloseUrl,
       lat, lng,
+      aiSources: merged.aiSources || merged._sources || merged.source?.split('+') || [],
+      providerStatus: {
+        claude: { configured: !!process.env.ANTHROPIC_API_KEY, available: !!claude },
+        openai: { configured: !!process.env.OPENAI_API_KEY, available: !!openai },
+        gemini: { configured: !!GEMINI_KEY, available: !!gemini },
+      },
       models: {
         claude: claude ? { available: true, raw: claude } : { available: false },
         openai: openai ? { available: true, raw: openai } : { available: false },
@@ -142,14 +147,17 @@ class SatelliteAnalyzer {
   }
 
   async analyzeWithOpenAI(imageBase64s) {
-    if (!OPENAI_KEY) return null;
+    if (!process.env.OPENAI_API_KEY) {
+      logger.info('OpenAI vision skipped: OPENAI_API_KEY not set');
+      return null;
+    }
 
     try {
       const response = await fetch(OPENAI_RESPONSES_API, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${OPENAI_KEY}`,
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         },
         body: JSON.stringify({
           model: OPENAI_VISION_MODEL,
@@ -297,7 +305,9 @@ class SatelliteAnalyzer {
     merged.agreementPct = agreePct;
     merged.fieldVerify = fieldVerify;
     merged.confidenceDetails = confidenceDetails;
-    merged.source = providerResults.map((r) => r.provider).join('+');
+    merged.aiSources = providerResults.map((r) => r.provider);
+    merged._sources = merged.aiSources;
+    merged.source = merged.aiSources.join('+');
 
     return merged;
   }
