@@ -663,6 +663,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('bookingState.isReserving = true;');
     expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
     expect(html).toContain("toast('Choose a payment setup first.')");
+    expect(html).toContain('const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;');
   });
 
   test('server-rendered slot selection ignores clicks while a reservation is in flight', () => {
@@ -1407,6 +1408,9 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
     expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total>$219.60</strong></div>');
+    expect(html).toContain('data-first-visit-copy-total>$219.60</span>');
+    expect(html).toContain("document.querySelectorAll('[data-first-visit-copy-total]')");
+    expect(html).not.toContain('data-first-visit-grand-total');
     expect(html).toContain('let firstVisitTotal = 0;');
     expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}');
     expect(html).not.toContain('.payment-summary-row.total strong');
@@ -1508,12 +1512,14 @@ describe('public estimate one-time breakdown', () => {
     expect(html.match(/WaveGuard Membership Setup/g)).toHaveLength(2);
     expect(html).toContain('Pay the 12-month plan in full');
     expect(html).toContain('we send one prepay invoice after approval and waive the setup.');
-    expect(html).toContain('Net setup fee: $0');
+    expect(html).not.toContain('Net setup fee: $0');
     expect(html).toContain('<strong><s>$99</s> $0</strong>');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
     expect(html).not.toContain('<strong>-$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
     expect(html).toContain('data-prepay-membership-due="0">$660</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-membership-due="0">$660</span>');
+    expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
     expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 660;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
     expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.");
@@ -1580,6 +1586,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="palm_injection"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="rodent_bait"');
+    expect(html).toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).toContain('data-estimate-ask-prompt="When am I charged?"');
   });
 
   test('v1 pricing bundle includes separate palm and rodent bait rows without tier discount', async () => {
