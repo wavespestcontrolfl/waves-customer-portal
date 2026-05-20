@@ -2578,6 +2578,14 @@ describe('public estimate one-time breakdown', () => {
     expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10')).toBe(false);
   });
 
+  test('preview user agents suppress first-view customer side effects', () => {
+    const req = {
+      headers: { 'user-agent': 'Slackbot-LinkExpanding 1.0' },
+    };
+
+    expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10')).toBe(false);
+  });
+
   test('normal public requests still apply first-view customer side effects', () => {
     const req = { headers: {} };
 

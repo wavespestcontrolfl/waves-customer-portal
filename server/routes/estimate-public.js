@@ -52,16 +52,19 @@ const ESTIMATE_ASK_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 // View-count hygiene. We surface view_count + last_viewed_at on the admin
 // estimates dashboard, so the count needs to mean "the customer opened it"
 // — not "iMessage unfurled the link" or "Virginia previewed it from the
-// office." Two filters, applied to BOTH the view_count increment and the
+// office." Three filters, applied to BOTH the view_count increment and the
 // per-open estimate_views insert:
 //   1. UA allowlist: drop anything whose user-agent matches a known bot /
 //      preview / scanner / CLI client (shared with public-shortlinks via
 //      utils/bot-ua so the shortlink click counter applies the same rules).
 //   2. Admin marker cookie: a long-lived signed JWT set by /api/admin/auth
 //      on every login + /me. Per-device, per-browser; survives network
-//      changes. Replaces the old WAVES_ADMIN_IPS env-var allowlist.
+//      changes.
+//   3. Admin IP allowlist: legacy WAVES_ADMIN_IPS support for office/network
+//      previews that do not carry the marker cookie.
 // First-view side-effects (status flip, office SMS, admin notification)
-// have their own gating downstream and are unaffected.
+// use the same gate; a filtered preview must not make the estimate look
+// customer-opened.
 const { isBotUserAgent } = require('../utils/bot-ua');
 
 function clientIp(req) {
@@ -92,14 +95,20 @@ function hasAdminMarker(req) {
   } catch { return false; }
 }
 
-function shouldCountView(req) {
-  if (isBotUserAgent(req.get('user-agent'))) return false;
+function requestUserAgent(req) {
+  if (typeof req?.get === 'function') return req.get('user-agent');
+  return req?.headers?.['user-agent'] || req?.headers?.['User-Agent'] || '';
+}
+
+function shouldCountView(req, ip) {
+  if (isBotUserAgent(requestUserAgent(req))) return false;
   if (hasAdminMarker(req)) return false;
+  if (isAdminIp(ip)) return false;
   return true;
 }
 
 function shouldApplyFirstViewSideEffects(req, ip) {
-  return !hasAdminMarker(req) && !isAdminIp(ip);
+  return shouldCountView(req, ip);
 }
 
 function hashEstimateToken(token) {
@@ -3180,7 +3189,7 @@ async function handleEstimateView(req, res, next) {
     // IPs are filtered upstream by shouldCountView so the dashboard count
     // reflects actual customer opens.
     const requestIp = clientIp(req);
-    const countThisView = shouldCountView(req);
+    const countThisView = shouldCountView(req, requestIp);
     if (countThisView) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
@@ -4321,13 +4330,13 @@ router.put('/:token/decline', async (req, res, next) => {
 // =========================================================================
 // Same-origin auth model as the HTML handler: token is the only gate.
 // Ported view-side-effects:
-//   - view_count++ + last_viewed_at + estimate_views row: ALWAYS on every
-//     200 (React refetches count as views; rate limit + per-open log
-//     together make this noisy-but-safe)
+//   - view_count++ + last_viewed_at + estimate_views row: every real customer
+//     200. Bot scanners, link previews, admin-cookie previews, and admin IPs
+//     are filtered out.
 //   - First-view transition (status='draft' → 'viewed', viewed_at stamp,
 //     office SMS, admin notification): fires only when viewed_at IS NULL
-//     AND request IP isn't in the admin allowlist. Keeps Virginia's
-//     preview clicks from triggering "customer just opened" alerts.
+//     AND the request passes the same real-customer-view gate. Keeps preview
+//     clicks from triggering "customer just opened" alerts.
 //
 // Admin allowlist: WAVES_ADMIN_IPS env var, comma-separated. Unset =
 // fire-for-everyone (fail open — matches current HTML behavior).
@@ -5491,7 +5500,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // drift on estimate_views or a locked row shouldn't break the
     // customer-facing endpoint.
     const ip = extractRequestIp(req);
-    if (shouldCountView(req)) {
+    if (shouldCountView(req, ip)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
