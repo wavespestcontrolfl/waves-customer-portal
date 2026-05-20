@@ -517,7 +517,7 @@ router.post('/sends/:id/resume', async (req, res) => {
     if (!send) return res.status(404).json({ error: 'not found' });
 
     const prepared = await NewsletterSender.prepareResumeCampaign(req.params.id);
-    NewsletterSender.sendCampaign(prepared.sendId, {
+    void NewsletterSender.sendCampaign(prepared.sendId, {
       force: true,
       preserveSentAt: true,
       existingDeliveriesOnly: prepared.existingDeliveriesOnly,
