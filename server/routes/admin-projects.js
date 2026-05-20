@@ -29,6 +29,7 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const { wrapEmail, formatDate, plainText } = require('../services/email-template');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1345,7 +1346,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
             lines,
             ctaHref: reportUrl,
             ctaLabel: 'View report',
-            footerNote: 'Questions? Reply to this email or call (941) 297-5749.',
+            footerNote: `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
           });
           const text = plainText([
             `Hi ${firstName},`,
@@ -1361,7 +1362,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
             fullAddress ? `Property: ${fullAddress}` : null,
             `View report: ${reportUrl}`,
             '',
-            'Questions? Reply to this email or call (941) 297-5749.',
+            `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
             '— Waves Pest Control',
           ]);
           const result = await sendgrid.sendOne({
