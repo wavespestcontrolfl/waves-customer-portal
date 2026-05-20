@@ -161,6 +161,49 @@ async function persistScore(knex, payload) {
   return inserted;
 }
 
+/**
+ * Update the active config for the given scope. Caller must have already
+ * called validateConfig and confirmed it's valid. Returns the row that
+ * was actually persisted so the route layer can return it to the client
+ * and pass it (with the previous row) to the audit helper.
+ *
+ * Stores the camelCase config back as snake_case jsonb columns.
+ */
+async function updateActiveConfig(knex, { scope = 'global', updatedBy = null, config }) {
+  if (!config || typeof config !== 'object') {
+    throw new TypeError('updateActiveConfig: config is required');
+  }
+  const row = {
+    enabled: Boolean(config.enabled),
+    show_on_customer_report: Boolean(config.showOnCustomerReport),
+    show_how_calculated: Boolean(config.showHowCalculated),
+    show_component_breakdown_to_customer: Boolean(config.showComponentBreakdownToCustomer),
+    missing_data_behavior: config.missingDataBehavior,
+    minimum_data_required: JSON.stringify(config.minimumDataRequired || {}),
+    allow_manual_override: Boolean(config.allowManualOverride),
+    allow_technician_client_rating_entry: Boolean(config.allowTechnicianClientRatingEntry),
+    weights: JSON.stringify(config.weights),
+    labels: JSON.stringify(config.labels),
+    trend_thresholds: JSON.stringify(config.trendThresholds),
+    service_frequency_windows: JSON.stringify(config.serviceFrequencyWindows),
+    client_question_text: JSON.stringify(config.clientQuestionText),
+    customer_explanation_text: config.customerExplanationText,
+    calculation_version: config.calculationVersion,
+    updated_by: updatedBy || null,
+    updated_at: knex.fn.now(),
+  };
+
+  const existing = await knex('pest_pressure_configs').where({ scope }).first('id');
+  if (existing) {
+    await knex('pest_pressure_configs').where({ id: existing.id }).update(row);
+    return knex('pest_pressure_configs').where({ id: existing.id }).first(CONFIG_COLUMNS).then(rowToConfig);
+  }
+  const [inserted] = await knex('pest_pressure_configs')
+    .insert({ ...row, scope, created_by: updatedBy || null })
+    .returning(CONFIG_COLUMNS);
+  return rowToConfig(inserted);
+}
+
 async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12 } = {}) {
   const q = knex('pest_pressure_scores')
     .where('customer_id', customerId)
@@ -178,6 +221,7 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
 
 module.exports = {
   loadActiveConfig,
+  updateActiveConfig,
   loadPreviousScore,
   loadScoreForServiceRecord,
   persistScore,
