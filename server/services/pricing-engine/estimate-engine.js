@@ -134,6 +134,9 @@ function generateEstimate(input) {
     stories: input.stories,
     storiesSource: input.storiesSource,
     lotSqFt: input.lotSqFt,
+    footprintSqFt: input.footprintSqFt ?? input.footprint,
+    buildingSqFt: input.buildingSqFt,
+    livingAreaSqFt: input.livingAreaSqFt,
     lawnSqFt: input.lawnSqFt,
     measuredTurfSf: input.measuredTurfSf,
     estimatedTurfSf: input.estimatedTurfSf,
@@ -226,9 +229,8 @@ function generateEstimate(input) {
       // booked with a non-none roach type. Recovers the heavier visit-1 cost
       // upfront — replaces the old multiplicative roachModifier (now zeroed)
       // which only paid back if the customer stayed past visit ~3.
-      const roachTypeRaw = (services.pest.roachType || 'none').toLowerCase();
-      if (roachTypeRaw !== 'none') {
-        const initialRoach = pricePestInitialRoach(property, { roachType: roachTypeRaw });
+      if (result.roachType && result.roachType !== 'none') {
+        const initialRoach = pricePestInitialRoach(property, { roachType: result.roachType });
         if (initialRoach) lineItems.push(initialRoach);
       }
     }
@@ -442,7 +444,7 @@ function generateEstimate(input) {
     lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
   if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control')) {
-    const result = priceWDO(property.footprint);
+    const result = priceWDO(property);
     lineItems.push(result);
   }
   if ((services.flea || services.fleaExterior) && !useCommercialManualQuote(services.flea || services.fleaExterior, 'pest_control')) {

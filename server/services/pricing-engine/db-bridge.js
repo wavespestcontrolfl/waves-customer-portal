@@ -37,6 +37,182 @@ function mergePlainObject(target, value) {
   Object.assign(target, value);
 }
 
+function isFiniteNumber(value) {
+  return Number.isFinite(Number(value));
+}
+
+function isPositiveNumber(value) {
+  return isFiniteNumber(value) && Number(value) > 0;
+}
+
+function isNonNegativeNumber(value) {
+  return isFiniteNumber(value) && Number(value) >= 0;
+}
+
+function validateSortedBrackets(errors, name, rows, key, valueKey, options = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    errors.push(`${name} must contain at least one bracket`);
+    return;
+  }
+  let previous = -Infinity;
+  rows.forEach((row, index) => {
+    const rawBound = row?.[key];
+    const bound = rawBound === Infinity || rawBound === 'Infinity' || rawBound === null
+      ? Infinity
+      : Number(rawBound);
+    if (!(Number.isFinite(bound) || (options.allowTerminalInfinity && bound === Infinity))) {
+      errors.push(`${name}[${index}].${key} must be finite${options.allowTerminalInfinity ? ' or terminal Infinity' : ''}`);
+    }
+    if (bound < previous) errors.push(`${name} must be sorted ascending`);
+    previous = bound;
+    if (!isFiniteNumber(row?.[valueKey])) errors.push(`${name}[${index}].${valueKey} must be finite`);
+  });
+  if (options.requireTerminalInfinity) {
+    const last = rows[rows.length - 1]?.[key];
+    if (!(last === Infinity || last === 'Infinity' || last === null)) {
+      errors.push(`${name} must end with Infinity`);
+    }
+  }
+}
+
+function validatePestPricingConfig(snapshot = constants) {
+  const errors = [];
+  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG } = snapshot;
+
+  if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
+  if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
+  if (!isNonNegativeNumber(PEST.initialFee)) errors.push('PEST.initialFee must be non-negative');
+  validateSortedBrackets(errors, 'PEST.footprintBrackets', PEST.footprintBrackets, 'sqft', 'adj');
+
+  for (const [key, value] of Object.entries(PEST.additionalAdjustments || {})) {
+    if (!isFiniteNumber(value)) errors.push(`PEST.additionalAdjustments.${key} must be finite`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(PEST.additionalAdjustments || {}, 'attachedGarage')) {
+    errors.push('PEST.additionalAdjustments.attachedGarage is required');
+  }
+  for (const [key, value] of Object.entries(PROPERTY_TYPE_ADJ || {})) {
+    if (!isFiniteNumber(value)) errors.push(`PROPERTY_TYPE_ADJ.${key} must be finite`);
+  }
+  for (const version of ['v1', 'v2']) {
+    for (const frequency of ['quarterly', 'bimonthly', 'monthly']) {
+      if (!isFiniteNumber(PEST.frequencyDiscounts?.[version]?.[frequency])) {
+        errors.push(`PEST.frequencyDiscounts.${version}.${frequency} is required`);
+      }
+    }
+  }
+  for (const frequency of ['quarterly', 'bimonthly', 'monthly']) {
+    if (!isPositiveNumber(PEST.frequencies?.[frequency])) errors.push(`PEST.frequencies.${frequency} must be positive`);
+  }
+  for (const type of ['german', 'regular', 'none']) {
+    if (!isFiniteNumber(PEST.roachModifier?.[type])) errors.push(`PEST.roachModifier.${type} must be finite`);
+  }
+  for (const scale of ['regular', 'german', 'regular_standalone']) {
+    validateSortedBrackets(errors, `PEST.pestInitialRoach.${scale}`, PEST.pestInitialRoach?.[scale], 'sqft', 'price', {
+      allowTerminalInfinity: true,
+      requireTerminalInfinity: true,
+    });
+  }
+  const diag = PEST.productionDiagnostics || {};
+  for (const key of ['baseStopMinutes', 'manualReviewLotSqFt', 'lowConfidenceLotSqFt', 'manualReviewMinutes', 'lowConfidenceMinutes']) {
+    if (!isPositiveNumber(diag[key])) errors.push(`PEST.productionDiagnostics.${key} must be positive`);
+  }
+
+  if (!isPositiveNumber(ONE_TIME.pest?.multiplier)) errors.push('ONE_TIME.pest.multiplier must be positive');
+  if (!isPositiveNumber(ONE_TIME.pest?.floor)) errors.push('ONE_TIME.pest.floor must be positive');
+
+  const germanRoach = SPECIALTY.germanRoach || {};
+  if (!isPositiveNumber(germanRoach.base)) errors.push('SPECIALTY.germanRoach.base must be positive');
+  if (!isPositiveNumber(germanRoach.floor)) errors.push('SPECIALTY.germanRoach.floor must be positive');
+  if (!isNonNegativeNumber(germanRoach.setupCharge)) errors.push('SPECIALTY.germanRoach.setupCharge must be non-negative');
+  if (!Array.isArray(germanRoach.footprintAdj) || germanRoach.footprintAdj.length === 0) {
+    errors.push('SPECIALTY.germanRoach.footprintAdj is required');
+  }
+
+  if (!Array.isArray(BED_BUG.allowedMethods) || !BED_BUG.allowedMethods.includes('HYBRID')) {
+    errors.push('BED_BUG.allowedMethods must include HYBRID');
+  }
+  if (BED_BUG.recurringDiscountEligible !== false || Number(BED_BUG.maxRecurringDiscountPct) !== 0) {
+    errors.push('BED_BUG must remain excluded from recurring discounts');
+  }
+
+  const flea = SPECIALTY.flea || {};
+  if (!isPositiveNumber(flea.initial?.base) || !isPositiveNumber(flea.initial?.floor)) {
+    errors.push('SPECIALTY.flea.initial base/floor must be positive');
+  }
+  if (!isPositiveNumber(flea.followUp?.base) || !isPositiveNumber(flea.followUp?.floor)) {
+    errors.push('SPECIALTY.flea.followUp base/floor must be positive');
+  }
+  validateSortedBrackets(errors, 'SPECIALTY.flea.exterior.tiers', flea.exterior?.tiers, 'max', 'initial');
+
+  const wasp = SPECIALTY.wasp || {};
+  if (!Array.isArray(wasp.tiers) || wasp.tiers.some(v => !isPositiveNumber(v))) {
+    errors.push('SPECIALTY.wasp.tiers must be positive');
+  }
+  for (const [key, value] of Object.entries(wasp.removal || {})) {
+    if (!isNonNegativeNumber(value)) errors.push(`SPECIALTY.wasp.removal.${key} must be non-negative`);
+  }
+
+  validateSortedBrackets(errors, 'SPECIALTY.wdo.brackets', SPECIALTY.wdo?.brackets, 'maxSqFt', 'price', {
+    allowTerminalInfinity: true,
+    requireTerminalInfinity: true,
+  });
+
+  const exclusion = SPECIALTY.exclusion || {};
+  for (const [key, value] of Object.entries(exclusion.perPoint || {})) {
+    if (!isPositiveNumber(value)) errors.push(`SPECIALTY.exclusion.perPoint.${key} must be positive`);
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+function assertValidPestPricingConfig(snapshot = constants) {
+  const result = validatePestPricingConfig(snapshot);
+  if (!result.valid) {
+    throw new Error(`Invalid pest pricing config: ${result.errors.join('; ')}`);
+  }
+  return result;
+}
+
+function clonePricingObject(value) {
+  return typeof structuredClone === 'function'
+    ? structuredClone(value)
+    : JSON.parse(JSON.stringify(value));
+}
+
+function replaceObjectInPlace(target, source) {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, source);
+}
+
+function snapshotPestPricingConfig() {
+  return {
+    PEST: clonePricingObject(constants.PEST),
+    PROPERTY_TYPE_ADJ: clonePricingObject(constants.PROPERTY_TYPE_ADJ),
+    oneTimePest: clonePricingObject(constants.ONE_TIME.pest),
+    germanRoach: clonePricingObject(constants.SPECIALTY.germanRoach),
+    bedBugSpecialty: clonePricingObject(constants.SPECIALTY.bedBug),
+    bedBug: clonePricingObject(constants.BED_BUG),
+    flea: clonePricingObject(constants.SPECIALTY.flea),
+    wasp: clonePricingObject(constants.SPECIALTY.wasp),
+    wdo: clonePricingObject(constants.SPECIALTY.wdo),
+    exclusion: clonePricingObject(constants.SPECIALTY.exclusion),
+  };
+}
+
+function restorePestPricingConfig(snapshot) {
+  if (!snapshot) return;
+  replaceObjectInPlace(constants.PEST, snapshot.PEST);
+  replaceObjectInPlace(constants.PROPERTY_TYPE_ADJ, snapshot.PROPERTY_TYPE_ADJ);
+  replaceObjectInPlace(constants.ONE_TIME.pest, snapshot.oneTimePest);
+  replaceObjectInPlace(constants.SPECIALTY.germanRoach, snapshot.germanRoach);
+  replaceObjectInPlace(constants.SPECIALTY.bedBug, snapshot.bedBugSpecialty);
+  replaceObjectInPlace(constants.BED_BUG, snapshot.bedBug);
+  replaceObjectInPlace(constants.SPECIALTY.flea, snapshot.flea);
+  replaceObjectInPlace(constants.SPECIALTY.wasp, snapshot.wasp);
+  replaceObjectInPlace(constants.SPECIALTY.wdo, snapshot.wdo);
+  replaceObjectInPlace(constants.SPECIALTY.exclusion, snapshot.exclusion);
+}
+
 function syncBedBugPricingConfig(bedBugConfig) {
   if (!bedBugConfig || typeof bedBugConfig !== 'object' || Array.isArray(bedBugConfig)) return;
 
@@ -174,6 +350,7 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 
 async function syncConstantsFromDB(dbInstance) {
   const db = dbInstance || require('../../models/db');
+  let pestSnapshot = null;
 
   try {
     const hasTable = await db.schema.hasTable('pricing_config');
@@ -190,6 +367,7 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
     if (Object.keys(config).length === 0) return false;
+    pestSnapshot = snapshotPestPricingConfig();
 
     // ── Global ───────────────────────────────────────────────
     if (config.global_labor_rate?.value) constants.GLOBAL.LABOR_RATE = config.global_labor_rate.value;
@@ -250,6 +428,7 @@ async function syncConstantsFromDB(dbInstance) {
       if (f.near_water != null) adj.nearWater = f.near_water;
       if (f.large_driveway != null) adj.largeDriveway = f.large_driveway;
       if (f.indoor != null) adj.indoor = r(f.indoor);
+      if (f.attached_garage != null) adj.attachedGarage = r(f.attached_garage);
     }
     if (config.pest_footprint?.breakpoints) {
       constants.PEST.footprintBrackets = config.pest_footprint.breakpoints.map(bp => ({
@@ -729,10 +908,13 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
 
+    assertValidPestPricingConfig(constants);
+
     _lastSync = Date.now();
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
   } catch (err) {
+    restorePestPricingConfig(pestSnapshot);
     console.error('[pricing-engine] DB sync failed, using defaults:', err.message);
     return false;
   }
@@ -746,4 +928,10 @@ function invalidatePricingConfigCache() {
   _lastSync = 0;
 }
 
-module.exports = { syncConstantsFromDB, needsSync, invalidatePricingConfigCache };
+module.exports = {
+  syncConstantsFromDB,
+  needsSync,
+  invalidatePricingConfigCache,
+  validatePestPricingConfig,
+  assertValidPestPricingConfig,
+};
