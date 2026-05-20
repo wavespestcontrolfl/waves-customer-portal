@@ -157,6 +157,11 @@ async function sendLegacyServiceReportEmail({
   try {
     const result = await sendgrid.sendOne({
       to: recipient.email,
+      // Service reports are transactional — name the sender explicitly
+      // instead of inheriting sendgrid-mail's `newsletter@` default, which
+      // was the wrong identity for billing-adjacent customer correspondence.
+      fromEmail: 'contact@wavespestcontrol.com',
+      fromName: 'Waves Pest Control',
       subject: email.subject,
       html: email.html,
       text: email.text,

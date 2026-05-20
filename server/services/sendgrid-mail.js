@@ -70,6 +70,13 @@ async function apiCall(method, path, body) {
   return parsed;
 }
 
+// Last-resort default — every caller SHOULD pass `fromEmail` explicitly
+// so the sender identity is a deliberate choice per send-stream
+// (transactional `contact@`, newsletter `newsletter@`, automation
+// `automations@`, etc.) rather than whatever this fallback happens to
+// be. Falling through to `newsletter@` for transactional sends was the
+// drift this audit (I2) cleaned up; the default is kept only so a
+// caller that genuinely doesn't care still produces a valid envelope.
 function defaultFrom(overrideEmail, overrideName) {
   return {
     email: overrideEmail || process.env.SENDGRID_FROM_EMAIL || 'newsletter@wavespestcontrol.com',
