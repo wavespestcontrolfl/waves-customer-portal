@@ -248,15 +248,26 @@ finding and warns on P1. Reviewers must return JSON matching
   is `config.jwt.secret` (env: `JWT_SECRET`).
 - **Public-by-token routes (no auth, by design).** `/api/pay/:token`,
   `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
-  `/api/public/estimates/:token/ask`, `/api/stripe/webhook`,
-  `/api/twilio/*-webhook`, `/api/bouncie-webhook`, `/api/sendgrid-webhook`,
-  `/api/lead-webhook`. New public routes outside this list are P0.
+  `/api/public/estimates/:token/ask`, `/api/reports/:token/*`,
+  `/api/stripe/webhook`, `/api/twilio/*-webhook`, `/api/bouncie-webhook`,
+  `/api/sendgrid-webhook`, `/api/lead-webhook`. New public routes outside
+  this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
   terminal/expired-estimate rejection, public-route rate limits, no raw
   customer question/answer logging, and estimate-context-only answers.
   Contract links are short-lived bearer tokens for customer e-signature and
   must burn the token when signed.
+  The `/api/reports/:token/*` family uses long-lived report tokens
+  (`report_view_token` on `service_records`, 32-hex format enforced by
+  `FULL_TOKEN_RE`). Writes on this family must: (a) gate state mutations on
+  service_report_v1 + the report-token format check; (b) use atomic
+  conditional updates for one-shot guards (e.g. one-rating-per-report uses
+  `whereNull('client_pest_rating')` + 409 when 0 rows affected); (c) mirror
+  the corresponding read-side eligibility check so a crafted POST can't
+  store state for a report the customer can't see; (d) validate request
+  bodies strictly before `Number()` coercion (raw `null`/`''`/`false`/`[]`
+  must not coerce silently to 0); (e) ride the `reportEventLimiter`.
 - **Receipt token permanence.** `/api/receipt/:token` reuses
   `invoices.token` and never expires or burns — customers share receipt
   links with bookkeepers months later.

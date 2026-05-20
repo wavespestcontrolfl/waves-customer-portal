@@ -6519,7 +6519,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           )}
         </section>
 
-        <PestPressureCard data={data.pestPressure} />
+        {/* Only pass token in live mode so the interactive rating picker
+            doesn't render into generated/cached PDFs (mode === 'pdf' /
+            'static') where the controls would be non-functional anyway. */}
+        <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />
 
         <QuickNavigationAndAsk
           mode={mode}
