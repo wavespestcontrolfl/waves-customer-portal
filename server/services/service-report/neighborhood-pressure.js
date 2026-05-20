@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
-const { customerVisiblePressureIndex } = require('./pressure-index');
+const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 async function buildNeighborhoodPressureContext({ record, knex = db } = {}) {
   if (!record?.id) return undefined;

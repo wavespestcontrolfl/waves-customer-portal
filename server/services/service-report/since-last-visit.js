@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
-const { customerVisiblePressureIndex } = require('./pressure-index');
+const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 function pressureValue(value) {
   const n = customerVisiblePressureIndex(value);

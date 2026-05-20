@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
-const { customerVisiblePressureIndex } = require('./pressure-index');
+const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 const PROMPT_VERSION = 'service_report_premium_experience_v1';
 

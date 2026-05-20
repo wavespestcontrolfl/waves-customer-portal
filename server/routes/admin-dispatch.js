@@ -21,7 +21,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
-const { computePressureIndex } = require('../services/service-report/pressure-index');
+const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
@@ -1684,9 +1684,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
         if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index) {
-          const pressureIndex = await computePressureIndex(record.id, trx);
-          record.pressure_index = pressureIndex;
-          await trx('service_records').where({ id: record.id }).update({ pressure_index: pressureIndex });
+          const pestPressure = await runPestPressureForServiceRecord(record.id, trx);
+          if (pestPressure && pestPressure.result.displayedScore != null) {
+            record.pressure_index = pestPressure.result.displayedScore;
+          }
         }
 
         if (canLinkLawnAssessmentRecord) {
