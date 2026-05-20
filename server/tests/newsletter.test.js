@@ -276,6 +276,25 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       });
     });
 
+    test('processed marks token-matched in-flight resume rows as sent', () => {
+      expect(computeNewsletterEventUpdates(
+        { event: 'processed', send_attempt_token: 'attempt-1' },
+        fresh({ status: 'sending', send_attempt_token: 'attempt-1' }),
+        now,
+      )).toEqual({
+        delivery: { status: 'sent', sent_at: now, updated_at: now },
+        reconcileSendStatus: true,
+      });
+    });
+
+    test('processed ignores in-flight resume rows when attempt token is stale', () => {
+      expect(computeNewsletterEventUpdates(
+        { event: 'processed', send_attempt_token: 'old-attempt' },
+        fresh({ status: 'sending', send_attempt_token: 'new-attempt' }),
+        now,
+      )).toBeNull();
+    });
+
     test('processed stays a no-op after the row is already sent', () => {
       expect(computeNewsletterEventUpdates({ event: 'processed' }, fresh({ status: 'sent' }), now)).toBeNull();
     });

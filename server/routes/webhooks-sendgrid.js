@@ -76,8 +76,13 @@ function deliveryEmailMismatchLogMessage(deliveryId, rowEmail, eventEmail) {
   return `[sendgrid-webhook] delivery_id ${deliveryId} matched but email mismatch (row=${redactEmail(rowEmail)} event=${redactEmail(eventEmail)}) - ignoring`;
 }
 
-function shouldMarkProcessedNewsletterDeliverySent(delivery) {
-  return ['queued', 'failed'].includes(String(delivery?.status || '').toLowerCase());
+function shouldMarkProcessedNewsletterDeliverySent(delivery, ev = {}) {
+  const status = String(delivery?.status || '').toLowerCase();
+  if (['queued', 'failed'].includes(status)) return true;
+  if (status !== 'sending') return false;
+  const rowToken = delivery?.send_attempt_token ? String(delivery.send_attempt_token) : null;
+  const eventToken = ev?.send_attempt_token ? String(ev.send_attempt_token) : null;
+  return !!rowToken && !!eventToken && rowToken === eventToken;
 }
 
 function canUseDeliveryIdFallback(delivery, messageId, attemptToken = null) {
@@ -363,7 +368,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       };
 
     case 'processed':
-      if (shouldMarkProcessedNewsletterDeliverySent(delivery)) {
+      if (shouldMarkProcessedNewsletterDeliverySent(delivery, ev)) {
         return {
           delivery: { status: 'sent', sent_at: now, updated_at: now },
           reconcileSendStatus: true,
