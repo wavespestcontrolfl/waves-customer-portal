@@ -549,6 +549,7 @@ const LOT_SQFT_MAX = 200_000;
 const ACRE_UNIT_RE = /\b(?:acreage|acres?|acs?|ac)\b\.?/i;
 const SQFT_UNIT_RE = /\b(?:sq\.?\s*ft\.?|sqft|square\s*feet|sf)\b\.?/i;
 const LOT_NUMBER_PATTERN = String.raw`(\d+(?:-\d+\s*\/\s*\d+|\s+\d+\s*\/\s*\d+)|\d+\s*\/\s*\d+|(?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)(?:\.\d+)?)`;
+const LOT_NUMBER_PATTERN_RE = new RegExp(`^${LOT_NUMBER_PATTERN}$`, 'i');
 
 // Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
 // or acres ("5.99 Acres Lot", "1/2 acre"). The pricing engine always wants
@@ -587,7 +588,7 @@ function coerceLotSize(raw) {
   let sqft;
   if (hasAcre) sqft = value * SQFT_PER_ACRE;
   else if (hasSqft) sqft = value;
-  else sqft = coerceUnqualifiedLotSqft(value);
+  else sqft = coerceUnqualifiedLotSqft(value, { allowOversizedSqft: isPlainLotNumberString(str) });
   if (sqft == null) return null;
 
   const rounded = Math.round(sqft);
@@ -602,6 +603,10 @@ function coerceUnqualifiedLotSqft(value, options = {}) {
   }
   if (value <= LOT_SQFT_MAX) return value;
   return options.allowOversizedSqft ? value : null;
+}
+
+function isPlainLotNumberString(str) {
+  return LOT_NUMBER_PATTERN_RE.test(String(str || '').trim());
 }
 
 function clampLotSqft(n) {
