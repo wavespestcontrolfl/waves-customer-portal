@@ -588,7 +588,7 @@ function coerceLotSize(raw) {
   let sqft;
   if (hasAcre) sqft = value * SQFT_PER_ACRE;
   else if (hasSqft) sqft = value;
-  else sqft = coerceUnqualifiedLotSqft(value, { allowOversizedSqft: isPlainLotNumberString(str) });
+  else sqft = coerceUnqualifiedLotSqft(value, { allowOversizedSqft: shouldAllowOversizedUnqualifiedLotSqft(str) });
   if (sqft == null) return null;
 
   const rounded = Math.round(sqft);
@@ -607,6 +607,12 @@ function coerceUnqualifiedLotSqft(value, options = {}) {
 
 function isPlainLotNumberString(str) {
   return LOT_NUMBER_PATTERN_RE.test(String(str || '').trim());
+}
+
+function shouldAllowOversizedUnqualifiedLotSqft(str) {
+  const trimmed = String(str || '').trim();
+  if (isPlainLotNumberString(trimmed)) return true;
+  return /\blot\s*size\b/i.test(trimmed) && /\b\d{1,3}(?:,\d{3})+\b/.test(trimmed);
 }
 
 function clampLotSqft(n) {

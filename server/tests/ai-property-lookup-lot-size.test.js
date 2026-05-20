@@ -36,6 +36,7 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('SECTION 22 LOT 13')).toBeNull();
     expect(coerceLotSize('BLOCK 30 LOT 13 AC ADJ REF PLAT')).toBeNull();
     expect(coerceLotSize('Lot size 999999')).toBeNull();
+    expect(coerceLotSize('Lot size 260,924')).toBe(200000);
     expect(coerceLotSize(260924)).toBe(200000);
     expect(coerceLotSize('260924')).toBe(200000);
     expect(coerceLotSize('260,924')).toBe(200000);
