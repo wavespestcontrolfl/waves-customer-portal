@@ -505,6 +505,76 @@ describe('admin pest-pressure: POST /scores/:id/recalculate', () => {
       expect(res.status).toBe(404);
     });
   });
+
+  test('clearOverride is parsed as strict boolean — string "false" preserves the override (codex round-3 P2 regression guard)', async () => {
+    // Before the fix, Boolean("false") === true coerced any truthy string
+    // into the override-removal path. A payload of { clearOverride: "false" }
+    // would silently clear a manual override the operator intended to keep.
+    calculateAndPersistForServiceRecord.mockResolvedValueOnce({
+      result: { score: 2.6, displayedScore: 2.6 },
+    });
+    loadScoreForServiceRecord.mockResolvedValueOnce(makeScoreRow({ is_overridden: true, displayed_score: 1.5 }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/recalculate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearOverride: "false" }),
+      });
+      expect(res.status).toBe(200);
+      // The override stays — removeOverride NEVER called.
+      expect(removeOverride).not.toHaveBeenCalled();
+      expect(auditLog.auditPestPressureScoreOverride).not.toHaveBeenCalled();
+    });
+  });
+
+  test('clearOverride is parsed as strict boolean — string "true" also rejected (only literal boolean true accepted)', async () => {
+    // Stricter than before: we require LITERAL true, not just truthy.
+    // String "true" intentionally does not enter the override-removal
+    // path either — callers must send the JSON boolean.
+    calculateAndPersistForServiceRecord.mockResolvedValueOnce({
+      result: { score: 2.6, displayedScore: 2.6 },
+    });
+    loadScoreForServiceRecord.mockResolvedValueOnce(makeScoreRow({ is_overridden: true, displayed_score: 1.5 }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/recalculate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearOverride: "true" }),
+      });
+      expect(res.status).toBe(200);
+      expect(removeOverride).not.toHaveBeenCalled();
+    });
+  });
+
+  test('clearOverride+404 does NOT mutate override state (codex round-3 P2 regression guard)', async () => {
+    // Before the fix, removeOverride + audit ran BEFORE the recalc's
+    // null-result 404 check. So an admin clearing the override on a
+    // service record that no longer exists (or has the feature disabled)
+    // would land in a "override cleared but score never recomputed"
+    // inconsistent state, and the audit row would record a removal that
+    // wasn't actually meaningful. The fix re-orders the operations: recalc
+    // first; only mutate override state after the recalc has succeeded.
+    loadScoreForServiceRecord.mockResolvedValueOnce(makeScoreRow({
+      is_overridden: true,
+      displayed_score: 1.5,
+      original_calculated_score: 2.4,
+    }));
+    calculateAndPersistForServiceRecord.mockResolvedValueOnce(null); // simulate disabled feature / missing record
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/recalculate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearOverride: true }),
+      });
+      expect(res.status).toBe(404);
+      // The mutation must NOT have happened on the failure path.
+      expect(removeOverride).not.toHaveBeenCalled();
+      expect(auditLog.auditPestPressureScoreOverride).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('admin pest-pressure: list endpoints', () => {

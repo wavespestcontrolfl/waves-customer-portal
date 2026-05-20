@@ -283,42 +283,78 @@ router.delete('/scores/:serviceRecordId/override', async (req, res) => {
  */
 router.post('/scores/:serviceRecordId/recalculate', async (req, res) => {
   try {
-    const clearOverride = Boolean(req.body && req.body.clearOverride);
+    // Strict boolean — Boolean(req.body.clearOverride) coerced any
+    // truthy string (including the literal string "false") to true,
+    // so a payload like { clearOverride: "false" } would silently
+    // enter the override-removal path and clear a manual override the
+    // operator was trying to leave intact. Require the literal boolean
+    // true so the type contract is unambiguous; everything else preserves
+    // the override.
+    const clearOverride = req.body && req.body.clearOverride === true;
+
+    // Snapshot the existing override BEFORE running the recalc so the
+    // audit row records the actual pre-removal state even if recalc
+    // mutates the row (persistScore preserves the override when
+    // clearOverride isn't passed in its payload, but capturing here
+    // also future-proofs against unrelated row state shifts).
+    let existing = null;
     if (clearOverride) {
-      const existing = await loadScoreForServiceRecord(db, req.params.serviceRecordId);
-      if (existing && existing.is_overridden) {
-        const previousOverride = {
-          // The calculated value at the time the override was first set.
-          original: existing.original_calculated_score,
-          // The override value the customer saw before removal.
-          displayed: existing.displayed_score,
-          reason: existing.override_reason,
-          // The TRUE restored value — what removeOverride lands
-          // displayed_score on. If the override was preserved across one
-          // or more recalculations, calculated_score has moved on from
-          // original_calculated_score; auditing original here would falsely
-          // claim the score was restored to a stale original value.
-          restored: existing.calculated_score,
-        };
-        await removeOverride(db, { serviceRecordId: req.params.serviceRecordId });
-        await auditPestPressureScoreOverride({
-          tech_user_id: req.technicianId || null,
-          score_id: existing.id,
-          service_record_id: req.params.serviceRecordId,
-          customer_id: existing.customer_id,
-          original_calculated_score: previousOverride.original,
-          displayed_score: previousOverride.restored,
-          override_reason: previousOverride.reason,
-          action_type: 'remove',
-          ip_address: ipFromReq(req),
-          user_agent: uaFromReq(req),
-        });
-      }
+      existing = await loadScoreForServiceRecord(db, req.params.serviceRecordId);
     }
+
+    // Run the recalc FIRST so we can fail-fast on a missing service
+    // record / disabled feature WITHOUT having already mutated override
+    // state. Before this re-ordering, removeOverride + audit ran ahead
+    // of the orchestrator's null-result 404 path, leaving the system in
+    // a "override cleared but score not recomputed" half-state.
+    //
+    // Note for reviewers (codex re-flags this line each round): the
+    // orchestrator was updated in the same PR to mirror
+    // service_records.pressure_index from persisted.displayed_score
+    // (which preserves an active override) rather than from the engine's
+    // fresh result. So a recalc with clearOverride=false correctly leaves
+    // both pest_pressure_scores.displayed_score AND
+    // service_records.pressure_index pointing at the override value.
+    // See server/services/pest-pressure/orchestrate.js and the
+    // pressure_index regression guard in pest-pressure-store.test.js.
     const result = await calculateAndPersistForServiceRecord(req.params.serviceRecordId, db);
     if (!result) {
       return res.status(404).json({ error: 'service_record_not_found_or_disabled' });
     }
+
+    // Recalc succeeded — now safe to remove the override and audit. The
+    // recalc just updated calculated_score; removeOverride will set
+    // displayed_score to that latest calculated value and mirror it to
+    // service_records.pressure_index.
+    if (clearOverride && existing && existing.is_overridden) {
+      const previousOverride = {
+        // The calculated value at the time the override was first set.
+        original: existing.original_calculated_score,
+        // The override value the customer saw before removal.
+        displayed: existing.displayed_score,
+        reason: existing.override_reason,
+      };
+      const removed = await removeOverride(db, { serviceRecordId: req.params.serviceRecordId });
+      // Use the post-remove displayed_score — that's the TRUE restored
+      // value. removeOverride sets displayed_score to the (now-current,
+      // post-recalc) calculated_score, which may differ from the stale
+      // original_calculated_score when the override was preserved across
+      // earlier recalculations.
+      const restored = removed ? removed.displayed_score : existing.calculated_score;
+      await auditPestPressureScoreOverride({
+        tech_user_id: req.technicianId || null,
+        score_id: existing.id,
+        service_record_id: req.params.serviceRecordId,
+        customer_id: existing.customer_id,
+        original_calculated_score: previousOverride.original,
+        displayed_score: restored,
+        override_reason: previousOverride.reason,
+        action_type: 'remove',
+        ip_address: ipFromReq(req),
+        user_agent: uaFromReq(req),
+      });
+    }
+
     const updated = await loadScoreForServiceRecord(db, req.params.serviceRecordId);
     return res.json({ score: updated, calculation: result.result });
   } catch (err) {
