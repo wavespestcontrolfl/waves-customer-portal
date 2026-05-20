@@ -1,6 +1,7 @@
 /**
- * Slot picker — fetches primary (3 route-optimal) + expander (10 more)
- * from /api/public/estimates/:token/available-slots. Customer tap sets
+ * Slot picker — fetches the soonest estimate slots from
+ * /api/public/estimates/:token/available-slots. Route-optimal slots are
+ * labeled by the API. Customer tap sets
  * selectedSlotId locally; actual /reserve fires from the payment-pref
  * buttons downstream.
  *
@@ -74,7 +75,7 @@ function SlotCard({ slot, isSelected, onSelect }) {
   );
 }
 
-const INITIAL_VISIBLE = 3;
+const INITIAL_VISIBLE = 6;
 
 export default function SlotPicker({
   token,
@@ -96,6 +97,7 @@ export default function SlotPicker({
     setShowMore(false);
     const params = new URLSearchParams();
     params.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
+    params.set('windowDays', '14');
     if (serviceMode !== 'one_time' && selectedFrequency) {
       params.set('selectedFrequency', selectedFrequency);
     }
@@ -125,10 +127,9 @@ export default function SlotPicker({
     );
   }
 
-  // Merge primary (route-optimal, top 3) + expander (rest) into a single
-  // ordered list. Always show the first 3 by default; next 3 hide behind
-  // a "See more" toggle. Keeps the card compact and avoids overwhelming
-  // the customer on wide windows with lots of availability.
+  // Merge primary + expander into a single ordered list. Show six windows
+  // by default so sparse route maps do not make the customer think only
+  // one or two dates exist.
   const primary = data?.primary || [];
   const expander = data?.expander || [];
   const allSlots = [...primary, ...expander];
@@ -159,7 +160,7 @@ export default function SlotPicker({
         Find a date & time that works for you
       </div>
       <div style={{ fontSize: 16, color: W.textCaption, lineHeight: 1.55, marginBottom: 22 }}>
-        These are the windows when we'll already be working in your neighborhood — pick whichever fits.
+        These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.
       </div>
       {initial.map((slot) => (
         <SlotCard key={slot.slotId} slot={slot} isSelected={selectedSlotId === slot.slotId} onSelect={onSelect} />

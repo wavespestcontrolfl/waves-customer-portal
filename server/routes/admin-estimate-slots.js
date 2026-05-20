@@ -3,7 +3,7 @@
  *
  * GET /api/admin/estimates/:id/slot-debug
  *   Returns the same slot pipeline as the public route, plus:
- *     - every raw slot considered (not just top-3 + expander)
+ *     - every raw slot considered (not just the public primary + expander lists)
  *     - full insertion anchors (with stop_id + before/after labels) per slot
  *     - cache hit/miss diagnostics
  *     - total compute time in ms

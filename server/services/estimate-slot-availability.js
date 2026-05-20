@@ -37,7 +37,7 @@ const BLOCKED_STATES_FOR_SLOTS = new Set(['accepted', 'declined', 'expired']);
 
 const DEFAULT_OPTS = {
   windowDays: 14,
-  maxResults: 3,
+  maxResults: 6,
   proximityDriveMinutes: 20,
   expanderMaxResults: 3,
   durationMinutes: 60,
@@ -605,6 +605,32 @@ function splitSlotResults(slots, maxResults, expanderMaxResults) {
   };
 }
 
+function compareCustomerFacingSlots(a, b) {
+  const dateCmp = String(a?.date || '').localeCompare(String(b?.date || ''));
+  if (dateCmp !== 0) return dateCmp;
+
+  const timeCmp = String(a?.windowStart || '').localeCompare(String(b?.windowStart || ''));
+  if (timeCmp !== 0) return timeCmp;
+
+  if (!!a?.routeOptimal !== !!b?.routeOptimal) return a?.routeOptimal ? -1 : 1;
+
+  const aDetour = a?.nearbyJob?.detourMinutes ?? Infinity;
+  const bDetour = b?.nearbyJob?.detourMinutes ?? Infinity;
+  if (aDetour !== bDetour) return aDetour - bDetour;
+
+  return String(a?.slotId || '').localeCompare(String(b?.slotId || ''));
+}
+
+function selectCustomerFacingSlots(slots, limit) {
+  const safeLimit = Math.max(0, Number(limit) || 0);
+  if (!safeLimit) return [];
+
+  return (Array.isArray(slots) ? slots : [])
+    .filter(Boolean)
+    .sort(compareCustomerFacingSlots)
+    .slice(0, safeLimit);
+}
+
 // Drop any candidate whose rounded display window collides with a real
 // booking on the same tech/date. find-time evaluates the un-rounded
 // earliestStart; the hour-rounding done in classifySlot can shift the
@@ -758,17 +784,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const end = new Date(today.getTime() + opts.windowDays * 86400000);
   const dateTo = end.toISOString().slice(0, 10);
 
-  // Pull a generous topN so we can split route-optimal + expander post-hoc
+  // Pull a generous topN so we can split customer-facing slots post-hoc
   // without a second call. find-time sorts by score (detour + day penalty)
-  // ascending, so the top 50 are the cheapest 50 insertions across the
-  // whole fleet over 14 days — way more than we'll surface.
+  // ascending, so this includes far more candidates than we'll surface.
   const raw = await findAvailableSlots({
     lat: coords.lat,
     lng: coords.lng,
     durationMinutes: serviceProfile.durationMinutes,
     dateFrom,
     dateTo,
-    topN: 50,
+    topN: Number.MAX_SAFE_INTEGER,
     includeWeekends: opts.includeWeekends,
   });
 
@@ -778,54 +803,18 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // existing booking on the same tech/date — see filterCollidingSlots.
   const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo });
 
-  // Primary: route-optimal only, sorted by detour asc then date asc.
-  // find-time's default sort is close to this already (detour + day penalty),
-  // but re-sort to make the ordering explicit and decouple from any future
-  // scoring tweaks over there.
-  const routeOptimalSlots = classified
-    .filter((s) => s.routeOptimal)
-    .sort((a, b) => {
-      const da = a.nearbyJob?.detourMinutes ?? Infinity;
-      const dbv = b.nearbyJob?.detourMinutes ?? Infinity;
-      if (da !== dbv) return da - dbv;
-      return a.date.localeCompare(b.date);
-    });
-
-  // Target: always show up to TARGET_TOTAL slots. Prefer route-optimal
-  // (detour within proximityDriveMinutes); fill any shortfall from the
-  // rest. Dropping the primary/expander split so customers aren't left
-  // staring at "2 slots and no way to see more" when the route-optimal
-  // filter is tight.
+  // Target: always show the soonest upcoming customer-facing windows first,
+  // even when those windows are not route-optimal. Route-optimality remains
+  // a per-slot badge/copy signal, not a reason to bury sooner dates.
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
-  const routeIds = new Set(routeOptimalSlots.map((s) => s.slotId));
-
-  // Fallback: everything that missed the route-optimal cut. Sort by
-  // date+time, then diversify by (techId, windowStart) so we don't
-  // land as "N× same time same tech" on a clumpy optimizer output.
-  const leftover = classified
-    .filter((s) => !routeIds.has(s.slotId))
-    .sort((a, b) => a.date.localeCompare(b.date) || a.windowStart.localeCompare(b.windowStart));
-
-  const buckets = new Map();
-  for (const s of leftover) {
-    const sig = `${s.techId || 'unassigned'}_${s.windowStart}`;
-    if (!buckets.has(sig)) buckets.set(sig, []);
-    buckets.get(sig).push(s);
-  }
-  const interleaved = [];
-  while (interleaved.length < leftover.length) {
-    for (const arr of buckets.values()) {
-      if (arr.length) interleaved.push(arr.shift());
-    }
-  }
-
-  const combined = [...routeOptimalSlots, ...interleaved].slice(0, TARGET_TOTAL);
-  const spread = spreadWindowsAcrossDay(combined, serviceProfile.durationMinutes);
+  const sortedPool = [...classified].sort(compareCustomerFacingSlots);
+  const spread = spreadWindowsAcrossDay(sortedPool, serviceProfile.durationMinutes);
   // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
   // slots; that can land them on an existing booking, so re-filter once
-  // more before returning.
+  // more before choosing the final customer-facing list.
   const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
-  const { primary, expander } = splitSlotResults(filtered, opts.maxResults, opts.expanderMaxResults);
+  const selected = selectCustomerFacingSlots(filtered, TARGET_TOTAL);
+  const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
   const result = {
     primary,
@@ -952,6 +941,9 @@ module.exports = {
     pickNearbyAnchor,
     classifySlot,
     splitSlotResults,
+    selectCustomerFacingSlots,
+    compareCustomerFacingSlots,
+    spreadWindowsAcrossDay,
     resolveEstimateSlotProfile,
     durationForService,
     addMinutesToHHMM,
