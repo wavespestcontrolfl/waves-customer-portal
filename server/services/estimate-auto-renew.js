@@ -38,6 +38,15 @@ async function renderTemplate(templateKey, vars) {
   throw new Error(`SMS template ${templateKey} is missing or inactive`);
 }
 
+// SMTP is dev/staging-only — in production we hard-fail rather than bypass
+// the email_messages audit row and email_suppressions check. A
+// template-missing error in prod is a migration bug; SendGrid unconfigured
+// in prod is a deploy bug; both should page operators, not fall through to
+// a silent SMTP delivery that the system can't see.
+function smtpFallbackAllowed() {
+  return process.env.NODE_ENV !== 'production';
+}
+
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
@@ -162,14 +171,18 @@ const EstimateAutoRenew = {
                 }
               }
               if (!sentWithTemplateLibrary) {
-                await EmailService.send({
-                  to: est.customer_email,
-                  subject: 'Your Waves estimate was extended',
-                  heading: `Hey ${firstName} — we extended your estimate`,
-                  body: `<p>Your Waves Pest Control estimate was about to expire, so we went ahead and extended it by another few days. It's still good — take another look whenever you're ready.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
-                  ctaUrl: url,
-                  ctaLabel: 'View Your Estimate',
-                });
+                if (!smtpFallbackAllowed()) {
+                  logger.error(`[est-auto-renew] SMTP fallback disabled in production for estimate ${est.id} — SendGrid template send required`);
+                } else {
+                  await EmailService.send({
+                    to: est.customer_email,
+                    subject: 'Your Waves estimate was extended',
+                    heading: `Hey ${firstName} — we extended your estimate`,
+                    body: `<p>Your Waves Pest Control estimate was about to expire, so we went ahead and extended it by another few days. It's still good — take another look whenever you're ready.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
+                    ctaUrl: url,
+                    ctaLabel: 'View Your Estimate',
+                  });
+                }
               }
             } catch (e) { logger.error(`[est-auto-renew] Email failed: ${e.message}`); }
           }
