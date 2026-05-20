@@ -484,7 +484,7 @@ Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
 - "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
-- If the converted lot size is above 200000 square feet, return null for lotSize so the public quote flow does not underprice acreage properties.
+- If the converted lot size is above 200000 square feet, output 200000 so the public quote flow prices at its maximum lot-size cap instead of defaulting to a small lot.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
@@ -494,7 +494,7 @@ Output rules:
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
   "squareFootage": <int 500-15000 or null>,
-  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed), or null>,
+  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed; cap verified oversized lots at 200000), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -552,7 +552,10 @@ const LOT_SQFT_MAX = 200_000;
 // square feet, so we normalize here.
 //   - Strings with "acre" → first number is acres, multiply by 43560.
 //   - Strings with "sqft" / "sq ft" → first number is sqft.
-//   - Bare numbers: small (< LOT_SQFT_MIN) assumed acres, large assumed sqft.
+//   - Bare numbers: small (< LOT_SQFT_MIN) are treated as acres only when
+//     conversion stays within the public quote cap; larger ambiguous values
+//     remain null.
+//   - Verified values above the public quote max are capped, not discarded.
 //   - Strings with BOTH "acre" and "sqft" (e.g. "0.5 acres (21,780 sqft)")
 //     are accepted only when the unit-qualified values agree.
 function coerceLotSize(raw) {
@@ -560,8 +563,8 @@ function coerceLotSize(raw) {
 
   if (typeof raw === 'number') {
     if (!Number.isFinite(raw) || raw <= 0) return null;
-    const sqft = Math.round(raw < LOT_SQFT_MIN ? raw * SQFT_PER_ACRE : raw);
-    return inLotRange(sqft) ? sqft : null;
+    const sqft = coerceUnqualifiedLotSqft(raw);
+    return sqft == null ? null : clampLotSqft(Math.round(sqft));
   }
 
   const str = String(raw).toLowerCase();
@@ -577,14 +580,24 @@ function coerceLotSize(raw) {
   let sqft;
   if (hasAcre) sqft = value * SQFT_PER_ACRE;
   else if (hasSqft) sqft = value;
-  else sqft = value < LOT_SQFT_MIN ? value * SQFT_PER_ACRE : value;
+  else sqft = coerceUnqualifiedLotSqft(value);
+  if (sqft == null) return null;
 
   const rounded = Math.round(sqft);
-  return inLotRange(rounded) ? rounded : null;
+  return clampLotSqft(rounded);
 }
 
-function inLotRange(n) {
-  return n >= LOT_SQFT_MIN && n <= LOT_SQFT_MAX;
+function coerceUnqualifiedLotSqft(value) {
+  if (value < LOT_SQFT_MIN) {
+    const converted = value * SQFT_PER_ACRE;
+    return converted <= LOT_SQFT_MAX ? converted : null;
+  }
+  return value;
+}
+
+function clampLotSqft(n) {
+  if (!Number.isFinite(n) || n < LOT_SQFT_MIN) return null;
+  return Math.min(n, LOT_SQFT_MAX);
 }
 
 function coerceDualUnitLotSize(str) {
@@ -596,11 +609,11 @@ function coerceDualUnitLotSize(str) {
 
   if (acreSqft != null && roundedSqft != null) {
     if (!lotValuesAgree(acreSqft, roundedSqft)) return null;
-    return inLotRange(roundedSqft) ? roundedSqft : null;
+    return clampLotSqft(roundedSqft);
   }
 
   const candidate = roundedSqft ?? acreSqft;
-  return candidate != null && inLotRange(candidate) ? candidate : null;
+  return candidate != null ? clampLotSqft(candidate) : null;
 }
 
 function lotValuesAgree(a, b) {
