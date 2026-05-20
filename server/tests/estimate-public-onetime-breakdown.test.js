@@ -12,6 +12,7 @@ const {
   buildWaveGuardIntelligencePayload,
   isEstimateAcceptActive,
   isEstimateAskAnswerable,
+  isAnnualPrepayEligibleServiceMix,
   isStructuralOneTimeOnlyEstimate,
   monthlyForRecurringParts,
   normalizeAcceptPaymentMethodPreference,
@@ -21,6 +22,7 @@ const {
   renderPage,
   resolveAcceptOneTimeTotal,
   resolveRecurringInvoiceFirstVisitAmount,
+  resolveAnnualPrepayInvoiceAmount,
   resolveRecurringMonthlyParts,
   resolveEstimateDeclineGuard,
   resolveEstimateQuoteRequirement,
@@ -28,6 +30,7 @@ const {
   resolveRecurringFirstVisitAmountFromFrequency,
   shouldApplyFirstViewSideEffects,
   validateRecurringSlotPaymentPreference,
+  sameDayVisitTotalForPricingFrequency,
   withSupplementedRecurringServices,
 } = require('../routes/estimate-public');
 const {
@@ -103,6 +106,38 @@ describe('public estimate one-time breakdown', () => {
       source: 'send_snapshot_fixture',
       frequencies: [{ key: 'quarterly', monthly: 88 }],
     });
+  });
+
+  test('public pricing bundle ignores stale send snapshots after totals change', async () => {
+    const bundle = await buildPricingBundle({
+      id: 'estimate-stale-snapshot',
+      monthly_total: 70,
+      annual_total: 840,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 88, annual: 1056 }],
+            source: 'send_snapshot_fixture',
+          },
+        },
+        result: {
+          results: {
+            pestTiers: [
+              { label: 'Quarterly', mo: 70, ann: 840, pa: 210, apps: 4 },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 70,
+            annualAfterDiscount: 840,
+            services: [{ name: 'Pest Control', mo: 70 }],
+          },
+        },
+      },
+    });
+
+    expect(bundle.snapshotHit).not.toBe(true);
+    expect(bundle.frequencies[0]).toMatchObject({ key: 'quarterly', monthly: 70, annual: 840 });
   });
 
   test('normalizes saved one-time and specialty rows including first-visit roach fees', () => {
@@ -342,6 +377,50 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('public pricing bundle exposes annual prepay for lawn-only estimates', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-only-prepay-test',
+      estimate_data: {
+        result: {
+          recurring: {
+            discount: 0,
+            waveGuardTier: 'Bronze',
+            monthlyTotal: 87,
+            annualAfterDiscount: 1044,
+            services: [{
+              service: 'lawn_care',
+              name: 'Lawn Care',
+              mo: 87,
+              perTreatment: 116,
+              visitsPerYear: 9,
+            }],
+          },
+          oneTime: {
+            total: 99,
+            membershipFee: 99,
+            items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+          },
+        },
+      },
+      monthly_total: 87,
+      annual_total: 1044,
+      onetime_total: 99,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.annualPrepayEligible).toBe(true);
+    expect(payload.setupFee).toEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+      amount: 99,
+      waivedWithPrepay: true,
+    }));
+    expect(payload.firstVisitFees).toContainEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+      amount: 99,
+      waivedWithPrepay: true,
+    }));
+  });
+
   test('classifies fallback-saved native roach initial by service key', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-native-roach-service-key-test',
@@ -576,7 +655,11 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = true;');
     expect(html).toContain('function bookingRequiresPaymentSetup()');
     expect(html).toContain('isReserving: false');
-    expect(html).toContain('btn.disabled = bookingState.isReserving || !!bookingState.reservation');
+    expect(html).toContain('reserveAttemptId: 0');
+    expect(html).toContain('function buildSlotContext()');
+    expect(html).toContain("slotParams.set('serviceMode', slotContext.serviceMode)");
+    expect(html).toContain("slotParams.set('selectedFrequency', slotContext.selectedFrequency)");
+    expect(html).toContain('body: JSON.stringify(reservePayload)');
     expect(html).toContain('bookingState.isReserving = true;');
     expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
     expect(html).toContain("toast('Choose a payment setup first.')");
@@ -1343,6 +1426,36 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('/ treatment</span>');
   });
 
+  test('server-rendered payment setup card avoids partial first-visit totals', () => {
+    const html = renderPage('partial-bundle-token', {
+      status: 'sent',
+      customerName: 'Stan Customer',
+      address: '4407 Lake Fox Pl',
+      monthlyTotal: 116.7,
+      annualTotal: 1400.4,
+      onetimeTotal: 0,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', mo: 128 },
+            { name: 'Lawn Care' },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          pest: { apps: 4 },
+          pestTiers: [{ label: 'Quarterly', mo: 128, pa: 128, apps: 4 }],
+        },
+      },
+    });
+
+    expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong>After completion</strong></div>');
+    expect(html).not.toContain('data-first-visit-total>$115.20</strong>');
+  });
+
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
     const html = renderPage('lawn-only-token', {
       status: 'sent',
@@ -1395,10 +1508,15 @@ describe('public estimate one-time breakdown', () => {
     expect(html.match(/WaveGuard Membership Setup/g)).toHaveLength(2);
     expect(html).toContain('Pay the 12-month plan in full');
     expect(html).toContain('we send one prepay invoice after approval and waive the setup.');
-    expect(html).toContain('Annual Pay-in-Full Waiver');
-    expect(html).toContain('<strong>-$99</strong>');
     expect(html).toContain('Net setup fee: $0');
+    expect(html).toContain('<strong><s>$99</s> $0</strong>');
+    expect(html).not.toContain('Annual Pay-in-Full Waiver');
+    expect(html).not.toContain('<strong>-$99</strong>');
+    expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
     expect(html).toContain('data-prepay-membership-due="0">$660</strong>');
+    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 660;');
+    expect(html).toContain('function currentAnnualPrepayInvoiceText()');
+    expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.");
     expect(html).not.toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
     expect(html).not.toContain('How billing works');
     expect(html).not.toContain('For comparison, your lawn care plan averages');
@@ -1917,6 +2035,39 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('accept success payload marks annual prepay as invoice follow-up without onboarding', () => {
+    expect(buildAcceptSuccessPayload({
+      billingTerm: 'prepay_annual',
+      prepayInvoiceAmount: 660,
+      onboardingToken: null,
+      treatAsOneTime: false,
+    })).toEqual(expect.objectContaining({
+      success: true,
+      nextStep: 'prepay_invoice',
+      serviceMode: 'recurring',
+      onboardingToken: null,
+      billingTerm: 'prepay_annual',
+      prepayInvoiceAmount: 660,
+    }));
+  });
+
+  test('accept success payload does not report annual prepay for one-time accepts', () => {
+    expect(buildAcceptSuccessPayload({
+      billingTerm: 'prepay_annual',
+      treatAsOneTime: true,
+      reservationCommitted: false,
+    })).toEqual(expect.objectContaining({
+      nextStep: 'book_one_time',
+      serviceMode: 'one_time',
+    }));
+  });
+
+  test('annual prepay amount falls back to monthly times twelve', () => {
+    expect(resolveAnnualPrepayInvoiceAmount(null, 55)).toBe(660);
+    expect(resolveAnnualPrepayInvoiceAmount(720, 55)).toBe(720);
+    expect(resolveAnnualPrepayInvoiceAmount(null, null)).toBe(0);
+  });
+
   test('accept payment preference canonicalizes card-on-file aliases', () => {
     expect(normalizeAcceptPaymentMethodPreference('card_on_file')).toBe('card_on_file');
     expect(normalizeAcceptPaymentMethodPreference('deposit_now')).toBe('card_on_file');
@@ -1957,6 +2108,87 @@ describe('public estimate one-time breakdown', () => {
       billByInvoice: true,
       paymentMethodPreference: 'pay_at_visit',
     })).toBeNull();
+  });
+
+  test('acceptance visit pricing uses displayed per-application totals before cadence fallback', () => {
+    expect(sameDayVisitTotalForPricingFrequency({
+      sameDayTreatmentTotal: 244,
+      perServiceTreatments: [
+        { label: 'Pest Control', perTreatment: 128, displayPrice: 115.2 },
+        { label: 'Lawn Care', perTreatment: 116, displayPrice: 104.4 },
+      ],
+    })).toBe(219.6);
+
+    expect(sameDayVisitTotalForPricingFrequency({
+      sameDayTreatmentTotal: 73.33,
+      perServiceTreatments: [],
+    })).toBe(73.33);
+
+    expect(sameDayVisitTotalForPricingFrequency({
+      sameDayTreatmentTotal: 244,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', visitsPerYear: 4, displayPrice: 115.2 },
+        { service: 'lawn_care', label: 'Lawn Care', visitsPerYear: 9 },
+      ],
+    })).toBe(244);
+
+    expect(sameDayVisitTotalForPricingFrequency({
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', visitsPerYear: 4, displayPrice: 115.2 },
+        { service: 'lawn_care', label: 'Lawn Care', visitsPerYear: 9 },
+      ],
+    })).toBeNull();
+  });
+
+  test('acceptance visit pricing applies pest preference discounts to same-day totals', () => {
+    expect(sameDayVisitTotalForPricingFrequency({
+      sameDayTreatmentTotal: 244,
+      perServiceTreatments: [
+        {
+          service: 'pest_control',
+          label: 'Pest Control',
+          visitsPerYear: 4,
+          perTreatment: 128,
+          displayPrice: 115.2,
+        },
+        {
+          service: 'lawn_care',
+          label: 'Lawn Care',
+          visitsPerYear: 9,
+          perTreatment: 116,
+          displayPrice: 104.4,
+        },
+      ],
+    }, {
+      preferences: { interior_spray: false, exterior_sweep: true },
+    })).toBe(209.61);
+  });
+
+  test('annual prepay eligibility is limited to estimates that offer it', () => {
+    expect(isAnnualPrepayEligibleServiceMix([
+      { name: 'Pest Control' },
+    ], [])).toBe(true);
+
+    expect(isAnnualPrepayEligibleServiceMix([
+      { service: 'lawn_care', name: 'Lawn Care' },
+    ], [
+      { name: 'WaveGuard Membership Setup' },
+    ])).toBe(true);
+
+    expect(isAnnualPrepayEligibleServiceMix([
+      { service: 'lawn_care', name: 'Lawn Care' },
+    ], [
+      { service: 'waveguard_setup', name: 'WaveGuard setup' },
+    ])).toBe(true);
+
+    expect(isAnnualPrepayEligibleServiceMix([
+      { service: 'mosquito', name: 'Mosquito' },
+    ], [])).toBe(false);
+
+    expect(isAnnualPrepayEligibleServiceMix([
+      { service: 'tree_shrub', name: 'Tree & Shrub' },
+      { service: 'palm_injection', name: 'Palm Injection' },
+    ], [])).toBe(false);
   });
 
   test('accept active guard rejects terminal and past-expiry estimates', () => {
@@ -2115,6 +2347,14 @@ describe('public estimate one-time breakdown', () => {
       monthlyTotal: 89,
       billByInvoice: true,
     })).toBe('Estimate accepted by Jane Doe at 123 Main St - Gold WaveGuard $89/mo. Invoice mode selected.');
+
+    expect(buildAcceptOfficeFallback({
+      customerName: 'Jane Doe',
+      address: '123 Main St',
+      waveguardTier: 'Bronze',
+      billingTerm: 'prepay_annual',
+      annualPrepayAmount: 660,
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660. Invoice follow-up needed.');
   });
 
   test('accept notification payload avoids WaveGuard onboarding copy for one-time accepts', () => {
@@ -2152,6 +2392,18 @@ describe('public estimate one-time breakdown', () => {
       adminBody: 'Gold WaveGuard $89/mo approved. Onboarding link sent.',
       customerBody: 'Your Gold WaveGuard plan is confirmed. Complete onboarding to get started.',
       customerLink: '/?tab=plan',
+    }));
+
+    expect(buildAcceptNotificationPayload({
+      customerName: 'Jane Doe',
+      waveguardTier: 'Bronze',
+      billingTerm: 'prepay_annual',
+      annualPrepayAmount: 660,
+    })).toEqual(expect.objectContaining({
+      adminTitle: 'Estimate accepted: Jane Doe',
+      adminBody: 'Bronze WaveGuard annual prepay $660 approved. Invoice follow-up needed.',
+      customerBody: 'Your Bronze WaveGuard plan is approved. Our team will follow up with the annual prepay invoice details.',
+      customerLink: '/?tab=billing',
     }));
   });
 

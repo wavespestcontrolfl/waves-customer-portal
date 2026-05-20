@@ -1,9 +1,9 @@
 {
   "baseline_single_family_zone_a_quarterly_pest_enhanced_lawn": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1083.6,
-      "recurringMonthlyAfterDiscount": 90.3,
-      "year1Total": 1084
+      "recurringAnnualAfterDiscount": 1047.6,
+      "recurringMonthlyAfterDiscount": 87.3,
+      "year1Total": 1048
     },
     "waveGuard": {
       "tier": "silver",
@@ -12,8 +12,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 508,
-        "monthly": 42.33
+        "annual": 468,
+        "monthly": 39
       },
       "lawn_care": {
         "annual": 696,
@@ -23,9 +23,9 @@
   },
   "zone_b_monthly_pest_bermuda_premium": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2168.42,
-      "recurringMonthlyAfterDiscount": 180.7,
-      "year1Total": 2168
+      "recurringAnnualAfterDiscount": 2014.2,
+      "recurringMonthlyAfterDiscount": 167.85,
+      "year1Total": 2014
     },
     "waveGuard": {
       "tier": "silver",
@@ -34,8 +34,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1305.36,
-        "monthly": 108.78
+        "annual": 1134,
+        "monthly": 94.5
       },
       "lawn_care": {
         "annual": 1104,
@@ -45,9 +45,9 @@
   },
   "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
     "summary": {
-      "recurringAnnualAfterDiscount": 3657.78,
-      "recurringMonthlyAfterDiscount": 304.82,
-      "year1Total": 3658
+      "recurringAnnualAfterDiscount": 3275.9,
+      "recurringMonthlyAfterDiscount": 272.99,
+      "year1Total": 3276
     },
     "waveGuard": {
       "tier": "gold",
@@ -56,24 +56,24 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 748.27,
-        "monthly": 62.36
+        "annual": 612,
+        "monthly": 51
       },
       "lawn_care": {
         "annual": 636,
         "monthly": 53
       },
       "tree_shrub": {
-        "annual": 2919,
-        "monthly": 243.25
+        "annual": 2606,
+        "monthly": 217.17
       }
     }
   },
   "zone_d_quarterly_pest_bahia_basic": {
     "summary": {
-      "recurringAnnualAfterDiscount": 777.6,
-      "recurringMonthlyAfterDiscount": 64.8,
-      "year1Total": 778
+      "recurringAnnualAfterDiscount": 702,
+      "recurringMonthlyAfterDiscount": 58.5,
+      "year1Total": 702
     },
     "waveGuard": {
       "tier": "silver",
@@ -82,8 +82,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 504,
-        "monthly": 42
+        "annual": 420,
+        "monthly": 35
       },
       "lawn_care": {
         "annual": 360,
@@ -209,7 +209,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 0,
       "recurringMonthlyAfterDiscount": 0,
-      "year1Total": 444
+      "year1Total": 410
     },
     "waveGuard": {
       "tier": "bronze",
@@ -239,7 +239,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 0,
       "recurringMonthlyAfterDiscount": 0,
-      "year1Total": 169
+      "year1Total": 199
     },
     "waveGuard": {
       "tier": "bronze",
@@ -252,9 +252,9 @@
   },
   "baseline_unknown_zone_minimal": {
     "summary": {
-      "recurringAnnualAfterDiscount": 508,
-      "recurringMonthlyAfterDiscount": 42.33,
-      "year1Total": 508
+      "recurringAnnualAfterDiscount": 468,
+      "recurringMonthlyAfterDiscount": 39,
+      "year1Total": 468
     },
     "waveGuard": {
       "tier": "bronze",
@@ -263,16 +263,16 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 508,
-        "monthly": 42.33
+        "annual": 468,
+        "monthly": 39
       }
     }
   },
   "german_roach_modifier_pest_quarterly": {
     "summary": {
-      "recurringAnnualAfterDiscount": 508,
-      "recurringMonthlyAfterDiscount": 42.33,
-      "year1Total": 792
+      "recurringAnnualAfterDiscount": 468,
+      "recurringMonthlyAfterDiscount": 39,
+      "year1Total": 752
     },
     "waveGuard": {
       "tier": "bronze",
@@ -281,8 +281,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 508,
-        "monthly": 42.33
+        "annual": 468,
+        "monthly": 39
       },
       "pest_initial_roach": {},
       "german_roach_initial": {}
@@ -290,9 +290,9 @@
   },
   "manual_discount_percent_recurring_pest": {
     "summary": {
-      "recurringAnnualAfterDiscount": 457.2,
-      "recurringMonthlyAfterDiscount": 38.1,
-      "year1Total": 457
+      "recurringAnnualAfterDiscount": 421.2,
+      "recurringMonthlyAfterDiscount": 35.1,
+      "year1Total": 421
     },
     "waveGuard": {
       "tier": "bronze",
@@ -301,8 +301,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 508,
-        "monthly": 42.33
+        "annual": 468,
+        "monthly": 39
       }
     }
   }
