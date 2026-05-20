@@ -5,6 +5,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const DiscountEngine = require('../services/discount-engine');
 const logger = require('../services/logger');
 const { parseETDateTime } = require('../utils/datetime-et');
+const { attachDiscountCatalogClassification } = require('../services/discount-catalog-classifier');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -12,7 +13,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 router.get('/', async (req, res, next) => {
   try {
     const discounts = await db('discounts').orderBy('sort_order', 'asc').orderBy('created_at', 'asc');
-    res.json(discounts);
+    res.json(discounts.map(attachDiscountCatalogClassification));
   } catch (err) { next(err); }
 });
 

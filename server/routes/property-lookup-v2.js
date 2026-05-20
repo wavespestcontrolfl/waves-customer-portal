@@ -1708,6 +1708,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // Step 2b-4: pass-through. v1 engine applies it to recurring annual
     // after WaveGuard, capped at base — exact mirror of v2 calcTotals.
     manualDiscount: o.manualDiscount || null,
+    serviceSpecificDiscounts: Array.isArray(o.serviceSpecificDiscounts) ? o.serviceSpecificDiscounts : [],
     services,
   };
 }

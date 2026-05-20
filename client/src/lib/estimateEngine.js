@@ -1396,7 +1396,35 @@ export function calculateEstimate(inputs) {
     };
   }
   const da = Math.round(ra * wd * 100) / 100;
-  const ad = Math.round((ra - da) * 100) / 100;
+  const recurringAnnualAfterWaveGuard = Math.round((ra - da) * 100) / 100;
+  const md = inputs.manualDiscount;
+  let manualDiscountAmount = 0;
+  let manualDiscountInfo = null;
+  if (md && Number(md.value) > 0) {
+    const v = Number(md.value);
+    if (md.type === 'PERCENT') {
+      if (v > 100) throw new Error('Manual percentage discount cannot exceed 100');
+      manualDiscountAmount = Math.round(recurringAnnualAfterWaveGuard * (v / 100) * 100) / 100;
+    } else {
+      manualDiscountAmount = Math.round(v * 100) / 100;
+    }
+    const requestedAmount = manualDiscountAmount;
+    manualDiscountAmount = Math.min(manualDiscountAmount, recurringAnnualAfterWaveGuard);
+    manualDiscountInfo = {
+      ...md,
+      type: md.type === 'PERCENT' ? 'PERCENT' : 'FIXED',
+      value: v,
+      requestedAmount,
+      amount: manualDiscountAmount,
+      label: md.label || (md.type === 'PERCENT' ? `Discount (${v}%)` : `Discount -$${v.toFixed(2)}`),
+      discountableBase: recurringAnnualAfterWaveGuard,
+      capped: requestedAmount > manualDiscountAmount,
+      capReason: requestedAmount > manualDiscountAmount ? 'discountable_base' : null,
+      scope: 'recurring_annual_after_waveguard',
+      stackingOrder: 'after_waveguard',
+    };
+  }
+  const ad = Math.round((recurringAnnualAfterWaveGuard - manualDiscountAmount) * 100) / 100;
   const mm = Math.round(ad / 12 * 100) / 100;
 
   // Margin floor check - flag any line that drops below 35% margin at current tier discount
@@ -1502,7 +1530,8 @@ export function calculateEstimate(inputs) {
       total: totalOT,
       otSubtotal: ot,
     },
-    totals: { year1: y1, year2: y2, year2mo: y2mo },
+    totals: { year1: y1, year2: y2, year2mo: y2mo, manualDiscount: manualDiscountInfo },
+    manualDiscount: manualDiscountInfo,
     results: R,
     specItems, // full array including onProg items for display
     fieldVerify,
