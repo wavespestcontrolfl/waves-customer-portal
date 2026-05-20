@@ -27,6 +27,7 @@ const {
   isFreshTimestamp,
   deliveryEmailMismatchLogMessage,
   canUseDeliveryIdFallback,
+  canUseProviderMessageMatch,
   bindNewsletterDeliveryMessageId,
   reconcileNewsletterSendStatus,
 } = sendgridWebhook;
@@ -355,6 +356,13 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
     expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg' }, 'new-msg')).toBe(false);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-1')).toBe(true);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg', send_attempt_token: 'tok-1' }, 'new-msg', 'tok-2')).toBe(false);
+  });
+
+  test('provider message fast path honors active attempt tokens', () => {
+    expect(canUseProviderMessageMatch({ provider_message_id: 'sg-old' }, null)).toBe(true);
+    expect(canUseProviderMessageMatch({ provider_message_id: 'sg-new', send_attempt_token: 'tok-1' }, 'tok-1')).toBe(true);
+    expect(canUseProviderMessageMatch({ provider_message_id: 'sg-old', send_attempt_token: 'tok-1' }, 'tok-2')).toBe(false);
+    expect(canUseProviderMessageMatch({ provider_message_id: 'sg-old', send_attempt_token: 'tok-1' }, null)).toBe(false);
   });
 
   test('binds provider message id behind an unbound-or-same guard', async () => {

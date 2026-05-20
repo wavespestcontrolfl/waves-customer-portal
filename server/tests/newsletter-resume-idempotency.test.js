@@ -397,6 +397,7 @@ describe('resumeCampaign — preconditions', () => {
 
   test('resume with existing deliveries only sends to the original campaign audience', async () => {
     let finalUpdate = null;
+    let deliveryClaimUpdate = null;
     let subscriberWhereIn = null;
     const sentSend = {
       id: 's',
@@ -425,7 +426,10 @@ describe('resumeCampaign — preconditions', () => {
           { id: 'd-1', subscriber_id: 1, status: 'delivered', ab_variant: null },
           { id: 'd-2', subscriber_id: 2, status: 'failed', ab_variant: null },
         ] }),
-        chain({ returning: [{ id: 'd-2', subscriber_id: 2, send_attempt_token: 'attempt-2' }] }), // claim retryable row before SendGrid
+        chain({
+          returning: [{ id: 'd-2', subscriber_id: 2, send_attempt_token: 'attempt-2' }],
+          onUpdate: (payload) => { deliveryClaimUpdate = payload; },
+        }),                                                   // claim retryable row before SendGrid
         chain({ updated: 1 }),                                // post-send bulk update
         chain({ count: 0 }),                                  // final retryable ledger count
       ],
@@ -449,6 +453,7 @@ describe('resumeCampaign — preconditions', () => {
     expect(result.recipients).toBe(2);
     expect(result.skipped_already_sent).toBe(1);
     expect(finalUpdate.recipient_count).toBe(2);
+    expect(deliveryClaimUpdate).toMatchObject({ status: 'sending', provider_message_id: null });
     expect(subscriberWhereIn).toEqual(['id', [2]]);
     expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
     expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);

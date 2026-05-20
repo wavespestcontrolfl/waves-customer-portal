@@ -101,6 +101,11 @@ function canUseDeliveryIdFallback(delivery, messageId, attemptToken = null) {
   return sendAttemptTokenMatches(delivery, attemptToken);
 }
 
+function canUseProviderMessageMatch(delivery, attemptToken = null) {
+  if (!delivery?.send_attempt_token) return true;
+  return sendAttemptTokenMatches(delivery, attemptToken);
+}
+
 async function bindNewsletterDeliveryMessageId(delivery, messageId, attemptToken = null, client = db) {
   if (!delivery || !messageId) return delivery;
   const providerMatches = delivery.provider_message_id
@@ -207,6 +212,9 @@ async function handleEvent(ev) {
   let newsletterDelivery = email ? await db('newsletter_send_deliveries')
     .where({ provider_message_id: messageId, email })
     .first() : null;
+  if (newsletterDelivery && !canUseProviderMessageMatch(newsletterDelivery, ev.send_attempt_token)) {
+    newsletterDelivery = null;
+  }
   if (!newsletterDelivery && ev.delivery_id) {
     newsletterDelivery = await db('newsletter_send_deliveries')
       .where({ id: String(ev.delivery_id) })
@@ -736,5 +744,6 @@ module.exports.suppressionForEmailEvent = suppressionForEmailEvent;
 module.exports.isFreshTimestamp = isFreshTimestamp;
 module.exports.deliveryEmailMismatchLogMessage = deliveryEmailMismatchLogMessage;
 module.exports.canUseDeliveryIdFallback = canUseDeliveryIdFallback;
+module.exports.canUseProviderMessageMatch = canUseProviderMessageMatch;
 module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId;
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;

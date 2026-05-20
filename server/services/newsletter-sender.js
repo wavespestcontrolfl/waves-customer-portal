@@ -88,7 +88,14 @@ async function claimRetryableDeliveriesForResume(sendId, subscriberIds) {
       .where({ send_id: sendId })
       .whereIn('subscriber_id', subscriberIds),
   )
-    .update({ status: 'sending', send_attempt_token: attemptToken, updated_at: new Date() })
+    // A resume attempt gets a fresh SendGrid message id; keep delayed events
+    // from the previous attempt out of the provider_message_id fast path.
+    .update({
+      status: 'sending',
+      provider_message_id: null,
+      send_attempt_token: attemptToken,
+      updated_at: new Date(),
+    })
     .returning(['id', 'subscriber_id', 'send_attempt_token']);
   return rows.map((row) => ({ ...row, send_attempt_token: row.send_attempt_token || attemptToken }));
 }
