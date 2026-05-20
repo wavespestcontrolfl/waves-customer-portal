@@ -35,13 +35,20 @@ import React, {
   useContext,
   Component,
 } from "react";
-import { fmt, fmtInt } from "../../lib/estimateEngine";
+import {
+  fmt,
+  fmtInt,
+  isCommercialEstimateInput,
+  resolveLookupPropertyTypeAutofill,
+} from "../../lib/estimateEngine";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
+const COMMERCIAL_WARNING_TEXT =
+  "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
 const FLEA_EXTERIOR_SOURCE_OPTIONS = [
   { value: "UNKNOWN", label: "Unknown" },
   { value: "AI_ESTIMATE", label: "AI estimate" },
@@ -267,6 +274,18 @@ function validateDeliveryOptions(form, estimate) {
     return "Bill by invoice requires a billable recurring or one-time total.";
   }
   return null;
+}
+
+function estimateRequiresQuote(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => estimateRequiresQuote(item, depth + 1));
+  }
+  if (typeof value !== "object") return false;
+  if (value.quoteRequired === true || value.requiresCustomQuote === true) {
+    return true;
+  }
+  return Object.values(value).some((item) => estimateRequiresQuote(item, depth + 1));
 }
 
 function nonPestRecurringServicesForDelivery(estimate) {
@@ -1380,6 +1399,9 @@ export default function EstimateToolViewV2({
     stories: "1",
     lotSqFt: "",
     propertyType: "Single Family",
+    isCommercial: "NO",
+    commercialSubtype: "",
+    commercialPricingMode: "manual_quote",
     hasPool: "NO",
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
@@ -1500,6 +1522,7 @@ export default function EstimateToolViewV2({
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
+    const commercialDetected = isCommercialEstimateInput(form);
     const qualifyingRecurringKeys = [
       "svcLawn",
       "svcPest",
@@ -1508,7 +1531,11 @@ export default function EstimateToolViewV2({
       "svcTermiteBait",
     ];
     const separateRecurringKeys = ["svcInjection", "svcRodentBait"];
-    const recurringCount = qualifyingRecurringKeys.filter((k) => form[k]).length;
+    const commercialManualQuoteCount =
+      commercialDetected ? ["svcLawn", "svcPest"].filter((k) => form[k]).length : 0;
+    const recurringCount = qualifyingRecurringKeys
+      .filter((k) => form[k] && !(commercialDetected && (k === "svcLawn" || k === "svcPest")))
+      .length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     const tierMap = {
@@ -1525,8 +1552,8 @@ export default function EstimateToolViewV2({
     const sqft = Number(form.homeSqFt) || 2000;
     const lotSqft = Number(form.lotSqFt) || 8000;
     const approx = {};
-    if (form.svcLawn) approx.lawn = Math.max(55, Math.round(sqft * 0.028 + 10));
-    if (form.svcPest) {
+    if (form.svcLawn && !commercialDetected) approx.lawn = Math.max(55, Math.round(sqft * 0.028 + 10));
+    if (form.svcPest && !commercialDetected) {
       const freqMult = { 4: 1, 6: 1.3, 12: 2.2 };
       approx.pest = Math.max(
         35,
@@ -1586,7 +1613,7 @@ export default function EstimateToolViewV2({
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,
@@ -1596,7 +1623,8 @@ export default function EstimateToolViewV2({
       // claiming "0 recurring selected" when only a non-qualifying
       // service is chosen. Tier-discount math still keys off
       // recurringCount alone.
-      totalRecurringCount: recurringCount + separateRecurringCount,
+      totalRecurringCount: recurringCount + separateRecurringCount + commercialManualQuoteCount,
+      commercialManualQuoteCount,
       onetimeCount,
       tier,
       recurringMonthly,
@@ -1972,14 +2000,10 @@ export default function EstimateToolViewV2({
       if (ep.homeSqFt) upd.homeSqFt = String(ep.homeSqFt);
       if (ep.lotSqFt) upd.lotSqFt = String(ep.lotSqFt);
       if (ep.stories) upd.stories = String(ep.stories);
-      if (ep.propertyType) {
-        const pt = ep.propertyType.toLowerCase();
-        if (pt.includes("single")) upd.propertyType = "Single Family";
-        else if (pt.includes("town")) upd.propertyType = "Townhome";
-        else if (pt.includes("condo")) upd.propertyType = "Condo";
-        else if (pt.includes("duplex")) upd.propertyType = "Duplex";
-        else if (pt.includes("commercial")) upd.propertyType = "Commercial";
+      if (ep.propertyType || ep.category) {
+        Object.assign(upd, resolveLookupPropertyTypeAutofill(ep.propertyType, ep.category));
       }
+      if (ep.commercialSubtype) upd.commercialSubtype = ep.commercialSubtype;
       if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
@@ -2138,7 +2162,9 @@ export default function EstimateToolViewV2({
       if (data.has_pool_cage) upd.hasPoolCage = "YES";
       if (data.has_large_driveway) upd.hasLargeDriveway = "YES";
       if (data.near_water) upd.nearWater = "YES";
-      if (data.property_type) upd.propertyType = data.property_type;
+      if (data.property_type || data.category) {
+        Object.assign(upd, resolveLookupPropertyTypeAutofill(data.property_type, data.category));
+      }
       if (data.perimeter_linear_ft)
         upd.boracareSqft = String(Math.round(data.perimeter_linear_ft));
 
@@ -2204,6 +2230,7 @@ export default function EstimateToolViewV2({
               label: form.manualDiscountLabel || "",
             }
           : null;
+      const formIsCommercial = isCommercialEstimateInput(form);
 
       const options = {
         grassType: form.grassType || "st_augustine",
@@ -2242,6 +2269,8 @@ export default function EstimateToolViewV2({
         sanitationAccess: form.sanitationAccess || "normal",
         roachType: form.roachType || "REGULAR",
         onetimeLawnType: form.otLawnType || "FERT",
+        commercialPricingMode: form.commercialPricingMode || "manual_quote",
+        commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
         fleaExterior: !!form.svcFleaExterior,
         fleaExteriorAreaSqFt: parseInt(form.fleaExteriorAreaSqFt, 10) || 0,
         fleaExteriorAreaSource: form.fleaExteriorAreaSource || "UNKNOWN",
@@ -2322,6 +2351,8 @@ export default function EstimateToolViewV2({
         form.landscapeComplexity || profile.landscapeComplexity;
       profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
       profile.propertyType = form.propertyType || profile.propertyType;
+      profile.isCommercial = formIsCommercial;
+      profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
@@ -2331,10 +2362,18 @@ export default function EstimateToolViewV2({
         alert("Enter home sq ft or lot size.");
         return null;
       }
+      const hasPricedTurfService =
+        !profile.isCommercial &&
+        (form.svcLawn ||
+          form.svcOnetimeLawn ||
+          form.svcTopdress ||
+          form.svcDethatch ||
+          (form.svcPlugging && !(parseInt(form.plugArea, 10) > 0)));
       if (
-        (form.svcLawn || form.svcOnetimeLawn) &&
+        hasPricedTurfService &&
         profile.lotSqFt <= 0 &&
-        !profile.estimatedTurfSf
+        !profile.estimatedTurfSf &&
+        !profile.measuredTurfSf
       ) {
         alert("Enter lot size or run Property Lookup for lawn pricing.");
         return null;
@@ -2474,6 +2513,9 @@ export default function EstimateToolViewV2({
     setSaving(true);
     try {
       const E = estimate;
+      const quoteRequired = estimateRequiresQuote(E);
+      const monthlyTotal = quoteRequired ? 0 : E.recurring?.grandTotal || 0;
+      const onetimeTotal = quoteRequired ? 0 : E.oneTime?.total || 0;
       const r = await fetch("/api/admin/estimates", {
         method: "POST",
         headers: authHeaders,
@@ -2485,9 +2527,9 @@ export default function EstimateToolViewV2({
           leadId: form.leadId || null,
           customerId: form.customerId || existingCustomerMatch?.id || null,
           estimateData: { inputs: form, result: E },
-          monthlyTotal: E.recurring?.grandTotal || 0,
-          annualTotal: (E.recurring?.grandTotal || 0) * 12,
-          onetimeTotal: E.oneTime?.total || 0,
+          monthlyTotal,
+          annualTotal: monthlyTotal * 12,
+          onetimeTotal,
           waveguardTier: E.recurring?.tier || "Bronze",
           notes: form.notes || "",
           satelliteUrl: satelliteData?.imageUrl || null,
@@ -2600,6 +2642,9 @@ export default function EstimateToolViewV2({
       stories: "1",
       lotSqFt: "",
       propertyType: "Single Family",
+      isCommercial: "NO",
+      commercialSubtype: "",
+      commercialPricingMode: "manual_quote",
       hasPool: "NO",
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
@@ -2702,6 +2747,7 @@ export default function EstimateToolViewV2({
   }
 
   const E = estimate;
+  const commercialDetected = isCommercialEstimateInput(form);
   const R = E?.results || {};
   const aiTurfSqFt =
     parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
@@ -2730,8 +2776,7 @@ export default function EstimateToolViewV2({
             : null;
   const pluggingUsesTurfFallback = !!form.svcPlugging && !(plugAreaSqFt > 0);
   const hasTurfPricedSelection =
-    !!form.svcLawn ||
-    !!form.svcOnetimeLawn ||
+    (!commercialDetected && (!!form.svcLawn || !!form.svcOnetimeLawn)) ||
     !!form.svcTopdress ||
     !!form.svcDethatch ||
     pluggingUsesTurfFallback;
@@ -2884,6 +2929,9 @@ export default function EstimateToolViewV2({
                       lotSqFt: "",
                       stories: "1",
                       propertyType: "Single Family",
+                      isCommercial: "NO",
+                      commercialSubtype: "",
+                      commercialPricingMode: "manual_quote",
                       hasPool: "NO",
                       hasPoolCage: "NO",
                       poolCageSize: "MEDIUM",
@@ -3135,6 +3183,36 @@ export default function EstimateToolViewV2({
                 />{" "}
               </FieldV2>{" "}
               <div className="grid grid-cols-2 gap-3">
+                <FieldV2 label="Commercial">
+                  <SelectV2
+                    k="isCommercial"
+                    options={[
+                      { value: "NO", label: "No" },
+                      { value: "YES", label: "Yes" },
+                    ]}
+                  />
+                </FieldV2>
+                <FieldV2 label="Commercial Pricing">
+                  <SelectV2
+                    k="commercialPricingMode"
+                    options={[
+                      { value: "manual_quote", label: "Manual quote" },
+                      { value: "small_commercial_pilot", label: "Small-commercial pilot" },
+                    ]}
+                  />
+                </FieldV2>
+              </div>
+              {(commercialDetected || form.commercialSubtype) && (
+                <FieldV2 label="Commercial Subtype">
+                  <InputV2 k="commercialSubtype" placeholder="Optional" />
+                </FieldV2>
+              )}
+              {commercialDetected && (
+                <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                  {COMMERCIAL_WARNING_TEXT}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-3">
                 {" "}
                 <FieldV2 label="Home Sq Ft">
                   <InputV2 k="homeSqFt" type="number" placeholder="2000" />
@@ -3314,7 +3392,12 @@ export default function EstimateToolViewV2({
               <PanelTitle>Services to Quote</PanelTitle>{" "}
               <SubGroupLabel>Recurring Programs</SubGroupLabel>{" "}
               <CheckboxV2 k="svcLawn" label="Lawn Care" />
-              {form.svcLawn && (
+              {form.svcLawn && commercialDetected && (
+                <div className="ml-7 mb-2 p-3 bg-alert-bg rounded-xs border-hairline border-alert-fg text-12 text-alert-fg">
+                  Commercial lawn treatment is set to manual quote. Residential lawn pricing is suppressed.
+                </div>
+              )}
+              {form.svcLawn && !commercialDetected && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
                   <FieldV2 label="Grass Type / Track" className="mb-0">
@@ -3403,7 +3486,12 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <CheckboxV2 k="svcPest" label="Pest Control" />
-              {form.svcPest && (
+              {form.svcPest && commercialDetected && (
+                <div className="ml-7 mb-2 p-3 bg-alert-bg rounded-xs border-hairline border-alert-fg text-12 text-alert-fg">
+                  Commercial pest is set to manual quote. Residential pest pricing is suppressed.
+                </div>
+              )}
+              {form.svcPest && !commercialDetected && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
                   <div className="grid grid-cols-2 gap-3">
@@ -3630,6 +3718,12 @@ export default function EstimateToolViewV2({
                   {livePreview.tier.discount > 0
                     ? ` (${Math.round(livePreview.tier.discount * 100)}% bundle discount)`
                     : " (no bundle discount yet)"}
+                </div>
+              )}
+              {livePreview.commercialManualQuoteCount > 0 && (
+                <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-alert-bg border-hairline border-alert-fg text-12 text-alert-fg">
+                  {livePreview.commercialManualQuoteCount} commercial lawn/pest selection
+                  {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} set to manual quote.
                 </div>
               )}
               <SubGroupLabel>One-Time Services</SubGroupLabel>{" "}
@@ -4412,7 +4506,7 @@ export default function EstimateToolViewV2({
                 <div className="text-14 text-ink-secondary mb-4">
                   {!livePreview.anySelected
                     ? "Select at least one service to see pricing"
-                    : `${livePreview.totalRecurringCount} recurring + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
+                    : `${livePreview.totalRecurringCount} recurring/manual + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
                 </div>
                 {enrichedProfile && (
                   <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-13 text-ink-secondary leading-relaxed">

@@ -198,6 +198,35 @@ describe("aggregateServiceLineRows", () => {
       avgTicket: 0,
     });
   });
+
+  it("keeps commercial manual quote service lines in pipeline analytics", () => {
+    const rows = aggregateServiceLineRows([
+      estimate({
+        id: "commercial-manual",
+        status: "sent",
+        serviceInterest: "",
+        monthlyTotal: 0,
+        serviceLines: [
+          { key: "commercial_pest", amount: null },
+          { key: "commercial_lawn", amount: null },
+        ],
+      }),
+    ]);
+
+    expect(rows.map((row) => row.key)).toEqual(["commercial_lawn", "commercial_pest"]);
+    expect(rows[0]).toMatchObject({
+      label: "Commercial lawn",
+      sent: 1,
+      won: 0,
+      avgTicket: 0,
+    });
+    expect(rows[1]).toMatchObject({
+      label: "Commercial pest",
+      sent: 1,
+      won: 0,
+      avgTicket: 0,
+    });
+  });
 });
 
 describe("withinDateRange", () => {

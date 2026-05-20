@@ -8,7 +8,10 @@ const logger = require('../services/logger');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
+const {
+  estimateDataHasQuoteRequirement,
+  validateEstimateDeliveryOptions,
+} = require('../services/estimate-delivery-options');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
@@ -110,6 +113,11 @@ function assertEstimateSendable(estimate) {
   }
   if (!SENDABLE_ESTIMATE_STATUSES.has(String(estimate.status || 'draft'))) {
     const err = new Error(`Estimate status ${estimate.status || 'unknown'} cannot be sent.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  if (estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
+    const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
     throw err;
   }
@@ -1089,6 +1097,7 @@ router.post('/cleanup-demo', async (req, res, next) => {
 });
 
 router._internals = {
+  assertEstimateSendable,
   sendEstimateEmail,
   estimateEmailIdempotencyKey,
 };

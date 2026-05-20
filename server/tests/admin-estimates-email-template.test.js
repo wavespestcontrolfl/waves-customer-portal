@@ -10,7 +10,15 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
-jest.mock('../services/estimate-delivery-options', () => ({ validateEstimateDeliveryOptions: jest.fn() }));
+jest.mock('../services/estimate-delivery-options', () => ({
+  estimateDataHasQuoteRequirement: jest.fn((estimateData) => {
+    const data = typeof estimateData === 'string' ? JSON.parse(estimateData) : estimateData;
+    return data?.result?.quoteRequired === true ||
+      data?.quoteRequired === true ||
+      data?.result?.specItems?.some((item) => item.quoteRequired === true);
+  }),
+  validateEstimateDeliveryOptions: jest.fn(),
+}));
 jest.mock('../services/estimate-pricing-audit', () => ({
   buildEstimatePricingAudit: jest.fn(),
   buildEstimatePricingRiskBatch: jest.fn(),
@@ -110,5 +118,20 @@ describe('admin estimate email delivery', () => {
 
     expect(firstAttemptKey).toMatch(/^estimate\.delivery:[a-f0-9]{64}$/);
     expect(retryKey).toBe(firstAttemptKey);
+  });
+
+  test('blocks sending quote-required estimates', () => {
+    expect(() => router._internals.assertEstimateSendable({
+      id: 'estimate-quote-required',
+      status: 'draft',
+      estimate_data: {
+        result: {
+          quoteRequired: true,
+          specItems: [
+            { service: 'commercial_pest', quoteRequired: true },
+          ],
+        },
+      },
+    })).toThrow(/Quote-required estimates need manual review/);
   });
 });

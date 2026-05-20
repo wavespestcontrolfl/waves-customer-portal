@@ -468,7 +468,7 @@ async function lookupPropertyFromAITrio(address) {
 }
 
 function buildPropertyPrompt(address) {
-  return `I need a complete property record for the residential property at this address. Find the missing facts via web search.
+  return `I need a complete property record for the property at this address. Find the missing facts via web search.
 
 Address: ${address}
 
@@ -486,7 +486,7 @@ Output rules:
 - "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
 - If the converted lot size is above 200000 square feet, return null for lotSize so the public quote flow does not underprice acreage properties.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
-- "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
+- "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", "Commercial", "Office", "Retail", "Warehouse", "Restaurant", "Medical Office", "School", "Industrial", "Multifamily", "Apartment", "HOA Common Area", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
 - Do NOT use generic city/category pages such as apartment directories, short-term-rental lists, or broad "homes for sale in city" pages as the source.
 - Use null for any field you can't verify — DO NOT guess. A null is more useful than a wrong number.
@@ -523,7 +523,7 @@ function parsePropertyJSON(text) {
       bedrooms: coerceInt(raw.bedrooms, 1, 15),
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
       stories: coerceInt(raw.stories, 1, 4),
-      propertyType: coerceEnum(raw.propertyType, ['Single Family', 'Townhome', 'Condo', 'Duplex']),
+      propertyType: normalizeLookupPropertyType(raw.propertyType),
       constructionMaterial: coerceEnum(raw.constructionMaterial, ['CBS', 'WOOD_FRAME', 'BRICK', 'METAL']),
       source: typeof raw.source === 'string' ? raw.source : null,
       confidence: typeof raw.confidence === 'string' ? raw.confidence.toLowerCase() : null,
@@ -656,9 +656,51 @@ function coerceEnum(raw, allowed) {
   return allowed.includes(raw) ? raw : null;
 }
 
+function normalizeLookupPropertyType(raw) {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  if (!text) return null;
+  const key = text.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!key) return null;
+
+  if (/(restaurant|food_service)/.test(key)) return 'Restaurant';
+  if (/(medical|clinic)/.test(key)) return 'Medical Office';
+  if (/(school|daycare)/.test(key)) return 'School';
+  if (/(warehouse)/.test(key)) return 'Warehouse';
+  if (/(industrial)/.test(key)) return 'Industrial';
+  if (/(government|municipal)/.test(key)) return 'Government Municipal';
+  if (/(office|retail|business|plaza|storefront|shop)/.test(key)) return 'Office';
+  if (/(apartment|apartments|multi_family|multifamily)/.test(key)) return 'Multifamily';
+  if (/(hoa_common|common_area)/.test(key)) return 'HOA Common Area';
+  if (/(commercial)/.test(key)) {
+    return 'Commercial';
+  }
+  if (/(townhome|town_home|townhouse)/.test(key)) return 'Townhome';
+  if (/duplex/.test(key)) return 'Duplex';
+  if (/(condo|condominium)/.test(key)) return 'Condo';
+  if (/(single_family|single|house|home|residential)/.test(key)) return 'Single Family';
+  return coerceEnum(text, [
+    'Single Family',
+    'Townhome',
+    'Condo',
+    'Duplex',
+    'Commercial',
+    'Office',
+    'Retail',
+    'Warehouse',
+    'Restaurant',
+    'Medical Office',
+    'School',
+    'Industrial',
+    'Multifamily',
+    'Apartment',
+    'HOA Common Area',
+  ]);
+}
+
 function hasAnyPropertyFact(parsed) {
   return !!(parsed?.squareFootage || parsed?.lotSize || parsed?.yearBuilt
-    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories);
+    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories || parsed?.propertyType);
 }
 
 // Reshape AI output to match the normalized property-record shape
@@ -995,4 +1037,9 @@ module.exports = {
   lookupPropertyFromOpenAI,
   lookupPropertyFromGemini,
   lookupPropertyFromAITrio,
+  _private: {
+    hasAnyPropertyFact,
+    normalizeLookupPropertyType,
+    parsePropertyJSON,
+  },
 };

@@ -43,6 +43,8 @@ const effectiveOneTimePrice = li => (
 );
 
 const SERVICE_LABEL = {
+  commercial_pest: 'Commercial Pest Control',
+  commercial_lawn: 'Commercial Lawn Treatment',
   one_time_pest: 'One-Time Pest',
   one_time_lawn: 'One-Time Lawn',
   one_time_mosquito: 'One-Time Mosquito',
@@ -76,6 +78,24 @@ const SERVICE_LABEL = {
 };
 
 const labelFor = svc => SERVICE_LABEL[svc] || svc;
+
+function commercialManualQuoteFields(li = {}) {
+  if (!li.isCommercial && !String(li.service || '').startsWith('commercial_')) return {};
+  return {
+    commercialPricingMode: li.commercialPricingMode,
+    isCommercial: !!li.isCommercial,
+    commercialSubtype: li.commercialSubtype || null,
+    originalRequestedService: li.originalRequestedService || null,
+    quoteRequired: !!li.quoteRequired,
+    requiresManualReview: !!li.requiresManualReview,
+    autoQuoteRequiresAdminApproval: !!li.autoQuoteRequiresAdminApproval,
+    manualReviewReasons: Array.isArray(li.manualReviewReasons) ? li.manualReviewReasons : [],
+    taxable: li.taxable,
+    taxCategory: li.taxCategory || null,
+    pricingConfidence: li.pricingConfidence || null,
+    reason: li.reason || null,
+  };
+}
 
 function describeMosquitoAddOns(addOns = {}, multiplier = 1) {
   const parts = [];
@@ -309,6 +329,7 @@ function mapV1ToLegacyShape(v1Result) {
     const price = quoteRequired ? null : effectiveOneTimePrice(li);
     const detail = [
       li.detail || li.det || '',
+      li.reason || '',
       li.exteriorDetail || li.display?.exteriorDetail || '',
       li.warning || '',
     ].filter(Boolean).join(' · ');
@@ -335,6 +356,7 @@ function mapV1ToLegacyShape(v1Result) {
         requiresCustomQuote: !!li.requiresCustomQuote,
         customQuoteReason: li.customQuoteReason || null,
         fleaExteriorZones: li.fleaExteriorZones || [],
+        ...commercialManualQuoteFields(li),
       });
     }
   });
@@ -359,6 +381,16 @@ function mapV1ToLegacyShape(v1Result) {
     .filter(s => !s.onProg)
     .reduce((s, i) => s + (i.price || 0), 0);
   const oneTimeTotal = oneTimeItemsMoney + specialtyMoney + membershipFee;
+  const quoteRequiredItems = lineItems
+    .filter(li => li && (li.quoteRequired === true || li.requiresCustomQuote === true))
+    .map(li => ({
+      service: li.service,
+      name: li.display?.name || li.label || labelFor(li.service),
+      reason: li.reason || li.customQuoteReason || null,
+      ...commercialManualQuoteFields(li),
+      quoteRequired: true,
+    }));
+  const quoteRequired = quoteRequiredItems.length > 0;
 
   const topDressingLI = lineItems.find(l => l.service === 'top_dressing');
   if (topDressingLI) {
@@ -434,15 +466,18 @@ function mapV1ToLegacyShape(v1Result) {
     isRecurringCustomer,
     hasRecurring: services.length > 0 || palmInjectionMonthly > 0 || rodentBaitMonthly > 0,
     hasOneTime: v1OtItems.length > 0 || v1SpecItems.some(s => !s.onProg && (s.quoteRequired || s.price > 0)),
+    quoteRequired,
+    quoteRequiredReason: quoteRequiredItems[0]?.reason || null,
+    quoteRequiredItems,
     recurring: {
       serviceCount: wg.qualifyingCount || 0,
       tier: waveGuardTier,
       waveGuardTier,
       discount: wg.discount || 0,
-      annualBeforeDiscount: recurringAnnualBefore,
-      grandTotal: year2Monthly,
-      monthlyTotal: recurringMonthly,
-      annualAfterDiscount: recurringAnnual,
+      annualBeforeDiscount: quoteRequired ? 0 : recurringAnnualBefore,
+      grandTotal: quoteRequired ? 0 : year2Monthly,
+      monthlyTotal: quoteRequired ? 0 : recurringMonthly,
+      annualAfterDiscount: quoteRequired ? 0 : recurringAnnual,
       savings: roundMoney((summary.waveGuardSavings || 0) - palmFlatCreditAnnual),
       rodentBaitMo: rodentBaitMonthly,
       palmInjectionMo: palmInjectionMonthly,
@@ -463,6 +498,16 @@ function mapV1ToLegacyShape(v1Result) {
           warnings: s.warnings,
           quoteRequired: !!s.quoteRequired,
           reason: s.reason,
+          commercialPricingMode: s.commercialPricingMode,
+          isCommercial: !!s.isCommercial,
+          commercialSubtype: s.commercialSubtype || null,
+          originalRequestedService: s.originalRequestedService || null,
+          requiresManualReview: !!s.requiresManualReview,
+          autoQuoteRequiresAdminApproval: !!s.autoQuoteRequiresAdminApproval,
+          manualReviewReasons: Array.isArray(s.manualReviewReasons) ? s.manualReviewReasons : [],
+          taxable: s.taxable,
+          taxCategory: s.taxCategory || null,
+          pricingConfidence: s.pricingConfidence || null,
           requiresCustomQuote: !!s.requiresCustomQuote,
           customQuoteReason: s.customQuoteReason,
           fleaExteriorZones: s.fleaExteriorZones,
@@ -476,9 +521,9 @@ function mapV1ToLegacyShape(v1Result) {
       otSubtotal: oneTimeTotal - tmInstall,
     },
     totals: {
-      year1,
-      year2,
-      year2mo: year2Monthly,
+      year1: quoteRequired ? 0 : year1,
+      year2: quoteRequired ? 0 : year2,
+      year2mo: quoteRequired ? 0 : year2Monthly,
       manualDiscount: summary.manualDiscount || null,
     },
     manualDiscount: summary.manualDiscount || null,

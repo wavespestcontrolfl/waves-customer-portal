@@ -18,9 +18,94 @@ const {
   withAutomatedEstimatePhoneLock,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const {
+  isCommercialProperty,
+  normalizePropertyType,
+} = require('../services/pricing-engine/commercial-helpers');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
+
+function isPublicCommercialQuote(body = {}, enriched = {}) {
+  const enrichedCommercial = isCommercialProperty({
+    propertyType: enriched.propertyType,
+    category: enriched.category,
+    isCommercial: enriched.isCommercial,
+    commercialSubtype: enriched.commercialSubtype,
+  });
+  const bodyPropertyType = normalizePropertyType(body.propertyType);
+  const bodyPropertyTypeLooksLikeWizardDefault =
+    bodyPropertyType === 'single_family' &&
+    !enriched.propertyType &&
+    enrichedCommercial &&
+    body.category === undefined &&
+    body.isCommercial === undefined &&
+    !body.commercialSubtype;
+
+  return isCommercialProperty({
+    propertyType: bodyPropertyTypeLooksLikeWizardDefault ? undefined : body.propertyType,
+    category: body.category,
+    isCommercial: body.isCommercial,
+    commercialSubtype: body.commercialSubtype,
+  }, {
+    propertyType: enriched.propertyType,
+    category: enriched.category,
+    isCommercial: enriched.isCommercial,
+    commercialSubtype: enriched.commercialSubtype,
+  });
+}
+
+function numberOrNull(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue;
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function isManualQuoteLine(line = {}) {
+  return line?.quoteRequired === true ||
+    line?.requiresManualReview === true ||
+    String(line?.service || '').startsWith('commercial_');
+}
+
+function pricedRecurringServicesFromLineItems(lineItems = []) {
+  return lineItems
+    .filter((line) => line && typeof line === 'object' && !isManualQuoteLine(line))
+    .map((line) => {
+      const monthly = numberOrNull(line.monthlyAfterDiscount, line.monthly, line.price);
+      if (!Number.isFinite(monthly) || monthly <= 0) return null;
+      return {
+        service: line.service,
+        name: line.name || line.label || line.displayName || line.service,
+        mo: Math.round(monthly * 100) / 100,
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) {
+  const lineItems = Array.isArray(estimate.lineItems) ? estimate.lineItems : [];
+  const recurringServices = pricedRecurringServicesFromLineItems(lineItems);
+  const recurringMonthly = recurringServices
+    .reduce((sum, service) => sum + Number(service.mo || 0), 0);
+
+  return {
+    ...estimate,
+    lineItems,
+    specItems: manualQuoteLines,
+    recurring: {
+      services: recurringServices,
+      grandTotal: Math.round(recurringMonthly * 100) / 100,
+      monthlyTotal: Math.round(recurringMonthly * 100) / 100,
+    },
+    oneTime: {
+      total: numberOrNull(estimate.summary?.oneTimeTotal) || 0,
+      specItems: manualQuoteLines,
+    },
+  };
+}
 
 async function renderTemplate(templateKey, vars) {
   try {
@@ -49,7 +134,11 @@ function normalizePhone(raw) {
 
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
-    const { leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt, lotSqFt, stories, propertyType, enriched, services, attribution } = req.body || {};
+    const {
+      leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
+      lotSqFt, stories, propertyType, category, isCommercial, commercialSubtype,
+      enriched, services, attribution,
+    } = req.body || {};
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
@@ -78,6 +167,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const sqft = Math.max(500, Math.min(20000, Number(homeSqFt) || 2000));
     const lot = Math.max(500, Math.min(200000, Number(lotSqFt) || sqft * 4));
     const ep = (enriched && typeof enriched === 'object') ? enriched : {};
+    const commercialDetected = isPublicCommercialQuote({
+      propertyType,
+      category,
+      isCommercial,
+      commercialSubtype,
+    }, ep);
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water, large-driveway) flow into the
@@ -92,7 +187,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       homeSqFt: sqft,
       stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
       lotSqFt: lot,
-      propertyType: propertyType || ep.propertyType || 'Single Family',
+      propertyType: commercialDetected ? 'commercial' : (propertyType || ep.propertyType || 'Single Family'),
+      category: category || ep.category || null,
+      isCommercial: commercialDetected,
+      commercialSubtype: commercialSubtype || ep.commercialSubtype || null,
       features: {
         pool: ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES',
         poolCage: ep.poolCage === 'YES' || ep.poolCage === true,
@@ -151,10 +249,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
 
     const estimate = generateEstimate(engineInput);
-    const monthly = Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
-    const annual = Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
+    const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
+      isManualQuoteLine(line)
+    );
+    const manualQuoteLine = manualQuoteLines[0] || null;
+    const quoteRequired = !!manualQuoteLine;
+    const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
+    const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
 
-    if (!monthly || !annual) {
+    if (!quoteRequired && (!monthly || !annual)) {
       logger.error('[public-quote] Engine returned zero price', { engineInput, estimate });
       return res.status(500).json({ error: 'Unable to calculate a price right now.' });
     }
@@ -180,6 +283,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       enriched: ep,
       annual,
       monthly,
+      quoteRequired,
+      quoteRequiredReason: manualQuoteLine?.reason || null,
+      quoteRequiredService: manualQuoteLine?.service || null,
+      manualQuoteLines,
       utm: attr?.utm || null,
       referrer: attr?.referrer || null,
       landing_url: attr?.landing_url || null,
@@ -201,7 +308,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         city: quoteCity || null,
         zip: quoteZip || null,
         service_interest: serviceInterest,
-        monthly_value: monthly,
+        monthly_value: quoteRequired ? null : monthly,
         extracted_data: extractedData,
         updated_at: new Date(),
       };
@@ -227,7 +334,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_type: 'quote_wizard',
         first_contact_channel: 'website_quote',
         lead_source_id: sourceMeta.leadSourceId,
-        monthly_value: monthly,
+        monthly_value: quoteRequired ? null : monthly,
         status: 'new',
         gclid,
         extracted_data: extractedData,
@@ -343,7 +450,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         monthly,
         annual,
         enriched: ep,
+        quoteRequired,
+        quoteRequiredReason: manualQuoteLine?.reason || null,
+        quoteRequiredService: manualQuoteLine?.service || null,
+        manualQuoteLines,
       };
+      if (quoteRequired) {
+        estimateDataObj.result = buildQuoteRequiredEstimateResult(estimate, manualQuoteLines);
+      }
       const existingEst = await db('estimates')
         .where({ source: 'quote_wizard', status: 'draft' })
         .whereRaw("estimate_data->>'lead_id' = ?", [lead.id])
@@ -381,8 +495,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const NotificationService = require('../services/notification-service');
       await NotificationService.notifyAdmin(
         'new_lead',
-        `Calculator quote: ${firstName} ${lastName}`,
-        `${serviceInterest} · $${Math.round(monthly)}/mo · ${quoteFullAddress}`,
+        quoteRequired ? `Manual quote needed: ${firstName} ${lastName}` : `Calculator quote: ${firstName} ${lastName}`,
+        quoteRequired
+          ? `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`
+          : `${serviceInterest} · $${Math.round(monthly)}/mo · ${quoteFullAddress}`,
         { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id } }
       );
     } catch (e) {
@@ -395,13 +511,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // via /api/leads (lead-webhook.js), where admin follow-up is actually needed.
     try {
       await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-        `\u{1F514} Quote-wizard lead!\n${firstName} ${lastName}\n\u{1F4DE} ${normalizedPhone || phone}\n\u{1F4CD} ${quoteFullAddress || 'No address'}\n\u{1F4B0} ${serviceInterest} · $${Math.round(monthly)}/mo`,
+        quoteRequired
+          ? `\u{1F514} Manual quote needed!\n${firstName} ${lastName}\n\u{1F4DE} ${normalizedPhone || phone}\n\u{1F4CD} ${quoteFullAddress || 'No address'}\n${serviceInterest} · commercial property`
+          : `\u{1F514} Quote-wizard lead!\n${firstName} ${lastName}\n\u{1F4DE} ${normalizedPhone || phone}\n\u{1F4CD} ${quoteFullAddress || 'No address'}\n\u{1F4B0} ${serviceInterest} · $${Math.round(monthly)}/mo`,
         { messageType: 'internal_alert' }
       );
     } catch (e) { logger.error(`[public-quote] Admin SMS failed: ${e.message}`); }
 
     // Customer SMS: estimate_accepted_onetime template (DB-editable).
-    if (normalizedPhone) {
+    if (normalizedPhone && !quoteRequired) {
       try {
         const wantsPest = !!services?.pest;
         const wantsLawn = !!services?.lawn;
@@ -506,6 +624,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const hasComplexity = !!(ep.landscapeComplexity || ep.complexity);
     const confidence = (hasShrubs || hasTrees || hasComplexity) ? 'high' : 'low';
     const varianceBand = confidence === 'low' ? 0.10 : 0.05;
+
+    if (quoteRequired) {
+      return res.status(202).json({
+        lead_id: lead.id,
+        quote_required: true,
+        service: manualQuoteLine?.service || null,
+        reason: manualQuoteLine?.reason || 'commercial_property_manual_quote_required',
+        service_interest: serviceInterest,
+        message: 'Commercial properties require a manual quote. The Waves team has been notified.',
+      });
+    }
 
     res.json({
       lead_id: lead.id,
@@ -623,3 +752,6 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 });
 
 module.exports = router;
+module.exports._internals = {
+  isPublicCommercialQuote,
+};
