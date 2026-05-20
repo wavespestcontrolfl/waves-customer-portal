@@ -3,7 +3,7 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, URGENCY, SPECIALTY } = require('./constants');
+const { GLOBAL, WAVEGUARD, URGENCY } = require('./constants');
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
@@ -18,6 +18,7 @@ const {
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
+  normalizeRoachType,
 } = require('./service-pricing');
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
@@ -31,6 +32,10 @@ function serviceSelected(value) {
   if (value === true) return true;
   if (!value || typeof value !== 'object') return false;
   return value.selected === true || value.enabled === true || value.value === true;
+}
+
+function serviceOptions(value) {
+  return value && typeof value === 'object' ? value : {};
 }
 
 function uniqueStrings(values = []) {
@@ -344,6 +349,7 @@ function generateEstimate(input) {
     storiesSource: input.storiesSource,
     lotSqFt: input.lotSqFt,
     footprintSqFt: input.footprintSqFt ?? input.footprint,
+    perimeterLF: input.perimeterLF ?? input.perimeterLf ?? input.perimeter,
     buildingSqFt: input.buildingSqFt,
     livingAreaSqFt: input.livingAreaSqFt,
     lawnSqFt: input.lawnSqFt,
@@ -374,6 +380,14 @@ function generateEstimate(input) {
     attachedGarage: input.attachedGarage,
     maintenanceCondition: input.maintenanceCondition,
     overallPestPressure: input.overallPestPressure,
+    atticSqFt: input.atticSqFt,
+    atticAreaSqFt: input.atticAreaSqFt,
+    rawWoodSqFt: input.rawWoodSqFt,
+    woodTreatmentSqFt: input.woodTreatmentSqFt,
+    slabSqFt: input.slabSqFt,
+    foundationSqFt: input.foundationSqFt,
+    buildingSlabSqFt: input.buildingSlabSqFt,
+    newConstructionSlabSqFt: input.newConstructionSlabSqFt,
   });
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
@@ -383,6 +397,41 @@ function generateEstimate(input) {
   // ── 3. Price each requested service ────────────────────────
   const lineItems = [];
   const activeServiceKeys = [];
+  const inputPricingMetadata = input.pricingMetadata || {};
+  const pricingMetadata = {
+    warnings: uniqueStrings(inputPricingMetadata.warnings),
+    manualReviewReasons: uniqueStrings(inputPricingMetadata.manualReviewReasons),
+    skippedServices: Array.isArray(inputPricingMetadata.skippedServices)
+      ? [...inputPricingMetadata.skippedServices]
+      : [],
+    ...(inputPricingMetadata.skippedDuplicateRoachLine
+      ? {
+          skippedDuplicateRoachLine: true,
+          skippedService: inputPricingMetadata.skippedService,
+          skippedReason: inputPricingMetadata.skippedReason,
+        }
+      : {}),
+  };
+  const addManualReviewReason = (reason) => {
+    pricingMetadata.manualReviewReasons = uniqueStrings([...pricingMetadata.manualReviewReasons, reason]);
+  };
+  const addRoutingWarning = (warning) => {
+    pricingMetadata.warnings = uniqueStrings([...pricingMetadata.warnings, warning]);
+  };
+  const addSkippedService = (skipped) => {
+    if (!skipped) return;
+    const exists = pricingMetadata.skippedServices.some((item) => (
+      item.skippedService === skipped.skippedService &&
+      item.skippedReason === skipped.skippedReason
+    ));
+    if (!exists) pricingMetadata.skippedServices.push(skipped);
+    if (skipped.skippedDuplicateRoachLine) {
+      pricingMetadata.skippedDuplicateRoachLine = true;
+      pricingMetadata.skippedService = skipped.skippedService;
+      pricingMetadata.skippedReason = skipped.skippedReason;
+    }
+  };
+  let recurringPestRoachType = 'none';
   if (profileIsCommercial) property.isCommercial = true;
   else if (hasExplicitCommercialFlag) property.isCommercial = inputIsCommercial;
   if (commercialSubtype) property.commercialSubtype = commercialSubtype;
@@ -433,13 +482,22 @@ function generateEstimate(input) {
       }
       lineItems.push(result);
       activeServiceKeys.push('pest_control');
+      recurringPestRoachType = result.roachType || 'none';
 
       // Auto-add the one-time Initial Roach Knockdown when recurring pest is
       // booked with a non-none roach type. Recovers the heavier visit-1 cost
       // upfront — replaces the old multiplicative roachModifier (now zeroed)
       // which only paid back if the customer stayed past visit ~3.
       if (result.roachType && result.roachType !== 'none') {
-        const initialRoach = pricePestInitialRoach(property, { roachType: result.roachType });
+        const pestOptions = serviceOptions(services.pest);
+        const initialRoach = pricePestInitialRoach(property, {
+          roachType: result.roachType,
+          standalone: false,
+          autoFiredFromRecurringPest: true,
+          source: 'recurring_pest_roach_activity',
+          severity: pestOptions.roachSeverity || pestOptions.severity,
+          severitySource: pestOptions.roachSeverity || pestOptions.severity ? 'admin' : undefined,
+        });
         if (initialRoach) lineItems.push(initialRoach);
       }
     }
@@ -510,16 +568,21 @@ function generateEstimate(input) {
   }
 
   // Termite Bait
-  if (services.termite && !useCommercialManualQuote(services.termite, 'pest_control')) {
+  const termiteBaitService = services.termite || services.termiteBait || services.termite_bait;
+  if (termiteBaitService && !useCommercialManualQuote(termiteBaitService, 'pest_control')) {
+    const termiteOptions = serviceOptions(termiteBaitService);
     const result = priceTermiteBait(property, {
-      system: services.termite.system || 'advance',
-      monitoringTier: services.termite.monitoringTier || 'basic',
+      ...termiteOptions,
+      system: termiteOptions.system || 'advance',
+      monitoringTier: termiteOptions.monitoringTier || 'basic',
       modifiers,
     });
     result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     lineItems.push(result);
-    activeServiceKeys.push('termite_bait');
+    if (!result.quoteRequired && !result.requiresMeasurement) {
+      activeServiceKeys.push('termite_bait');
+    }
   }
 
   // Rodent Bait
@@ -593,11 +656,23 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.trenching && !useCommercialManualQuote(services.trenching, 'pest_control')) {
-    const result = priceTrenching(property);
+    const result = priceTrenching(property, serviceOptions(services.trenching));
     lineItems.push(result);
   }
   if (services.germanRoach && !useCommercialManualQuote(services.germanRoach, 'pest_control')) {
-    const result = priceGermanRoach(property);
+    const result = priceGermanRoach(property, {
+      ...serviceOptions(services.germanRoach),
+      source: 'german_roach_cleanout_selected',
+    });
+    if (recurringPestRoachType === 'german') {
+      const reason = 'german_roach_initial_and_cleanout_both_selected';
+      const warning = 'German initial knockdown and German Roach 3-visit cleanout are both selected. Verify this is intentional.';
+      result.requiresManualReview = true;
+      result.manualReviewReasons = uniqueStrings([...(result.manualReviewReasons || []), reason]);
+      result.warnings = uniqueStrings([...(result.warnings || []), warning]);
+      addManualReviewReason(reason);
+      addRoutingWarning(warning);
+    }
     lineItems.push(result);
   }
   // Standalone Initial Roach Knockdown — fires when the customer wants the
@@ -607,9 +682,23 @@ function generateEstimate(input) {
   // Translator skips this when recurring pest already auto-fires the same
   // knockdown via roachModifier, so no double-charge.
   if (services.pestInitialRoach && !useCommercialManualQuote(services.pestInitialRoach, 'pest_control')) {
-    const roachTypeRaw = (services.pestInitialRoach.roachType || 'regular').toLowerCase();
-    const result = pricePestInitialRoach(property, { roachType: roachTypeRaw, standalone: true });
-    if (result) lineItems.push(result);
+    const pestInitialRoachOptions = serviceOptions(services.pestInitialRoach);
+    const standaloneRoachMeta = normalizeRoachType(pestInitialRoachOptions.roachType || 'regular');
+    if (recurringPestRoachType === 'regular' && standaloneRoachMeta.roachType === 'regular') {
+      addSkippedService({
+        skippedDuplicateRoachLine: true,
+        skippedService: 'standalone_native_cockroach_treatment',
+        skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
+      });
+    } else {
+      const result = pricePestInitialRoach(property, {
+        ...pestInitialRoachOptions,
+        roachType: standaloneRoachMeta.roachType,
+        standalone: true,
+        source: pestInitialRoachOptions.source || 'standalone_native_cockroach_treatment',
+      });
+      if (result) lineItems.push(result);
+    }
   }
   // Legacy explicit service for old callers. The current v2 adapter relies on
   // the recurring pest auto-fire above (`pest_initial_roach`) and does not
@@ -625,19 +714,15 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
-  if (services.boraCare && !useCommercialManualQuote(services.boraCare, 'pest_control')) {
-    const result = priceBoraCare(services.boraCare.atticSqFt || property.footprint);
+  const boraCareService = services.boraCare || services.bora_care;
+  if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control')) {
+    const result = priceBoraCare(property, serviceOptions(boraCareService));
     lineItems.push(result);
   }
-  if (services.preSlab && !useCommercialManualQuote(services.preSlab, 'pest_control')) {
-    const result = pricePreSlabTermidor(
-      services.preSlab.slabSqFt || property.footprint,
-      services.preSlab.volumeDiscount || 'none'
-    );
-    if (services.preSlab.warranty === 'EXTENDED') {
-      result.price += SPECIALTY.preSlabTermidor.warrantyExtended;
-      result.warrantyAdd = SPECIALTY.preSlabTermidor.warrantyExtended;
-    }
+  const preSlabService = services.preSlab || services.preSlabTermidor || services.pre_slab_termidor;
+  if (preSlabService && !useCommercialManualQuote(preSlabService, 'pest_control')) {
+    const preSlabOptions = serviceOptions(preSlabService);
+    const result = pricePreSlabTermidor(property, preSlabOptions);
     lineItems.push(result);
   }
   if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control')) {
@@ -973,7 +1058,7 @@ function generateEstimate(input) {
 
   // ── 6. Calculate totals ────────────────────────────────────
   const recurringItems = lineItems.filter(i => i.annual);
-  const oneTimeItems = lineItems.filter(i => i.price && !i.annual);
+  const oneTimeItems = lineItems.filter(i => i.price && !i.annual && !i.total);
   const specialtyItems = lineItems.filter(i => i.total && !i.annual);
   const serviceSpecificDiscounts = applyServiceSpecificCredits(
     lineItems,
@@ -1044,7 +1129,12 @@ function generateEstimate(input) {
 
   const year1Total = recurringAnnualAfter + oneTimeTotal + specialtyTotal + installationTotal;
   const year2Total = recurringAnnualAfter; // + trenching renewal if applicable
-  const trenchingRenewal = lineItems.find(i => i.service === 'trenching')?.renewal || 0;
+  const trenchingRenewal = lineItems.find(i => (
+    i.service === 'trenching' &&
+    !i.quoteRequired &&
+    !i.requiresMeasurement &&
+    Number.isFinite(i.renewal)
+  ))?.renewal || 0;
   const year2WithRenewal = year2Total + trenchingRenewal;
 
   // ── 7. Validate margins ────────────────────────────────────
@@ -1107,6 +1197,8 @@ function generateEstimate(input) {
 
     // Warnings
     marginWarnings,
+    pricingMetadata,
+    routingMetadata: pricingMetadata,
     fieldVerify: turfPricedServicesSelected ? Array.from(new Set(property.turfFlags || [])) : [],
 
     // Property-driven modifiers & structural notes (v2 port)
@@ -1141,8 +1233,8 @@ function quickQuote(input) {
     savings: estimate.summary.waveGuardSavings,
     services: estimate.lineItems.map(i => ({
       name: i.service,
-      monthly: i.monthlyAfterDiscount || null,
-      price: i.priceAfterDiscount || i.totalAfterDiscount || null,
+      monthly: i.monthlyAfterDiscount ?? null,
+      price: i.totalAfterDiscount ?? i.total ?? i.priceAfterDiscount ?? i.price ?? null,
     })),
   };
 }

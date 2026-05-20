@@ -33,6 +33,22 @@ const LOCATION_ENV_KEYS = {
   'venice': 'VENICE',
 };
 
+function tokenSettingsKey(locationId) {
+  return `gbp.oauth_tokens.${locationId}`;
+}
+
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 // Google's My Business v4 endpoints normally return JSON, but when the OAuth
 // client lives in a project where the API isn't enabled — or hits a redirect
 // chain — they sometimes return 2xx with an HTML body. Parsing that as JSON
@@ -76,7 +92,67 @@ class GoogleBusinessService {
    * Get an OAuth2 client for a specific location.
    * Each location has its own Client ID, Secret, and Refresh Token.
    */
-  _getClient(locationId) {
+  async _getStoredTokens(locationId) {
+    try {
+      const row = await db('system_settings')
+        .where({ key: tokenSettingsKey(locationId) })
+        .first();
+      return parseJsonObject(row?.value);
+    } catch (err) {
+      logger.warn(`[gbp] Stored token lookup failed for ${locationId}: ${err.message}`);
+      return {};
+    }
+  }
+
+  async storeTokens(locationId, tokens = {}, options = {}) {
+    const envKey = LOCATION_ENV_KEYS[locationId];
+    if (!envKey) throw new Error(`Unknown location: ${locationId}`);
+
+    const existing = options.merge ? await this._getStoredTokens(locationId) : {};
+    const refreshToken = tokens.refresh_token || existing.refresh_token || process.env[`GBP_REFRESH_TOKEN_${envKey}`] || null;
+    if (!refreshToken) {
+      throw new Error('Google did not return a GBP refresh token. Revoke the app grant and start OAuth again.');
+    }
+
+    const now = new Date();
+    const tokenRecord = {
+      refresh_token: refreshToken,
+      access_token: tokens.access_token || existing.access_token || null,
+      token_expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : existing.token_expires_at || null,
+      scope: tokens.scope || existing.scope || null,
+      token_type: tokens.token_type || existing.token_type || null,
+      updated_at: now.toISOString(),
+    };
+
+    await db('system_settings')
+      .insert({
+        key: tokenSettingsKey(locationId),
+        value: JSON.stringify(tokenRecord),
+        category: 'integrations',
+        description: `Google Business Profile OAuth tokens for ${locationId}`,
+        created_at: now,
+        updated_at: now,
+      })
+      .onConflict('key')
+      .merge({
+        value: JSON.stringify(tokenRecord),
+        category: 'integrations',
+        description: `Google Business Profile OAuth tokens for ${locationId}`,
+        updated_at: now,
+      });
+
+    delete this._clients[locationId];
+    this.configured = true;
+
+    return {
+      connected: true,
+      locationId,
+      tokenExpiresAt: tokenRecord.token_expires_at,
+      hasRefreshToken: true,
+    };
+  }
+
+  async _getClient(locationId) {
     if (this._clients[locationId]) return this._clients[locationId];
 
     const envKey = LOCATION_ENV_KEYS[locationId];
@@ -84,12 +160,25 @@ class GoogleBusinessService {
 
     const clientId = process.env[`GBP_CLIENT_ID_${envKey}`];
     const clientSecret = process.env[`GBP_CLIENT_SECRET_${envKey}`];
-    const refreshToken = process.env[`GBP_REFRESH_TOKEN_${envKey}`];
+    const storedTokens = await this._getStoredTokens(locationId);
+    const refreshToken = storedTokens.refresh_token || process.env[`GBP_REFRESH_TOKEN_${envKey}`];
 
     if (!clientId || !clientSecret || !refreshToken) return null;
 
     const client = new (getGoogle()).auth.OAuth2(clientId, clientSecret, this.redirectUri);
-    client.setCredentials({ refresh_token: refreshToken });
+    const expiryDate = storedTokens.token_expires_at ? new Date(storedTokens.token_expires_at).getTime() : undefined;
+    client.setCredentials({
+      refresh_token: refreshToken,
+      access_token: storedTokens.access_token || undefined,
+      expiry_date: Number.isFinite(expiryDate) ? expiryDate : undefined,
+    });
+    client.on('tokens', async (tokens) => {
+      try {
+        await this.storeTokens(locationId, tokens, { merge: true });
+      } catch (err) {
+        logger.warn(`[gbp] Token refresh persistence failed for ${locationId}: ${err.message}`);
+      }
+    });
     this._clients[locationId] = client;
     return client;
   }
@@ -98,7 +187,7 @@ class GoogleBusinessService {
    * Get auth headers for a specific location's Google account.
    */
   async _getHeaders(locationId) {
-    const client = this._getClient(locationId);
+    const client = await this._getClient(locationId);
     if (!client) throw new Error(`No GBP credentials for location: ${locationId}`);
     const { token } = await client.getAccessToken();
     return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -107,14 +196,12 @@ class GoogleBusinessService {
   /**
    * Check which locations have credentials configured.
    */
-  getConfiguredLocations() {
-    return WAVES_LOCATIONS.filter(loc => {
-      const envKey = LOCATION_ENV_KEYS[loc.id];
-      return envKey &&
-        process.env[`GBP_CLIENT_ID_${envKey}`] &&
-        process.env[`GBP_CLIENT_SECRET_${envKey}`] &&
-        process.env[`GBP_REFRESH_TOKEN_${envKey}`];
-    });
+  async getConfiguredLocations() {
+    const configured = [];
+    for (const loc of WAVES_LOCATIONS) {
+      if (await this._getClient(loc.id)) configured.push(loc);
+    }
+    return configured;
   }
 
   // =========================================================================
@@ -406,7 +493,7 @@ class GoogleBusinessService {
       for (const [locId, reviews] of Object.entries(byLocation)) {
         const loc = WAVES_LOCATIONS.find(l => l.id === locId);
         if (!loc?.googleLocationResourceName) continue;
-        if (!this._getClient(locId)) continue;
+        if (!(await this._getClient(locId))) continue;
 
         try {
           const gbpReviews = await this.getReviews(loc.googleLocationResourceName, locId, 100);
@@ -449,7 +536,7 @@ class GoogleBusinessService {
    * Data has a ~2-day reporting lag. Upserts by (location_id, date).
    */
   async syncPerformanceDaily(daysBack = 7) {
-    const configuredLocations = this.getConfiguredLocations();
+    const configuredLocations = await this.getConfiguredLocations();
     if (configuredLocations.length === 0) {
       logger.warn('[gbp] No GBP credentials — skipping performance sync');
       return { synced: false, partial: false, rows: 0, errors: [], reason: 'not_configured' };
@@ -552,7 +639,7 @@ class GoogleBusinessService {
   // =========================================================================
   // OAUTH HELPERS — for initial token setup
   // =========================================================================
-  getAuthUrl(locationId) {
+  getAuthUrl(locationId, state = locationId) {
     const envKey = LOCATION_ENV_KEYS[locationId];
     if (!envKey) throw new Error(`Unknown location: ${locationId}`);
     const clientId = process.env[`GBP_CLIENT_ID_${envKey}`];
@@ -562,7 +649,7 @@ class GoogleBusinessService {
     return client.generateAuthUrl({
       access_type: 'offline', prompt: 'consent',
       scope: ['https://www.googleapis.com/auth/business.manage'],
-      state: locationId,
+      state,
     });
   }
 
@@ -570,9 +657,10 @@ class GoogleBusinessService {
     const envKey = LOCATION_ENV_KEYS[locationId];
     const clientId = process.env[`GBP_CLIENT_ID_${envKey}`];
     const clientSecret = process.env[`GBP_CLIENT_SECRET_${envKey}`];
+    if (!clientId || !clientSecret) throw new Error(`GBP_CLIENT_ID_${envKey} and GBP_CLIENT_SECRET_${envKey} must be set first`);
     const client = new (getGoogle()).auth.OAuth2(clientId, clientSecret, this.redirectUri);
     const { tokens } = await client.getToken(code);
-    return tokens;
+    return this.storeTokens(locationId, tokens);
   }
 }
 

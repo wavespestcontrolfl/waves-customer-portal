@@ -34,13 +34,24 @@ const finiteMoney = value => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 };
-const effectiveOneTimePrice = li => (
-  finiteMoney(li.priceAfterDiscount)
-  ?? finiteMoney(li.totalAfterDiscount)
-  ?? finiteMoney(li.price)
-  ?? finiteMoney(li.total)
-  ?? 0
-);
+const effectiveOneTimePrice = (li = {}) => {
+  if (li.service === 'german_roach') {
+    return (
+      finiteMoney(li.totalAfterDiscount)
+      ?? finiteMoney(li.total)
+      ?? finiteMoney(li.priceAfterDiscount)
+      ?? finiteMoney(li.price)
+      ?? 0
+    );
+  }
+  return (
+    finiteMoney(li.priceAfterDiscount)
+    ?? finiteMoney(li.totalAfterDiscount)
+    ?? finiteMoney(li.price)
+    ?? finiteMoney(li.total)
+    ?? 0
+  );
+};
 
 const SERVICE_LABEL = {
   commercial_pest: 'Commercial Pest Control',
@@ -95,6 +106,43 @@ function commercialManualQuoteFields(li = {}) {
     pricingConfidence: li.pricingConfidence || null,
     reason: li.reason || null,
   };
+}
+
+function measurementMetadataFields(li = {}) {
+  const fields = {};
+  if (li.measurements !== undefined) fields.measurements = li.measurements;
+  if (li.measurementWarnings !== undefined) fields.measurementWarnings = li.measurementWarnings;
+  if (li.warnings !== undefined) fields.warnings = Array.isArray(li.warnings) ? li.warnings : [];
+  if (li.footprintUsed !== undefined) fields.footprintUsed = li.footprintUsed;
+  if (li.footprintSource !== undefined) fields.footprintSource = li.footprintSource;
+  if (li.footprintWasDefaulted !== undefined) fields.footprintWasDefaulted = !!li.footprintWasDefaulted;
+  if (li.requiresMeasurement !== undefined) fields.requiresMeasurement = !!li.requiresMeasurement;
+  if (li.quoteRequired !== undefined) fields.quoteRequired = !!li.quoteRequired;
+  if (li.requiresManualReview !== undefined) fields.requiresManualReview = !!li.requiresManualReview;
+  if (li.manualReviewReasons !== undefined) {
+    fields.manualReviewReasons = Array.isArray(li.manualReviewReasons) ? li.manualReviewReasons : [];
+  }
+  [
+    'source',
+    'standalone',
+    'autoFiredFromRecurringPest',
+    'requestedRoachType',
+    'roachType',
+    'roachTypeWasDefaulted',
+    'severity',
+    'severitySource',
+    'pricingModel',
+    'legacyPricingModel',
+    'noRecurringDiscount',
+    'visits',
+    'setupCharge',
+    'total',
+    'scaleKey',
+  ].forEach((field) => {
+    if (li[field] !== undefined) fields[field] = li[field];
+  });
+  if (li.inputSourceSummary !== undefined) fields.inputSourceSummary = li.inputSourceSummary;
+  return fields;
 }
 
 function describeMosquitoAddOns(addOns = {}, multiplier = 1) {
@@ -258,13 +306,24 @@ function mapV1ToLegacyShape(v1Result) {
   if (tbLI) {
     const installPrice = tbLI.installation?.price || 0;
     const monMonthly = tbLI.monitoring?.monthly || 0;
+    const selectedSystem = tbLI.selectedSystem || tbLI.system || null;
     R.tmBait = {
-      ai: tbLI.system === 'advance' ? installPrice : 0,
-      ti: tbLI.system === 'trelona' ? installPrice : 0,
+      selectedSystem,
+      system: selectedSystem,
+      selectedMonitoringTier: tbLI.selectedMonitoringTier || tbLI.monitoringTier || null,
+      monitoringTier: tbLI.monitoringTier || tbLI.selectedMonitoringTier || null,
+      ai: selectedSystem === 'advance' ? installPrice : null,
+      ti: selectedSystem === 'trelona' ? installPrice : null,
       bmo: tbLI.monitoringTier === 'basic' ? monMonthly : 35,
       pmo: tbLI.monitoringTier === 'premier' ? monMonthly : 65,
       perim: tbLI.perimeter || 0,
       sta: tbLI.stations || 0,
+      measurements: tbLI.measurements || null,
+      measurementWarnings: tbLI.measurementWarnings || [],
+      requiresMeasurement: !!tbLI.requiresMeasurement,
+      quoteRequired: !!tbLI.quoteRequired,
+      requiresManualReview: !!tbLI.requiresManualReview,
+      manualReviewReasons: tbLI.manualReviewReasons || [],
     };
   }
 
@@ -286,7 +345,7 @@ function mapV1ToLegacyShape(v1Result) {
     const mo = li.monthly || 0;
     const perTreatment = Number(li.perApp ?? li.perVisit ?? 0) || null;
     const visitsPerYear = Number(li.visitsPerYear ?? li.visits ?? li.frequency ?? 0) || null;
-    services.push({ name, mo, monthly: mo, perTreatment, visitsPerYear, ...extra });
+    services.push({ name, mo, monthly: mo, perTreatment, visitsPerYear, ...measurementMetadataFields(li), ...extra });
   };
   svcAdd('Lawn Care', lawnLI, { service: 'lawn_care' });
   svcAdd('Pest Control', pestLI, { service: 'pest_control' });
@@ -312,7 +371,9 @@ function mapV1ToLegacyShape(v1Result) {
       addOns: mqLI.addOns || null,
     });
   }
-  svcAdd('Termite Bait', tbLI, { service: 'termite_bait' });
+  if (tbLI && !tbLI.quoteRequired && !tbLI.requiresMeasurement) {
+    svcAdd('Termite Bait', tbLI, { service: 'termite_bait' });
+  }
 
   // One-time + specialty split
   const v1OtItems = [];
@@ -334,18 +395,38 @@ function mapV1ToLegacyShape(v1Result) {
       li.warning || '',
     ].filter(Boolean).join(' · ');
     if (ONE_TIME_SERVICES.has(li.service)) {
+      if (quoteRequired) {
+        v1SpecItems.push({
+          service: li.service,
+          name,
+          price: null,
+          det: detail,
+          quoteRequired: true,
+          reason: li.reason,
+          warning: li.warning || null,
+          warnings: li.warnings || [],
+          requiresCustomQuote: !!li.requiresCustomQuote,
+          customQuoteReason: li.customQuoteReason || null,
+          requiresMeasurement: !!li.requiresMeasurement,
+          ...measurementMetadataFields(li),
+          ...commercialManualQuoteFields(li),
+        });
+        return;
+      }
       // Preserve `service` on the mapped item so consumers can match by
       // canonical key (e.g. estimate-public's findInitialRoachItem) without
       // depending on display labels that may be re-translated downstream.
-      const item = { service: li.service, name, price, detail };
+      const item = { service: li.service, name, price, detail, ...measurementMetadataFields(li) };
       if (li.spacing !== undefined) item.spacing = li.spacing;
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;
       if (li.addOns !== undefined) item.addOns = li.addOns;
+      if (!quoteRequired && li.renewal !== undefined) item.renewal = li.renewal;
+      if (!quoteRequired && li.renewalLabel !== undefined) item.renewalLabel = li.renewalLabel;
       if (li.serviceSpecificDiscountApplied !== undefined) item.serviceSpecificDiscountApplied = !!li.serviceSpecificDiscountApplied;
       if (li.serviceSpecificDiscounts !== undefined) item.serviceSpecificDiscounts = li.serviceSpecificDiscounts;
       v1OtItems.push(item);
-      if (li.service === 'trenching') R.trench = true;
+      if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
       v1SpecItems.push({
         service: li.service, name, price, det: detail,
@@ -358,8 +439,13 @@ function mapV1ToLegacyShape(v1Result) {
         requiresCustomQuote: !!li.requiresCustomQuote,
         customQuoteReason: li.customQuoteReason || null,
         fleaExteriorZones: li.fleaExteriorZones || [],
+        addOns: li.addOns || [],
         serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied,
         serviceSpecificDiscounts: li.serviceSpecificDiscounts || [],
+        warrantyExtendedSelected: li.warrantyExtendedSelected,
+        warrantyExtendedPrice: li.warrantyExtendedPrice,
+        warrantyAdd: li.warrantyAdd,
+        ...measurementMetadataFields(li),
         ...commercialManualQuoteFields(li),
       });
     }
@@ -370,9 +456,11 @@ function mapV1ToLegacyShape(v1Result) {
   if (tbLI && (tbLI.installation?.price || 0) > 0) {
     tmInstall = tbLI.installation.price;
     v1OtItems.push({
+      service: 'termite_bait_installation',
       name: `${CAP(tbLI.system)} Installation`,
       price: tmInstall,
       detail: `${tbLI.stations} stations · ${tbLI.perimeter} linear ft perimeter`,
+      ...measurementMetadataFields(tbLI),
     });
   }
 
@@ -391,6 +479,7 @@ function mapV1ToLegacyShape(v1Result) {
       service: li.service,
       name: li.display?.name || li.label || labelFor(li.service),
       reason: li.reason || li.customQuoteReason || null,
+      ...measurementMetadataFields(li),
       ...commercialManualQuoteFields(li),
       quoteRequired: true,
     }));
@@ -465,6 +554,8 @@ function mapV1ToLegacyShape(v1Result) {
     productionDiagnostics: pestLI?.productionDiagnostics || null,
     fieldVerify: v1Result.fieldVerify || [],
     notes: v1Result.notes || [],
+    pricingMetadata: v1Result.pricingMetadata || v1Result.routingMetadata || null,
+    routingMetadata: v1Result.routingMetadata || v1Result.pricingMetadata || null,
     urgency: { mult: 1, label: '' },
     recurringCustomer: isRecurringCustomer,
     isRecurringCustomer,
@@ -515,8 +606,26 @@ function mapV1ToLegacyShape(v1Result) {
           requiresCustomQuote: !!s.requiresCustomQuote,
           customQuoteReason: s.customQuoteReason,
           fleaExteriorZones: s.fleaExteriorZones,
+          source: s.source,
+          pricingModel: s.pricingModel,
+          legacyPricingModel: s.legacyPricingModel,
+          visits: s.visits,
+          setupCharge: s.setupCharge,
+          total: s.total,
+          noRecurringDiscount: s.noRecurringDiscount,
+          standalone: s.standalone,
+          autoFiredFromRecurringPest: s.autoFiredFromRecurringPest,
+          requestedRoachType: s.requestedRoachType,
+          roachType: s.roachType,
+          measurements: s.measurements,
+          measurementWarnings: s.measurementWarnings,
+          requiresMeasurement: !!s.requiresMeasurement,
+          inputSourceSummary: s.inputSourceSummary,
+          addOns: s.addOns,
           serviceSpecificDiscountApplied: !!s.serviceSpecificDiscountApplied,
           serviceSpecificDiscounts: s.serviceSpecificDiscounts || [],
+          warrantyExtendedSelected: s.warrantyExtendedSelected,
+          warrantyExtendedPrice: s.warrantyExtendedPrice,
         })),
       total: oneTimeTotal,
       tmInstall,

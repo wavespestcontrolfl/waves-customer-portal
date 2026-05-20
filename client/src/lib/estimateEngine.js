@@ -51,6 +51,21 @@ export function interpolate(v, b) {
   return 0;
 }
 
+function interpolateLinear(v, b) {
+  if (v <= b[0].at) return b[0].adj;
+  if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
+  for (let i = 0; i < b.length - 1; i++) {
+    const lo = b[i];
+    const hi = b[i + 1];
+    if (v >= lo.at && v <= hi.at) {
+      const span = hi.at - lo.at;
+      if (span === 0) return lo.adj;
+      return lo.adj + ((v - lo.at) / span) * (hi.adj - lo.adj);
+    }
+  }
+  return b[b.length - 1].adj;
+}
+
 export function fmt(n) {
   if (n === undefined || n === null || isNaN(n)) return '$0.00';
   return '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -59,6 +74,22 @@ export function fmt(n) {
 export function fmtInt(n) {
   if (n === undefined || n === null || isNaN(n)) return '$0';
   return '$' + Math.round(Number(n)).toLocaleString();
+}
+
+export function termiteBaitSystemLabel(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return key === 'trelona' ? 'Trelona' : 'Advance';
+}
+
+export function termiteBaitMonitoringLabel(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return key === 'premier' ? 'Premier' : 'Basic';
+}
+
+export function termiteBaitSelectionLabel(tmBait = {}, fallback = {}) {
+  const system = tmBait.selectedSystem || tmBait.system || fallback.termiteBaitSystem;
+  const tier = tmBait.selectedMonitoringTier || tmBait.monitoringTier || fallback.termiteMonitoringTier;
+  return `${termiteBaitSystemLabel(system)} ${termiteBaitMonitoringLabel(tier)}`;
 }
 
 export function normalizeCommercialString(value) {
@@ -433,6 +464,16 @@ export function calculateEstimate(inputs) {
     bedbugOccupancyType,
     bedbugHeatScope,
     bedbugSubcontractCost,
+    termiteFootprintSqFt: _termiteFootprintSqFt,
+    termitePerimeterLF: _termitePerimeterLF,
+    termiteBaitComplexity,
+    termiteBaitSystem,
+    termiteMonitoringTier,
+    trenchingPerimeterLF: _trenchingPerimeterLF,
+    trenchingConcreteLF: _trenchingConcreteLF,
+    trenchingDirtLF: _trenchingDirtLF,
+    trenchingConcretePct: _trenchingConcretePct,
+    trenchingEstimateFromFootprint,
     boracareSqft: bcSqft,
     preslabSqft: psSqft,
     preslabWarranty,
@@ -480,6 +521,18 @@ export function calculateEstimate(inputs) {
   const plugArea = Math.max(0, Number(_plugArea) || 0);
   const plugSpacing = Number(_plugSpacing) || 12;
   const bedbugRooms = Number(_bedbugRooms) || 1;
+  const termiteFootprintSqFt = toPositiveNumber(_termiteFootprintSqFt);
+  const termitePerimeterLF = toPositiveNumber(_termitePerimeterLF);
+  const trenchingPerimeterLF = toPositiveNumber(_trenchingPerimeterLF);
+  const hasTrenchingConcreteLF = hasNonNegativeNumber(_trenchingConcreteLF);
+  const hasTrenchingDirtLF = hasNonNegativeNumber(_trenchingDirtLF);
+  const hasTrenchingConcretePct = hasNonNegativeNumber(_trenchingConcretePct);
+  const trenchingConcreteLF = hasTrenchingConcreteLF ? toNonNegativeNumber(_trenchingConcreteLF) : 0;
+  const trenchingDirtLF = hasTrenchingDirtLF ? toNonNegativeNumber(_trenchingDirtLF) : 0;
+  const trenchingConcretePctRaw = hasTrenchingConcretePct ? toNonNegativeNumber(_trenchingConcretePct) : 0;
+  const trenchingConcretePct = trenchingConcretePctRaw > 1
+    ? trenchingConcretePctRaw / 100
+    : trenchingConcretePctRaw;
   const grassType = normalizeGrassType(_grassType);
   const lawnFreq = resolveLawnFreq(_lawnFreq);
   const mosquitoStationCount = Math.max(0, Math.round(Number(_mosquitoStationCount) || 0));
@@ -537,6 +590,27 @@ export function calculateEstimate(inputs) {
 
   let R = {}, wgServices = [];
   let notes = [];
+  const pricingMetadata = {
+    warnings: [],
+    manualReviewReasons: [],
+    skippedServices: [],
+  };
+  const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
+  const addRoutingWarning = warning => {
+    pricingMetadata.warnings = uniqueStrings([...pricingMetadata.warnings, warning]);
+  };
+  const addManualReviewReason = reason => {
+    pricingMetadata.manualReviewReasons = uniqueStrings([...pricingMetadata.manualReviewReasons, reason]);
+  };
+  const addSkippedService = skipped => {
+    if (!skipped) return;
+    pricingMetadata.skippedServices.push(skipped);
+    if (skipped.skippedDuplicateRoachLine) {
+      pricingMetadata.skippedDuplicateRoachLine = true;
+      pricingMetadata.skippedService = skipped.skippedService;
+      pricingMetadata.skippedReason = skipped.skippedReason;
+    }
+  };
   const isCommercial = isCommercialEstimateInput(inputs);
   const commercialManualSpecItems = [];
   if (isCommercial && hasAnySelectedFlag(inputs, COMMERCIAL_PEST_FALLBACK_FLAGS)) {
@@ -999,16 +1073,47 @@ export function calculateEstimate(inputs) {
 
   /* ── TERMITE BAIT ────────────────────────────────────────── */
   if (svcTermiteBait && !isCommercial) {
-    hasRec = true;
-    const fpEff = footprint > 0 ? footprint : 2500;
-    let pm = (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
-    const perim = Math.round(4 * Math.sqrt(fpEff) * pm);
-    const sta = Math.max(8, Math.ceil(perim / 10));
-    const hi = Math.round((sta * 8.69 + sta * 5.25 + sta * 0.75) * 1.75);
-    const ai = Math.round((sta * 14 + sta * 5.25 + sta * 0.75) * 1.75);
-    const ti = Math.round((sta * 24 + sta * 5.25 + sta * 0.75) * 1.75);
-    R.tmBait = { hi, ai, ti, bmo: 35, pmo: 65, perim, sta };
-    wgServices.push({ name: 'Termite Bait (Basic)', service: 'termite_bait', mo: 35, perTreatment: null, visitsPerYear: null });
+    const fpEff = termiteFootprintSqFt || footprint;
+    const layout = termiteBaitComplexity || (landscapeComplexity === 'MODERATE' ? 'moderate' : landscapeComplexity === 'COMPLEX' ? 'complex' : 'standard');
+    const pm = (layout === 'moderate' || layout === 'complex') ? 1.35 : 1.25;
+    const perim = termitePerimeterLF || (fpEff > 0 ? Math.round(4 * Math.sqrt(fpEff) * pm) : 0);
+    if (perim > 0) {
+      hasRec = true;
+      const sta = Math.max(8, Math.ceil(perim / 10));
+      const ai = Math.round((sta * (13.16 + 5.25 + 0.75)) * 1.45);
+      const ti = Math.round((sta * (22.05 + 5.25 + 0.75)) * 1.45);
+      const bmo = termiteMonitoringTier === 'premier' ? 35 : 35;
+      const pmo = 65;
+      R.tmBait = {
+        selectedSystem: termiteBaitSystem,
+        system: termiteBaitSystem,
+        selectedMonitoringTier: termiteMonitoringTier,
+        monitoringTier: termiteMonitoringTier,
+        ai,
+        ti,
+        bmo,
+        pmo,
+        perim,
+        sta,
+        measurements: {
+          footprintSqFt: { value: fpEff || null, source: termiteFootprintSqFt ? 'manual_override' : 'property_footprint' },
+          perimeterLF: { value: perim, source: termitePerimeterLF ? 'manual_override' : 'computed_from_footprint' },
+        },
+      };
+      wgServices.push({
+        name: termiteMonitoringTier === 'premier' ? 'Termite Bait (Premier)' : 'Termite Bait (Basic)',
+        service: 'termite_bait',
+        mo: termiteMonitoringTier === 'premier' ? 65 : 35,
+        perTreatment: null,
+        visitsPerYear: null,
+      });
+    } else {
+      R.tmBait = {
+        quoteRequired: true,
+        requiresMeasurement: true,
+        manualReviewReasons: ['missing_termite_footprint'],
+      };
+    }
   }
 
   /* ── RODENT BAIT ─────────────────────────────────────────── */
@@ -1125,20 +1230,39 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Trenching ───────────────────────────────────────────── */
-  if (svcTrenching && !isCommercial && footprint > 0) {
-    hasOT = true;
-    let pm = (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
-    const perim = Math.round(4 * Math.sqrt(footprint) * pm);
-    let cp = 0.25;
-    if (hasPoolCage) cp = 0.35;
-    else if (hasPool) cp = 0.30;
-    if (hasLargeDriveway) cp += 0.05;
-    // v1.5: raised cap from 0.50 to 0.60 — full cage + 3-car garage can hit 55-60%
-    cp = Math.min(0.60, cp);
-    const dl = Math.round(perim * (1 - cp)), cl = Math.round(perim * cp);
-    const fp = otP(Math.max(600, dl * 10 + cl * 14));
-    R.trench = { price: fp, ren: 325, dl, cl };
-    otItems.push({ name: 'Trenching', price: fp, detail: dl + ' LF dirt + ' + cl + ' LF concrete' });
+  if (svcTrenching && !isCommercial) {
+    const layout = (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
+    const estimatedPerim = footprint > 0 ? Math.round(4 * Math.sqrt(footprint) * layout) : 0;
+    const perim = trenchingPerimeterLF || (trenchingEstimateFromFootprint ? estimatedPerim : 0);
+    if (perim > 0) {
+      hasOT = true;
+      let cl;
+      let dl;
+      let cp;
+      if (hasTrenchingConcreteLF) {
+        cl = Math.min(Math.round(trenchingConcreteLF), Math.round(perim));
+        dl = hasTrenchingDirtLF && Math.abs((trenchingDirtLF + trenchingConcreteLF) - perim) <= Math.max(5, perim * 0.02)
+          ? Math.round(trenchingDirtLF)
+          : Math.max(0, Math.round(perim - cl));
+        cp = cl / perim;
+      } else {
+        cp = hasTrenchingConcretePct ? trenchingConcretePct : 0.25;
+        if (!hasTrenchingConcretePct) {
+          if (hasPoolCage) cp = 0.35;
+          else if (hasPool) cp = 0.30;
+          if (hasLargeDriveway) cp += 0.05;
+        }
+        cp = Math.min(0.60, cp);
+        cl = Math.round(perim * cp);
+        dl = Math.round(perim - cl);
+      }
+      const fp = otP(Math.max(600, dl * 10 + cl * 14));
+      R.trench = { price: fp, ren: 325, dl, cl, perim, cp };
+      otItems.push({ name: 'Trenching', price: fp, detail: dl + ' LF dirt + ' + cl + ' LF concrete' });
+    } else {
+      R.trenchQuoteRequired = { quoteRequired: true, requiresMeasurement: true, manualReviewReasons: ['missing_termite_perimeter_lf'] };
+      otItems.push({ name: 'Trenching', price: null, detail: 'Perimeter LF required', quoteRequired: true });
+    }
   }
 
   /* ── Bora-Care ───────────────────────────────────────────── */
@@ -1155,6 +1279,8 @@ export function calculateEstimate(inputs) {
     const fp = otP(Math.round(cost / 0.45));
     const detail = '~' + bcSqft.toLocaleString() + ' sf | ' + gal + ' gal | ' + lhr.toFixed(1) + ' hrs' + (isMultiDay ? ' (multi-day)' : '');
     otItems.push({ name: 'Bora-Care', price: fp, detail, atticIsEstimated, bcSqft, gal, lhr, isMultiDay });
+  } else if (svcBoracare && !isCommercial) {
+    otItems.push({ name: 'Bora-Care', price: null, detail: 'Attic/raw wood sqft required', quoteRequired: true });
   }
 
   /* ── Pre-Slab Termidor ───────────────────────────────────── */
@@ -1171,6 +1297,8 @@ export function calculateEstimate(inputs) {
     const warrAdd = preslabWarranty === 'EXTENDED' ? 200 : 0;
     const fp = otP(price) + warrAdd;
     otItems.push({ name: 'Pre-Slab', price: fp, detail: psSqft.toLocaleString() + ' sf | ' + btl + ' bottles' + (vol !== 'NONE' ? ' (vol disc)' : ''), psSqft, btl, volDisc: vol !== 'NONE', basePrice: otP(price), warrAdd });
+  } else if (svcPreslab && !isCommercial) {
+    otItems.push({ name: 'Pre-Slab', price: null, detail: 'Slab sqft required', quoteRequired: true });
   }
 
   /* ── Foam Drill ──────────────────────────────────────────── */
@@ -1209,6 +1337,11 @@ export function calculateEstimate(inputs) {
       name: roachMod === 'GERMAN' ? 'Initial German Roach Knockdown' : 'Initial Native Roach Knockdown',
       price: fp,
       detail: roachMod === 'GERMAN' ? 'First-visit gel bait + IGR' : 'First-visit knockdown',
+      requestedRoachType: roachMod,
+      roachType: roachMod === 'GERMAN' ? 'german' : 'regular',
+      standalone: false,
+      autoFiredFromRecurringPest: true,
+      source: 'recurring_pest_roach_activity',
       noRecurringDiscount: true,
     });
   }
@@ -1270,15 +1403,54 @@ export function calculateEstimate(inputs) {
     if (rt === 'REGULAR') {
       if (R.pestRoachMod !== 'REGULAR') {
         const fpEff = footprint > 0 ? footprint : 2500;
-        specItems.push({ name: 'Regular Roach', price: initialRoachPrice(rt, fpEff, true), det: 'Standalone knockdown' });
+        specItems.push({
+          service: 'pest_initial_roach',
+          name: 'Standalone Native Cockroach Treatment',
+          price: initialRoachPrice(rt, fpEff, true),
+          det: 'Standalone knockdown',
+          source: 'standalone_native_cockroach_treatment',
+          standalone: true,
+          roachType: 'regular',
+          noRecurringDiscount: true,
+        });
+      } else {
+        addSkippedService({
+          skippedDuplicateRoachLine: true,
+          skippedService: 'standalone_native_cockroach_treatment',
+          skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
+        });
       }
     } else {
-      let gp = 450 + interpolate(footprint, [
+      const germanFootprintAdj = interpolateLinear(footprint, [
         { at: 800, adj: -40 }, { at: 1200, adj: -20 }, { at: 1500, adj: -10 },
-        { at: 2000, adj: 0 }, { at: 2500, adj: 25 }, { at: 3000, adj: 50 },
-        { at: 4000, adj: 85 },
+        { at: 2000, adj: 0 }, { at: 2500, adj: 15 }, { at: 3000, adj: 30 },
+        { at: 4000, adj: 55 }, { at: 5500, adj: 85 },
       ]);
-      specItems.push({ name: 'German Roach (3-visit)', price: otP(Math.max(400, gp)), det: 'Gel+IGR+monitoring' });
+      const basePrice = Math.max(400, 450 + Math.round(germanFootprintAdj));
+      const setupCharge = 100;
+      const price = basePrice + setupCharge;
+      const warning = 'German initial knockdown and German Roach 3-visit cleanout are both selected. Verify this is intentional.';
+      if (R.pestRoachMod === 'GERMAN') {
+        addManualReviewReason('german_roach_initial_and_cleanout_both_selected');
+        addRoutingWarning(warning);
+      }
+      specItems.push({
+        service: 'german_roach',
+        name: 'German Roach Cleanout — 3 Visit Program',
+        price,
+        det: 'Gel+IGR+monitoring',
+        source: 'german_roach_cleanout_selected',
+        pricingModel: 'german_roach_three_visit_cleanout',
+        visits: 3,
+        setupCharge,
+        total: price,
+        noRecurringDiscount: true,
+        requiresManualReview: R.pestRoachMod === 'GERMAN',
+        manualReviewReasons: R.pestRoachMod === 'GERMAN'
+          ? ['german_roach_initial_and_cleanout_both_selected']
+          : [],
+        warnings: R.pestRoachMod === 'GERMAN' ? [warning] : [],
+      });
     }
   }
 
@@ -1364,7 +1536,12 @@ export function calculateEstimate(inputs) {
     const ri = R.mqMeta?.ri ?? 1;
     if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', ann: R.mq[ri].ann }); }
   }
-  if (R.tmBait) { ac++; ra += 35 * 12; lineItems.push({ name: 'Termite Bait', ann: 420 }); }
+  if (R.tmBait && !R.tmBait.quoteRequired && !R.tmBait.requiresMeasurement) {
+    const termiteMonthly = termiteMonitoringTier === 'premier' ? 65 : 35;
+    ac++;
+    ra += termiteMonthly * 12;
+    lineItems.push({ name: 'Termite Bait', ann: termiteMonthly * 12 });
+  }
 
   // WaveGuard tier discounts — must match server
   // pricing-engine/constants.WAVEGUARD.tiers (see docs/pricing/POLICY.md).
@@ -1452,7 +1629,7 @@ export function calculateEstimate(inputs) {
   let ot = 0;
   otItems.forEach(i => ot += i.price);
   specItems.forEach(s => { if (!s.onProg) ot += s.price; });
-  let tmInstall = R.tmBait ? R.tmBait.ti : 0; // default Trelona; hi=HexPro, ai=Advance also available
+  let tmInstall = R.tmBait ? ((termiteBaitSystem === 'trelona' ? R.tmBait.ti : R.tmBait.ai) || 0) : 0;
   ot = Math.round(ot * 100) / 100;
 
   const rba = R.rodBaitMo ? R.rodBaitMo * 12 : 0;
@@ -1460,7 +1637,7 @@ export function calculateEstimate(inputs) {
   const palmMo = R.injection ? R.injection.mo : 0;
   const totalOT = ot + tmInstall;
   const y1 = Math.round((ad + rba + palmAnn + totalOT) * 100) / 100;
-  const y2 = Math.round((ad + rba + palmAnn + (R.trench ? 325 : 0)) * 100) / 100;
+  const y2 = Math.round((ad + rba + palmAnn + (R.trench && !R.trench.quoteRequired && !R.trench.requiresMeasurement ? 325 : 0)) * 100) / 100;
   const y2mo = Math.round(y2 / 12 * 100) / 100;
 
   return {
@@ -1522,6 +1699,17 @@ export function calculateEstimate(inputs) {
           requiresManualReview: !!s.requiresManualReview,
           autoQuoteRequiresAdminApproval: !!s.autoQuoteRequiresAdminApproval,
           manualReviewReasons: s.manualReviewReasons || [],
+          warnings: s.warnings || [],
+          source: s.source,
+          pricingModel: s.pricingModel,
+          visits: s.visits,
+          setupCharge: s.setupCharge,
+          total: s.total,
+          standalone: s.standalone,
+          autoFiredFromRecurringPest: s.autoFiredFromRecurringPest,
+          requestedRoachType: s.requestedRoachType,
+          roachType: s.roachType,
+          noRecurringDiscount: s.noRecurringDiscount,
           taxable: s.taxable,
           taxCategory: s.taxCategory || null,
           pricingConfidence: s.pricingConfidence || null,
@@ -1534,6 +1722,8 @@ export function calculateEstimate(inputs) {
     manualDiscount: manualDiscountInfo,
     results: R,
     specItems, // full array including onProg items for display
+    pricingMetadata,
+    routingMetadata: pricingMetadata,
     fieldVerify,
     notes,
     urgency,

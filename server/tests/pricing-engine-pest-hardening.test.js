@@ -1,6 +1,7 @@
 const {
   calculatePropertyProfile,
   generateEstimate,
+  quickQuote,
   pricePestControl,
   pricePestInitialRoach,
   priceOneTimePest,
@@ -14,6 +15,9 @@ const {
   normalizeRoachType,
   normalizePestPropertyType,
   resolvePestFootprint,
+  determineWaveGuardTier,
+  getEffectiveDiscount,
+  applyDiscount,
   constants,
   validatePestPricingConfig,
   syncConstantsFromDB,
@@ -159,9 +163,12 @@ describe('pest-control pricing hardening', () => {
     expect(pricePestInitialRoach({ footprint: 2501 }, { roachType: 'regular' }).price).toBe(169);
     expect(pricePestInitialRoach({ footprint: 1499 }, { roachType: 'german' }).price).toBe(169);
     expect(pricePestInitialRoach({ footprint: 1500 }, { roachType: 'german' }).price).toBe(199);
+    expect(pricePestInitialRoach({ footprint: 2500 }, { roachType: 'german' }).price).toBe(199);
     expect(pricePestInitialRoach({ footprint: 2501 }, { roachType: 'german' }).price).toBe(249);
 
     expect(pricePestInitialRoach({ footprint: 1499 }, { roachType: 'regular', standalone: true }).price).toBe(202.50);
+    expect(pricePestInitialRoach({ footprint: 1500 }, { roachType: 'regular', standalone: true }).price).toBe(239);
+    expect(pricePestInitialRoach({ footprint: 2500 }, { roachType: 'regular', standalone: true }).price).toBe(239);
     expect(pricePestInitialRoach({ footprint: 1800 }, { roachType: 'regular', standalone: true })).toEqual(expect.objectContaining({
       scaleKey: 'regular_standalone',
       price: 239,
@@ -180,7 +187,12 @@ describe('pest-control pricing hardening', () => {
   test('roach routing uses normalized roach type and does not double-charge specialty German Roach', () => {
     const regular = generateEstimate({ homeSqFt: 1800, stories: 1, lotSqFt: 7500, services: { pest: { roachType: 'palmetto' } } });
     expect(regular.lineItems.filter(line => line.service === 'pest_initial_roach')).toHaveLength(1);
-    expect(regular.lineItems.find(line => line.service === 'pest_initial_roach').roachType).toBe('regular');
+    expect(regular.lineItems.find(line => line.service === 'pest_initial_roach')).toEqual(expect.objectContaining({
+      roachType: 'regular',
+      autoFiredFromRecurringPest: true,
+      source: 'recurring_pest_roach_activity',
+      standalone: false,
+    }));
 
     const none = generateEstimate({ homeSqFt: 1800, stories: 1, lotSqFt: 7500, services: { pest: { roachType: 'none' } } });
     expect(none.lineItems.filter(line => line.service === 'pest_initial_roach')).toHaveLength(0);
@@ -193,6 +205,80 @@ describe('pest-control pricing hardening', () => {
     expect(specialty.lineItems.filter(line => line.service === 'german_roach')).toHaveLength(1);
     expect(specialty.lineItems.filter(line => line.service === 'pest_initial_roach')).toHaveLength(0);
     expect(specialty.lineItems.filter(line => line.service === 'german_roach_initial')).toHaveLength(0);
+    expect(specialty.summary.oneTimeTotal).toBe(0);
+    expect(specialty.summary.specialtyTotal).toBe(574);
+    expect(specialty.summary.year1Total).toBe(574);
+    expect(quickQuote({ homeSqFt: 2800, stories: 1, lotSqFt: 10000, services: { germanRoach: true } }).services).toContainEqual(
+      expect.objectContaining({ name: 'german_roach', price: 574 })
+    );
+
+    const directDuplicate = generateEstimate({
+      homeSqFt: 1800,
+      stories: 1,
+      lotSqFt: 7500,
+      services: {
+        pest: { roachType: 'regular' },
+        pestInitialRoach: { roachType: 'regular' },
+      },
+    });
+    expect(directDuplicate.lineItems.filter(line => line.service === 'pest_initial_roach')).toHaveLength(1);
+    expect(directDuplicate.pricingMetadata).toEqual(expect.objectContaining({
+      skippedDuplicateRoachLine: true,
+      skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
+    }));
+
+    const germanOverlap = generateEstimate({
+      homeSqFt: 2800,
+      stories: 1,
+      lotSqFt: 10000,
+      services: {
+        pest: { roachType: 'german' },
+        germanRoach: true,
+      },
+    });
+    expect(germanOverlap.pricingMetadata.manualReviewReasons).toContain('german_roach_initial_and_cleanout_both_selected');
+    expect(germanOverlap.lineItems.find(line => line.service === 'german_roach')).toEqual(expect.objectContaining({
+      requiresManualReview: true,
+      manualReviewReasons: expect.arrayContaining(['german_roach_initial_and_cleanout_both_selected']),
+    }));
+  });
+
+  test('roach specialty and initial lines are excluded from percentage discounts', () => {
+    const silver = determineWaveGuardTier(['pest_control', 'lawn_care']);
+    ['pest_initial_roach', 'german_roach', 'german_roach_initial'].forEach((serviceKey) => {
+      const discount = getEffectiveDiscount(serviceKey, silver, {
+        isRecurringCustomer: true,
+        isOneTimeService: true,
+      });
+      expect(discount.effectiveDiscount).toBe(0);
+      expect(discount.appliedDiscounts).toContainEqual(expect.objectContaining({ type: 'exclusion' }));
+      expect(discount.appliedDiscounts).not.toContainEqual(expect.objectContaining({ type: 'waveguard' }));
+      expect(discount.appliedDiscounts).not.toContainEqual(expect.objectContaining({ type: 'recurring_customer_one_time_perk' }));
+    });
+
+    const recurringRoach = generateEstimate({
+      homeSqFt: 2000,
+      stories: 1,
+      lotSqFt: 10000,
+      recurringCustomer: true,
+      services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+    });
+    const initialRoach = recurringRoach.lineItems.find(line => line.service === 'pest_initial_roach');
+    expect(initialRoach.priceAfterDiscount).toBe(initialRoach.price);
+    expect(initialRoach.discount.appliedDiscounts).toContainEqual(expect.objectContaining({ type: 'exclusion' }));
+
+    const germanCleanout = generateEstimate({
+      homeSqFt: 2800,
+      stories: 1,
+      lotSqFt: 10000,
+      recurringCustomer: true,
+      services: { germanRoach: true },
+    });
+    const germanLine = germanCleanout.lineItems.find(line => line.service === 'german_roach');
+    expect(germanLine.priceAfterDiscount).toBe(germanLine.price);
+    expect(germanLine.totalAfterDiscount ?? germanLine.total).toBe(574);
+    expect(germanLine.discount.appliedDiscounts).toContainEqual(expect.objectContaining({ type: 'exclusion' }));
+    expect(germanCleanout.summary.specialtyTotal).toBe(574);
   });
 
   test('one-time pest protocol example and invalid recurring baseline guard are stable', () => {
@@ -216,7 +302,9 @@ describe('pest-control pricing hardening', () => {
 
   test('German Roach multi-visit and WDO boundaries preserve valid pricing', () => {
     expect(priceGermanRoach({ footprint: 2800 })).toEqual(expect.objectContaining({
-      pricingModel: 'german_roach_multi_visit',
+      source: 'german_roach_cleanout_selected',
+      pricingModel: 'german_roach_three_visit_cleanout',
+      legacyPricingModel: 'german_roach_multi_visit',
       footprintAdj: 24,
       price: 474,
       setupCharge: 100,

@@ -14,6 +14,8 @@ import {
   fmtInt,
   isCommercialEstimateInput,
   resolveLookupPropertyTypeAutofill,
+  termiteBaitSelectionLabel,
+  termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
 import { LeadsSection } from "./LeadsTabs";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
@@ -503,6 +505,19 @@ function Select({ k, options }) {
     </select>
   );
 }
+
+function parsePositiveNumber(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function parseNonNegativeNumber(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
 function Checkbox({ k, label }) {
   const { form, toggle } = useContext(FormCtx);
   return (
@@ -708,6 +723,16 @@ function EstimateToolView() {
     bedbugEquipment: "INHOUSE",
     bedbugHeatScope: "ROOMS_ONLY",
     bedbugSubcontractCost: "",
+    termiteFootprintSqFt: "",
+    termitePerimeterLF: "",
+    termiteBaitComplexity: "",
+    termiteBaitSystem: "advance",
+    termiteMonitoringTier: "basic",
+    trenchingPerimeterLF: "",
+    trenchingConcreteLF: "",
+    trenchingDirtLF: "",
+    trenchingConcretePct: "",
+    trenchingEstimateFromFootprint: false,
     boracareSqft: "",
     preslabSqft: "",
     preslabWarranty: "BASIC",
@@ -889,6 +914,7 @@ function EstimateToolView() {
         [key]: val,
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
+        ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
       })),
     [],
   );
@@ -901,20 +927,18 @@ function EstimateToolView() {
     }
   }, []);
 
-  /* ── auto-estimate attic / preslab ────────────────────────── */
+  /* ── termite footprint prefill ─────────────────────────────── */
   useEffect(() => {
     const sqft = Number(form.homeSqFt) || 0;
     const st = Math.max(1, Number(form.stories) || 1);
     if (sqft > 0) {
-      const attic = Math.round((sqft / st) * 0.85);
       const fp = Math.round(sqft / st);
       setForm((f) => {
         const upd = {};
-        if (!f.boracareSqft || f._boracareAuto)
-          upd.boracareSqft = String(attic);
-        if (!f.preslabSqft || f._preslabAuto) upd.preslabSqft = String(fp);
+        if (!f.termiteFootprintSqFt || f._termiteFootprintAuto)
+          upd.termiteFootprintSqFt = String(fp);
         if (Object.keys(upd).length === 0) return f;
-        return { ...f, ...upd, _boracareAuto: true, _preslabAuto: true };
+        return { ...f, ...upd, _termiteFootprintAuto: true };
       });
     }
   }, [form.homeSqFt, form.stories]);
@@ -1032,6 +1056,7 @@ function EstimateToolView() {
   function toggleServiceSpecificDiscount(key) {
     setEstimate(null);
     setSavedId(null);
+    setSavedViewUrl(null);
     setForm((f) => {
       const current = new Set(Array.isArray(f.serviceSpecificDiscountKeys) ? f.serviceSpecificDiscountKeys : []);
       if (current.has(key)) current.delete(key);
@@ -1268,11 +1293,22 @@ function EstimateToolView() {
       if (data.has_pool_cage) upd.hasPoolCage = "YES";
       if (data.has_large_driveway) upd.hasLargeDriveway = "YES";
       if (data.near_water) upd.nearWater = "YES";
+      const termiteFootprint =
+        data.footprint_sqft ||
+        data.footprintSqFt ||
+        data.building_footprint_sqft ||
+        data.buildingFootprintSqFt;
+      if (termiteFootprint)
+        upd.termiteFootprintSqFt = String(Math.round(termiteFootprint));
       if (data.property_type || data.category) {
         Object.assign(upd, resolveLookupPropertyTypeAutofill(data.property_type, data.category));
       }
       if (data.perimeter_linear_ft)
-        upd.boracareSqft = String(Math.round(data.perimeter_linear_ft));
+        upd.trenchingPerimeterLF = String(Math.round(data.perimeter_linear_ft));
+      if (data.attic_sqft || data.atticSqFt)
+        upd.boracareSqft = String(Math.round(data.attic_sqft || data.atticSqFt));
+      if (data.slab_sqft || data.slabSqFt)
+        upd.preslabSqft = String(Math.round(data.slab_sqft || data.slabSqFt));
 
       setForm((f) => ({ ...f, ...upd }));
 
@@ -1423,6 +1459,14 @@ function EstimateToolView() {
           form,
           presets: serviceCreditPresets,
         });
+        const termiteFootprintSqFt = parsePositiveNumber(form.termiteFootprintSqFt);
+        const termitePerimeterLF = parsePositiveNumber(form.termitePerimeterLF);
+        const trenchingPerimeterLF = parsePositiveNumber(form.trenchingPerimeterLF);
+        const trenchingConcreteLF = parseNonNegativeNumber(form.trenchingConcreteLF);
+        const trenchingDirtLF = parseNonNegativeNumber(form.trenchingDirtLF);
+        const trenchingConcretePct = parseNonNegativeNumber(form.trenchingConcretePct);
+        const boracareSqft = parsePositiveNumber(form.boracareSqft);
+        const preslabSqft = parsePositiveNumber(form.preslabSqft);
         const options = {
           grassType: form.grassType || "st_augustine",
           lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq) || 9,
@@ -1430,15 +1474,27 @@ function EstimateToolView() {
           manualDiscount,
           serviceSpecificDiscounts,
           roachModifier: form.roachModifier || "NONE",
+          recurringRoachType: form.roachModifier || "NONE",
           urgency: form.urgency || "ROUTINE",
           afterHours: form.isAfterHours === "YES",
           recurringCustomer: form.isRecurringCustomer === "YES",
           plugArea: parseInt(form.plugArea) || 0,
           plugSpacing: parseInt(form.plugSpacing) || 12,
-          boracareSqft: parseInt(form.boracareSqft) || 0,
-          preslabSqft: parseInt(form.preslabSqft) || 0,
+          termiteBaitSystem: form.termiteBaitSystem || "advance",
+          termiteMonitoringTier: form.termiteMonitoringTier || "basic",
+          termiteBaitComplexity: form.termiteBaitComplexity || "",
+          termiteFootprintSqFt,
+          termitePerimeterLF,
+          trenchingPerimeterLF,
+          trenchingConcreteLF,
+          trenchingDirtLF,
+          trenchingConcretePct,
+          trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint,
+          boracareSqft,
+          preslabSqft,
           preslabWarranty: form.preslabWarranty || "BASIC",
           preslabVolume: form.preslabVolume || "NONE",
+          includePreSlabWarrantyExtended: form.preslabWarranty === "EXTENDED",
           foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
           bedbugRooms: parseInt(form.bedbugRooms) || 1,
           bedbugMethod: form.bedbugMethod || "CHEMICAL",
@@ -1453,6 +1509,8 @@ function EstimateToolView() {
           exclAdvanced: parseInt(form.exclAdvanced) || 0,
           exclWaiveInspection: form.exclWaive === "YES",
           roachType: form.roachType || "REGULAR",
+          standaloneRoachTreatment: !!form.svcRoach && form.roachType === "REGULAR",
+          germanRoachCleanoutSelected: !!form.svcRoach && form.roachType === "GERMAN",
           onetimeLawnType: form.otLawnType || "FERT",
           commercialPricingMode: form.commercialPricingMode || "manual_quote",
           commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
@@ -1481,6 +1539,9 @@ function EstimateToolView() {
         } else {
           delete profile.footprint;
         }
+        if (trenchingPerimeterLF) profile.perimeterLF = trenchingPerimeterLF;
+        if (boracareSqft) profile.atticSqFt = boracareSqft;
+        if (preslabSqft) profile.slabSqFt = preslabSqft;
         // Override property features from form dropdowns
         profile.pool = form.hasPool === "YES" ? "YES" : "NO";
         profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
@@ -1671,7 +1732,6 @@ function EstimateToolView() {
       isCommercial: formIsCommercial,
       commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
       commercialPricingMode: form.commercialPricingMode || "manual_quote",
-      boracareSqftAuto: form._boracareAuto || false,
     };
     const result = calculateEstimate(inputs);
     if (result.error) {
@@ -1832,9 +1892,20 @@ function EstimateToolView() {
       treeCount: "",
       boracareSqft: "",
       preslabSqft: "",
+      termiteFootprintSqFt: "",
+      termitePerimeterLF: "",
+      termiteBaitComplexity: "",
+      termiteBaitSystem: "advance",
+      termiteMonitoringTier: "basic",
+      trenchingPerimeterLF: "",
+      trenchingConcreteLF: "",
+      trenchingDirtLF: "",
+      trenchingConcretePct: "",
+      trenchingEstimateFromFootprint: false,
       customerName: "",
       customerPhone: "",
       customerEmail: "",
+      _termiteFootprintAuto: false,
       _boracareAuto: false,
       _preslabAuto: false,
     }));
@@ -1875,6 +1946,30 @@ function EstimateToolView() {
   const commercialDetected = isCommercialEstimateInput(form);
   const formCtx = { form, set, toggle };
   const R = E?.results || {};
+  const hasAnyTermiteSelection =
+    !!form.svcTermiteBait ||
+    !!form.svcWdo ||
+    !!form.svcTrenching ||
+    !!form.svcBoracare ||
+    !!form.svcPreslab;
+  const termiteMeasurementWarnings = [
+    form.svcTermiteBait &&
+      !parsePositiveNumber(form.termiteFootprintSqFt) &&
+      !parsePositiveNumber(form.termitePerimeterLF)
+      ? "Termite bait needs footprint sqft or a perimeter LF override."
+      : null,
+    form.svcTrenching &&
+      !parsePositiveNumber(form.trenchingPerimeterLF) &&
+      !form.trenchingEstimateFromFootprint
+      ? "Trenching needs measured perimeter LF before pricing."
+      : null,
+    form.svcBoracare && !parsePositiveNumber(form.boracareSqft)
+      ? "Bora-Care needs attic/raw wood sqft."
+      : null,
+    form.svcPreslab && !parsePositiveNumber(form.preslabSqft)
+      ? "Pre-Slab Termidor needs slab sqft."
+      : null,
+  ].filter(Boolean);
 
   /* ═══════════════════════════════════════════════════════════
      RENDER
@@ -2636,23 +2731,26 @@ function EstimateToolView() {
                         ]}
                       />
                     </Field>{" "}
-                    <Field label="Cockroach Modifier">
+                    <Field label="Roach Activity on Initial Visit">
                       <Select
                         k="roachModifier"
                         options={[
                           { value: "NONE", label: "None" },
                           {
                             value: "REGULAR",
-                            label: "Regular initial knockdown",
+                            label: "Native / Palmetto / American roaches",
                           },
                           {
                             value: "GERMAN",
-                            label: "German initial knockdown",
+                            label: "German roaches",
                           },
                         ]}
                       />
                     </Field>{" "}
                   </div>{" "}
+                  <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
+                    Adds a one-time Initial Roach Knockdown line to recurring pest. This is not a recurring per-visit multiplier.
+                  </div>
                 </div>
               )}
               <Checkbox k="svcTs" label="Tree & Shrub" />{" "}
@@ -2759,55 +2857,123 @@ function EstimateToolView() {
               <Checkbox k="svcWdo" label="WDO / Termite Inspection" />{" "}
               <Checkbox k="svcTrenching" label="Termite Trenching" />{" "}
               <Checkbox k="svcBoracare" label="Termite Attic Remediation" />
-              {form.svcBoracare && (
-                <div style={sSubOpts}>
-                  {" "}
-                  <Field
-                    label="Attic Sq Ft (auto-estimated from home/stories)"
-                    style={{ marginBottom: 0 }}
-                  >
-                    {" "}
-                    <Input
-                      k="boracareSqft"
-                      type="number"
-                      placeholder="Auto from AI property search"
-                    />{" "}
-                  </Field>{" "}
-                </div>
-              )}
               <Checkbox k="svcPreslab" label="Pre-Slab Termite Treatment" />
-              {form.svcPreslab && (
+              {hasAnyTermiteSelection && (
                 <div style={sSubOpts}>
                   {" "}
-                  <div style={sRow}>
-                    {" "}
-                    <Field label="Slab Sq Ft">
-                      <Input
-                        k="preslabSqft"
-                        type="number"
-                        placeholder="From footprint"
-                      />
-                    </Field>{" "}
-                    <Field label="Warranty">
-                      <Select
-                        k="preslabWarranty"
-                        options={[
-                          { value: "BASIC", label: "Basic 1-yr (included)" },
-                          { value: "EXTENDED", label: "Extended 5-yr (+$200)" },
-                        ]}
-                      />
-                    </Field>{" "}
-                  </div>{" "}
-                  <Field label="Builder Volume">
-                    <Select
-                      k="preslabVolume"
-                      options={[
-                        { value: "NONE", label: "No discount" },
-                        { value: "5", label: "5+ homes (-10%)" },
-                        { value: "10", label: "10+ homes (-15%)" },
-                      ]}
-                    />
-                  </Field>{" "}
+                  <div style={{ fontSize: 13, fontWeight: 600, color: C.heading, marginBottom: 6 }}>
+                    Termite Measurements
+                  </div>
+                  <div style={{ fontSize: 11, color: C.gray, marginBottom: 12 }}>
+                    Manual/admin-entered values override property lookup.
+                  </div>
+                  {termiteMeasurementWarnings.length > 0 && (
+                    <div style={{ ...statusStyle("err"), marginBottom: 12 }}>
+                      {termiteMeasurementWarnings.join(" ")}
+                    </div>
+                  )}
+                  {form.svcTermiteBait && (
+                    <>
+                      <div style={sRow}>
+                        <Field label="Footprint Sq Ft">
+                          <Input k="termiteFootprintSqFt" type="number" placeholder="Admin-entered" />
+                        </Field>
+                        <Field label="Perimeter LF Override">
+                          <Input k="termitePerimeterLF" type="number" placeholder="Optional" />
+                        </Field>
+                      </div>
+                      <div style={sRow}>
+                        <Field label="Layout">
+                          <Select
+                            k="termiteBaitComplexity"
+                            options={[
+                              { value: "", label: "Auto from property" },
+                              { value: "standard", label: "Standard" },
+                              { value: "moderate", label: "Moderate" },
+                              { value: "complex", label: "Complex" },
+                            ]}
+                          />
+                        </Field>
+                        <Field label="System">
+                          <Select
+                            k="termiteBaitSystem"
+                            options={[
+                              { value: "advance", label: "Advance" },
+                              { value: "trelona", label: "Trelona" },
+                            ]}
+                          />
+                        </Field>
+                      </div>
+                      <Field label="Monitoring">
+                        <Select
+                          k="termiteMonitoringTier"
+                          options={[
+                            { value: "basic", label: "Basic" },
+                            { value: "premier", label: "Premier" },
+                          ]}
+                        />
+                      </Field>
+                    </>
+                  )}
+                  {form.svcTrenching && (
+                    <>
+                      <div style={sRow}>
+                        <Field label="Perimeter LF">
+                          <Input k="trenchingPerimeterLF" type="number" placeholder="Measured LF" />
+                        </Field>
+                        <Field label="Concrete / Slab LF">
+                          <Input k="trenchingConcreteLF" type="number" placeholder="Optional" />
+                        </Field>
+                      </div>
+                      <div style={sRow}>
+                        <Field label="Dirt Trench LF">
+                          <Input k="trenchingDirtLF" type="number" placeholder="Optional" />
+                        </Field>
+                        <Field label="Concrete %">
+                          <Input k="trenchingConcretePct" type="number" placeholder="0.40 or 40" />
+                        </Field>
+                      </div>
+                      <Checkbox k="trenchingEstimateFromFootprint" label="Estimate trenching perimeter from footprint" />
+                    </>
+                  )}
+                  {form.svcBoracare && (
+                    <Field label="Attic / Raw Wood Sq Ft">
+                      <Input k="boracareSqft" type="number" placeholder="Admin-entered" />
+                    </Field>
+                  )}
+                  {form.svcPreslab && (
+                    <>
+                      <div style={sRow}>
+                        {" "}
+                        <Field label="Slab Sq Ft">
+                          <Input
+                            k="preslabSqft"
+                            type="number"
+                            placeholder="Admin-entered"
+                          />
+                        </Field>{" "}
+                        <Field label="Warranty">
+                          <Select
+                            k="preslabWarranty"
+                            options={[
+                              { value: "BASIC", label: "Basic 1-yr (included)" },
+                              { value: "EXTENDED", label: "Extended 5-yr (+$200)" },
+                            ]}
+                          />
+                        </Field>{" "}
+                      </div>{" "}
+                      <Field label="Builder Volume">
+                        <Select
+                          k="preslabVolume"
+                          options={[
+                            { value: "NONE", label: "No discount" },
+                            { value: "5", label: "5+ homes (-10%)" },
+                            { value: "10", label: "10+ homes (-15%)" },
+                          ]}
+                        />
+                      </Field>{" "}
+                    </>
+                  )}
                 </div>
               )}
               <Checkbox k="svcFoam" label="Termite Foam Treatment" />
@@ -2835,23 +3001,31 @@ function EstimateToolView() {
               <Checkbox k="svcOnetimePest" label="Pest Treatment" />{" "}
               <Checkbox k="svcOnetimeMosquito" label="Mosquito Treatment" />{" "}
               <Checkbox k="svcFlea" label="Flea Treatment" />{" "}
-              <Checkbox k="svcRoach" label="Cockroach Treatment" />
+              <Checkbox k="svcRoach" label="Cockroach Specialty Service" />
               {form.svcRoach && (
                 <div style={sSubOpts}>
                   {" "}
-                  <Field label="Type" style={{ marginBottom: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.ink, marginBottom: 8 }}>
+                    Standalone / Specialty Services
+                  </div>
+                  <Field label="Service Type" style={{ marginBottom: 0 }}>
                     {" "}
                     <Select
                       k="roachType"
                       options={[
                         {
                           value: "REGULAR",
-                          label: "Regular (American/Smoky Brown)",
+                          label: "Standalone Native Cockroach Treatment",
                         },
-                        { value: "GERMAN", label: "German (3-visit)" },
+                        { value: "GERMAN", label: "German Roach Cleanout — 3 Visit Program" },
                       ]}
                     />{" "}
                   </Field>{" "}
+                  {form.roachType === "GERMAN" && (
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
+                      German Roach Cleanout is a separate specialty program, not the German version of native cockroach treatment.
+                    </div>
+                  )}
                 </div>
               )}
               <Checkbox k="svcWasp" label="Wasp/Bee/Stinging Insect" />{" "}
@@ -3675,7 +3849,9 @@ function EstimateToolView() {
                               const ri = E.results.mqMeta?.ri ?? 1;
                               parts.push(R.mq[ri].n + " Mosquito");
                             }
-                            if (R.tmBait) parts.push("Trelona Premier");
+                            if (R.tmBait && !R.tmBait.quoteRequired && !R.tmBait.requiresMeasurement) {
+                              parts.push(termiteBaitSelectionLabel(R.tmBait, form));
+                            }
                             if (parts.length < 2) return null;
                             return (
                               <div
@@ -4067,28 +4243,44 @@ function EstimateToolView() {
                             <div style={sSectionTitle}>
                               Termite Bait{" "}
                               <span style={sTag("blue")}>
-                                {R.tmBait.sta} sta | {R.tmBait.perim} ft
+                                {R.tmBait.quoteRequired || R.tmBait.requiresMeasurement
+                                  ? "Quote Required"
+                                  : `${R.tmBait.sta} sta | ${R.tmBait.perim} ft`}
                               </span>
                             </div>{" "}
-                            <TierGrid>
-                              {" "}
-                              <TierRow
-                                name="Advance"
-                                detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
-                                price="$35-65"
-                                dimmed
-                              />{" "}
-                              <TierRow
-                                name="Trelona"
-                                detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
-                                price="$35-65"
-                                recommended
-                              />{" "}
-                            </TierGrid>{" "}
-                            <div style={sModNote}>
-                              Install cost is a one-time setup fee, not a
-                              recurring charge
-                            </div>{" "}
+                            {R.tmBait.quoteRequired || R.tmBait.requiresMeasurement ? (
+                              <div style={sModNote}>
+                                Footprint sqft or perimeter LF is required before pricing termite bait.
+                              </div>
+                            ) : (
+                              <>
+                                <TierGrid>
+                                  {" "}
+                                  {R.tmBait.ai != null && (
+                                    <TierRow
+                                      name="Advance"
+                                      detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
+                                      price="$35-65"
+                                      recommended={R.tmBait.selectedSystem === "advance"}
+                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
+                                    />
+                                  )}{" "}
+                                  {R.tmBait.ti != null && (
+                                    <TierRow
+                                      name="Trelona"
+                                      detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
+                                      price="$35-65"
+                                      recommended={R.tmBait.selectedSystem === "trelona"}
+                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
+                                    />
+                                  )}{" "}
+                                </TierGrid>{" "}
+                                <div style={sModNote}>
+                                  Install cost is a one-time setup fee, not a
+                                  recurring charge
+                                </div>{" "}
+                              </>
+                            )}
                           </div>
                         )}
                         {/* Rodent Bait */}
@@ -4377,6 +4569,37 @@ function EstimateToolView() {
                         </div>{" "}
                       </>
                     )}
+                    {E.pricingMetadata && (
+                      (E.pricingMetadata.skippedServices?.length > 0 ||
+                        E.pricingMetadata.warnings?.length > 0 ||
+                        E.pricingMetadata.manualReviewReasons?.length > 0) && (
+                        <div
+                          style={{
+                            marginBottom: 24,
+                            padding: 12,
+                            background: C.card,
+                            border: `1px solid ${C.border}`,
+                            borderRadius: 6,
+                            fontSize: 12,
+                            color: C.ink,
+                          }}
+                        >
+                          <div style={{ fontWeight: 700, marginBottom: 4 }}>Roach Routing Notes</div>
+                          {(E.pricingMetadata.skippedServices || []).map((item, i) => (
+                            <div key={`skip-${i}`} style={{ color: C.muted }}>
+                              {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
+                                ? "Skipped standalone native cockroach charge because recurring pest already includes Initial Native Roach Knockdown."
+                                : item.skippedReason}
+                            </div>
+                          ))}
+                          {(E.pricingMetadata.warnings || []).map((warning, i) => (
+                            <div key={`warning-${i}`} style={{ color: C.muted }}>
+                              {warning}
+                            </div>
+                          ))}
+                        </div>
+                      )
+                    )}
 
                     {/* ── WaveGuard + Totals ───────────────── */}
                     {(E.recurring.serviceCount > 0 ||
@@ -4662,7 +4885,13 @@ function EstimateToolView() {
                               }}
                             >
                               {" "}
-                              <span>Termite bait install (Trelona)</span>{" "}
+                              <span>
+                                {`Termite bait install (${termiteBaitSystemLabel(
+                                  R.tmBait?.selectedSystem ||
+                                    R.tmBait?.system ||
+                                    form.termiteBaitSystem,
+                                )})`}
+                              </span>{" "}
                               <span
                                 style={{
                                   fontFamily: "'JetBrains Mono', monospace",

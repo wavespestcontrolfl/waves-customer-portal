@@ -201,6 +201,7 @@ function getMosquitoTreatableCategory(mosquitoTreatableSqFt, grossLotCategory) {
 function calculatePropertyProfile(input) {
   const explicitFootprint = toPositiveNumber(input.footprintSqFt ?? input.footprint);
   const footprint = explicitFootprint || calculateFootprint(input.homeSqFt, input.stories || 1);
+  const explicitPerimeter = toPositiveNumber(input.perimeterLF ?? input.perimeterLf ?? input.perimeter);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, input.features || {});
   const hasInputBedArea = hasNonNegativeNumber(input.bedArea);
   const estimatedBedAreaInput = hasNonNegativeNumber(input.estimatedBedAreaSf)
@@ -271,7 +272,8 @@ function calculatePropertyProfile(input) {
     bedAreaSource = 'fallback';
     bedAreaPricingConfidence = 'low';
   }
-  const perimeter = calculatePerimeter(footprint, (input.features || {}).complexity);
+  const perimeter = explicitPerimeter || calculatePerimeter(footprint, (input.features || {}).complexity);
+  const perimeterSource = explicitPerimeter ? 'property_perimeter' : 'computed_from_footprint';
   const lotCategory = getLotCategory(input.lotSqFt);
   const mosquitoTreatableSqFt = Math.max(0, input.lotSqFt - footprint - hardscape);
   const mosquitoLotCategory = getMosquitoTreatableCategory(mosquitoTreatableSqFt, lotCategory);
@@ -289,7 +291,9 @@ function calculatePropertyProfile(input) {
     bedAreaPricingConfidence,
     bedAreaCapped,
     ...(uncappedBedAreaEstimate !== undefined ? { uncappedBedAreaEstimate } : {}),
-    perimeter, lotCategory,
+    perimeter,
+    perimeterSource,
+    lotCategory,
     mosquitoTreatableSqFt, mosquitoLotCategory,
     complexityScore: calculateComplexityScore(features),
     homeSqFt: input.homeSqFt,
@@ -315,6 +319,14 @@ function calculatePropertyProfile(input) {
     footprintSqFt: input.footprintSqFt,
     buildingSqFt: input.buildingSqFt,
     livingAreaSqFt: input.livingAreaSqFt,
+    atticSqFt: input.atticSqFt,
+    atticAreaSqFt: input.atticAreaSqFt,
+    rawWoodSqFt: input.rawWoodSqFt,
+    woodTreatmentSqFt: input.woodTreatmentSqFt,
+    slabSqFt: input.slabSqFt,
+    foundationSqFt: input.foundationSqFt,
+    buildingSlabSqFt: input.buildingSlabSqFt,
+    newConstructionSlabSqFt: input.newConstructionSlabSqFt,
     maintenanceCondition: input.maintenanceCondition || null,
     overallPestPressure: input.overallPestPressure || null,
   };

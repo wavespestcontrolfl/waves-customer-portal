@@ -44,15 +44,23 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
         lotSqFt: { type: 'number', description: 'Lot size in square feet (defaults to ~4× homeSqFt if unknown)' },
         stories: { type: 'number', description: 'Number of stories (1, 2, or 3). Default 1.' },
         propertyType: { type: 'string', description: 'Property type (e.g. "Single Family", "Townhouse", "Condo"). Default "Single Family".' },
+        footprintSqFt: { type: 'number', description: 'Optional termite bait footprint sqft override' },
+        perimeterLF: { type: 'number', description: 'Optional trenching/termite perimeter linear-foot override' },
+        atticSqFt: { type: 'number', description: 'Optional Bora-Care attic/raw wood sqft override' },
+        slabSqFt: { type: 'number', description: 'Optional Pre-Slab Termidor slab sqft override' },
         services: {
           type: 'object',
-          description: 'Which services to include. Each key optional. Pest: { frequency: "quarterly"|"bimonthly"|"monthly" }. Lawn: { track: "st_augustine"|"bermuda"|"zoysia"|"bahia", tier: "basic"|"enhanced"|"premium" }. Mosquito: { tier: "essential"|"enhanced"|"premium" }. Tree & shrub: { frequency: "quarterly" }.',
+              description: 'Which services to include. Each key optional. Pest: { frequency: "quarterly"|"bimonthly"|"monthly" }. Lawn: { track: "st_augustine"|"bermuda"|"zoysia"|"bahia", tier: "basic"|"enhanced"|"premium" }. Mosquito: { tier: "seasonal9"|"monthly12" }. Termite bait: { system, monitoringTier, measurements: { footprintSqFt, perimeterLF } }. Trenching: { measurements: { perimeterLF, concreteLF, dirtLF, concretePct } }. Bora-Care: { measurements: { atticSqFt } }. Pre-Slab: { measurements: { slabSqFt }, volumeDiscount, includeWarrantyExtended }.',
           properties: {
             pest: { type: 'object' },
             lawn: { type: 'object' },
             mosquito: { type: 'object' },
             treeShrub: { type: 'object' },
             termite: { type: 'object' },
+            termiteBait: { type: 'object' },
+            trenching: { type: 'object' },
+            boraCare: { type: 'object' },
+            preSlabTermidor: { type: 'object' },
             rodent: { type: 'object' },
           },
         },
@@ -259,7 +267,17 @@ async function computeEstimate(input) {
     return { error: 'At least one service is required in services object' };
   }
 
-  const engineInput = { homeSqFt, lotSqFt, stories, propertyType, services };
+  const engineInput = {
+    homeSqFt,
+    lotSqFt,
+    stories,
+    propertyType,
+    services,
+    footprintSqFt: input.footprintSqFt,
+    perimeterLF: input.perimeterLF,
+    atticSqFt: input.atticSqFt,
+    slabSqFt: input.slabSqFt,
+  };
   const estimate = generateEstimate(engineInput);
 
   const summary = estimate?.summary || {};

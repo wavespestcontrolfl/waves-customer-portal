@@ -95,6 +95,11 @@ const WEEKDAY_OPTIONS = [
   { value: 6, label: 'Saturday' },
 ];
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const HOURLY_TIME_OPTIONS = Array.from({ length: 24 }, (_, h) => {
+  const value = `${String(h).padStart(2, '0')}:00`;
+  const hour12 = h % 12 || 12;
+  return { value, label: `${hour12}:00 ${h >= 12 ? 'PM' : 'AM'}` };
+});
 
 // Booster months — extra visits on top of a recurring base. Common pattern:
 // quarterly pest + boosters in Jun/Aug. Months are 1-indexed.
@@ -110,6 +115,18 @@ const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', l
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
 const WAVEGUARD_TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
+
+function normalizeHourTime(value, fallback = '09:00') {
+  const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
+  if (!match) return fallback;
+  const hour = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(hour)) return fallback;
+  return `${String(Math.min(23, Math.max(0, hour))).padStart(2, '0')}:00`;
+}
+
+function isHourTime(value) {
+  return /^\d{2}:00(?::00)?$/.test(String(value || '').trim());
+}
 
 function inferServiceCadence(service) {
   const name = String(typeof service === 'string' ? service : service?.name || '').toLowerCase();
@@ -323,19 +340,20 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [timeSlots, setTimeSlots] = useState(null); // null = hidden, [] = searched but none, [...] = results
   const [slotError, setSlotError] = useState('');
 
-  // Date/Time/Tech state — default to today + next 15-min boundary in local time
+  // Date/Time/Tech state — default to today + next clean hour in local time
   const _now = new Date();
   const _ymd = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}-${String(_now.getDate()).padStart(2, '0')}`;
   const _rounded = new Date(_now);
-  _rounded.setSeconds(0, 0);
-  const _addMin = 15 - (_rounded.getMinutes() % 15 || 15);
-  _rounded.setMinutes(_rounded.getMinutes() + _addMin);
+  if (_rounded.getMinutes() > 0 || _rounded.getSeconds() > 0 || _rounded.getMilliseconds() > 0) {
+    _rounded.setHours(_rounded.getHours() + 1);
+  }
+  _rounded.setMinutes(0, 0, 0);
   const _hhmm = `${String(_rounded.getHours()).padStart(2, '0')}:${String(_rounded.getMinutes()).padStart(2, '0')}`;
   const _defaultDate = _rounded.toDateString() !== _now.toDateString()
     ? `${_rounded.getFullYear()}-${String(_rounded.getMonth() + 1).padStart(2, '0')}-${String(_rounded.getDate()).padStart(2, '0')}`
     : _ymd;
   const [apptDate, setApptDate] = useState(defaultDate || _defaultDate);
-  const [windowStart, setWindowStart] = useState(defaultWindowStart || _hhmm);
+  const [windowStart, setWindowStart] = useState(normalizeHourTime(defaultWindowStart || _hhmm, _hhmm));
   const [techMode, setTechMode] = useState(defaultTechId ? 'choose' : 'auto');
   const [techId, setTechId] = useState(defaultTechId || '');
   const [techs, setTechs] = useState([]);
@@ -651,10 +669,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           dateFrom: searchFrom,
           dateTo: to,
           technicianId: techMode === 'choose' && techId ? techId : undefined,
-          topN: 8,
+          topN: 25,
         }),
       });
-      setTimeSlots(r.slots || []);
+      setTimeSlots((r.slots || [])
+        .filter((slot) => isHourTime(slot.start_time))
+        .slice(0, 8)
+        .map((slot, index) => ({ ...slot, rank: index + 1 })));
     } catch (e) {
       setSlotError(e.message || 'Failed to find times');
       setTimeSlots(null);
@@ -664,7 +685,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   const applySlot = (slot) => {
     setApptDate(slot.date);
-    setWindowStart(slot.start_time);
+    setWindowStart(normalizeHourTime(slot.start_time, windowStart));
     setTechMode('choose');
     setTechId(slot.technician.id);
     setTimeSlots(null);
@@ -931,7 +952,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
 
   const modalStyle = {
-    background: D.bg, width: isMobile ? '100%' : 560, maxWidth: '100%',
+    background: D.bg, width: isMobile ? '100%' : 640, maxWidth: '100%',
     height: isMobile ? '100dvh' : undefined,
     maxHeight: isMobile ? '100dvh' : '90vh',
     overflow: isMobile ? 'hidden' : 'auto',
@@ -983,7 +1004,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   const serviceLineColumns = isMobile
     ? 'minmax(0, 1fr) 112px'
-    : 'minmax(260px, 1fr) 132px 170px 36px';
+    : 'minmax(0, 1fr) 112px 132px 36px';
   const serviceLineGrid = (isDiscount = false) => ({
     display: 'grid',
     gridTemplateColumns: serviceLineColumns,
@@ -1683,7 +1704,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
             <div>
               <label style={labelStyle}>Time</label>
-              <input type="time" value={windowStart} onChange={e => setWindowStart(e.target.value)} step={900} className="waves-sq-date" style={inputStyle} />
+              <select value={windowStart} onChange={e => setWindowStart(normalizeHourTime(e.target.value, windowStart))} className="waves-sq-date" style={inputStyle}>
+                {HOURLY_TIME_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
             </div>
           </div>
 

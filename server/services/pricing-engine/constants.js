@@ -1147,6 +1147,9 @@ const WAVEGUARD = {
     // it here stops the orchestrator discount loop from applying the 15% rc
     // perk a second time on the already-discounted $85.
     german_roach_initial: true,
+    // Active German Roach Cleanout is a 3-visit specialty/cost-recovery line,
+    // not a recurring-service benefit or one-time perk candidate.
+    german_roach: true,
     // pest_initial_roach is a non-waivable first-visit cost-recovery charge
     // (auto-fired when recurring pest is booked with a non-none roachType).
     // The whole point is to recover the heavier visit-1 product + labor

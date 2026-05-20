@@ -696,6 +696,115 @@ function deepMergeConfig(base = {}, override = {}) {
   return merged;
 }
 
+function VisitTimelineSettingsCard() {
+  const [config, setConfig] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    adminFetch("/admin/settings/visit-timeline")
+      .then((data) => setConfig(data.config || data.defaults))
+      .catch((err) => setMessage(err.message || "Could not load Visit Timeline settings."));
+  }, []);
+
+  const update = (patch) => setConfig((current) => ({ ...(current || {}), ...patch }));
+
+  const save = async () => {
+    if (!config) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const data = await adminFetch("/admin/settings/visit-timeline", {
+        method: "PUT",
+        body: JSON.stringify({ config }),
+      });
+      setConfig(data.config || config);
+      setMessage("Visit Timeline settings saved.");
+    } catch (err) {
+      setMessage(err.message || "Could not save Visit Timeline settings.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    setSaving(true);
+    setMessage("");
+    try {
+      const data = await adminFetch("/admin/settings/visit-timeline/reset", { method: "POST" });
+      setConfig(data.config);
+      setMessage("Visit Timeline settings restored to defaults.");
+    } catch (err) {
+      setMessage(err.message || "Could not restore Visit Timeline settings.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!config) {
+    return <Card><div style={{ color: D.muted, fontSize: 13 }}>Loading Visit Timeline settings...</div></Card>;
+  }
+
+  return (
+    <Card>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Visit Timeline</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+            Configure the customer-facing timeline that uses Bouncie for movement and Waves report finalization for service completion.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button type="button" onClick={reset} disabled={saving} style={{ ...settingsButtonStyle("secondary"), opacity: saving ? 0.6 : 1 }}>
+            <RotateCcw size={15} /> Restore defaults
+          </button>
+          <button type="button" onClick={save} disabled={saving} style={{ ...settingsButtonStyle("primary"), opacity: saving ? 0.6 : 1 }}>
+            <Save size={15} /> {saving ? "Saving..." : "Save settings"}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 12, marginTop: 14 }}>
+        <Toggle checked={config.enabled !== false} onChange={(value) => update({ enabled: value })} label="Enable Visit Timeline" description="Show one unified customer-facing visit timeline on service reports." />
+        <Toggle checked={config.showOnCustomerReports !== false} onChange={(value) => update({ showOnCustomerReports: value })} label="Show on customer reports" />
+        <Toggle checked={config.showTechnicianEnRoute !== false} onChange={(value) => update({ showTechnicianEnRoute: value })} label="Show technician en route" description="Source: Bouncie." />
+        <Toggle checked={config.showTechnicianOnSite !== false} onChange={(value) => update({ showTechnicianOnSite: value })} label="Show technician on site" description="Source: Bouncie." />
+        <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: "#FAFAFA" }}>
+          <div style={{ fontSize: 13, color: D.heading, fontWeight: 800 }}>Service completed is required</div>
+          <div style={{ fontSize: 12, color: D.muted, marginTop: 3, lineHeight: 1.4 }}>
+            Completed reports always show Service completed from Waves report finalization.
+          </div>
+        </div>
+        <Toggle checked={config.showCustomerContact !== false} onChange={(value) => update({ showCustomerContact: value })} label="Show customer contact detail" description="Shown inside Visit Timeline, not as a primary milestone." />
+        <Toggle checked={config.showReportGenerated === true} onChange={(value) => update({ showReportGenerated: value })} label="Show report generated detail" description="Secondary detail only. Hidden by default." />
+        <Toggle checked={config.showDuration === true} onChange={(value) => update({ showDuration: value })} label="Show duration when reliable" />
+        <label style={settingsLabelStyle}>
+          Minimum reliable duration
+          <input
+            type="number"
+            min="1"
+            value={config.minimumDurationMinutes || 5}
+            onChange={(event) => update({ minimumDurationMinutes: Number(event.target.value) || 5 })}
+            style={settingsInputStyle()}
+          />
+        </label>
+        <Toggle checked={config.showTimingNoteWhenDurationUnavailable !== false} onChange={(value) => update({ showTimingNoteWhenDurationUnavailable: value })} label="Show timing note when duration is unavailable" />
+        <Toggle checked={config.showDataSourceNote !== false} onChange={(value) => update({ showDataSourceNote: value })} label="Show data source note" />
+        <label style={settingsLabelStyle}>
+          Data source note
+          <textarea
+            rows={2}
+            value={config.dataSourceNote || ""}
+            onChange={(event) => update({ dataSourceNote: event.target.value })}
+            style={settingsInputStyle({ resize: "vertical" })}
+          />
+        </label>
+      </div>
+      {message && <div style={{ marginTop: 12, fontSize: 12, color: message.includes("Could not") ? D.red : D.green }}>{message}</div>}
+    </Card>
+  );
+}
+
 function ServiceCoverageSettingsTab() {
   const [config, setConfig] = useState(null);
   const [defaults, setDefaults] = useState(null);
@@ -756,6 +865,8 @@ function ServiceCoverageSettingsTab() {
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
+      <VisitTimelineSettingsCard />
+
       <Card>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
           <div>
