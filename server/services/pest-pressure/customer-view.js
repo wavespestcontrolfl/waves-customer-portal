@@ -9,6 +9,29 @@
  */
 
 const { DEFAULT_CONFIG } = require('./config');
+const { isOneTimeServiceLabel } = require('./review-window');
+const { detectServiceLine } = require('../service-report/service-line-configs');
+
+function isServiceLineEnabled(config, serviceRecord) {
+  const enabledLines = Array.isArray(config && config.enabledServiceLines) ? config.enabledServiceLines : [];
+  if (enabledLines.length === 0) return true;
+  if (!serviceRecord) return false;
+  // Use the same service_line resolution the orchestrator uses (column,
+  // then detectServiceLine(service_type) fallback). Otherwise a legacy
+  // record with service_line=null + service_type='Monthly Pest Control'
+  // gets scored + persisted by the engine but hidden by this gate —
+  // calc path and visibility path disagree on the same record.
+  const resolved = serviceRecord.service_line || detectServiceLine(serviceRecord.service_type);
+  if (!resolved) return false;
+  return enabledLines.includes(resolved);
+}
+
+function meetsRecurringFrequencyRequirement(config, serviceRecord) {
+  if (!config || config.requireRecurringFrequency !== true) return true;
+  if (!serviceRecord) return false;
+  // Mirrors the orchestrator gate: skip only explicit one-time labels.
+  return !isOneTimeServiceLabel(serviceRecord.service_type);
+}
 
 function formatDate(value) {
   if (!value) return null;
@@ -22,11 +45,16 @@ function formatScore(value) {
   return Number(value).toFixed(1);
 }
 
-function buildPestPressureCustomerView({ config, scoreRow }) {
+function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null }) {
   const effectiveConfig = config || DEFAULT_CONFIG;
   if (!effectiveConfig.enabled || !effectiveConfig.showOnCustomerReport) {
     return null;
   }
+  // Mirror orchestrator scope gates so the card disappears uniformly when
+  // a service line is opted out OR the report is one-time, even if a
+  // historical score row exists from a previous config.
+  if (!isServiceLineEnabled(effectiveConfig, serviceRecord)) return null;
+  if (!meetsRecurringFrequencyRequirement(effectiveConfig, serviceRecord)) return null;
 
   const showComponentBreakdown = Boolean(effectiveConfig.showComponentBreakdownToCustomer);
   const howCalculated = effectiveConfig.showHowCalculated
@@ -95,4 +123,6 @@ function buildPestPressureAdminView({ scoreRow }) {
 module.exports = {
   buildPestPressureCustomerView,
   buildPestPressureAdminView,
+  isServiceLineEnabled,
+  meetsRecurringFrequencyRequirement,
 };

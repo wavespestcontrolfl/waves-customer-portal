@@ -51,6 +51,8 @@ const EDITABLE_FIELDS = [
   'minimumDataRequired',
   'allowManualOverride',
   'allowTechnicianClientRatingEntry',
+  'enabledServiceLines',
+  'requireRecurringFrequency',
   'weights',
   'labels',
   'trendThresholds',

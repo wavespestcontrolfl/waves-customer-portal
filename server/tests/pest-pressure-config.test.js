@@ -75,6 +75,46 @@ describe('validateConfig', () => {
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.field === 'serviceFrequencyWindows.monthly')).toBe(true);
   });
+
+  test('missing semiannual window fails', () => {
+    const config = cloneDefault();
+    delete config.serviceFrequencyWindows.semiannual;
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.field === 'serviceFrequencyWindows.semiannual')).toBe(true);
+  });
+
+  test('default enabledServiceLines is [pest, mosquito]', () => {
+    expect(DEFAULT_CONFIG.enabledServiceLines).toEqual(['pest', 'mosquito']);
+  });
+
+  test('default requireRecurringFrequency is true', () => {
+    expect(DEFAULT_CONFIG.requireRecurringFrequency).toBe(true);
+  });
+
+  test('empty enabledServiceLines fails', () => {
+    const config = cloneDefault();
+    config.enabledServiceLines = [];
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.field === 'enabledServiceLines')).toBe(true);
+  });
+
+  test('unknown service line fails', () => {
+    const config = cloneDefault();
+    config.enabledServiceLines = ['pest', 'totally-not-a-line'];
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.message.includes('totally-not-a-line'))).toBe(true);
+  });
+
+  test('non-boolean requireRecurringFrequency fails', () => {
+    const config = cloneDefault();
+    config.requireRecurringFrequency = 'yes';
+    const result = validateConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.field === 'requireRecurringFrequency')).toBe(true);
+  });
 });
 
 describe('snapshotConfig', () => {

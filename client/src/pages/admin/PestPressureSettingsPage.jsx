@@ -375,7 +375,8 @@ export default function PestPressureSettingsPage() {
       && config.trendThresholds.significantIncreaseFrom > config.trendThresholds.increasingFrom)
     : false;
 
-  const canSave = config && weightValid && !labelError && !trendInvalid;
+  const enabledLinesValid = config && Array.isArray(config.enabledServiceLines) && config.enabledServiceLines.length > 0;
+  const canSave = config && weightValid && !labelError && !trendInvalid && enabledLinesValid;
 
   const handleSave = async () => {
     if (!canSave) return;
@@ -636,6 +637,54 @@ export default function PestPressureSettingsPage() {
           </div>
         </Card>
 
+        {/* A.5 Service Lines */}
+        <Card>
+          <SectionHeading
+            label="Service line scope"
+            description="Pest Pressure runs only on the service lines selected here. The multi-visit-trend model is built for recurring pest control; other lines (lawn, tree & shrub) probably shouldn't show a card."
+          />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+            {[
+              { key: "pest", label: "Pest control" },
+              { key: "mosquito", label: "Mosquito (WaveGuard)" },
+              { key: "rodent", label: "Rodent" },
+              { key: "termite", label: "Termite (bait monitoring)" },
+              { key: "lawn", label: "Lawn care" },
+              { key: "tree_shrub", label: "Tree & shrub" },
+              { key: "palm", label: "Palm injection" },
+            ].map((line) => {
+              const enabledLines = Array.isArray(config.enabledServiceLines) ? config.enabledServiceLines : [];
+              const checked = enabledLines.includes(line.key);
+              return (
+                <label key={line.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", border: `1px solid ${D.inputBorder}`, borderRadius: 6, cursor: "pointer", background: checked ? D.bg : D.white }}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                        ? Array.from(new Set([...enabledLines, line.key]))
+                        : enabledLines.filter((k) => k !== line.key);
+                      setField("enabledServiceLines", next);
+                    }}
+                  />
+                  <span style={{ fontSize: 13, color: D.text }}>{line.label}</span>
+                </label>
+              );
+            })}
+          </div>
+          {(!Array.isArray(config.enabledServiceLines) || config.enabledServiceLines.length === 0) ? (
+            <div style={{ fontSize: 12, color: D.red, marginTop: 8 }}>Select at least one service line.</div>
+          ) : null}
+          <div style={{ marginTop: 16 }}>
+            <Toggle
+              label="Skip one-time services"
+              description="When on, services explicitly labelled 'one-time' (or 'single visit', 'one-off', 'spot treatment', 'just once') are skipped — the model needs a recurring plan to compare against. Unknown-frequency labels (e.g. 'General Pest Control') are treated as recurring."
+              checked={Boolean(config.requireRecurringFrequency)}
+              onChange={(v) => setField("requireRecurringFrequency", v)}
+            />
+          </div>
+        </Card>
+
         {/* B. Score Formula */}
         <Card>
           <SectionHeading
@@ -750,10 +799,11 @@ export default function PestPressureSettingsPage() {
             label="Service frequency windows"
             description="Review window in days for each service frequency."
           />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
             <NumberField label="Monthly" value={config.serviceFrequencyWindows.monthly} onChange={(v) => setField("serviceFrequencyWindows.monthly", v)} min={1} step={1} suffix="days" />
             <NumberField label="Bi-monthly" value={config.serviceFrequencyWindows.bimonthly} onChange={(v) => setField("serviceFrequencyWindows.bimonthly", v)} min={1} step={1} suffix="days" />
             <NumberField label="Quarterly" value={config.serviceFrequencyWindows.quarterly} onChange={(v) => setField("serviceFrequencyWindows.quarterly", v)} min={1} step={1} suffix="days" />
+            <NumberField label="Semi-annual" value={config.serviceFrequencyWindows.semiannual} onChange={(v) => setField("serviceFrequencyWindows.semiannual", v)} min={1} step={1} suffix="days" />
             <NumberField label="Fallback (custom)" value={config.serviceFrequencyWindows.fallbackDays} onChange={(v) => setField("serviceFrequencyWindows.fallbackDays", v)} min={1} step={1} suffix="days" />
           </div>
         </Card>
