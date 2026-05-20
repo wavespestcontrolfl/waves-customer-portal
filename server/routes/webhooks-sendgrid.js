@@ -8,8 +8,8 @@
  * Setup (one-time, SendGrid UI):
  *   Settings → Mail Settings → Event Webhook
  *     POST URL: https://portal.wavespestcontrol.com/api/webhooks/sendgrid/events
- *     Enable: Delivered, Bounced, Blocked, Deferred, Dropped, Opened,
- *             Clicked, Spam Reports, Unsubscribe
+ *     Enable: Processed, Delivered, Bounced, Blocked, Deferred, Dropped,
+ *             Opened, Clicked, Spam Reports, Unsubscribe
  *     Signed Event Webhook: ON
  *   Copy the generated "Verification Key" → Railway env SENDGRID_WEBHOOK_PUBLIC_KEY
  *
@@ -25,6 +25,7 @@ const logger = require('../services/logger');
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
 const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
+const NEWSLETTER_RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed', 'sending'];
 
 // Convert SendGrid's base64 SPKI public key to a Node KeyObject.
 // Cached — key is static env input.
@@ -69,6 +70,75 @@ function redactEmail(value) {
   const [local, domain] = value.split('@');
   if (!domain) return '[redacted]';
   return `${local.slice(0, 2)}***@${domain}`;
+}
+
+function deliveryEmailMismatchLogMessage(deliveryId, rowEmail, eventEmail) {
+  return `[sendgrid-webhook] delivery_id ${deliveryId} matched but email mismatch (row=${redactEmail(rowEmail)} event=${redactEmail(eventEmail)}) - ignoring`;
+}
+
+function shouldMarkProcessedNewsletterDeliverySent(delivery, ev = {}) {
+  const status = String(delivery?.status || '').toLowerCase();
+  if (['queued', 'failed'].includes(status)) return true;
+  if (status !== 'sending') return false;
+  return sendAttemptTokenMatches(delivery, ev?.send_attempt_token);
+}
+
+function sendAttemptTokenMatches(delivery, attemptToken = null) {
+  const rowToken = delivery?.send_attempt_token ? String(delivery.send_attempt_token) : null;
+  const eventToken = attemptToken ? String(attemptToken) : null;
+  return !!rowToken && !!eventToken && rowToken === eventToken;
+}
+
+function canUseDeliveryIdFallback(delivery, messageId, attemptToken = null) {
+  if (!delivery) return false;
+  if (!delivery.provider_message_id) {
+    const rowToken = delivery.send_attempt_token ? String(delivery.send_attempt_token) : null;
+    const eventToken = attemptToken ? String(attemptToken) : null;
+    if (rowToken || eventToken) return !!rowToken && !!eventToken && rowToken === eventToken;
+    return String(delivery.status || '').toLowerCase() !== 'sending';
+  }
+  if (String(delivery.provider_message_id) === String(messageId || '')) return true;
+  return sendAttemptTokenMatches(delivery, attemptToken);
+}
+
+function canUseProviderMessageMatch(delivery, attemptToken = null) {
+  if (!delivery?.send_attempt_token) return true;
+  return sendAttemptTokenMatches(delivery, attemptToken);
+}
+
+async function bindNewsletterDeliveryMessageId(delivery, messageId, attemptToken = null, client = db) {
+  if (!delivery || !messageId) return delivery;
+  const providerMatches = delivery.provider_message_id
+    && String(delivery.provider_message_id) === String(messageId);
+  if (providerMatches) return delivery;
+
+  const tokenMatches = sendAttemptTokenMatches(delivery, attemptToken);
+  if (delivery.provider_message_id && !tokenMatches) return delivery;
+
+  const bindQuery = client('newsletter_send_deliveries')
+    .where({ id: delivery.id })
+    .where((q) => {
+      q.whereNull('provider_message_id').orWhere({ provider_message_id: messageId });
+      if (tokenMatches) q.orWhere({ send_attempt_token: String(attemptToken) });
+    });
+  if (delivery.send_attempt_token || attemptToken) {
+    bindQuery.where({ send_attempt_token: attemptToken || delivery.send_attempt_token });
+  }
+  const updated = await bindQuery.update({ provider_message_id: messageId, updated_at: new Date() });
+  if (updated) return { ...delivery, provider_message_id: messageId };
+
+  return client('newsletter_send_deliveries')
+    .where({ id: delivery.id })
+    .first();
+}
+
+function applyRetryableNewsletterDeliveryFilter(query) {
+  return query
+    .whereIn('status', NEWSLETTER_RETRYABLE_DELIVERY_STATUSES)
+    .whereNull('sent_at')
+    .whereNull('delivered_at')
+    .whereNull('opened_at')
+    .whereNull('clicked_at');
 }
 
 router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
@@ -128,9 +198,42 @@ async function handleEvent(ev) {
   // X-Message-Id across all recipients in a chunk, so the lookup MUST also
   // filter by email — otherwise events for recipient B silently update
   // recipient A's row.
-  const newsletterDelivery = email ? await db('newsletter_send_deliveries')
+  //
+  // Fallback: SendGrid echoes our per-recipient `custom_args.delivery_id`
+  // on every event for that recipient. When the X-Message-Id is unknown
+  // to us (lost-response case: our sendBatch POST timed out before reading
+  // the X-Message-Id header, so the row was marked 'failed' with no id),
+  // the delivery_id lets the event still find its home and self-heal the
+  // row. Only trust the fallback for unbound rows, rows already bound to the
+  // same message id, or a token-matched resume attempt that needs to replace
+  // an older message id; otherwise a delayed event from an earlier resume
+  // attempt could mutate the current attempt. Backfill the provider_message_id
+  // while we're here so subsequent events hit the fast path.
+  let newsletterDelivery = email ? await db('newsletter_send_deliveries')
     .where({ provider_message_id: messageId, email })
     .first() : null;
+  if (newsletterDelivery && !canUseProviderMessageMatch(newsletterDelivery, ev.send_attempt_token)) {
+    newsletterDelivery = null;
+  }
+  if (!newsletterDelivery && ev.delivery_id) {
+    newsletterDelivery = await db('newsletter_send_deliveries')
+      .where({ id: String(ev.delivery_id) })
+      .first();
+    if (newsletterDelivery && !canUseDeliveryIdFallback(newsletterDelivery, messageId, ev.send_attempt_token)) {
+      newsletterDelivery = null;
+    } else if (newsletterDelivery && newsletterDelivery.email && email
+        && String(newsletterDelivery.email).toLowerCase() !== String(email).toLowerCase()) {
+      // Email mismatch on a delivery_id match → reject; treat as untracked
+      // rather than corrupt an unrelated row. Should never happen unless
+      // an event payload was tampered with.
+      logger.warn(deliveryEmailMismatchLogMessage(ev.delivery_id, newsletterDelivery.email, email));
+      newsletterDelivery = null;
+    } else if (newsletterDelivery && messageId
+        && String(newsletterDelivery.provider_message_id || '') !== String(messageId)) {
+      const boundDelivery = await bindNewsletterDeliveryMessageId(newsletterDelivery, messageId, ev.send_attempt_token);
+      newsletterDelivery = canUseDeliveryIdFallback(boundDelivery, messageId, ev.send_attempt_token) ? boundDelivery : null;
+    }
+  }
   // Automation step sends are always single-recipient (one customer per
   // step), so message id alone is unique there. Belt-and-suspenders email
   // filter anyway.
@@ -206,6 +309,8 @@ async function processWebhookEvent(ev, messageId, email, handler) {
  * Update shape:
  *   delivery       — fields to write to newsletter_send_deliveries
  *   sendIncrement  — column on newsletter_sends to increment by 1
+ *   reconcileSendStatus — re-check failed parent send when a delivery leaves
+ *     the retryable set via webhook self-heal
  *   subscriberAction — one of:
  *     'bounce_increment'    bounce_count++ + last_bounced_at
  *     'force_unsubscribe'   status='unsubscribed' regardless of prior state
@@ -219,6 +324,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       return {
         delivery: { status: 'delivered', delivered_at: now, updated_at: now },
         sendIncrement: 'delivered_count',
+        reconcileSendStatus: true,
       };
 
     case 'bounce':
@@ -233,6 +339,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
           updated_at: now,
         },
         sendIncrement: 'bounced_count',
+        reconcileSendStatus: true,
         subscriberAction: delivery.subscriber_id ? 'bounce_increment' : null,
         subscriberAt: now,
       };
@@ -243,6 +350,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       return {
         delivery: { opened_at: now, updated_at: now },
         sendIncrement: 'opened_count',
+        reconcileSendStatus: true,
       };
 
     case 'click':
@@ -250,6 +358,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       return {
         delivery: { clicked_at: now, updated_at: now },
         sendIncrement: 'clicked_count',
+        reconcileSendStatus: true,
       };
 
     case 'spamreport':
@@ -260,6 +369,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       return {
         delivery: { status: 'complained', complained_at: now, updated_at: now },
         sendIncrement: 'complained_count',
+        reconcileSendStatus: true,
         subscriberAction: delivery.subscriber_id ? 'force_unsubscribe' : null,
         subscriberAt: now,
       };
@@ -279,10 +389,17 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       };
 
     case 'processed':
+      if (shouldMarkProcessedNewsletterDeliverySent(delivery, ev)) {
+        return {
+          delivery: { status: 'sent', sent_at: now, updated_at: now },
+          reconcileSendStatus: true,
+        };
+      }
+      return null;
+
     case 'deferred':
     case 'group_resubscribe':
     default:
-      // processed = accepted by SG (already "sent" in our model)
       // deferred = temporary fail, SG will retry — don't update row
       // group_resubscribe = we don't use SG groups
       return null;
@@ -442,6 +559,9 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   if (updates.delivery) {
     await client('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
   }
+  if (updates.reconcileSendStatus) {
+    await reconcileNewsletterSendStatus(delivery.send_id, client);
+  }
   if (updates.sendIncrement) {
     await client('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
   }
@@ -579,6 +699,19 @@ async function unsubscribeNewsletterSubscriber(email, at, client = db) {
     });
 }
 
+async function reconcileNewsletterSendStatus(sendId, client = db) {
+  const outstanding = await applyRetryableNewsletterDeliveryFilter(
+    client('newsletter_send_deliveries').where({ send_id: sendId }),
+  )
+    .count('* as c')
+    .first();
+  if (Number(outstanding?.c || 0) > 0) return;
+
+  await client('newsletter_sends')
+    .where({ id: sendId, status: 'failed' })
+    .update({ status: 'sent', updated_at: new Date() });
+}
+
 async function cancelActiveEnrollments({ email, reason, asmGroup }, client = db) {
   if (!email) return;
   const lc = String(email).trim().toLowerCase();
@@ -609,3 +742,8 @@ module.exports.computeNewsletterEventUpdates = computeNewsletterEventUpdates;
 module.exports.computeEmailMessageEventUpdates = computeEmailMessageEventUpdates;
 module.exports.suppressionForEmailEvent = suppressionForEmailEvent;
 module.exports.isFreshTimestamp = isFreshTimestamp;
+module.exports.deliveryEmailMismatchLogMessage = deliveryEmailMismatchLogMessage;
+module.exports.canUseDeliveryIdFallback = canUseDeliveryIdFallback;
+module.exports.canUseProviderMessageMatch = canUseProviderMessageMatch;
+module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId;
+module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
