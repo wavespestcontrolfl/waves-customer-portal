@@ -687,6 +687,7 @@ function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex) {
   const lotPrefix = hasLotIdentifierPrefix(fullStr, matchIndex);
   const lotMixedFraction = value.match(/^\d+\s*(?:-|\s)\s*(\d+\s*\/\s*\d+)$/);
   if (lotPrefix && lotMixedFraction) return parseFirstLotNumber(lotMixedFraction[1]);
+  if (lotPrefix && /^\d+$/.test(value)) return null;
   return parseFirstLotNumber(value);
 }
 
