@@ -11,12 +11,11 @@
  */
 
 const db = require("../models/db");
-const EmailService = require("./email");
+const EmailTemplateLibrary = require("./email-template-library");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const logger = require("./logger");
 const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -129,6 +128,14 @@ async function releaseStage(estId, flag) {
 // Shared sender — fires SMS if phone exists, email if email exists. Returns
 // true if at least one channel attempted (callers use this to decide whether
 // to keep the stage claim or release it).
+//
+// Email goes through EmailTemplateLibrary.sendTemplate so every send writes
+// an `email_messages` audit row, respects `email_suppressions`, carries the
+// ASM (List-Unsubscribe) header for the service_operational group, and
+// renders content the admin can edit in /admin/email without a deploy. The
+// `idempotencyKey` is stable per (stage, estimate) — duplicate cron ticks
+// hit the email_messages unique index instead of resending. The atomic
+// claimStage() flag is still primary; idempotency is belt-and-suspenders.
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   if (est.customer_phone && sms) {
@@ -167,20 +174,33 @@ async function sendDualChannel(est, { sms, email }) {
       );
     }
   }
-  if (est.customer_email) {
+  if (est.customer_email && email?.templateKey) {
     try {
-      const r = await EmailService.send({
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: email.templateKey,
         to: est.customer_email,
-        subject: email.subject,
-        heading: email.heading,
-        body: email.body,
-        ctaUrl: email.ctaUrl,
-        ctaLabel: email.ctaLabel || "View Your Estimate",
+        payload: email.payload || {},
+        recipientType: est.customer_id ? "customer" : "lead",
+        recipientId: est.customer_id || null,
+        triggerEventId: `estimate_followup_${email.stage}:${est.id}`,
+        idempotencyKey: `estimate_followup_${email.stage}:${est.id}`,
+        categories: ["estimate_followup", `estimate_followup_${email.stage}`],
       });
-      if (r.ok) attempted = true;
+      if (result?.blocked) {
+        logger.warn(
+          `[est-followup] Email suppressed for estimate ${est.id} (${email.stage}): ${result.reason || "blocked"}`,
+        );
+      } else if (result?.deduped) {
+        logger.info(
+          `[est-followup] Email deduped for estimate ${est.id} (${email.stage}) — prior send already on record`,
+        );
+        attempted = true;
+      } else if (result?.sent) {
+        attempted = true;
+      }
     } catch (e) {
       logger.error(
-        `[est-followup] Email failed for estimate ${est.id}: ${e.message}`,
+        `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${e.message}`,
       );
     }
   }
@@ -242,10 +262,9 @@ const EstimateFollowUp = {
           const ok = await sendDualChannel(est, {
             sms: smsBody,
             email: {
-              subject: "Your Waves estimate is ready to review",
-              heading: `Hi ${firstName} — did you see your estimate?`,
-              body: `<p>We sent your Waves Pest Control estimate yesterday and wanted to make sure it didn't get lost in your inbox.</p><p>Take a quick look whenever you get a chance — no pressure, we're here to answer any questions.</p>`,
-              ctaUrl: url,
+              templateKey: "estimate.unviewed_followup",
+              stage: "unviewed",
+              payload: { first_name: firstName, estimate_url: url },
             },
           });
           if (ok) {
@@ -326,10 +345,9 @@ const EstimateFollowUp = {
           const ok = await sendDualChannel(est, {
             sms: smsBody,
             email: {
-              subject: "Any questions about your Waves estimate?",
-              heading: `Hi ${firstName} — any questions?`,
-              body: `<p>Thanks for taking a look at your Waves estimate! If anything isn't clear or you'd like to talk through what's included, I'm happy to help.</p><p>Just reply to this email or call me directly at ${WAVES_SUPPORT_PHONE_DISPLAY}.</p><p>— Adam, Waves Pest Control</p>`,
-              ctaUrl: url,
+              templateKey: "estimate.viewed_followup",
+              stage: "viewed",
+              payload: { first_name: firstName, estimate_url: url },
             },
           });
           if (ok) {
@@ -411,10 +429,9 @@ const EstimateFollowUp = {
           const ok = await sendDualChannel(est, {
             sms: smsBody,
             email: {
-              subject: "Last check-in on your Waves estimate",
-              heading: `Last check-in, ${firstName}`,
-              body: `<p>Wanted to send one last friendly reminder that your Waves estimate is still available. No pressure at all — if we're not the right fit, that's OK.</p><p>But if you'd like to move forward or you have questions I can answer, just reply here.</p><p>— Adam, Waves Pest Control</p>`,
-              ctaUrl: url,
+              templateKey: "estimate.followup_final",
+              stage: "final",
+              payload: { first_name: firstName, estimate_url: url },
             },
           });
           if (ok) {
@@ -502,10 +519,13 @@ const EstimateFollowUp = {
           const ok = await sendDualChannel(est, {
             sms: smsBody,
             email: {
-              subject: `Your Waves estimate expires ${expDate}`,
-              heading: `Heads up, ${firstName} — your estimate expires ${expDate}`,
-              body: `<p>Your Waves Pest Control estimate is set to expire on <strong>${expDate}</strong>. If you'd like to move forward, just accept it from the link below.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
-              ctaUrl: url,
+              templateKey: "estimate.expiring_notice",
+              stage: "expiring",
+              payload: {
+                first_name: firstName,
+                estimate_url: url,
+                expires_at: expDate,
+              },
             },
           });
           if (ok) {
@@ -543,3 +563,4 @@ const EstimateFollowUp = {
 };
 
 module.exports = EstimateFollowUp;
+module.exports._private = { sendDualChannel };
