@@ -484,7 +484,7 @@ Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
 - "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
-- If the converted lot size is above 200000 square feet, return null for lotSize so the public quote flow does not underprice acreage properties.
+- If the converted lot size is above 200000 square feet, output 200000 so the public quote flow prices at its maximum lot-size cap instead of defaulting to a small lot.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
@@ -494,7 +494,7 @@ Output rules:
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
   "squareFootage": <int 500-15000 or null>,
-  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed), or null>,
+  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed; cap verified oversized lots at 200000), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -546,13 +546,20 @@ function coerceInt(raw, min, max) {
 const SQFT_PER_ACRE = 43560;
 const LOT_SQFT_MIN = 1000;
 const LOT_SQFT_MAX = 200_000;
+const ACRE_UNIT_RE = /\b(?:acreage|acres?|acs?|ac)\b\.?/i;
+const SQFT_UNIT_RE = /\b(?:sq\.?\s*ft\.?|sqft|square\s*feet|sf)\b\.?/i;
+const LOT_NUMBER_PATTERN = String.raw`(\d+(?:-\d+\s*\/\s*\d+|\s+\d+\s*\/\s*\d+)|\d+\s*\/\s*\d+|(?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)(?:\.\d+)?)`;
+const LOT_NUMBER_PATTERN_RE = new RegExp(`^${LOT_NUMBER_PATTERN}$`, 'i');
 
 // Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
 // or acres ("5.99 Acres Lot", "1/2 acre"). The pricing engine always wants
 // square feet, so we normalize here.
-//   - Strings with "acre" → first number is acres, multiply by 43560.
-//   - Strings with "sqft" / "sq ft" → first number is sqft.
-//   - Bare numbers: small (< LOT_SQFT_MIN) assumed acres, large assumed sqft.
+//   - Strings with acre units → unit-qualified number is acres, multiply by 43560.
+//   - Strings with sqft units → unit-qualified number is sqft.
+//   - Bare numbers: small (< LOT_SQFT_MIN) are treated as acres only when
+//     conversion stays within the public quote cap; larger ambiguous values
+//     remain null.
+//   - Verified values above the public quote max are capped, not discarded.
 //   - Strings with BOTH "acre" and "sqft" (e.g. "0.5 acres (21,780 sqft)")
 //     are accepted only when the unit-qualified values agree.
 function coerceLotSize(raw) {
@@ -560,47 +567,74 @@ function coerceLotSize(raw) {
 
   if (typeof raw === 'number') {
     if (!Number.isFinite(raw) || raw <= 0) return null;
-    const sqft = Math.round(raw < LOT_SQFT_MIN ? raw * SQFT_PER_ACRE : raw);
-    return inLotRange(sqft) ? sqft : null;
+    const sqft = coerceUnqualifiedLotSqft(raw, { allowOversizedSqft: true });
+    return sqft == null ? null : clampLotSqft(Math.round(sqft));
   }
 
   const str = String(raw).toLowerCase();
-  const hasAcre = /\bacre/.test(str);
-  const hasSqft = /\bsq\.?\s*ft\b|\bsqft\b|\bsquare\s*feet\b/.test(str);
+  const hasAcre = ACRE_UNIT_RE.test(str);
+  const hasSqft = SQFT_UNIT_RE.test(str);
   if (hasAcre && hasSqft) {
     return coerceDualUnitLotSize(str);
   }
 
-  const value = parseFirstLotNumber(str);
+  const value = hasAcre
+    ? parseUnitQualifiedLotNumber(str, ACRE_UNIT_RE, 'acre')
+    : hasSqft
+      ? parseUnitQualifiedLotNumber(str, SQFT_UNIT_RE, 'sqft')
+      : parseFirstLotNumber(str);
   if (value == null || value <= 0) return null;
 
   let sqft;
   if (hasAcre) sqft = value * SQFT_PER_ACRE;
   else if (hasSqft) sqft = value;
-  else sqft = value < LOT_SQFT_MIN ? value * SQFT_PER_ACRE : value;
+  else sqft = coerceUnqualifiedLotSqft(value, { allowOversizedSqft: shouldAllowOversizedUnqualifiedLotSqft(str) });
+  if (sqft == null) return null;
 
   const rounded = Math.round(sqft);
-  return inLotRange(rounded) ? rounded : null;
+  return clampLotSqft(rounded);
 }
 
-function inLotRange(n) {
-  return n >= LOT_SQFT_MIN && n <= LOT_SQFT_MAX;
+function coerceUnqualifiedLotSqft(value, options = {}) {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  if (value < LOT_SQFT_MIN) {
+    const converted = value * SQFT_PER_ACRE;
+    return converted <= LOT_SQFT_MAX ? converted : null;
+  }
+  if (value <= LOT_SQFT_MAX) return value;
+  return options.allowOversizedSqft ? value : null;
+}
+
+function isPlainLotNumberString(str) {
+  return LOT_NUMBER_PATTERN_RE.test(String(str || '').trim());
+}
+
+function shouldAllowOversizedUnqualifiedLotSqft(str) {
+  const trimmed = String(str || '').trim();
+  if (isPlainLotNumberString(trimmed)) return true;
+  return /\blot\s*size\b/i.test(trimmed) && /\b\d{1,3}(?:,\d{3})+\b/.test(trimmed);
+}
+
+function clampLotSqft(n) {
+  if (!Number.isFinite(n) || n < LOT_SQFT_MIN) return null;
+  return Math.min(n, LOT_SQFT_MAX);
 }
 
 function coerceDualUnitLotSize(str) {
-  const acres = parseUnitQualifiedLotNumber(str, /acres?\b/);
-  const sqft = parseUnitQualifiedLotNumber(str, /sq\.?\s*ft\b|sqft\b|square\s*feet\b/);
+  const acres = parseUnitQualifiedLotNumber(str, ACRE_UNIT_RE, 'acre');
+  const sqft = parseUnitQualifiedLotNumber(str, SQFT_UNIT_RE, 'sqft');
 
   const acreSqft = acres == null ? null : Math.round(acres * SQFT_PER_ACRE);
   const roundedSqft = sqft == null ? null : Math.round(sqft);
 
   if (acreSqft != null && roundedSqft != null) {
+    if (acreSqft >= LOT_SQFT_MAX && roundedSqft >= LOT_SQFT_MAX) return LOT_SQFT_MAX;
     if (!lotValuesAgree(acreSqft, roundedSqft)) return null;
-    return inLotRange(roundedSqft) ? roundedSqft : null;
+    return clampLotSqft(roundedSqft);
   }
 
   const candidate = roundedSqft ?? acreSqft;
-  return candidate != null && inLotRange(candidate) ? candidate : null;
+  return candidate != null ? clampLotSqft(candidate) : null;
 }
 
 function lotValuesAgree(a, b) {
@@ -608,11 +642,106 @@ function lotValuesAgree(a, b) {
   return Math.abs(a - b) <= tolerance;
 }
 
-function parseUnitQualifiedLotNumber(str, unitPattern) {
-  const numberPattern = String.raw`(\d+\s+\d+\/\d+|\d+\/\d+|\d[\d,]*(?:\.\d+)?)`;
-  const re = new RegExp(`${numberPattern}\\s*-?\\s*(?:${unitPattern.source})`, 'i');
-  const match = str.match(re);
-  return match ? parseFirstLotNumber(match[1]) : null;
+function parseUnitQualifiedLotNumber(str, unitPattern, unitKind) {
+  const afterUnit = new RegExp(`(?:${unitPattern.source})(\\s*(?:[:=]\\s*)?(?:of\\s*)?)${LOT_NUMBER_PATTERN}`, 'i');
+  const afterMatch = str.match(afterUnit);
+  const afterValue = afterMatch ? parseFirstLotNumber(afterMatch[2]) : null;
+
+  const beforeUnit = new RegExp(`${LOT_NUMBER_PATTERN}\\s*-?\\s*(?:${unitPattern.source})`, 'i');
+  const beforeMatch = str.match(beforeUnit);
+  const beforeValue = beforeMatch ? parseUnitPrefixLotNumber(beforeMatch[1], str, beforeMatch.index, unitKind) : null;
+
+  if (afterValue != null && shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, unitKind, beforeMatch)) {
+    return afterValue;
+  }
+  return beforeValue;
+}
+
+function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, unitKind, beforeMatch = null) {
+  if (!afterMatch || afterValue == null) return false;
+  if (beforeValue == null) return isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind);
+
+  const beforeHasLotPrefix = hasLotIdentifierPrefix(str, beforeMatch?.index);
+  const rawNumber = afterMatch[2];
+  const numberOffset = afterMatch[0].lastIndexOf(rawNumber);
+  const numberEnd = afterMatch.index + numberOffset + rawNumber.length;
+  const trailing = str.slice(numberEnd, numberEnd + 24);
+  const hasFollowingOtherUnit = unitKind === 'acre'
+    ? SQFT_UNIT_RE.test(trailing)
+    : ACRE_UNIT_RE.test(trailing);
+  if (hasFollowingOtherUnit) {
+    return unitKind === 'acre' && beforeHasLotPrefix && Number.isInteger(beforeValue) && afterValue > 0 && afterValue < LOT_SQFT_MIN;
+  }
+
+  const separator = afterMatch[1] || '';
+  if (/[:=]/.test(separator)) return true;
+
+  const beforeSqft = unitKind === 'acre' ? beforeValue * SQFT_PER_ACRE : beforeValue;
+  const afterSqft = unitKind === 'acre' ? afterValue * SQFT_PER_ACRE : afterValue;
+  if (beforeSqft > LOT_SQFT_MAX) return false;
+  if (unitKind === 'acre' && beforeHasLotPrefix && Number.isInteger(beforeValue)) return true;
+
+  return (beforeSqft < LOT_SQFT_MIN || beforeSqft > LOT_SQFT_MAX)
+    && afterSqft >= LOT_SQFT_MIN
+    && isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind);
+}
+
+function isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind) {
+  const { rawNumber, trailing } = getAfterUnitNumberContext(afterMatch);
+  if (hasMetadataAfterUnitTrailing(trailing)) return false;
+
+  const separator = afterMatch[1] || '';
+  if (/[:=]|\bof\b/i.test(separator)) return true;
+
+  if (unitKind !== 'acre') return true;
+
+  const unitToken = (afterMatch[0].match(ACRE_UNIT_RE)?.[0] || '').replace(/\./g, '').toLowerCase();
+  if (/^acs?$/.test(unitToken)) return true;
+
+  return !isPlainIntegerString(rawNumber) || afterValue < 1000;
+}
+
+function getAfterUnitNumberContext(afterMatch) {
+  const rawNumber = afterMatch[2] || '';
+  const numberOffset = afterMatch[0].lastIndexOf(rawNumber);
+  const numberEnd = afterMatch.index + numberOffset + rawNumber.length;
+  return {
+    rawNumber,
+    trailing: String(afterMatch.input || '').slice(numberEnd, numberEnd + 32),
+  };
+}
+
+function hasMetadataAfterUnitTrailing(trailing) {
+  return /^[\s,;:/()_-]*(?:adj|tax|years?|records?|plats?|refs?|references?|parcels?|ids?|identifiers?|blocks?|books?|pages?)\b/i.test(trailing);
+}
+
+function isPlainIntegerString(rawNumber) {
+  return /^\d+$/.test(String(rawNumber || '').trim());
+}
+
+function hasLotIdentifierPrefix(str, matchIndex) {
+  if (!Number.isInteger(matchIndex) || matchIndex < 0) return false;
+  return /\b(?:lot|parcel|tract|block|section)\s*(?:#|no\.?|number)?\s*$/i.test(str.slice(0, matchIndex));
+}
+
+function hasExplicitLotIdentifierPrefix(str, matchIndex) {
+  if (!Number.isInteger(matchIndex) || matchIndex < 0) return false;
+  return /\b(?:lot|parcel|tract|block|section)\s*(?:#|no\.?|number)\s*$/i.test(str.slice(0, matchIndex));
+}
+
+function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex, unitKind) {
+  const value = String(rawNumber || '').trim();
+  const lotPrefix = hasLotIdentifierPrefix(fullStr, matchIndex);
+  const lotMixedFraction = value.match(/^(\d+)\s*(-|\s)\s*(\d+\s*\/\s*\d+)$/);
+  if (lotPrefix && lotMixedFraction) {
+    const whole = Number(lotMixedFraction[1]);
+    const explicitLotPrefix = hasExplicitLotIdentifierPrefix(fullStr, matchIndex);
+    if (explicitLotPrefix || lotMixedFraction[2] === '-' || whole > LOT_SQFT_MAX / SQFT_PER_ACRE) {
+      return parseFirstLotNumber(lotMixedFraction[3]);
+    }
+  }
+  if (unitKind === 'acre' && lotPrefix && /^\d+$/.test(value)) return null;
+  return parseFirstLotNumber(value);
 }
 
 // Pull the FIRST numeric value out of a lot-size string. Supports mixed
@@ -621,22 +750,22 @@ function parseUnitQualifiedLotNumber(str, unitPattern) {
 // non-digit characters — that would merge "0.5 acres (21,780)" into a
 // single bogus number, or turn "1/2" into "12".
 function parseFirstLotNumber(str) {
-  const mixed = str.match(/(\d+)\s+(\d+)\/(\d+)/);
+  const mixed = str.match(/(\d+)(?:-(\d+)\s*\/\s*(\d+)|\s+(\d+)\s*\/\s*(\d+))/);
   if (mixed) {
     const whole = Number(mixed[1]);
-    const num = Number(mixed[2]);
-    const den = Number(mixed[3]);
+    const num = Number(mixed[2] ?? mixed[4]);
+    const den = Number(mixed[3] ?? mixed[5]);
     if (Number.isFinite(whole) && Number.isFinite(num) && den > 0) {
       return whole + num / den;
     }
   }
-  const frac = str.match(/(\d+)\/(\d+)/);
+  const frac = str.match(/(^|[^\d])(\d+)\s*\/\s*(\d+)/);
   if (frac) {
-    const num = Number(frac[1]);
-    const den = Number(frac[2]);
+    const num = Number(frac[2]);
+    const den = Number(frac[3]);
     if (Number.isFinite(num) && den > 0) return num / den;
   }
-  const decimal = str.match(/\d[\d,]*(?:\.\d+)?/);
+  const decimal = str.match(/(?:\d[\d,]*|\.\d+)(?:\.\d+)?/);
   if (decimal) {
     const n = Number(decimal[0].replace(/,/g, ''));
     if (Number.isFinite(n)) return n;
@@ -995,4 +1124,9 @@ module.exports = {
   lookupPropertyFromOpenAI,
   lookupPropertyFromGemini,
   lookupPropertyFromAITrio,
+  _test: {
+    coerceLotSize,
+    parseFirstLotNumber,
+    parseUnitQualifiedLotNumber,
+  },
 };
