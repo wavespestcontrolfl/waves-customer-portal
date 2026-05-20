@@ -425,6 +425,7 @@ describe('resumeCampaign — preconditions', () => {
           { id: 'd-1', subscriber_id: 1, status: 'delivered', ab_variant: null },
           { id: 'd-2', subscriber_id: 2, status: 'failed', ab_variant: null },
         ] }),
+        chain({ returning: [{ id: 'd-2', subscriber_id: 2 }] }), // claim retryable row before SendGrid
         chain({ updated: 1 }),                                // post-send bulk update
         chain({ count: 0 }),                                  // final retryable ledger count
       ],
@@ -451,6 +452,52 @@ describe('resumeCampaign — preconditions', () => {
     expect(subscriberWhereIn).toEqual(['id', [2]]);
     expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
     expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
+  });
+
+  test('resume skips a delivery row that self-healed before the external send claim', async () => {
+    let finalUpdate = null;
+    const sentSend = {
+      id: 's',
+      status: 'sent',
+      sent_at: new Date('2026-05-01T10:00:00Z'),
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: sentSend }),                          // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
+        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 1 }),                                  // rows exist
+        chain({ count: 1 }),                                  // one outstanding at preflight
+        chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'failed', ab_variant: null }] }),
+        chain({ returning: [] }),                             // webhook self-healed before claim
+        chain({ count: 0 }),                                  // final retryable ledger count
+      ],
+      newsletter_subscribers: [
+        chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
+      ],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await resumeCampaign('s');
+
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+    expect(result.accepted).toBe(0);
+    expect(finalUpdate.status).toBe('sent');
   });
 
   test('throws ALREADY_CLAIMED when the resume status reset loses a race', async () => {
@@ -509,6 +556,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ count: 1 }),                                  // rows exist
         chain({ count: 1 }),                                  // one outstanding
         chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'failed', ab_variant: null }] }),
+        chain({ returning: [{ id: 'd-1', subscriber_id: 1 }] }), // claim retryable row before SendGrid
         chain({ updated: 1 }),                                // post-send bulk update
         chain({ count: 0 }),                                  // final retryable ledger count
       ],

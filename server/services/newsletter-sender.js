@@ -64,14 +64,30 @@ function hasDeliverySuccessSignal(delivery) {
     || !!delivery.clicked_at;
 }
 
-function applyRetryableDeliveryFilter(query, tableAlias = null) {
+function applyDeliveryNoSuccessFilter(query, tableAlias = null) {
   const col = (name) => (tableAlias ? `${tableAlias}.${name}` : name);
   return query
-    .whereIn(col('status'), RETRYABLE_DELIVERY_STATUSES)
     .whereNull(col('sent_at'))
     .whereNull(col('delivered_at'))
     .whereNull(col('opened_at'))
     .whereNull(col('clicked_at'));
+}
+
+function applyRetryableDeliveryFilter(query, tableAlias = null) {
+  const col = (name) => (tableAlias ? `${tableAlias}.${name}` : name);
+  return applyDeliveryNoSuccessFilter(query, tableAlias)
+    .whereIn(col('status'), RETRYABLE_DELIVERY_STATUSES);
+}
+
+async function claimRetryableDeliveriesForResume(sendId, subscriberIds) {
+  if (!subscriberIds.length) return [];
+  return applyRetryableDeliveryFilter(
+    db('newsletter_send_deliveries')
+      .where({ send_id: sendId })
+      .whereIn('subscriber_id', subscriberIds),
+  )
+    .update({ status: 'sending', updated_at: new Date() })
+    .returning(['id', 'subscriber_id']);
 }
 
 /**
@@ -228,7 +244,17 @@ async function sendCampaign(sendId, opts = {}) {
     for (let i = 0; i < group.length; i += 500) chunks.push(group.slice(i, i + 500));
 
     for (const chunk of chunks) {
-      const recipients = chunk.map((s) => ({
+      let chunkToSend = chunk;
+      let claimedDeliveryIds = [];
+      if (opts.existingDeliveriesOnly) {
+        const claimedRows = await claimRetryableDeliveriesForResume(send.id, chunk.map((s) => s.id));
+        const claimedBySub = new Map(claimedRows.map((d) => [d.subscriber_id, d.id]));
+        chunkToSend = chunk.filter((s) => claimedBySub.has(s.id));
+        claimedDeliveryIds = chunkToSend.map((s) => claimedBySub.get(s.id)).filter(Boolean);
+        if (!chunkToSend.length) continue;
+      }
+
+      const recipients = chunkToSend.map((s) => ({
         email: s.email,
         unsubscribeUrl: sendgrid.unsubscribeUrl(s.unsubscribe_token),
         // delivery_id rides on every SendGrid event webhook for this
@@ -241,7 +267,7 @@ async function sendCampaign(sendId, opts = {}) {
           send_id: String(send.id),
         },
       }));
-      const subscriberIds = chunk.map((s) => s.id);
+      const subscriberIds = chunkToSend.map((s) => s.id);
 
       try {
         // sendBroadcast = sendBatch with the SENDGRID_ASM_GROUP_NEWSLETTER
@@ -263,24 +289,28 @@ async function sendCampaign(sendId, opts = {}) {
         // returns the affected row count so the SendGrid-accepted tally
         // stays accurate. True delivery is counted only from provider
         // webhooks after mailbox acceptance.
-        const updated = await applyRetryableDeliveryFilter(
-          db('newsletter_send_deliveries')
-            .where({ send_id: send.id })
-            .whereIn('subscriber_id', subscriberIds),
-        )
-          .update({
-            status: 'sent',
-            provider_message_id: result.messageId,
-            sent_at: new Date(),
-            updated_at: new Date(),
-          });
+        const deliveryUpdateQuery = db('newsletter_send_deliveries').where({ send_id: send.id });
+        if (opts.existingDeliveriesOnly) {
+          deliveryUpdateQuery.where({ status: 'sending' }).whereIn('id', claimedDeliveryIds);
+        } else {
+          deliveryUpdateQuery.whereIn('subscriber_id', subscriberIds);
+        }
+        const updated = await (opts.existingDeliveriesOnly
+          ? applyDeliveryNoSuccessFilter(deliveryUpdateQuery)
+          : applyRetryableDeliveryFilter(deliveryUpdateQuery))
+        .update({
+          status: 'sent',
+          provider_message_id: result.messageId,
+          sent_at: new Date(),
+          updated_at: new Date(),
+        });
         accepted += updated;
 
         // Customer touchpoints in parallel — one per linked customer in
         // the chunk. Promise.allSettled so a single touchpoint failure
         // doesn't fail the campaign (touchpoints are best-effort comms
         // history; SendGrid already accepted the actual mail).
-        const customerSubs = chunk.filter((s) => s.customer_id);
+        const customerSubs = chunkToSend.filter((s) => s.customer_id);
         if (customerSubs.length) {
           const tpResults = await Promise.allSettled(customerSubs.map((s) =>
             recordTouchpoint({
@@ -306,12 +336,16 @@ async function sendCampaign(sendId, opts = {}) {
         }
       } catch (err) {
         logger.error(`[newsletter] batch failed for send ${send.id} variant=${variant}: ${err.message}`);
-        const updated = await applyRetryableDeliveryFilter(
-          db('newsletter_send_deliveries')
-            .where({ send_id: send.id })
-            .whereIn('subscriber_id', subscriberIds),
-        )
-          .update({ status: 'failed', bounce_reason: err.message.slice(0, 500), updated_at: new Date() });
+        const failureQuery = db('newsletter_send_deliveries').where({ send_id: send.id });
+        if (opts.existingDeliveriesOnly) {
+          failureQuery.where({ status: 'sending' }).whereIn('id', claimedDeliveryIds);
+        } else {
+          failureQuery.whereIn('subscriber_id', subscriberIds);
+        }
+        const updated = await (opts.existingDeliveriesOnly
+          ? applyDeliveryNoSuccessFilter(failureQuery)
+          : applyRetryableDeliveryFilter(failureQuery))
+        .update({ status: 'failed', bounce_reason: err.message.slice(0, 500), updated_at: new Date() });
         failed += updated;
       }
     }
