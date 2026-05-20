@@ -992,7 +992,7 @@ export default function PestPressureSettingsPage() {
                       <Pill tone={evt.action.includes("override") ? "warning" : "neutral"}>{evt.action}</Pill>
                       <span style={{ color: D.muted }}>{evt.actor_type} {evt.actor_id ? `· ${String(evt.actor_id).slice(0, 8)}` : ""}</span>
                     </span>
-                    <span style={{ color: D.muted, fontSize: 11 }}>{evt.created_at ? new Date(evt.created_at).toLocaleString() : ""}</span>
+                    <span style={{ color: D.muted, fontSize: 11 }}>{evt.created_at ? new Date(evt.created_at).toLocaleString("en-US", { timeZone: "America/New_York" }) : ""}</span>
                   </summary>
                   <pre style={{ marginTop: 8, fontSize: 11, color: D.text, background: D.subtle, padding: 10, borderRadius: 4, overflow: "auto" }}>
                     {JSON.stringify(evt.metadata, null, 2)}

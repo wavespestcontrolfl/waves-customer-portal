@@ -31,6 +31,17 @@ const { calculateAndPersistForServiceRecord } = require('../services/pest-pressu
 // surfaces. Tech-only roles get a flat 403.
 router.use(adminAuthenticate, requireAdmin);
 
+// Clamp a list-endpoint `limit` query param into [1, max], defaulting to
+// `def` for missing/non-numeric values. The old code only clamped the
+// upper bound, so `?limit=-1` produced a negative value that PostgreSQL
+// rejects as `ERROR: LIMIT must not be negative`. Force the lower bound
+// to 1 so the route can't be a denial-of-service vector.
+function clampListLimit(raw, def, max) {
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return def;
+  return Math.min(parsed, max);
+}
+
 const EDITABLE_FIELDS = [
   'enabled',
   'showOnCustomerReport',
@@ -323,7 +334,7 @@ router.post('/scores/:serviceRecordId/recalculate', async (req, res) => {
  */
 router.get('/scores/recent', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
+    const limit = clampListLimit(req.query.limit, 25, 100);
     const rows = await listRecentScores(db, { limit });
     return res.json({ scores: rows });
   } catch (err) {
@@ -338,7 +349,7 @@ router.get('/scores/recent', async (req, res) => {
  */
 router.get('/customers/:customerId/history', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 12, 50);
+    const limit = clampListLimit(req.query.limit, 12, 50);
     const serviceLine = req.query.serviceLine || null;
     const rows = await loadHistoryForCustomer(db, req.params.customerId, { serviceLine, limit });
     return res.json({ history: rows });
@@ -355,7 +366,7 @@ router.get('/customers/:customerId/history', async (req, res) => {
  */
 router.get('/audit', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const limit = clampListLimit(req.query.limit, 50, 200);
     const events = await listAuditEvents(db, { limit });
     return res.json({ events });
   } catch (err) {

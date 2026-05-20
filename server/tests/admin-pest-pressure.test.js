@@ -520,6 +520,45 @@ describe('admin pest-pressure: list endpoints', () => {
     });
   });
 
+  test('GET /scores/recent rejects negative limit and falls back to default (codex P2 regression guard)', async () => {
+    // Before the fix, `?limit=-1` flowed past Math.min upper-bound clamp
+    // and was handed to Knex as a negative LIMIT, which Postgres rejects
+    // with ERROR: LIMIT must not be negative.
+    listRecentScores.mockResolvedValueOnce([makeScoreRow()]);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/recent?limit=-1`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const [, opts] = listRecentScores.mock.calls[0];
+      expect(opts.limit).toBe(25); // default when input <= 0
+    });
+  });
+
+  test('GET /scores/recent rejects non-numeric limit and falls back to default', async () => {
+    listRecentScores.mockResolvedValueOnce([makeScoreRow()]);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/recent?limit=banana`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const [, opts] = listRecentScores.mock.calls[0];
+      expect(opts.limit).toBe(25);
+    });
+  });
+
+  test('GET /audit rejects negative limit (same clamp regression guard)', async () => {
+    listAuditEvents.mockResolvedValueOnce([]);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/audit?limit=-99`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const [, opts] = listAuditEvents.mock.calls[0];
+      expect(opts.limit).toBe(50);
+    });
+  });
+
   test('GET /customers/:id/history forwards serviceLine + limit', async () => {
     loadHistoryForCustomer.mockResolvedValueOnce([makeScoreRow()]);
     await withServer(async (baseUrl) => {
