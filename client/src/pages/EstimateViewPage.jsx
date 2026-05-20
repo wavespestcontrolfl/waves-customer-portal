@@ -466,6 +466,10 @@ function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'rec
 }
 
 function getServiceLabel(frequency, estimate, pricing) {
+  if (estimate?.isOneTimeOnly) {
+    const primary = pricing?.oneTimeBreakdown?.items?.find((item) => item?.kind !== 'discount');
+    return primary?.label || 'One-time service';
+  }
   if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
     return `${frequency?.label || 'Quarterly'} Pest Control or One-Time Pest Control`;
   }
@@ -832,10 +836,9 @@ export default function EstimateViewPage() {
   const [selectedFrequency, setSelectedFrequency] = useState(null);
   const [selectedAddOns, setSelectedAddOns] = useState(new Set());
   const [selectedSlotId, setSelectedSlotId] = useState(null);
-  // serviceMode: 'recurring' | 'one_time'. Only toggleable when the estimate
-  // has show_one_time_option=true (admin-opted-in). Defaults to 'recurring'
-  // so existing estimates keep current behavior; one-time shown as an
-  // opt-in alternative when surfaced.
+  // serviceMode: 'recurring' | 'one_time'. Most estimates default to
+  // recurring; structurally one-time estimates are forced to one_time after
+  // the data endpoint loads.
   const [serviceMode, setServiceMode] = useState('recurring');
   const [paymentPreference, setPaymentPreference] = useState(null);
   const [ctaPhase, setCtaPhase] = useState('configure');
@@ -865,6 +868,13 @@ export default function EstimateViewPage() {
     const body = await r.json();
     setData(body);
     setLoading(false);
+    const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
+    const isOneTimeOnly = body?.estimate?.isOneTimeOnly === true || defaultServiceMode === 'one_time';
+    setServiceMode((prev) => {
+      if (isOneTimeOnly) return 'one_time';
+      if (preserveSelection) return prev;
+      return defaultServiceMode === 'one_time' ? 'one_time' : 'recurring';
+    });
     const frequencies = body?.pricing?.frequencies || [];
     const firstFreq = frequencies[0];
     setSelectedFrequency((prev) => {
@@ -1168,7 +1178,7 @@ export default function EstimateViewPage() {
               estimate into the one-time option AND there's a non-zero
               one-time price to offer. Default mode is 'recurring' so
               estimates without the flag behave identically to before. */}
-          {estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
+          {!estimate.isOneTimeOnly && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
@@ -1225,7 +1235,7 @@ export default function EstimateViewPage() {
             </>
           ) : (
             <>
-              <OneTimePriceCard oneTimePrice={pricing.anchorOneTimePrice} />
+              <OneTimePriceCard oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0} />
               <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
             </>
           )}

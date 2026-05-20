@@ -1498,7 +1498,7 @@ function renderPage(token, estimate, estData) {
   } else if (qualifyingRecurring.length === 2 && !qualifyingKeys.has('mosquito')) {
     upsellService = 'WaveGuard Mosquito';
   }
-  const showUpsell = !!upsellService && !canChooseOneTime;
+  const showUpsell = !!upsellService && !canChooseOneTime && !isOneTimeOnly;
 
   const nextTierCount = qualifyingRecurring.length + 1;
   const nextTierName = nextTierCount >= 4 ? 'Platinum' : nextTierCount === 3 ? 'Gold' : 'Silver';
@@ -1773,7 +1773,20 @@ function renderPage(token, estimate, estData) {
         ${day != null ? `<div class="day-price">That\u2019s just ${dayPriceHtml}/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
       </div>`;
   })();
-  const recurringHeroPriceHtml = quoteRequired ? `
+  const oneTimeOnlyHeroPriceHtml = `
+      <div class="choice-treatment">
+        <div class="choice-treatment-name">${escapeHtml(quotedOneTimeNames[0] || quotedServicesLabel || 'One-time service')}</div>
+        <div class="choice-treatment-detail">One-time service</div>
+        <div class="big-price choice-treatment-price">
+          <span class="num" id="onetime-display">${fmtMoney(onetimeTotal || oneTimeChoicePrice)}</span>
+          <span class="per">one-time</span>
+        </div>
+        <div class="onetime-note">
+          One visit, pay on service day. No recurring schedule.
+        </div>
+      </div>
+    `;
+  const recurringHeroPriceHtml = isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (quoteRequired ? `
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
@@ -1791,7 +1804,7 @@ function renderPage(token, estimate, estData) {
       ${manualDiscountHtml}
       <div class="day-price" data-mode-only="recurring">${hasOnlyLawnCareServices ? `That\u2019s just ${fmtMoney(dayPrice)}/day to stop lawn pests before they turn green grass brown.` : `That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.`}</div>
       ${supplementalServiceSummaryHtml}
-    `);
+    `));
 
   const separatelyBilledOneTimeItems = oneTimeItems.filter((it) => {
     if (isWaveGuardSetupOneTimeItem(it)) return false;
@@ -2249,7 +2262,8 @@ ${shellTopBar()}
       </div>
     </div>
     ` : ''}
-    ${quoteRequired ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
+    ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
+    ${isOneTimeOnly ? `<div class="mini-guarantee">Includes a 30-day callback period if pests return after this visit.</div>` : ''}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
   </div>
 
@@ -2298,14 +2312,14 @@ ${shellTopBar()}
 
   ${oneTimeRows ? `
   <div class="card"${canChooseOneTime ? ' data-mode-only="recurring"' : ''} style="margin-top:24px">
-    <h3>One-time items (billed separately)</h3>
+    <h3>${isOneTimeOnly ? 'Service details' : 'One-time items (billed separately)'}</h3>
     <table>${oneTimeRows}
-      <tr><td><strong>One-time total</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
+      <tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
     </table>
-    ${hasRealOneTime ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
+    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
   </div>` : ''}
 
-  ${quoteRequired ? '' : `<div class="card" data-mode-only="recurring">
+  ${quoteRequired || isOneTimeOnly ? '' : `<div class="card" data-mode-only="recurring">
     <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
     <p class="ai-blurb">Your WaveGuard membership goes beyond routine visits — priority service, locked-in pricing, and protection between treatments.</p>
     <ul class="perks-list">${perksHtml}</ul>
@@ -2336,8 +2350,8 @@ ${shellTopBar()}
     </div>
   </div>` : `
   <div class="final">
-    <h2 data-mode-only="recurring">${escapeHtml(pageCopy.finalHeading)}</h2>
-    ${pageCopy.finalSubhead ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
+    <h2${isOneTimeOnly ? '' : ' data-mode-only="recurring"'}>${escapeHtml(isOneTimeOnly ? 'Ready to book?' : pageCopy.finalHeading)}</h2>
+    ${pageCopy.finalSubhead && !isOneTimeOnly ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
     ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves! Wave Goodbye to Pests!</h2>` : ''}
     ${pageCopy.finalBody ? `<p>${escapeHtml(pageCopy.finalBody)}</p>` : ''}
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">Pick a time and book</button>`}
@@ -3648,7 +3662,7 @@ router.put('/:token/accept', async (req, res, next) => {
             paymentMethodPreference,
             estimatedPrice: visitEstimatedPrice,
             estimate: estimateForPricing,
-            serviceMode,
+            serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
             selectedFrequency: selectedFrequency?.key || selectedFrequencyKey,
             trx,
           });
@@ -4865,6 +4879,10 @@ function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
     && Number(oneTimeBreakdown.total || 0) > 0;
 }
 
+function defaultServiceModeForEstimate(estData, estimate = {}) {
+  return isStructuralOneTimeOnlyEstimate(estData, estimate) ? 'one_time' : 'recurring';
+}
+
 function acceptanceServiceLists(estData) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
@@ -5579,14 +5597,20 @@ async function buildPricingBundle(estimate) {
   const choiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption)
     ? oneTimePestChoiceAmountFromBreakdown(oneTimeBreakdown)
     : null;
+  const oneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
   const anchorOneTimePrice = choiceOneTimePrice
-    ?? frequencies[0]?.oneTimeTotal
-    ?? (Number(estimate.onetime_total || 0) || null);
+    ?? firstPositiveNumber(
+      oneTimeOnly ? oneTimeBreakdown.total : null,
+      frequencies[0]?.oneTimeTotal,
+      oneTimeBreakdown.total,
+      estimate.onetime_total,
+    );
 
   const payload = attachQuoteRequirement(withManualDiscount({
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,
+    defaultServiceMode: oneTimeOnly ? 'one_time' : 'recurring',
     oneTimeBreakdown,
     source: 'engine_invocation',
   }), estData);
@@ -5672,6 +5696,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     }
 
     const pricingBundle = await buildPricingBundle(estimate);
+    const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
     const intelligence = buildWaveGuardIntelligencePayload(
       {
@@ -5688,7 +5713,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         estData: estimateDataForIntelligence,
         pricingBundle,
         selectedFrequency: '',
-        serviceMode: 'recurring',
+        serviceMode: defaultServiceMode,
       });
       intelligence.supportSources = loadPublicEstimateSupportSources({
         question: 'What is included in this WaveGuard estimate?',
@@ -5725,9 +5750,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
+        isOneTimeOnly: defaultServiceMode === 'one_time',
+        defaultServiceMode,
         billByInvoice: !!estimate.bill_by_invoice,
       },
-      pricing: pricingBundle,
+      pricing: {
+        ...pricingBundle,
+        defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
+      },
       cta: {
         canAccept: terminalState === null && !quoteRequirement.quoteRequired,
         terminalState: ctaTerminalState,
@@ -5816,6 +5846,7 @@ module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmou
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
+module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;

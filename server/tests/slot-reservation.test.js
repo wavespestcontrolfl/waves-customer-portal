@@ -26,6 +26,13 @@ describe('slot reservation helpers', () => {
     jest.clearAllMocks();
   });
 
+  test('canonicalizes rodent trapping reservations to the trapping service type', () => {
+    expect(slotReservation._internals.canonicalServiceTypeForProfile(
+      { serviceMode: 'one_time', services: [] },
+      'Rodent Trapping',
+    )).toBe('Rodent Trapping Service');
+  });
+
   test('reserveSlot writes service-profile duration and checks overlapping windows', async () => {
     const estimateBuilder = {
       where: jest.fn().mockReturnThis(),
