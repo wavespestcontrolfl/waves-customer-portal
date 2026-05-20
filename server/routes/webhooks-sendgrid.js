@@ -86,6 +86,22 @@ function canUseDeliveryIdFallback(delivery, messageId) {
   return String(delivery.provider_message_id) === String(messageId || '');
 }
 
+async function bindNewsletterDeliveryMessageId(delivery, messageId, client = db) {
+  if (!delivery || !messageId || delivery.provider_message_id) return delivery;
+
+  const updated = await client('newsletter_send_deliveries')
+    .where({ id: delivery.id })
+    .where((q) => {
+      q.whereNull('provider_message_id').orWhere({ provider_message_id: messageId });
+    })
+    .update({ provider_message_id: messageId, updated_at: new Date() });
+  if (updated) return { ...delivery, provider_message_id: messageId };
+
+  return client('newsletter_send_deliveries')
+    .where({ id: delivery.id })
+    .first();
+}
+
 function applyRetryableNewsletterDeliveryFilter(query) {
   return query
     .whereIn('status', NEWSLETTER_RETRYABLE_DELIVERY_STATUSES)
@@ -180,10 +196,8 @@ async function handleEvent(ev) {
       logger.warn(deliveryEmailMismatchLogMessage(ev.delivery_id, newsletterDelivery.email, email));
       newsletterDelivery = null;
     } else if (newsletterDelivery && !newsletterDelivery.provider_message_id && messageId) {
-      await db('newsletter_send_deliveries')
-        .where({ id: newsletterDelivery.id })
-        .update({ provider_message_id: messageId, updated_at: new Date() });
-      newsletterDelivery.provider_message_id = messageId;
+      const boundDelivery = await bindNewsletterDeliveryMessageId(newsletterDelivery, messageId);
+      newsletterDelivery = canUseDeliveryIdFallback(boundDelivery, messageId) ? boundDelivery : null;
     }
   }
   // Automation step sends are always single-recipient (one customer per
@@ -696,4 +710,5 @@ module.exports.suppressionForEmailEvent = suppressionForEmailEvent;
 module.exports.isFreshTimestamp = isFreshTimestamp;
 module.exports.deliveryEmailMismatchLogMessage = deliveryEmailMismatchLogMessage;
 module.exports.canUseDeliveryIdFallback = canUseDeliveryIdFallback;
+module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId;
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;

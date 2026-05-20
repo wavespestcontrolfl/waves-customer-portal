@@ -64,13 +64,14 @@ function hasDeliverySuccessSignal(delivery) {
     || !!delivery.clicked_at;
 }
 
-function applyRetryableDeliveryFilter(query) {
+function applyRetryableDeliveryFilter(query, tableAlias = null) {
+  const col = (name) => (tableAlias ? `${tableAlias}.${name}` : name);
   return query
-    .whereIn('status', RETRYABLE_DELIVERY_STATUSES)
-    .whereNull('sent_at')
-    .whereNull('delivered_at')
-    .whereNull('opened_at')
-    .whereNull('clicked_at');
+    .whereIn(col('status'), RETRYABLE_DELIVERY_STATUSES)
+    .whereNull(col('sent_at'))
+    .whereNull(col('delivered_at'))
+    .whereNull(col('opened_at'))
+    .whereNull(col('clicked_at'));
 }
 
 /**
@@ -137,9 +138,7 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
 
-  const subscribers = await buildSubscriberQuery(send.segment_filter);
-  logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${send.segment_filter ? JSON.stringify(send.segment_filter) : 'all'})`);
-
+  let subscribers = [];
   const useAb = !!send.subject_b;
 
   // Pre-seed per-recipient deliveries with A/B assignment. The onConflict
@@ -147,6 +146,8 @@ async function sendCampaign(sendId, opts = {}) {
   // insert. Resume mode with existing rows skips this entirely so a changed
   // segment or new subscribers cannot expand an old campaign's audience.
   if (!opts.existingDeliveriesOnly) {
+    subscribers = await buildSubscriberQuery(send.segment_filter);
+    logger.info(`[newsletter] send ${send.id} → ${subscribers.length} subscribers (segment=${send.segment_filter ? JSON.stringify(send.segment_filter) : 'all'})`);
     const deliveryRows = subscribers.map((s) => ({
       send_id: send.id,
       subscriber_id: s.id,
@@ -161,6 +162,21 @@ async function sendCampaign(sendId, opts = {}) {
   const existingDeliveries = await db('newsletter_send_deliveries')
     .where({ send_id: send.id })
     .select('id', 'subscriber_id', 'status', 'ab_variant', 'sent_at', 'delivered_at', 'opened_at', 'clicked_at');
+
+  if (opts.existingDeliveriesOnly) {
+    const retryableSubscriberIds = Array.from(new Set(existingDeliveries
+      .filter(isRetryableDelivery)
+      .map((d) => d.subscriber_id)
+      .filter((id) => id !== null && id !== undefined)));
+    subscribers = retryableSubscriberIds.length
+      ? await db('newsletter_subscribers')
+        .where({ status: 'active' })
+        .whereIn('id', retryableSubscriberIds)
+        .select('id', 'email', 'unsubscribe_token', 'customer_id')
+      : [];
+    logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger`);
+  }
+
   const deliveryBySub = new Map(existingDeliveries.map((d) => [d.subscriber_id, d]));
   const successfulDeliveryCount = existingDeliveries.filter(hasDeliverySuccessSignal).length;
   // Per-recipient idempotency: first sends target newly queued rows; resume
@@ -369,7 +385,10 @@ async function prepareResumeCampaign(sendId) {
   }
   if (totalDeliveries > 0) {
     const outstanding = await applyRetryableDeliveryFilter(
-      db('newsletter_send_deliveries').where({ send_id: send.id }),
+      db('newsletter_send_deliveries')
+        .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
+        .where({ 'newsletter_send_deliveries.send_id': send.id, 'newsletter_subscribers.status': 'active' }),
+      'newsletter_send_deliveries',
     )
       .count('* as c')
       .first();

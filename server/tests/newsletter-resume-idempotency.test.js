@@ -37,11 +37,15 @@ const { sendCampaign, resumeCampaign } = require('../services/newsletter-sender'
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
 // invoice-receipt-email-idempotency.test.js / portal-url.test.js so the
 // failure surface stays familiar.
-function chain({ first, result, returning, count, updated, onUpdate } = {}) {
+function chain({ first, result, returning, count, updated, onUpdate, onWhereIn } = {}) {
   const q = {};
-  ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
+  ['where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
    'select', 'orderBy', 'limit', 'leftJoin', 'join']
     .forEach((m) => { q[m] = jest.fn(() => q); });
+  q.whereIn = jest.fn((...args) => {
+    if (onWhereIn) onWhereIn(...args);
+    return q;
+  });
   q.first = jest.fn(async () => first);
   q.count = jest.fn(() => ({
     first: jest.fn(async () => ({ c: count ?? 0 })),
@@ -390,6 +394,7 @@ describe('resumeCampaign — preconditions', () => {
 
   test('resume with existing deliveries only sends to the original campaign audience', async () => {
     let finalUpdate = null;
+    let subscriberWhereIn = null;
     const sentSend = {
       id: 's',
       status: 'sent',
@@ -420,11 +425,12 @@ describe('resumeCampaign — preconditions', () => {
         chain({ updated: 1 }),                                // post-send bulk update
       ],
       newsletter_subscribers: [
-        chain({ result: [
-          { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
-          { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
-          { id: 3, email: 'new@example.com', unsubscribe_token: 'tok-new', customer_id: null },
-        ] }),
+        chain({
+          result: [
+            { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+          ],
+          onWhereIn: (...args) => { subscriberWhereIn = args; },
+        }),
       ],
     };
     db.mockImplementation((table) => {
@@ -438,6 +444,7 @@ describe('resumeCampaign — preconditions', () => {
     expect(result.recipients).toBe(2);
     expect(result.skipped_already_sent).toBe(1);
     expect(finalUpdate.recipient_count).toBe(2);
+    expect(subscriberWhereIn).toEqual(['id', [2]]);
     expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
     expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
   });

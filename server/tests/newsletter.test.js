@@ -27,6 +27,7 @@ const {
   isFreshTimestamp,
   deliveryEmailMismatchLogMessage,
   canUseDeliveryIdFallback,
+  bindNewsletterDeliveryMessageId,
 } = sendgridWebhook;
 
 describe('newsletter buildSubscriberQuery', () => {
@@ -329,6 +330,57 @@ describe('sendgrid webhook delivery_id fallback guard', () => {
     expect(canUseDeliveryIdFallback({ provider_message_id: null }, 'new-msg')).toBe(true);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'new-msg' }, 'new-msg')).toBe(true);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg' }, 'new-msg')).toBe(false);
+  });
+
+  test('binds provider message id behind an unbound-or-same guard', async () => {
+    const nested = {};
+    nested.whereNull = jest.fn(() => nested);
+    nested.orWhere = jest.fn(() => nested);
+    const query = {};
+    query.where = jest.fn((arg) => {
+      if (typeof arg === 'function') arg(nested);
+      return query;
+    });
+    query.update = jest.fn(async () => 1);
+    const client = jest.fn(() => query);
+
+    const result = await bindNewsletterDeliveryMessageId(
+      { id: 'delivery-1', provider_message_id: null },
+      'sg-msg-1',
+      client,
+    );
+
+    expect(result.provider_message_id).toBe('sg-msg-1');
+    expect(query.where).toHaveBeenCalledWith({ id: 'delivery-1' });
+    expect(nested.whereNull).toHaveBeenCalledWith('provider_message_id');
+    expect(nested.orWhere).toHaveBeenCalledWith({ provider_message_id: 'sg-msg-1' });
+  });
+
+  test('re-reads the delivery row when a concurrent message bind wins', async () => {
+    const nested = {};
+    nested.whereNull = jest.fn(() => nested);
+    nested.orWhere = jest.fn(() => nested);
+    const updateQuery = {};
+    updateQuery.where = jest.fn((arg) => {
+      if (typeof arg === 'function') arg(nested);
+      return updateQuery;
+    });
+    updateQuery.update = jest.fn(async () => 0);
+    const rereadQuery = {};
+    rereadQuery.where = jest.fn(() => rereadQuery);
+    rereadQuery.first = jest.fn(async () => ({ id: 'delivery-1', provider_message_id: 'sg-other' }));
+    const client = jest.fn()
+      .mockReturnValueOnce(updateQuery)
+      .mockReturnValueOnce(rereadQuery);
+
+    const result = await bindNewsletterDeliveryMessageId(
+      { id: 'delivery-1', provider_message_id: null },
+      'sg-msg-1',
+      client,
+    );
+
+    expect(result.provider_message_id).toBe('sg-other');
+    expect(rereadQuery.where).toHaveBeenCalledWith({ id: 'delivery-1' });
   });
 });
 
