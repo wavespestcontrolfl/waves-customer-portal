@@ -112,7 +112,12 @@ async function gatherInputs(knex, serviceRecord, config) {
  * Returns the full engine result (caller may also surface it inline).
  *
  * Mirrors displayed_score back to service_records.pressure_index so the
- * legacy customer report rendering keeps working pre-Phase-5.
+ * legacy customer report rendering keeps working pre-Phase-5. The key
+ * subtlety: persistScore preserves an existing manual override when the
+ * caller hasn't asked to clear it, so the persisted displayed_score may
+ * NOT equal `result.displayedScore` (the raw engine output). Mirror from
+ * the persisted row's displayed_score so the two surfaces stay in sync
+ * across override-preserving recalculations.
  */
 async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
   if (!serviceRecordId) {
@@ -133,7 +138,7 @@ async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
   const { serviceLine, window, inputs } = await gatherInputs(knex, serviceRecord, config);
   const result = calculatePestPressureScore(inputs, config);
 
-  await persistScore(knex, {
+  const persisted = await persistScore(knex, {
     customerId: serviceRecord.customer_id,
     serviceRecordId: serviceRecord.id,
     serviceLine,
@@ -143,10 +148,15 @@ async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
     result,
   });
 
-  if (result.displayedScore != null) {
+  // Use persisted.displayed_score — not result.displayedScore — so an
+  // override-preserving recalc doesn't silently overwrite pressure_index
+  // with the engine's fresh value while pest_pressure_scores.displayed_score
+  // holds the manual override. Customer/report surfaces reading
+  // pressure_index must always agree with the score row's displayed value.
+  if (persisted && persisted.displayed_score != null) {
     await knex('service_records')
       .where({ id: serviceRecord.id })
-      .update({ pressure_index: result.displayedScore });
+      .update({ pressure_index: persisted.displayed_score });
   }
 
   return { result, serviceLine, window };

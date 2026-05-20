@@ -111,3 +111,41 @@ describe('removeOverride — pressure_index mirror (codex P1 regression guard)',
     expect(updates.pest_pressure_scores).toBeNull();
   });
 });
+
+describe('orchestrate.js — pressure_index mirror source-text regression guard (codex P1 round-2)', () => {
+  // Codex flagged: when recalc runs with clearOverride=false (default),
+  // calculateAndPersistForServiceRecord wrote service_records.pressure_index
+  // from result.displayedScore (raw engine output) even when the score
+  // row was still overridden. pest_pressure_scores.displayed_score
+  // correctly stayed on the override (persistScore preserves it), but
+  // pressure_index got reset to the engine's fresh value — so customer
+  // surfaces reading pressure_index no longer reflected the preserved
+  // override. The fix mirrors from the PERSISTED row's displayed_score
+  // instead.
+  //
+  // The orchestrate function's mock surface is enormous (loadActiveConfig,
+  // gatherInputs with knex sub-chains, 5 component extractors,
+  // loadPreviousScore). A source-text guard is the better cost/benefit
+  // here: it prevents a silent revert to the wrong field without dragging
+  // every collaborator into the test.
+
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'services', 'pest-pressure', 'orchestrate.js'),
+    'utf8',
+  );
+
+  test('pressure_index update reads from persisted row, not raw engine result', () => {
+    // persistScore's return value is captured.
+    expect(src).toMatch(/const\s+persisted\s*=\s*await\s+persistScore\b/);
+    // The pressure_index UPDATE uses the persisted field.
+    expect(src).toMatch(/pressure_index:\s*persisted\.displayed_score\b/);
+    // And does NOT read from the raw engine result.
+    expect(src).not.toMatch(/pressure_index:\s*result\.displayedScore\b/);
+  });
+
+  test('null-guard reads the persisted field', () => {
+    expect(src).toMatch(/persisted\s*&&\s*persisted\.displayed_score\s*!=\s*null/);
+  });
+});
