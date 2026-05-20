@@ -68,6 +68,12 @@ describe('ReportViewPage report chrome helpers', () => {
     expect(labels).not.toContain('Coverage Map');
   });
 
+  it('omits visit timeline quick navigation when the timeline is hidden', () => {
+    const labels = quickNavigationLinks({ hasVisitTimeline: false }).map(([, label]) => label);
+    expect(labels).not.toContain('Visit Timeline');
+    expect(labels).toContain('Service Coverage');
+  });
+
   it('does not show a readiness status badge without re-entry context', () => {
     expect(readinessStatusBadge(null)).toBeNull();
   });
@@ -261,6 +267,92 @@ describe('ReportViewPage visit timeline helpers', () => {
       }),
     ]);
     expect(timeline.details.some((detail) => detail.type === 'report_generated')).toBe(false);
+  });
+
+  it('keeps a server-disabled timeline disabled even when fallback timing exists', () => {
+    const timeline = normalizeVisitTimeline({
+      visitTimeline: {
+        enabled: false,
+        events: [
+          { type: 'technician_on_site', occurredAt: '2026-05-17T18:35:00.000Z' },
+          { type: 'service_completed', occurredAt: '2026-05-17T18:35:00.000Z' },
+        ],
+      },
+      visitTiming: {
+        arrivedAt: '2026-05-17T18:35:00.000Z',
+        exitedAt: '2026-05-17T18:35:00.000Z',
+      },
+      timingSource: {
+        status: 'completed',
+        serviceRecord: {
+          arrived_at: '2026-05-17T18:35:00.000Z',
+          completed_at: '2026-05-17T18:35:00.000Z',
+        },
+      },
+    });
+
+    expect(timeline.enabled).toBe(false);
+  });
+
+  it('does not re-add events omitted from a server-provided timeline', () => {
+    const timeline = normalizeVisitTimeline({
+      visitTimeline: {
+        enabled: true,
+        status: 'completed',
+        config: {
+          showTechnicianEnRoute: false,
+          showTechnicianOnSite: false,
+        },
+        events: [
+          { type: 'service_completed', occurredAt: '2026-05-17T19:05:00.000Z' },
+        ],
+      },
+      workflowEvents: [
+        { type: 'technician_en_route', timestamp: '2026-05-17T16:44:00.000Z' },
+        { type: 'arrived_on_site', timestamp: '2026-05-17T18:35:00.000Z' },
+      ],
+      visitTiming: {
+        arrivedAt: '2026-05-17T18:35:00.000Z',
+        exitedAt: '2026-05-17T19:05:00.000Z',
+      },
+    });
+
+    expect(timeline.events.map((event) => event.type)).toEqual(['service_completed']);
+  });
+
+  it('respects showExactTimes when normalizing server and derived timeline events', () => {
+    const serverTimeline = normalizeVisitTimeline({
+      visitTimeline: {
+        enabled: true,
+        config: { showExactTimes: false },
+        events: [
+          { type: 'service_completed', occurredAt: '2026-05-17T19:05:00.000Z' },
+        ],
+      },
+    });
+    const derivedTimeline = normalizeVisitTimeline({
+      workflowEvents: [
+        { type: 'arrived_on_site', timestamp: '2026-05-17T18:35:00.000Z' },
+        { type: 'report_published', timestamp: '2026-05-17T19:06:00.000Z' },
+      ],
+      timingSource: {
+        status: 'completed',
+        serviceRecord: {
+          completed_at: '2026-05-17T19:05:00.000Z',
+        },
+      },
+      config: { showExactTimes: false, showReportGenerated: true },
+    });
+
+    expect(serverTimeline.events[0]).toMatchObject({
+      occurredAt: '2026-05-17T19:05:00.000Z',
+      displayTime: null,
+    });
+    expect(derivedTimeline.events.map((event) => event.displayTime)).toEqual([null, null]);
+    expect(derivedTimeline.details.find((detail) => detail.type === 'report_generated')).toMatchObject({
+      text: 'Report generated May 17, 2026.',
+      displayTime: null,
+    });
   });
 
   it('can show report generated as a secondary detail when enabled', () => {

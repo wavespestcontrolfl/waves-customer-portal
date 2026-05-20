@@ -1054,6 +1054,15 @@ describe('service report v1', () => {
       .toBe('Your technician completed the pest control service and finalized the report.');
     expect(timeline.durationMinutes).toBeNull();
     expect(timeline.timingNote).toBe('Exact on-site duration was not available for this visit.');
+    expect(timeline.config).toMatchObject({
+      enabled: true,
+      showOnCustomerReports: true,
+      showTechnicianEnRoute: true,
+      showTechnicianOnSite: true,
+      showServiceCompleted: true,
+      serviceCompletedRequiredWhenReportCompleted: true,
+      showExactTimes: true,
+    });
     expect(timeline.details).toEqual([
       expect.objectContaining({
         type: 'customer_contact',

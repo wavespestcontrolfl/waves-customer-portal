@@ -1410,9 +1410,9 @@ function ReportAskBox({ mode, token, serviceLine }) {
   );
 }
 
-export function quickNavigationLinks({ hasProducts = true } = {}) {
+export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true } = {}) {
   return [
-    ['#service-timeline', 'Visit Timeline'],
+    hasVisitTimeline ? ['#service-timeline', 'Visit Timeline'] : null,
     ['#service-coverage', 'Service Coverage'],
     hasProducts ? ['#products-applied', 'Products Applied'] : null,
     ['#what-to-expect', 'What to Expect'],
@@ -1420,8 +1420,8 @@ export function quickNavigationLinks({ hasProducts = true } = {}) {
   ].filter(Boolean);
 }
 
-function QuickNavigationAndAsk({ mode, token, serviceLine, hasProducts = true }) {
-  const links = quickNavigationLinks({ hasProducts });
+function QuickNavigationAndAsk({ mode, token, serviceLine, hasProducts = true, hasVisitTimeline = true }) {
+  const links = quickNavigationLinks({ hasProducts, hasVisitTimeline });
 
   return (
     <section className="sr-section quick-report-tools" id="quick-navigation">
@@ -3061,10 +3061,11 @@ function completedTimelineReport(timingSource = {}, workflowEvents = []) {
   return Boolean(getReportCompletionTime(timingSource));
 }
 
-function reportGeneratedDetailText(timestamp) {
+function reportGeneratedDetailText(timestamp, { showExactTimes = true } = {}) {
   const dateLabel = formatDate(timestamp);
-  const timeLabel = formatClockTime(timestamp);
+  const timeLabel = showExactTimes ? formatClockTime(timestamp) : null;
   if (dateLabel && timeLabel) return `Report generated ${dateLabel.replace(/^[A-Za-z]+,\s*/, '')} at ${timeLabel}.`;
+  if (dateLabel) return `Report generated ${dateLabel.replace(/^[A-Za-z]+,\s*/, '')}.`;
   return 'Report generated after service completion.';
 }
 
@@ -3087,6 +3088,7 @@ export function normalizeVisitTimeline({
     source?.serviceLine || serviceLine || timingSource?.serviceLine || timingSource?.coverageServiceType,
     serviceType || timingSource?.serviceType,
   );
+  const hasServerTimeline = Boolean(source);
   const { arrivedAt, completedAt } = timelineAnchorTimes(timingSource, visitTiming);
   const reportCompleted = source?.status === 'completed' || completedTimelineReport(timingSource, workflowEvents);
   const rawSourceEvents = Array.isArray(source?.events) ? source.events : workflowEvents;
@@ -3102,14 +3104,14 @@ export function normalizeVisitTimeline({
     firstWorkflowEventTimestamp(workflowEvents, 'technician_en_route'),
   );
 
-  if (resolvedConfig.showTechnicianEnRoute && enRouteAt && !nextEvents.some((event) => event.type === 'technician_en_route')) {
+  if (!hasServerTimeline && resolvedConfig.showTechnicianEnRoute && enRouteAt && !nextEvents.some((event) => event.type === 'technician_en_route')) {
     nextEvents.push({
       id: 'technician_en_route-derived',
       type: 'technician_en_route',
       label: 'Technician en route',
       occurredAt: enRouteAt,
       timestamp: enRouteAt,
-      displayTime: formatClockTime(enRouteAt) || null,
+      displayTime: resolvedConfig.showExactTimes !== false ? (formatClockTime(enRouteAt) || null) : null,
       source: 'bouncie',
       status: 'completed',
       customerDescription: 'Your technician was on the way to the property.',
@@ -3118,14 +3120,14 @@ export function normalizeVisitTimeline({
     });
   }
 
-  if (resolvedConfig.showTechnicianOnSite && arrivedAt && !nextEvents.some((event) => event.type === 'technician_on_site')) {
+  if (!hasServerTimeline && resolvedConfig.showTechnicianOnSite && arrivedAt && !nextEvents.some((event) => event.type === 'technician_on_site')) {
     nextEvents.push({
       id: 'technician_on_site-derived',
       type: 'technician_on_site',
       label: 'Technician on site',
       occurredAt: arrivedAt,
       timestamp: arrivedAt,
-      displayTime: formatClockTime(arrivedAt) || null,
+      displayTime: resolvedConfig.showExactTimes !== false ? (formatClockTime(arrivedAt) || null) : null,
       source: 'bouncie',
       status: 'completed',
       customerDescription: 'Your technician was recorded at the property.',
@@ -3134,14 +3136,14 @@ export function normalizeVisitTimeline({
     });
   }
 
-  if (resolvedConfig.showServiceCompleted && reportCompleted && !nextEvents.some((event) => event.type === 'service_completed')) {
+  if (!hasServerTimeline && resolvedConfig.showServiceCompleted && reportCompleted && !nextEvents.some((event) => event.type === 'service_completed')) {
     nextEvents.push({
       id: 'service_completed-derived',
       type: 'service_completed',
       label: 'Service completed',
       occurredAt: completedAt || null,
       timestamp: completedAt || null,
-      displayTime: formatClockTime(completedAt) || null,
+      displayTime: resolvedConfig.showExactTimes !== false ? (formatClockTime(completedAt) || null) : null,
       source: 'service_report',
       confidence: completedAt ? 'high' : 'medium',
       status: 'completed',
@@ -3173,7 +3175,7 @@ export function normalizeVisitTimeline({
       label: detail.label || formatEnumLabel(detail.type || 'detail'),
       text: detail.text || detail.customerDescription || detail.customerVisibleDescription || '',
       occurredAt: firstValidTimelineValue(detail.occurredAt, detail.timestamp),
-      displayTime: detail.displayTime || formatClockTime(detail.occurredAt || detail.timestamp) || null,
+      displayTime: resolvedConfig.showExactTimes !== false ? (detail.displayTime || formatClockTime(detail.occurredAt || detail.timestamp) || null) : null,
       showAsTimelineEvent: detail.showAsTimelineEvent === true,
     }))
     .filter((detail) => detail.text);
@@ -3200,9 +3202,9 @@ export function normalizeVisitTimeline({
       id: 'report_generated',
       type: 'report_generated',
       label: 'Report generated',
-      text: reportGeneratedDetailText(reportGeneratedAt),
+      text: reportGeneratedDetailText(reportGeneratedAt, { showExactTimes: resolvedConfig.showExactTimes !== false }),
       occurredAt: reportGeneratedAt,
-      displayTime: formatClockTime(reportGeneratedAt) || null,
+      displayTime: resolvedConfig.showExactTimes !== false ? (formatClockTime(reportGeneratedAt) || null) : null,
       showAsTimelineEvent: false,
     });
   }
@@ -3271,6 +3273,8 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
     );
   }
 
+  if (!timeline.enabled) return null;
+
   return (
     <section className="sr-section service-workflow-section" id="service-timeline">
       <div className="coverage-section-header">
@@ -3295,7 +3299,7 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
                   <div className="workflow-event-body">
                     <div className="workflow-event-heading">
                       <h3>{event.label || formatEnumLabel(event.type)}</h3>
-                      {event.occurredAt && <time dateTime={event.occurredAt}>{event.displayTime || formatClockTime(event.occurredAt)}</time>}
+                      {event.occurredAt && event.displayTime && <time dateTime={event.occurredAt}>{event.displayTime}</time>}
                     </div>
                     {(event.customerDescription || event.customerVisibleDescription) && <p>{event.customerDescription || event.customerVisibleDescription}</p>}
                   </div>
@@ -4056,6 +4060,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
   const showDetails = mode !== 'live';
   const advisoryRows = advisoryDisplayRows(data.advisory || {});
+  const visitTimelineServiceType = data.coverageServiceType || data.serviceLine || data.serviceType;
+  const normalizedVisitTimeline = normalizeVisitTimeline({
+    visitTimeline: data.visitTimeline,
+    workflowEvents: data.workflowEvents,
+    customerInteraction: data.customerInteraction,
+    visitTiming: data.visitTiming,
+    timingSource: data,
+    serviceType: visitTimelineServiceType,
+  });
 
   const share = async () => {
     if (navigator.share) {
@@ -6508,13 +6521,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <PestPressureCard data={data.pestPressure} />
 
-        <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} hasProducts={hasApplications} />
+        <QuickNavigationAndAsk
+          mode={mode}
+          token={token}
+          serviceLine={data.serviceLine}
+          hasProducts={hasApplications}
+          hasVisitTimeline={normalizedVisitTimeline.enabled}
+        />
 
         <div id="map">
           <ServiceReportCoverageAndWorkflow
-            serviceType={data.coverageServiceType || data.serviceLine || data.serviceType}
+            serviceType={visitTimelineServiceType}
             serviceCoverage={serviceCoverage}
-            visitTimeline={data.visitTimeline}
+            visitTimeline={normalizedVisitTimeline}
             workflowEvents={data.workflowEvents}
             customerInteraction={data.customerInteraction}
             visitTiming={data.visitTiming}
