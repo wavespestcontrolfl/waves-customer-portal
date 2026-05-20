@@ -2,7 +2,7 @@
  * Call Recording Processor.
  *
  * Processes Twilio call recordings end-to-end:
- *   1. Transcribe audio (Gemini or Twilio built-in)
+ *   1. Transcribe audio (OpenAI, Gemini fallback, or Twilio built-in)
  *   2. AI extraction: customer info, appointment details, pain points, sentiment
  *   3. Create/update customer in portal DB
  *   4. If appointment detected → create calendar row, register reminders, send confirmation SMS + log
@@ -32,6 +32,17 @@ const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('.
 const { renderSmsTemplate } = require('./sms-template-renderer');
 
 const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam B.';
+const OPENAI_TRANSCRIPTIONS_API = 'https://api.openai.com/v1/audio/transcriptions';
+const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
+const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe-diarize';
+const OPENAI_TRANSCRIPT_LABEL_MODEL = process.env.OPENAI_TRANSCRIPT_LABEL_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
+const OPENAI_COMPLETENESS_FALLBACK_SECONDS = Number(process.env.OPENAI_COMPLETENESS_FALLBACK_SECONDS) || 600;
+const OPENAI_COMPLETENESS_FALLBACK_CHARS = Number(process.env.OPENAI_COMPLETENESS_FALLBACK_CHARS) || 7000;
+const OPENAI_TRANSCRIPTION_PROMPT = `Transcribe this phone call recording for Waves Pest Control (pest control and lawn care, Southwest Florida).
+
+Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and proper nouns exactly as spoken.
+Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
+const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
 
 function twilioClient() {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
@@ -706,26 +717,164 @@ async function downloadRecording(mp3Url) {
     redirect: 'follow',
   });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-  const buffer = Buffer.from(await res.arrayBuffer());
-  return buffer.toString('base64');
+  return Buffer.from(await res.arrayBuffer());
 }
 
-// ── Transcribe audio via Gemini (download + inline base64) ──
-async function transcribeWithGemini(mp3Url, opts = {}) {
+function normalizeOpenAITranscript(data) {
+  if (!data) return null;
+  if (typeof data === 'string') return data.trim() || null;
+
+  if (Array.isArray(data.segments)) {
+    const speakerLabels = new Map();
+    const text = data.segments
+      .map((segment) => {
+        const speaker = segment.speaker || segment.speaker_id || segment.speaker_label;
+        const body = String(segment.text || '').trim();
+        if (!body) return null;
+        if (!speaker) return body;
+        if (!speakerLabels.has(speaker)) speakerLabels.set(speaker, `Speaker ${speakerLabels.size + 1}`);
+        return `${speakerLabels.get(speaker)}: ${body}`;
+      })
+      .filter(Boolean)
+      .join('\n');
+    return text.trim() || null;
+  }
+
+  if (typeof data.text === 'string') return data.text.trim() || null;
+  return null;
+}
+
+function transcriptHasAgentCallerLabels(transcript) {
+  return /(^|\n)\s*(Agent|Caller)\s*:/i.test(String(transcript || ''));
+}
+
+function recordingDurationSeconds(call = {}) {
+  return Number(call.recording_duration_seconds || call.duration_seconds || call.duration || 0) || 0;
+}
+
+function shouldTryGeminiBeforeAcceptingOpenAI(transcript, opts = {}) {
+  const text = String(transcript || '');
+  const durationSeconds = recordingDurationSeconds(opts.call || {});
+  return durationSeconds >= OPENAI_COMPLETENESS_FALLBACK_SECONDS
+    || text.length >= OPENAI_COMPLETENESS_FALLBACK_CHARS;
+}
+
+function extractOpenAIText(data) {
+  if (typeof data?.output_text === 'string') return data.output_text;
+  const parts = [];
+  for (const item of data?.output || []) {
+    for (const content of item?.content || []) {
+      if (content?.type === 'output_text' && content.text) parts.push(content.text);
+      if (content?.type === 'text' && content.text) parts.push(content.text);
+    }
+  }
+  return parts.join('');
+}
+
+async function labelTranscriptWithOpenAI(transcript, opts = {}) {
+  const text = String(transcript || '').trim();
+  if (!text || transcriptHasAgentCallerLabels(text)) return text || null;
+  if (!process.env.OPENAI_API_KEY) return null;
+
+  const direction = isOutboundCall(opts.call) ? 'outbound' : 'inbound';
+  const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
+
+  try {
+    const res = await fetch(OPENAI_RESPONSES_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_TRANSCRIPT_LABEL_MODEL,
+        input: `Relabel this Waves Pest Control phone transcript for downstream extraction.
+
+Call direction: ${direction}
+External customer/contact phone: ${contactPhone || 'unknown'}
+
+Rules:
+- Preserve every spoken word exactly. Do not summarize, add facts, omit turns, or rewrite meaning.
+- Rewrite only speaker prefixes so each turn starts with exactly "Agent:" or "Caller:".
+- "Agent" means Waves staff. "Caller" means the external customer/contact, including on outbound calls placed by Waves.
+- If a speaker identity is unclear, infer from context such as greetings, scheduling role, company references, and whether the speaker provides customer contact/service details.
+- Return the relabeled transcript only.
+
+Transcript:
+${text}`,
+      }),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      logger.warn(`[call-proc] OpenAI transcript labeling failed: ${res.status} ${errBody.slice(0, 200)}`);
+      return null;
+    }
+
+    const data = await res.json();
+    const labeled = extractOpenAIText(data).trim();
+    if (!transcriptHasAgentCallerLabels(labeled)) {
+      logger.warn('[call-proc] OpenAI transcript labeling returned no Agent/Caller labels');
+      return null;
+    }
+    return labeled;
+  } catch (err) {
+    logger.error(`[call-proc] OpenAI transcript labeling error: ${err.message}`);
+    return null;
+  }
+}
+
+// ── Primary transcription via OpenAI (multipart upload) ──
+async function transcribeWithOpenAI(audioBuffer) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const form = new FormData();
+    form.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'call-recording.mp3');
+    form.append('model', OPENAI_TRANSCRIPTION_MODEL);
+    form.append('language', 'en');
+    const diarized = OPENAI_TRANSCRIPTION_MODEL.includes('diarize');
+    form.append('response_format', diarized ? 'diarized_json' : 'json');
+    if (diarized) {
+      form.append('chunking_strategy', 'auto');
+    } else {
+      form.append('prompt', OPENAI_TRANSCRIPTION_PROMPT);
+    }
+    form.append('temperature', '0');
+
+    const res = await fetch(OPENAI_TRANSCRIPTIONS_API, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      logger.warn(`[call-proc] OpenAI transcription failed: ${res.status} ${errBody.slice(0, 200)}`);
+      return null;
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    const data = contentType.includes('application/json') ? await res.json() : await res.text();
+    return normalizeOpenAITranscript(data);
+  } catch (err) {
+    logger.error(`[call-proc] OpenAI transcription error: ${err.message}`);
+    return null;
+  }
+}
+
+// ── Secondary fallback transcription via Gemini (inline base64) ──
+async function transcribeWithGemini(audioBuffer, opts = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
   try {
-    // Download audio from Twilio (requires auth)
-    logger.info(`[call-proc] Downloading recording: ${mp3Url}`);
-    const audioBase64 = await downloadRecording(mp3Url);
-    logger.info(`[call-proc] Downloaded ${Math.round(audioBase64.length / 1024)}KB audio`);
-
-    const model = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
+    const audioBase64 = audioBuffer.toString('base64');
     const direction = isOutboundCall(opts.call) ? 'outbound' : 'inbound';
     const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -751,17 +900,54 @@ Rules:
     );
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
-      logger.warn(`[call-proc] Gemini transcription failed: ${res.status} ${errBody.slice(0, 200)}`);
+      logger.warn(`[call-proc] Gemini fallback transcription failed: ${res.status} ${errBody.slice(0, 200)}`);
       return null;
     }
     const data = await res.json();
     // Gemini 2.5 may return thinking parts — skip those
     const parts = data.candidates?.[0]?.content?.parts || [];
     const textPart = parts.find(p => p.text && !p.thought);
-    return textPart?.text || parts[0]?.text || null;
+    return (textPart?.text || parts[0]?.text || '').trim() || null;
   } catch (err) {
-    logger.error(`[call-proc] Gemini transcription error: ${err.message}`);
+    logger.error(`[call-proc] Gemini fallback transcription error: ${err.message}`);
     return null;
+  }
+}
+
+async function transcribeRecording(mp3Url, opts = {}) {
+  try {
+    logger.info(`[call-proc] Downloading recording for transcription: ${mp3Url}`);
+    const audioBuffer = await downloadRecording(mp3Url);
+    logger.info(`[call-proc] Downloaded ${Math.round(audioBuffer.length / 1024)}KB audio`);
+
+    const openaiTranscript = await transcribeWithOpenAI(audioBuffer);
+    const openaiNeedsCompletenessFallback = openaiTranscript
+      && shouldTryGeminiBeforeAcceptingOpenAI(openaiTranscript, opts);
+
+    if (openaiNeedsCompletenessFallback) {
+      logger.warn('[call-proc] OpenAI transcript is long/near limit; trying Gemini before accepting it');
+    }
+
+    if (openaiTranscript && !openaiNeedsCompletenessFallback) {
+      const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
+      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai' };
+      logger.warn('[call-proc] OpenAI transcript missing usable Agent/Caller labels; trying Gemini fallback');
+    }
+
+    const geminiTranscript = await transcribeWithGemini(audioBuffer, opts);
+    if (geminiTranscript) return { transcription: geminiTranscript, provider: 'gemini_fallback' };
+
+    if (openaiTranscript) {
+      const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
+      if (labeledTranscript) return { transcription: labeledTranscript, provider: 'openai_post_gemini_fallback' };
+      logger.warn('[call-proc] Using raw OpenAI transcript because labeling and Gemini fallback failed');
+      return { transcription: openaiTranscript, provider: 'openai_unlabeled_fallback' };
+    }
+
+    return { transcription: null, provider: null };
+  } catch (err) {
+    logger.error(`[call-proc] Recording transcription download/setup error: ${err.message}`);
+    return { transcription: null, provider: null };
   }
 }
 
@@ -1013,30 +1199,31 @@ const CallRecordingProcessor = {
     try {
     const contactPhone = resolveCallContactPhone(call);
 
-    // Step 1: Transcribe — Gemini is the source of truth. Twilio's built-in is fallback only.
+    // Step 1: Transcribe — OpenAI is the source of record. Gemini and Twilio are fallbacks only.
     let transcription = null;
 
     if (call.recording_url) {
-      transcription = await transcribeWithGemini(call.recording_url, { call, contactPhone });
+      const result = await transcribeRecording(call.recording_url, { call, contactPhone });
+      transcription = result.transcription;
       if (transcription) {
         await db('call_log').where({ id: call.id }).update({
           transcription,
           transcription_status: 'completed',
           updated_at: new Date(),
         });
-        logger.info(`[call-proc] Gemini transcription complete: ${transcription.length} chars`);
+        logger.info(`[call-proc] ${result.provider} transcription complete: ${transcription.length} chars`);
       }
     }
 
-    // Fallback: use Twilio's built-in transcription if Gemini failed or no recording URL
+    // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL
     if (!transcription) {
       const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
       if (freshCall?.transcription) {
         transcription = freshCall.transcription;
-        logger.info(`[call-proc] Gemini unavailable — falling back to Twilio transcription: ${transcription.length} chars`);
+        logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
       } else if (call.transcription) {
         transcription = call.transcription;
-        logger.info(`[call-proc] Gemini unavailable — using cached Twilio transcription: ${transcription.length} chars`);
+        logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
 
