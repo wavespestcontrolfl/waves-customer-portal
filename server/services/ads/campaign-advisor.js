@@ -3,6 +3,7 @@ const logger = require('../logger');
 const BudgetManager = require('./budget-manager');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { publicPortalUrl } = require('../../utils/portal-url');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -294,7 +295,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     try {
       const topRecs = (advice.recommendations || []).slice(0, 3).map(r => `• ${r.action}`).join('\n');
       await TwilioService.sendSMS(process.env.ADAM_PHONE,
-        `📊 Daily Ads Report — Grade: ${advice.grade || '?'}\n${advice.overall_assessment || ''}\n\nTop actions:\n${topRecs}\n\nFull report: ${process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com'}/admin/ads`,
+        `📊 Daily Ads Report — Grade: ${advice.grade || '?'}\n${advice.overall_assessment || ''}\n\nTop actions:\n${topRecs}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
         { messageType: 'internal_alert' }
       );
     } catch (err) {

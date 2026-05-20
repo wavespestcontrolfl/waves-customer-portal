@@ -18,6 +18,7 @@ const logger = require('../logger');
 const SearchConsole = require('./search-console-v2');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { publicPortalUrl } = require('../../utils/portal-url');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -291,7 +292,7 @@ Analyze and provide specific, prioritized recommendations.`
       const topRecs = (report.recommendations || []).slice(0, 3).map(r => `• ${r.action}`).join('\n');
       const opps = (report.page2_opportunities || []).length;
       await TwilioService.sendSMS(process.env.ADAM_PHONE,
-        `🔍 Weekly SEO Report — Grade: ${report.grade || '?'}\n${report.overall_assessment || ''}\n\n${opps} page-2 opportunities\n\nTop actions:\n${topRecs}\n\nFull report: ${process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com'}/admin/ads`,
+        `🔍 Weekly SEO Report — Grade: ${report.grade || '?'}\n${report.overall_assessment || ''}\n\n${opps} page-2 opportunities\n\nTop actions:\n${topRecs}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
         { messageType: 'internal_alert' }
       );
     } catch (err) {

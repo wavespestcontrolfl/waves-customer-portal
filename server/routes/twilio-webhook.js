@@ -10,6 +10,7 @@ const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { hasSchedulingIntent, isSmsReaction } = require('../services/sms-intent');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 const WAVES_ADMIN_PHONE = '+19413187612';
 
@@ -471,7 +472,7 @@ router.post('/sms', async (req, res) => {
         if (['COMPLAINT', 'CANCEL_REQUEST', 'SCHEDULE_INQUIRY'].includes(intent.intent)) {
           try {
             await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-              `📱 ${customer.first_name}: "${Body.slice(0, 80)}"\n🤖 Draft: "${draft.draft.slice(0, 80)}..."\nApprove: ${process.env.CLIENT_URL || 'http://localhost:5173'}/admin/communications`,
+              `📱 ${customer.first_name}: "${Body.slice(0, 80)}"\n🤖 Draft: "${draft.draft.slice(0, 80)}..."\nApprove: ${publicPortalUrl()}/admin/communications`,
               { messageType: 'internal_alert' }
             );
           } catch (e) { logger.error(`Draft alert failed: ${e.message}`); }

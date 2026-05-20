@@ -11,6 +11,7 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 function templateKeyForOverdue(daysSince) {
   if (daysSince < 14) return 'late_payment_7d';
@@ -43,7 +44,7 @@ const LatePaymentService = {
 
     let notified = 0;
     let skipped = 0;
-    const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const domain = publicPortalUrl();
 
     for (const inv of invoices) {
       const refDate = inv.due_date ? new Date(inv.due_date) : new Date(inv.created_at);
