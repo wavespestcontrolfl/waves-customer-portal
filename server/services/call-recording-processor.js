@@ -57,6 +57,107 @@ function maskSid(sid) {
   return `${value.slice(0, 2)}...${value.slice(-6)}`;
 }
 
+function isOutboundCall(call = {}) {
+  return String(call.direction || '').toLowerCase().startsWith('outbound');
+}
+
+function phoneDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function phoneKey(value) {
+  const digits = phoneDigits(value);
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  return digits;
+}
+
+function samePhone(a, b) {
+  const aKey = phoneKey(a);
+  const bKey = phoneKey(b);
+  return !!aKey && !!bKey && aKey === bKey;
+}
+
+function maskPhone(value) {
+  const digits = phoneDigits(value);
+  return digits ? `***${digits.slice(-4)}` : 'unknown';
+}
+
+function resolveCallContactPhone(call = {}, extractedPhone = null) {
+  const extracted = String(extractedPhone || '').trim();
+  if (isOutboundCall(call)) {
+    if (extracted && !samePhone(extracted, call.from_phone)) return extracted;
+    return call.to_phone || extracted || call.from_phone || null;
+  }
+
+  if (extracted && !samePhone(extracted, call.to_phone)) return extracted;
+  return call.from_phone || extracted || call.to_phone || null;
+}
+
+function normalizeNamePart(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
+  const extractedFirst = normalizeNamePart(extracted.first_name);
+  const customerFirst = normalizeNamePart(customer.first_name);
+  if (!extractedFirst || !customerFirst) return true;
+  if (extractedFirst !== customerFirst) return false;
+
+  const extractedLast = normalizeNamePart(extracted.last_name);
+  const customerLast = normalizeNamePart(customer.last_name);
+  if (extractedLast && customerLast && extractedLast !== customerLast) return false;
+  return true;
+}
+
+function customerPhoneMatches(phone, customer = {}) {
+  return samePhone(phone, customer.phone);
+}
+
+async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
+  const contactKey = phoneKey(phone);
+  if (!contactKey) return null;
+
+  const base = () => {
+    const query = db('customers').whereNull('deleted_at');
+    if (contactKey.length === 10) {
+      return query.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [contactKey]);
+    }
+    return query.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [contactKey]);
+  };
+
+  if (opts.preferredCustomerId) {
+    const preferred = await db('customers')
+      .where({ id: opts.preferredCustomerId })
+      .whereNull('deleted_at')
+      .first();
+    if (preferred && customerPhoneMatches(phone, preferred)) return preferred;
+  }
+
+  const firstName = normalizeNamePart(extracted.first_name);
+  if (firstName) {
+    let namedQuery = base()
+      .whereRaw("LOWER(regexp_replace(COALESCE(first_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [firstName]);
+
+    const lastName = normalizeNamePart(extracted.last_name);
+    if (lastName) {
+      namedQuery = namedQuery.orderByRaw(
+        "CASE WHEN LOWER(regexp_replace(COALESCE(last_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ? THEN 0 ELSE 1 END",
+        [lastName]
+      );
+    }
+
+    const [named] = await namedQuery.orderBy('updated_at', 'desc').limit(1);
+    return named && extractedNameMatchesCustomer(extracted, named) ? named : null;
+  }
+
+  const matches = await base().orderBy('updated_at', 'desc').limit(2);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    logger.warn(`[call-proc] ${matches.length} customers share call contact phone ${maskPhone(phone)}; not auto-linking without name match`);
+  }
+  return null;
+}
+
 async function registerScheduleSideEffects({ scheduledServiceId, customerId, scheduledDate, windowStart, serviceType }) {
   try {
     const AppointmentReminders = require('./appointment-reminders');
@@ -610,7 +711,7 @@ async function downloadRecording(mp3Url) {
 }
 
 // ── Transcribe audio via Gemini (download + inline base64) ──
-async function transcribeWithGemini(mp3Url) {
+async function transcribeWithGemini(mp3Url, opts = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
@@ -621,6 +722,8 @@ async function transcribeWithGemini(mp3Url) {
     logger.info(`[call-proc] Downloaded ${Math.round(audioBase64.length / 1024)}KB audio`);
 
     const model = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
+    const direction = isOutboundCall(opts.call) ? 'outbound' : 'inbound';
+    const contactPhone = resolveCallContactPhone(opts.call || {}, opts.contactPhone);
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
       {
@@ -631,9 +734,12 @@ async function transcribeWithGemini(mp3Url) {
             parts: [
               { inlineData: { mimeType: 'audio/mpeg', data: audioBase64 } },
               { text: `Transcribe this phone call recording for Waves Pest Control (pest control + lawn care, SW Florida).
+Call direction: ${direction}.
+External customer/contact phone: ${contactPhone || 'unknown'}.
 
 Rules:
 - Label every turn "Agent:" or "Caller:" on its own line.
+- "Agent" means Waves staff. "Caller" means the external customer/contact, including on outbound calls placed by Waves.
 - Transcribe verbatim — preserve fillers ("um", "uh"), numbers, addresses, phone numbers, and proper nouns exactly as spoken.
 - If audio is silent, unintelligible, or only voicemail tones, output exactly: [VOICEMAIL] or [NO SPEECH].
 - Do NOT summarize, translate, or add commentary. Output the transcript only, nothing before or after.` },
@@ -905,11 +1011,13 @@ const CallRecordingProcessor = {
     // the lock to a recoverable terminal state so manual retry works
     // immediately and the real error reaches the caller.
     try {
+    const contactPhone = resolveCallContactPhone(call);
+
     // Step 1: Transcribe — Gemini is the source of truth. Twilio's built-in is fallback only.
     let transcription = null;
 
     if (call.recording_url) {
-      transcription = await transcribeWithGemini(call.recording_url);
+      transcription = await transcribeWithGemini(call.recording_url, { call, contactPhone });
       if (transcription) {
         await db('call_log').where({ id: call.id }).update({
           transcription,
@@ -946,7 +1054,7 @@ const CallRecordingProcessor = {
     // Step 2: AI extraction
     let extracted;
     try {
-      extracted = await extractCallData(transcription, call.from_phone, { callStartedAt: call.created_at });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       await db('call_log').where({ id: call.id }).update({
@@ -973,13 +1081,32 @@ const CallRecordingProcessor = {
 
     // Step 3: Create or update customer
     let customerId = call.customer_id;
-    const phone = extracted.phone || call.from_phone;
+    const phone = resolveCallContactPhone(call, extracted.phone);
     let newsletterResult = null;
     let newsletterCandidate = null;
 
+    if (customerId && extracted.first_name && phone) {
+      const currentCustomer = await db('customers').where({ id: customerId }).first().catch(() => null);
+      if (currentCustomer && customerPhoneMatches(phone, currentCustomer) && !extractedNameMatchesCustomer(extracted, currentCustomer)) {
+        const namedCustomer = await findCustomerForCallContact(phone, extracted).catch((e) => {
+          logger.warn(`[call-proc] Name-based customer reconciliation failed for ${maskSid(callSid)}: ${e.message}`);
+          return null;
+        });
+        if (namedCustomer && namedCustomer.id !== customerId) {
+          logger.warn(
+            `[call-proc] Reassigning call ${maskSid(callSid)} from customer ${customerId} to ${namedCustomer.id}; ` +
+            'transcript name matched alternate customer'
+          );
+          customerId = namedCustomer.id;
+        }
+      }
+    }
+
     if (!customerId && phone) {
-      // Try to find existing customer by phone
-      const existing = await db('customers').where({ phone }).first();
+      // Try to find an existing customer by the external contact phone.
+      // Name match wins; phone-only matching is allowed only when the number
+      // maps to a single active customer.
+      const existing = await findCustomerForCallContact(phone, extracted);
       if (existing) {
         customerId = existing.id;
         // Update with any new info
@@ -1229,8 +1356,8 @@ const CallRecordingProcessor = {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
-          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, call.from_phone);
-          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, call.from_phone);
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone);
+          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           if (!customerValidation.ok) {
             appointmentResult = {
               service: serviceResolution.service,
@@ -1836,9 +1963,11 @@ CallRecordingProcessor._test = {
   canonicalWavesService,
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
+  resolveCallContactPhone,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   validatePhoneCallAppointmentCustomer,
+  extractedNameMatchesCustomer,
 };
 
 module.exports = CallRecordingProcessor;

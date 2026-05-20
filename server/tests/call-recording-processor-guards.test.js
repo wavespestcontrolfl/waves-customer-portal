@@ -3,10 +3,62 @@ const CallRecordingProcessor = require('../services/call-recording-processor');
 describe('call recording appointment guardrails', () => {
   const {
     canonicalWavesService,
+    extractedNameMatchesCustomer,
+    resolveCallContactPhone,
     resolveDefaultCallBookingTechnician,
     resolveSchedulableCallService,
     validatePhoneCallAppointmentCustomer,
   } = CallRecordingProcessor._test;
+
+  test('uses the external contact leg as the customer phone for outbound calls', () => {
+    expect(resolveCallContactPhone({
+      direction: 'outbound',
+      from_phone: '+19412975749',
+      to_phone: '+19145234413',
+    })).toBe('+19145234413');
+
+    expect(resolveCallContactPhone({
+      direction: 'inbound',
+      from_phone: '+19145234413',
+      to_phone: '+19412975749',
+    })).toBe('+19145234413');
+
+    expect(resolveCallContactPhone({
+      direction: 'outbound',
+      from_phone: '+19412975749',
+      to_phone: '+19145234413',
+    }, '+19145550000')).toBe('+19145550000');
+
+    expect(resolveCallContactPhone({
+      direction: 'outbound',
+      from_phone: '+19412975749',
+      to_phone: '+19145234413',
+    }, '+19412975749')).toBe('+19145234413');
+
+    expect(resolveCallContactPhone({
+      direction: 'outbound',
+      from_phone: '+19412975749',
+      to_phone: '+19145234413',
+    }, '9412975749')).toBe('+19145234413');
+
+    expect(resolveCallContactPhone({
+      direction: 'inbound',
+      from_phone: '+19145234413',
+      to_phone: '+19412975749',
+    }, '+19412975749')).toBe('+19145234413');
+  });
+
+  test('detects transcript name mismatch against a linked customer', () => {
+    expect(extractedNameMatchesCustomer(
+      { first_name: 'Andrea' },
+      { first_name: 'George', last_name: 'Stone' }
+    )).toBe(false);
+
+    expect(extractedNameMatchesCustomer(
+      { first_name: 'Andrea' },
+      { first_name: 'Andrea', last_name: 'Stone' }
+    )).toBe(true);
+  });
 
   test('rejects unrelated SEO or construction calls even if a service phrase was extracted', () => {
     const result = resolveSchedulableCallService({
