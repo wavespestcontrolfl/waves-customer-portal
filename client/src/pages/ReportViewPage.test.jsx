@@ -8,6 +8,7 @@ import {
   getMinutesBetween,
   getReportArrivalTime,
   getReportCompletionTime,
+  normalizeServiceCoverage,
   quickNavigationLinks,
   readinessStatusBadge,
   reviewRequestCopy,
@@ -59,7 +60,9 @@ describe('ReportViewPage report chrome helpers', () => {
   it('omits product quick navigation when no products were applied', () => {
     const labels = quickNavigationLinks({ hasProducts: false }).map(([, label]) => label);
     expect(labels).not.toContain('Products Applied');
-    expect(labels).toContain('Coverage Map');
+    expect(labels).toContain('Service Coverage');
+    expect(labels).not.toContain('Areas Serviced');
+    expect(labels).not.toContain('Coverage Map');
   });
 
   it('does not show a readiness status badge without re-entry context', () => {
@@ -107,6 +110,72 @@ describe('ReportViewPage report chrome helpers', () => {
     expect(top.title).not.toBe(bottom.title);
     expect(top.cta).toBe('Share feedback');
     expect(bottom.cta).toBe('Share feedback');
+  });
+});
+
+describe('ReportViewPage service coverage helper', () => {
+  it('normalizes legacy areas and map data into one section model', () => {
+    const coverage = normalizeServiceCoverage({
+      serviceLine: 'pest',
+      serviceType: 'Quarterly Pest Control Service',
+      serviceDate: '2026-05-17',
+      propertyAddress: '12312 Cedar Pass Trl, Parrish, FL 34219',
+      serviceAreas: ['Perimeter', 'Entry Points'],
+      zones: [
+        { id: 'zone-a', letter: 'A', label: 'Perimeter' },
+        { id: 'zone-b', letter: 'B', label: 'Entry Points' },
+      ],
+      serviceLocations: [
+        {
+          id: 'loc-a',
+          zoneId: 'zone-a',
+          name: 'Perimeter',
+          status: 'serviced',
+          geometry: { type: 'LineString', coordinates: [[0.1, 0.1], [0.8, 0.1]] },
+        },
+        {
+          id: 'loc-b',
+          zoneId: 'zone-b',
+          name: 'Entry Points',
+          status: 'serviced',
+          geometry: { type: 'Point', coordinates: [0.5, 0.5] },
+        },
+      ],
+    });
+
+    expect(coverage.enabled).toBe(true);
+    expect(coverage.title).toBe('Service Coverage');
+    expect(coverage.items.map((item) => item.markerLabel)).toEqual(['A', 'B']);
+    expect(coverage.items[0].customerDescription).toBe('Exterior perimeter service completed.');
+    expect(coverage.items[1].customerDescription).toBe('Entry points inspected and treated.');
+    expect(coverage.map.available).toBe(true);
+  });
+
+  it('uses API-provided serviceCoverage without falling back to duplicate legacy sections', () => {
+    const coverage = normalizeServiceCoverage({
+      serviceCoverage: {
+        enabled: true,
+        title: 'Lawn Coverage',
+        intro: 'Custom intro',
+        items: [{ id: 'front', markerLabel: 'A', areaName: 'Front Lawn', status: 'completed' }],
+        map: { available: false, markers: [] },
+      },
+      serviceAreas: ['Should not duplicate'],
+    });
+
+    expect(coverage.title).toBe('Lawn Coverage');
+    expect(coverage.intro).toBe('Custom intro');
+    expect(coverage.items).toHaveLength(1);
+  });
+
+  it('honors API-disabled service coverage even when legacy fields are present', () => {
+    const coverage = normalizeServiceCoverage({
+      serviceCoverage: { enabled: false },
+      serviceAreas: ['Perimeter'],
+      serviceLocations: [{ id: 'loc-a', name: 'Perimeter', status: 'serviced' }],
+    });
+
+    expect(coverage.enabled).toBe(false);
   });
 });
 

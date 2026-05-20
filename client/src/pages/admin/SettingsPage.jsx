@@ -4,7 +4,10 @@ import {
   Activity,
   Building2,
   ChevronRight,
+  MapPinned,
   Plug,
+  RotateCcw,
+  Save,
   Server,
   Settings as SettingsIcon,
   ToggleLeft,
@@ -32,11 +35,13 @@ const D = {
 };
 const MONO = "'JetBrains Mono', monospace";
 
-function adminFetch(path) {
+function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
+    ...options,
     headers: {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
+      ...(options.headers || {}),
     },
   }).then((r) => {
     if (r.status === 401) {
@@ -120,6 +125,7 @@ const VALID_TABS = [
   "integrations",
   "gates",
   "team",
+  "service-reports",
   "system",
 ];
 
@@ -166,6 +172,7 @@ export default function SettingsPage() {
     { key: "integrations", label: "Integrations", Icon: Plug },
     { key: "gates", label: "Feature Gates", Icon: ToggleLeft },
     { key: "team", label: "Team", Icon: Users },
+    { key: "service-reports", label: "Service Reports", Icon: MapPinned },
     { key: "system", label: "System", Icon: Server },
   ];
 
@@ -458,6 +465,7 @@ export default function SettingsPage() {
           <TeamList />{" "}
         </Card>
       )}
+      {tab === "service-reports" && <ServiceCoverageSettingsTab />}
       {/* ── SYSTEM ── */}
       {tab === "system" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -628,6 +636,379 @@ export default function SettingsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+const SERVICE_COVERAGE_SERVICE_LINES = [
+  { key: "default", label: "Default" },
+  { key: "pest", label: "Pest" },
+  { key: "lawn", label: "Lawn" },
+  { key: "termite", label: "Termite" },
+  { key: "tree_shrub", label: "Tree & Shrub" },
+  { key: "mosquito", label: "Mosquito" },
+  { key: "rodent", label: "Rodent" },
+  { key: "commercial", label: "Commercial" },
+];
+
+const SERVICE_COVERAGE_STATUS_KEYS = [
+  "completed",
+  "treated",
+  "inspected",
+  "checked",
+  "inaccessible",
+  "needs_attention",
+  "needs_follow_up",
+  "skipped",
+  "not_serviced",
+];
+
+function settingsInputStyle(extra = {}) {
+  return {
+    width: "100%",
+    border: `1px solid ${D.inputBorder}`,
+    borderRadius: 8,
+    padding: "9px 10px",
+    color: D.heading,
+    background: D.white,
+    fontSize: 13,
+    lineHeight: 1.35,
+    boxSizing: "border-box",
+    ...extra,
+  };
+}
+
+function deepMergeConfig(base = {}, override = {}) {
+  const merged = { ...base };
+  Object.entries(override || {}).forEach(([key, value]) => {
+    if (
+      value
+      && typeof value === "object"
+      && !Array.isArray(value)
+      && base[key]
+      && typeof base[key] === "object"
+      && !Array.isArray(base[key])
+    ) {
+      merged[key] = deepMergeConfig(base[key], value);
+      return;
+    }
+    merged[key] = value;
+  });
+  return merged;
+}
+
+function ServiceCoverageSettingsTab() {
+  const [config, setConfig] = useState(null);
+  const [defaults, setDefaults] = useState(null);
+  const [serviceLine, setServiceLine] = useState("pest");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    adminFetch("/admin/settings/service-coverage")
+      .then((data) => {
+        setConfig(data.config || data.defaults);
+        setDefaults(data.defaults || data.config);
+      })
+      .catch((err) => setMessage(err.message || "Could not load Service Coverage settings."));
+  }, []);
+
+  const update = (patch) => setConfig((current) => deepMergeConfig(current || defaults || {}, patch));
+  const currentIntroKey = serviceLine === "default" ? "default" : serviceLine;
+  const previewTitle = serviceLine === "default"
+    ? config?.defaultTitle
+    : config?.titleByServiceLine?.[serviceLine] || config?.defaultTitle;
+  const previewIntro = config?.introByServiceLine?.[currentIntroKey] || config?.introByServiceLine?.default;
+
+  const save = async () => {
+    setSaving(true);
+    setMessage("");
+    try {
+      const data = await adminFetch("/admin/settings/service-coverage", {
+        method: "PUT",
+        body: JSON.stringify({ config }),
+      });
+      setConfig(data.config || config);
+      setMessage("Service Coverage settings saved.");
+    } catch (err) {
+      setMessage(err.message || "Could not save Service Coverage settings.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    setSaving(true);
+    setMessage("");
+    try {
+      const data = await adminFetch("/admin/settings/service-coverage/reset", { method: "POST" });
+      setConfig(data.config || defaults);
+      setMessage("Service Coverage settings restored to defaults.");
+    } catch (err) {
+      setMessage(err.message || "Could not restore Service Coverage settings.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!config) {
+    return <Card><div style={{ color: D.muted, fontSize: 13 }}>Loading Service Coverage settings...</div></Card>;
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <Card>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>Service Coverage</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
+              Configure the unified customer-facing report card that combines serviced areas, technician-marked coverage, map display, and status wording.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <button type="button" onClick={reset} disabled={saving} style={{ ...settingsButtonStyle("secondary"), opacity: saving ? 0.6 : 1 }}>
+              <RotateCcw size={15} /> Restore defaults
+            </button>
+            <button type="button" onClick={save} disabled={saving} style={{ ...settingsButtonStyle("primary"), opacity: saving ? 0.6 : 1 }}>
+              <Save size={15} /> {saving ? "Saving..." : "Save settings"}
+            </button>
+          </div>
+        </div>
+        {message && <div style={{ marginTop: 12, fontSize: 12, color: message.includes("Could not") ? D.red : D.green }}>{message}</div>}
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(320px, .8fr)", gap: 16, alignItems: "start" }}>
+        <div style={{ display: "grid", gap: 16 }}>
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10 }}>Visibility</div>
+            <Toggle checked={!!config.enabled} onChange={(value) => update({ enabled: value })} label="Enable Service Coverage" description="Build the normalized coverage object for service reports." />
+            <Toggle checked={!!config.showOnCustomerReports} onChange={(value) => update({ showOnCustomerReports: value })} label="Show on customer reports" description="Hide this when coverage data should remain internal." />
+            <Toggle checked={config.showSummaryCounts !== false} onChange={(value) => update({ showSummaryCounts: value })} label="Show summary counts" description="Completed, inspected, inaccessible, and needs attention chips." />
+            <Toggle checked={config.showMap !== false} onChange={(value) => update({ showMap: value })} label="Show map" description="Do not render a blank map when no technician-marked map data exists." />
+            <Toggle checked={config.showList !== false} onChange={(value) => update({ showList: value })} label="Show list" description="Show customer-friendly area, station, plant group, or lawn section rows." />
+            <Toggle checked={config.showAddress !== false} onChange={(value) => update({ showAddress: value })} label="Show address" />
+            <Toggle checked={config.showServiceDate !== false} onChange={(value) => update({ showServiceDate: value })} label="Show service date" />
+          </Card>
+
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Copy by Service Line</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+              {SERVICE_COVERAGE_SERVICE_LINES.map((line) => (
+                <button
+                  type="button"
+                  key={line.key}
+                  onClick={() => setServiceLine(line.key)}
+                  style={{
+                    border: `1px solid ${serviceLine === line.key ? D.teal : D.border}`,
+                    background: serviceLine === line.key ? D.teal : D.white,
+                    color: serviceLine === line.key ? D.white : D.text,
+                    borderRadius: 999,
+                    padding: "7px 10px",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {line.label}
+                </button>
+              ))}
+            </div>
+            <label style={settingsLabelStyle}>
+              Title
+              <input
+                value={serviceLine === "default" ? config.defaultTitle : config.titleByServiceLine?.[serviceLine] || ""}
+                onChange={(event) => {
+                  if (serviceLine === "default") update({ defaultTitle: event.target.value });
+                  else update({ titleByServiceLine: { [serviceLine]: event.target.value } });
+                }}
+                style={settingsInputStyle()}
+              />
+            </label>
+            <label style={{ ...settingsLabelStyle, marginTop: 12 }}>
+              Intro text
+              <textarea
+                value={config.introByServiceLine?.[currentIntroKey] || ""}
+                onChange={(event) => update({ introByServiceLine: { [currentIntroKey]: event.target.value } })}
+                rows={3}
+                style={settingsInputStyle({ resize: "vertical" })}
+              />
+            </label>
+            <label style={{ ...settingsLabelStyle, marginTop: 12 }}>
+              Disclaimer
+              <textarea
+                value={config.disclaimerText || ""}
+                onChange={(event) => update({ disclaimerText: event.target.value })}
+                rows={2}
+                style={settingsInputStyle({ resize: "vertical" })}
+              />
+            </label>
+          </Card>
+
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Map Privacy and Notes</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <label style={settingsLabelStyle}>
+                Default layout
+                <select value={config.defaultLayout || "split"} onChange={(event) => update({ defaultLayout: event.target.value })} style={settingsInputStyle()}>
+                  <option value="split">Map right / list left</option>
+                  <option value="map_top">Map top / list below</option>
+                  <option value="list_only">List only</option>
+                  <option value="map_only">Map only</option>
+                </select>
+              </label>
+              <label style={settingsLabelStyle}>
+                Map precision
+                <select value={config.mapPrecisionMode || "exact"} onChange={(event) => update({ mapPrecisionMode: event.target.value })} style={settingsInputStyle()}>
+                  <option value="exact">Exact pins</option>
+                  <option value="approximate">Approximate zones</option>
+                  <option value="hidden">Hide map</option>
+                </select>
+              </label>
+            </div>
+            <Toggle checked={config.showInaccessibleReasonsToCustomer !== false} onChange={(value) => update({ showInaccessibleReasonsToCustomer: value })} label="Show inaccessible reasons" />
+            <Toggle checked={!!config.showTechnicianNotesToCustomer} onChange={(value) => update({ showTechnicianNotesToCustomer: value })} label="Show technician notes" description="Default should stay off for internal-only notes." />
+          </Card>
+
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 12 }}>Customer Status Labels</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+              {SERVICE_COVERAGE_STATUS_KEYS.map((key) => (
+                <label key={key} style={settingsLabelStyle}>
+                  {key.replace(/_/g, " ")}
+                  <input
+                    value={config.statusLabels?.[key] || ""}
+                    onChange={(event) => update({ statusLabels: { [key]: event.target.value } })}
+                    style={settingsInputStyle()}
+                  />
+                </label>
+              ))}
+            </div>
+          </Card>
+        </div>
+
+        <ServiceCoverageAdminPreview
+          title={previewTitle}
+          intro={previewIntro}
+          disclaimer={config.disclaimerText}
+          showMap={config.showMap !== false && config.mapPrecisionMode !== "hidden"}
+          showList={config.showList !== false}
+          showSummary={config.showSummaryCounts !== false}
+          statusLabels={config.statusLabels || {}}
+          serviceLine={serviceLine === "default" ? "pest" : serviceLine}
+        />
+      </div>
+    </div>
+  );
+}
+
+const settingsLabelStyle = {
+  display: "grid",
+  gap: 6,
+  color: D.muted,
+  fontSize: 12,
+  fontWeight: 700,
+  textTransform: "capitalize",
+};
+
+function settingsButtonStyle(tone) {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 7,
+    border: `1px solid ${tone === "primary" ? D.teal : D.border}`,
+    borderRadius: 8,
+    background: tone === "primary" ? D.teal : D.white,
+    color: tone === "primary" ? D.white : D.text,
+    padding: "8px 11px",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: "pointer",
+  };
+}
+
+function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showList, showSummary, statusLabels, serviceLine }) {
+  const sampleItems = serviceLine === "lawn"
+    ? [
+      { label: "A", area: "Front Lawn", description: "Lawn treatment completed.", status: "completed" },
+      { label: "B", area: "Landscape Beds", description: "Weed control applied.", status: "completed" },
+    ]
+    : serviceLine === "termite"
+      ? [
+        { label: "A", area: "Station 4", description: "Station checked.", status: "checked" },
+        { label: "B", area: "Station 8", description: "Bait replaced and station checked.", status: "completed" },
+      ]
+      : [
+        { label: "A", area: "Perimeter", description: "Exterior perimeter service completed.", status: "completed" },
+        { label: "B", area: "Entry Points", description: "Entry points inspected and treated.", status: "completed" },
+      ];
+
+  return (
+    <Card style={{ position: "sticky", top: 16 }}>
+      <div style={{ fontSize: 12, color: D.muted, fontWeight: 800, textTransform: "uppercase", marginBottom: 10 }}>Preview</div>
+      <div style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 16, background: "#FAFAFA" }}>
+        <h2 style={{ margin: "0 0 6px", color: D.heading, fontSize: 24, lineHeight: 1.2 }}>{title || "Service Coverage"}</h2>
+        <p style={{ margin: 0, color: D.muted, fontSize: 13, lineHeight: 1.45 }}>{intro}</p>
+        <div style={{ marginTop: 10, color: D.muted, fontSize: 12, lineHeight: 1.45 }}>
+          <div>12312 Cedar Pass Trl, Parrish, FL 34219</div>
+          <div>Sunday, May 17, 2026</div>
+        </div>
+        {showSummary && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+            {["Completed: 2", "Inspected: 0", "Inaccessible: 0", "Needs Attention: 0"].map((chip) => (
+              <span key={chip} style={{ border: "1px solid #BBF7D0", background: "#DCFCE7", color: "#14532D", borderRadius: 999, padding: "6px 8px", fontSize: 11, fontWeight: 800 }}>
+                {chip}
+              </span>
+            ))}
+          </div>
+        )}
+        {showMap && (
+          <div style={{ marginTop: 12, height: 150, border: `1px solid ${D.border}`, borderRadius: 8, background: "#EAF2F5", position: "relative", overflow: "hidden" }}>
+            {sampleItems.map((item, index) => (
+              <span
+                key={item.label}
+                style={{
+                  position: "absolute",
+                  left: `${28 + index * 32}%`,
+                  top: `${42 + index * 12}%`,
+                  width: 28,
+                  height: 28,
+                  borderRadius: 999,
+                  background: D.teal,
+                  color: D.white,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 12,
+                  fontWeight: 900,
+                }}
+              >
+                {item.label}
+              </span>
+            ))}
+          </div>
+        )}
+        {showList && (
+          <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+            {sampleItems.map((item) => (
+              <div key={item.label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, background: D.white }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                  <span style={{ width: 28, height: 28, borderRadius: 999, background: D.teal, color: D.white, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 900, flex: "0 0 auto" }}>
+                    {item.label}
+                  </span>
+                  <div>
+                    <div style={{ color: D.heading, fontSize: 13, fontWeight: 800 }}>{item.area}</div>
+                    <div style={{ color: D.muted, fontSize: 12, lineHeight: 1.35 }}>{item.description}</div>
+                  </div>
+                </div>
+                <span style={{ border: "1px solid #BBF7D0", background: "#DCFCE7", color: "#14532D", borderRadius: 999, padding: "6px 8px", fontSize: 11, fontWeight: 800 }}>
+                  {statusLabels[item.status] || "Completed"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <p style={{ margin: "12px 0 0", color: D.muted, fontSize: 12, lineHeight: 1.45 }}>{disclaimer}</p>
+      </div>
+    </Card>
   );
 }
 

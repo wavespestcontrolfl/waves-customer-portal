@@ -1446,8 +1446,7 @@ function ReportAskBox({ mode, token, serviceLine }) {
 export function quickNavigationLinks({ hasProducts = true } = {}) {
   return [
     ['#service-timeline', 'Visit Progress'],
-    ['#areas-serviced', 'Areas Serviced'],
-    ['#service-coverage-map', 'Coverage Map'],
+    ['#service-coverage', 'Service Coverage'],
     hasProducts ? ['#products-applied', 'Products Applied'] : null,
     ['#what-to-expect', 'What to Expect'],
     ['#supporting-details', 'Details'],
@@ -2007,19 +2006,24 @@ function AppliedProductsSection({ data, showAll = false, mode = 'live' }) {
 
 const COVERAGE_VIEWBOX = { width: 640, height: 340, padding: 28 };
 const COVERAGE_STATUSES = {
+  completed: { label: 'Completed', tone: 'green', Icon: CheckCircle2 },
   treated: { label: 'Treated', tone: 'green', Icon: CheckCircle2 },
   partially_treated: { label: 'Partially treated', tone: 'light-green', Icon: CheckCircle2 },
-  serviced: { label: 'Serviced', tone: 'green', Icon: CheckCircle2 },
+  serviced: { label: 'Completed', tone: 'green', Icon: CheckCircle2 },
   inspected: { label: 'Inspected', tone: 'blue', Icon: Eye },
+  checked: { label: 'Checked', tone: 'blue', Icon: MapPin },
   spot_treated: { label: 'Spot-treated', tone: 'blue', Icon: Eye },
   skipped: { label: 'Skipped', tone: 'orange', Icon: AlertTriangle },
   inaccessible: { label: 'Inaccessible', tone: 'orange', Icon: AlertTriangle },
+  needs_attention: { label: 'Needs Attention', tone: 'orange', Icon: AlertTriangle },
+  needs_follow_up: { label: 'Follow-Up Recommended', tone: 'orange', Icon: AlertTriangle },
   activity_found: { label: 'Activity found', tone: 'orange', Icon: MapPin },
   entry_point_found: { label: 'Entry point noted', tone: 'orange', Icon: MapPin },
   blocked: { label: 'Blocked', tone: 'red', Icon: Lock },
   device_checked: { label: 'Checked', tone: 'blue', Icon: MapPin },
   device_placed: { label: 'Placed', tone: 'green', Icon: MapPin },
   not_included: { label: 'Not included', tone: 'gray', Icon: AlertTriangle },
+  not_serviced: { label: 'Not Serviced', tone: 'gray', Icon: AlertTriangle },
 };
 const EVIDENCE_COPY = {
   technician_confirmed: 'Marked completed by your technician.',
@@ -2037,6 +2041,35 @@ function normalizeCoverageServiceType(value) {
   return 'other';
 }
 
+function normalizeServiceCoverageLine(...values) {
+  const raw = values.map((value) => String(value || '').toLowerCase().replace(/[_-]+/g, ' ')).filter(Boolean).join(' ');
+  if (raw.includes('tree') || raw.includes('shrub') || raw.includes('palm') || raw.includes('ornamental')) return 'tree_shrub';
+  if (raw.includes('termite')) return 'termite';
+  if (raw.includes('mosquito')) return 'mosquito';
+  if (raw.includes('rodent') || raw.includes('rat') || raw.includes('mouse')) return 'rodent';
+  if (raw.includes('lawn') || raw.includes('turf') || raw.includes('weed') || raw.includes('fertil')) return 'lawn';
+  if (raw.includes('commercial')) return 'commercial';
+  if (raw.includes('pest') || raw.includes('roach') || raw.includes('ant') || raw.includes('spider')) return 'pest';
+  return 'other';
+}
+
+function normalizeCoverageStatus(status, actionTypes = []) {
+  const raw = [status, ...[].concat(actionTypes || [])]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  if (/\b(inaccessible|locked|no access|access issue|blocked)\b/.test(raw)) return 'inaccessible';
+  if (/\b(needs attention|activity found|issue noted|customer action)\b/.test(raw)) return 'needs_attention';
+  if (/\b(follow up|follow-up|return visit)\b/.test(raw)) return 'needs_follow_up';
+  if (/\b(skip|skipped|weather)\b/.test(raw)) return 'skipped';
+  if (/\b(not serviced|not included)\b/.test(raw)) return 'not_serviced';
+  if (/\b(inspect|inspection|no activity found|entry point found)\b/.test(raw)) return 'inspected';
+  if (/\b(station checked|device checked|checked|monitor)\b/.test(raw)) return 'checked';
+  if (/\b(treat|treated|spot treated)\b/.test(raw)) return 'treated';
+  return 'completed';
+}
+
 function coverageStatusConfig(status) {
   return COVERAGE_STATUSES[status] || { label: formatEnumLabel(status) || 'Service location', tone: 'gray', Icon: MapPin };
 }
@@ -2052,17 +2085,17 @@ function coverageSectionSubtitle(serviceType) {
 }
 
 function coverageLegendKey(status, serviceType) {
-  if (status === 'treated' || status === 'serviced' || status === 'device_placed') return 'green';
+  if (status === 'completed' || status === 'treated' || status === 'serviced' || status === 'device_placed') return 'green';
   if (status === 'partially_treated') return 'light-green';
-  if (status === 'inspected' || status === 'spot_treated' || status === 'device_checked') return 'blue';
-  if (status === 'activity_found' || status === 'entry_point_found' || status === 'skipped' || status === 'inaccessible') return 'orange';
+  if (status === 'inspected' || status === 'checked' || status === 'spot_treated' || status === 'device_checked') return 'blue';
+  if (status === 'activity_found' || status === 'entry_point_found' || status === 'skipped' || status === 'inaccessible' || status === 'needs_attention' || status === 'needs_follow_up') return 'orange';
   if (status === 'blocked') return 'red';
-  if (status === 'not_included') return 'gray';
+  if (status === 'not_included' || status === 'not_serviced') return 'gray';
   return serviceType === 'lawn' ? 'green' : 'blue';
 }
 
 function coverageLegendLabel(key, serviceType, statuses) {
-  if (key === 'green') return serviceType === 'lawn' ? 'Treated' : 'Serviced';
+  if (key === 'green') return statuses.includes('treated') ? 'Treated' : 'Completed';
   if (key === 'light-green') return 'Partially treated';
   if (key === 'blue') return serviceType === 'lawn' ? 'Inspected / spot-treated' : 'Inspected';
   if (key === 'orange') {
@@ -2215,81 +2248,299 @@ function coverageGeometryCenter(geometry, projection) {
 function coverageMarkerText(status) {
   if (status === 'device_checked' || status === 'device_placed') return 'D';
   if (status === 'inspected' || status === 'spot_treated') return 'i';
-  if (status === 'treated' || status === 'serviced' || status === 'partially_treated') return 'OK';
+  if (status === 'completed' || status === 'treated' || status === 'serviced' || status === 'partially_treated') return 'A';
   return '!';
 }
 
-function coverageAriaLabel(location) {
-  const detail = coverageSummaryParts(location, normalizeCoverageServiceType(location.serviceType)).join(', ');
-  return `${location.name}: ${detail}`;
+const DEFAULT_SERVICE_COVERAGE_COPY = {
+  defaultTitle: 'Service Coverage',
+  titleByServiceLine: {
+    pest: 'Service Coverage',
+    lawn: 'Lawn Coverage',
+    termite: 'Inspection & Treatment Coverage',
+    tree_shrub: 'Tree & Shrub Coverage',
+    mosquito: 'Mosquito Service Coverage',
+    rodent: 'Rodent Service Coverage',
+    commercial: 'Service Coverage',
+    other: 'Service Coverage',
+  },
+  introByServiceLine: {
+    default: "Here's where your technician completed work, inspected, or marked an area as inaccessible during today's visit.",
+    pest: "Here's where your technician completed pest control service, inspected, or marked an area as inaccessible during today's visit.",
+    lawn: "Here's where your technician completed lawn service, inspected, or marked an area as inaccessible during today's visit.",
+    termite: "Here's where your technician inspected, treated, checked stations, or marked an area as inaccessible during today's visit.",
+    tree_shrub: "Here's where your technician inspected, treated, or marked landscape areas that need attention during today's visit.",
+    mosquito: "Here's where your technician completed mosquito service, inspected, or marked an area as inaccessible during today's visit.",
+    rodent: "Here's where your technician checked rodent service areas, inspected, or marked an area as inaccessible during today's visit.",
+  },
+  disclaimerText: 'Service coverage is based on technician-marked locations and available visit data. It is not a property survey.',
+  statusLabels: {
+    completed: 'Completed',
+    treated: 'Treated',
+    inspected: 'Inspected',
+    checked: 'Checked',
+    inaccessible: 'Inaccessible',
+    needs_attention: 'Needs Attention',
+    needs_follow_up: 'Follow-Up Recommended',
+    skipped: 'Skipped',
+    not_serviced: 'Not Serviced',
+  },
+};
+
+function coverageAreaKey(areaName) {
+  const text = String(areaName || '').toLowerCase();
+  if (/\bentry|door|window|threshold|opening|access point\b/.test(text)) return 'entry_points';
+  if (/\bperimeter|foundation|exterior\b/.test(text)) return 'perimeter';
+  if (/\bstation|bait\b/.test(text)) return 'station';
+  if (/\bfront lawn|back lawn|side yard|turf|yard|lawn\b/.test(text)) return 'lawn';
+  if (/\bplant|shrub|tree|palm|hedge|landscape\b/.test(text)) return 'plant';
+  return 'generic';
 }
 
-function CoverageMapGeometry({ location, projection }) {
+function serviceCoverageDescription(location, { areaName, status, serviceLine }) {
+  const explicit = String(
+    location.customerDescription
+    || location.customer_description
+    || location.descriptionForCustomer
+    || location.customerVisibleNote
+    || location.customer_visible_note
+    || '',
+  ).trim();
+  if (explicit && !/^(perimeter|entry points?|treated|serviced)$/i.test(explicit)) return explicit;
+
+  const reason = String(location.inaccessibleReason || location.inaccessible_reason || location.skippedReason || location.skipped_reason || '').trim();
+  const areaKey = coverageAreaKey(areaName);
+  if (status === 'inaccessible') return reason ? `Technician could not access this area because ${reason}.` : 'Technician could not access this area.';
+  if (status === 'needs_attention') return 'Technician noted an issue that may need attention.';
+  if (status === 'skipped') return reason ? `Service was skipped because ${reason}.` : 'Service was skipped for this area.';
+  if ((serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') && areaKey === 'perimeter') return 'Exterior perimeter service completed.';
+  if ((serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') && areaKey === 'entry_points') return 'Entry points inspected and treated.';
+  if (serviceLine === 'lawn') return String(location.status || '').toLowerCase().includes('weed') ? 'Weed control applied.' : 'Lawn treatment completed.';
+  if (serviceLine === 'termite' && (areaKey === 'station' || status === 'checked')) return 'Station checked.';
+  if (serviceLine === 'termite' && status === 'inspected') return 'Inspection completed.';
+  if (serviceLine === 'tree_shrub') return 'Plant health treatment completed.';
+  if (status === 'inspected') return `${areaName} inspected.`;
+  if (status === 'treated') return `${areaName} treatment completed.`;
+  return `${areaName} service completed.`;
+}
+
+function serviceCoverageSummary(items = []) {
+  return items.reduce((summary, item) => {
+    if (item.status === 'inspected' || item.status === 'checked') summary.inspectedCount += 1;
+    else if (item.status === 'inaccessible') summary.inaccessibleCount += 1;
+    else if (item.status === 'needs_attention' || item.status === 'needs_follow_up') summary.needsAttentionCount += 1;
+    else summary.completedCount += 1;
+    return summary;
+  }, {
+    completedCount: 0,
+    inspectedCount: 0,
+    inaccessibleCount: 0,
+    needsAttentionCount: 0,
+  });
+}
+
+function isCoverageItemVisible(location = {}) {
+  return location.isVisibleToCustomer !== false
+    && location.customerVisible !== false
+    && location.customer_visible !== false
+    && location.internalOnly !== true
+    && location.internal_only !== true;
+}
+
+export function normalizeServiceCoverage(report = {}, configOverride = {}) {
+  const config = {
+    ...DEFAULT_SERVICE_COVERAGE_COPY,
+    ...configOverride,
+    titleByServiceLine: { ...DEFAULT_SERVICE_COVERAGE_COPY.titleByServiceLine, ...(configOverride.titleByServiceLine || {}) },
+    introByServiceLine: { ...DEFAULT_SERVICE_COVERAGE_COPY.introByServiceLine, ...(configOverride.introByServiceLine || {}) },
+    statusLabels: { ...DEFAULT_SERVICE_COVERAGE_COPY.statusLabels, ...(configOverride.statusLabels || {}) },
+  };
+
+  if (report.serviceCoverage?.enabled === false) return { ...report.serviceCoverage, enabled: false };
+  if (report.serviceCoverage?.enabled) {
+    return {
+      ...report.serviceCoverage,
+      title: report.serviceCoverage.title || config.defaultTitle,
+      intro: report.serviceCoverage.intro || report.serviceCoverage.introText || config.introByServiceLine.default,
+      disclaimer: report.serviceCoverage.disclaimer || config.disclaimerText,
+      items: Array.isArray(report.serviceCoverage.items) ? report.serviceCoverage.items : [],
+      settings: {
+        showMap: true,
+        showList: true,
+        showSummaryCounts: true,
+        defaultLayout: 'split',
+        ...(report.serviceCoverage.settings || {}),
+      },
+    };
+  }
+
+  const serviceLine = normalizeServiceCoverageLine(report.serviceLine, report.serviceType, report.serviceDisplayName, report.coverageServiceType);
+  const zoneById = new Map((report.zones || []).map((zone, index) => [String(zone.id), {
+    ...zone,
+    letter: zone.letter || String.fromCharCode(65 + (index % 26)),
+  }]));
+  const locations = Array.isArray(report.serviceLocations) ? report.serviceLocations.filter(isCoverageItemVisible) : [];
+  const serviceAreas = Array.isArray(report.serviceAreas) ? report.serviceAreas.filter(Boolean) : [];
+  const sourceRows = locations.length ? locations : serviceAreas.map((area, index) => ({
+    id: `coverage_area_${index + 1}`,
+    name: area,
+    status: 'completed',
+  }));
+  const items = sourceRows.map((location, index) => {
+    const zone = zoneById.get(String(location.zoneId || location.zone_id || ''));
+    const status = normalizeCoverageStatus(location.status, location.actionTypes || location.action_types);
+    const areaName = String(location.areaName || location.area_name || location.name || zone?.label || `Area ${index + 1}`).trim();
+    const markerLabel = String(location.markerLabel || location.marker_label || zone?.letter || String.fromCharCode(65 + (index % 26))).trim();
+    return {
+      id: String(location.id || `coverage_item_${index + 1}`),
+      serviceLine,
+      markerLabel,
+      areaName,
+      customerDescription: serviceCoverageDescription(location, { areaName, status, serviceLine }),
+      status,
+      customerStatusLabel: config.statusLabels[status] || coverageStatusConfig(status).label,
+      statusLabel: config.statusLabels[status] || coverageStatusConfig(status).label,
+      zoneId: location.zoneId || location.zone_id || zone?.id || null,
+      geometry: location.geometry || location.geometryGeoJson || location.geometry_geojson || zone?.geometryGeoJson || zone?.geometry || null,
+      imageGeometry: location.imageGeometry || location.image_geometry || zone?.geometryImage || zone?.geometry_image || null,
+      sortOrder: Number.isFinite(Number(location.sortOrder || location.sort_order)) ? Number(location.sortOrder || location.sort_order) : index,
+    };
+  }).filter((item, index, all) => all.findIndex((candidate) => (
+    candidate.markerLabel === item.markerLabel
+    && candidate.areaName.toLowerCase() === item.areaName.toLowerCase()
+    && candidate.status === item.status
+  )) === index);
+
+  const itemsWithGeometry = items.filter(hasRenderableCoverageGeometry);
+  if (!items.length && !itemsWithGeometry.length) return { enabled: false };
+  const title = config.titleByServiceLine[serviceLine] || config.defaultTitle;
+  const intro = config.introByServiceLine[serviceLine] || config.introByServiceLine.default;
+  return {
+    enabled: true,
+    serviceLine,
+    title,
+    intro,
+    introText: intro,
+    address: report.propertyAddress || report.serviceAddress || '',
+    serviceDate: report.serviceDate || '',
+    disclaimer: config.disclaimerText,
+    summary: serviceCoverageSummary(items),
+    legend: coverageLegendItems(items, normalizeCoverageServiceType(serviceLine)),
+    map: {
+      available: itemsWithGeometry.length > 0,
+      center: report.mapCenter || null,
+      markers: itemsWithGeometry.map((item) => ({
+        id: `marker_${item.id}`,
+        coverageItemId: item.id,
+        label: item.markerLabel,
+        status: item.status,
+        geometry: item.geometry,
+      })),
+      polygons: [],
+      lines: [],
+    },
+    groups: [{ serviceLine, title, items }],
+    items,
+    settings: {
+      showMap: true,
+      showList: true,
+      showSummaryCounts: true,
+      defaultLayout: 'split',
+    },
+  };
+}
+
+function coverageAriaLabel(location) {
+  const name = location.areaName || location.name || 'Service area';
+  const detail = [
+    location.statusLabel || location.customerStatusLabel || coverageStatusConfig(location.status).label,
+    location.customerDescription,
+    ...coverageSummaryParts(location, normalizeCoverageServiceType(location.serviceType)),
+  ].filter(Boolean).join(', ');
+  return `${location.markerLabel ? `${location.markerLabel}. ` : ''}${name}: ${detail}`;
+}
+
+function CoverageMapGeometry({ location, projection, active = false, onActivate }) {
   const geometry = location.geometry;
   const config = coverageStatusConfig(location.status);
   const toneClass = `status-${config.tone}`;
   const label = coverageAriaLabel(location);
   const center = coverageGeometryCenter(geometry, projection);
+  const name = location.areaName || location.name || 'Service area';
   const labelText = location.status === 'skipped' || location.status === 'inaccessible'
-    ? `${location.name} skipped`
+    ? `${name} skipped`
     : location.status === 'activity_found'
       ? 'Activity noted'
       : location.status === 'entry_point_found'
         ? 'Entry point'
-        : location.name;
+        : name;
+  const activateProps = {
+    tabIndex: 0,
+    role: 'button',
+    'aria-label': label,
+    'aria-pressed': active ? 'true' : 'false',
+    onClick: () => onActivate?.(location.id),
+    onFocus: () => onActivate?.(location.id),
+    onKeyDown: (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        onActivate?.(location.id);
+      }
+    },
+  };
 
   if (geometry.type === 'Polygon') {
     return (
-      <g className="coverage-geometry-group" tabIndex={0} role="img" aria-label={label}>
+      <g className={`coverage-geometry-group${active ? ' is-active' : ''}`} {...activateProps}>
         <path className={`coverage-area ${toneClass} status-${location.status}`} d={coveragePolygonPath(geometry.coordinates || [], projection)}>
           <title>{label}</title>
         </path>
-        {center && <text x={center.x} y={center.y} className="coverage-map-label">{labelText}</text>}
+        {center && <text x={center.x} y={center.y} className="coverage-map-label">{location.markerLabel || labelText}</text>}
       </g>
     );
   }
   if (geometry.type === 'MultiPolygon') {
     return (
-      <g className="coverage-geometry-group" tabIndex={0} role="img" aria-label={label}>
+      <g className={`coverage-geometry-group${active ? ' is-active' : ''}`} {...activateProps}>
         {(geometry.coordinates || []).map((polygon, index) => (
           <path key={`${location.id}-poly-${index}`} className={`coverage-area ${toneClass} status-${location.status}`} d={coveragePolygonPath(polygon, projection)}>
             <title>{label}</title>
           </path>
         ))}
-        {center && <text x={center.x} y={center.y} className="coverage-map-label">{labelText}</text>}
+        {center && <text x={center.x} y={center.y} className="coverage-map-label">{location.markerLabel || labelText}</text>}
       </g>
     );
   }
   if (geometry.type === 'LineString') {
     return (
-      <g className="coverage-geometry-group" tabIndex={0} role="img" aria-label={label}>
+      <g className={`coverage-geometry-group${active ? ' is-active' : ''}`} {...activateProps}>
         <path className={`coverage-line ${toneClass} status-${location.status}`} d={coverageLinePath(geometry.coordinates || [], projection)}>
           <title>{label}</title>
         </path>
-        {center && <text x={center.x} y={center.y - 10} className="coverage-map-label">{labelText}</text>}
+        {center && <text x={center.x} y={center.y - 10} className="coverage-map-label">{location.markerLabel || labelText}</text>}
       </g>
     );
   }
   if (geometry.type === 'MultiLineString') {
     return (
-      <g className="coverage-geometry-group" tabIndex={0} role="img" aria-label={label}>
+      <g className={`coverage-geometry-group${active ? ' is-active' : ''}`} {...activateProps}>
         {(geometry.coordinates || []).map((line, index) => (
           <path key={`${location.id}-line-${index}`} className={`coverage-line ${toneClass} status-${location.status}`} d={coverageLinePath(line, projection)}>
             <title>{label}</title>
           </path>
         ))}
-        {center && <text x={center.x} y={center.y - 10} className="coverage-map-label">{labelText}</text>}
+        {center && <text x={center.x} y={center.y - 10} className="coverage-map-label">{location.markerLabel || labelText}</text>}
       </g>
     );
   }
   if (geometry.type === 'Point') {
     const point = projectCoveragePoint(geometry.coordinates || [0, 0], projection);
     return (
-      <g className={`coverage-marker ${toneClass} status-${location.status}`} transform={`translate(${point.x} ${point.y})`} tabIndex={0} role="img" aria-label={label}>
+      <g className={`coverage-marker ${toneClass} status-${location.status}${active ? ' is-active' : ''}`} transform={`translate(${point.x} ${point.y})`} {...activateProps}>
         <title>{label}</title>
         <circle r="13" className="coverage-marker-outer" />
         <circle r="9" className="coverage-marker-inner" />
-        <text y="3.5" textAnchor="middle" className="coverage-marker-text">{coverageMarkerText(location.status)}</text>
+        <text y="3.5" textAnchor="middle" className="coverage-marker-text">{location.markerLabel || coverageMarkerText(location.status)}</text>
         <text x="16" y="4" className="coverage-map-label coverage-point-label">{labelText}</text>
       </g>
     );
@@ -2297,18 +2548,16 @@ function CoverageMapGeometry({ location, projection }) {
   return null;
 }
 
-function ServiceCoverageMapSection({
-  serviceType,
-  serviceLocations,
-  propertyAddress,
-  serviceDate,
+function ServiceCoverageMap({
+  coverage,
   evidenceLevel,
   mapBackgroundUrl,
   mapAttribution,
-  loading = false,
+  activeItemId,
+  onActivate,
 }) {
-  const normalizedServiceType = normalizeCoverageServiceType(serviceType);
-  const locations = Array.isArray(serviceLocations) ? serviceLocations : [];
+  const normalizedServiceType = normalizeCoverageServiceType(coverage?.serviceLine);
+  const locations = Array.isArray(coverage?.items) ? coverage.items : [];
   const imageLocations = locations.map(coverageImageDisplayLocation);
   const imageRenderableCount = imageLocations.filter(hasRenderableCoverageGeometry).length;
   const canUseImageGeometry = Boolean(mapBackgroundUrl)
@@ -2324,98 +2573,227 @@ function ServiceCoverageMapSection({
   );
   const renderableLocations = displayLocations.filter(hasRenderableCoverageGeometry);
   const projection = useMemo(() => buildCoverageProjection(renderableLocations), [renderableLocations]);
-  const legend = coverageLegendItems(locations, normalizedServiceType);
+  const legend = Array.isArray(coverage?.legend) && coverage.legend.length
+    ? coverage.legend.map((entry) => {
+      const config = coverageStatusConfig(entry.key);
+      return {
+        key: entry.key,
+        tone: config.tone,
+        Icon: config.Icon,
+        label: entry.label || config.label,
+      };
+    })
+    : coverageLegendItems(locations, normalizedServiceType);
   const evidenceNote = EVIDENCE_COPY[evidenceLevel]
     || EVIDENCE_COPY[locations.find((location) => EVIDENCE_COPY[location.evidenceLevel])?.evidenceLevel];
-  const subtitle = coverageSectionSubtitle(normalizedServiceType);
+  if (!coverage?.map?.available || !locations.length) return null;
 
-  if (loading) {
-    return (
-      <section className="sr-section service-coverage-section service-coverage-loading" id="service-coverage-map">
-        <h2>Coverage Map</h2>
-        <div className="coverage-skeleton-map" aria-label="Loading service coverage map" />
-        <div className="coverage-skeleton-list">
-          <span />
-          <span />
-          <span />
+  return (
+    <div className="service-coverage-map-panel">
+      <div
+        className={`service-coverage-map${activeMapBackgroundUrl ? ' has-map-image' : ''}`}
+        style={activeMapBackgroundUrl ? { '--coverage-map-image': `url("${activeMapBackgroundUrl}")` } : undefined}
+      >
+        {projection && renderableLocations.length ? (
+          <svg
+            role="img"
+            aria-label="Service coverage map showing technician-marked service coverage"
+            viewBox={`0 0 ${COVERAGE_VIEWBOX.width} ${COVERAGE_VIEWBOX.height}`}
+            className="coverage-map-svg"
+          >
+            <defs>
+              <pattern id="coverage-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+                <path d="M24 0H0V24" className="coverage-grid-line" />
+              </pattern>
+              <pattern id="coverage-partial-pattern" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                <rect width="9" height="9" className="coverage-partial-bg" />
+                <line x1="0" y1="0" x2="0" y2="9" className="coverage-partial-line" />
+              </pattern>
+            </defs>
+            <rect width={COVERAGE_VIEWBOX.width} height={COVERAGE_VIEWBOX.height} className="coverage-map-base" />
+            {!activeMapBackgroundUrl && (
+              <>
+                <rect x="36" y="30" width="568" height="280" rx="12" className="coverage-map-lot" />
+                <rect x="248" y="124" width="144" height="92" rx="5" className="coverage-map-structure" />
+                <rect x="392" y="146" width="64" height="70" rx="4" className="coverage-map-structure coverage-map-garage" />
+                <path d="M456 217L512 310" className="coverage-map-drive" />
+              </>
+            )}
+            {renderableLocations.map((location) => (
+              <CoverageMapGeometry
+                key={location.id || `${location.areaName || location.name}-${location.status}`}
+                location={location}
+                projection={projection}
+                active={activeItemId === location.id}
+                onActivate={onActivate}
+              />
+            ))}
+          </svg>
+        ) : (
+          <div className="coverage-empty-state coverage-empty-state-map">Map geometry is not available for these locations.</div>
+        )}
+        {activeMapBackgroundUrl && mapAttribution && <div className="map-attribution coverage-map-attribution">{mapAttribution}</div>}
+      </div>
+
+      {legend.length > 0 && (
+        <div className="coverage-legend" aria-label="Service coverage legend">
+          {legend.map(({ key, label, tone, Icon }) => (
+            <div className={`coverage-legend-item status-${tone}`} key={key}>
+              <span className="coverage-legend-swatch" aria-hidden="true"><Icon size={14} strokeWidth={2} /></span>
+              <span>{label}</span>
+            </div>
+          ))}
         </div>
+      )}
+
+      {evidenceNote && <p className="coverage-evidence-note">{evidenceNote}</p>}
+    </div>
+  );
+}
+
+function ServiceCoverageSummary({ summary = {} }) {
+  const rows = [
+    ['Completed', summary.completedCount || 0, 'green'],
+    ['Inspected', summary.inspectedCount || 0, 'blue'],
+    ['Inaccessible', summary.inaccessibleCount || 0, 'orange'],
+    ['Needs Attention', summary.needsAttentionCount || 0, 'orange'],
+  ];
+  return (
+    <div className="service-coverage-summary" aria-label="Service coverage summary">
+      {rows.map(([label, value, tone]) => (
+        <div className={`service-coverage-chip status-${tone}`} key={label}>
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ServiceCoverageList({ coverage, activeItemId, onActivate }) {
+  const groups = Array.isArray(coverage?.groups) && coverage.groups.length
+    ? coverage.groups
+    : [{ serviceLine: coverage?.serviceLine, items: coverage?.items || [] }];
+  const showGroupTitles = groups.length > 1;
+
+  return (
+    <div className="service-coverage-list" aria-label="Service coverage areas">
+      {groups.map((group) => (
+        <div className="service-coverage-list-group" key={group.serviceLine || group.title || 'coverage'}>
+          {showGroupTitles && <h3>{group.title || formatEnumLabel(group.serviceLine)}</h3>}
+          {(group.items || []).map((item) => {
+            const config = coverageStatusConfig(item.status);
+            const statusLabel = item.customerStatusLabel || item.statusLabel || config.label;
+            return (
+              <article
+                className={`coverage-summary-row zone-service-row service-coverage-item${activeItemId === item.id ? ' is-active' : ''}`}
+                key={item.id}
+                tabIndex={0}
+                role="button"
+                aria-pressed={activeItemId === item.id ? 'true' : 'false'}
+                onClick={() => onActivate(item.id)}
+                onFocus={() => onActivate(item.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    onActivate(item.id);
+                  }
+                }}
+              >
+                <div className="zone-service-identity">
+                  <span className="zone-letter-badge" aria-label={item.markerLabel ? `Coverage marker ${item.markerLabel}` : 'Service coverage marker'}>
+                    {item.markerLabel}
+                  </span>
+                  <div className="zone-service-copy">
+                    <h3>{item.areaName}</h3>
+                    <p>{item.customerDescription}</p>
+                  </div>
+                </div>
+                <span className={`coverage-status-chip zone-status-chip status-${config.tone}`}>{statusLabel}</span>
+              </article>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ServiceCoverageCard({
+  coverage,
+  evidenceLevel,
+  mapBackgroundUrl,
+  mapAttribution,
+}) {
+  const [activeItemId, setActiveItemId] = useState(null);
+  if (!coverage?.enabled) return null;
+
+  const items = Array.isArray(coverage.items) ? coverage.items : [];
+  const showSummary = coverage.settings?.showSummaryCounts !== false;
+  const showList = coverage.settings?.showList !== false && items.length > 0;
+  const showMap = coverage.settings?.showMap !== false && coverage.map?.available;
+  const activeId = activeItemId || items[0]?.id || null;
+  const meta = [
+    coverage.address,
+    coverage.serviceDate ? formatDate(coverage.serviceDate) : null,
+  ].filter(Boolean);
+
+  if (!showList && !showMap) {
+    return (
+      <section className="sr-section service-coverage-section" id="service-coverage">
+        <span id="areas-serviced" className="legacy-section-anchor" aria-hidden="true" />
+        <span id="service-coverage-map" className="legacy-section-anchor" aria-hidden="true" />
+        <h2>{coverage.title || 'Service Coverage'}</h2>
+        <div className="coverage-empty-state">{coverage.unavailableText || 'Service coverage details were not recorded for this visit.'}</div>
       </section>
     );
   }
 
   return (
-    <section className="sr-section service-coverage-section" id="service-coverage-map">
+    <section className="sr-section service-coverage-section unified-service-coverage" id="service-coverage">
+      <span id="areas-serviced" className="legacy-section-anchor" aria-hidden="true" />
+      <span id="service-coverage-map" className="legacy-section-anchor" aria-hidden="true" />
       <div className="coverage-section-header">
         <div>
-          <h2>Coverage Map</h2>
-          <p className="map-context-copy">{subtitle}</p>
+          <h2>{coverage.title || 'Service Coverage'}</h2>
+          <p className="map-context-copy">{coverage.intro || coverage.introText || DEFAULT_SERVICE_COVERAGE_COPY.introByServiceLine.default}</p>
         </div>
-        {(propertyAddress || serviceDate) && (
-          <div className="coverage-map-meta" aria-label="Service map context">
-            {propertyAddress && <span>{propertyAddress}</span>}
-            {serviceDate && <span>{formatDate(serviceDate)}</span>}
+        {meta.length > 0 && (
+          <div className="coverage-map-meta" aria-label="Service coverage context">
+            {meta.map((item) => <span key={item}>{item}</span>)}
           </div>
         )}
       </div>
 
-      {!locations.length ? (
-        <div className="coverage-empty-state">Service coverage map is not available for this visit.</div>
-      ) : (
-        <>
-          <div
-            className={`service-coverage-map${activeMapBackgroundUrl ? ' has-map-image' : ''}`}
-            style={activeMapBackgroundUrl ? { '--coverage-map-image': `url("${activeMapBackgroundUrl}")` } : undefined}
-          >
-            {projection && renderableLocations.length ? (
-              <svg
-                role="img"
-                aria-label="Service coverage map showing completed, inspected, skipped, and noted service locations"
-                viewBox={`0 0 ${COVERAGE_VIEWBOX.width} ${COVERAGE_VIEWBOX.height}`}
-                className="coverage-map-svg"
-              >
-                <defs>
-                  <pattern id="coverage-grid" width="24" height="24" patternUnits="userSpaceOnUse">
-                    <path d="M24 0H0V24" className="coverage-grid-line" />
-                  </pattern>
-                  <pattern id="coverage-partial-pattern" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                    <rect width="9" height="9" className="coverage-partial-bg" />
-                    <line x1="0" y1="0" x2="0" y2="9" className="coverage-partial-line" />
-                  </pattern>
-                </defs>
-                <rect width={COVERAGE_VIEWBOX.width} height={COVERAGE_VIEWBOX.height} className="coverage-map-base" />
-                {!activeMapBackgroundUrl && (
-                  <>
-                    <rect x="36" y="30" width="568" height="280" rx="12" className="coverage-map-lot" />
-                    <rect x="248" y="124" width="144" height="92" rx="5" className="coverage-map-structure" />
-                    <rect x="392" y="146" width="64" height="70" rx="4" className="coverage-map-structure coverage-map-garage" />
-                    <path d="M456 217L512 310" className="coverage-map-drive" />
-                  </>
-                )}
-                {renderableLocations.map((location) => (
-                  <CoverageMapGeometry key={location.id || `${location.name}-${location.status}`} location={location} projection={projection} />
-                ))}
-              </svg>
-            ) : (
-              <div className="coverage-empty-state coverage-empty-state-map">Map geometry is not available for these locations.</div>
-            )}
-            {activeMapBackgroundUrl && mapAttribution && <div className="map-attribution coverage-map-attribution">{mapAttribution}</div>}
-          </div>
+      {showSummary && <ServiceCoverageSummary summary={coverage.summary} />}
 
-          {legend.length > 0 && (
-            <div className="coverage-legend" aria-label="Service coverage legend">
-              {legend.map(({ key, label, tone, Icon }) => (
-                <div className={`coverage-legend-item status-${tone}`} key={key}>
-                  <span className="coverage-legend-swatch" aria-hidden="true"><Icon size={14} strokeWidth={2} /></span>
-                  <span>{label}</span>
-                </div>
-              ))}
-            </div>
+      {showMap || showList ? (
+        <div className={`service-coverage-card-grid${showMap ? ' has-map' : ' list-only'}${showList ? ' has-list' : ' map-only'}`}>
+          {showMap ? (
+            <ServiceCoverageMap
+              coverage={coverage}
+              evidenceLevel={evidenceLevel}
+              mapBackgroundUrl={mapBackgroundUrl}
+              mapAttribution={mapAttribution}
+              activeItemId={activeId}
+              onActivate={setActiveItemId}
+            />
+          ) : (
+            <p className="coverage-map-unavailable">Coverage map was not recorded for this visit.</p>
           )}
+          {showList ? (
+            <ServiceCoverageList
+              coverage={coverage}
+              activeItemId={activeId}
+              onActivate={setActiveItemId}
+            />
+          ) : (
+            <p className="coverage-map-unavailable">Technician-marked coverage is shown on the map.</p>
+          )}
+        </div>
+      ) : null}
 
-          {evidenceNote && <p className="coverage-evidence-note">{evidenceNote}</p>}
-          <p className="map-footnote">Service coverage is based on technician-marked locations and available visit data. It is not a property survey.</p>
-        </>
-      )}
+      <p className="map-footnote">{coverage.disclaimer || DEFAULT_SERVICE_COVERAGE_COPY.disclaimerText}</p>
     </section>
   );
 }
@@ -2687,106 +3065,16 @@ function ServiceTimelineSection({ serviceType, workflowEvents, customerInteracti
   );
 }
 
-function zoneColorByIndex(index = 0) {
-  return TREATMENT_OVERLAY_COLORS[Math.max(0, index) % TREATMENT_OVERLAY_COLORS.length];
-}
-
-function zoneLetterByIndex(index = 0) {
-  return String.fromCharCode(65 + (Math.max(0, index) % 26));
-}
-
-function areaStatusCopy(row = {}) {
-  const status = String(row.status || '').trim();
-  if (!status) return row.zoneLetter ? `Zone ${row.zoneLetter}` : 'Service area';
-  const verb = status.toLowerCase() === 'serviced' ? 'treated' : status.toLowerCase();
-  return row.zoneLetter ? `Zone ${row.zoneLetter} ${verb}` : status;
-}
-
-function AreasServicedSection({ serviceAreas = [], serviceLocations = [], serviceType, zones = [] }) {
-  const normalizedServiceType = normalizeCoverageServiceType(serviceType);
-  const zoneIndexById = new Map((zones || []).map((zone, index) => [String(zone.id), index]));
-  const zoneById = new Map((zones || []).map((zone, index) => [
-    String(zone.id),
-    {
-      ...zone,
-      color: zone.color || zoneColorByIndex(index),
-    },
-  ]));
-  const locationRows = Array.isArray(serviceLocations) && serviceLocations.length
-    ? serviceLocations.map((location, index) => {
-      const zone = zoneById.get(String(location.zoneId || location.zone_id || ''));
-      const status = coverageStatusConfig(location.status);
-      return {
-        key: location.id || `${location.name}-${location.status}`,
-        name: location.name,
-        status: status.label,
-        tone: status.tone,
-        zoneLetter: zone?.letter || zoneLetterByIndex(index),
-        zoneLabel: zone?.label || location.name,
-        zoneColor: zone?.color || zoneColorByIndex(zoneIndexById.get(String(location.zoneId || location.zone_id || '')) ?? index),
-      };
-    })
-    : serviceAreas.map((area, index) => ({
-      key: area,
-      name: area,
-      status: 'Serviced',
-      tone: 'green',
-      zoneLetter: zones[index]?.letter || zoneLetterByIndex(index),
-      zoneLabel: zones[index]?.label || area,
-      zoneColor: zones[index]?.color || zoneColorByIndex(index),
-    }));
-
-  return (
-    <section className="sr-section areas-serviced-section" id="areas-serviced">
-      <div className="coverage-section-header">
-        <div>
-          <h2>Areas Serviced</h2>
-          <p className="map-context-copy">{coverageSectionSubtitle(normalizedServiceType)}</p>
-        </div>
-      </div>
-      {!locationRows.length ? (
-        <div className="coverage-empty-state">Serviced areas were not recorded for this visit.</div>
-      ) : (
-        <div className="areas-serviced-list" aria-label="Areas serviced">
-          {locationRows.map((row) => (
-            <article
-              className="coverage-summary-row zone-service-row"
-              key={row.key}
-              style={{ '--zone-color': row.zoneColor }}
-            >
-              <div className="zone-service-identity">
-                <span className="zone-letter-badge" aria-label={row.zoneLetter ? `Zone ${row.zoneLetter}` : 'Service zone'}>
-                  {row.zoneLetter}
-                </span>
-                <div className="zone-service-copy">
-                  <h3>{row.name}</h3>
-                  <p>{areaStatusCopy(row)}</p>
-                </div>
-              </div>
-              <span className={`coverage-status-chip zone-status-chip status-${row.tone}`}>{row.status}</span>
-            </article>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
 function ServiceReportCoverageAndWorkflow({
   serviceType,
-  serviceAreas,
-  serviceLocations,
+  serviceCoverage,
   workflowEvents,
   customerInteraction,
   visitTiming,
   timingSource,
-  propertyAddress,
-  mapCenter,
-  serviceDate,
   evidenceLevel,
   mapBackgroundUrl,
   mapAttribution,
-  zones,
 }) {
   return (
     <>
@@ -2797,18 +3085,8 @@ function ServiceReportCoverageAndWorkflow({
         visitTiming={visitTiming}
         timingSource={timingSource}
       />
-      <AreasServicedSection
-        serviceType={serviceType}
-        serviceAreas={serviceAreas}
-        serviceLocations={serviceLocations}
-        zones={zones}
-      />
-      <ServiceCoverageMapSection
-        serviceType={serviceType}
-        serviceLocations={serviceLocations}
-        propertyAddress={propertyAddress}
-        mapCenter={mapCenter}
-        serviceDate={serviceDate}
+      <ServiceCoverageCard
+        coverage={serviceCoverage}
         evidenceLevel={evidenceLevel}
         mapBackgroundUrl={mapBackgroundUrl}
         mapAttribution={mapAttribution}
@@ -3514,6 +3792,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const serviceNotes = String(data.legacy?.notes || '').trim();
   const visitSummary = String(data.summary || '').trim();
   const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas.filter(Boolean) : [];
+  const serviceCoverage = normalizeServiceCoverage(data);
   const findings = Array.isArray(data.findings) ? data.findings : [];
   const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
   const hasApplications = (data.applications || []).length > 0;
@@ -4018,9 +4297,85 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 850;
           white-space: nowrap;
         }
-        .areas-serviced-list {
+        .legacy-section-anchor {
+          position: relative;
+          display: block;
+          height: 0;
+          width: 0;
+          overflow: hidden;
+        }
+        .service-coverage-summary {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin: 14px 0;
+        }
+        .service-coverage-chip {
+          display: inline-flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          min-width: 132px;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 8px 11px;
+          background: #fff;
+          font-size: 12px;
+          line-height: 1;
+          font-weight: 800;
+        }
+        .service-coverage-chip strong {
+          font-size: 13px;
+        }
+        .service-coverage-chip.status-green { border-color: #86efac; background: #dcfce7; color: #14532d; }
+        .service-coverage-chip.status-blue { border-color: #93c5fd; background: #dbeafe; color: #1e3a8a; }
+        .service-coverage-chip.status-orange { border-color: #fdba74; background: #ffedd5; color: #7c2d12; }
+        .service-coverage-card-grid {
+          display: grid;
+          grid-template-columns: minmax(0, .88fr) minmax(320px, 1.12fr);
+          grid-template-areas: "list map";
+          gap: 14px;
+          align-items: start;
+        }
+        .service-coverage-card-grid.list-only {
+          grid-template-columns: 1fr;
+          grid-template-areas: "list";
+        }
+        .service-coverage-card-grid.map-only {
+          grid-template-columns: 1fr;
+          grid-template-areas: "map";
+        }
+        .service-coverage-map-panel {
+          grid-area: map;
+          min-width: 0;
+        }
+        .service-coverage-list {
+          grid-area: list;
           display: grid;
           gap: 8px;
+          min-width: 0;
+        }
+        .service-coverage-list-group {
+          display: grid;
+          gap: 8px;
+        }
+        .service-coverage-list-group > h3 {
+          margin: 2px 0 4px;
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.25;
+          font-weight: 850;
+        }
+        .coverage-map-unavailable {
+          grid-area: map;
+          margin: 0;
+          border: 1px dashed var(--line);
+          border-radius: 12px;
+          background: var(--wash);
+          color: var(--muted);
+          padding: 14px;
+          font-size: 13px;
+          line-height: 1.45;
         }
         .sr-pressure {
           justify-self: end;
@@ -4227,6 +4582,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke: #111827;
           stroke-width: 3;
         }
+        .coverage-geometry-group.is-active .coverage-area,
+        .coverage-geometry-group.is-active .coverage-line,
+        .coverage-marker.is-active .coverage-marker-outer {
+          stroke: #111827;
+          stroke-width: 3;
+        }
         .coverage-marker-outer {
           fill: rgba(255,255,255,.94);
           stroke: rgba(15,23,42,.28);
@@ -4332,6 +4693,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .zone-service-row {
           align-items: center;
         }
+        .service-coverage-item {
+          cursor: pointer;
+          transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+        }
+        .service-coverage-item:hover,
+        .service-coverage-item:focus,
+        .service-coverage-item.is-active {
+          border-color: rgba(27,44,91,.36);
+          box-shadow: 0 0 0 3px rgba(27,44,91,.08);
+          outline: none;
+        }
         .zone-service-identity {
           display: flex;
           align-items: center;
@@ -4374,12 +4746,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 12px;
         }
         .coverage-status-chip.zone-status-chip {
-          border-color: var(--zone-color, ${B.blueDeeper});
-          background: #fff;
-          color: var(--zone-color, ${B.blueDeeper});
-          border-color: color-mix(in srgb, var(--zone-color, ${B.blueDeeper}) 42%, #fff);
-          background: color-mix(in srgb, var(--zone-color, ${B.blueDeeper}) 12%, #fff);
-          color: var(--zone-color, ${B.blueDeeper});
+          font-weight: 850;
         }
         .coverage-empty-state {
           border: 1px dashed var(--line);
@@ -5807,6 +6174,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .report-ask-actions { grid-template-columns: 1fr; }
           .coverage-section-header { flex-direction: column; }
           .coverage-map-meta { justify-items: start; text-align: left; max-width: none; }
+          .service-coverage-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .service-coverage-chip { min-width: 0; }
+          .service-coverage-card-grid,
+          .service-coverage-card-grid.has-map,
+          .service-coverage-card-grid.list-only,
+          .service-coverage-card-grid.map-only {
+            grid-template-columns: 1fr;
+            grid-template-areas: "map" "list";
+          }
           .service-coverage-map { aspect-ratio: 32 / 17; }
           .coverage-map-label { display: none; }
           .coverage-summary-row { align-items: flex-start; flex-direction: column; }
@@ -5879,19 +6255,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <div id="map">
           <ServiceReportCoverageAndWorkflow
             serviceType={data.coverageServiceType || data.serviceLine || data.serviceType}
-            serviceAreas={serviceAreas}
-            serviceLocations={data.serviceLocations}
+            serviceCoverage={serviceCoverage}
             workflowEvents={data.workflowEvents}
             customerInteraction={data.customerInteraction}
             visitTiming={data.visitTiming}
             timingSource={data}
-            propertyAddress={data.propertyAddress || data.serviceAddress}
-            mapCenter={data.mapCenter}
-            serviceDate={data.serviceDate}
             evidenceLevel={data.evidenceLevel}
             mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
             mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
-            zones={data.zones}
           />
         </div>
 

@@ -10,7 +10,7 @@
 //
 // Destinations that already exist as standalone routes are linked
 // directly. Tabs that only live inside SettingsPage (general, integrations,
-// gates, team, system) deep-link via ?tab=X — the desktop
+// gates, team, service-reports, system) deep-link via ?tab=X — the desktop
 // SettingsPage now reads that param on mount.
 
 import { useMemo, useState } from "react";
@@ -31,6 +31,11 @@ const SECTIONS = [
     to: "/admin/communications",
   },
   { key: "team", label: "Team", to: "/admin/settings?tab=team" },
+  {
+    key: "service-reports",
+    label: "Service Reports",
+    to: "/admin/settings?tab=service-reports",
+  },
   {
     key: "integrations",
     label: "Integrations",
