@@ -227,6 +227,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
 
 async function sendReceiptEmail(invoiceId, options = {}) {
   const memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
+  // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
+  // retried delivery doesn't email the customer twice; manual operator
+  // resends from /admin/invoices intentionally omit it so the operator
+  // can always force a fresh send.
+  const idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
+    ? options.idempotencyKey.trim()
+    : null;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
@@ -329,9 +336,17 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
         triggerEventId: `invoice_receipt:${invoice.id}`,
+        idempotencyKey,
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
       });
+      if (result?.blocked) {
+        return { ok: false, error: result.reason || 'Email suppressed', blocked: true };
+      }
+      if (result?.deduped) {
+        logger.info(`[invoice-email] Receipt email deduped for ${invoice.invoice_number} (idempotencyKey=${idempotencyKey})`);
+        return { ok: true, deduped: true, messageId: result.message?.provider_message_id || null };
+      }
       logger.info(`[invoice-email] Template receipt email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
       return { ok: true, messageId: result.message?.provider_message_id || null };
     } catch (err) {

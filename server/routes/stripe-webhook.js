@@ -599,19 +599,24 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   // ReviewService.create is idempotent by service_record_id.
   await scheduleReviewAfterPaidInvoice(piId);
 
-  // ── Auto-send payment receipt SMS ─────────────────────────
+  // ── Auto-send payment receipt (SMS + email) ───────────────
   //
-  // Single source of truth for "payment succeeded → text the customer a
-  // receipt." Runs for every Stripe payment path (Payment Element on
-  // /pay/:token, Tap to Pay, autopay charges, Payment Links, etc.).
+  // Single source of truth for "payment succeeded → notify the customer."
+  // Runs for every Stripe payment path (Payment Element on /pay/:token,
+  // Tap to Pay, autopay charges, Payment Links, etc.).
   //
-  // sendReceipt() is idempotent against invoices.receipt_sent_at, so
-  // duplicate webhooks (Stripe retries on 5xx) and the legacy
-  // /pay/:token/confirm fire-and-forget call won't double-send.
+  // SMS: InvoiceService.sendReceipt() is idempotent against
+  //   invoices.receipt_sent_at, so duplicate webhooks (Stripe retries on
+  //   5xx) and the legacy /pay/:token/confirm fire-and-forget call won't
+  //   double-send.
+  // Email: sendReceiptEmail() with an idempotency key (`receipt_email_auto:
+  //   {invoiceId}`) — the email_messages.idempotency_key unique index gives
+  //   the same dedupe guarantee on the email side, without depending on
+  //   receipt_sent_at (which only stamps after SMS).
   //
-  // Fire-and-forget — the invoice is already marked paid; a Twilio
-  // outage shouldn't make Stripe retry the whole webhook. Logged loudly
-  // so operators can manually resend via the admin "SEND RECEIPT" button.
+  // Channels run independently — a missing phone / missing email skips
+  // that channel but the other still fires. Fire-and-forget: a Twilio or
+  // SendGrid outage shouldn't make Stripe retry the whole webhook.
   //
   // Wait until enrichment + save-card persistence below have a chance
   // to run by deferring to setImmediate, so card_brand / card_last_four
@@ -622,9 +627,24 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         const paidInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
         if (!paidInvoice) return;
         const InvoiceService = require('../services/invoice');
-        const result = await InvoiceService.sendReceipt(paidInvoice.id);
-        if (result?.sent === false && result.reason !== 'already-sent') {
-          logger.warn(`[stripe-webhook] Receipt not sent for invoice ${paidInvoice.invoice_number}: ${result.reason}`);
+        const { sendReceiptEmail } = require('../services/invoice-email');
+
+        const smsResult = await InvoiceService.sendReceipt(paidInvoice.id)
+          .catch((err) => ({ sent: false, reason: err.message }));
+        if (smsResult?.sent === false && smsResult.reason !== 'already-sent') {
+          logger.warn(`[stripe-webhook] Receipt SMS not sent for invoice ${paidInvoice.invoice_number}: ${smsResult.reason}`);
+        }
+
+        const emailResult = await sendReceiptEmail(paidInvoice.id, {
+          idempotencyKey: `receipt_email_auto:${paidInvoice.id}`,
+        }).catch((err) => ({ ok: false, error: err.message }));
+        if (!emailResult?.ok) {
+          // 'No receipt recipient email' is the expected no-email-on-file case
+          // and not actionable; everything else (suppression, send failure) is.
+          const reason = emailResult?.error || 'unknown';
+          if (reason !== 'No receipt recipient email') {
+            logger.warn(`[stripe-webhook] Receipt email not sent for invoice ${paidInvoice.invoice_number}: ${reason}`);
+          }
         }
       } catch (err) {
         logger.error(`[stripe-webhook] Auto-receipt failed for PI ${piId}: ${err.message}`, { stack: err.stack });
