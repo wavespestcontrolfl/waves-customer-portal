@@ -595,14 +595,13 @@ function coerceLotSize(raw) {
 }
 
 function coerceUnqualifiedLotSqft(value, options = {}) {
+  if (!Number.isFinite(value) || value <= 0) return null;
   if (value < LOT_SQFT_MIN) {
     const converted = value * SQFT_PER_ACRE;
     return converted <= LOT_SQFT_MAX ? converted : null;
   }
-  if (value > LOT_SQFT_MAX) {
-    return options.allowOversizedSqft ? value : null;
-  }
-  return value;
+  if (value <= LOT_SQFT_MAX) return value;
+  return options.allowOversizedSqft ? value : null;
 }
 
 function clampLotSqft(n) {
