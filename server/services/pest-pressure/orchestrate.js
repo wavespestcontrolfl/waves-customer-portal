@@ -20,7 +20,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const { calculatePestPressureScore } = require('./calculate');
-const { resolveReviewWindow } = require('./review-window');
+const { resolveReviewWindow, isOneTimeServiceLabel } = require('./review-window');
 const {
   loadActiveConfig,
   loadPreviousScore,
@@ -138,6 +138,21 @@ async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
 
   const config = await loadActiveConfig(knex);
   if (!config.enabled) {
+    return null;
+  }
+
+  // Service-line scope: by default Pest Pressure runs only on the lines
+  // where the multi-visit-trend model makes sense (pest + mosquito).
+  const serviceLineGuess = serviceRecord.service_line || detectServiceLine(serviceRecord.service_type);
+  const enabledLines = Array.isArray(config.enabledServiceLines) ? config.enabledServiceLines : [];
+  if (enabledLines.length > 0 && !enabledLines.includes(serviceLineGuess)) {
+    return null;
+  }
+
+  // Recurring-frequency scope: skip explicit one-time service labels.
+  // Unknown-frequency recurring jobs (e.g. "General Pest Control") fall
+  // through and use the engine's fallback review window.
+  if (config.requireRecurringFrequency && isOneTimeServiceLabel(serviceRecord.service_type)) {
     return null;
   }
 

@@ -8,6 +8,25 @@
 
 const COMPONENT_KEYS = ['client', 'technician', 'reService', 'recurring', 'risk'];
 
+// Canonical service_line IDs returned by
+// services/service-report/service-line-configs.js#detectServiceLine. The
+// orchestrator's scope gate compares against
+// service_records.service_line || detectServiceLine(...), so the admin
+// allow list must use the same vocabulary or the toggle silently does
+// nothing. 'termite' covers termite bait monitoring;
+// requireRecurringFrequency keeps one-time termite jobs out.
+const SUPPORTED_SERVICE_LINES = [
+  'pest',
+  'mosquito',
+  'rodent',
+  'termite',
+  'lawn',
+  'tree_shrub',
+  'palm',
+];
+
+const RECURRING_FREQUENCY_KEYS = new Set(['monthly', 'bimonthly', 'quarterly', 'semiannual']);
+
 const DEFAULT_CONFIG = Object.freeze({
   enabled: true,
   showOnCustomerReport: true,
@@ -17,6 +36,8 @@ const DEFAULT_CONFIG = Object.freeze({
   minimumDataRequired: { requireOneOf: ['technicianRating', 'clientRating', 'history'] },
   allowManualOverride: true,
   allowTechnicianClientRatingEntry: true,
+  enabledServiceLines: ['pest', 'mosquito'],
+  requireRecurringFrequency: true,
   weights: { client: 25, technician: 30, reService: 20, recurring: 15, risk: 10 },
   labels: [
     { key: 'very_low', name: 'Very Low', min: 0.0, max: 0.9, description: 'Little to no pest activity.' },
@@ -35,6 +56,7 @@ const DEFAULT_CONFIG = Object.freeze({
     monthly: 30,
     bimonthly: 60,
     quarterly: 90,
+    semiannual: 180,
     fallbackDays: 90,
   },
   clientQuestionText: {
@@ -158,10 +180,26 @@ function validateFrequencyWindows(w, errors) {
     errors.push({ field: 'serviceFrequencyWindows', message: 'must be an object' });
     return;
   }
-  for (const key of ['monthly', 'bimonthly', 'quarterly', 'fallbackDays']) {
+  for (const key of ['monthly', 'bimonthly', 'quarterly', 'semiannual', 'fallbackDays']) {
     const v = w[key];
     if (!isFiniteNumber(v) || v <= 0) {
       errors.push({ field: `serviceFrequencyWindows.${key}`, message: 'must be a positive number of days' });
+    }
+  }
+}
+
+function validateEnabledServiceLines(lines, errors) {
+  if (!Array.isArray(lines)) {
+    errors.push({ field: 'enabledServiceLines', message: 'must be an array' });
+    return;
+  }
+  if (lines.length === 0) {
+    errors.push({ field: 'enabledServiceLines', message: 'must include at least one service line' });
+    return;
+  }
+  for (const line of lines) {
+    if (!SUPPORTED_SERVICE_LINES.includes(line)) {
+      errors.push({ field: 'enabledServiceLines', message: `unknown service line "${line}"` });
     }
   }
 }
@@ -175,6 +213,10 @@ function validateConfig(config) {
   validateLabels(config.labels, errors);
   validateTrendThresholds(config.trendThresholds, errors);
   validateFrequencyWindows(config.serviceFrequencyWindows, errors);
+  validateEnabledServiceLines(config.enabledServiceLines, errors);
+  if (typeof config.requireRecurringFrequency !== 'boolean') {
+    errors.push({ field: 'requireRecurringFrequency', message: 'must be a boolean' });
+  }
   if (!VALID_MISSING_DATA_BEHAVIORS.has(config.missingDataBehavior)) {
     errors.push({ field: 'missingDataBehavior', message: `must be one of ${[...VALID_MISSING_DATA_BEHAVIORS].join(', ')}` });
   }
@@ -197,6 +239,8 @@ module.exports = {
   COMPONENT_KEYS,
   DEFAULT_CONFIG,
   VALID_MISSING_DATA_BEHAVIORS,
+  SUPPORTED_SERVICE_LINES,
+  RECURRING_FREQUENCY_KEYS,
   validateConfig,
   snapshotConfig,
 };

@@ -18,6 +18,7 @@ const CONFIG_COLUMNS = [
   'show_on_customer_report', 'show_how_calculated', 'show_component_breakdown_to_customer',
   'missing_data_behavior', 'minimum_data_required',
   'allow_manual_override', 'allow_technician_client_rating_entry',
+  'enabled_service_lines', 'require_recurring_frequency',
   'weights', 'labels', 'trend_thresholds',
   'service_frequency_windows', 'client_question_text',
   'customer_explanation_text', 'calculation_version',
@@ -37,6 +38,12 @@ function rowToConfig(row) {
     minimumDataRequired: row.minimum_data_required || {},
     allowManualOverride: row.allow_manual_override,
     allowTechnicianClientRatingEntry: row.allow_technician_client_rating_entry,
+    enabledServiceLines: Array.isArray(row.enabled_service_lines)
+      ? row.enabled_service_lines
+      : DEFAULT_CONFIG.enabledServiceLines,
+    requireRecurringFrequency: typeof row.require_recurring_frequency === 'boolean'
+      ? row.require_recurring_frequency
+      : DEFAULT_CONFIG.requireRecurringFrequency,
     weights: row.weights,
     labels: row.labels,
     trendThresholds: row.trend_thresholds,
@@ -182,6 +189,8 @@ async function updateActiveConfig(knex, { scope = 'global', updatedBy = null, co
     minimum_data_required: JSON.stringify(config.minimumDataRequired || {}),
     allow_manual_override: Boolean(config.allowManualOverride),
     allow_technician_client_rating_entry: Boolean(config.allowTechnicianClientRatingEntry),
+    enabled_service_lines: JSON.stringify(Array.isArray(config.enabledServiceLines) ? config.enabledServiceLines : []),
+    require_recurring_frequency: Boolean(config.requireRecurringFrequency),
     weights: JSON.stringify(config.weights),
     labels: JSON.stringify(config.labels),
     trend_thresholds: JSON.stringify(config.trendThresholds),

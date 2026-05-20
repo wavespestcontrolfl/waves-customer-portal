@@ -1,7 +1,9 @@
 import { useState, useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
+  Activity,
   Building2,
+  ChevronRight,
   Plug,
   Server,
   Settings as SettingsIcon,
@@ -331,6 +333,38 @@ export default function SettingsPage() {
               ))}
             </div>{" "}
           </Card>{" "}
+          <Card>
+            <Link
+              to="/admin/settings/pest-pressure"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                textDecoration: "none",
+                color: "inherit",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div
+                  style={{
+                    width: 36, height: 36, borderRadius: 8,
+                    background: D.bg, display: "flex",
+                    alignItems: "center", justifyContent: "center",
+                  }}
+                >
+                  <Activity size={18} color={D.heading} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>Pest Pressure</div>
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                    Configure the 0–5 score on customer service reports — service-line scope, weights, labels, trend thresholds, overrides, audit log.
+                  </div>
+                </div>
+              </div>
+              <ChevronRight size={18} color={D.muted} />
+            </Link>
+          </Card>
         </div>
       )}
       {/* ── INTEGRATIONS ── */}
