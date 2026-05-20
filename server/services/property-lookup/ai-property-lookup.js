@@ -687,11 +687,12 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
 }
 
 function isPlausibleAfterUnitValue(afterMatch, afterValue, unitKind) {
+  const { rawNumber, trailing } = getAfterUnitNumberContext(afterMatch);
+  if (hasMetadataAfterUnitTrailing(trailing)) return false;
+
   const separator = afterMatch[1] || '';
   if (/[:=]|\bof\b/i.test(separator)) return true;
 
-  const { rawNumber, trailing } = getAfterUnitNumberContext(afterMatch);
-  if (hasMetadataAfterUnitTrailing(trailing)) return false;
   if (unitKind !== 'acre') return true;
 
   const unitToken = (afterMatch[0].match(ACRE_UNIT_RE)?.[0] || '').replace(/\./g, '').toLowerCase();

@@ -19,8 +19,10 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot 13 AC 0.02')).toBeNull();
     expect(coerceLotSize('Acreage: 5')).toBe(200000);
     expect(coerceLotSize('Acreage 2024 tax year')).toBeNull();
+    expect(coerceLotSize('Acreage: 2024 tax year')).toBeNull();
     expect(coerceLotSize('0.02 acres 2024 tax record')).toBeNull();
     expect(coerceLotSize('AC 2024 tax year')).toBeNull();
+    expect(coerceLotSize('AC: 2024 tax record')).toBeNull();
     expect(coerceLotSize('AC 2024, tax year')).toBeNull();
     expect(coerceLotSize('AC 13 plat')).toBeNull();
     expect(coerceLotSize('AC 13 - plat')).toBeNull();
