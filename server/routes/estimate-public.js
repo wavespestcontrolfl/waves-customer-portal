@@ -1837,7 +1837,7 @@ function renderPage(token, estimate, estData) {
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
   .card-sub{color:#6B7280;font-size:14px;margin:0 0 14px}
-  .ai-card{background:#F7F5EE}
+  .ai-card{background:#F2EEE0}
   .waveguard-ai-card{display:grid;gap:14px}
   .intelligence-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
   .intelligence-header h2{margin-bottom:0}
