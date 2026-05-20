@@ -4521,7 +4521,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
             </div>
-            {/* Manual Discount */}
+            {/* Manual Recurring Discount */}
             <div>
               {" "}
               <PanelTitle>Manual Recurring Discount (optional)</PanelTitle>{" "}

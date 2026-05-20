@@ -21,7 +21,7 @@ function asBoolean(value) {
 function manualTypeForDiscount(discountType) {
   const type = normalizedText(discountType);
   if (type === 'percentage' || type === 'variable_percentage') return 'PERCENT';
-  if (type === 'fixed_amount' || type === 'variable_amount') return 'FIXED';
+  if (type === 'fixed_amount' || type === 'variable_amount' || type === 'amount' || type === 'fixed') return 'FIXED';
   return null;
 }
 

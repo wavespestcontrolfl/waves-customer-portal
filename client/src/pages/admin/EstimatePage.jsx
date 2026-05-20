@@ -3147,7 +3147,7 @@ function EstimateToolView() {
                 </div>
               )}
             </div>
-            {/* Manual discount (stacks on top of WaveGuard bundle discount) */}
+            {/* Manual recurring discount (stacks on top of WaveGuard bundle discount) */}
             <div style={{ ...sPanel, borderColor: C.border, marginBottom: 14 }}>
               {" "}
               <div style={sPanelTitle}>Manual Recurring Discount (optional)</div>{" "}

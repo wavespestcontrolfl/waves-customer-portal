@@ -32,7 +32,7 @@ describe('discount catalog classification', () => {
     const dollar = classifyDiscountCatalogEntry(row({
       discount_key: 'custom_dollar',
       name: 'Custom Dollar Discount',
-      discount_type: 'fixed_amount',
+      discount_type: 'amount',
       amount: 0,
     }));
     const percent = classifyDiscountCatalogEntry(row({
