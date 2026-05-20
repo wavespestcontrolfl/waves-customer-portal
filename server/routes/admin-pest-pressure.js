@@ -277,9 +277,17 @@ router.post('/scores/:serviceRecordId/recalculate', async (req, res) => {
       const existing = await loadScoreForServiceRecord(db, req.params.serviceRecordId);
       if (existing && existing.is_overridden) {
         const previousOverride = {
+          // The calculated value at the time the override was first set.
           original: existing.original_calculated_score,
+          // The override value the customer saw before removal.
           displayed: existing.displayed_score,
           reason: existing.override_reason,
+          // The TRUE restored value — what removeOverride lands
+          // displayed_score on. If the override was preserved across one
+          // or more recalculations, calculated_score has moved on from
+          // original_calculated_score; auditing original here would falsely
+          // claim the score was restored to a stale original value.
+          restored: existing.calculated_score,
         };
         await removeOverride(db, { serviceRecordId: req.params.serviceRecordId });
         await auditPestPressureScoreOverride({
@@ -288,7 +296,7 @@ router.post('/scores/:serviceRecordId/recalculate', async (req, res) => {
           service_record_id: req.params.serviceRecordId,
           customer_id: existing.customer_id,
           original_calculated_score: previousOverride.original,
-          displayed_score: previousOverride.original,
+          displayed_score: previousOverride.restored,
           override_reason: previousOverride.reason,
           action_type: 'remove',
           ip_address: ipFromReq(req),

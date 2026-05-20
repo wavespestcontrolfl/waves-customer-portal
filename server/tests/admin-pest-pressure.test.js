@@ -459,6 +459,41 @@ describe('admin pest-pressure: POST /scores/:id/recalculate', () => {
     });
   });
 
+  test('clearOverride audit records the latest calculated_score, not the stale original_calculated_score (codex P1)', async () => {
+    // Setup: an override was set when calculated_score was 2.4, but the
+    // engine has since been recalculated and the override was preserved
+    // — so the current row has original_calculated_score=2.4 (stale) and
+    // calculated_score=3.1 (post-recalc). Removing the override should
+    // restore displayed_score to 3.1 (the latest calculation), and the
+    // audit row must report 3.1 — not the stale 2.4.
+    loadScoreForServiceRecord.mockResolvedValueOnce(makeScoreRow({
+      is_overridden: true,
+      displayed_score: 1.5,
+      calculated_score: 3.1,             // latest engine output
+      original_calculated_score: 2.4,    // captured when override was first set
+      override_reason: 'old reason',
+    }));
+    removeOverride.mockResolvedValueOnce(makeScoreRow({ displayed_score: 3.1 }));
+    calculateAndPersistForServiceRecord.mockResolvedValueOnce({
+      result: { score: 3.3, displayedScore: 3.3 },
+    });
+    loadScoreForServiceRecord.mockResolvedValueOnce(makeScoreRow({ displayed_score: 3.3 }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/recalculate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearOverride: true }),
+      });
+      expect(res.status).toBe(200);
+      const auditArgs = auditLog.auditPestPressureScoreOverride.mock.calls[0][0];
+      expect(auditArgs.action_type).toBe('remove');
+      expect(auditArgs.original_calculated_score).toBe(2.4);  // captured original
+      expect(auditArgs.displayed_score).toBe(3.1);            // TRUE restored value
+      expect(auditArgs.displayed_score).not.toBe(2.4);        // not the stale original
+    });
+  });
+
   test('404 when orchestrator returns null (no service record)', async () => {
     calculateAndPersistForServiceRecord.mockResolvedValueOnce(null);
     await withServer(async (baseUrl) => {

@@ -272,9 +272,14 @@ async function removeOverride(knex, { serviceRecordId }) {
     updated_at: knex.fn.now(),
   });
 
-  if (restored !== null && restored !== undefined) {
-    await knex('service_records').where({ id: serviceRecordId }).update({ pressure_index: restored });
-  }
+  // Always mirror the override removal to service_records.pressure_index,
+  // including the null case. With the previous guard, removing an override
+  // from an "insufficient data" score left the old overridden value in
+  // pressure_index — so customer/report surfaces reading pressure_index
+  // would continue showing the stale score after the override was cleared.
+  await knex('service_records')
+    .where({ id: serviceRecordId })
+    .update({ pressure_index: restored ?? null });
 
   return loadScoreForServiceRecord(knex, serviceRecordId);
 }
