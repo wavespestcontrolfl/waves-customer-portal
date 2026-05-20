@@ -6,6 +6,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const EmailTemplates = require('../services/email-template-library');
 const AutomationExecutor = require('../services/email-template-automation-executor');
 const { isEnabled } = require('../config/feature-gates');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -536,7 +537,7 @@ router.get('/deliverability', async (req, res, next) => {
 
     const fromEmail = process.env.SENDGRID_FROM_EMAIL || 'newsletter@wavespestcontrol.com';
     const serviceFromEmail = process.env.SENDGRID_SERVICE_FROM_EMAIL || 'contact@wavespestcontrol.com';
-    const publicPortalUrl = process.env.PUBLIC_PORTAL_URL || process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const portalOrigin = publicPortalUrl();
     res.json({
       provider: {
         name: 'sendgrid',
@@ -545,7 +546,7 @@ router.get('/deliverability', async (req, res, next) => {
         service_from_email: serviceFromEmail,
         from_domain: fromEmail.includes('@') ? fromEmail.split('@')[1] : null,
         service_from_domain: serviceFromEmail.includes('@') ? serviceFromEmail.split('@')[1] : null,
-        public_portal_url: publicPortalUrl,
+        public_portal_url: portalOrigin,
         newsletter_asm_group_id: sendgrid.newsletterGroupId(),
         service_asm_group_id: sendgrid.serviceGroupId(),
         webhook_public_key_configured: !!process.env.SENDGRID_WEBHOOK_PUBLIC_KEY,

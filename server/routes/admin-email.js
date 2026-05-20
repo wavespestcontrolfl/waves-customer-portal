@@ -9,6 +9,7 @@ const { classifyEmail } = require('../services/email/email-classifier');
 const { executeAutoAction } = require('../services/email/email-actions');
 const { unblockSender } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 const MAX_PAGE_LIMIT = 200;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -107,7 +108,7 @@ router.get('/oauth/callback', async (req, res) => {
     });
 
     // Redirect to the email page
-    const clientUrl = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const clientUrl = publicPortalUrl();
     res.redirect(`${clientUrl}/admin/email`);
   } catch (err) {
     logger.error(`[email] OAuth callback error: ${err.message}`);

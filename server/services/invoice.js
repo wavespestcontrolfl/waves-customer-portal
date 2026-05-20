@@ -5,6 +5,7 @@ const TaxCalculator = require("./tax-calculator");
 const DiscountEngine = require("./discount-engine");
 const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
+const { publicPortalUrl } = require("../utils/portal-url");
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -1062,8 +1063,7 @@ const InvoiceService = {
       throw new Error("Customer has no phone number");
     }
 
-    const domain =
-      process.env.CLIENT_URL || "https://portal.wavespestcontrol.com";
+    const domain = publicPortalUrl();
     const longPayUrl = `${domain}/pay/${invoice.token}`;
     const payUrl = await shortenOrPassthrough(longPayUrl, {
       kind: "invoice",
@@ -1467,8 +1467,7 @@ const InvoiceService = {
       .first();
     if (!customer?.phone) return { sent: false, reason: "no-phone" };
 
-    const domain =
-      process.env.PORTAL_DOMAIN || "https://portal.wavespestcontrol.com";
+    const domain = publicPortalUrl();
     const longReceiptUrl = invoice.token
       ? `${domain}/pay/${invoice.token}`
       : "";

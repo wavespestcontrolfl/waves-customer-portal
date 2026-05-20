@@ -11,8 +11,8 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { getServiceContact } = require('../services/customer-contact');
+const { publicPortalUrl } = require('../utils/portal-url');
 
-const PORTAL_DOMAIN = process.env.PORTAL_DOMAIN || 'portal.wavespestcontrol.com';
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
 function isDraftReply(reply) {
@@ -546,7 +546,7 @@ router.post('/send-request', async (req, res, next) => {
       serviceDate: lastSvc?.scheduled_date || null,
     });
 
-    const rateUrl = `https://${PORTAL_DOMAIN}/rate/${reviewReq.token}`;
+    const rateUrl = `${publicPortalUrl()}/rate/${reviewReq.token}`;
     const svcLabel = reviewReq.service_type || 'pest control service';
     const body = await renderRequiredSmsTemplate('review_request', {
       first_name: firstName,

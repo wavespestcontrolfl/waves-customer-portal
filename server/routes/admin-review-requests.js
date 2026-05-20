@@ -3,6 +3,7 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const ReviewService = require('../services/review-request');
 const db = require('../models/db');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -59,7 +60,7 @@ router.post('/tech-trigger', async (req, res, next) => {
 
     res.json({
       sent: true,
-      reviewUrl: `${process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com'}/review/${request.token}`,
+      reviewUrl: `${publicPortalUrl()}/review/${request.token}`,
     });
   } catch (err) { next(err); }
 });

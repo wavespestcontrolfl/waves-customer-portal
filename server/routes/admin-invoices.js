@@ -11,6 +11,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible } = require('../services/invoice-helpers');
 const { getInvoiceEmailRecipients, getPrimaryContact } = require('../services/customer-contact');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -481,7 +482,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       customerId, serviceRecordId, title, lineItems, notes, dueDate, taxRate, discountIds, serviceDate,
     });
 
-    const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
       kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
       codePrefix: invoiceShortCodePrefix(invoice),
@@ -504,7 +505,7 @@ router.post('/from-service', requireAdmin, async (req, res, next) => {
       amount: parseFloat(amount), description, taxRate,
     });
 
-    const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
       kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
       codePrefix: invoiceShortCodePrefix(invoice),
@@ -526,7 +527,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
     }
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
 
-    const domain = process.env.CLIENT_URL || 'https://portal.wavespestcontrol.com';
+    const domain = publicPortalUrl();
     const created = [];
     const failed = [];
 
