@@ -3,10 +3,10 @@
  *
  * Pins the three guarantees added by this PR:
  *
- *   1. sendCampaign skips subscribers whose existing delivery row is in a
- *      terminal-success state (sent / delivered / opened / clicked). A
- *      manual re-run after a partial failure must not double-email the
- *      successes.
+ *   1. sendCampaign retries only explicitly transient delivery rows
+ *      (queued / failed with no success or engagement timestamps). A manual
+ *      re-run after a partial failure must not double-email successes or
+ *      terminal provider failures.
  *
  *   2. Every recipient passed to SendGrid carries custom_args.delivery_id
  *      so an event webhook can find the right row even when the
@@ -14,8 +14,9 @@
  *      response case).
  *
  *   3. resumeCampaign rejects 'sending' (active worker), rejects
- *      'draft'/'scheduled' (use sendCampaign), and rejects when there are
- *      no outstanding non-success deliveries.
+ *      'draft'/'scheduled' (use sendCampaign), rejects when existing
+ *      delivery rows are all terminal-success, and treats resume claim
+ *      races as benign.
  */
 
 const mockSendBroadcast = jest.fn(async () => ({ messageId: 'sg-batch-1', recipientCount: 1 }));
@@ -36,7 +37,7 @@ const { sendCampaign, resumeCampaign } = require('../services/newsletter-sender'
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
 // invoice-receipt-email-idempotency.test.js / portal-url.test.js so the
 // failure surface stays familiar.
-function chain({ first, result, returning, count, updated } = {}) {
+function chain({ first, result, returning, count, updated, onUpdate } = {}) {
   const q = {};
   ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereNull',
    'select', 'orderBy', 'limit', 'leftJoin', 'join']
@@ -49,10 +50,13 @@ function chain({ first, result, returning, count, updated } = {}) {
     onConflict: jest.fn(() => ({ ignore: jest.fn(async () => result || []) })),
     returning: jest.fn(async () => returning || []),
   }));
-  q.update = jest.fn(() => ({
+  q.update = jest.fn((payload) => {
+    if (onUpdate) onUpdate(payload);
+    return {
     returning: jest.fn(async () => returning ?? []),
     then: (resolve) => Promise.resolve(updated ?? 0).then(resolve),
-  }));
+    };
+  });
   q.then = (resolve, reject) => Promise.resolve(result ?? []).then(resolve, reject);
   q.catch = (reject) => Promise.resolve(result ?? []).catch(reject);
   return q;
@@ -157,6 +161,40 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(args.recipients.map((r) => r.email).sort()).toEqual(['b@example.com', 'c@example.com']);
   });
 
+  test('does not retry bounced, complained, or engagement-recovered rows', async () => {
+    buildDb({
+      send: {
+        id: 'send-1',
+        status: 'draft',
+        html_body: '<p>Body</p>',
+        text_body: 'Body',
+        subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com',
+        from_name: 'Waves',
+        reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: null,
+        subject_b: null,
+      },
+      subscribers: [
+        { id: 1, email: 'retry@example.com', unsubscribe_token: 'tok-retry', customer_id: null },
+        { id: 2, email: 'bounce@example.com', unsubscribe_token: 'tok-bounce', customer_id: null },
+        { id: 3, email: 'complaint@example.com', unsubscribe_token: 'tok-complaint', customer_id: null },
+        { id: 4, email: 'opened@example.com', unsubscribe_token: 'tok-opened', customer_id: null },
+      ],
+      deliveries: [
+        { id: 'd-1', subscriber_id: 1, status: 'failed', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'bounced', ab_variant: null },
+        { id: 'd-3', subscriber_id: 3, status: 'complained', ab_variant: null },
+        { id: 'd-4', subscriber_id: 4, status: 'failed', opened_at: new Date('2026-05-01T10:00:00Z'), ab_variant: null },
+      ],
+    });
+
+    await sendCampaign('send-1');
+
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['retry@example.com']);
+  });
+
   test('all-skip case still completes without calling SendGrid', async () => {
     buildDb({
       send: {
@@ -185,6 +223,59 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(result.recipients).toBe(1);
     expect(result.skipped_already_sent).toBe(1);
   });
+
+  test('does not overwrite deliveries recovered by processed webhooks when SendGrid rejects', async () => {
+    mockSendBroadcast.mockRejectedValueOnce(new Error('lost response'));
+    let finalUpdate = null;
+    const failureUpdate = chain({ updated: 1 });
+    const queues = {
+      newsletter_sends: [
+        chain({
+          first: {
+            id: 'send-1',
+            status: 'draft',
+            html_body: '<p>Body</p>',
+            text_body: 'Body',
+            subject: 'Hello',
+            from_email: 'newsletter@wavespestcontrol.com',
+            from_name: 'Waves',
+            reply_to: 'contact@wavespestcontrol.com',
+            segment_filter: null,
+            subject_b: null,
+          },
+        }),
+        chain({ returning: [{ id: 'send-1' }] }),
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+      ],
+      newsletter_subscribers: [
+        chain({ result: [
+          { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+          { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+        ] }),
+      ],
+      newsletter_send_deliveries: [
+        chain({}),
+        chain({ result: [
+          { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
+          { id: 'd-2', subscriber_id: 2, status: 'queued', ab_variant: null },
+        ] }),
+        failureUpdate,
+      ],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await sendCampaign('send-1', { force: true });
+
+    expect(failureUpdate.whereIn).toHaveBeenCalledWith('status', ['queued', 'failed']);
+    expect(failureUpdate.whereNull).toHaveBeenCalledWith('sent_at');
+    expect(failureUpdate.whereNull).toHaveBeenCalledWith('opened_at');
+    expect(result.failed).toBe(1);
+    expect(finalUpdate.status).toBe('sent');
+  });
 });
 
 describe('resumeCampaign — preconditions', () => {
@@ -212,7 +303,26 @@ describe('resumeCampaign — preconditions', () => {
     await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'STILL_SENDING' });
   });
 
-  test("rejects 'sent' with NOTHING_TO_RESUME when all rows are terminal-success", async () => {
+  test("rejects 'sent' with NOTHING_TO_RESUME when existing rows are all terminal-success", async () => {
+    let sendsCalls = 0;
+    let deliveriesCalls = 0;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        sendsCalls++;
+        return chain({ first: { id: 's', status: 'sent', html_body: 'x', text_body: 'x' } });
+      }
+      if (table === 'newsletter_send_deliveries') {
+        deliveriesCalls++;
+        return deliveriesCalls === 1 ? chain({ count: 1 }) : chain({ count: 0 });
+      }
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'NOTHING_TO_RESUME' });
+    expect(sendsCalls).toBe(1);
+    expect(deliveriesCalls).toBe(2);
+  });
+
+  test("rejects 'sent' with NOTHING_TO_RESUME when no delivery rows exist", async () => {
     let sendsCalls = 0;
     let deliveriesCalls = 0;
     db.mockImplementation((table) => {
@@ -226,8 +336,184 @@ describe('resumeCampaign — preconditions', () => {
       }
       throw new Error(`unexpected ${table}`);
     });
+
     await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'NOTHING_TO_RESUME' });
     expect(sendsCalls).toBe(1);
     expect(deliveriesCalls).toBe(1);
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+  });
+
+  test('allows failed sends with no delivery rows to reseed and send', async () => {
+    const failedSend = {
+      id: 's',
+      status: 'failed',
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: failedSend }),                         // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional reset to scheduled
+        chain({ first: { ...failedSend, status: 'scheduled' } }), // sendCampaign fetch
+        chain({ returning: [{ id: 's' }] }),                  // sendCampaign atomic claim
+        chain({ updated: 1 }),                                // final status update
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 0 }),                                  // no rows exist yet
+        chain({}),                                            // insert onConflict
+        chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }] }),
+        chain({ updated: 1 }),                                // post-send bulk update
+      ],
+      newsletter_subscribers: [
+        chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
+      ],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await resumeCampaign('s');
+
+    expect(result.accepted).toBe(1);
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients[0].customArgs).toEqual({ delivery_id: 'd-1', send_id: 's' });
+  });
+
+  test('resume with existing deliveries only sends to the original campaign audience', async () => {
+    let finalUpdate = null;
+    const sentSend = {
+      id: 's',
+      status: 'sent',
+      sent_at: new Date('2026-05-01T10:00:00Z'),
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: sentSend }),                          // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional reset
+        chain({ first: { ...sentSend, status: 'scheduled' } }), // sendCampaign fetch
+        chain({ returning: [{ id: 's' }] }),                  // sendCampaign atomic claim
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 2 }),                                  // rows exist
+        chain({ count: 1 }),                                  // one outstanding
+        chain({ result: [
+          { id: 'd-1', subscriber_id: 1, status: 'delivered', ab_variant: null },
+          { id: 'd-2', subscriber_id: 2, status: 'failed', ab_variant: null },
+        ] }),
+        chain({ updated: 1 }),                                // post-send bulk update
+      ],
+      newsletter_subscribers: [
+        chain({ result: [
+          { id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null },
+          { id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null },
+          { id: 3, email: 'new@example.com', unsubscribe_token: 'tok-new', customer_id: null },
+        ] }),
+      ],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await resumeCampaign('s');
+
+    expect(result.recipients).toBe(2);
+    expect(result.skipped_already_sent).toBe(1);
+    expect(finalUpdate.recipient_count).toBe(2);
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
+  });
+
+  test('throws ALREADY_CLAIMED when the resume status reset loses a race', async () => {
+    let sendsCalls = 0;
+    let deliveriesCalls = 0;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        sendsCalls++;
+        return sendsCalls === 1
+          ? chain({ first: { id: 's', status: 'failed', html_body: 'x', text_body: 'x' } })
+          : chain({ returning: [] });
+      }
+      if (table === 'newsletter_send_deliveries') {
+        deliveriesCalls++;
+        return deliveriesCalls === 1 ? chain({ count: 1 }) : chain({ count: 1 });
+      }
+      throw new Error(`unexpected ${table}`);
+    });
+
+    await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'ALREADY_CLAIMED' });
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+  });
+
+  test('admin resume route treats ALREADY_CLAIMED as a benign background race', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-newsletter.js'), 'utf8');
+    expect(src).toMatch(/err\.code === 'ALREADY_CLAIMED'/);
+    expect(src).toMatch(/background resume .* already claimed by another worker/);
+  });
+
+  test('partial resume preserves the original sent_at timestamp', async () => {
+    const firstSentAt = new Date('2026-05-01T10:00:00Z');
+    let finalUpdate = null;
+    const sentSend = {
+      id: 's',
+      status: 'sent',
+      sent_at: firstSentAt,
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: sentSend }),                          // resume fetch
+        chain({ returning: [{ id: 's' }] }),                  // conditional reset
+        chain({ first: { ...sentSend, status: 'scheduled' } }), // sendCampaign fetch
+        chain({ returning: [{ id: 's' }] }),                  // sendCampaign atomic claim
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 1 }),                                  // rows exist
+        chain({ count: 1 }),                                  // one outstanding
+        chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'failed', ab_variant: null }] }),
+        chain({ updated: 1 }),                                // post-send bulk update
+      ],
+      newsletter_subscribers: [
+        chain({ result: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }] }),
+      ],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    await resumeCampaign('s');
+
+    expect(finalUpdate).toBeTruthy();
+    expect(Object.prototype.hasOwnProperty.call(finalUpdate, 'sent_at')).toBe(false);
   });
 });

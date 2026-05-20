@@ -25,6 +25,7 @@ const logger = require('../services/logger');
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
 const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
+const NEWSLETTER_RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed'];
 
 // Convert SendGrid's base64 SPKI public key to a Node KeyObject.
 // Cached — key is static env input.
@@ -69,6 +70,29 @@ function redactEmail(value) {
   const [local, domain] = value.split('@');
   if (!domain) return '[redacted]';
   return `${local.slice(0, 2)}***@${domain}`;
+}
+
+function deliveryEmailMismatchLogMessage(deliveryId, rowEmail, eventEmail) {
+  return `[sendgrid-webhook] delivery_id ${deliveryId} matched but email mismatch (row=${redactEmail(rowEmail)} event=${redactEmail(eventEmail)}) - ignoring`;
+}
+
+function shouldMarkProcessedNewsletterDeliverySent(delivery) {
+  return ['queued', 'failed'].includes(String(delivery?.status || '').toLowerCase());
+}
+
+function canUseDeliveryIdFallback(delivery, messageId) {
+  if (!delivery) return false;
+  if (!delivery.provider_message_id) return true;
+  return String(delivery.provider_message_id) === String(messageId || '');
+}
+
+function applyRetryableNewsletterDeliveryFilter(query) {
+  return query
+    .whereIn('status', NEWSLETTER_RETRYABLE_DELIVERY_STATUSES)
+    .whereNull('sent_at')
+    .whereNull('delivered_at')
+    .whereNull('opened_at')
+    .whereNull('clicked_at');
 }
 
 router.post('/events', express.raw({ type: '*/*' }), async (req, res) => {
@@ -134,8 +158,11 @@ async function handleEvent(ev) {
   // to us (lost-response case: our sendBatch POST timed out before reading
   // the X-Message-Id header, so the row was marked 'failed' with no id),
   // the delivery_id lets the event still find its home and self-heal the
-  // row. Backfill the provider_message_id while we're here so subsequent
-  // events for the same recipient hit the fast path.
+  // row. Only trust the fallback for unbound rows, or when the row is already
+  // bound to the same message id; otherwise a delayed event from an earlier
+  // resume attempt could mutate the current attempt. Backfill the
+  // provider_message_id while we're here so subsequent events hit the fast
+  // path.
   let newsletterDelivery = email ? await db('newsletter_send_deliveries')
     .where({ provider_message_id: messageId, email })
     .first() : null;
@@ -143,12 +170,14 @@ async function handleEvent(ev) {
     newsletterDelivery = await db('newsletter_send_deliveries')
       .where({ id: String(ev.delivery_id) })
       .first();
-    if (newsletterDelivery && newsletterDelivery.email && email
+    if (newsletterDelivery && !canUseDeliveryIdFallback(newsletterDelivery, messageId)) {
+      newsletterDelivery = null;
+    } else if (newsletterDelivery && newsletterDelivery.email && email
         && String(newsletterDelivery.email).toLowerCase() !== String(email).toLowerCase()) {
       // Email mismatch on a delivery_id match → reject; treat as untracked
       // rather than corrupt an unrelated row. Should never happen unless
       // an event payload was tampered with.
-      logger.warn(`[sendgrid-webhook] delivery_id ${ev.delivery_id} matched but email mismatch (row=${newsletterDelivery.email} event=${email}) — ignoring`);
+      logger.warn(deliveryEmailMismatchLogMessage(ev.delivery_id, newsletterDelivery.email, email));
       newsletterDelivery = null;
     } else if (newsletterDelivery && !newsletterDelivery.provider_message_id && messageId) {
       await db('newsletter_send_deliveries')
@@ -305,10 +334,17 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       };
 
     case 'processed':
+      if (shouldMarkProcessedNewsletterDeliverySent(delivery)) {
+        return {
+          delivery: { status: 'sent', sent_at: now, updated_at: now },
+          reconcileSendStatus: true,
+        };
+      }
+      return null;
+
     case 'deferred':
     case 'group_resubscribe':
     default:
-      // processed = accepted by SG (already "sent" in our model)
       // deferred = temporary fail, SG will retry — don't update row
       // group_resubscribe = we don't use SG groups
       return null;
@@ -468,6 +504,9 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   if (updates.delivery) {
     await client('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
   }
+  if (updates.reconcileSendStatus) {
+    await reconcileNewsletterSendStatus(delivery.send_id, client);
+  }
   if (updates.sendIncrement) {
     await client('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
   }
@@ -605,6 +644,19 @@ async function unsubscribeNewsletterSubscriber(email, at, client = db) {
     });
 }
 
+async function reconcileNewsletterSendStatus(sendId, client = db) {
+  const outstanding = await applyRetryableNewsletterDeliveryFilter(
+    client('newsletter_send_deliveries').where({ send_id: sendId }),
+  )
+    .count('* as c')
+    .first();
+  if (Number(outstanding?.c || 0) > 0) return;
+
+  await client('newsletter_sends')
+    .where({ id: sendId, status: 'failed' })
+    .update({ status: 'sent', updated_at: new Date() });
+}
+
 async function cancelActiveEnrollments({ email, reason, asmGroup }, client = db) {
   if (!email) return;
   const lc = String(email).trim().toLowerCase();
@@ -635,3 +687,6 @@ module.exports.computeNewsletterEventUpdates = computeNewsletterEventUpdates;
 module.exports.computeEmailMessageEventUpdates = computeEmailMessageEventUpdates;
 module.exports.suppressionForEmailEvent = suppressionForEmailEvent;
 module.exports.isFreshTimestamp = isFreshTimestamp;
+module.exports.deliveryEmailMismatchLogMessage = deliveryEmailMismatchLogMessage;
+module.exports.canUseDeliveryIdFallback = canUseDeliveryIdFallback;
+module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;

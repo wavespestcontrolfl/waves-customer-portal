@@ -25,6 +25,8 @@ const {
   computeEmailMessageEventUpdates,
   suppressionForEmailEvent,
   isFreshTimestamp,
+  deliveryEmailMismatchLogMessage,
+  canUseDeliveryIdFallback,
 } = sendgridWebhook;
 
 describe('newsletter buildSubscriberQuery', () => {
@@ -260,6 +262,17 @@ describe('newsletter computeNewsletterEventUpdates', () => {
     test.each(['processed', 'deferred', 'group_resubscribe', 'unknown_future_event'])('%s is a no-op', (e) => {
       expect(computeNewsletterEventUpdates({ event: e }, fresh(), now)).toBeNull();
     });
+
+    test.each(['queued', 'failed'])('processed marks %s delivery rows as sent', (status) => {
+      expect(computeNewsletterEventUpdates({ event: 'processed' }, fresh({ status }), now)).toEqual({
+        delivery: { status: 'sent', sent_at: now, updated_at: now },
+        reconcileSendStatus: true,
+      });
+    });
+
+    test('processed stays a no-op after the row is already sent', () => {
+      expect(computeNewsletterEventUpdates({ event: 'processed' }, fresh({ status: 'sent' }), now)).toBeNull();
+    });
   });
 });
 
@@ -289,6 +302,28 @@ describe('email template suppression event mapping', () => {
     });
     expect(suppressionForEmailEvent({ event: 'blocked' })).toBeNull();
     expect(suppressionForEmailEvent({ event: 'dropped' })).toBeNull();
+  });
+});
+
+describe('sendgrid webhook PII-safe diagnostics', () => {
+  test('redacts recipient emails in delivery_id mismatch warnings', () => {
+    const msg = deliveryEmailMismatchLogMessage(
+      'delivery-1',
+      'customer.person@example.com',
+      'tampered.person@example.net',
+    );
+    expect(msg).toContain('cu***@example.com');
+    expect(msg).toContain('ta***@example.net');
+    expect(msg).not.toContain('customer.person@example.com');
+    expect(msg).not.toContain('tampered.person@example.net');
+  });
+});
+
+describe('sendgrid webhook delivery_id fallback guard', () => {
+  test('accepts unbound rows and rejects rows bound to a different provider message id', () => {
+    expect(canUseDeliveryIdFallback({ provider_message_id: null }, 'new-msg')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: 'new-msg' }, 'new-msg')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg' }, 'new-msg')).toBe(false);
   });
 });
 

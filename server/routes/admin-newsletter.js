@@ -516,9 +516,14 @@ router.post('/sends/:id/resume', async (req, res) => {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
 
-    NewsletterSender.resumeCampaign(req.params.id).catch(async (err) => {
-      if (err.code === 'STILL_SENDING' || err.code === 'NOT_RESUMABLE' || err.code === 'NOTHING_TO_RESUME') {
-        logger.info(`[newsletter] resume ${req.params.id} declined: ${err.code} (${err.message})`);
+    const prepared = await NewsletterSender.prepareResumeCampaign(req.params.id);
+    NewsletterSender.sendCampaign(prepared.sendId, {
+      force: true,
+      preserveSentAt: true,
+      existingDeliveriesOnly: prepared.existingDeliveriesOnly,
+    }).catch(async (err) => {
+      if (err.code === 'ALREADY_CLAIMED') {
+        logger.info(`[newsletter] background resume ${req.params.id} already claimed by another worker — no-op`);
         return;
       }
       logger.error(`[newsletter] background resume ${req.params.id} failed: ${err.message}`, { stack: err.stack });
@@ -529,6 +534,12 @@ router.post('/sends/:id/resume', async (req, res) => {
 
     res.status(202).json({ accepted: true, sendId: req.params.id, status: 'resuming' });
   } catch (err) {
+    if (err.code === 'STILL_SENDING' || err.code === 'ALREADY_CLAIMED') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
+    if (err.code === 'NOT_RESUMABLE' || err.code === 'NOTHING_TO_RESUME') {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
     logger.error(`[newsletter] resume dispatch failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: err.message });
   }
