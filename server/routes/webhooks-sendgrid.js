@@ -128,9 +128,35 @@ async function handleEvent(ev) {
   // X-Message-Id across all recipients in a chunk, so the lookup MUST also
   // filter by email — otherwise events for recipient B silently update
   // recipient A's row.
-  const newsletterDelivery = email ? await db('newsletter_send_deliveries')
+  //
+  // Fallback: SendGrid echoes our per-recipient `custom_args.delivery_id`
+  // on every event for that recipient. When the X-Message-Id is unknown
+  // to us (lost-response case: our sendBatch POST timed out before reading
+  // the X-Message-Id header, so the row was marked 'failed' with no id),
+  // the delivery_id lets the event still find its home and self-heal the
+  // row. Backfill the provider_message_id while we're here so subsequent
+  // events for the same recipient hit the fast path.
+  let newsletterDelivery = email ? await db('newsletter_send_deliveries')
     .where({ provider_message_id: messageId, email })
     .first() : null;
+  if (!newsletterDelivery && ev.delivery_id) {
+    newsletterDelivery = await db('newsletter_send_deliveries')
+      .where({ id: String(ev.delivery_id) })
+      .first();
+    if (newsletterDelivery && newsletterDelivery.email && email
+        && String(newsletterDelivery.email).toLowerCase() !== String(email).toLowerCase()) {
+      // Email mismatch on a delivery_id match → reject; treat as untracked
+      // rather than corrupt an unrelated row. Should never happen unless
+      // an event payload was tampered with.
+      logger.warn(`[sendgrid-webhook] delivery_id ${ev.delivery_id} matched but email mismatch (row=${newsletterDelivery.email} event=${email}) — ignoring`);
+      newsletterDelivery = null;
+    } else if (newsletterDelivery && !newsletterDelivery.provider_message_id && messageId) {
+      await db('newsletter_send_deliveries')
+        .where({ id: newsletterDelivery.id })
+        .update({ provider_message_id: messageId, updated_at: new Date() });
+      newsletterDelivery.provider_message_id = messageId;
+    }
+  }
   // Automation step sends are always single-recipient (one customer per
   // step), so message id alone is unique there. Belt-and-suspenders email
   // filter anyway.

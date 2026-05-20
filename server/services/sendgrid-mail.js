@@ -140,11 +140,22 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
 /**
  * Send a campaign blast. SendGrid's `personalizations` array supports
  * up to 1000 recipients per request, each with their own `to`, `subject`,
- * `headers`, and `substitutions`. We use it to inject a per-recipient
- * unsubscribe URL into the List-Unsubscribe header AND the body footer
- * (via {{unsubscribe_url}} substitution) in a single API call.
+ * `headers`, `substitutions`, and `custom_args`. We use it to inject a
+ * per-recipient unsubscribe URL into the List-Unsubscribe header AND the
+ * body footer (via {{unsubscribe_url}} substitution) in a single API
+ * call.
  *
- * Each `recipients[i]` is { email, unsubscribeUrl }.
+ * Each `recipients[i]` is { email, unsubscribeUrl, customArgs? }.
+ *
+ * `customArgs` is a flat string-valued object that SendGrid echoes back
+ * on every event webhook for that recipient — opens, clicks, bounces,
+ * processed, delivered. Newsletter sender uses it to carry the
+ * `delivery_id` (our DB row UUID), which lets the webhook handler match
+ * an event to the right row even when the SendGrid response that would
+ * have carried the X-Message-Id was lost mid-flight. Without this, a
+ * timed-out POST that SendGrid actually queued leaves the delivery row
+ * stuck in 'failed' with no path to self-heal — and an operator retry
+ * would double-send.
  */
 async function sendBatch({ recipients, fromEmail, fromName, subject, html, text, replyTo, categories, asmGroupId }) {
   if (!Array.isArray(recipients) || recipients.length === 0) {
@@ -164,6 +175,12 @@ async function sendBatch({ recipients, fromEmail, fromName, subject, html, text,
       },
       // Substitution lets the body footer point at the right URL per recipient.
       substitutions: { '{{unsubscribe_url}}': r.unsubscribeUrl },
+      // Per-recipient custom_args travel with every webhook event — used
+      // by the newsletter sender to attach delivery_id so events can find
+      // the right row when provider_message_id is unknown.
+      ...(r.customArgs && Object.keys(r.customArgs).length
+        ? { custom_args: r.customArgs }
+        : {}),
     })),
     from: defaultFrom(fromEmail, fromName),
     reply_to: { email: replyTo || 'contact@wavespestcontrol.com' },

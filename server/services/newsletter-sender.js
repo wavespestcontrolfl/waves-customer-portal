@@ -38,10 +38,24 @@ function assignAbVariant() {
   return Math.random() < 0.5 ? 'a' : 'b';
 }
 
+// SendGrid event webhooks echo this set back verbatim per recipient. The
+// newsletter handler in webhooks-sendgrid.js falls back to matching on
+// custom_args.delivery_id when the X-Message-Id-based lookup fails, which
+// covers the "we lost the SendGrid response but they actually queued the
+// batch" case. Without this, those rows stay 'failed' forever and an
+// operator-triggered resume would double-send.
+const TERMINAL_SUCCESS_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
+
 /**
  * Send a campaign (now). Used by the immediate-send route and the
  * scheduler tick. Idempotent-ish: refuses to re-send non-draft/non-scheduled
  * rows, and flips status to 'sending' before doing any external work.
+ *
+ * Per-recipient idempotency: subscribers whose delivery row is already in
+ * a terminal-success state (sent / delivered / opened / clicked) are
+ * skipped on every pass. A second call to sendCampaign — or a call to
+ * resumeCampaign on a partially-failed send — only re-sends to the rows
+ * that aren't yet known-good.
  *
  * opts.force — bypass the 0-recipient guard. The route layer also
  *   pre-validates so the operator gets a 400 with a force=true hint;
@@ -92,7 +106,11 @@ async function sendCampaign(sendId, opts = {}) {
 
   const useAb = !!send.subject_b;
 
-  // Pre-seed per-recipient deliveries with A/B assignment.
+  // Pre-seed per-recipient deliveries with A/B assignment. The onConflict
+  // is the idempotency keystone — on a resume / re-run, the existing rows
+  // (already sent or failed) survive the insert; only brand-new subscribers
+  // get fresh rows. We then read all rows back so the loop has the
+  // canonical delivery.id to plumb into SendGrid's custom_args.
   const deliveryRows = subscribers.map((s) => ({
     send_id: send.id,
     subscriber_id: s.id,
@@ -102,6 +120,22 @@ async function sendCampaign(sendId, opts = {}) {
   }));
   if (deliveryRows.length) {
     await db('newsletter_send_deliveries').insert(deliveryRows).onConflict(['send_id', 'subscriber_id']).ignore();
+  }
+  const existingDeliveries = await db('newsletter_send_deliveries')
+    .where({ send_id: send.id })
+    .select('id', 'subscriber_id', 'status', 'ab_variant');
+  const deliveryBySub = new Map(existingDeliveries.map((d) => [d.subscriber_id, d]));
+  // Per-recipient idempotency: subscribers whose row is in a terminal-
+  // success state from a prior run are skipped. The first pass sees only
+  // 'queued' rows so this is a no-op then; on resumeCampaign it's the
+  // dedupe.
+  const subscribersToSend = subscribers.filter((s) => {
+    const d = deliveryBySub.get(s.id);
+    return !d || !TERMINAL_SUCCESS_STATUSES.includes(d.status);
+  });
+  const skippedAlreadySent = subscribers.length - subscribersToSend.length;
+  if (skippedAlreadySent > 0) {
+    logger.info(`[newsletter] send ${send.id} skipping ${skippedAlreadySent} recipient(s) already in terminal-success state (resume)`);
   }
 
   // Wrap the operator-written body in branded chrome (header + footer
@@ -117,8 +151,9 @@ async function sendCampaign(sendId, opts = {}) {
 
   // O(1) variant lookup per subscriber. The previous .filter().find() was
   // O(n²) — at 5k subscribers that's 25M comparisons before the first
-  // SendGrid call.
-  const variantBySub = new Map(deliveryRows.map((d) => [d.subscriber_id, d.ab_variant]));
+  // SendGrid call. Reads the canonical ab_variant from the persisted row
+  // so a resume picks up the same A/B split the first pass assigned.
+  const variantBySub = new Map(existingDeliveries.map((d) => [d.subscriber_id, d.ab_variant]));
 
   // Body for customer touchpoints — pure function on the campaign body,
   // hoisted out of the loop. Same for every recipient.
@@ -128,7 +163,7 @@ async function sendCampaign(sendId, opts = {}) {
   // off every delivery gets variant=null and we just ship one group.
   const variants = useAb ? ['a', 'b'] : [null];
   for (const variant of variants) {
-    const group = subscribers.filter((s) => (variantBySub.get(s.id) ?? null) === variant);
+    const group = subscribersToSend.filter((s) => (variantBySub.get(s.id) ?? null) === variant);
     if (!group.length) continue;
 
     const subjectForGroup = variant === 'b' ? send.subject_b : send.subject;
@@ -141,6 +176,15 @@ async function sendCampaign(sendId, opts = {}) {
       const recipients = chunk.map((s) => ({
         email: s.email,
         unsubscribeUrl: sendgrid.unsubscribeUrl(s.unsubscribe_token),
+        // delivery_id rides on every SendGrid event webhook for this
+        // recipient, so the handler can resolve back to the right row
+        // even when the X-Message-Id from this batch was never observed
+        // (lost-response case). send_id is included so the handler can
+        // shortcut to the right table without a join.
+        customArgs: {
+          delivery_id: String(deliveryBySub.get(s.id)?.id || ''),
+          send_id: String(send.id),
+        },
       }));
       const subscriberIds = chunk.map((s) => s.id);
 
@@ -214,14 +258,79 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
 
+  // Final state. If every recipient bounced into 'failed', the whole send
+  // is 'failed' (operator can resume after fixing the cause). Otherwise we
+  // call it 'sent' — partial failures live on as 'failed' deliveries that
+  // resumeCampaign() can re-send without double-emailing the successes.
+  const allFailed = failed === subscribers.length && subscribers.length > 0;
   await db('newsletter_sends').where({ id: send.id }).update({
-    status: failed === subscribers.length && subscribers.length > 0 ? 'failed' : 'sent',
+    status: allFailed ? 'failed' : 'sent',
     recipient_count: subscribers.length,
     sent_at: new Date(),
     updated_at: new Date(),
   });
 
-  return { recipients: subscribers.length, accepted, failed };
+  return { recipients: subscribers.length, accepted, failed, skipped_already_sent: skippedAlreadySent };
+}
+
+/**
+ * Operator-triggered re-send of a campaign that previously failed or only
+ * partially completed. Bypasses the draft/scheduled atomic claim (which is
+ * designed to prevent two workers from racing on a NEW send) but inherits
+ * sendCampaign's per-recipient idempotency filter — recipients already in
+ * terminal-success state (sent/delivered/opened/clicked) are skipped, and
+ * only 'queued' / 'failed' / 'bounced'-marked-by-our-error-handler rows
+ * get a fresh attempt.
+ *
+ * Refuses to resume rows that are still in 'sending' state (an active
+ * sendCampaign call holds the work) or already 'sent' status with no
+ * outstanding non-success deliveries.
+ *
+ * Returns { recipients, accepted, failed, skipped_already_sent }.
+ */
+async function resumeCampaign(sendId) {
+  if (!sendgrid.isConfigured()) throw new Error('SendGrid not configured (SENDGRID_API_KEY missing)');
+
+  const send = await db('newsletter_sends').where({ id: sendId }).first();
+  if (!send) throw new Error('not found');
+  if (!send.html_body && !send.text_body) throw new Error('body required');
+  if (send.status === 'draft' || send.status === 'scheduled') {
+    const err = new Error('use sendCampaign, not resumeCampaign, for draft/scheduled sends');
+    err.code = 'NOT_RESUMABLE';
+    throw err;
+  }
+  if (send.status === 'sending') {
+    // An active sendCampaign holds the work — refuse the resume so we
+    // don't race two writers on the same delivery rows. Operator can
+    // wait or, if the send genuinely stalled (worker died, status stuck),
+    // flip the row to 'failed' manually first.
+    const err = new Error('campaign is actively sending; refusing to resume');
+    err.code = 'STILL_SENDING';
+    throw err;
+  }
+
+  // Are there outstanding non-success deliveries to resume? If everyone
+  // is already terminal-success we bail early so the operator knows.
+  const outstanding = await db('newsletter_send_deliveries')
+    .where({ send_id: send.id })
+    .whereNotIn('status', TERMINAL_SUCCESS_STATUSES)
+    .count('* as c')
+    .first();
+  if (Number(outstanding?.c || 0) === 0) {
+    const err = new Error('no outstanding deliveries to resume');
+    err.code = 'NOTHING_TO_RESUME';
+    throw err;
+  }
+
+  // Flip back to 'sending' so sendCampaign's atomic claim accepts the row.
+  // sendCampaign's own pre-flight will refuse a true 'sending' row coming
+  // in via the normal path, but we just verified above that no active
+  // worker holds it.
+  await db('newsletter_sends')
+    .where({ id: send.id })
+    .update({ status: 'scheduled', updated_at: new Date() });
+
+  return sendCampaign(send.id, { force: true });
 }
 
 /**
@@ -259,4 +368,4 @@ async function processScheduledSends() {
   return { processed };
 }
 
-module.exports = { sendCampaign, processScheduledSends, buildSubscriberQuery };
+module.exports = { sendCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery };

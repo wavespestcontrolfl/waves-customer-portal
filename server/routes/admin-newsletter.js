@@ -503,6 +503,37 @@ router.post('/sends/:id/send', async (req, res) => {
   }
 });
 
+// POST /api/admin/newsletter/sends/:id/resume — operator-triggered re-send
+// for a previously failed or partially-completed campaign. Per-recipient
+// idempotency in NewsletterSender skips anyone already in terminal-success
+// state so the resume only mails the ones that didn't make it.
+//
+// Refuses 'sending' (active worker holds it) and 'draft'/'scheduled' (use
+// the normal /send route). Refuses with NOTHING_TO_RESUME if every row is
+// already terminal-success — the campaign is effectively done.
+router.post('/sends/:id/resume', async (req, res) => {
+  try {
+    const send = await db('newsletter_sends').where({ id: req.params.id }).first();
+    if (!send) return res.status(404).json({ error: 'not found' });
+
+    NewsletterSender.resumeCampaign(req.params.id).catch(async (err) => {
+      if (err.code === 'STILL_SENDING' || err.code === 'NOT_RESUMABLE' || err.code === 'NOTHING_TO_RESUME') {
+        logger.info(`[newsletter] resume ${req.params.id} declined: ${err.code} (${err.message})`);
+        return;
+      }
+      logger.error(`[newsletter] background resume ${req.params.id} failed: ${err.message}`, { stack: err.stack });
+      try {
+        await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' });
+      } catch { /* swallow */ }
+    });
+
+    res.status(202).json({ accepted: true, sendId: req.params.id, status: 'resuming' });
+  } catch (err) {
+    logger.error(`[newsletter] resume dispatch failed: ${err.message}`, { stack: err.stack });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/newsletter/sends/:id/schedule — mark a draft as scheduled
 router.post('/sends/:id/schedule', async (req, res, next) => {
   try {
