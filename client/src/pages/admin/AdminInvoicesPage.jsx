@@ -1889,11 +1889,11 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
   const overrideEmail = recipientEmail.trim();
   const overrideValid = !useOverride || isEmailLike(overrideEmail);
   const emailChannel = useOverride ? overrideValid : !!defaultEmail;
+  const sendWithServerRecipients = !!loadError && !useOverride;
   const canSend =
     !loading &&
-    !loadError &&
     !sending &&
-    (emailChannel || !!smsPhone) &&
+    (sendWithServerRecipients || emailChannel || !!smsPhone) &&
     overrideValid;
 
   const send = async () => {
@@ -1980,7 +1980,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
               lineHeight: 1.45,
             }}
           >
-            {loadError}
+            {loadError}. You can still send using the saved invoice delivery settings.
           </div>
         ) : (
           <>

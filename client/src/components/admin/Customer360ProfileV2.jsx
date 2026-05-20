@@ -1842,6 +1842,7 @@ export default function Customer360ProfileV2({
 
   const updateNotificationPrefs = async (patch) => {
     const previous = data.notificationPrefs || {};
+    const patchKeys = Object.keys(patch);
     setData((prev) =>
       prev
         ? {
@@ -1867,9 +1868,18 @@ export default function Customer360ProfileV2({
         );
       }
     } catch {
-      setData((prev) =>
-        prev ? { ...prev, notificationPrefs: previous } : prev,
-      );
+      setData((prev) => {
+        if (!prev) return prev;
+        const notificationPrefs = { ...(prev.notificationPrefs || {}) };
+        patchKeys.forEach((key) => {
+          if (Object.prototype.hasOwnProperty.call(previous, key)) {
+            notificationPrefs[key] = previous[key];
+          } else {
+            delete notificationPrefs[key];
+          }
+        });
+        return { ...prev, notificationPrefs };
+      });
     }
   };
 

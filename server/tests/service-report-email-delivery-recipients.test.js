@@ -188,4 +188,33 @@ describe('service report email recipient delivery', () => {
       'service_report_ready:record-1:service_contact',
     ]);
   });
+
+  test('legacy fallback skips recipients already blocked by the template send', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+
+    EmailTemplateLibrary.sendTemplate.mockImplementation(({ to }) => {
+      if (to === 'owner@example.com') {
+        return Promise.resolve({ sent: false, reason: 'Email already sent' });
+      }
+      return Promise.reject(new Error('active template not found'));
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'legacy-tenant' });
+
+    const result = await sendServiceReportV1Email('record-1', {
+      token: 'token-1',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.messageIds).toEqual(['legacy-tenant']);
+    expect(result.recipientCount).toBe(1);
+    expect(result.blockedCount).toBe(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'tenant@example.com',
+    }));
+    expect(emailMessageRows.map((row) => row.idempotency_key)).toEqual([
+      'service_report_ready:record-1:service_contact',
+    ]);
+  });
 });

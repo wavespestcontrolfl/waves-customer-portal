@@ -389,7 +389,8 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
   const sent = [];
   const blocked = [];
   const failed = [];
-  for (const outcome of templateOutcomes) {
+  for (const [index, outcome] of templateOutcomes.entries()) {
+    const recipient = recipients[index];
     if (outcome.status === 'fulfilled') {
       if (outcome.value.result?.blocked) {
         blocked.push({ recipient: outcome.value.recipient, reason: outcome.value.result.reason });
@@ -402,13 +403,15 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
         sent.push(outcome.value.result);
       }
     } else {
-      failed.push(outcome.reason);
+      failed.push({ recipient, error: outcome.reason });
     }
   }
-  if (!sent.length && !blocked.length && failed.length && failed.every(canFallbackFromTemplateEmailError)) {
-    logger.warn(`[service-report-v1-email] Template unavailable for ${recordId}; falling back to legacy renderer: ${errorMessage(failed[0])}`);
+  let legacyRecipients = recipients;
+  if (!sent.length && failed.length && failed.every(({ error }) => canFallbackFromTemplateEmailError(error))) {
+    legacyRecipients = failed.map(({ recipient }) => recipient).filter(Boolean);
+    logger.warn(`[service-report-v1-email] Template unavailable for ${recordId}; falling back to legacy renderer for ${legacyRecipients.length} recipient(s): ${errorMessage(failed[0]?.error)}`);
   } else if (failed.length) {
-    const err = failed[0] || new Error('Email delivery failed');
+    const err = failed[0]?.error || new Error('Email delivery failed');
     logger.warn(`[service-report-v1-email] Template service report ${recordId} delivered to ${sent.length} recipient(s), ${blocked.length} blocked, ${failed.length} failed; queue will retry failed recipient(s): ${errorMessage(err)}`);
     return {
       ok: false,
@@ -437,7 +440,7 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     logger.warn(`[service-report-v1-email] Template service report ${recordId} blocked for all recipients: ${reason}`);
     return { ok: false, skipped: true, error: reason, attachedPdf: !!pdf };
   } else {
-    const err = failed[0] || new Error(blocked[0]?.reason || 'Email suppressed');
+    const err = failed[0]?.error || new Error(blocked[0]?.reason || 'Email suppressed');
     logger.error(`[service-report-v1-email] Template send failed for ${recordId}: ${errorMessage(err)}`);
     return {
       ok: false,
@@ -448,7 +451,7 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     };
   }
 
-  const legacyOutcomes = await Promise.allSettled(recipients.map((recipient) => {
+  const legacyOutcomes = await Promise.allSettled(legacyRecipients.map((recipient) => {
     const email = buildServiceReportV1Email({
       data: { ...data, customerName: recipient.name || data.customerName, pdfUrl: fullPdfUrl },
       reportUrl: fullReportUrl,
@@ -478,10 +481,10 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     }
   }
 
-  if (!legacySent.length && legacyBlocked.length === recipients.length) {
+  if (!legacySent.length && legacyBlocked.length === legacyRecipients.length) {
     const reason = legacyBlocked[0]?.reason || 'Email suppressed';
     logger.warn(`[service-report-v1-email] Legacy service report ${recordId} blocked for all recipients: ${reason}`);
-    return { ok: false, skipped: true, error: reason, attachedPdf: !!pdf };
+    return { ok: false, skipped: true, error: reason, blockedCount: blocked.length + legacyBlocked.length, attachedPdf: !!pdf };
   }
 
   if (!legacySent.length) {
@@ -490,7 +493,8 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     return {
       ok: false,
       error: errorMessage(err),
-      failedCount: legacyFailed.length || recipients.length,
+      failedCount: legacyFailed.length || legacyRecipients.length,
+      blockedCount: blocked.length + legacyBlocked.length,
       attachedPdf: !!pdf,
     };
   }
@@ -505,12 +509,13 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
       messageIds: legacySent.map(emailMessageId).filter(Boolean),
       recipientCount: legacySent.length,
       failedCount: legacyFailed.length,
-      blockedCount: legacyBlocked.length,
+      blockedCount: blocked.length + legacyBlocked.length,
       attachedPdf: !!pdf,
     };
   }
 
-  const partial = legacyBlocked.length ? `; ${legacyBlocked.length} blocked` : '';
+  const totalBlocked = blocked.length + legacyBlocked.length;
+  const partial = totalBlocked ? `; ${totalBlocked} blocked` : '';
   logger.info(`[service-report-v1-email] Sent service report ${recordId} to ${legacySent.length} recipient(s) for customer ${service.customer_id || 'unknown'}${partial}`);
   return {
     ok: true,
@@ -518,7 +523,7 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     messageIds: legacySent.map(emailMessageId).filter(Boolean),
     recipientCount: legacySent.length,
     failedCount: legacyFailed.length,
-    blockedCount: legacyBlocked.length,
+    blockedCount: totalBlocked,
     attachedPdf: !!pdf,
   };
 }

@@ -169,8 +169,10 @@ function invoiceRecipientOverrideError(email, saveBillingRecipient = false) {
   if (!isEmailLike(email)) {
     return 'Enter a valid invoice recipient email.';
   }
-  if (saveBillingRecipient && cleanEmail(email).length > BILLING_RECIPIENT_EMAIL_MAX_LENGTH) {
-    return 'Billing recipient email must be 200 characters or fewer.';
+  if (cleanEmail(email).length > BILLING_RECIPIENT_EMAIL_MAX_LENGTH) {
+    return saveBillingRecipient
+      ? 'Billing recipient email must be 200 characters or fewer.'
+      : 'Invoice recipient email must be 200 characters or fewer.';
   }
   return null;
 }

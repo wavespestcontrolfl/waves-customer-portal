@@ -15,10 +15,10 @@ describe('admin invoice recipient override validation', () => {
       .toBe('Billing recipient email must be 200 characters or fewer.');
   });
 
-  test('allows over-length invoice recipient email when not saving as default', () => {
+  test('rejects over-length one-time invoice recipient email', () => {
     const localPart = 'a'.repeat(190);
 
     expect(invoiceRecipientOverrideError(`${localPart}@example.com`, false))
-      .toBeNull();
+      .toBe('Invoice recipient email must be 200 characters or fewer.');
   });
 });
