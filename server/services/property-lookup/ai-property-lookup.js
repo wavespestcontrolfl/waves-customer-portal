@@ -548,7 +548,7 @@ const LOT_SQFT_MIN = 1000;
 const LOT_SQFT_MAX = 200_000;
 const ACRE_UNIT_RE = /\b(?:acres?|acs?|ac)\b\.?/i;
 const SQFT_UNIT_RE = /\b(?:sq\.?\s*ft\.?|sqft|square\s*feet|sf)\b\.?/i;
-const LOT_NUMBER_PATTERN = String.raw`(\d+\s*(?:-|\s)\s*\d+\s*\/\s*\d+|\d+\s*\/\s*\d+|(?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)(?:\.\d+)?)`;
+const LOT_NUMBER_PATTERN = String.raw`(\d+(?:-\d+\s*\/\s*\d+|\s+\d+\s*\/\s*\d+)|\d+\s*\/\s*\d+|(?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)(?:\.\d+)?)`;
 
 // Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
 // or acres ("5.99 Acres Lot", "1/2 acre"). The pricing engine always wants
@@ -660,6 +660,8 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
   const separator = afterMatch[1] || '';
   if (/[:=]/.test(separator)) return true;
 
+  if (unitKind === 'acre' && /[./]/.test(rawNumber) && Number.isInteger(beforeValue)) return true;
+
   const beforeSqft = unitKind === 'acre' ? beforeValue * SQFT_PER_ACRE : beforeValue;
   const afterSqft = unitKind === 'acre' ? afterValue * SQFT_PER_ACRE : afterValue;
   return (beforeSqft < LOT_SQFT_MIN || beforeSqft > LOT_SQFT_MAX)
@@ -673,11 +675,11 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
 // non-digit characters — that would merge "0.5 acres (21,780)" into a
 // single bogus number, or turn "1/2" into "12".
 function parseFirstLotNumber(str) {
-  const mixed = str.match(/(\d+)\s*(?:-|\s)\s*(\d+)\s*\/\s*(\d+)/);
+  const mixed = str.match(/(\d+)(?:-(\d+)\s*\/\s*(\d+)|\s+(\d+)\s*\/\s*(\d+))/);
   if (mixed) {
     const whole = Number(mixed[1]);
-    const num = Number(mixed[2]);
-    const den = Number(mixed[3]);
+    const num = Number(mixed[2] ?? mixed[4]);
+    const den = Number(mixed[3] ?? mixed[5]);
     if (Number.isFinite(whole) && Number.isFinite(num) && den > 0) {
       return whole + num / den;
     }
