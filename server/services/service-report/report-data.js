@@ -8,6 +8,10 @@ const { buildNoActivityFinding } = require('./no-activity-finding');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
+const {
+  loadServiceCoverageConfig,
+  normalizeServiceCoverage,
+} = require('./service-coverage');
 const { resolveTechPhotoUrl } = require('../tech-photo');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const {
@@ -1196,6 +1200,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const preloadedPestPressureConfig = Object.prototype.hasOwnProperty.call(opts, 'pestPressureConfig')
     ? opts.pestPressureConfig
     : undefined;
+  const preloadedServiceCoverageConfig = Object.prototype.hasOwnProperty.call(opts, 'serviceCoverageConfig')
+    ? opts.serviceCoverageConfig
+    : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
   const structured = parseJsonObject(service.structured_notes);
@@ -1264,9 +1271,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const pestPressureConfigPromise = preloadedPestPressureConfig === undefined
     ? loadActiveConfig(knex).catch(() => null)
     : Promise.resolve(preloadedPestPressureConfig);
-  const [pestPressureConfig, pestPressureRow] = await Promise.all([
+  const serviceCoverageConfigPromise = preloadedServiceCoverageConfig === undefined
+    ? loadServiceCoverageConfig(knex).catch(() => null)
+    : Promise.resolve(preloadedServiceCoverageConfig);
+  const [pestPressureConfig, pestPressureRow, serviceCoverageConfig] = await Promise.all([
     pestPressureConfigPromise,
     loadScoreForServiceRecord(knex, service.id).catch(() => null),
+    serviceCoverageConfigPromise,
   ]);
   const pestPressure = buildPestPressureCustomerView({
     config: pestPressureConfig,
@@ -1436,6 +1447,28 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     service.technician_photo_s3_key,
     service.technician_avatar_url || service.technician_photo_url,
   ).catch(() => service.technician_avatar_url || service.technician_photo_url || null);
+  const publicZones = zones.map((zone) => ({
+    id: zone.id,
+    letter: zone.letter,
+    label: zone.label,
+    category: zone.category,
+    geometry: parseJsonObject(zone.geometry),
+    geometryGeoJson: normalizeGeometry(zone.geometry_geojson) || undefined,
+    geometryImage: parseJsonObject(zone.geometry_image),
+  }));
+  const serviceCoverage = normalizeServiceCoverage({
+    serviceReportId: service.id,
+    serviceLine,
+    serviceType: service.service_type,
+    serviceDisplayName: serviceDisplayName(service),
+    serviceDate: service.service_date,
+    serviceAddress: compactAddress(service),
+    propertyAddress: compactAddress(service),
+    mapCenter,
+    serviceAreas: areaLabels,
+    serviceLocations,
+    zones: publicZones,
+  }, serviceCoverageConfig || {});
 
   return {
     reportVersion: 'service_report_v1',
@@ -1497,17 +1530,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       satellite: satelliteMap,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
+    serviceCoverage,
     serviceLocations,
     workflowEvents,
-    zones: zones.map((zone) => ({
-      id: zone.id,
-      letter: zone.letter,
-      label: zone.label,
-      category: zone.category,
-      geometry: parseJsonObject(zone.geometry),
-      geometryGeoJson: normalizeGeometry(zone.geometry_geojson) || undefined,
-      geometryImage: parseJsonObject(zone.geometry_image),
-    })),
+    zones: publicZones,
     applications,
     conditions: {
       ...parseJsonObject(service.conditions),
