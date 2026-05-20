@@ -348,6 +348,26 @@ describe('pest-control pricing hardening', () => {
       source: 'homeSqFt',
       wasDefaulted: false,
     }));
+    expect(resolvePestFootprint({ homeSqFt: 4000, stories: 2 })).toEqual(expect.objectContaining({
+      footprint: 2000,
+      source: 'homeSqFt',
+      wasDefaulted: false,
+    }));
+    expect(resolvePestFootprint({ livingAreaSqFt: 3600, stories: 3 })).toEqual(expect.objectContaining({
+      footprint: 1200,
+      source: 'livingAreaSqFt',
+      wasDefaulted: false,
+    }));
+
+    const directPest = pricePestControl({
+      homeSqFt: 4000,
+      stories: 2,
+      lotSqFt: 10000,
+      propertyType: 'single_family',
+      features: { shrubs: 'moderate', trees: 'moderate', complexity: 'moderate' },
+    });
+    expect(directPest.footprintUsed).toBe(2000);
+    expect(directPest.footprintSource).toBe('homeSqFt');
   });
 
   test('generated estimates preserve explicit measured footprint over derived home footprint', () => {

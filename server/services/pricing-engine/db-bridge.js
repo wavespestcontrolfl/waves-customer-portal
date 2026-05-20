@@ -173,10 +173,16 @@ function assertValidPestPricingConfig(snapshot = constants) {
   return result;
 }
 
-function clonePricingObject(value) {
-  return typeof structuredClone === 'function'
-    ? structuredClone(value)
-    : JSON.parse(JSON.stringify(value));
+function clonePricingObject(value, seen = new WeakMap()) {
+  if (!value || typeof value !== 'object') return value;
+  if (seen.has(value)) return seen.get(value);
+
+  const clone = Array.isArray(value) ? [] : {};
+  seen.set(value, clone);
+  for (const [key, child] of Object.entries(value)) {
+    clone[key] = clonePricingObject(child, seen);
+  }
+  return clone;
 }
 
 function replaceObjectInPlace(target, source) {
@@ -184,33 +190,36 @@ function replaceObjectInPlace(target, source) {
   Object.assign(target, source);
 }
 
-function snapshotPestPricingConfig() {
-  return {
-    PEST: clonePricingObject(constants.PEST),
-    PROPERTY_TYPE_ADJ: clonePricingObject(constants.PROPERTY_TYPE_ADJ),
-    oneTimePest: clonePricingObject(constants.ONE_TIME.pest),
-    germanRoach: clonePricingObject(constants.SPECIALTY.germanRoach),
-    bedBugSpecialty: clonePricingObject(constants.SPECIALTY.bedBug),
-    bedBug: clonePricingObject(constants.BED_BUG),
-    flea: clonePricingObject(constants.SPECIALTY.flea),
-    wasp: clonePricingObject(constants.SPECIALTY.wasp),
-    wdo: clonePricingObject(constants.SPECIALTY.wdo),
-    exclusion: clonePricingObject(constants.SPECIALTY.exclusion),
-  };
+function replaceValueInPlace(key, source) {
+  const target = constants[key];
+  if (Array.isArray(target) && Array.isArray(source)) {
+    target.length = 0;
+    target.push(...source);
+    return;
+  }
+  if (
+    target &&
+    source &&
+    typeof target === 'object' &&
+    typeof source === 'object' &&
+    !Array.isArray(target) &&
+    !Array.isArray(source)
+  ) {
+    replaceObjectInPlace(target, source);
+    return;
+  }
+  constants[key] = source;
 }
 
-function restorePestPricingConfig(snapshot) {
+function snapshotPricingConstants() {
+  return clonePricingObject(constants);
+}
+
+function restorePricingConstants(snapshot) {
   if (!snapshot) return;
-  replaceObjectInPlace(constants.PEST, snapshot.PEST);
-  replaceObjectInPlace(constants.PROPERTY_TYPE_ADJ, snapshot.PROPERTY_TYPE_ADJ);
-  replaceObjectInPlace(constants.ONE_TIME.pest, snapshot.oneTimePest);
-  replaceObjectInPlace(constants.SPECIALTY.germanRoach, snapshot.germanRoach);
-  replaceObjectInPlace(constants.SPECIALTY.bedBug, snapshot.bedBugSpecialty);
-  replaceObjectInPlace(constants.BED_BUG, snapshot.bedBug);
-  replaceObjectInPlace(constants.SPECIALTY.flea, snapshot.flea);
-  replaceObjectInPlace(constants.SPECIALTY.wasp, snapshot.wasp);
-  replaceObjectInPlace(constants.SPECIALTY.wdo, snapshot.wdo);
-  replaceObjectInPlace(constants.SPECIALTY.exclusion, snapshot.exclusion);
+  for (const [key, source] of Object.entries(snapshot)) {
+    replaceValueInPlace(key, source);
+  }
 }
 
 function syncBedBugPricingConfig(bedBugConfig) {
@@ -350,7 +359,7 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 
 async function syncConstantsFromDB(dbInstance) {
   const db = dbInstance || require('../../models/db');
-  let pestSnapshot = null;
+  let constantsSnapshot = null;
 
   try {
     const hasTable = await db.schema.hasTable('pricing_config');
@@ -367,7 +376,7 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
     if (Object.keys(config).length === 0) return false;
-    pestSnapshot = snapshotPestPricingConfig();
+    constantsSnapshot = snapshotPricingConstants();
 
     // ── Global ───────────────────────────────────────────────
     if (config.global_labor_rate?.value) constants.GLOBAL.LABOR_RATE = config.global_labor_rate.value;
@@ -914,7 +923,7 @@ async function syncConstantsFromDB(dbInstance) {
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
   } catch (err) {
-    restorePestPricingConfig(pestSnapshot);
+    restorePricingConstants(constantsSnapshot);
     console.error('[pricing-engine] DB sync failed, using defaults:', err.message);
     return false;
   }

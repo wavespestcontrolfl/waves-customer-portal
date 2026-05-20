@@ -58,20 +58,31 @@ function normalizeToken(value) {
     .replace(/[\s-]+/g, '_');
 }
 
+function positiveStories(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function livingAreaToFootprint(value, stories) {
+  const parsed = positiveFiniteNumber(value);
+  if (parsed === null) return null;
+  return Math.max(1, Math.round(parsed / positiveStories(stories)));
+}
+
 function resolvePestFootprint(property = {}, options = {}) {
   const fallback = positiveFiniteNumber(options.fallback) || 2000;
   const manualReviewReasons = [];
   const warnings = [];
   const aliases = [
-    ['footprint', property.footprint],
-    ['footprintSqFt', property.footprintSqFt],
-    ['homeSqFt', property.homeSqFt],
-    ['buildingSqFt', property.buildingSqFt],
-    ['livingAreaSqFt', property.livingAreaSqFt],
+    ['footprint', property.footprint, positiveFiniteNumber],
+    ['footprintSqFt', property.footprintSqFt, positiveFiniteNumber],
+    ['homeSqFt', property.homeSqFt, value => livingAreaToFootprint(value, property.stories)],
+    ['buildingSqFt', property.buildingSqFt, positiveFiniteNumber],
+    ['livingAreaSqFt', property.livingAreaSqFt, value => livingAreaToFootprint(value, property.stories)],
   ];
 
-  for (const [source, value] of aliases) {
-    const parsed = positiveFiniteNumber(value);
+  for (const [source, value, parser] of aliases) {
+    const parsed = parser(value);
     if (parsed !== null) {
       return {
         footprint: parsed,
