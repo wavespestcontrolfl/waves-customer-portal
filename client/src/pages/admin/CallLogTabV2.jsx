@@ -61,6 +61,46 @@ function timeAgo(dateStr) {
   return new Date(dateStr).toLocaleDateString();
 }
 
+function parseAiExtraction(call) {
+  if (!call?.ai_extraction) return null;
+  try {
+    return typeof call.ai_extraction === "string"
+      ? JSON.parse(call.ai_extraction)
+      : call.ai_extraction;
+  } catch {
+    return null;
+  }
+}
+
+function namePartsMatch(a, b) {
+  return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+}
+
+function getCallDisplayName(call) {
+  const linkedName = call.first_name
+    ? `${call.first_name} ${call.last_name || ""}`.trim()
+    : "";
+  const extraction = parseAiExtraction(call);
+  const extractedName = extraction?.first_name
+    ? `${extraction.first_name} ${extraction.last_name || ""}`.trim()
+    : "";
+
+  if (
+    call.direction === "outbound" &&
+    linkedName &&
+    extractedName &&
+    !namePartsMatch(extraction.first_name, call.first_name)
+  ) {
+    return `${extractedName} (${linkedName})`;
+  }
+
+  if (linkedName) return linkedName;
+  if (extractedName) return extractedName;
+  return call.direction === "outbound"
+    ? call.to_phone || call.from_phone || "Unknown"
+    : call.from_phone || call.to_phone || "Unknown";
+}
+
 function StatButton({ label, value, filter, active, onClick, alert }) {
   return (
     <button
@@ -92,6 +132,7 @@ export default function CallLogTabV2() {
   const [loading, setLoading] = useState(true);
   const [callTo, setCallTo] = useState("");
   const [callToSearch, setCallToSearch] = useState("");
+  const [callToCustomerId, setCallToCustomerId] = useState(null);
   const [callToResults, setCallToResults] = useState([]);
   const [callFrom, setCallFrom] = useState("+19412975749");
   const [calling, setCalling] = useState(false);
@@ -188,13 +229,19 @@ export default function CallLogTabV2() {
     try {
       await adminFetch("/admin/communications/call", {
         method: "POST",
-        body: JSON.stringify({ to: callTo.trim(), fromNumber: callFrom }),
+        body: JSON.stringify({
+          to: callTo.trim(),
+          fromNumber: callFrom,
+          customerId: callToCustomerId || undefined,
+        }),
       });
       setCallResult({
         ok: true,
         text: "Call initiated. Your phone will ring shortly.",
       });
       setCallTo("");
+      setCallToSearch("");
+      setCallToCustomerId(null);
       setTimeout(loadCalls, 3000);
     } catch (e) {
       setCallResult({ ok: false, text: `Failed: ${e.message}` });
@@ -417,6 +464,7 @@ export default function CallLogTabV2() {
                 value={callToSearch || callTo}
                 onChange={async (e) => {
                   const val = e.target.value;
+                  setCallToCustomerId(null);
                   if (/^[\d\s()\-+]+$/.test(val)) {
                     setCallTo(val);
                     setCallToSearch("");
@@ -457,6 +505,7 @@ export default function CallLogTabV2() {
                       type="button"
                       onClick={() => {
                         setCallTo(c.phone || "");
+                        setCallToCustomerId(c.id || null);
                         setCallToSearch(
                           `${c.firstName} ${c.lastName} — ${c.phone || ""}`,
                         );
@@ -563,9 +612,7 @@ export default function CallLogTabV2() {
                       <div className="flex-1 min-w-0">
                         {" "}
                         <div className="text-15 md:text-13 text-ink-primary font-medium">
-                          {c.first_name
-                            ? `${c.first_name} ${c.last_name || ""}`
-                            : c.from_phone || "Unknown"}
+                          {getCallDisplayName(c)}
                           <span className="ml-2 text-12 md:text-11 text-ink-tertiary font-normal">
                             {c.direction === "inbound" ? "Inbound" : "Outbound"}
                           </span>{" "}

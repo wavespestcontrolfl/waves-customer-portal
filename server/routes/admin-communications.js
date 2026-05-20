@@ -28,6 +28,32 @@ function notifyTwilioFailure(payload) {
   });
 }
 
+function phoneDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function maskPhone(value) {
+  const digits = phoneDigits(value);
+  return digits ? `***${digits.slice(-4)}` : 'unknown';
+}
+
+async function findSingleCustomerForPhone(phone) {
+  const digits = phoneDigits(normalizePhone(phone) || phone);
+  if (!digits) return null;
+
+  const matches = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [digits])
+    .orderBy('updated_at', 'desc')
+    .limit(2);
+
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    logger.warn(`[admin-call] ${matches.length} customers share outbound phone ${maskPhone(phone)}; require selected customerId to link call_log`);
+  }
+  return null;
+}
+
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   try {
@@ -96,7 +122,7 @@ router.post('/sms', async (req, res, next) => {
 // POST /api/admin/communications/call — initiate an outbound call via Twilio
 router.post('/call', async (req, res, next) => {
   try {
-    const { to, fromNumber } = req.body;
+    const { to, fromNumber, customerId } = req.body;
     if (!to) return res.status(400).json({ error: 'to number required' });
 
     const { isEnabled } = require('../config/feature-gates');
@@ -116,9 +142,27 @@ router.post('/call', async (req, res, next) => {
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
 
-    // Look up customer first so we can pass leadName into the admin prompt
-    // and so the call_log row has the right customer_id before Twilio fires.
-    const customer = await db('customers').where({ phone: to }).first().catch(() => null);
+    // Prefer the explicit customer picked in the UI. Phone-only lookup is
+    // ambiguous when spouses/contacts share a number, so auto-link only when
+    // exactly one active customer owns the dialed number.
+    let customer = null;
+    if (customerId) {
+      customer = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .first();
+      if (!customer) return res.status(404).json({ error: 'customerId not found' });
+      const normalizedTo = normalizePhone(to);
+      const normalizedCustomerPhone = normalizePhone(customer.phone);
+      if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
+        return res.status(400).json({ error: 'to must match the selected customer phone' });
+      }
+    } else {
+      customer = await findSingleCustomerForPhone(to).catch((e) => {
+        logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);
+        return null;
+      });
+    }
     const leadName = customer
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
