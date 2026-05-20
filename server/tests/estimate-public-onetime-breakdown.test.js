@@ -580,6 +580,35 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('quote-required result spec rows lock public commercial manual drafts', async () => {
+    const estimateData = {
+      result: {
+        specItems: [{
+          service: 'commercial_pest',
+          name: 'Commercial Pest Control',
+          price: null,
+          quoteRequired: true,
+          reason: 'Commercial pest requires manual quote or commercial pilot pricing.',
+        }],
+      },
+    };
+
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-commercial-manual-test',
+      estimate_data: estimateData,
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(resolveEstimateQuoteRequirement(payload)).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      reason: 'Commercial pest requires manual quote or commercial pilot pricing.',
+    }));
+  });
+
   test('server-rendered quote-required page suppresses normal lock-in copy', () => {
     const html = renderPage('quote-token', {
       status: 'quote_required',

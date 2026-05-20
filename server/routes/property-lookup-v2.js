@@ -17,6 +17,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { lookupStoriesFromAI, lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -437,6 +438,9 @@ ${rcContext}
 Return a JSON object with exactly these fields:
 
 {
+  "propertyUse": "RESIDENTIAL" | "COMMERCIAL" | "MIXED" | "UNKNOWN",
+  "commercialUseType": "OFFICE_RETAIL" | "WAREHOUSE_LIGHT" | "RESTAURANT_FOOD_SERVICE" | "MEDICAL_OFFICE" | "INDUSTRIAL" | "SCHOOL_DAYCARE" | "GOVERNMENT_MUNICIPAL" | "HOA_COMMON_AREA" | "MULTIFAMILY_COMMON_AREA" | "OTHER" | "NONE",
+
   "pool": "YES" | "NO" | "POSSIBLE",
   "poolCage": "YES" | "NO" | "POSSIBLE",
   "poolCageSize": "NONE" | "SMALL" | "MEDIUM" | "LARGE" | "OVERSIZED",
@@ -569,6 +573,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     ai?.imperviousSurfacePercent,
     ai?.imperviosSurfacePercent
   );
+  const category = detectCategory(rc, ai);
+  const commercialProfile = category === 'COMMERCIAL';
+  const commercialSubtype = commercialProfile ? resolveCommercialSubtype(rc, ai) : null;
   const profile = {
     // ── ADDRESS ──
     address: rc?.formattedAddress || '',
@@ -578,8 +585,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null) {
     zipCode: rc?.zipCode || '',
 
     // ── CATEGORY / TYPE ──
-    category: detectCategory(rc),
-    propertyType: rc?.propertyType || 'Single Family',
+    category,
+    propertyType: commercialProfile ? 'Commercial' : (rc?.propertyType || 'Single Family'),
+    isCommercial: commercialProfile,
+    commercialSubtype,
+    commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
     unitCount: rc?.unitCount || 1,
 
     // ── DIMENSIONS ──
@@ -798,6 +808,54 @@ function firstNonNegativeNumber(...values) {
   return undefined;
 }
 
+function normalizeCommercialFlag(value) {
+  if (value === true) return true;
+  const raw = String(value || '').trim().toLowerCase();
+  return raw === 'true' || raw === 'yes' || raw === 'commercial';
+}
+
+function hasExplicitCommercialFalse(value) {
+  if (value === false) return true;
+  const raw = String(value || '').trim().toLowerCase();
+  return raw === 'false' || raw === 'no' || raw === 'residential';
+}
+
+const RESIDENTIAL_PROFILE_PROPERTY_TYPES = new Set([
+  'single_family',
+  'townhome_end',
+  'townhome_interior',
+  'duplex',
+  'condo_ground',
+  'condo_upper',
+]);
+
+function isCommercialProfile(profile = {}, options = {}) {
+  const profilePropertyType = normalizePricingPropertyType(profile.propertyType);
+  const optionPropertyType = normalizePricingPropertyType(options.propertyType);
+  const hasCommercialSubtype = !!profile.commercialSubtype || !!options.commercialSubtype;
+  const hasExplicitCommercialTrueWithoutSubtype =
+    normalizeCommercialFlag(profile.isCommercial) ||
+    normalizeCommercialFlag(options.isCommercial) ||
+    profilePropertyType === 'commercial' ||
+    optionPropertyType === 'commercial';
+  const hasConcreteResidentialType =
+    RESIDENTIAL_PROFILE_PROPERTY_TYPES.has(profilePropertyType) ||
+    RESIDENTIAL_PROFILE_PROPERTY_TYPES.has(optionPropertyType);
+  if (!hasExplicitCommercialTrueWithoutSubtype && hasConcreteResidentialType) return false;
+
+  const hasResidentialOverride = (
+    hasExplicitCommercialFalse(options.isCommercial) ||
+    hasExplicitCommercialFalse(profile.isCommercial)
+  ) && !hasExplicitCommercialTrueWithoutSubtype;
+
+  if (hasResidentialOverride) return false;
+
+  return hasExplicitCommercialTrueWithoutSubtype ||
+    hasCommercialSubtype ||
+    normalizePricingPropertyType(profile.category) === 'commercial' ||
+    normalizePricingPropertyType(options.category) === 'commercial';
+}
+
 function selectedTurfPricedServices(selectedServices = []) {
   return (selectedServices || [])
     .map((service) => String(service || '').toUpperCase())
@@ -824,7 +882,18 @@ function turfRiskReasons(source = {}) {
 }
 
 function needsTurfManualConfirmation(profile = {}, selectedServices = [], options = {}) {
-  const turfServices = selectedTurfPricedServices(selectedServices);
+  let turfServices = selectedTurfPricedServices(selectedServices);
+  if (isCommercialProfile(profile, options)) {
+    // Commercial turf services are manual quote in PR 1; do not block them
+    // with residential lawn pricing measurement confirmation.
+    turfServices = turfServices.filter((service) => ![
+      'LAWN',
+      'OT_LAWN',
+      'TOPDRESS',
+      'DETHATCH',
+      'PLUGGING',
+    ].includes(service));
+  }
   if (turfServices.length === 0) return null;
   const manualTurfSf = firstNonNegativeNumber(profile.measuredTurfSf, profile.lawnSqFt);
   if (manualTurfSf !== undefined) return null;
@@ -843,14 +912,85 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
   };
 }
 
-function detectCategory(rc) {
-  if (!rc) return 'RESIDENTIAL';
-  const pt = (rc.propertyType || '').toLowerCase();
-  if (pt.includes('commercial') || pt.includes('office') || pt.includes('retail') ||
-      pt.includes('industrial') || pt.includes('warehouse')) return 'COMMERCIAL';
-  if (pt.includes('apartment') || pt.includes('multi') || (rc.unitCount && rc.unitCount > 4))
+function commercialSignalText(rc = {}, ai = {}) {
+  const structuredAiSignals = [];
+  const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();
+  const commercialUseType = String(ai?.commercialUseType || '').trim().toUpperCase();
+  const nonCommercialUseTypes = ['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'];
+  if (['COMMERCIAL', 'MIXED'].includes(propertyUse)) {
+    structuredAiSignals.push(ai.propertyUse);
+  }
+  if (
+    commercialUseType &&
+    !nonCommercialUseTypes.includes(commercialUseType)
+  ) {
+    structuredAiSignals.push(ai.commercialUseType);
+  }
+
+  return [
+    rc?.propertyType,
+    rc?.zoning,
+    rc?._raw?.zoning,
+    rc?._raw?.landUse,
+    rc?._raw?.propertyUse,
+    rc?._raw?.propertyType,
+    ...structuredAiSignals,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function hasStructuredCommercialAiSignal(ai = {}) {
+  const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();
+  const commercialUseType = String(ai?.commercialUseType || '').trim().toUpperCase();
+  const nonCommercialUseTypes = ['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'];
+  if (['COMMERCIAL', 'MIXED'].includes(propertyUse)) return true;
+  if (!commercialUseType || nonCommercialUseTypes.includes(commercialUseType)) {
+    return false;
+  }
+  return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';
+}
+
+function detectCategory(rc, ai = {}) {
+  if (!rc && !ai) return 'RESIDENTIAL';
+  const text = commercialSignalText(rc, ai);
+  if (/(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/.test(text)) return 'COMMERCIAL';
+  if (/(apartment|apartments|multi\s*family|multifamily|hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
+  if (hasStructuredCommercialAiSignal(ai)) return 'COMMERCIAL';
+  if (rc?.unitCount && rc.unitCount > 4)
     return 'COMMERCIAL';
   return 'RESIDENTIAL';
+}
+
+function hasCommercialSignalText(rc = {}, ai = {}) {
+  return detectCategory(
+    { propertyType: '', unitCount: 1, ...rc },
+    { ...ai, propertyUse: ai?.propertyUse || 'UNKNOWN' }
+  ) === 'COMMERCIAL';
+}
+
+function resolveCommercialSubtype(rc = {}, ai = {}) {
+  const text = commercialSignalText(rc, ai);
+  if (/warehouse|light\s*industrial/.test(text)) return 'warehouse_light';
+  if (/restaurant|food\s*service|commercial\s*kitchen/.test(text)) return 'restaurant_food_service';
+  if (/medical|clinic/.test(text)) return 'medical_office';
+  if (/school|daycare/.test(text)) return 'school_daycare';
+  if (/government|municipal/.test(text)) return 'government_municipal';
+  if (/industrial/.test(text)) return 'industrial';
+  if (/apartment|apartments|multi\s*family|multifamily/.test(text)) return 'multifamily_common_area_residential';
+  if (/business\s*park|commercial\s*hoa/.test(text)) return 'hoa_common_area_commercial';
+  if (/hoa|condo\s*association|common\s*area/.test(text)) return 'hoa_common_area_residential';
+  if (/office|retail|storefront|shop|plaza|business|commercial/.test(text)) return 'office_retail';
+  return 'other';
+}
+
+function resolveCommercialDetectionSource(rc = {}, ai = {}) {
+  if (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) === 'commercial') return 'property_record_property_type';
+  if (rc?.unitCount && rc.unitCount > 4) return 'property_record_unit_count';
+  if (hasCommercialSignalText(rc, {})) return 'property_record_commercial_signal';
+  if (hasStructuredCommercialAiSignal(ai)) return 'satellite_ai_property_use';
+  return 'commercial_signal';
 }
 
 function classifyAge(yearBuilt) {
@@ -1270,20 +1410,20 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const lotSqFt = Number(p.lotSqFt) || 0;
   const stories = Number(p.stories) || 1;
   const normalizePropertyType = (value) => {
-    const raw = String(value || '').toLowerCase();
-    if (raw.includes('commercial')) return 'commercial';
-    if (raw.includes('duplex')) return 'duplex';
-    if (raw.includes('town')) {
-      return raw.includes('interior') || raw.includes('inner') ? 'townhome_interior' : 'townhome_end';
-    }
-    if (raw.includes('condo')) {
-      return raw.includes('upper') || raw.includes('2nd') || raw.includes('3rd')
-        ? 'condo_upper'
-        : 'condo_ground';
-    }
-    return 'single_family';
+    const normalized = normalizePricingPropertyType(value);
+    return [
+      'commercial',
+      'single_family',
+      'townhome_end',
+      'townhome_interior',
+      'duplex',
+      'condo_ground',
+      'condo_upper',
+    ].includes(normalized) ? normalized : 'single_family';
   };
-
+  const v1PropertyType = normalizePropertyType(p.propertyType);
+  const commercialProfile = isCommercialProfile(p, o);
+  const commercialSubtype = commercialProfile ? (o.commercialSubtype || p.commercialSubtype || null) : null;
   // Grass track — v2 accepts old A/B/C1/C2/D letters AND new keys.
   const TRACK_MAP = { A: 'st_augustine', B: 'st_augustine', C1: 'bermuda', C2: 'zoysia', D: 'bahia' };
   const rawGrass = o.grassType || 'st_augustine';
@@ -1328,7 +1468,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
                   : 'none';
 
   // Recurring
-  if (sel.has('PEST')) services.pest = { frequency: pestFreq, roachType };
+  if (sel.has('PEST')) {
+    services.pest = {
+      frequency: pestFreq,
+      roachType,
+      ...(commercialProfile && o.commercialPricingMode
+        ? { commercialPricingMode: o.commercialPricingMode }
+        : {}),
+      ...(commercialProfile && commercialSubtype ? { commercialSubtype } : {}),
+    };
+  }
   if (sel.has('LAWN')) {
     services.lawn = {
       track,
@@ -1340,6 +1489,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       lawnMaterialCostPerK: o.lawnMaterialCostPerK,
       lawnLaborMinutesBase: o.lawnLaborMinutesBase,
       lawnLaborMinutesPerK: o.lawnLaborMinutesPerK,
+      ...(commercialProfile && o.commercialPricingMode
+        ? { commercialPricingMode: o.commercialPricingMode }
+        : {}),
+      ...(commercialProfile && commercialSubtype ? { commercialSubtype } : {}),
     };
   }
   if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
@@ -1517,7 +1670,10 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     stories,
     storiesSource: p.storiesSource || null,
     lotSqFt,
-    propertyType: normalizePropertyType(p.propertyType),
+    propertyType: commercialProfile ? 'commercial' : v1PropertyType,
+    category: p.category || o.category || null,
+    isCommercial: commercialProfile,
+    commercialSubtype,
     measuredTurfSf: p.measuredTurfSf,
     estimatedTurfSf: p.estimatedTurfSf,
     imperviousSurfacePercent: p.imperviousSurfacePercent,
@@ -1692,7 +1848,7 @@ function mergeAiAnalyses(providerResults) {
   const merged = { ...primary.analysis };
 
   // Use higher confidence for key fields when models disagree
-  const fieldsToValidate = ['pool', 'poolCage', 'poolCageSize', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'nearWater', 'waterDistance', 'overallPestPressureEstimate'];
+  const fieldsToValidate = ['propertyUse', 'commercialUseType', 'pool', 'poolCage', 'poolCageSize', 'fenceType', 'shrubDensity', 'treeDensity', 'landscapeComplexity', 'nearWater', 'waterDistance', 'overallPestPressureEstimate'];
 
   const divergences = [];
   for (const { provider, analysis } of sorted.slice(1)) {
@@ -1742,6 +1898,8 @@ function normalizeSatelliteAnalysis(analysis = {}) {
   if (!normalized.waterProximity && normalized.nearWater) normalized.waterProximity = normalized.nearWater;
   if (!normalized.nearWater && normalized.waterProximity) normalized.nearWater = normalized.waterProximity;
   if (!normalized.waterDistance) normalized.waterDistance = 'NONE';
+  if (normalized.propertyUse) normalized.propertyUse = String(normalized.propertyUse).toUpperCase();
+  if (normalized.commercialUseType) normalized.commercialUseType = String(normalized.commercialUseType).toUpperCase();
   return normalized;
 }
 
@@ -1753,6 +1911,8 @@ For pool cages, classify the visible screen enclosure service burden. SMALL is a
 
 Return ONLY valid JSON with these fields:
 {
+  "propertyUse": "RESIDENTIAL" | "COMMERCIAL" | "MIXED" | "UNKNOWN",
+  "commercialUseType": "OFFICE_RETAIL" | "WAREHOUSE_LIGHT" | "RESTAURANT_FOOD_SERVICE" | "MEDICAL_OFFICE" | "INDUSTRIAL" | "SCHOOL_DAYCARE" | "GOVERNMENT_MUNICIPAL" | "HOA_COMMON_AREA" | "MULTIFAMILY_COMMON_AREA" | "OTHER" | "NONE",
   "pool": "YES" | "NO" | "POSSIBLE",
   "poolCage": "YES" | "NO" | "POSSIBLE",
   "poolCageSize": "NONE" | "SMALL" | "MEDIUM" | "LARGE" | "OVERSIZED",

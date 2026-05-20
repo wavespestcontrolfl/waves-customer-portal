@@ -655,7 +655,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           homeSqFt: sq,
           lotSqFt: Number(lotSqFt) || undefined,
           stories: Number(enriched?.stories) || 1,
-          propertyType: enriched?.propertyType || 'Single Family',
+          propertyType: enriched?.propertyType || undefined,
           enriched: enriched || undefined,
           services: {
             ...(svcPest ? { pest: { frequency: pestFreq } } : {}),
@@ -668,7 +668,7 @@ export default function QuotePage({ serviceSlug = '' }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Could not calculate.');
       setResult(d);
-      setStage(showUpsell ? 'upsell' : 'result');
+      setStage(showUpsell && !d.quote_required ? 'upsell' : 'result');
     } catch (e) {
       setError(e.message);
     } finally {
@@ -1161,32 +1161,54 @@ export default function QuotePage({ serviceSlug = '' }) {
 
             {stage === 'result' && result && (
               <div>
-                <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
-                  <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
-                  <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
-                    ${Number(result.monthly_total).toLocaleString()}
-                    <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>/mo</span>
-                  </div>
-                  <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${Number(result.variance_low).toLocaleString()} – ${Number(result.variance_high).toLocaleString()}</strong> per month</div>
-                  {result.confidence === 'low' && (
-                    <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
-                  )}
-                  <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${Number(result.annual_total).toLocaleString()}/yr · {result.service_interest}</div>
-                  {result.has_setup_fee && (
-                    <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
-                      + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
+                {result.quote_required ? (
+                  <>
+                    <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
+                      <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Manual Quote Required</div>
+                      <div style={{ fontSize: 34, fontWeight: 800, color: COLORS.blueDeeper, marginTop: 10, lineHeight: 1.1 }}>
+                        Commercial property detected
+                      </div>
+                      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>
+                        {result.message || 'The Waves team has been notified and will follow up to finish the quote.'}
+                      </div>
+                      <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>
+                        {result.service_interest}
+                      </div>
                     </div>
-                  )}
-                </div>
+                    <div style={{ padding: 16, background: '#FEF3C7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
+                      Residential lawn and pest pricing is not valid for commercial properties. A Waves specialist will review the scope and contact you shortly.
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
+                      <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
+                      <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
+                        ${Number(result.monthly_total).toLocaleString()}
+                        <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>/mo</span>
+                      </div>
+                      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${Number(result.variance_low).toLocaleString()} – ${Number(result.variance_high).toLocaleString()}</strong> per month</div>
+                      {result.confidence === 'low' && (
+                        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
+                      )}
+                      <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>${Number(result.annual_total).toLocaleString()}/yr · {result.service_interest}</div>
+                      {result.has_setup_fee && (
+                        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
+                          + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
+                        </div>
+                      )}
+                    </div>
 
-                <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
-                  We already texted your local Waves team. <strong>They'll confirm the final number and book your first visit</strong> — usually within the hour.
-                </div>
+                    <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
+                      We already texted your local Waves team. <strong>They'll confirm the final number and book your first visit</strong> — usually within the hour.
+                    </div>
 
-                <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 16, lineHeight: 1.55 }}>
-                  <div style={{ fontWeight: 700, marginBottom: 4 }}>100% Satisfaction Guarantee</div>
-                  <div>If pests return between visits, so do we — free. No contracts, cancel anytime. Licensed &amp; Insured Florida Pest Control Operator.</div>
-                </div>
+                    <div style={{ marginTop: 12, padding: 14, borderRadius: 12, background: '#FFF8E1', color: COLORS.navy, fontSize: 16, lineHeight: 1.55 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 4 }}>100% Satisfaction Guarantee</div>
+                      <div>If pests return between visits, so do we — free. No contracts, cancel anytime. Licensed &amp; Insured Florida Pest Control Operator.</div>
+                    </div>
+                  </>
+                )}
 
                 <div style={{ marginTop: 24, display: 'grid', gap: 12 }}>
                   <Button variant="primary" as="a" href="tel:+19412975749" style={{ fontSize: 16, textAlign: 'center', textDecoration: 'none', textTransform: 'none' }}>Call (941) 297-5749</Button>

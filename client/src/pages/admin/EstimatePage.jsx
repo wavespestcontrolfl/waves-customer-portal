@@ -8,11 +8,32 @@ import React, {
   useContext,
   Component,
 } from "react";
-import { calculateEstimate, fmt, fmtInt } from "../../lib/estimateEngine";
+import {
+  calculateEstimate,
+  fmt,
+  fmtInt,
+  isCommercialEstimateInput,
+  resolveLookupPropertyTypeAutofill,
+} from "../../lib/estimateEngine";
 import { LeadsSection } from "./LeadsTabs";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
 import { MarginCalculator } from "./PricingLogicPage";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
+
+const COMMERCIAL_WARNING_TEXT =
+  "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
+
+function estimateRequiresQuote(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => estimateRequiresQuote(item, depth + 1));
+  }
+  if (typeof value !== "object") return false;
+  if (value.quoteRequired === true || value.requiresCustomQuote === true) {
+    return true;
+  }
+  return Object.values(value).some((item) => estimateRequiresQuote(item, depth + 1));
+}
 
 class EstimateErrorBoundary extends Component {
   constructor(props) {
@@ -594,6 +615,9 @@ function EstimateToolView() {
     stories: "1",
     lotSqFt: "",
     propertyType: "Single Family",
+    isCommercial: "NO",
+    commercialSubtype: "",
+    commercialPricingMode: "manual_quote",
     hasPool: "NO",
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
@@ -665,6 +689,7 @@ function EstimateToolView() {
 
   /* ── live pricing preview (approximate from form state) ──── */
   const livePreview = useMemo(() => {
+    const commercialDetected = isCommercialEstimateInput(form);
     // Count recurring services
     const qualifyingRecurringKeys = [
       "svcLawn",
@@ -674,7 +699,11 @@ function EstimateToolView() {
       "svcTermiteBait",
     ];
     const separateRecurringKeys = ["svcInjection", "svcRodentBait"];
-    const recurringCount = qualifyingRecurringKeys.filter((k) => form[k]).length;
+    const commercialManualQuoteCount =
+      commercialDetected ? ["svcLawn", "svcPest"].filter((k) => form[k]).length : 0;
+    const recurringCount = qualifyingRecurringKeys
+      .filter((k) => form[k] && !(commercialDetected && (k === "svcLawn" || k === "svcPest")))
+      .length;
     const separateRecurringCount = separateRecurringKeys.filter((k) => form[k]).length;
 
     // Tier logic
@@ -693,8 +722,8 @@ function EstimateToolView() {
     const sqft = Number(form.homeSqFt) || 2000;
     const lotSqft = Number(form.lotSqFt) || 8000;
     const approx = {};
-    if (form.svcLawn) approx.lawn = Math.max(55, Math.round(sqft * 0.028 + 10));
-    if (form.svcPest) {
+    if (form.svcLawn && !commercialDetected) approx.lawn = Math.max(55, Math.round(sqft * 0.028 + 10));
+    if (form.svcPest && !commercialDetected) {
       const freqMult = { 4: 1, 6: 1.3, 12: 2.2 };
       approx.pest = Math.max(
         35,
@@ -748,10 +777,12 @@ function EstimateToolView() {
       "svcExclusion",
     ];
     const onetimeCount = onetimeKeys.filter((k) => form[k]).length;
-    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || onetimeCount > 0;
+    const anySelected = recurringCount > 0 || separateRecurringCount > 0 || commercialManualQuoteCount > 0 || onetimeCount > 0;
 
     return {
       recurringCount,
+      totalRecurringCount: recurringCount + separateRecurringCount + commercialManualQuoteCount,
+      commercialManualQuoteCount,
       onetimeCount,
       tier,
       recurringMonthly,
@@ -959,14 +990,10 @@ function EstimateToolView() {
       if (ep.homeSqFt) upd.homeSqFt = String(ep.homeSqFt);
       if (ep.lotSqFt) upd.lotSqFt = String(ep.lotSqFt);
       if (ep.stories) upd.stories = String(ep.stories);
-      if (ep.propertyType) {
-        const pt = ep.propertyType.toLowerCase();
-        if (pt.includes("single")) upd.propertyType = "Single Family";
-        else if (pt.includes("town")) upd.propertyType = "Townhome";
-        else if (pt.includes("condo")) upd.propertyType = "Condo";
-        else if (pt.includes("duplex")) upd.propertyType = "Duplex";
-        else if (pt.includes("commercial")) upd.propertyType = "Commercial";
+      if (ep.propertyType || ep.category) {
+        Object.assign(upd, resolveLookupPropertyTypeAutofill(ep.propertyType, ep.category));
       }
+      if (ep.commercialSubtype) upd.commercialSubtype = ep.commercialSubtype;
       if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
@@ -1132,7 +1159,9 @@ function EstimateToolView() {
       if (data.has_pool_cage) upd.hasPoolCage = "YES";
       if (data.has_large_driveway) upd.hasLargeDriveway = "YES";
       if (data.near_water) upd.nearWater = "YES";
-      if (data.property_type) upd.propertyType = data.property_type;
+      if (data.property_type || data.category) {
+        Object.assign(upd, resolveLookupPropertyTypeAutofill(data.property_type, data.category));
+      }
       if (data.perimeter_linear_ft)
         upd.boracareSqft = String(Math.round(data.perimeter_linear_ft));
 
@@ -1156,6 +1185,7 @@ function EstimateToolView() {
 
   /* ── generate estimate ────────────────────────────────────── */
   async function doGenerate(overrides = {}) {
+    const formIsCommercial = isCommercialEstimateInput(form);
     const serviceFlagValues = [
       form.svcLawn,
       form.svcPest,
@@ -1184,11 +1214,12 @@ function EstimateToolView() {
     const bedBugOnlyManual =
       form.svcBedbug && serviceFlagValues.filter(Boolean).length === 1;
     const hasLawnPricedService =
-      form.svcLawn ||
-      form.svcOnetimeLawn ||
-      form.svcTopdress ||
-      form.svcDethatch ||
-      form.svcPlugging;
+      !formIsCommercial &&
+      (form.svcLawn ||
+        form.svcOnetimeLawn ||
+        form.svcTopdress ||
+        form.svcDethatch ||
+        form.svcPlugging);
     const hasManualLawnDimensions =
       (Number(form.lotSqFt) || 0) > 0 ||
       (Number(form.measuredTurfSf) || 0) > 0 ||
@@ -1256,7 +1287,6 @@ function EstimateToolView() {
                 label: form.manualDiscountLabel || "",
               }
             : null;
-
         const options = {
           grassType: form.grassType || "st_augustine",
           lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq) || 9,
@@ -1287,6 +1317,8 @@ function EstimateToolView() {
           exclWaiveInspection: form.exclWaive === "YES",
           roachType: form.roachType || "REGULAR",
           onetimeLawnType: form.otLawnType || "FERT",
+          commercialPricingMode: form.commercialPricingMode || "manual_quote",
+          commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
         };
 
         // Override enriched profile with any manual form edits. When bed bug is
@@ -1332,6 +1364,8 @@ function EstimateToolView() {
           form.landscapeComplexity || profile.landscapeComplexity;
         profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
         profile.propertyType = form.propertyType || profile.propertyType;
+        profile.isCommercial = formIsCommercial;
+        profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
 
         const r = await fetch("/api/admin/estimator/calculate-estimate", {
           method: "POST",
@@ -1462,6 +1496,9 @@ function EstimateToolView() {
       isAfterHours: yesNo(form.isAfterHours),
       isRecurringCustomer: yesNo(form.isRecurringCustomer),
       exclWaive: yesNo(form.exclWaive),
+      isCommercial: formIsCommercial,
+      commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
+      commercialPricingMode: form.commercialPricingMode || "manual_quote",
       boracareSqftAuto: form._boracareAuto || false,
     };
     const result = calculateEstimate(inputs);
@@ -1479,6 +1516,9 @@ function EstimateToolView() {
     setSaving(true);
     try {
       const E = estimate;
+      const quoteRequired = estimateRequiresQuote(E);
+      const monthlyTotal = quoteRequired ? 0 : E.recurring?.grandTotal || 0;
+      const onetimeTotal = quoteRequired ? 0 : E.oneTime?.total || 0;
       const r = await fetch("/api/admin/estimates", {
         method: "POST",
         headers: authHeaders,
@@ -1488,9 +1528,9 @@ function EstimateToolView() {
           customerPhone: form.customerPhone || "",
           customerEmail: form.customerEmail || "",
           estimateData: { inputs: form, result: E },
-          monthlyTotal: E.recurring?.grandTotal || 0,
-          annualTotal: (E.recurring?.grandTotal || 0) * 12,
-          onetimeTotal: E.oneTime?.total || 0,
+          monthlyTotal,
+          annualTotal: monthlyTotal * 12,
+          onetimeTotal,
           waveguardTier: E.recurring?.tier || "Bronze",
           notes: form.notes || "",
           satelliteUrl: satelliteData?.imageUrl || null,
@@ -1597,6 +1637,9 @@ function EstimateToolView() {
       stories: "1",
       lotSqFt: "",
       propertyType: "Single Family",
+      isCommercial: "NO",
+      commercialSubtype: "",
+      commercialPricingMode: "manual_quote",
       hasPool: "NO",
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
@@ -1653,6 +1696,7 @@ function EstimateToolView() {
   }
 
   const E = estimate; // shorthand
+  const commercialDetected = isCommercialEstimateInput(form);
   const formCtx = { form, set, toggle };
   const R = E?.results || {};
 
@@ -1780,6 +1824,9 @@ function EstimateToolView() {
                       lotSqFt: "",
                       stories: "1",
                       propertyType: "Single Family",
+                      isCommercial: "NO",
+                      commercialSubtype: "",
+                      commercialPricingMode: "manual_quote",
                       hasPool: "NO",
                       hasPoolCage: "NO",
                       poolCageSize: "MEDIUM",
@@ -2146,6 +2193,47 @@ function EstimateToolView() {
                 />{" "}
               </Field>{" "}
               <div style={sRow}>
+                <Field label="Commercial">
+                  <Select
+                    k="isCommercial"
+                    options={[
+                      { value: "NO", label: "No" },
+                      { value: "YES", label: "Yes" },
+                    ]}
+                  />
+                </Field>
+                <Field label="Commercial Pricing">
+                  <Select
+                    k="commercialPricingMode"
+                    options={[
+                      { value: "manual_quote", label: "Manual quote" },
+                      { value: "small_commercial_pilot", label: "Small-commercial pilot" },
+                    ]}
+                  />
+                </Field>
+              </div>
+              {(commercialDetected || form.commercialSubtype) && (
+                <Field label="Commercial Subtype">
+                  <Input k="commercialSubtype" placeholder="Optional" />
+                </Field>
+              )}
+              {commercialDetected && (
+                <div
+                  style={{
+                    background: "rgba(245,158,11,0.12)",
+                    border: "1px solid rgba(245,158,11,0.45)",
+                    color: C.amber,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    fontSize: 13,
+                    lineHeight: 1.45,
+                    marginBottom: 12,
+                  }}
+                >
+                  {COMMERCIAL_WARNING_TEXT}
+                </div>
+              )}
+              <div style={sRow}>
                 {" "}
                 <Field label="Home Sq Ft">
                   <Input k="homeSqFt" type="number" placeholder="2000" />
@@ -2312,7 +2400,18 @@ function EstimateToolView() {
               <div style={sPanelTitle}>Services to Quote</div>{" "}
               <div style={sSvcSection}>Recurring Programs</div>{" "}
               <Checkbox k="svcLawn" label="Lawn Care" />
-              {form.svcLawn && (
+              {form.svcLawn && commercialDetected && (
+                <div style={{
+                  ...sSubOpts,
+                  background: "rgba(245,158,11,0.12)",
+                  border: "1px solid rgba(245,158,11,0.45)",
+                  color: C.amber,
+                  fontSize: 13,
+                }}>
+                  Commercial lawn treatment is set to manual quote. Residential lawn pricing is suppressed.
+                </div>
+              )}
+              {form.svcLawn && !commercialDetected && (
                 <div style={sSubOpts}>
                   {" "}
                   <Field label="Grass Type / Track">
@@ -2330,7 +2429,18 @@ function EstimateToolView() {
                 </div>
               )}
               <Checkbox k="svcPest" label="Pest Control" />
-              {form.svcPest && (
+              {form.svcPest && commercialDetected && (
+                <div style={{
+                  ...sSubOpts,
+                  background: "rgba(245,158,11,0.12)",
+                  border: "1px solid rgba(245,158,11,0.45)",
+                  color: C.amber,
+                  fontSize: 13,
+                }}>
+                  Commercial pest is set to manual quote. Residential pest pricing is suppressed.
+                </div>
+              )}
+              {form.svcPest && !commercialDetected && (
                 <div style={sSubOpts}>
                   {" "}
                   <div style={sRow}>
@@ -2391,6 +2501,22 @@ function EstimateToolView() {
                   {livePreview.tier.discount > 0
                     ? ` (${Math.round(livePreview.tier.discount * 100)}% bundle discount)`
                     : " (no discount \u2014 add 1 more for Silver 10%)"}
+                </div>
+              )}
+              {livePreview.commercialManualQuoteCount > 0 && (
+                <div
+                  style={{
+                    margin: "12px 0 6px 0",
+                    padding: "8px 14px",
+                    borderRadius: 8,
+                    background: "rgba(245,158,11,0.12)",
+                    border: "1px solid rgba(245,158,11,0.45)",
+                    fontSize: 13,
+                    color: C.amber,
+                  }}
+                >
+                  {livePreview.commercialManualQuoteCount} commercial lawn/pest selection
+                  {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} set to manual quote.
                 </div>
               )}
               <div style={sSvcSection}>One-Time Services</div>
@@ -3066,7 +3192,7 @@ function EstimateToolView() {
                 <div style={{ fontSize: 15, color: C.gray, marginBottom: 16 }}>
                   {!livePreview.anySelected
                     ? "Select at least one service to see pricing"
-                    : `${livePreview.recurringCount} recurring + ${livePreview.onetimeCount} one-time selected \u2014 click Generate Estimate`}
+                    : `${livePreview.totalRecurringCount || livePreview.recurringCount} recurring/manual + ${livePreview.onetimeCount} one-time selected \u2014 click Generate Estimate`}
                 </div>
                 {/* Mini property summary if lookup done */}
                 {enrichedProfile && (

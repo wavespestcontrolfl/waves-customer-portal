@@ -1,4 +1,6 @@
 const SERVICE_LINE_LABELS = {
+  commercial_pest: 'Commercial Pest Control',
+  commercial_lawn: 'Commercial Lawn Treatment',
   pest: 'Pest Control',
   lawn: 'Lawn Care',
   mosquito: 'Mosquito',
@@ -8,7 +10,9 @@ const SERVICE_LINE_LABELS = {
 };
 
 const SERVICE_LINE_PATTERNS = [
-  ['termite', /termite|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
+  ['commercial_pest', /commercial.*pest|pest.*commercial|commercial_pest/],
+  ['commercial_lawn', /commercial.*lawn|commercial.*turf|lawn.*commercial|commercial_lawn/],
+  ['termite', /termite|trench(?:ing)?|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
   ['mosquito', /mosquito/],
   ['rodent', /rodent|rat|mouse|mice/],
   ['lawn', /lawn|turf|fertili[sz]|weed|topdress|top\s*dress|dethatch|plugging|overseed/],
@@ -43,9 +47,14 @@ function unique(values) {
 function serviceKeysFromText(...parts) {
   const text = cleanText(parts.filter(Boolean).join(' '));
   if (!text) return [];
-  return SERVICE_LINE_PATTERNS
+  const keys = SERVICE_LINE_PATTERNS
     .filter(([, pattern]) => pattern.test(text))
     .map(([key]) => key);
+  return keys.filter((key) => {
+    if (key === 'pest' && keys.includes('commercial_pest')) return false;
+    if (key === 'lawn' && keys.includes('commercial_lawn')) return false;
+    return true;
+  });
 }
 
 function numberOrNull(...values) {
@@ -55,6 +64,59 @@ function numberOrNull(...values) {
     if (Number.isFinite(n)) return n;
   }
   return null;
+}
+
+function commercialMetadata(line = {}) {
+  if (!line.isCommercial && !String(line.service || '').startsWith('commercial_')) return {};
+  return {
+    commercialPricingMode: line.commercialPricingMode,
+    isCommercial: !!line.isCommercial,
+    commercialSubtype: line.commercialSubtype || null,
+    originalRequestedService: line.originalRequestedService || null,
+    quoteRequired: !!line.quoteRequired,
+    requiresManualReview: !!line.requiresManualReview,
+    autoQuoteRequiresAdminApproval: !!line.autoQuoteRequiresAdminApproval,
+    manualReviewReasons: Array.isArray(line.manualReviewReasons) ? line.manualReviewReasons : [],
+    taxable: line.taxable,
+    taxCategory: line.taxCategory || null,
+    pricingConfidence: line.pricingConfidence || null,
+    reason: line.reason || null,
+  };
+}
+
+function commercialKeyFromService(service) {
+  const key = String(service || '').toLowerCase();
+  if (key === 'commercial_pest') return 'commercial_pest';
+  if (key === 'commercial_lawn') return 'commercial_lawn';
+  return null;
+}
+
+function commercialManualLinesFromData(data) {
+  const sources = [
+    ...(Array.isArray(data?.manualQuoteLines) ? data.manualQuoteLines : []),
+    ...(Array.isArray(data?.commercialManualQuoteLines) ? data.commercialManualQuoteLines : []),
+    ...(Array.isArray(data?.result?.lineItems) ? data.result.lineItems : []),
+    ...(Array.isArray(data?.engineResult?.lineItems) ? data.engineResult.lineItems : []),
+    ...(Array.isArray(data?.result?.specItems) ? data.result.specItems : []),
+    ...(Array.isArray(data?.result?.oneTime?.specItems) ? data.result.oneTime.specItems : []),
+  ];
+  const seen = new Set();
+  return sources
+    .map((line) => {
+      const key = commercialKeyFromService(line?.service);
+      if (!key) return null;
+      const id = `${key}|${line.originalRequestedService || ''}`;
+      if (seen.has(id)) return null;
+      seen.add(id);
+      return {
+        key,
+        service: line.service,
+        amount: numberOrNull(line.monthly, line.price, line.amount),
+        amountBasis: 'manual_quote',
+        ...commercialMetadata(line),
+      };
+    })
+    .filter(Boolean);
 }
 
 function getEstimateMonthlyTotal(estimate) {
@@ -112,6 +174,46 @@ function recurringServicesFromData(data) {
   return Array.from(linesByKey.values());
 }
 
+function oneTimeServicesFromData(data) {
+  const sources = [
+    ...(Array.isArray(data?.result?.oneTime?.items) ? data.result.oneTime.items : []),
+    ...(Array.isArray(data?.result?.oneTime?.specItems) ? data.result.oneTime.specItems : []),
+    ...(Array.isArray(data?.result?.specItems) ? data.result.specItems : []),
+    ...(Array.isArray(data?.engineResult?.oneTime?.items) ? data.engineResult.oneTime.items : []),
+    ...(Array.isArray(data?.engineResult?.oneTime?.specItems) ? data.engineResult.oneTime.specItems : []),
+    ...(Array.isArray(data?.engineResult?.specItems) ? data.engineResult.specItems : []),
+  ];
+  if (!sources.length) return [];
+
+  const linesByKey = new Map();
+  const seen = new Set();
+  sources.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    if (commercialKeyFromService(item.service)) return;
+    if (item.onProg === true || item.includedOnProgram === true) return;
+    const detail = item.detail || item.det || item.note || '';
+    const identity = [
+      item.service || '',
+      item.serviceKey || item.service_key || '',
+      item.name || item.label || '',
+      item.price ?? item.amount ?? item.total ?? '',
+      detail,
+    ].join('|');
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    const keys = serviceKeysFromText(
+      item?.service,
+      item?.serviceKey,
+      item?.service_key,
+      item?.name,
+      item?.label,
+      detail,
+    );
+    addLine(linesByKey, keys[0] || 'unknown', numberOrNull(item?.price, item?.amount, item?.total), 'one_time');
+  });
+  return Array.from(linesByKey.values());
+}
+
 function selectedServiceKeysFromInputs(inputs = {}) {
   const keys = [];
   if (inputs.svcPest || inputs.svcOnetimePest || inputs.svcRoach || inputs.svcFlea || inputs.svcFleaExterior || inputs.svcWasp || inputs.svcBedbug) keys.push('pest');
@@ -131,7 +233,15 @@ function fallbackAmountForKey(estimate, key, keyCount) {
 
 function inferEstimateServiceLines(estimate = {}) {
   const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
+  const commercialManualLines = commercialManualLinesFromData(data);
   const recurringLines = recurringServicesFromData(data);
+  if (commercialManualLines.length) {
+    return [
+      ...commercialManualLines,
+      ...recurringLines,
+      ...oneTimeServicesFromData(data),
+    ];
+  }
   if (recurringLines.length) return recurringLines;
 
   const inputKeys = selectedServiceKeysFromInputs(data?.inputs || data?.engineInputs || {});

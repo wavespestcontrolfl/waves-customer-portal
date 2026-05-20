@@ -61,6 +61,240 @@ export function fmtInt(n) {
   return '$' + Math.round(Number(n)).toLocaleString();
 }
 
+export function normalizeCommercialString(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/_+/g, "_");
+}
+
+export function normalizePropertyType(value) {
+  const normalized = normalizeCommercialString(value);
+  if (!normalized) return "";
+  const commercialAliases = [
+    "commercial",
+    "commercial_property",
+    "business",
+    "office",
+    "office_retail",
+    "retail",
+    "shop",
+    "storefront",
+    "plaza",
+    "warehouse",
+    "warehouse_light",
+    "light_warehouse",
+    "apartment",
+    "apartments",
+    "apartment_common",
+    "multi_family",
+    "multifamily",
+    "multifamily_common_area_residential",
+    "multifamily_common_area_commercial",
+    "commercial_multifamily",
+    "hoa",
+    "hoa_common",
+    "hoa_common_area",
+    "hoa_common_area_residential",
+    "hoa_common_area_commercial",
+    "residential_hoa",
+    "residential_common_area",
+    "commercial_hoa",
+    "business_park",
+    "condo_association",
+    "common_area",
+    "restaurant",
+    "restaurant_food_service",
+    "food_service",
+    "medical",
+    "medical_office",
+    "clinic",
+    "industrial",
+    "school",
+    "daycare",
+    "school_daycare",
+    "government",
+    "municipal",
+    "government_municipal",
+  ];
+  if (commercialAliases.includes(normalized)) {
+    return "commercial";
+  }
+  const commercialTokens = [
+    "commercial",
+    "business",
+    "office",
+    "retail",
+    "shop",
+    "storefront",
+    "plaza",
+    "warehouse",
+    "apartment",
+    "apartments",
+    "multifamily",
+    "hoa",
+    "restaurant",
+    "medical",
+    "clinic",
+    "industrial",
+    "school",
+    "daycare",
+    "government",
+    "municipal",
+  ];
+  const tokens = normalized.split("_").filter(Boolean);
+  if (normalized.includes("multi_family")) return "commercial";
+  if (normalized.includes("common_area")) return "commercial";
+  if (normalized.includes("food_service")) return "commercial";
+  if (commercialTokens.some((token) => tokens.includes(token))) return "commercial";
+  if (normalized === "residential") return "single_family";
+  if (normalized === "single_family" || normalized === "single_family_home") return "single_family";
+  if (normalized === "townhome_interior" || normalized === "town_home_interior") return "townhome_interior";
+  if (normalized === "townhome" || normalized === "town_home" || normalized === "townhouse") return "townhome_end";
+  if (normalized === "duplex") return "duplex";
+  if (normalized === "condo_upper" || normalized === "upper_condo") return "condo_upper";
+  if (normalized === "condo" || normalized === "condo_ground" || normalized === "condominium") return "condo_ground";
+  if ((tokens.includes("townhome") || tokens.includes("townhouse")) && tokens.includes("interior")) return "townhome_interior";
+  if (tokens.includes("townhome") || tokens.includes("townhouse")) return "townhome_end";
+  if (tokens.includes("town") && tokens.includes("home") && tokens.includes("interior")) return "townhome_interior";
+  if (tokens.includes("town") && tokens.includes("home")) return "townhome_end";
+  if (tokens.includes("duplex")) return "duplex";
+  if ((tokens.includes("condo") || tokens.includes("condominium")) && tokens.includes("upper")) return "condo_upper";
+  if (tokens.includes("condo") || tokens.includes("condominium")) return "condo_ground";
+  if (tokens.includes("single") || tokens.includes("family") || tokens.includes("home") || tokens.includes("residential")) return "single_family";
+  return normalized;
+}
+
+const RESIDENTIAL_PROPERTY_TYPES = new Set([
+  "single_family",
+  "townhome_end",
+  "townhome_interior",
+  "duplex",
+  "condo_ground",
+  "condo_upper",
+]);
+
+export function isCommercialEstimateInput(input = {}) {
+  const commercialFlag = input.isCommercial === true ||
+    ["yes", "true", "commercial"].includes(String(input.isCommercial || "").trim().toLowerCase());
+  const explicitResidentialOverride = input.isCommercial === false ||
+    ["no", "false", "residential"].includes(String(input.isCommercial || "").trim().toLowerCase());
+  const propertyType = normalizePropertyType(input.propertyType);
+  const hasResidentialPropertyType = RESIDENTIAL_PROPERTY_TYPES.has(propertyType);
+  if (!commercialFlag && hasResidentialPropertyType) {
+    return false;
+  }
+  if (explicitResidentialOverride && propertyType !== "commercial") {
+    return false;
+  }
+
+  return !!(
+    commercialFlag ||
+    propertyType === "commercial" ||
+    normalizePropertyType(input.category) === "commercial" ||
+    input.commercialSubtype
+  );
+}
+
+const LOOKUP_PROPERTY_TYPE_LABELS = {
+  single_family: "Single Family",
+  townhome_end: "Townhome",
+  townhome_interior: "Townhome Interior",
+  duplex: "Duplex",
+  condo_ground: "Condo",
+  condo_upper: "Condo Upper",
+};
+
+export function resolveLookupPropertyTypeAutofill(propertyType, category) {
+  const normalizedPropertyType = normalizePropertyType(propertyType);
+  if (normalizedPropertyType === "commercial") {
+    return { propertyType: "Commercial", isCommercial: "YES" };
+  }
+  if (LOOKUP_PROPERTY_TYPE_LABELS[normalizedPropertyType]) {
+    return {
+      propertyType: LOOKUP_PROPERTY_TYPE_LABELS[normalizedPropertyType],
+      isCommercial: "NO",
+      commercialSubtype: "",
+    };
+  }
+
+  const normalizedCategory = normalizePropertyType(category);
+  if (normalizedCategory === "commercial") {
+    return { propertyType: "Commercial", isCommercial: "YES" };
+  }
+  if (!normalizedPropertyType && LOOKUP_PROPERTY_TYPE_LABELS[normalizedCategory]) {
+    return {
+      propertyType: LOOKUP_PROPERTY_TYPE_LABELS[normalizedCategory],
+      isCommercial: "NO",
+      commercialSubtype: "",
+    };
+  }
+  return {};
+}
+
+function commercialManualQuoteItem(service, input = {}) {
+  const isLawn = service === "commercial_lawn" || service === "lawn_care";
+  const canonical = isLawn ? "commercial_lawn" : "commercial_pest";
+  const reason = isLawn
+    ? "Commercial lawn treatment requires manual quote or commercial pilot pricing."
+    : "Commercial pest requires manual quote or commercial pilot pricing.";
+  return {
+    service: canonical,
+    name: isLawn ? "Commercial Lawn Treatment" : "Commercial Pest Control",
+    price: null,
+    det: reason,
+    detail: reason,
+    originalRequestedService: isLawn ? "lawn_care" : "pest_control",
+    propertyType: "commercial",
+    isCommercial: true,
+    commercialSubtype: input.commercialSubtype || null,
+    commercialPricingMode: "manual_quote",
+    quoteRequired: true,
+    requiresManualReview: true,
+    autoQuoteRequiresAdminApproval: true,
+    manualReviewReasons: ["commercial_property_manual_quote_required"],
+    reason,
+    taxable: !isLawn,
+    taxCategory: isLawn ? "lawn_spraying_or_treatment" : "nonresidential_pest_control",
+    pricingConfidence: "LOW",
+  };
+}
+
+const COMMERCIAL_LAWN_FALLBACK_FLAGS = [
+  "svcLawn",
+  "svcOnetimeLawn",
+  "svcTopdress",
+  "svcDethatch",
+  "svcPlugging",
+  "svcTs",
+  "svcInjection",
+];
+
+const COMMERCIAL_PEST_FALLBACK_FLAGS = [
+  "svcPest",
+  "svcOnetimePest",
+  "svcMosquito",
+  "svcOnetimeMosquito",
+  "svcTermiteBait",
+  "svcRodentBait",
+  "svcTrenching",
+  "svcBoracare",
+  "svcPreslab",
+  "svcFoam",
+  "svcRodentTrap",
+  "svcFlea",
+  "svcWasp",
+  "svcRoach",
+  "svcBedbug",
+  "svcExclusion",
+];
+
+function hasAnySelectedFlag(input = {}, flags = []) {
+  return flags.some((flag) => !!input[flag]);
+}
+
 const LAWN_TABLE_MAX_SQFT = 20000;
 const LAWN_FREQS = [4, 6, 9, 12];
 const LAWN_PRICES = {
@@ -303,6 +537,14 @@ export function calculateEstimate(inputs) {
 
   let R = {}, wgServices = [];
   let notes = [];
+  const isCommercial = isCommercialEstimateInput(inputs);
+  const commercialManualSpecItems = [];
+  if (isCommercial && hasAnySelectedFlag(inputs, COMMERCIAL_PEST_FALLBACK_FLAGS)) {
+    commercialManualSpecItems.push(commercialManualQuoteItem("commercial_pest", inputs));
+  }
+  if (isCommercial && hasAnySelectedFlag(inputs, COMMERCIAL_LAWN_FALLBACK_FLAGS)) {
+    commercialManualSpecItems.push(commercialManualQuoteItem("commercial_lawn", inputs));
+  }
   function addLawnCustomQuoteNote() {
     if (notes.some(n => n.type === 'LAWN_CUSTOM_QUOTE')) return;
     notes.push({
@@ -545,7 +787,7 @@ export function calculateEstimate(inputs) {
   let hasRec = false;
 
   /* ── LAWN ────────────────────────────────────────────────── */
-  if (svcLawn && lotSqFt > 0) {
+  if (svcLawn && !isCommercial && lotSqFt > 0) {
     hasRec = true;
 
     const hardscape = estimateHardscape();
@@ -606,7 +848,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── PEST — multi-frequency ──────────────────────────────── */
-  if (svcPest) {
+  if (svcPest && !isCommercial) {
     hasRec = true;
     const fpEff = footprint > 0 ? footprint : 2500; // default SWFL home fallback when sqft unknown
     const adj = pestBaseAdjustment(fpEff);
@@ -628,7 +870,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── TREE & SHRUB ────────────────────────────────────────── */
-  if (svcTs && lotSqFt > 0) {
+  if (svcTs && !isCommercial && lotSqFt > 0) {
     hasRec = true;
     let eb = bedArea;
     if (eb <= 0) {
@@ -666,7 +908,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── PALM INJECTION ──────────────────────────────────────── */
-  if (svcInjection) {
+  if (svcInjection && !isCommercial) {
     hasRec = true;
     // v1.5: prefer manual injectable count — the 30% estimate is unreliable
     // (10 Washingtonia + 2 Canary Islands = 12 palms but only 2 injectable)
@@ -701,7 +943,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── MOSQUITO ────────────────────────────────────────────── */
-  if (svcMosquito && lotSqFt > 0) {
+  if (svcMosquito && !isCommercial && lotSqFt > 0) {
     hasRec = true;
     const categoryOrder = ['SMALL', 'QUARTER', 'THIRD', 'HALF', 'ACRE'];
     const grossLotCategory = lotSqFt >= 43560 ? 'ACRE'
@@ -756,7 +998,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── TERMITE BAIT ────────────────────────────────────────── */
-  if (svcTermiteBait) {
+  if (svcTermiteBait && !isCommercial) {
     hasRec = true;
     const fpEff = footprint > 0 ? footprint : 2500;
     let pm = (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
@@ -770,7 +1012,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── RODENT BAIT ─────────────────────────────────────────── */
-  if (svcRodentBait) {
+  if (svcRodentBait && !isCommercial) {
     hasRec = true;
     // v1.5: matrix classification — both footprint AND lot matter for rodent pressure
     // A 2,600sf home on a 40,000sf lot has very different pressure than 2,600sf on 10,000sf
@@ -790,7 +1032,7 @@ export function calculateEstimate(inputs) {
   let hasOT = false, otItems = [];
 
   /* ── One-Time Pest ───────────────────────────────────────── */
-  if (svcOnetimePest) {
+  if (svcOnetimePest && !isCommercial) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
     const bpp = R.pest ? R.pest.pa : Math.max(89, 117 + pestBaseAdjustment(fpEff));
@@ -799,7 +1041,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── One-Time Lawn ───────────────────────────────────────── */
-  if (svcOnetimeLawn && lotSqFt > 0) {
+  if (svcOnetimeLawn && !isCommercial && lotSqFt > 0) {
     hasOT = true;
     const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
     const selectedFreq = resolveLawnFreq(lawnFreq);
@@ -818,7 +1060,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── One-Time Mosquito ───────────────────────────────────── */
-  if (svcOnetimeMosquito && lotSqFt > 0) {
+  if (svcOnetimeMosquito && !isCommercial && lotSqFt > 0) {
     hasOT = true;
     const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
     let p = 225;
@@ -837,7 +1079,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Plugging ────────────────────────────────────────────── */
-  if (svcPlugging && plugArea > 0) {
+  if (svcPlugging && !isCommercial && plugArea > 0) {
     hasOT = true;
     const cpp = 19.99 / 18, ir = 150;
     let ppsf, sl;
@@ -856,7 +1098,7 @@ export function calculateEstimate(inputs) {
     ? turfArea.turfSf
     : (R.lawn ? Math.round(lotSqFt * 0.55 * (R.lawn[2] ? 0.65 : 0.55)) : Math.round(lotSqFt * 0.35));
   const topDressingLawnEst = svcLawn ? lawnEst : Math.round(lawnEst * 0.65);
-  if (svcTopdress && topDressingLawnEst > 0) {
+  if (svcTopdress && !isCommercial && topDressingLawnEst > 0) {
     hasOT = true;
     const lk = topDressingLawnEst / 1000;
     // Server pricing is authoritative; keep these constants synced with
@@ -873,7 +1115,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Dethatching ─────────────────────────────────────────── */
-  if (svcDethatch && lawnEst > 0) {
+  if (svcDethatch && !isCommercial && lawnEst > 0) {
     hasOT = true;
     const dt = lawnEst / 100 + lawnEst / 200 + 30;
     const dc = LABOR * (dt / 60) + lawnEst / 1000 * 2.10;
@@ -883,7 +1125,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Trenching ───────────────────────────────────────────── */
-  if (svcTrenching && footprint > 0) {
+  if (svcTrenching && !isCommercial && footprint > 0) {
     hasOT = true;
     let pm = (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
     const perim = Math.round(4 * Math.sqrt(footprint) * pm);
@@ -900,7 +1142,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Bora-Care ───────────────────────────────────────────── */
-  if (svcBoracare && bcSqft > 0) {
+  if (svcBoracare && !isCommercial && bcSqft > 0) {
     hasOT = true;
     const BC_GAL = 91.98, BC_COV = 275, BC_EQUIP = 17.50;
     const gal = Math.max(3, Math.ceil(bcSqft / BC_COV));
@@ -916,7 +1158,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Pre-Slab Termidor ───────────────────────────────────── */
-  if (svcPreslab && psSqft > 0) {
+  if (svcPreslab && !isCommercial && psSqft > 0) {
     hasOT = true;
     const PS_BTL = 152.10, PS_COV = 1250, PS_EQUIP = 15;
     const btl = Math.max(1, Math.ceil(psSqft / PS_COV));
@@ -932,7 +1174,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Foam Drill ──────────────────────────────────────────── */
-  if (svcFoam) {
+  if (svcFoam && !isCommercial) {
     hasOT = true;
     const FM_CAN = 39.08, FM_BITS = 8;
     const { pointCount: fmPts, tier: t } = resolveFoamDrillTier(_foamPoints);
@@ -942,7 +1184,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Rodent Trapping ─────────────────────────────────────── */
-  if (svcRodentTrap) {
+  if (svcRodentTrap && !isCommercial) {
     hasOT = true;
     let p = 350;
     p += interpolate(footprint, [
@@ -972,10 +1214,10 @@ export function calculateEstimate(inputs) {
   }
 
   /* ═══════════ SPECIALTY ═══════════ */
-  let specItems = [];
+  let specItems = [...commercialManualSpecItems];
 
   /* ── Flea ────────────────────────────────────────────────── */
-  if (svcFlea) {
+  if (svcFlea && !isCommercial) {
     let fi = 225, ff = 125;
     fi += interpolate(footprint, [
       { at: 800, adj: -25 }, { at: 1200, adj: -15 }, { at: 1500, adj: -5 },
@@ -1005,7 +1247,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Wasp ────────────────────────────────────────────────── */
-  if (svcWasp) {
+  if (svcWasp && !isCommercial) {
     let wp = 150;
     wp += interpolate(treeNum, [{ at: 0, adj: 0 }, { at: 1, adj: 10 }, { at: 2, adj: 25 }]);
     if (landscapeComplexity === 'COMPLEX') wp += 15;
@@ -1023,7 +1265,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Roach (standalone specialty) ────────────────────────── */
-  if (svcRoach) {
+  if (svcRoach && !isCommercial) {
     const rt = roachType;
     if (rt === 'REGULAR') {
       if (R.pestRoachMod !== 'REGULAR') {
@@ -1041,7 +1283,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Bed Bug ─────────────────────────────────────────────── */
-  if (svcBedbug) {
+  if (svcBedbug && !isCommercial) {
     // Deprecated v1 fallback only. Source of truth is server/services/pricing-engine/
     // priceBedBugTreatment. TODO(2026-05-16, pricing-owner): remove after all
     // estimate surfaces use POST /admin/pricing-config/estimate for bed bugs.
@@ -1097,7 +1339,7 @@ export function calculateEstimate(inputs) {
   }
 
   /* ── Exclusion ───────────────────────────────────────────── */
-  if (svcExclusion && (exS + exM + exA) > 0) {
+  if (svcExclusion && !isCommercial && (exS + exM + exA) > 0) {
     const sc = exS * 37.50 + exM * 75 + exA * 150;
     let ep = Math.max(150, Math.round(sc));
     let insp = exW ? 0 : 85;
@@ -1196,6 +1438,10 @@ export function calculateEstimate(inputs) {
   return {
     property: {
       type: propertyType,
+      propertyType,
+      isCommercial,
+      commercialSubtype: inputs.commercialSubtype || null,
+      commercialPricingMode: inputs.commercialPricingMode || "manual_quote",
       homeSqFt,
       lotSqFt,
       stories,
@@ -1232,7 +1478,26 @@ export function calculateEstimate(inputs) {
     },
     oneTime: {
       items: otItems,
-      specItems: specItems.filter(s => !s.onProg && s.price > 0).map(s => ({ name: s.name, price: s.price })),
+      specItems: specItems
+        .filter(s => !s.onProg && (s.quoteRequired || s.price > 0))
+        .map(s => ({
+          name: s.name,
+          price: s.price,
+          service: s.service,
+          detail: s.detail || s.det,
+          quoteRequired: !!s.quoteRequired,
+          reason: s.reason,
+          commercialPricingMode: s.commercialPricingMode,
+          isCommercial: !!s.isCommercial,
+          commercialSubtype: s.commercialSubtype || null,
+          originalRequestedService: s.originalRequestedService || null,
+          requiresManualReview: !!s.requiresManualReview,
+          autoQuoteRequiresAdminApproval: !!s.autoQuoteRequiresAdminApproval,
+          manualReviewReasons: s.manualReviewReasons || [],
+          taxable: s.taxable,
+          taxCategory: s.taxCategory || null,
+          pricingConfidence: s.pricingConfidence || null,
+        })),
       tmInstall,
       total: totalOT,
       otSubtotal: ot,
