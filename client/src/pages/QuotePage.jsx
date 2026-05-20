@@ -237,18 +237,6 @@ function splitName(full) {
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
 }
 
-function selectedServiceInterest(intake) {
-  const primaryLabels = {
-    pest: 'Pest Control',
-    lawn: 'Lawn Care',
-    both: 'Pest Control + Lawn Care',
-  };
-  if (intake.interest === 'other') {
-    return OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || intake.otherService || '';
-  }
-  return primaryLabels[intake.interest] || '';
-}
-
 function addressPartsFromGoogleResult(result, fallback = '') {
   const components = result?.address_components || [];
   const get = (type) => components.find(c => c.types.includes(type))?.long_name || '';
@@ -490,9 +478,6 @@ export default function QuotePage({ serviceSlug = '' }) {
           email: intake.email.trim(),
           phone: phoneDigits,
           address: resolvedAddress.formatted || intake.address,
-          interest: intake.interest,
-          frequency: intake.frequency,
-          service_interest: selectedServiceInterest(intake),
           attribution: attribution || undefined,
         }),
       });

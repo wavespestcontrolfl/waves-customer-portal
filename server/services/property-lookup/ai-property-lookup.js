@@ -483,8 +483,7 @@ Search aggressively, in this order:
 Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
-- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
-- If the converted lot size is above 200000 square feet, return null for lotSize so the public quote flow does not underprice acreage properties.
+- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "5.99 Acres Lot", "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "5.99 Acres Lot" → 260924 (5.99 × 43560 = 260924).
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
@@ -494,7 +493,7 @@ Output rules:
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
   "squareFootage": <int 500-15000 or null>,
-  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed), or null>,
+  "lotSize": <int 1000-1000000, in SQUARE FEET (convert from acres if needed), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -545,7 +544,7 @@ function coerceInt(raw, min, max) {
 
 const SQFT_PER_ACRE = 43560;
 const LOT_SQFT_MIN = 1000;
-const LOT_SQFT_MAX = 200_000;
+const LOT_SQFT_MAX = 1_000_000;
 
 // Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
 // or acres ("5.99 Acres Lot", "1/2 acre"). The pricing engine always wants
@@ -554,7 +553,8 @@ const LOT_SQFT_MAX = 200_000;
 //   - Strings with "sqft" / "sq ft" → first number is sqft.
 //   - Bare numbers: small (< LOT_SQFT_MIN) assumed acres, large assumed sqft.
 //   - Strings with BOTH "acre" and "sqft" (e.g. "0.5 acres (21,780 sqft)")
-//     are accepted only when the unit-qualified values agree.
+//     are ambiguous; bail to null so downstream code falls back rather than
+//     accepting a silently-wrong value.
 function coerceLotSize(raw) {
   if (raw == null) return null;
 
@@ -567,9 +567,7 @@ function coerceLotSize(raw) {
   const str = String(raw).toLowerCase();
   const hasAcre = /\bacre/.test(str);
   const hasSqft = /\bsq\.?\s*ft\b|\bsqft\b|\bsquare\s*feet\b/.test(str);
-  if (hasAcre && hasSqft) {
-    return coerceDualUnitLotSize(str);
-  }
+  if (hasAcre && hasSqft) return null;
 
   const value = parseFirstLotNumber(str);
   if (value == null || value <= 0) return null;
@@ -585,34 +583,6 @@ function coerceLotSize(raw) {
 
 function inLotRange(n) {
   return n >= LOT_SQFT_MIN && n <= LOT_SQFT_MAX;
-}
-
-function coerceDualUnitLotSize(str) {
-  const acres = parseUnitQualifiedLotNumber(str, /acres?\b/);
-  const sqft = parseUnitQualifiedLotNumber(str, /sq\.?\s*ft\b|sqft\b|square\s*feet\b/);
-
-  const acreSqft = acres == null ? null : Math.round(acres * SQFT_PER_ACRE);
-  const roundedSqft = sqft == null ? null : Math.round(sqft);
-
-  if (acreSqft != null && roundedSqft != null) {
-    if (!lotValuesAgree(acreSqft, roundedSqft)) return null;
-    return inLotRange(roundedSqft) ? roundedSqft : null;
-  }
-
-  const candidate = roundedSqft ?? acreSqft;
-  return candidate != null && inLotRange(candidate) ? candidate : null;
-}
-
-function lotValuesAgree(a, b) {
-  const tolerance = Math.max(250, Math.round(Math.max(a, b) * 0.02));
-  return Math.abs(a - b) <= tolerance;
-}
-
-function parseUnitQualifiedLotNumber(str, unitPattern) {
-  const numberPattern = String.raw`(\d+\s+\d+\/\d+|\d+\/\d+|\d[\d,]*(?:\.\d+)?)`;
-  const re = new RegExp(`${numberPattern}\\s*-?\\s*(?:${unitPattern.source})`, 'i');
-  const match = str.match(re);
-  return match ? parseFirstLotNumber(match[1]) : null;
 }
 
 // Pull the FIRST numeric value out of a lot-size string. Supports mixed
