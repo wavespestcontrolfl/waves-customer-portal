@@ -1510,9 +1510,6 @@ function renderPage(token, estimate, estData) {
   const annualPrepayWaivesMembership = showMembershipFee;
   const prepayMembershipDue = showMembershipFee && !annualPrepayWaivesMembership ? membershipFee : 0;
   const prepayInvoiceTotal = Math.max(0, Math.round((annualTotal + prepayMembershipDue) * 100) / 100);
-  const firstVisitInvoiceTotal = showMembershipFee && firstServiceVisitTotal > 0
-    ? Math.round((membershipFee + firstServiceVisitTotal) * 100) / 100
-    : null;
   const prepayMembershipSummaryHtml = showMembershipFee
     ? (annualPrepayWaivesMembership
       ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
@@ -1536,9 +1533,8 @@ function renderPage(token, estimate, estData) {
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
-          ${showMembershipFee && firstVisitInvoiceTotal != null ? `<div class="payment-summary-row payment-summary-total"><span>First visit invoice total</span><strong data-first-visit-grand-total data-setup-fee="${Number(membershipFee || 0)}">${fmtMoney(firstVisitInvoiceTotal)}</strong></div>` : ''}
         </div>
-        <p class="billing-small">${showMembershipFee && firstVisitInvoiceTotal != null ? `No payment is charged on this page. Your first invoice totals <span data-first-visit-copy-total data-setup-fee="${Number(membershipFee || 0)}">${fmtMoney(firstVisitInvoiceTotal)}</span> (${fmtMoney(membershipFee)} setup + first visit) and is billed after that visit completes.` : (showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy))}</p>
+        <p class="billing-small">${showMembershipFee && firstServiceVisitTotal > 0 ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; your first service visit bills after completion at <span data-first-visit-copy-total>${fmtMoney(firstServiceVisitTotal)}</span>.` : (showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy))}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Choose pay-after-visit setup</button>
       </div>
       ${showAnnualPrepayOption ? `
@@ -2238,13 +2234,8 @@ ${shellQuestionsBar()}
     document.querySelectorAll('[data-first-visit-total]').forEach((el) => {
       if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
     });
-    document.querySelectorAll('[data-first-visit-grand-total]').forEach((el) => {
-      const setup = Number(el.dataset.setupFee || 0);
-      if (firstVisitTotal > 0) el.textContent = fmt(Math.round((firstVisitTotal + setup) * 100) / 100);
-    });
     document.querySelectorAll('[data-first-visit-copy-total]').forEach((el) => {
-      const setup = Number(el.dataset.setupFee || 0);
-      if (firstVisitTotal > 0) el.textContent = fmt(Math.round((firstVisitTotal + setup) * 100) / 100);
+      if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
     });
     document.querySelectorAll('[data-service-card-savings]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);

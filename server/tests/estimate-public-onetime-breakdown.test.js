@@ -1408,8 +1408,9 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
     expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total>$219.60</strong></div>');
-    expect(html).toContain('data-first-visit-copy-total data-setup-fee="99">$318.60</span>');
+    expect(html).toContain('data-first-visit-copy-total>$219.60</span>');
     expect(html).toContain("document.querySelectorAll('[data-first-visit-copy-total]')");
+    expect(html).not.toContain('data-first-visit-grand-total');
     expect(html).toContain('let firstVisitTotal = 0;');
     expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}');
     expect(html).not.toContain('.payment-summary-row.total strong');
