@@ -40,6 +40,8 @@ import {
   fmtInt,
   isCommercialEstimateInput,
   resolveLookupPropertyTypeAutofill,
+  termiteBaitSelectionLabel,
+  termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
@@ -1538,7 +1540,7 @@ export default function EstimateToolViewV2({
     preslabVolume: "NONE",
     termiteFootprintSqFt: "",
     termitePerimeterLF: "",
-    termiteBaitComplexity: "standard",
+    termiteBaitComplexity: "",
     termiteBaitSystem: "advance",
     termiteMonitoringTier: "basic",
     trenchingPerimeterLF: "",
@@ -2401,7 +2403,7 @@ export default function EstimateToolViewV2({
         plugSpacing: parseInt(form.plugSpacing, 10) || 12,
         termiteBaitSystem: form.termiteBaitSystem || "advance",
         termiteMonitoringTier: form.termiteMonitoringTier || "basic",
-        termiteBaitComplexity: form.termiteBaitComplexity || "standard",
+        termiteBaitComplexity: form.termiteBaitComplexity || "",
         termiteFootprintSqFt,
         termitePerimeterLF,
         trenchingPerimeterLF,
@@ -2498,7 +2500,6 @@ export default function EstimateToolViewV2({
         profile.footprint = Math.round(
           profile.homeSqFt / (profile.stories || 1),
         );
-      if (termiteFootprintSqFt) profile.footprint = termiteFootprintSqFt;
       if (trenchingPerimeterLF) profile.perimeterLF = trenchingPerimeterLF;
       if (boracareSqft) profile.atticSqFt = boracareSqft;
       if (preslabSqft) profile.slabSqFt = preslabSqft;
@@ -2838,7 +2839,7 @@ export default function EstimateToolViewV2({
       preslabSqft: "",
       termiteFootprintSqFt: "",
       termitePerimeterLF: "",
-      termiteBaitComplexity: "standard",
+      termiteBaitComplexity: "",
       termiteBaitSystem: "advance",
       termiteMonitoringTier: "basic",
       trenchingPerimeterLF: "",
@@ -4025,6 +4026,7 @@ export default function EstimateToolViewV2({
                           <SelectV2
                             k="termiteBaitComplexity"
                             options={[
+                              { value: "", label: "Auto from property" },
                               { value: "standard", label: "Standard" },
                               { value: "moderate", label: "Moderate" },
                               { value: "complex", label: "Complex" },
@@ -4978,7 +4980,9 @@ export default function EstimateToolViewV2({
                               const ri = E.results.mqMeta?.ri ?? 1;
                               parts.push(R.mq[ri].n + " Mosquito");
                             }
-                            if (R.tmBait) parts.push("Trelona Premier");
+                            if (R.tmBait && !R.tmBait.quoteRequired && !R.tmBait.requiresMeasurement) {
+                              parts.push(termiteBaitSelectionLabel(R.tmBait, form));
+                            }
                             if (parts.length < 2) return null;
                             return (
                               <div className="bg-zinc-50 border-hairline border-zinc-300 rounded-sm px-4 py-3 mb-5 text-13 text-ink-secondary">
@@ -5294,34 +5298,44 @@ export default function EstimateToolViewV2({
                             <SectionTitle>
                               Termite Bait{" "}
                               <Tag>
-                                {R.tmBait.sta} sta | {R.tmBait.perim} ft
+                                {R.tmBait.quoteRequired || R.tmBait.requiresMeasurement
+                                  ? "Quote Required"
+                                  : `${R.tmBait.sta} sta | ${R.tmBait.perim} ft`}
                               </Tag>{" "}
                             </SectionTitle>{" "}
-                            <TierGridV2>
-                              {" "}
-                              {R.tmBait.ai != null && (
-                                <TierRowV2
-                                  name="Advance"
-                                  detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
-                                  price="$35-65"
-                                  recommended={R.tmBait.selectedSystem === "advance"}
-                                  dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
-                                />
-                              )}{" "}
-                              {R.tmBait.ti != null && (
-                                <TierRowV2
-                                  name="Trelona"
-                                  detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
-                                  price="$35-65"
-                                  recommended={R.tmBait.selectedSystem === "trelona"}
-                                  dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
-                                />
-                              )}{" "}
-                            </TierGridV2>{" "}
-                            <div className="text-11 text-ink-secondary mt-1">
-                              Install cost is a one-time setup fee, not a
-                              recurring charge
-                            </div>{" "}
+                            {R.tmBait.quoteRequired || R.tmBait.requiresMeasurement ? (
+                              <div className="text-12 text-ink-secondary">
+                                Footprint sqft or perimeter LF is required before pricing termite bait.
+                              </div>
+                            ) : (
+                              <>
+                                <TierGridV2>
+                                  {" "}
+                                  {R.tmBait.ai != null && (
+                                    <TierRowV2
+                                      name="Advance"
+                                      detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
+                                      price="$35-65"
+                                      recommended={R.tmBait.selectedSystem === "advance"}
+                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
+                                    />
+                                  )}{" "}
+                                  {R.tmBait.ti != null && (
+                                    <TierRowV2
+                                      name="Trelona"
+                                      detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
+                                      price="$35-65"
+                                      recommended={R.tmBait.selectedSystem === "trelona"}
+                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
+                                    />
+                                  )}{" "}
+                                </TierGridV2>{" "}
+                                <div className="text-11 text-ink-secondary mt-1">
+                                  Install cost is a one-time setup fee, not a
+                                  recurring charge
+                                </div>{" "}
+                              </>
+                            )}
                           </div>
                         )}
                         {R.rodBaitMo && (
@@ -5770,7 +5784,11 @@ export default function EstimateToolViewV2({
                             <div className="flex justify-between items-center py-1.5 text-14">
                               {" "}
                               <span className="text-ink-secondary">
-                                Termite bait install (Trelona)
+                                {`Termite bait install (${termiteBaitSystemLabel(
+                                  R.tmBait?.selectedSystem ||
+                                    R.tmBait?.system ||
+                                    form.termiteBaitSystem,
+                                )})`}
                               </span>{" "}
                               <span className="font-medium text-zinc-900 u-nums">
                                 {fmtInt(E.oneTime.tmInstall)}

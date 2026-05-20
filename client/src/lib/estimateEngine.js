@@ -51,6 +51,21 @@ export function interpolate(v, b) {
   return 0;
 }
 
+function interpolateLinear(v, b) {
+  if (v <= b[0].at) return b[0].adj;
+  if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
+  for (let i = 0; i < b.length - 1; i++) {
+    const lo = b[i];
+    const hi = b[i + 1];
+    if (v >= lo.at && v <= hi.at) {
+      const span = hi.at - lo.at;
+      if (span === 0) return lo.adj;
+      return lo.adj + ((v - lo.at) / span) * (hi.adj - lo.adj);
+    }
+  }
+  return b[b.length - 1].adj;
+}
+
 export function fmt(n) {
   if (n === undefined || n === null || isNaN(n)) return '$0.00';
   return '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -59,6 +74,22 @@ export function fmt(n) {
 export function fmtInt(n) {
   if (n === undefined || n === null || isNaN(n)) return '$0';
   return '$' + Math.round(Number(n)).toLocaleString();
+}
+
+export function termiteBaitSystemLabel(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return key === 'trelona' ? 'Trelona' : 'Advance';
+}
+
+export function termiteBaitMonitoringLabel(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return key === 'premier' ? 'Premier' : 'Basic';
+}
+
+export function termiteBaitSelectionLabel(tmBait = {}, fallback = {}) {
+  const system = tmBait.selectedSystem || tmBait.system || fallback.termiteBaitSystem;
+  const tier = tmBait.selectedMonitoringTier || tmBait.monitoringTier || fallback.termiteMonitoringTier;
+  return `${termiteBaitSystemLabel(system)} ${termiteBaitMonitoringLabel(tier)}`;
 }
 
 export function normalizeCommercialString(value) {
@@ -1054,6 +1085,10 @@ export function calculateEstimate(inputs) {
       const bmo = termiteMonitoringTier === 'premier' ? 35 : 35;
       const pmo = 65;
       R.tmBait = {
+        selectedSystem: termiteBaitSystem,
+        system: termiteBaitSystem,
+        selectedMonitoringTier: termiteMonitoringTier,
+        monitoringTier: termiteMonitoringTier,
         ai,
         ti,
         bmo,
@@ -1386,12 +1421,12 @@ export function calculateEstimate(inputs) {
         });
       }
     } else {
-      let gp = 450 + interpolate(footprint, [
+      const germanFootprintAdj = interpolateLinear(footprint, [
         { at: 800, adj: -40 }, { at: 1200, adj: -20 }, { at: 1500, adj: -10 },
-        { at: 2000, adj: 0 }, { at: 2500, adj: 25 }, { at: 3000, adj: 50 },
-        { at: 4000, adj: 85 },
+        { at: 2000, adj: 0 }, { at: 2500, adj: 15 }, { at: 3000, adj: 30 },
+        { at: 4000, adj: 55 }, { at: 5500, adj: 85 },
       ]);
-      const basePrice = Math.round(Math.max(400, gp));
+      const basePrice = Math.max(400, 450 + Math.round(germanFootprintAdj));
       const setupCharge = 100;
       const price = basePrice + setupCharge;
       const warning = 'German initial knockdown and German Roach 3-visit cleanout are both selected. Verify this is intentional.';

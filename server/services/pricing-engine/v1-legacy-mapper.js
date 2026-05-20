@@ -309,6 +309,9 @@ function mapV1ToLegacyShape(v1Result) {
     const selectedSystem = tbLI.selectedSystem || tbLI.system || null;
     R.tmBait = {
       selectedSystem,
+      system: selectedSystem,
+      selectedMonitoringTier: tbLI.selectedMonitoringTier || tbLI.monitoringTier || null,
+      monitoringTier: tbLI.monitoringTier || tbLI.selectedMonitoringTier || null,
       ai: selectedSystem === 'advance' ? installPrice : null,
       ti: selectedSystem === 'trelona' ? installPrice : null,
       bmo: tbLI.monitoringTier === 'basic' ? monMonthly : 35,
@@ -368,7 +371,9 @@ function mapV1ToLegacyShape(v1Result) {
       addOns: mqLI.addOns || null,
     });
   }
-  svcAdd('Termite Bait', tbLI, { service: 'termite_bait' });
+  if (tbLI && !tbLI.quoteRequired && !tbLI.requiresMeasurement) {
+    svcAdd('Termite Bait', tbLI, { service: 'termite_bait' });
+  }
 
   // One-time + specialty split
   const v1OtItems = [];
@@ -390,6 +395,24 @@ function mapV1ToLegacyShape(v1Result) {
       li.warning || '',
     ].filter(Boolean).join(' · ');
     if (ONE_TIME_SERVICES.has(li.service)) {
+      if (quoteRequired) {
+        v1SpecItems.push({
+          service: li.service,
+          name,
+          price: null,
+          det: detail,
+          quoteRequired: true,
+          reason: li.reason,
+          warning: li.warning || null,
+          warnings: li.warnings || [],
+          requiresCustomQuote: !!li.requiresCustomQuote,
+          customQuoteReason: li.customQuoteReason || null,
+          requiresMeasurement: !!li.requiresMeasurement,
+          ...measurementMetadataFields(li),
+          ...commercialManualQuoteFields(li),
+        });
+        return;
+      }
       // Preserve `service` on the mapped item so consumers can match by
       // canonical key (e.g. estimate-public's findInitialRoachItem) without
       // depending on display labels that may be re-translated downstream.

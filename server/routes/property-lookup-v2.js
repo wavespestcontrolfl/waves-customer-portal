@@ -1562,7 +1562,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     services.termite = {
       system: o.termiteBaitSystem || 'advance',
       monitoringTier: o.termiteMonitoringTier || 'basic',
-      complexity: o.termiteBaitComplexity || 'standard',
+      ...(o.termiteBaitComplexity ? { complexity: o.termiteBaitComplexity } : {}),
       measurements: termiteBaitMeasurements,
     };
   }
@@ -1748,13 +1748,19 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     treeCount: Number(p.treeCount || p.estimatedTreeCount) || 0,
   };
 
+  const perimeterLF = p.perimeterLF ?? p.perimeterLf;
+  const perimeter = p.perimeterSource === 'computed_from_footprint'
+    ? undefined
+    : p.perimeter;
+
   return {
     homeSqFt,
     stories,
     storiesSource: p.storiesSource || null,
     lotSqFt,
     footprintSqFt: p.footprintSqFt ?? p.footprint,
-    perimeterLF: p.perimeterLF ?? p.perimeterLf ?? p.perimeter,
+    perimeterLF: perimeterLF ?? perimeter,
+    perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,
     category: p.category || o.category || null,
     isCommercial: commercialProfile,

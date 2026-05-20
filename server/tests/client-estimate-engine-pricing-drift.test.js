@@ -2,10 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const { priceTopDressing } = require('../services/pricing-engine/service-pricing');
+const { priceGermanRoach, priceTopDressing } = require('../services/pricing-engine/service-pricing');
 
 const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
 const legacyAdminEstimatePagePath = path.resolve(__dirname, '../../client/src/pages/admin/EstimatePage.jsx');
+const adminEstimateToolViewPath = path.resolve(__dirname, '../../client/src/pages/admin/EstimateToolViewV2.jsx');
 
 const TOP_DRESSING_LAWN_SQFT_CASES = [3000, 5000, 7500, 10000, 15000, 20000];
 const TOP_DRESSING_EXPECTED = {
@@ -96,11 +97,13 @@ function clientTopDressingPrice(calculateEstimate, { lawnSqFt, depth, hasRecurri
 describe('deprecated client estimator pricing drift guards', () => {
   let source;
   let legacyAdminSource;
+  let adminToolViewSource;
   let calculateEstimate;
 
   beforeAll(() => {
     source = fs.readFileSync(clientEstimatorPath, 'utf8');
     legacyAdminSource = fs.readFileSync(legacyAdminEstimatePagePath, 'utf8');
+    adminToolViewSource = fs.readFileSync(adminEstimateToolViewPath, 'utf8');
     calculateEstimate = loadClientEstimator(source).calculateEstimate;
   });
 
@@ -145,6 +148,32 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(standard.oneTime.total).toBe(cleanout.price);
     expect(discountedCleanout.price).toBe(cleanout.price);
     expect(recurringCustomer.oneTime.total).toBe(cleanout.price);
+  });
+
+  test('client fallback German Roach Cleanout matches server total', () => {
+    const estimate = calculateEstimate({
+      homeSqFt: 2800,
+      stories: 1,
+      lotSqFt: 10000,
+      propertyType: 'single_family',
+      svcRoach: true,
+      roachType: 'GERMAN',
+      urgency: 'NONE',
+      isAfterHours: false,
+    });
+    const cleanout = estimate.oneTime.specItems.find((line) => line.service === 'german_roach');
+    const server = priceGermanRoach({ footprint: 2800 });
+
+    expect(cleanout.price).toBe(server.total);
+    expect(cleanout.total).toBe(server.total);
+    expect(estimate.oneTime.total).toBe(server.total);
+  });
+
+  test('admin termite footprint override stays service-scoped', () => {
+    expect(legacyAdminSource).toContain('termiteFootprintSqFt,');
+    expect(adminToolViewSource).toContain('termiteFootprintSqFt,');
+    expect(legacyAdminSource).not.toContain('profile.footprint = termiteFootprintSqFt');
+    expect(adminToolViewSource).not.toContain('profile.footprint = termiteFootprintSqFt');
   });
 
   test('client fallback quote-required trenching does not add renewal', () => {

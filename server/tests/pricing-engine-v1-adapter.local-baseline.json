@@ -434,25 +434,25 @@
       "ts": [],
       "mq": [],
       "tmBait": {
-        "ai": 639,
+        "ai": 695,
         "ti": null,
         "bmo": 35,
         "pmo": 65
       }
     },
     "oneTime": {
-      "total": 639,
-      "tmInstall": 639,
+      "total": 695,
+      "tmInstall": 695,
       "items": [
         {
           "name": "Advance Installation",
-          "price": 639
+          "price": 695
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 1059,
+      "year1": 1115,
       "year2": 420
     }
   },

@@ -1,6 +1,7 @@
 const {
   calculatePropertyProfile,
   generateEstimate,
+  quickQuote,
   pricePestControl,
   pricePestInitialRoach,
   priceOneTimePest,
@@ -207,6 +208,9 @@ describe('pest-control pricing hardening', () => {
     expect(specialty.summary.oneTimeTotal).toBe(0);
     expect(specialty.summary.specialtyTotal).toBe(574);
     expect(specialty.summary.year1Total).toBe(574);
+    expect(quickQuote({ homeSqFt: 2800, stories: 1, lotSqFt: 10000, services: { germanRoach: true } }).services).toContainEqual(
+      expect.objectContaining({ name: 'german_roach', price: 574 })
+    );
 
     const directDuplicate = generateEstimate({
       homeSqFt: 1800,

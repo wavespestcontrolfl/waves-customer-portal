@@ -1349,7 +1349,7 @@ function renderPage(token, estimate, estData) {
         payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
         noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
         bookingTitle: 'Find a date & time that works for you',
-        bookingSubhead: 'These are the windows when we’ll already be working in your neighborhood — pick whichever fits.',
+        bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
         payPrefHeading: 'Choose how you want to pay',
         payPrefCardTitle: 'Pay after each visit',
         payPrefCardSub: 'Billed after each completed service through autopay.',
@@ -2693,7 +2693,7 @@ ${shellQuestionsBar()}
     if (s.routeOptimal) {
       return s.techFirstName
         ? s.techFirstName + ' will already be nearby.'
-        : 'We\\'ll already be working in your neighborhood.';
+        : 'We\\'ll already be nearby.';
     }
     return 'Open route window for your area.';
   }
@@ -2716,6 +2716,7 @@ ${shellQuestionsBar()}
       const slotContext = buildSlotContext();
       const slotParams = new URLSearchParams();
       slotParams.set('serviceMode', slotContext.serviceMode);
+      slotParams.set('windowDays', '14');
       if (slotContext.selectedFrequency) {
         slotParams.set('selectedFrequency', slotContext.selectedFrequency);
       }
@@ -2726,11 +2727,11 @@ ${shellQuestionsBar()}
       const primary = body.primary || [];
       const expander = body.expander || [];
       const allSlots = primary.concat(expander);
-      const slots = allSlots.slice(0, 3);
-      const moreSlots = allSlots.slice(3, 6);
+      const slots = allSlots.slice(0, 6);
+      const moreSlots = allSlots.slice(6, 9);
       if (!slots.length) {
         area.className = 'booking-state';
-        area.innerHTML = 'No times available in the next 2 weeks. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll get you on the schedule.';
+        area.innerHTML = 'No times available in the next 14 days. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll get you on the schedule.';
         return;
       }
       area.className = '';

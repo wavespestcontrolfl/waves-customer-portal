@@ -687,7 +687,11 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('reserveAttemptId: 0');
     expect(html).toContain('function buildSlotContext()');
     expect(html).toContain("slotParams.set('serviceMode', slotContext.serviceMode)");
+    expect(html).toContain("slotParams.set('windowDays', '14')");
     expect(html).toContain("slotParams.set('selectedFrequency', slotContext.selectedFrequency)");
+    expect(html).toContain('const slots = allSlots.slice(0, 6);');
+    expect(html).toContain('const moreSlots = allSlots.slice(6, 9);');
+    expect(html).toContain('These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.');
     expect(html).toContain('body: JSON.stringify(reservePayload)');
     expect(html).toContain('bookingState.isReserving = true;');
     expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");

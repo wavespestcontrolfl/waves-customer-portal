@@ -1002,8 +1002,8 @@ function quickQuote(input) {
     savings: estimate.summary.waveGuardSavings,
     services: estimate.lineItems.map(i => ({
       name: i.service,
-      monthly: i.monthlyAfterDiscount || null,
-      price: i.priceAfterDiscount || i.totalAfterDiscount || null,
+      monthly: i.monthlyAfterDiscount ?? null,
+      price: i.totalAfterDiscount ?? i.total ?? i.priceAfterDiscount ?? i.price ?? null,
     })),
   };
 }

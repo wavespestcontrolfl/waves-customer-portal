@@ -14,6 +14,8 @@ import {
   fmtInt,
   isCommercialEstimateInput,
   resolveLookupPropertyTypeAutofill,
+  termiteBaitSelectionLabel,
+  termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
 import { LeadsSection } from "./LeadsTabs";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
@@ -710,7 +712,7 @@ function EstimateToolView() {
     bedbugSubcontractCost: "",
     termiteFootprintSqFt: "",
     termitePerimeterLF: "",
-    termiteBaitComplexity: "standard",
+    termiteBaitComplexity: "",
     termiteBaitSystem: "advance",
     termiteMonitoringTier: "basic",
     trenchingPerimeterLF: "",
@@ -1401,7 +1403,7 @@ function EstimateToolView() {
           plugSpacing: parseInt(form.plugSpacing) || 12,
           termiteBaitSystem: form.termiteBaitSystem || "advance",
           termiteMonitoringTier: form.termiteMonitoringTier || "basic",
-          termiteBaitComplexity: form.termiteBaitComplexity || "standard",
+          termiteBaitComplexity: form.termiteBaitComplexity || "",
           termiteFootprintSqFt,
           termitePerimeterLF,
           trenchingPerimeterLF,
@@ -1458,7 +1460,6 @@ function EstimateToolView() {
         } else {
           delete profile.footprint;
         }
-        if (termiteFootprintSqFt) profile.footprint = termiteFootprintSqFt;
         if (trenchingPerimeterLF) profile.perimeterLF = trenchingPerimeterLF;
         if (boracareSqft) profile.atticSqFt = boracareSqft;
         if (preslabSqft) profile.slabSqFt = preslabSqft;
@@ -1773,9 +1774,20 @@ function EstimateToolView() {
       treeCount: "",
       boracareSqft: "",
       preslabSqft: "",
+      termiteFootprintSqFt: "",
+      termitePerimeterLF: "",
+      termiteBaitComplexity: "",
+      termiteBaitSystem: "advance",
+      termiteMonitoringTier: "basic",
+      trenchingPerimeterLF: "",
+      trenchingConcreteLF: "",
+      trenchingDirtLF: "",
+      trenchingConcretePct: "",
+      trenchingEstimateFromFootprint: false,
       customerName: "",
       customerPhone: "",
       customerEmail: "",
+      _termiteFootprintAuto: false,
       _boracareAuto: false,
       _preslabAuto: false,
     }));
@@ -2755,6 +2767,7 @@ function EstimateToolView() {
                           <Select
                             k="termiteBaitComplexity"
                             options={[
+                              { value: "", label: "Auto from property" },
                               { value: "standard", label: "Standard" },
                               { value: "moderate", label: "Moderate" },
                               { value: "complex", label: "Complex" },
@@ -3669,7 +3682,9 @@ function EstimateToolView() {
                               const ri = E.results.mqMeta?.ri ?? 1;
                               parts.push(R.mq[ri].n + " Mosquito");
                             }
-                            if (R.tmBait) parts.push("Trelona Premier");
+                            if (R.tmBait && !R.tmBait.quoteRequired && !R.tmBait.requiresMeasurement) {
+                              parts.push(termiteBaitSelectionLabel(R.tmBait, form));
+                            }
                             if (parts.length < 2) return null;
                             return (
                               <div
@@ -4061,34 +4076,44 @@ function EstimateToolView() {
                             <div style={sSectionTitle}>
                               Termite Bait{" "}
                               <span style={sTag("blue")}>
-                                {R.tmBait.sta} sta | {R.tmBait.perim} ft
+                                {R.tmBait.quoteRequired || R.tmBait.requiresMeasurement
+                                  ? "Quote Required"
+                                  : `${R.tmBait.sta} sta | ${R.tmBait.perim} ft`}
                               </span>
                             </div>{" "}
-                            <TierGrid>
-                              {" "}
-                              {R.tmBait.ai != null && (
-                                <TierRow
-                                  name="Advance"
-                                  detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
-                                  price="$35-65"
-                                  recommended={R.tmBait.selectedSystem === "advance"}
-                                  dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
-                                />
-                              )}{" "}
-                              {R.tmBait.ti != null && (
-                                <TierRow
-                                  name="Trelona"
-                                  detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
-                                  price="$35-65"
-                                  recommended={R.tmBait.selectedSystem === "trelona"}
-                                  dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
-                                />
-                              )}{" "}
-                            </TierGrid>{" "}
-                            <div style={sModNote}>
-                              Install cost is a one-time setup fee, not a
-                              recurring charge
-                            </div>{" "}
+                            {R.tmBait.quoteRequired || R.tmBait.requiresMeasurement ? (
+                              <div style={sModNote}>
+                                Footprint sqft or perimeter LF is required before pricing termite bait.
+                              </div>
+                            ) : (
+                              <>
+                                <TierGrid>
+                                  {" "}
+                                  {R.tmBait.ai != null && (
+                                    <TierRow
+                                      name="Advance"
+                                      detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
+                                      price="$35-65"
+                                      recommended={R.tmBait.selectedSystem === "advance"}
+                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
+                                    />
+                                  )}{" "}
+                                  {R.tmBait.ti != null && (
+                                    <TierRow
+                                      name="Trelona"
+                                      detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
+                                      price="$35-65"
+                                      recommended={R.tmBait.selectedSystem === "trelona"}
+                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
+                                    />
+                                  )}{" "}
+                                </TierGrid>{" "}
+                                <div style={sModNote}>
+                                  Install cost is a one-time setup fee, not a
+                                  recurring charge
+                                </div>{" "}
+                              </>
+                            )}
                           </div>
                         )}
                         {/* Rodent Bait */}
@@ -4693,7 +4718,13 @@ function EstimateToolView() {
                               }}
                             >
                               {" "}
-                              <span>Termite bait install (Trelona)</span>{" "}
+                              <span>
+                                {`Termite bait install (${termiteBaitSystemLabel(
+                                  R.tmBait?.selectedSystem ||
+                                    R.tmBait?.system ||
+                                    form.termiteBaitSystem,
+                                )})`}
+                              </span>{" "}
                               <span
                                 style={{
                                   fontFamily: "'JetBrains Mono', monospace",

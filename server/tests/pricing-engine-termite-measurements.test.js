@@ -24,6 +24,34 @@ describe('termite measurement overrides and safeguards', () => {
     expect(result.measurements.perimeterLF.source).toBe('computed_from_footprint');
   });
 
+  test('termite bait falls back to property complexity unless layout is explicit', () => {
+    const auto = translateV2CallToV1Input(
+      { homeSqFt: 2000, stories: 1, lotSqFt: 8000, landscapeComplexity: 'COMPLEX' },
+      ['TERMITE_BAIT'],
+      { termiteBaitSystem: 'advance' }
+    );
+    const autoEstimate = generateEstimate(auto);
+    const autoBait = autoEstimate.lineItems.find((item) => item.service === 'termite_bait');
+
+    expect(autoBait.complexity).toBe('complex');
+    expect(autoBait.perimeter).toBe(241);
+    expect(autoBait.stations).toBe(25);
+    expect(autoBait.installation.price).toBe(695);
+
+    const explicitStandard = translateV2CallToV1Input(
+      { homeSqFt: 2000, stories: 1, lotSqFt: 8000, landscapeComplexity: 'COMPLEX' },
+      ['TERMITE_BAIT'],
+      { termiteBaitSystem: 'advance', termiteBaitComplexity: 'standard' }
+    );
+    const standardEstimate = generateEstimate(explicitStandard);
+    const standardBait = standardEstimate.lineItems.find((item) => item.service === 'termite_bait');
+
+    expect(standardBait.complexity).toBe('standard');
+    expect(standardBait.perimeter).toBe(224);
+    expect(standardBait.stations).toBe(23);
+    expect(standardBait.installation.price).toBe(639);
+  });
+
   test('termite bait accepts manual perimeter override and avoids NaN on missing measurements', () => {
     const override = priceTermiteBait(
       { footprint: 2000 },
@@ -206,10 +234,69 @@ describe('termite measurement overrides and safeguards', () => {
     expect(estimate.summary.year2Annual).toBe(0);
 
     const mapped = mapV1ToLegacyShape(estimate);
-    const mappedTrench = mapped.oneTime.items.find((item) => item.service === 'trenching');
+    expect(mapped.oneTime.items.find((item) => item.service === 'trenching')).toBeUndefined();
+    const mappedTrench = mapped.oneTime.specItems.find((item) => item.service === 'trenching');
     expect(mappedTrench.quoteRequired).toBe(true);
     expect(mappedTrench.price).toBeNull();
-    expect(mappedTrench.renewal).toBeUndefined();
+    expect(mappedTrench.requiresMeasurement).toBe(true);
     expect(mapped.results.trench).toBeUndefined();
+  });
+
+  test('v2 adapter does not promote computed perimeter to measured trenching LF', () => {
+    const v1Input = translateV2CallToV1Input(
+      {
+        homeSqFt: 2400,
+        stories: 1,
+        lotSqFt: 9000,
+        footprint: 2400,
+        perimeter: 248,
+        perimeterSource: 'computed_from_footprint',
+      },
+      ['TRENCHING'],
+      {}
+    );
+
+    expect(v1Input.perimeterLF).toBeUndefined();
+    expect(v1Input.perimeterSource).toBe('computed_from_footprint');
+
+    const estimate = generateEstimate(v1Input);
+    const trench = estimate.lineItems.find((item) => item.service === 'trenching');
+    expect(trench.quoteRequired).toBe(true);
+    expect(trench.price).toBeNull();
+
+    const allowComputed = translateV2CallToV1Input(
+      {
+        homeSqFt: 2400,
+        stories: 1,
+        lotSqFt: 9000,
+        footprint: 2400,
+        perimeter: 248,
+        perimeterSource: 'computed_from_footprint',
+      },
+      ['TRENCHING'],
+      { trenchingEstimateFromFootprint: true }
+    );
+    const allowedEstimate = generateEstimate(allowComputed);
+    const pricedTrench = allowedEstimate.lineItems.find((item) => item.service === 'trenching');
+    expect(pricedTrench.quoteRequired).not.toBe(true);
+    expect(pricedTrench.perimeter).toBeGreaterThan(0);
+  });
+
+  test('missing termite bait measurement is not listed as priced recurring service', () => {
+    const estimate = generateEstimate({
+      lotSqFt: 9000,
+      propertyType: 'single_family',
+      services: { termiteBait: true },
+    });
+
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.results.tmBait).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      requiresMeasurement: true,
+    }));
+    expect(mapped.recurring.services.find((service) => service.service === 'termite_bait')).toBeUndefined();
+    expect(mapped.quoteRequiredItems.find((item) => item.service === 'termite_bait')).toEqual(expect.objectContaining({
+      quoteRequired: true,
+    }));
   });
 });
