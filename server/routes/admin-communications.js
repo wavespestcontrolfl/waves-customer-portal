@@ -122,8 +122,11 @@ router.post('/sms', async (req, res, next) => {
 // POST /api/admin/communications/call — initiate an outbound call via Twilio
 router.post('/call', async (req, res, next) => {
   try {
-    const { to, fromNumber, customerId } = req.body;
+    const { to, fromNumber, customerId, source: rawSource, relatedCallId } = req.body;
     if (!to) return res.status(400).json({ error: 'to number required' });
+    if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
+      return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
+    }
 
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
@@ -139,6 +142,8 @@ router.post('/call', async (req, res, next) => {
 
     const from = fromNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
     const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
+    const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
+    const metadata = relatedCallId ? { relatedCallId } : null;
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
 
@@ -177,7 +182,8 @@ router.post('/call', async (req, res, next) => {
         from_phone: from,
         to_phone: to,
         status: 'initiated',
-        source: 'admin-click',
+        source,
+        metadata: metadata ? JSON.stringify(metadata) : null,
       })
       .returning(['id']);
     const callLogId = callLogRow?.id;

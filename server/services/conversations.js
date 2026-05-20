@@ -18,7 +18,7 @@ const logger = require('../services/logger');
  *   (contact_phone, channel, our_endpoint_id) for unknown contacts (phone)
  *   (contact_email, channel, our_endpoint_id) for unknown contacts (email)
  */
-async function findOrCreateThread({
+async function findOrCreateThreadWith(conn, {
   customerId,
   channel,
   ourEndpointId,
@@ -29,11 +29,11 @@ async function findOrCreateThread({
   if (!channel) throw new Error('findOrCreateThread: channel is required');
 
   if (customerId) {
-    const existing = await db('conversations')
+    const existing = await conn('conversations')
       .where({ customer_id: customerId, channel, our_endpoint_id: ourEndpointId || null })
       .first();
     if (existing) return existing;
-    const [row] = await db('conversations').insert({
+    const [row] = await conn('conversations').insert({
       customer_id: customerId,
       channel,
       our_endpoint_id: ourEndpointId || null,
@@ -43,12 +43,12 @@ async function findOrCreateThread({
   }
 
   if (contactPhone) {
-    const existing = await db('conversations')
+    const existing = await conn('conversations')
       .where({ contact_phone: contactPhone, channel, our_endpoint_id: ourEndpointId || null })
       .whereNull('customer_id')
       .first();
     if (existing) return existing;
-    const [row] = await db('conversations').insert({
+    const [row] = await conn('conversations').insert({
       channel,
       our_endpoint_id: ourEndpointId || null,
       contact_phone: contactPhone,
@@ -59,12 +59,12 @@ async function findOrCreateThread({
   }
 
   if (contactEmail) {
-    const existing = await db('conversations')
+    const existing = await conn('conversations')
       .where({ contact_email: contactEmail, channel, our_endpoint_id: ourEndpointId || null })
       .whereNull('customer_id')
       .first();
     if (existing) return existing;
-    const [row] = await db('conversations').insert({
+    const [row] = await conn('conversations').insert({
       channel,
       our_endpoint_id: ourEndpointId || null,
       contact_email: contactEmail,
@@ -77,6 +77,160 @@ async function findOrCreateThread({
   throw new Error('findOrCreateThread: requires customerId, contactPhone, or contactEmail');
 }
 
+async function findOrCreateThread(opts) {
+  return findOrCreateThreadWith(db, opts);
+}
+
+function parseMetadata(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+function voiceMediaForCall(call) {
+  if (!call?.recording_url) return [];
+  return [{
+    type: 'recording',
+    url: call.recording_url,
+    sid: call.recording_sid || null,
+    duration_seconds: call.recording_duration_seconds || call.duration_seconds || null,
+  }];
+}
+
+async function refreshConversationStats(conn, conversationId) {
+  if (!conversationId) return;
+  const stats = await conn('messages')
+    .where({ conversation_id: conversationId })
+    .select(
+      conn.raw('COUNT(*)::int AS message_count'),
+      conn.raw('MAX(created_at) AS last_message_at'),
+      conn.raw("MAX(created_at) FILTER (WHERE direction = 'inbound') AS last_inbound_at")
+    )
+    .first();
+
+  await conn('conversations')
+    .where({ id: conversationId })
+    .update({
+      message_count: Number(stats?.message_count || 0),
+      last_message_at: stats?.last_message_at || null,
+      last_inbound_at: stats?.last_inbound_at || null,
+      updated_at: new Date(),
+    });
+}
+
+async function syncVoiceMessageForCall(callSid, extraPatch = {}) {
+  if (!callSid) return null;
+
+  try {
+    const call = await db('call_log').where('twilio_call_sid', callSid).first();
+    if (!call) return null;
+
+    const media = voiceMediaForCall(call);
+    const duration = call.duration_seconds || call.recording_duration_seconds || null;
+    const patch = {
+      body: call.transcription || null,
+      recording_sid: call.recording_sid || null,
+      duration_seconds: duration,
+      answered_by: call.answered_by || null,
+      delivery_status: call.status || null,
+      ...extraPatch,
+      updated_at: new Date(),
+    };
+    if (media.length && !patch.media) patch.media = JSON.stringify(media);
+
+    const direction = call.direction || 'inbound';
+    const ourEndpointId = direction === 'outbound' ? call.from_phone : call.to_phone;
+    const contactPhone = direction === 'outbound' ? call.to_phone : call.from_phone;
+    const createdAt = call.created_at || new Date();
+
+    return await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`message:voice:${call.twilio_call_sid}`]);
+
+      const existing = await trx('messages')
+        .where({ channel: 'voice', twilio_sid: call.twilio_call_sid })
+        .first();
+      if (existing) {
+        let sourceConversationId = null;
+        let targetConversationId = null;
+
+        if (call.customer_id) {
+          const targetThread = await findOrCreateThreadWith(trx, {
+            customerId: call.customer_id,
+            channel: 'voice',
+            ourEndpointId: ourEndpointId || null,
+          });
+
+          if (targetThread && targetThread.id !== existing.conversation_id) {
+            patch.conversation_id = targetThread.id;
+            sourceConversationId = existing.conversation_id;
+            targetConversationId = targetThread.id;
+          }
+        }
+
+        const [updated] = await trx('messages')
+          .where({ id: existing.id })
+          .update(patch)
+          .returning('*');
+        if (sourceConversationId && targetConversationId) {
+          await refreshConversationStats(trx, sourceConversationId);
+          await refreshConversationStats(trx, targetConversationId);
+        }
+        return updated || existing;
+      }
+
+      const thread = await findOrCreateThreadWith(trx, {
+        customerId: call.customer_id || null,
+        channel: 'voice',
+        ourEndpointId: ourEndpointId || null,
+        contactPhone: call.customer_id ? null : contactPhone,
+      });
+      if (!thread) return null;
+
+      const messageRow = {
+        conversation_id: thread.id,
+        channel: 'voice',
+        direction,
+        body: call.transcription || null,
+        media: JSON.stringify(media),
+        author_type: direction === 'outbound' ? 'admin' : 'customer',
+        twilio_sid: call.twilio_call_sid,
+        recording_sid: call.recording_sid || null,
+        duration_seconds: duration,
+        answered_by: call.answered_by || null,
+        delivery_status: call.status || null,
+        metadata: JSON.stringify({
+          ...parseMetadata(call.metadata),
+          source: 'voice_message_sync',
+        }),
+        created_at: createdAt,
+        updated_at: new Date(),
+      };
+      for (const [key, value] of Object.entries(patch)) {
+        if (key !== 'conversation_id' && value !== undefined) messageRow[key] = value;
+      }
+
+      const [message] = await trx('messages').insert(messageRow).returning('*');
+
+      const updates = {
+        last_message_at: createdAt,
+        message_count: trx.raw('message_count + 1'),
+        updated_at: new Date(),
+      };
+      if (direction === 'inbound') updates.last_inbound_at = createdAt;
+      await trx('conversations').where({ id: thread.id }).update(updates);
+
+      return message;
+    });
+  } catch (err) {
+    logger.error(`[conversations] syncVoiceMessageForCall failed for ${callSid}: ${err.message}`);
+    return null;
+  }
+}
+
 /**
  * Append a message to a thread. Updates last_message_at, last_inbound_at
  * (when applicable), and the message_count counter.
@@ -87,7 +241,8 @@ async function appendMessage(opts) {
   if (!opts.direction) throw new Error('appendMessage: direction required');
   if (!opts.authorType) throw new Error('appendMessage: authorType required');
 
-  const [msg] = await db('messages').insert({
+  const createdAt = opts.createdAt || new Date();
+  const row = {
     conversation_id: opts.conversationId,
     channel: opts.channel,
     direction: opts.direction,
@@ -110,20 +265,62 @@ async function appendMessage(opts) {
     read_at: opts.isRead === true ? (opts.readAt || new Date()) : null,
     read_by_admin_user_id: opts.readByAdminUserId || null,
     metadata: opts.metadata ? JSON.stringify(opts.metadata) : '{}',
+    created_at: createdAt,
     updated_at: new Date(),
-  }).returning('*');
-
-  const now = new Date();
-  const update = {
-    last_message_at: now,
-    message_count: db.raw('message_count + 1'),
-    updated_at: now,
   };
-  if (opts.direction === 'inbound') update.last_inbound_at = now;
 
-  await db('conversations').where({ id: opts.conversationId }).update(update);
+  const appendWith = async (conn) => {
+    const [msg] = await conn('messages').insert(row).returning('*');
 
-  return msg;
+    const update = {
+      last_message_at: createdAt,
+      message_count: conn.raw('message_count + 1'),
+      updated_at: createdAt,
+    };
+    if (opts.direction === 'inbound') update.last_inbound_at = createdAt;
+
+    await conn('conversations').where({ id: opts.conversationId }).update(update);
+    return msg;
+  };
+
+  if (!opts.twilioSid) return appendWith(db);
+
+  return await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`message:${opts.channel}:${opts.twilioSid}`]);
+
+    const existing = await trx('messages')
+      .where({ channel: opts.channel, twilio_sid: opts.twilioSid })
+      .first();
+    if (!existing) return appendWith(trx);
+
+    const patch = { updated_at: new Date() };
+    if (opts.body) patch.body = opts.body;
+    if (opts.subject) patch.subject = opts.subject;
+    if (opts.media) {
+      const media = Array.isArray(opts.media) ? opts.media : [];
+      if (media.length) patch.media = JSON.stringify(media);
+    }
+    if (opts.recordingSid) patch.recording_sid = opts.recordingSid;
+    if (opts.durationSeconds) patch.duration_seconds = opts.durationSeconds;
+    if (opts.answeredBy) patch.answered_by = opts.answeredBy;
+    if (opts.deliveryStatus) patch.delivery_status = opts.deliveryStatus;
+    if (opts.templateId) patch.template_id = opts.templateId;
+    if (opts.coachSessionId) patch.coach_session_id = opts.coachSessionId;
+    if (opts.messageType) patch.message_type = opts.messageType;
+    if (opts.aiSummary) patch.ai_summary = opts.aiSummary;
+    if (opts.isRead === true) {
+      patch.is_read = true;
+      patch.read_at = opts.readAt || new Date();
+      patch.read_by_admin_user_id = opts.readByAdminUserId || null;
+    }
+    if (opts.metadata) patch.metadata = JSON.stringify(opts.metadata);
+
+    const [updated] = await trx('messages')
+      .where({ id: existing.id })
+      .update(patch)
+      .returning('*');
+    return updated || existing;
+  });
 }
 
 /**
@@ -173,4 +370,5 @@ module.exports = {
   appendMessage,
   recordTouchpoint,
   updateByTwilioSid,
+  syncVoiceMessageForCall,
 };
