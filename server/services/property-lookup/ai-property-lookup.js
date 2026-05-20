@@ -628,6 +628,7 @@ function coerceDualUnitLotSize(str) {
   const roundedSqft = sqft == null ? null : Math.round(sqft);
 
   if (acreSqft != null && roundedSqft != null) {
+    if (acreSqft >= LOT_SQFT_MAX && roundedSqft >= LOT_SQFT_MAX) return LOT_SQFT_MAX;
     if (!lotValuesAgree(acreSqft, roundedSqft)) return null;
     return clampLotSqft(roundedSqft);
   }
@@ -710,7 +711,7 @@ function getAfterUnitNumberContext(afterMatch) {
 }
 
 function hasMetadataAfterUnitTrailing(trailing) {
-  return /^\s*(?:tax|years?|records?|plats?|refs?|references?|parcels?|ids?|identifiers?|blocks?|books?|pages?)\b/i.test(trailing);
+  return /^[\s,;:/()_-]*(?:adj|tax|years?|records?|plats?|refs?|references?|parcels?|ids?|identifiers?|blocks?|books?|pages?)\b/i.test(trailing);
 }
 
 function isPlainIntegerString(rawNumber) {
