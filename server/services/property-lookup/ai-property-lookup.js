@@ -546,7 +546,7 @@ function coerceInt(raw, min, max) {
 const SQFT_PER_ACRE = 43560;
 const LOT_SQFT_MIN = 1000;
 const LOT_SQFT_MAX = 200_000;
-const ACRE_UNIT_RE = /\b(?:acres?|acs?|ac)\b\.?/i;
+const ACRE_UNIT_RE = /\b(?:acreage|acres?|acs?|ac)\b\.?/i;
 const SQFT_UNIT_RE = /\b(?:sq\.?\s*ft\.?|sqft|square\s*feet|sf)\b\.?/i;
 const LOT_NUMBER_PATTERN = String.raw`(\d+(?:-\d+\s*\/\s*\d+|\s+\d+\s*\/\s*\d+)|\d+\s*\/\s*\d+|(?:\d{1,3}(?:,\d{3})+|\d+|\.\d+)(?:\.\d+)?)`;
 
@@ -638,7 +638,7 @@ function parseUnitQualifiedLotNumber(str, unitPattern, unitKind) {
 
   const beforeUnit = new RegExp(`${LOT_NUMBER_PATTERN}\\s*-?\\s*(?:${unitPattern.source})`, 'i');
   const beforeMatch = str.match(beforeUnit);
-  const beforeValue = beforeMatch ? parseFirstLotNumber(beforeMatch[1]) : null;
+  const beforeValue = beforeMatch ? parseUnitPrefixLotNumber(beforeMatch[1], str, beforeMatch.index) : null;
 
   if (afterValue != null && shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, unitKind)) {
     return afterValue;
@@ -664,11 +664,19 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
 
   const beforeSqft = unitKind === 'acre' ? beforeValue * SQFT_PER_ACRE : beforeValue;
   const afterSqft = unitKind === 'acre' ? afterValue * SQFT_PER_ACRE : afterValue;
-  if (unitKind === 'acre' && Number.isInteger(beforeValue) && afterSqft >= LOT_SQFT_MIN) return true;
+  if (unitKind === 'acre' && Number.isInteger(beforeValue)) return true;
 
   return (beforeSqft < LOT_SQFT_MIN || beforeSqft > LOT_SQFT_MAX)
     && afterSqft >= LOT_SQFT_MIN
     && afterSqft <= LOT_SQFT_MAX;
+}
+
+function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex) {
+  const value = String(rawNumber || '').trim();
+  const lotPrefix = /\blot\s*(?:#|no\.?|number)?\s*$/i.test(fullStr.slice(0, matchIndex));
+  const lotHyphenFraction = value.match(/^\d+\s*-\s*(\d+\s*\/\s*\d+)$/);
+  if (lotPrefix && lotHyphenFraction) return parseFirstLotNumber(lotHyphenFraction[1]);
+  return parseFirstLotNumber(value);
 }
 
 // Pull the FIRST numeric value out of a lot-size string. Supports mixed

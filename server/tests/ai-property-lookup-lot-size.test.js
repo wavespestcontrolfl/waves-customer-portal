@@ -14,12 +14,15 @@ describe('AI property lookup lot-size normalization', () => {
     expect(coerceLotSize('Lot 4 AC 0.25')).toBe(10890);
     expect(coerceLotSize('Lot 1 AC 2')).toBe(87120);
     expect(coerceLotSize('Lot 4 AC 5')).toBe(200000);
+    expect(coerceLotSize('Lot 13 AC 0.02')).toBeNull();
+    expect(coerceLotSize('Acreage: 5')).toBe(200000);
   });
 
   test('parses fractional acreage formats before decimal fallback', () => {
     expect(coerceLotSize('1-1/2 acres')).toBe(65340);
     expect(coerceLotSize('1 / 2 acre')).toBe(21780);
     expect(coerceLotSize('Lot 13 - 1/2 acre')).toBe(21780);
+    expect(coerceLotSize('Lot 13-1/2 acre')).toBe(21780);
   });
 
   test('recognizes acre and square-foot abbreviations without using unrelated numbers', () => {
