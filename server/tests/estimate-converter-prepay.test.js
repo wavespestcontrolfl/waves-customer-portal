@@ -3,6 +3,8 @@ const {
   countTierQualifyingRecurringServices,
   determineTier,
   hasWaveGuardSetupService,
+  resolveAnnualPrepayDraftAmount,
+  shouldCreateDraftInvoiceForRecurring,
 } = require('../services/estimate-converter');
 
 describe('estimate converter annual prepay amount', () => {
@@ -16,6 +18,21 @@ describe('estimate converter annual prepay amount', () => {
 
     expect(calculateAnnualPrepayAmount(zoneAndRoachAdjustedMonthly)).toBe(782.48);
     expect(calculateAnnualPrepayAmount(zoneAndRoachAdjustedMonthly)).not.toBe(648);
+  });
+
+  test('annual prepay draft amount prefers accepted annual total over monthly fallback', () => {
+    expect(resolveAnnualPrepayDraftAmount({
+      prepayInvoiceAmount: 777.77,
+      annualTotal: 660,
+      monthlyRate: 55,
+    })).toBe(777.77);
+    expect(resolveAnnualPrepayDraftAmount({
+      annualTotal: 660,
+      monthlyRate: 0,
+    })).toBe(660);
+    expect(resolveAnnualPrepayDraftAmount({
+      monthlyRate: 55,
+    })).toBe(660);
   });
 
   test('counts only tier-qualifying recurring services for WaveGuard activation', () => {
@@ -43,5 +60,18 @@ describe('estimate converter annual prepay amount', () => {
       { service: 'lawn_care', name: 'Lawn Care' },
       { service: 'pest_control', name: 'Pest Control' },
     ])).toBe(true);
+  });
+
+  test('annual prepay creates a draft invoice for non-pest recurring plans', () => {
+    const lawnOnly = [{ service: 'lawn_care', name: 'Lawn Care' }];
+
+    expect(shouldCreateDraftInvoiceForRecurring({
+      billingTerm: 'standard',
+      recurringServices: lawnOnly,
+    })).toBe(false);
+    expect(shouldCreateDraftInvoiceForRecurring({
+      billingTerm: 'prepay_annual',
+      recurringServices: lawnOnly,
+    })).toBe(true);
   });
 });
