@@ -1218,6 +1218,12 @@ function renderPage(token, estimate, estData) {
   const firstName = escapeHtml((est.customerName || '').split(' ')[0] || 'there');
   const fullName = escapeHtml(est.customerName || '');
   const address = escapeHtml(est.address || '');
+  const customerEmail = escapeHtml(est.customerEmail || '');
+  const customerPhoneRaw = String(est.customerPhone || '').replace(/\D/g, '');
+  const customerPhoneDigits = customerPhoneRaw.length === 11 && customerPhoneRaw.startsWith('1') ? customerPhoneRaw.slice(1) : customerPhoneRaw;
+  const customerPhoneDisplay = customerPhoneDigits.length === 10
+    ? `(${customerPhoneDigits.slice(0, 3)}) ${customerPhoneDigits.slice(3, 6)}-${customerPhoneDigits.slice(6)}`
+    : escapeHtml(est.customerPhone || '');
 
   const estResult = estData?.result || estData || {};
   const savedEstimateTierDiscount = Number(estResult?.recurring?.discount);
@@ -1529,8 +1535,9 @@ function renderPage(token, estimate, estData) {
           <div class="payment-summary-row"><span>Today</span><strong>$0</strong></div>
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
+          ${showMembershipFee && firstServiceVisitTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>First visit invoice total</span><strong data-first-visit-grand-total data-setup-fee="${Number(membershipFee || 0)}">${fmtMoney(Math.round((membershipFee + firstServiceVisitTotal) * 100) / 100)}</strong></div>` : ''}
         </div>
-        <p class="billing-small">${showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy)}</p>
+        <p class="billing-small">${showMembershipFee && firstServiceVisitTotal > 0 ? `No payment is charged on this page. Your first invoice totals ${fmtMoney(Math.round((membershipFee + firstServiceVisitTotal) * 100) / 100)} (${fmtMoney(membershipFee)} setup + first visit) and is billed after that visit completes.` : (showMembershipFee ? `No payment is charged on this page. The ${fmtMoney(membershipFee)} setup invoice is prepared after approval; service visits bill after completion.` : escapeHtml(pageCopy.noPaymentCopy))}</p>
         <button type="button" class="payment-choice-cta" data-payment-setup="card_on_file">Choose pay-after-visit setup</button>
       </div>
       ${showAnnualPrepayOption ? `
@@ -1544,11 +1551,10 @@ function renderPage(token, estimate, estData) {
           <div class="payment-summary-row"><span>Today</span><strong>$0</strong></div>
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
-          <div class="payment-summary-row total"><span>Prepay invoice</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
+          <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">No payment is charged on this page. The annual prepay invoice is prepared after approval.</p>
+        <p class="billing-small">No payment is charged on this page. Your annual prepay invoice totals ${fmtMoney(prepayInvoiceTotal)} and is prepared after approval.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
-        ${annualPrepayWaivesMembership ? `<p class="billing-small">Net setup fee: $0</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Choose annual prepay setup</button>
       </div>` : ''}
     </div>
@@ -1669,12 +1675,30 @@ function renderPage(token, estimate, estData) {
       ${intelligence.signals.map((signal) => `<div class="intelligence-signal">${escapeHtml(signal)}</div>`).join('')}
     </div>` : ''}
   </section>` : '';
-  const askPrompts = [
-    'What is included?',
-    'How does billing work?',
-    'Why this price?',
-    'Who is Waves?',
-  ];
+  // Service-aware quick-question chips: 2 service-specific (when applicable),
+  // a safety chip for any chemical service, then 1 universal billing chip —
+  // capped at 4 so the prompt row stays scannable.
+  const askPrompts = (() => {
+    const prompts = [];
+    const hasLawn = recurring.some((s) => /lawn|turf/i.test(s?.name || s?.label || s?.service || ''));
+    const hasMosquito = recurring.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''));
+    const hasTermite = recurring.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''));
+    const hasTreeShrub = recurring.some((s) => /\btree\b|shrub/i.test(s?.name || s?.label || s?.service || ''));
+    const hasRodent = recurring.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
+    const hasPalm = recurring.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
+    const hasPestAny = !!pestRecurring || hasPestOneTime;
+    if (hasPestAny) prompts.push('What products do you use?');
+    if (hasLawn) prompts.push('What gets applied each visit?');
+    if (hasMosquito) prompts.push('How long does it last?');
+    if (hasTermite) prompts.push('How does the bait work?');
+    if (hasTreeShrub) prompts.push('Which trees get treated?');
+    if (hasRodent) prompts.push('Where do bait stations go?');
+    if (hasPalm) prompts.push('Why injections vs. spray?');
+    if (hasPestAny || hasLawn || hasMosquito) prompts.push('Are pets and kids safe?');
+    prompts.push('When am I charged?');
+    prompts.push('What happens after approval?');
+    return prompts.slice(0, 4);
+  })();
   const estimateAskEnabled = isEstimateAskAnswerable({
     status: est.status,
     expires_at: est.expiresAt || est.expires_at,
@@ -1751,6 +1775,8 @@ function renderPage(token, estimate, estData) {
   *{box-sizing:border-box}
   [hidden]{display:none!important}
   body{margin:0;font-family:Inter,system-ui,sans-serif;background:#FAF8F3;color:#1B2C5B;line-height:1.55;min-height:100vh;display:flex;flex-direction:column}
+  @keyframes click-pulse{0%{transform:scale(1)}40%{transform:scale(.96)}100%{transform:scale(1)}}
+  .is-click-pulse{animation:click-pulse .22s ease-out}
   h1,h2,h3{font-family:'Source Serif 4',Georgia,serif;font-weight:500;letter-spacing:0;margin:0 0 12px;color:#1B2C5B}
   h1{font-size:clamp(40px,6vw,64px);line-height:1.04;max-width:860px}
   h2{font-size:clamp(22px,3vw,28px);line-height:1.2}
@@ -1765,13 +1791,15 @@ function renderPage(token, estimate, estData) {
   .wrap{flex:1;max-width:1040px;width:100%;margin:0 auto;padding:62px 24px 80px}
   .hero{padding:10px 0 28px;max-width:900px}
   .hero .addr{color:#3F4A65;font-size:17px;margin-top:8px}
+  .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#6B7280;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
   .hero .prop-meta{color:#6B7280;font-size:16px;margin-top:4px}
   .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
-  .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04);display:flex;flex-direction:column;min-height:256px}
+  .service-price-card{padding:18px 20px;border:1px solid #E7E2D7;border-radius:12px;background:#F7F5EE;box-shadow:0 1px 3px rgba(15,23,42,.04);display:flex;flex-direction:column;transition:background .15s,border-color .15s}
+  .service-price-card:hover{background:#F2EEE0;border-color:#D9D3C4}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
   .service-price-detail{font-size:12px;color:#6B7280;line-height:1.45;margin-top:2px;min-height:18px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
-  .service-big-price{margin-top:14px;gap:8px 12px;min-height:132px;align-content:flex-start}
+  .service-big-price{margin-top:14px;gap:8px 12px;align-content:flex-start}
   .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:28px;color:#9CA3AF;text-decoration:line-through}
   .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(62px,8vw,84px);line-height:.92;color:#1B2C5B}
   .service-big-price .anchor{font-size:22px;flex-basis:100%}
@@ -1781,7 +1809,7 @@ function renderPage(token, estimate, estData) {
   .big-price .tier-lbl{display:inline-block;padding:4px 10px;border-radius:6px;background:#EEF2FF;color:#1B2C5B;font-weight:600;font-size:12px;letter-spacing:.04em}
   .save-row{margin-top:10px;min-height:20px}
   .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
-  .service-price-card>.day-price{margin-top:auto;padding-top:8px}
+  .service-price-card>.day-price{padding-top:8px}
   .supplemental-service-list{display:grid;gap:8px;max-width:720px;margin:18px auto 0}
   .supplemental-service-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 14px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;text-align:left}
   .supplemental-service-name{font-size:14px;font-weight:800;color:#1B2C5B;line-height:1.35}
@@ -1809,11 +1837,12 @@ function renderPage(token, estimate, estData) {
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
   @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}.supplemental-service-row{grid-template-columns:1fr}.supplemental-service-row strong{white-space:normal}}
-  .card{background:#fff;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #E7E2D7}
+  .card{background:#F7F5EE;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #E7E2D7;transition:background .15s,border-color .15s}
+  .card:hover{background:#F2EEE0;border-color:#D9D3C4}
   .card h2{margin:0 0 6px}
   .card h3{margin:0 0 10px}
   .card-sub{color:#6B7280;font-size:14px;margin:0 0 14px}
-  .ai-card{background:linear-gradient(180deg,#F5F1E6 0%,#fff 100%)}
+  .ai-card{background:#F7F5EE}
   .waveguard-ai-card{display:grid;gap:14px}
   .intelligence-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
   .intelligence-header h2{margin-bottom:0}
@@ -1828,7 +1857,7 @@ function renderPage(token, estimate, estData) {
   .intelligence-signals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:2px}
   @media(max-width:760px){.intelligence-header{display:grid}.intelligence-signals{grid-template-columns:1fr}}
   .intelligence-signal{border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;background:#fff;padding:10px 12px;color:#3F4A65;font-size:16px;line-height:1.45}
-  .estimate-ask-card{display:grid;gap:12px;border-color:#CFE7F5;background:#fff}
+  .estimate-ask-card{display:grid;gap:12px}
   .estimate-ask-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
   .estimate-ask-form{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
   .estimate-ask-form input{width:100%;min-height:48px;border:1px solid #CFE7F5;border-radius:10px;padding:12px 14px;font:500 15px/1.35 Inter,system-ui,sans-serif;color:#1B2C5B;background:#F8FCFE;outline:none}
@@ -1861,8 +1890,11 @@ function renderPage(token, estimate, estData) {
   .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}
   .payment-summary-row.discount strong,.payment-summary-row.discount span{color:${BRAND.green}}
   .payment-summary-row strong s{color:#9CA3AF;text-decoration-color:${BRAND.red};text-decoration-thickness:2px;margin-right:6px}
-  .payment-choice-cta{margin-top:auto;width:100%;border:1px solid #1B2C5B;background:#fff;color:#1B2C5B;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
-  .payment-choice-cta:hover:not([disabled]),.payment-choice-cta[aria-pressed="true"]{background:#1B2C5B;color:#fff}
+  .payment-summary-row.payment-summary-total{border-top:1px solid #1B2C5B;margin-top:4px;padding-top:12px}
+  .payment-summary-row.payment-summary-total span{color:#1B2C5B}
+  .payment-summary-row.payment-summary-total strong{font-size:15px;color:#1B2C5B}
+  .payment-choice-cta{margin-top:auto;width:100%;border:1px solid ${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
+  .payment-choice-cta:hover:not([disabled]),.payment-choice-cta[aria-pressed="true"]{background:#121E3D;border-color:#121E3D}
   .payment-choice-cta.primary{background:${ESTIMATE_BUTTON_BLUE};border-color:${ESTIMATE_BUTTON_BLUE};color:#fff}
   .payment-choice-cta.primary:hover:not([disabled]),.payment-choice-cta.primary[aria-pressed="true"]{background:#121E3D;border-color:#121E3D}
   .payment-choice-cta[disabled]{opacity:.55;cursor:not-allowed}
@@ -1939,11 +1971,11 @@ function renderPage(token, estimate, estData) {
   .upsell h3{color:#1B2C5B;margin:0 0 4px}
   .upsell-btn{background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;border:none;font-weight:500;cursor:pointer;font-size:14px;min-height:44px;pointer-events:none}
   @media(max-width:520px){.upsell-btn{width:100%}}
-  .perks-list{list-style:none;padding:0;margin:0;columns:2;column-gap:20px;font-size:14px}
-  @media(max-width:640px){.perks-list{columns:1}}
-  .perks-list li{padding:6px 0 6px 24px;position:relative;break-inside:avoid;font:400 14px/1.45 Inter,system-ui,sans-serif;color:#3F4A65}
-  .perks-list li::before{content:'✓';position:absolute;left:0;color:${BRAND.green};font-weight:600}
-  .review-carousel{background:#F7F5EE;border-radius:10px;padding:18px;position:relative;border:1px solid #E7E2D7}
+  .perks-list{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+  @media(max-width:640px){.perks-list{grid-template-columns:1fr}}
+  .perks-list li{background:#fff;border:1px solid #E7E2D7;border-radius:12px;padding:14px 16px 14px 40px;position:relative;font:500 14px/1.4 Inter,system-ui,sans-serif;color:#1B2C5B}
+  .perks-list li::before{content:'✓';position:absolute;left:14px;top:14px;color:${BRAND.green};font-weight:700;font-size:14px;line-height:1.4}
+  .review-carousel{background:transparent;border:0;padding:0;position:relative}
   .review-track{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;transition:opacity .3s}
   @media(max-width:760px){.review-track{grid-template-columns:1fr}}
   .review-card{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:16px;min-height:178px;display:flex;flex-direction:column}
@@ -2012,7 +2044,10 @@ ${shellTopBar()}
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
     <h1>Hey ${firstName}, ${canChooseOneTime ? 'choose your pest control option.' : escapeHtml(pageCopy.heroSuffix)}</h1>
-    <div class="addr">${address}</div>
+    ${fullName ? `<div class="hero-contact">${fullName}</div>` : ''}
+    ${address ? `<div class="hero-contact">${address}</div>` : ''}
+    ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
+    ${customerPhoneDisplay ? `<div class="hero-contact">${customerPhoneDisplay}</div>` : ''}
     ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
     ${canChooseOneTime ? `
     <div class="mode-toggle" role="group" aria-label="Pest control service type">
@@ -2155,6 +2190,15 @@ ${shellQuestionsBar()}
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
+  // Subtle click pulse on any button — fires once per click, self-removes after animation
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button, .cta, .upsell, .review-card-link');
+    if (!btn || btn.disabled) return;
+    btn.classList.remove('is-click-pulse');
+    void btn.offsetWidth;
+    btn.classList.add('is-click-pulse');
+    setTimeout(() => btn.classList.remove('is-click-pulse'), 240);
+  });
   const refreshBillingAmounts = (monthlyTotal, annualTotal, prefMonthlyOff) => {
     const monthly = Number(monthlyTotal || 0);
     const annual = Number.isFinite(Number(annualTotal))
@@ -2182,6 +2226,10 @@ ${shellQuestionsBar()}
     });
     document.querySelectorAll('[data-first-visit-total]').forEach((el) => {
       if (firstVisitTotal > 0) el.textContent = fmt(firstVisitTotal);
+    });
+    document.querySelectorAll('[data-first-visit-grand-total]').forEach((el) => {
+      const setup = Number(el.dataset.setupFee || 0);
+      if (firstVisitTotal > 0) el.textContent = fmt(Math.round((firstVisitTotal + setup) * 100) / 100);
     });
     document.querySelectorAll('[data-service-card-savings]').forEach((el) => {
       const base = Number(el.dataset.serviceBasePrice || 0);
@@ -3083,6 +3131,8 @@ async function handleEstimateView(req, res, next) {
       quoteRequired: quoteRequirement.quoteRequired,
       quoteRequiredReason: quoteRequirement.reason || null,
       customerName: estimate.customer_name,
+      customerEmail: estimate.customer_email,
+      customerPhone: estimate.customer_phone,
       address: estimate.address,
       monthlyTotal: parseFloat(estimate.monthly_total || 0),
       annualTotal: parseFloat(estimate.annual_total || 0),

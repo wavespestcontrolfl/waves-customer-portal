@@ -1508,7 +1508,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html.match(/WaveGuard Membership Setup/g)).toHaveLength(2);
     expect(html).toContain('Pay the 12-month plan in full');
     expect(html).toContain('we send one prepay invoice after approval and waive the setup.');
-    expect(html).toContain('Net setup fee: $0');
+    expect(html).not.toContain('Net setup fee: $0');
     expect(html).toContain('<strong><s>$99</s> $0</strong>');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
     expect(html).not.toContain('<strong>-$99</strong>');
