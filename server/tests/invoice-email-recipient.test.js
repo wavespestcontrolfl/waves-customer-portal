@@ -15,7 +15,9 @@ jest.mock('../services/short-url', () => ({
   invoiceShortCodePrefix: jest.fn(),
 }));
 
-const { _private } = require('../services/invoice-email');
+const { _private, sendInvoiceEmail } = require('../services/invoice-email');
+const db = require('../models/db');
+const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 
 const customer = {
   id: 'cust-1',
@@ -25,7 +27,21 @@ const customer = {
   phone: '+15551110000',
 };
 
+function query(result) {
+  const chain = {
+    where: jest.fn(() => chain),
+    select: jest.fn(() => chain),
+    first: jest.fn(() => Promise.resolve(result)),
+    catch: jest.fn((handler) => Promise.resolve(result).catch(handler)),
+  };
+  return chain;
+}
+
 describe('invoice email recipient resolution', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
   test('uses a valid one-time recipient override ahead of customer billing prefs', () => {
     const result = _private.invoiceRecipientFor(
       customer,
@@ -59,5 +75,30 @@ describe('invoice email recipient resolution', () => {
       name: 'Accounts Payable',
       role: 'billing_contact',
     }));
+  });
+
+  test('returns a controlled failure when invoice customer is missing with override', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        return query({
+          id: 'invoice-1',
+          customer_id: 'missing-customer',
+          invoice_number: 'INV-1',
+          token: 'token-1',
+        });
+      }
+      if (table === 'customers') {
+        return query(null);
+      }
+      return query(null);
+    });
+
+    await expect(sendInvoiceEmail('invoice-1', {
+      recipientOverride: { email: 'billing@example.com' },
+    })).resolves.toEqual({
+      ok: false,
+      error: 'Customer not found',
+    });
+    expect(buildInvoicePDFBuffer).not.toHaveBeenCalled();
   });
 });

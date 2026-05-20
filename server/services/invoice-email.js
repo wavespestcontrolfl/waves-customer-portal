@@ -94,6 +94,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
+  if (!customer) return { ok: false, error: 'Customer not found' };
   const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
   const { recipient, error: recipientError } = invoiceRecipientFor(customer, prefs, options.recipientOverride);
   if (recipientError) return { ok: false, error: recipientError };

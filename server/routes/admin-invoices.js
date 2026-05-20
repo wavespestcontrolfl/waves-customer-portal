@@ -165,6 +165,9 @@ function isEmailLike(value) {
 }
 
 function invoiceRecipientOverrideError(email, saveBillingRecipient = false) {
+  if (saveBillingRecipient !== undefined && typeof saveBillingRecipient !== 'boolean') {
+    return 'saveBillingRecipient must be true or false.';
+  }
   if (!email) return null;
   if (!isEmailLike(email)) {
     return 'Enter a valid invoice recipient email.';
@@ -722,6 +725,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
     const overrideEmail = cleanEmail(invoiceRecipientEmail);
     const overrideName = cleanOptionalText(invoiceRecipientName);
+    const shouldSaveBillingRecipient = saveBillingRecipient === true;
     let emailRecipientOverride = null;
 
     if (overrideEmail) {
@@ -734,7 +738,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         name: overrideName || undefined,
       };
 
-      if (saveBillingRecipient) {
+      if (shouldSaveBillingRecipient) {
         const invoice = await db('invoices')
           .where({ id })
           .select('customer_id')

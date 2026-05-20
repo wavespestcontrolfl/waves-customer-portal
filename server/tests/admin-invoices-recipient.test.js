@@ -8,6 +8,11 @@ describe('admin invoice recipient override validation', () => {
       .toBe('Enter a valid invoice recipient email.');
   });
 
+  test('rejects non-boolean save-as-default flags', () => {
+    expect(invoiceRecipientOverrideError('billing@example.com', 'false'))
+      .toBe('saveBillingRecipient must be true or false.');
+  });
+
   test('rejects over-length billing recipient email when saving as default', () => {
     const localPart = 'a'.repeat(190);
 
