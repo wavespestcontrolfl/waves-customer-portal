@@ -521,6 +521,7 @@ router.post('/sends/:id/resume', async (req, res) => {
       force: true,
       preserveSentAt: true,
       existingDeliveriesOnly: prepared.existingDeliveriesOnly,
+      preclaimed: prepared.preclaimed,
     }).catch(async (err) => {
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter] background resume ${req.params.id} already claimed by another worker — no-op`);

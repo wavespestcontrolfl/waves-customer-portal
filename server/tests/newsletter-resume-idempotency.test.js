@@ -344,6 +344,7 @@ describe('resumeCampaign — preconditions', () => {
   });
 
   test('allows failed sends with no delivery rows to reseed and send', async () => {
+    let claimUpdate = null;
     const failedSend = {
       id: 's',
       status: 'failed',
@@ -359,9 +360,8 @@ describe('resumeCampaign — preconditions', () => {
     const queues = {
       newsletter_sends: [
         chain({ first: failedSend }),                         // resume fetch
-        chain({ returning: [{ id: 's' }] }),                  // conditional reset to scheduled
-        chain({ first: { ...failedSend, status: 'scheduled' } }), // sendCampaign fetch
-        chain({ returning: [{ id: 's' }] }),                  // sendCampaign atomic claim
+        chain({ returning: [{ id: 's' }], onUpdate: (payload) => { claimUpdate = payload; } }),
+        chain({ first: { ...failedSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
         chain({ updated: 1 }),                                // final status update
       ],
       newsletter_send_deliveries: [
@@ -383,6 +383,7 @@ describe('resumeCampaign — preconditions', () => {
     const result = await resumeCampaign('s');
 
     expect(result.accepted).toBe(1);
+    expect(claimUpdate.status).toBe('sending');
     expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
     expect(mockSendBroadcast.mock.calls[0][0].recipients[0].customArgs).toEqual({ delivery_id: 'd-1', send_id: 's' });
   });
@@ -405,9 +406,8 @@ describe('resumeCampaign — preconditions', () => {
     const queues = {
       newsletter_sends: [
         chain({ first: sentSend }),                          // resume fetch
-        chain({ returning: [{ id: 's' }] }),                  // conditional reset
-        chain({ first: { ...sentSend, status: 'scheduled' } }), // sendCampaign fetch
-        chain({ returning: [{ id: 's' }] }),                  // sendCampaign atomic claim
+        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
+        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_send_deliveries: [
@@ -490,9 +490,8 @@ describe('resumeCampaign — preconditions', () => {
     const queues = {
       newsletter_sends: [
         chain({ first: sentSend }),                          // resume fetch
-        chain({ returning: [{ id: 's' }] }),                  // conditional reset
-        chain({ first: { ...sentSend, status: 'scheduled' } }), // sendCampaign fetch
-        chain({ returning: [{ id: 's' }] }),                  // sendCampaign atomic claim
+        chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
+        chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_send_deliveries: [

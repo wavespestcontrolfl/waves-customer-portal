@@ -161,6 +161,7 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       expect(u).toEqual({
         delivery: { status: 'delivered', delivered_at: now, updated_at: now },
         sendIncrement: 'delivered_count',
+        reconcileSendStatus: true,
       });
     });
     test('idempotent — already-delivered row is a no-op', () => {
@@ -180,6 +181,7 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       expect(u.delivery.bounced_at).toBe(now);
       expect(u.delivery.bounce_reason).toBe('mailbox does not exist');
       expect(u.sendIncrement).toBe('bounced_count');
+      expect(u.reconcileSendStatus).toBe(true);
       expect(u.subscriberAction).toBe('bounce_increment');
       expect(u.subscriberAt).toBe(now);
     });
@@ -210,11 +212,13 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       expect(u.delivery).toEqual({ opened_at: now, updated_at: now });
       expect(u.delivery.status).toBeUndefined();
       expect(u.sendIncrement).toBe('opened_count');
+      expect(u.reconcileSendStatus).toBe(true);
     });
     test('click stamps timestamp + clicked_count', () => {
       const u = computeNewsletterEventUpdates({ event: 'click' }, fresh(), now);
       expect(u.delivery).toEqual({ clicked_at: now, updated_at: now });
       expect(u.sendIncrement).toBe('clicked_count');
+      expect(u.reconcileSendStatus).toBe(true);
     });
     test('open is idempotent', () => {
       expect(computeNewsletterEventUpdates({ event: 'open' }, fresh({ opened_at: now }), now)).toBeNull();
@@ -229,6 +233,7 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       const u = computeNewsletterEventUpdates({ event: 'spamreport' }, fresh(), now);
       expect(u.delivery).toEqual({ status: 'complained', complained_at: now, updated_at: now });
       expect(u.sendIncrement).toBe('complained_count');
+      expect(u.reconcileSendStatus).toBe(true);
       expect(u.subscriberAction).toBe('force_unsubscribe');
     });
     test('idempotent — already-complained row is a no-op', () => {

@@ -261,6 +261,8 @@ async function processWebhookEvent(ev, messageId, email, handler) {
  * Update shape:
  *   delivery       — fields to write to newsletter_send_deliveries
  *   sendIncrement  — column on newsletter_sends to increment by 1
+ *   reconcileSendStatus — re-check failed parent send when a delivery leaves
+ *     the retryable set via webhook self-heal
  *   subscriberAction — one of:
  *     'bounce_increment'    bounce_count++ + last_bounced_at
  *     'force_unsubscribe'   status='unsubscribed' regardless of prior state
@@ -274,6 +276,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       return {
         delivery: { status: 'delivered', delivered_at: now, updated_at: now },
         sendIncrement: 'delivered_count',
+        reconcileSendStatus: true,
       };
 
     case 'bounce':
@@ -288,6 +291,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
           updated_at: now,
         },
         sendIncrement: 'bounced_count',
+        reconcileSendStatus: true,
         subscriberAction: delivery.subscriber_id ? 'bounce_increment' : null,
         subscriberAt: now,
       };
@@ -298,6 +302,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       return {
         delivery: { opened_at: now, updated_at: now },
         sendIncrement: 'opened_count',
+        reconcileSendStatus: true,
       };
 
     case 'click':
@@ -305,6 +310,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       return {
         delivery: { clicked_at: now, updated_at: now },
         sendIncrement: 'clicked_count',
+        reconcileSendStatus: true,
       };
 
     case 'spamreport':
@@ -315,6 +321,7 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
       return {
         delivery: { status: 'complained', complained_at: now, updated_at: now },
         sendIncrement: 'complained_count',
+        reconcileSendStatus: true,
         subscriberAction: delivery.subscriber_id ? 'force_unsubscribe' : null,
         subscriberAt: now,
       };

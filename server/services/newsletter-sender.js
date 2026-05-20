@@ -88,6 +88,9 @@ function applyRetryableDeliveryFilter(query) {
  *   pre-flight) and the rare race where the segment empties between
  *   pre-flight and dispatch.
  *
+ * opts.preclaimed — caller already atomically moved the row to 'sending'.
+ *   Used by resume so it never reopens a send as generic 'scheduled'.
+ *
  * Returns { recipients, accepted, failed }.
  */
 async function sendCampaign(sendId, opts = {}) {
@@ -109,21 +112,29 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
 
-  // Atomic claim: only one caller can flip draft/scheduled → sending.
-  // Returning the rows lets us distinguish 'lost the race' (0 rows) from
-  // 'won' (1 row). Without this guard, the immediate-send route + the
-  // scheduler tick can both pick up the same row and double-send.
-  // The race-loser is tagged so dispatch-side catch handlers can skip
-  // the 'failed' flip — the row is actively sending under the winner.
-  const claimed = await db('newsletter_sends')
-    .where({ id: send.id })
-    .whereIn('status', ['draft', 'scheduled'])
-    .update({ status: 'sending', updated_at: new Date() })
-    .returning('id');
-  if (!claimed.length) {
-    const err = new Error('already sent or in progress');
-    err.code = 'ALREADY_CLAIMED';
-    throw err;
+  if (opts.preclaimed) {
+    if (send.status !== 'sending') {
+      const err = new Error('already sent or in progress');
+      err.code = 'ALREADY_CLAIMED';
+      throw err;
+    }
+  } else {
+    // Atomic claim: only one caller can flip draft/scheduled -> sending.
+    // Returning the rows lets us distinguish 'lost the race' (0 rows) from
+    // 'won' (1 row). Without this guard, the immediate-send route + the
+    // scheduler tick can both pick up the same row and double-send.
+    // The race-loser is tagged so dispatch-side catch handlers can skip
+    // the 'failed' flip because the row is actively sending under the winner.
+    const claimed = await db('newsletter_sends')
+      .where({ id: send.id })
+      .whereIn('status', ['draft', 'scheduled'])
+      .update({ status: 'sending', updated_at: new Date() })
+      .returning('id');
+    if (!claimed.length) {
+      const err = new Error('already sent or in progress');
+      err.code = 'ALREADY_CLAIMED';
+      throw err;
+    }
   }
 
   const subscribers = await buildSubscriberQuery(send.segment_filter);
@@ -310,10 +321,10 @@ async function sendCampaign(sendId, opts = {}) {
 
 /**
  * Operator-triggered re-send of a campaign that previously failed or only
- * partially completed. Bypasses the draft/scheduled atomic claim (which is
- * designed to prevent two workers from racing on a NEW send) but inherits
- * sendCampaign's per-recipient idempotency filter: only queued/failed rows
- * with no success or engagement timestamps get a fresh attempt.
+ * partially completed. Preclaims the row as 'sending' before handing it to
+ * sendCampaign, then inherits sendCampaign's per-recipient idempotency filter:
+ * only queued/failed rows with no success or engagement timestamps get a
+ * fresh attempt.
  *
  * Refuses to resume rows that are still in 'sending' state (an active
  * sendCampaign call holds the work) or already 'sent' status with no
@@ -369,20 +380,20 @@ async function prepareResumeCampaign(sendId) {
     }
   }
 
-  // Flip back to 'scheduled' only if the row is still in the state we
-  // inspected above. A second resume click can otherwise overwrite another
-  // worker's fresh 'scheduled' -> 'sending' claim and invite duplicate work.
-  const reset = await db('newsletter_sends')
+  // Claim directly as 'sending' only if the row is still in the state we
+  // inspected above. This avoids a generic 'scheduled' window where the normal
+  // /send path or scheduler could claim the send without resume constraints.
+  const claimed = await db('newsletter_sends')
     .where({ id: send.id, status: send.status })
-    .update({ status: 'scheduled', scheduled_for: null, updated_at: new Date() })
+    .update({ status: 'sending', scheduled_for: null, updated_at: new Date() })
     .returning('id');
-  if (!reset.length) {
+  if (!claimed.length) {
     const err = new Error('campaign was claimed by another worker');
     err.code = 'ALREADY_CLAIMED';
     throw err;
   }
 
-  return { sendId: send.id, existingDeliveriesOnly: totalDeliveries > 0 };
+  return { sendId: send.id, existingDeliveriesOnly: totalDeliveries > 0, preclaimed: true };
 }
 
 async function resumeCampaign(sendId) {
@@ -391,6 +402,7 @@ async function resumeCampaign(sendId) {
     force: true,
     preserveSentAt: true,
     existingDeliveriesOnly: prepared.existingDeliveriesOnly,
+    preclaimed: prepared.preclaimed,
   });
 }
 
