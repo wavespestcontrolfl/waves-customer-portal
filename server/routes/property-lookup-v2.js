@@ -1874,6 +1874,7 @@ function mergeAiAnalyses(providerResults) {
     merged.confidenceScore = Math.round(confidences.reduce((sum, n) => sum + n, 0) / confidences.length);
   }
   merged._sources = sorted.map((r) => r.provider);
+  merged.aiSources = merged._sources;
   for (const { provider, analysis } of sorted) {
     merged[`_${provider}Confidence`] = analysis?.confidenceScore || null;
   }
