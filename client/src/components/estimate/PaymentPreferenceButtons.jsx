@@ -2,13 +2,16 @@
  * Payment preference picker. Rendered after a slot is selected. Clicking
  * any button triggers the /reserve -> confirm -> /accept flow.
  *
- * Copy shifts when serviceMode='one_time' — the customer is booking a
+ * Copy shifts when serviceMode='one_time' - the customer is booking a
  * single visit, so framing changes.
  *
- * Third "Pay the year upfront" button renders only when setupFee is
- * present AND waivedWithPrepay is true (recurring pest estimates).
- * Selection encodes as 'prepay_annual'; the converter creates the
- * prepaid-annual draft invoice instead of the standard $99 setup draft.
+ * Third "Pay the year upfront" button renders when the server marks the
+ * recurring service mix as annual-prepay eligible. Older pricing bundles can
+ * still surface it through a waivable setupFee.
+ * Selection encodes as 'prepay_annual' - the server treats it like
+ * pay_at_visit for reservation purposes (no immediate charge) but
+ * the converter creates the prepaid-annual draft invoice instead of
+ * the standard $99 setup draft invoice.
  */
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -20,9 +23,17 @@ const W = {
 
 const ACTION_BG = W.blueDeeper;
 
-export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMode, setupFee, invoiceMode = false }) {
+export default function PaymentPreferenceButtons({
+  onSelect,
+  disabled,
+  serviceMode,
+  setupFee,
+  invoiceMode = false,
+  annualPrepayEligible = false,
+}) {
   const isOneTime = serviceMode === 'one_time';
-  const offerPrepay = !invoiceMode && !isOneTime && setupFee && setupFee.waivedWithPrepay;
+  const waivableSetupFee = setupFee && setupFee.waivedWithPrepay ? setupFee : null;
+  const offerPrepay = !invoiceMode && !isOneTime && (annualPrepayEligible || !!waivableSetupFee);
 
   const btnBase = {
     padding: '16px 20px', borderRadius: 12,
@@ -119,11 +130,13 @@ export default function PaymentPreferenceButtons({ onSelect, disabled, serviceMo
             onClick={() => onSelect('prepay_annual')}
             style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
           >
-            Choose annual prepay setup
+            Pay the year upfront
             <span style={{
               display: 'block', fontSize: 12, fontWeight: 500,
               color: 'rgba(255,255,255,0.9)', marginTop: 2,
-            }}>Save ${setupFee.amount} setup fee</span>
+            }}>
+              {waivableSetupFee ? `Save $${waivableSetupFee.amount} setup fee` : '12-month invoice after approval'}
+            </span>
           </button>
         )}
       </div>
