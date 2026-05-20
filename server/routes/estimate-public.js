@@ -1532,7 +1532,6 @@ function renderPage(token, estimate, estData) {
         </div>
         <p class="payment-choice-body">${escapeHtml(pageCopy.payAfterBody)}</p>
         <div class="payment-summary-list">
-          <div class="payment-summary-row"><span>Today</span><strong>$0</strong></div>
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total>${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
           ${showMembershipFee && firstServiceVisitTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>First visit invoice total</span><strong data-first-visit-grand-total data-setup-fee="${Number(membershipFee || 0)}">${fmtMoney(Math.round((membershipFee + firstServiceVisitTotal) * 100) / 100)}</strong></div>` : ''}
@@ -1548,7 +1547,6 @@ function renderPage(token, estimate, estData) {
         </div>
         <p class="payment-choice-body">${escapeHtml(pageCopy.prepayBody)}</p>
         <div class="payment-summary-list">
-          <div class="payment-summary-row"><span>Today</span><strong>$0</strong></div>
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total data-prepay-membership-due="${Number(prepayMembershipDue || 0)}">${fmtMoney(prepayInvoiceTotal)}</strong></div>
