@@ -1268,6 +1268,7 @@ async function buildReportV1Data(service, token, knex = db) {
   const pestPressure = buildPestPressureCustomerView({
     config: pestPressureConfig,
     scoreRow: pestPressureRow,
+    serviceRecord: service,
   });
 
   const applications = products.map((product, index) => {

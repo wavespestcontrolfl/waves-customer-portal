@@ -5872,7 +5872,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           )}
         </section>
 
-        <PestPressureCard data={data.pestPressure} />
+        <PestPressureCard data={data.pestPressure} token={token} />
 
         <QuickNavigationAndAsk mode={mode} token={token} serviceLine={data.serviceLine} hasProducts={hasApplications} />
 

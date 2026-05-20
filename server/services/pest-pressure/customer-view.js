@@ -9,6 +9,7 @@
  */
 
 const { DEFAULT_CONFIG } = require('./config');
+const { detectFrequencyKey } = require('./review-window');
 
 function formatDate(value) {
   if (!value) return null;
@@ -22,7 +23,13 @@ function formatScore(value) {
   return Number(value).toFixed(1);
 }
 
-function buildPestPressureCustomerView({ config, scoreRow }) {
+function resolveClientRatingQuestion(config, serviceTypeText) {
+  const questions = (config && config.clientQuestionText) || DEFAULT_CONFIG.clientQuestionText;
+  const key = detectFrequencyKey(serviceTypeText);
+  return questions[key] || questions.custom || DEFAULT_CONFIG.clientQuestionText.custom;
+}
+
+function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null }) {
   const effectiveConfig = config || DEFAULT_CONFIG;
   if (!effectiveConfig.enabled || !effectiveConfig.showOnCustomerReport) {
     return null;
@@ -32,6 +39,19 @@ function buildPestPressureCustomerView({ config, scoreRow }) {
   const howCalculated = effectiveConfig.showHowCalculated
     ? effectiveConfig.customerExplanationText
     : null;
+
+  // Customer is allowed to submit a rating when:
+  //   - the feature is enabled (above guard)
+  //   - the report hasn't already captured one
+  // (We don't gate on showOnCustomerReport here — that's already true.)
+  const hasClientRating = serviceRecord
+    && serviceRecord.client_pest_rating !== null
+    && serviceRecord.client_pest_rating !== undefined;
+  const canCaptureClientRating = Boolean(serviceRecord) && !hasClientRating;
+  const clientRatingQuestion = canCaptureClientRating
+    ? resolveClientRatingQuestion(effectiveConfig, serviceRecord && serviceRecord.service_type)
+    : null;
+  const submittedClientRating = hasClientRating ? Number(serviceRecord.client_pest_rating) : null;
 
   if (!scoreRow || scoreRow.data_completeness === 'insufficient' || scoreRow.displayed_score === null || scoreRow.displayed_score === undefined) {
     return {
@@ -49,6 +69,9 @@ function buildPestPressureCustomerView({ config, scoreRow }) {
       howCalculated,
       showComponentBreakdown,
       components: null,
+      canCaptureClientRating,
+      clientRatingQuestion,
+      submittedClientRating,
     };
   }
 
@@ -69,6 +92,9 @@ function buildPestPressureCustomerView({ config, scoreRow }) {
     howCalculated,
     showComponentBreakdown,
     components: showComponentBreakdown ? scoreRow.component_scores || null : null,
+    canCaptureClientRating,
+    clientRatingQuestion,
+    submittedClientRating,
   };
 }
 
@@ -95,4 +121,5 @@ function buildPestPressureAdminView({ scoreRow }) {
 module.exports = {
   buildPestPressureCustomerView,
   buildPestPressureAdminView,
+  resolveClientRatingQuestion,
 };
