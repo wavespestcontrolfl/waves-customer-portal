@@ -45,7 +45,7 @@ function assignAbVariant() {
 // batch" case. Without this, those rows stay 'failed' forever and an
 // operator-triggered resume would double-send.
 const TERMINAL_SUCCESS_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
-const RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed'];
+const RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed', 'sending'];
 
 function isRetryableDelivery(delivery) {
   if (!delivery) return false;
@@ -96,7 +96,7 @@ async function claimRetryableDeliveriesForResume(sendId, subscriberIds) {
  * rows, and flips status to 'sending' before doing any external work.
  *
  * Per-recipient idempotency: resume sends only retry explicitly transient
- * rows (queued / failed with no success or engagement timestamps). Provider
+ * rows (queued / failed / abandoned sending with no success or engagement timestamps). Provider
  * terminal rows such as delivered, bounced, or complained are skipped.
  *
  * opts.force — bypass the 0-recipient guard. The route layer also
@@ -381,8 +381,8 @@ async function sendCampaign(sendId, opts = {}) {
  * Operator-triggered re-send of a campaign that previously failed or only
  * partially completed. Preclaims the row as 'sending' before handing it to
  * sendCampaign, then inherits sendCampaign's per-recipient idempotency filter:
- * only queued/failed rows with no success or engagement timestamps get a
- * fresh attempt.
+ * only queued/failed/abandoned-sending rows with no success or engagement
+ * timestamps get a fresh attempt.
  *
  * Refuses to resume rows that are still in 'sending' state (an active
  * sendCampaign call holds the work) or already 'sent' status with no

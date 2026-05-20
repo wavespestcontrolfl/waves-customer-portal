@@ -4,7 +4,7 @@
  * Pins the three guarantees added by this PR:
  *
  *   1. sendCampaign retries only explicitly transient delivery rows
- *      (queued / failed with no success or engagement timestamps). A manual
+ *      (queued / failed / abandoned sending with no success or engagement timestamps). A manual
  *      re-run after a partial failure must not double-email successes or
  *      terminal provider failures.
  *
@@ -276,7 +276,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
 
     const result = await sendCampaign('send-1', { force: true });
 
-    expect(failureUpdate.whereIn).toHaveBeenCalledWith('status', ['queued', 'failed']);
+    expect(failureUpdate.whereIn).toHaveBeenCalledWith('status', ['queued', 'failed', 'sending']);
     expect(failureUpdate.whereNull).toHaveBeenCalledWith('sent_at');
     expect(failureUpdate.whereNull).toHaveBeenCalledWith('opened_at');
     expect(result.failed).toBe(1);

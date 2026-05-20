@@ -328,6 +328,7 @@ describe('sendgrid webhook PII-safe diagnostics', () => {
 describe('sendgrid webhook delivery_id fallback guard', () => {
   test('accepts unbound rows and rejects rows bound to a different provider message id', () => {
     expect(canUseDeliveryIdFallback({ provider_message_id: null }, 'new-msg')).toBe(true);
+    expect(canUseDeliveryIdFallback({ provider_message_id: null, status: 'sending' }, 'new-msg')).toBe(false);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'new-msg' }, 'new-msg')).toBe(true);
     expect(canUseDeliveryIdFallback({ provider_message_id: 'old-msg' }, 'new-msg')).toBe(false);
   });

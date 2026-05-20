@@ -82,7 +82,9 @@ function shouldMarkProcessedNewsletterDeliverySent(delivery) {
 
 function canUseDeliveryIdFallback(delivery, messageId) {
   if (!delivery) return false;
-  if (!delivery.provider_message_id) return true;
+  if (!delivery.provider_message_id) {
+    return String(delivery.status || '').toLowerCase() !== 'sending';
+  }
   return String(delivery.provider_message_id) === String(messageId || '');
 }
 
