@@ -599,7 +599,9 @@ function coerceUnqualifiedLotSqft(value, options = {}) {
     const converted = value * SQFT_PER_ACRE;
     return converted <= LOT_SQFT_MAX ? converted : null;
   }
-  if (!options.allowOversizedSqft && value > LOT_SQFT_MAX) return null;
+  if (value > LOT_SQFT_MAX) {
+    return options.allowOversizedSqft ? value : null;
+  }
   return value;
 }
 
