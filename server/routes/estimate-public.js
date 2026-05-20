@@ -1659,7 +1659,6 @@ function renderPage(token, estimate, estData) {
   <section class="card ai-card waveguard-ai-card">
     <div class="intelligence-header">
       <div>
-        <div class="eyebrow">${escapeHtml(intelligence.eyebrow)}</div>
         <h2>${escapeHtml(intelligence.title)}</h2>
       </div>
     </div>
@@ -1704,8 +1703,8 @@ function renderPage(token, estimate, estData) {
   <section class="card estimate-ask-card" aria-labelledby="estimate-ask-title">
     <div class="estimate-ask-heading">
       <div>
-        <div class="eyebrow">Waves AI</div>
         <h2 id="estimate-ask-title">Ask Waves AI</h2>
+        <p class="ai-blurb">Get quick answers about your plan, pricing, scheduling, or service before you continue.</p>
       </div>
     </div>
     <form class="estimate-ask-form" id="estimate-ask-form">
@@ -1751,7 +1750,6 @@ function renderPage(token, estimate, estData) {
   const recurringOnlyAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const prefsBlockHtml = showPrefs ? `
   <section class="card prefs-card"${recurringOnlyAttr}>
-    <div class="eyebrow">Customize your visit</div>
     <h2>Skip parts you don't need</h2>
     <p class="card-sub">Both are on by default. Toggle off whatever you don't want and the price adjusts instantly.</p>
     <div class="prefs-list">
@@ -2116,11 +2114,13 @@ ${shellTopBar()}
 
   ${quoteRequired ? '' : `<div class="card" data-mode-only="recurring">
     <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
+    <p class="ai-blurb">Your WaveGuard membership goes beyond routine visits — priority service, locked-in pricing, and protection between treatments.</p>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
 
   <div class="card">
     <h2>Customer reviews</h2>
+    <p class="ai-blurb">Real Google reviews from homeowners across our service area.</p>
     <div class="review-carousel" id="review-carousel">
       <div class="review-track" id="review-track">
         <div class="review-card">
