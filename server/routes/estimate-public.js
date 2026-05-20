@@ -1870,7 +1870,7 @@ function renderPage(token, estimate, estData) {
   .billing-lede{margin:0;color:#3F4A65;font-size:15px;line-height:1.6}
   .payment-choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   @media(max-width:760px){.payment-choice-grid{grid-template-columns:1fr}}
-  .payment-choice{border:1px solid #E7E2D7;border-radius:10px;background:#fff;padding:18px;display:flex;flex-direction:column;gap:10px}
+  .payment-choice{border:1px solid #E7E2D7;border-radius:10px;background:#fff;padding:18px;display:flex;flex-direction:column;gap:10px;box-shadow:0 3px 10px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.05)}
   .payment-choice.is-selected{border-color:${ESTIMATE_BUTTON_BLUE};box-shadow:0 0 0 3px rgba(27,44,91,.08)}
   .payment-choice-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
   .payment-choice h3{font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:1.25;font-weight:800;letter-spacing:0;margin:0;color:#1B2C5B}
@@ -1901,7 +1901,7 @@ function renderPage(token, estimate, estData) {
   .billing-small{font-size:12px!important;color:#6B7280!important;line-height:1.5!important}
   .prefs-card h2{margin-bottom:4px}
   .prefs-list{margin-top:14px;display:flex;flex-direction:column;gap:10px}
-  .pref-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;transition:all .15s}
+  .pref-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;transition:all .15s;box-shadow:0 3px 10px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.05)}
   .pref-row.off{background:#F7F5EE;border-color:#D4CBB8}
   .pref-row .pref-label{flex:1;min-width:0}
   .pref-row .pref-title{font-weight:600;font-size:14px;color:#1B2C5B}
@@ -1968,7 +1968,7 @@ function renderPage(token, estimate, estData) {
   @media(max-width:520px){.upsell-btn{width:100%}}
   .perks-list{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
   @media(max-width:640px){.perks-list{grid-template-columns:1fr}}
-  .perks-list li{background:#fff;border:1px solid #E7E2D7;border-radius:12px;padding:14px 16px 14px 40px;position:relative;font:500 14px/1.4 Inter,system-ui,sans-serif;color:#1B2C5B}
+  .perks-list li{background:#fff;border:1px solid #E7E2D7;border-radius:12px;padding:14px 16px 14px 40px;position:relative;font:500 14px/1.4 Inter,system-ui,sans-serif;color:#1B2C5B;box-shadow:0 3px 10px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.05)}
   .perks-list li::before{content:'✓';position:absolute;left:14px;top:14px;color:${BRAND.green};font-weight:700;font-size:14px;line-height:1.4}
   .review-carousel{background:transparent;border:0;padding:0;position:relative}
   .review-track{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;transition:opacity .3s}
