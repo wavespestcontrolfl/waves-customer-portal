@@ -10,9 +10,6 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
-const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
-const { loadActiveConfig, loadScoreForServiceRecord } = require('../services/pest-pressure/store');
-const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
 const {
   getHealthyStoredReportPdf,
@@ -132,10 +129,36 @@ async function recordServiceReportEvent(service, eventName, channel, req, metada
 async function buildServiceReportV1ResponseData(service, token, { mode = 'live' } = {}) {
   const data = await buildReportV1Data(service, token);
   if (service?.report_template_version !== 'service_report_v1') return data;
+
+  // buildPestPressureCustomerView returns null only when Pest Pressure
+  // is hidden from the customer (feature disabled, showOnCustomerReport
+  // off, service_line outside allow list, or requireRecurringFrequency
+  // excludes this report). When that's the case, the dynamic-context
+  // builders that read service_records.pressure_index must also be
+  // suppressed — otherwise pressureTrend, sinceLastVisit.pressureLine,
+  // neighborhoodPressure, aiSummary, and premiumExperience would still
+  // leak the score outside the new card.
+  const omitPestPressureContext = data.pestPressure === null;
   const dynamicContext = await buildServiceReportDynamicContext({
     recordId: service.id,
     mode,
+    omitPestPressureContext,
   });
+
+  if (omitPestPressureContext) {
+    // Top-level pressureIndex + the buildMetrics-emitted pressure_index
+    // entry are built in report-data.js (separate code path from the
+    // dynamic-context builders), so still scrub them here.
+    const scrubbedMetrics = Array.isArray(data.metrics)
+      ? data.metrics.filter((m) => m && m.key !== 'pressure_index')
+      : data.metrics;
+    return {
+      ...data,
+      pressureIndex: null,
+      metrics: scrubbedMetrics,
+      dynamicContext,
+    };
+  }
   return { ...data, dynamicContext };
 }
 
@@ -288,70 +311,6 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     await recordServiceReportEvent(service, eventName, channel, req, metadata);
 
     return res.json({ ok: true });
-  } catch (err) { next(err); }
-});
-
-// POST /api/reports/:token/pest-pressure/client-rating — customer-facing,
-// token-scoped capture of the "how much pest activity have you noticed?"
-// rating. Updates service_records.client_pest_rating (source='customer'),
-// re-runs the pest-pressure orchestrator to incorporate the new signal,
-// and returns the updated pestPressure object so the page can re-render
-// without a full reload.
-//
-// One rating per report (409 on re-submit). Feature flag is config.enabled;
-// 404 covers disabled / non-v1 / unknown-token uniformly so the existence
-// of any specific report token isn't leaked.
-router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (req, res, next) => {
-  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
-    return res.status(404).json({ error: 'Report not found' });
-  }
-  try {
-    const rawRating = req.body && req.body.rating;
-    const rating = Number(rawRating);
-    if (!Number.isFinite(rating) || rating < 0 || rating > 5) {
-      return res.status(400).json({ error: 'rating_out_of_range' });
-    }
-    // Smallint column on service_records; accept whole-number 0–5.
-    const rounded = Math.round(rating);
-
-    const service = await db('service_records')
-      .where({ report_view_token: req.params.token })
-      .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'report_template_version', 'client_pest_rating');
-    if (!service || service.report_template_version !== 'service_report_v1') {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-
-    const config = await loadActiveConfig(db);
-    if (!config.enabled) {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-
-    if (service.client_pest_rating !== null && service.client_pest_rating !== undefined) {
-      return res.status(409).json({ error: 'rating_already_submitted' });
-    }
-
-    await db('service_records').where({ id: service.id }).update({
-      client_pest_rating: rounded,
-      client_pest_rating_source: 'customer',
-      client_pest_rating_at: db.fn.now(),
-    });
-
-    // runAndSwallowErrors so a transient pest-pressure failure doesn't
-    // surface as a 500 after the customer's rating has been recorded.
-    await runPestPressureForServiceRecord(service.id, db);
-
-    const [updatedService, updatedScore] = await Promise.all([
-      db('service_records').where({ id: service.id }).first('id', 'customer_id', 'service_type', 'client_pest_rating'),
-      loadScoreForServiceRecord(db, service.id),
-    ]);
-
-    const pestPressure = buildPestPressureCustomerView({
-      config,
-      scoreRow: updatedScore,
-      serviceRecord: updatedService,
-    });
-
-    return res.json({ pestPressure, submittedRating: rounded });
   } catch (err) { next(err); }
 });
 

@@ -14,9 +14,12 @@
  */
 
 // Order matters: bi-monthly must be checked before monthly so the substring
-// "monthly" inside "bi-monthly" doesn't capture the wrong bucket.
+// "monthly" inside "bi-monthly" doesn't capture the wrong bucket. Semi-
+// annual must also be checked before any annual variants because "annual"
+// is a substring of "semi-annual".
 const FREQUENCY_PATTERNS = [
   { key: 'bimonthly', re: /\b(bi[-\s]?monthly|every[-\s]?other[-\s]?month|2[-\s]?month)\b/i },
+  { key: 'semiannual', re: /\b(semi[-\s]?annual|every[-\s]?6[-\s]?months?|6[-\s]?month)\b/i },
   { key: 'quarterly', re: /\bquarterly\b/i },
   { key: 'monthly', re: /\bmonthly\b/i },
 ];
@@ -27,6 +30,20 @@ function detectFrequencyKey(serviceFrequency) {
     if (re.test(serviceFrequency)) return key;
   }
   return 'custom';
+}
+
+// Used by the recurring-frequency scope gate. Matches the explicit
+// one-time / single-visit markers Waves uses on service_records.service_type
+// ("One-Time Pest Treatment", "Single Visit Mosquito Event", "One-off
+// Spot Treatment", etc.). Unknown frequencies (e.g. "General Pest Control",
+// "Recurring Pest Control") are NOT one-time — those are real recurring
+// jobs that just don't include a cadence word in the label, and the engine
+// has a fallback review window for them. Don't widen this to "follow-up"
+// or "callback" — both are extra visits between regular services on an
+// active recurring plan and still deserve a Pest Pressure score.
+function isOneTimeServiceLabel(serviceTypeText) {
+  if (!serviceTypeText || typeof serviceTypeText !== 'string') return false;
+  return /\b(one[-\s]?time|one[-\s]?off|single[-\s]?visit|just[-\s]?once|spot[-\s]?treatment)\b/i.test(serviceTypeText);
 }
 
 function subtractDays(date, days) {
@@ -53,7 +70,7 @@ function resolveReviewWindow({ serviceFrequency, serviceDate, lastCompletedServi
 
   const key = detectFrequencyKey(serviceFrequency);
 
-  if (key === 'monthly' || key === 'bimonthly' || key === 'quarterly') {
+  if (key === 'monthly' || key === 'bimonthly' || key === 'quarterly' || key === 'semiannual') {
     const days = windows[key];
     return {
       start: subtractDays(end, days),
@@ -86,4 +103,4 @@ function resolveReviewWindow({ serviceFrequency, serviceDate, lastCompletedServi
   };
 }
 
-module.exports = { resolveReviewWindow, detectFrequencyKey };
+module.exports = { resolveReviewWindow, detectFrequencyKey, isOneTimeServiceLabel };

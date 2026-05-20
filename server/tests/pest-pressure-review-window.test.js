@@ -14,6 +14,9 @@ describe('detectFrequencyKey', () => {
     ['Bi-monthly Pest', 'bimonthly'],
     ['Bimonthly Pest', 'bimonthly'],
     ['Every Other Month', 'bimonthly'],
+    ['Semi-annual Termite Inspection', 'semiannual'],
+    ['Semiannual termite', 'semiannual'],
+    ['Every 6 months', 'semiannual'],
     ['One-Time Service', 'custom'],
     [null, 'custom'],
     ['', 'custom'],
@@ -55,6 +58,17 @@ describe('resolveReviewWindow', () => {
     });
     expect(w.days).toBe(90);
     expect(w.frequencyKey).toBe('quarterly');
+  });
+
+  test('semiannual maps to 180-day window', () => {
+    const w = resolveReviewWindow({
+      serviceFrequency: 'Semi-annual Termite Inspection',
+      serviceDate,
+      windows,
+    });
+    expect(w.days).toBe(180);
+    expect(w.frequencyKey).toBe('semiannual');
+    expect(w.source).toBe('frequency');
   });
 
   test('custom uses last completed service date', () => {

@@ -20,7 +20,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const { calculatePestPressureScore } = require('./calculate');
-const { resolveReviewWindow } = require('./review-window');
+const { resolveReviewWindow, isOneTimeServiceLabel } = require('./review-window');
 const {
   loadActiveConfig,
   loadPreviousScore,
@@ -130,10 +130,27 @@ async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
     return null;
   }
 
+  // Service-line scope: by default Pest Pressure runs only on the lines
+  // where the multi-visit-trend model makes sense (pest + mosquito).
+  const serviceLineGuess = serviceRecord.service_line || detectServiceLine(serviceRecord.service_type);
+  const enabledLines = Array.isArray(config.enabledServiceLines) ? config.enabledServiceLines : [];
+  if (enabledLines.length > 0 && !enabledLines.includes(serviceLineGuess)) {
+    return null;
+  }
+
+  // Recurring-frequency scope: skip only EXPLICIT one-time service labels.
+  // Unknown-frequency recurring jobs (e.g. "General Pest Control",
+  // "Recurring Pest Control") fall through and use the engine's fallback
+  // review window — they're real recurring jobs that just don't include
+  // a cadence word in the label.
+  if (config.requireRecurringFrequency && isOneTimeServiceLabel(serviceRecord.service_type)) {
+    return null;
+  }
+
   const { serviceLine, window, inputs } = await gatherInputs(knex, serviceRecord, config);
   const result = calculatePestPressureScore(inputs, config);
 
-  await persistScore(knex, {
+  const persisted = await persistScore(knex, {
     customerId: serviceRecord.customer_id,
     serviceRecordId: serviceRecord.id,
     serviceLine,
@@ -143,11 +160,20 @@ async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
     result,
   });
 
-  if (result.displayedScore != null) {
-    await knex('service_records')
-      .where({ id: serviceRecord.id })
-      .update({ pressure_index: result.displayedScore });
-  }
+  // Mirror the persisted row's displayed_score — NOT result.displayedScore.
+  // persistScore preserves an existing manual override, so a recalculation
+  // can produce a fresh calculated_score while displayed_score stays at
+  // the admin-set override. Legacy report metrics + the trend chart read
+  // service_records.pressure_index, so they must see the same number the
+  // customer sees (override-aware). When the persisted row has no displayed
+  // value (insufficient data, brand-new), clear pressure_index too so
+  // legacy consumers don't read a stale prior number.
+  const displayedScoreToMirror = persisted && persisted.displayed_score !== undefined
+    ? persisted.displayed_score
+    : result.displayedScore;
+  await knex('service_records')
+    .where({ id: serviceRecord.id })
+    .update({ pressure_index: displayedScoreToMirror == null ? null : displayedScoreToMirror });
 
   return { result, serviceLine, window };
 }

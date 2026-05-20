@@ -18,6 +18,7 @@ const CONFIG_COLUMNS = [
   'show_on_customer_report', 'show_how_calculated', 'show_component_breakdown_to_customer',
   'missing_data_behavior', 'minimum_data_required',
   'allow_manual_override', 'allow_technician_client_rating_entry',
+  'enabled_service_lines', 'require_recurring_frequency',
   'weights', 'labels', 'trend_thresholds',
   'service_frequency_windows', 'client_question_text',
   'customer_explanation_text', 'calculation_version',
@@ -37,6 +38,10 @@ function rowToConfig(row) {
     minimumDataRequired: row.minimum_data_required || {},
     allowManualOverride: row.allow_manual_override,
     allowTechnicianClientRatingEntry: row.allow_technician_client_rating_entry,
+    enabledServiceLines: Array.isArray(row.enabled_service_lines) ? row.enabled_service_lines : DEFAULT_CONFIG.enabledServiceLines,
+    requireRecurringFrequency: typeof row.require_recurring_frequency === 'boolean'
+      ? row.require_recurring_frequency
+      : DEFAULT_CONFIG.requireRecurringFrequency,
     weights: row.weights,
     labels: row.labels,
     trendThresholds: row.trend_thresholds,
@@ -182,6 +187,8 @@ async function updateActiveConfig(knex, { scope = 'global', updatedBy = null, co
     minimum_data_required: JSON.stringify(config.minimumDataRequired || {}),
     allow_manual_override: Boolean(config.allowManualOverride),
     allow_technician_client_rating_entry: Boolean(config.allowTechnicianClientRatingEntry),
+    enabled_service_lines: JSON.stringify(Array.isArray(config.enabledServiceLines) ? config.enabledServiceLines : []),
+    require_recurring_frequency: Boolean(config.requireRecurringFrequency),
     weights: JSON.stringify(config.weights),
     labels: JSON.stringify(config.labels),
     trend_thresholds: JSON.stringify(config.trendThresholds),
@@ -217,6 +224,15 @@ async function updateActiveConfig(knex, { scope = 'global', updatedBy = null, co
  */
 async function applyOverride(knex, { serviceRecordId, displayedScore, reason, overriddenBy }) {
   if (!serviceRecordId) throw new TypeError('applyOverride: serviceRecordId is required');
+  // Strict typing — Number('') / Number(null) / Number(false) / Number([])
+  // all coerce to 0, which would silently set a customer-visible override to
+  // 0 on malformed input or an empty form field. Accept only a number or a
+  // non-blank numeric string.
+  const isNumericInput = typeof displayedScore === 'number'
+    || (typeof displayedScore === 'string' && displayedScore.trim() !== '' && Number.isFinite(Number(displayedScore)));
+  if (!isNumericInput) {
+    throw new RangeError('applyOverride: displayedScore must be a number between 0 and 5');
+  }
   const num = Number(displayedScore);
   if (!Number.isFinite(num) || num < 0 || num > 5) {
     throw new RangeError('applyOverride: displayedScore must be a number between 0 and 5');
@@ -272,9 +288,14 @@ async function removeOverride(knex, { serviceRecordId }) {
     updated_at: knex.fn.now(),
   });
 
-  if (restored !== null && restored !== undefined) {
-    await knex('service_records').where({ id: serviceRecordId }).update({ pressure_index: restored });
-  }
+  // Always mirror — including null. If we skipped the mirror when
+  // `restored` is null, the old override value would remain visible on
+  // service_records.pressure_index to legacy report metrics + the trend
+  // chart, while pest_pressure_scores.displayed_score now correctly
+  // shows null. Keep the two source-of-truth columns in sync.
+  await knex('service_records')
+    .where({ id: serviceRecordId })
+    .update({ pressure_index: restored == null ? null : restored });
 
   return loadScoreForServiceRecord(knex, serviceRecordId);
 }

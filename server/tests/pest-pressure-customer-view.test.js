@@ -4,6 +4,11 @@ const {
   buildPestPressureAdminView,
 } = require('../services/pest-pressure/customer-view');
 
+// Default service record fixture for tests that don't otherwise care about
+// service-line scoping — passes the scope gates so older tests still
+// exercise the core view logic.
+const PEST_RECORD = { id: 'svc-1', service_line: 'pest', service_type: 'Monthly Pest Control', client_pest_rating: null };
+
 function makeScoreRow(overrides = {}) {
   return {
     service_record_id: 'svc-1',
@@ -45,7 +50,7 @@ describe('buildPestPressureCustomerView', () => {
   });
 
   test('builds full object when enabled and score is present', () => {
-    const view = buildPestPressureCustomerView({ config: DEFAULT_CONFIG, scoreRow: makeScoreRow() });
+    const view = buildPestPressureCustomerView({ config: DEFAULT_CONFIG, scoreRow: makeScoreRow(), serviceRecord: PEST_RECORD });
     expect(view).toMatchObject({
       enabled: true,
       showOnCustomerReport: true,
@@ -67,7 +72,7 @@ describe('buildPestPressureCustomerView', () => {
 
   test('includes components when showComponentBreakdownToCustomer is true', () => {
     const config = { ...DEFAULT_CONFIG, showComponentBreakdownToCustomer: true };
-    const view = buildPestPressureCustomerView({ config, scoreRow: makeScoreRow() });
+    const view = buildPestPressureCustomerView({ config, scoreRow: makeScoreRow(), serviceRecord: PEST_RECORD });
     expect(view.showComponentBreakdown).toBe(true);
     expect(view.components).toEqual({ clientRating: { value: 1, weight: 25, present: true } });
   });
@@ -76,6 +81,7 @@ describe('buildPestPressureCustomerView', () => {
     const view = buildPestPressureCustomerView({
       config: DEFAULT_CONFIG,
       scoreRow: makeScoreRow({ displayed_score: null, data_completeness: 'insufficient', label_name: null, label_key: null, trend: 'insufficient_data' }),
+      serviceRecord: PEST_RECORD,
     });
     expect(view.score).toBeNull();
     expect(view.displayScore).toBeNull();
@@ -84,64 +90,113 @@ describe('buildPestPressureCustomerView', () => {
   });
 
   test('returns insufficient placeholder when no scoreRow exists', () => {
-    const view = buildPestPressureCustomerView({ config: DEFAULT_CONFIG, scoreRow: null });
+    const view = buildPestPressureCustomerView({ config: DEFAULT_CONFIG, scoreRow: null, serviceRecord: PEST_RECORD });
     expect(view.score).toBeNull();
     expect(view.dataCompleteness).toBe('insufficient');
   });
 
   test('omits howCalculated when showHowCalculated is false', () => {
     const config = { ...DEFAULT_CONFIG, showHowCalculated: false };
-    const view = buildPestPressureCustomerView({ config, scoreRow: makeScoreRow() });
+    const view = buildPestPressureCustomerView({ config, scoreRow: makeScoreRow(), serviceRecord: PEST_RECORD });
     expect(view.howCalculated).toBeNull();
   });
 });
 
-describe('buildPestPressureCustomerView: client rating capture', () => {
-  test('canCaptureClientRating false when no serviceRecord supplied', () => {
+describe('buildPestPressureCustomerView: scope gate fails closed without serviceRecord', () => {
+  test('returns null when no serviceRecord supplied (allow list is restricted by default)', () => {
     const view = buildPestPressureCustomerView({ config: DEFAULT_CONFIG, scoreRow: makeScoreRow() });
-    expect(view.canCaptureClientRating).toBe(false);
-    expect(view.clientRatingQuestion).toBeNull();
-    expect(view.submittedClientRating).toBeNull();
+    expect(view).toBeNull();
+  });
+});
+
+describe('buildPestPressureCustomerView: service-line + frequency scope', () => {
+  test('returns null when service_line is not in enabledServiceLines', () => {
+    const view = buildPestPressureCustomerView({
+      config: DEFAULT_CONFIG, // pest + mosquito
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'lawn', service_type: 'Monthly Lawn Care', client_pest_rating: null },
+    });
+    expect(view).toBeNull();
   });
 
-  test('canCaptureClientRating true when serviceRecord has no rating', () => {
+  test('returns null when service_line is unknown and config restricts', () => {
     const view = buildPestPressureCustomerView({
       config: DEFAULT_CONFIG,
       scoreRow: makeScoreRow(),
-      serviceRecord: { id: 'svc-1', service_type: 'Quarterly Pest Control', client_pest_rating: null },
+      serviceRecord: { id: 'svc-1', service_line: null, service_type: 'Monthly Pest Control', client_pest_rating: null },
     });
-    expect(view.canCaptureClientRating).toBe(true);
-    expect(view.clientRatingQuestion).toMatch(/past 3 months/);
-    expect(view.submittedClientRating).toBeNull();
+    expect(view).toBeNull();
   });
 
-  test('clientRatingQuestion adapts to monthly frequency', () => {
+  test('returns the card when service_line IS enabled (pest)', () => {
     const view = buildPestPressureCustomerView({
       config: DEFAULT_CONFIG,
       scoreRow: makeScoreRow(),
-      serviceRecord: { id: 'svc-1', service_type: 'Monthly Pest Control', client_pest_rating: null },
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: 'Monthly Pest Control', client_pest_rating: null },
     });
-    expect(view.clientRatingQuestion).toMatch(/Since your last service/);
+    expect(view).not.toBeNull();
+    expect(view.score).toBe(1.2);
   });
 
-  test('clientRatingQuestion adapts to bi-monthly frequency', () => {
+  test('mosquito is enabled by default', () => {
     const view = buildPestPressureCustomerView({
       config: DEFAULT_CONFIG,
       scoreRow: makeScoreRow(),
-      serviceRecord: { id: 'svc-1', service_type: 'Bi-monthly Pest Control', client_pest_rating: null },
+      serviceRecord: { id: 'svc-1', service_line: 'mosquito', service_type: 'Monthly Mosquito Treatment', client_pest_rating: null },
     });
-    expect(view.clientRatingQuestion).toMatch(/past 2 months/);
+    expect(view).not.toBeNull();
   });
 
-  test('canCaptureClientRating false + submittedClientRating populated once captured', () => {
+  test.each([
+    'One-Time Pest Treatment',
+    'One time Pest Treatment',
+    'One-off Spot Visit',
+    'Single Visit Pest Treatment',
+    'Just once mosquito event',
+    'Spot Treatment for ants',
+  ])('returns null for explicit one-time label "%s"', (label) => {
+    const view = buildPestPressureCustomerView({
+      config: DEFAULT_CONFIG, // requireRecurringFrequency: true
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: label, client_pest_rating: null },
+    });
+    expect(view).toBeNull();
+  });
+
+  test('returns the card on a recurring-but-no-cadence-keyword label (e.g. "General Pest Control")', () => {
     const view = buildPestPressureCustomerView({
       config: DEFAULT_CONFIG,
       scoreRow: makeScoreRow(),
-      serviceRecord: { id: 'svc-1', service_type: 'Monthly Pest Control', client_pest_rating: 3 },
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: 'General Pest Control', client_pest_rating: null },
     });
-    expect(view.canCaptureClientRating).toBe(false);
-    expect(view.clientRatingQuestion).toBeNull();
-    expect(view.submittedClientRating).toBe(3);
+    expect(view).not.toBeNull();
+  });
+
+  test('returns the card for "Recurring Pest Control" label', () => {
+    const view = buildPestPressureCustomerView({
+      config: DEFAULT_CONFIG,
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: 'Recurring Pest Control', client_pest_rating: null },
+    });
+    expect(view).not.toBeNull();
+  });
+
+  test('returns the card on one-time visit when requireRecurringFrequency is off', () => {
+    const view = buildPestPressureCustomerView({
+      config: { ...DEFAULT_CONFIG, requireRecurringFrequency: false },
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: 'One-Time Pest Treatment', client_pest_rating: null },
+    });
+    expect(view).not.toBeNull();
+  });
+
+  test('empty enabledServiceLines passes everything through (no allow list)', () => {
+    const view = buildPestPressureCustomerView({
+      config: { ...DEFAULT_CONFIG, enabledServiceLines: [], requireRecurringFrequency: false },
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'lawn', service_type: 'Monthly Lawn Care', client_pest_rating: null },
+    });
+    expect(view).not.toBeNull();
   });
 });
 

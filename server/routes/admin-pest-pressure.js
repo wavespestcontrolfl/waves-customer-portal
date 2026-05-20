@@ -6,6 +6,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   auditPestPressureConfigChange,
   auditPestPressureScoreOverride,
+  auditPestPressureScoreRecalculate,
   ipFromReq,
   uaFromReq,
 } = require('../services/audit-log');
@@ -40,6 +41,8 @@ const EDITABLE_FIELDS = [
   'minimumDataRequired',
   'allowManualOverride',
   'allowTechnicianClientRatingEntry',
+  'enabledServiceLines',
+  'requireRecurringFrequency',
   'weights',
   'labels',
   'trendThresholds',
@@ -102,25 +105,32 @@ router.put('/config', async (req, res) => {
       return res.status(422).json({ error: 'invalid_config', errors: validation.errors });
     }
 
-    const after = await updateActiveConfig(db, {
-      scope: 'global',
-      updatedBy: req.technicianId || null,
-      config: merged,
-    });
-
-    const changedFields = diffChangedFields(before, after);
-    if (changedFields.length > 0) {
-      await auditPestPressureConfigChange({
-        tech_user_id: req.technicianId || null,
-        config_id: after.id,
+    // Atomic: config write + audit must commit together. Without the trx,
+    // a failing audit_log insert returns 500 to the client, but the config
+    // is already changed; a retry with the same payload sees no
+    // changedFields and skips audit — silent loss of the audit row.
+    const { after, changedFields } = await db.transaction(async (trx) => {
+      const persisted = await updateActiveConfig(trx, {
         scope: 'global',
-        changed_fields: changedFields,
-        before,
-        after,
-        ip_address: ipFromReq(req),
-        user_agent: uaFromReq(req),
+        updatedBy: req.technicianId || null,
+        config: merged,
       });
-    }
+      const changes = diffChangedFields(before, persisted);
+      if (changes.length > 0) {
+        await auditPestPressureConfigChange({
+          tech_user_id: req.technicianId || null,
+          config_id: persisted.id,
+          scope: 'global',
+          changed_fields: changes,
+          before,
+          after: persisted,
+          ip_address: ipFromReq(req),
+          user_agent: uaFromReq(req),
+          trx,
+        });
+      }
+      return { after: persisted, changedFields: changes };
+    });
 
     return res.json({ config: after, changedFields });
   } catch (err) {
@@ -184,24 +194,27 @@ router.put('/scores/:serviceRecordId/override', async (req, res) => {
       return res.status(400).json({ error: 'reason_too_long', max: OVERRIDE_REASON_MAX });
     }
 
-    const updated = await applyOverride(db, {
-      serviceRecordId: req.params.serviceRecordId,
-      displayedScore,
-      reason: trimmedReason,
-      overriddenBy: req.technicianId || null,
-    });
-
-    await auditPestPressureScoreOverride({
-      tech_user_id: req.technicianId || null,
-      score_id: updated.id,
-      service_record_id: updated.service_record_id,
-      customer_id: updated.customer_id,
-      original_calculated_score: updated.original_calculated_score,
-      displayed_score: updated.displayed_score,
-      override_reason: trimmedReason,
-      action_type: 'set',
-      ip_address: ipFromReq(req),
-      user_agent: uaFromReq(req),
+    const updated = await db.transaction(async (trx) => {
+      const persisted = await applyOverride(trx, {
+        serviceRecordId: req.params.serviceRecordId,
+        displayedScore,
+        reason: trimmedReason,
+        overriddenBy: req.technicianId || null,
+      });
+      await auditPestPressureScoreOverride({
+        tech_user_id: req.technicianId || null,
+        score_id: persisted.id,
+        service_record_id: persisted.service_record_id,
+        customer_id: persisted.customer_id,
+        original_calculated_score: persisted.original_calculated_score,
+        displayed_score: persisted.displayed_score,
+        override_reason: trimmedReason,
+        action_type: 'set',
+        ip_address: ipFromReq(req),
+        user_agent: uaFromReq(req),
+        trx,
+      });
+      return persisted;
     });
 
     return res.json({ score: updated });
@@ -235,19 +248,22 @@ router.delete('/scores/:serviceRecordId/override', async (req, res) => {
       displayed: existing.displayed_score,
       reason: existing.override_reason,
     };
-    const updated = await removeOverride(db, { serviceRecordId: req.params.serviceRecordId });
-
-    await auditPestPressureScoreOverride({
-      tech_user_id: req.technicianId || null,
-      score_id: updated.id,
-      service_record_id: updated.service_record_id,
-      customer_id: updated.customer_id,
-      original_calculated_score: previousOverride.original,
-      displayed_score: updated.displayed_score,
-      override_reason: previousOverride.reason,
-      action_type: 'remove',
-      ip_address: ipFromReq(req),
-      user_agent: uaFromReq(req),
+    const updated = await db.transaction(async (trx) => {
+      const persisted = await removeOverride(trx, { serviceRecordId: req.params.serviceRecordId });
+      await auditPestPressureScoreOverride({
+        tech_user_id: req.technicianId || null,
+        score_id: persisted.id,
+        service_record_id: persisted.service_record_id,
+        customer_id: persisted.customer_id,
+        original_calculated_score: previousOverride.original,
+        displayed_score: persisted.displayed_score,
+        override_reason: previousOverride.reason,
+        action_type: 'remove',
+        ip_address: ipFromReq(req),
+        user_agent: uaFromReq(req),
+        trx,
+      });
+      return persisted;
     });
 
     return res.json({ score: updated, removed: true });
@@ -273,15 +289,16 @@ router.delete('/scores/:serviceRecordId/override', async (req, res) => {
 router.post('/scores/:serviceRecordId/recalculate', async (req, res) => {
   try {
     const clearOverride = Boolean(req.body && req.body.clearOverride);
-    if (clearOverride) {
-      const existing = await loadScoreForServiceRecord(db, req.params.serviceRecordId);
-      if (existing && existing.is_overridden) {
+    const { updated, result, before, clearedOverride } = await db.transaction(async (trx) => {
+      const existing = await loadScoreForServiceRecord(trx, req.params.serviceRecordId);
+      let didClearOverride = false;
+      if (clearOverride && existing && existing.is_overridden) {
         const previousOverride = {
           original: existing.original_calculated_score,
           displayed: existing.displayed_score,
           reason: existing.override_reason,
         };
-        await removeOverride(db, { serviceRecordId: req.params.serviceRecordId });
+        await removeOverride(trx, { serviceRecordId: req.params.serviceRecordId });
         await auditPestPressureScoreOverride({
           tech_user_id: req.technicianId || null,
           score_id: existing.id,
@@ -293,16 +310,41 @@ router.post('/scores/:serviceRecordId/recalculate', async (req, res) => {
           action_type: 'remove',
           ip_address: ipFromReq(req),
           user_agent: uaFromReq(req),
+          trx,
         });
+        didClearOverride = true;
       }
-    }
-    const result = await calculateAndPersistForServiceRecord(req.params.serviceRecordId, db);
-    if (!result) {
-      return res.status(404).json({ error: 'service_record_not_found_or_disabled' });
-    }
-    const updated = await loadScoreForServiceRecord(db, req.params.serviceRecordId);
-    return res.json({ score: updated, calculation: result.result });
+      const inner = await calculateAndPersistForServiceRecord(req.params.serviceRecordId, trx);
+      if (!inner) {
+        const err = new Error('service_record_not_found_or_disabled');
+        err.statusCode = 404;
+        throw err;
+      }
+      const persisted = await loadScoreForServiceRecord(trx, req.params.serviceRecordId);
+      await auditPestPressureScoreRecalculate({
+        tech_user_id: req.technicianId || null,
+        score_id: persisted && persisted.id,
+        service_record_id: req.params.serviceRecordId,
+        customer_id: persisted && persisted.customer_id,
+        before: existing
+          ? { calculated_score: existing.calculated_score, displayed_score: existing.displayed_score, is_overridden: existing.is_overridden }
+          : null,
+        after: persisted
+          ? { calculated_score: persisted.calculated_score, displayed_score: persisted.displayed_score, is_overridden: persisted.is_overridden }
+          : null,
+        cleared_override: didClearOverride,
+        ip_address: ipFromReq(req),
+        user_agent: uaFromReq(req),
+        trx,
+      });
+      return { updated: persisted, result: inner.result, before: existing, clearedOverride: didClearOverride };
+    });
+
+    return res.json({ score: updated, calculation: result, clearedOverride });
   } catch (err) {
+    if (err.statusCode === 404) {
+      return res.status(404).json({ error: err.message });
+    }
     logger.error(`[admin-pest-pressure] POST /scores/:id/recalculate failed: ${err.message}`);
     return res.status(500).json({ error: 'recalculate_failed' });
   }

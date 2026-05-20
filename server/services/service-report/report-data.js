@@ -1257,10 +1257,6 @@ async function buildReportV1Data(service, token, knex = db) {
   // Pest Pressure is computed by the pest-pressure orchestrator on report
   // completion and mirrored back to service_records.pressure_index. Legacy
   // pre-v1 reports without a stored value have no Pest Pressure score.
-  const pressureIndex = service.pressure_index != null
-    ? customerVisiblePressureIndex(service.pressure_index)
-    : null;
-
   const [pestPressureConfig, pestPressureRow] = await Promise.all([
     loadActiveConfig(knex).catch(() => null),
     loadScoreForServiceRecord(knex, service.id).catch(() => null),
@@ -1270,6 +1266,17 @@ async function buildReportV1Data(service, token, knex = db) {
     scoreRow: pestPressureRow,
     serviceRecord: service,
   });
+
+  // buildPestPressureCustomerView returns null ONLY when Pest Pressure is
+  // hidden from the customer (feature off, showOnCustomerReport off, scope
+  // excludes the report). When that's the case, the legacy pressureIndex
+  // field must also stay hidden — otherwise PDF, email, and any other
+  // direct caller of buildReportV1Data would still leak the score even
+  // though reports-public.js scrubs its own JSON response. Gate here, at
+  // the source, so every caller benefits.
+  const pressureIndex = (pestPressure !== null && service.pressure_index != null)
+    ? customerVisiblePressureIndex(service.pressure_index)
+    : null;
 
   const applications = products.map((product, index) => {
     const method = methodFromProduct(product, serviceLine);
@@ -1405,7 +1412,14 @@ async function buildReportV1Data(service, token, knex = db) {
         format: 'integer',
       }
       : metric
-  ));
+  )).filter((metric) => {
+    // Drop the pressure_index metric when Pest Pressure is hidden from
+    // the customer (pestPressure === null). The lawn-health remap above
+    // already replaced the entry's key when a lawn assessment is present,
+    // so we only filter the raw pressure_index when it's still that key.
+    if (metric.key !== 'pressure_index') return true;
+    return pestPressure !== null;
+  });
   const technicianName = formatTechnicianForCustomer({
     name: service.technician_name,
     first_name: service.technician_first_name,

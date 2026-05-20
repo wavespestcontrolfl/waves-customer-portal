@@ -1,7 +1,5 @@
-import { useMemo, useState } from 'react';
-import { ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, Minus, Sparkles } from 'lucide-react';
-
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+import { useMemo } from 'react';
+import { ArrowDownRight, ArrowRight, ArrowUpRight, Minus, Sparkles } from 'lucide-react';
 
 /**
  * Customer-facing Pest Pressure card.
@@ -147,90 +145,10 @@ function ComponentsTable({ components }) {
   );
 }
 
-function ClientRatingPicker({ token, question, onSubmitted }) {
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState(null);
-
-  const submit = async (rating) => {
-    if (submitting || !token) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      const res = await fetch(`${API_BASE}/reports/${token}/pest-pressure/client-rating`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rating }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-      const body = await res.json();
-      if (onSubmitted) onSubmitted(body.pestPressure);
-    } catch (err) {
-      setError(err.message || 'Could not submit rating');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div style={{
-      marginTop: 12, marginBottom: 4, padding: 14,
-      background: '#FAF8F3', border: '1px solid #E7E2D7', borderRadius: 10,
-    }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: '#1B2C5B', marginBottom: 8 }}>
-        {question}
-      </div>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        {[0, 1, 2, 3, 4, 5].map((n) => (
-          <button
-            key={n}
-            type="button"
-            aria-label={`Rating ${n} out of 5`}
-            disabled={submitting}
-            onClick={() => submit(n)}
-            style={{
-              width: 40, height: 40, borderRadius: 8,
-              border: '1px solid #CFE7F5', background: '#F8FCFE',
-              color: '#0B3A66', fontSize: 15, fontWeight: 600, lineHeight: 1,
-              cursor: submitting ? 'wait' : 'pointer',
-              fontFamily: "'JetBrains Mono', monospace",
-            }}
-          >
-            {n}
-          </button>
-        ))}
-      </div>
-      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-        0 = no activity · 5 = severe activity
-      </div>
-      {error ? (
-        <div style={{ fontSize: 12, color: '#991B1B', marginTop: 8 }}>{error}</div>
-      ) : null}
-    </div>
-  );
-}
-
-function SubmittedRatingNote({ rating }) {
-  return (
-    <div style={{
-      marginTop: 12, padding: 10,
-      background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8,
-      display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#15803D',
-    }}>
-      <CheckCircle2 size={14} aria-hidden="true" />
-      <span>Thanks — you reported activity level <strong>{rating}</strong> for this period.</span>
-    </div>
-  );
-}
-
-export default function PestPressureCard({ data, token }) {
-  const [override, setOverride] = useState(null);
-  const effective = override || data;
-
+export default function PestPressureCard({ data }) {
   // Pre-compute date once (avoid recompute on hover/expand).
-  const dateText = useMemo(() => formatDate(effective && effective.date), [effective]);
+  const dateText = useMemo(() => formatDate(data && data.date), [data]);
+  const effective = data;
 
   if (!effective) return null;
   if (effective.enabled === false || effective.showOnCustomerReport === false) return null;
@@ -278,18 +196,6 @@ export default function PestPressureCard({ data, token }) {
         <p style={{ margin: '0 0 12px', fontSize: 14, lineHeight: 1.55, color: '#3F4A65' }}>
           {effective.summary}
         </p>
-      ) : null}
-
-      {effective.canCaptureClientRating && token ? (
-        <ClientRatingPicker
-          token={token}
-          question={effective.clientRatingQuestion || 'Since your last service, how much pest activity have you noticed?'}
-          onSubmitted={(updated) => setOverride(updated || effective)}
-        />
-      ) : null}
-
-      {effective.submittedClientRating !== null && effective.submittedClientRating !== undefined ? (
-        <SubmittedRatingNote rating={effective.submittedClientRating} />
       ) : null}
 
       {effective.showComponentBreakdown && effective.components ? (

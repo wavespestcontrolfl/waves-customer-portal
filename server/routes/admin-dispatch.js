@@ -21,7 +21,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
-const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
+const { calculateAndPersistForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
@@ -1684,9 +1684,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         }
         if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index) {
-          const pestPressure = await runPestPressureForServiceRecord(record.id, trx);
-          if (pestPressure && pestPressure.result.displayedScore != null) {
-            record.pressure_index = pestPressure.result.displayedScore;
+          // Pest Pressure is a derived/computed artifact — it must not abort
+          // the tech's service completion if it fails. We run it inside a
+          // SAVEPOINT (knex .transaction() on an existing trx makes a nested
+          // tx == savepoint) so a Postgres-level error rolls back the inner
+          // ops cleanly without poisoning the outer trx's aborted state.
+          try {
+            const pestPressure = await trx.transaction(async (ppTrx) => {
+              return calculateAndPersistForServiceRecord(record.id, ppTrx);
+            });
+            if (pestPressure && pestPressure.result.displayedScore != null) {
+              record.pressure_index = pestPressure.result.displayedScore;
+            }
+          } catch (err) {
+            logger.error(`[pest-pressure] orchestrate failed for service_record ${record.id}: ${err.message}`);
           }
         }
 

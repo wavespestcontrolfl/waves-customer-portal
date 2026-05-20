@@ -9,7 +9,7 @@
  */
 
 const { DEFAULT_CONFIG } = require('./config');
-const { detectFrequencyKey } = require('./review-window');
+const { isOneTimeServiceLabel } = require('./review-window');
 
 function formatDate(value) {
   if (!value) return null;
@@ -23,10 +23,25 @@ function formatScore(value) {
   return Number(value).toFixed(1);
 }
 
-function resolveClientRatingQuestion(config, serviceTypeText) {
-  const questions = (config && config.clientQuestionText) || DEFAULT_CONFIG.clientQuestionText;
-  const key = detectFrequencyKey(serviceTypeText);
-  return questions[key] || questions.custom || DEFAULT_CONFIG.clientQuestionText.custom;
+function isServiceLineEnabled(config, serviceRecord) {
+  const enabledLines = Array.isArray(config && config.enabledServiceLines) ? config.enabledServiceLines : [];
+  if (enabledLines.length === 0) return true;
+  if (!serviceRecord || !serviceRecord.service_line) {
+    // Unknown service line — be conservative: if the config restricts to a
+    // subset, treat unknown as "not in the allow list" so legacy reports
+    // missing service_line don't accidentally show a card.
+    return false;
+  }
+  return enabledLines.includes(serviceRecord.service_line);
+}
+
+function meetsRecurringFrequencyRequirement(config, serviceRecord) {
+  if (!config || config.requireRecurringFrequency !== true) return true;
+  if (!serviceRecord) return false;
+  // Mirrors the orchestrator gate: skip only explicit one-time labels.
+  // Unknown-frequency labels are treated as recurring (engine uses
+  // fallback window).
+  return !isOneTimeServiceLabel(serviceRecord.service_type);
 }
 
 function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null }) {
@@ -34,24 +49,16 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null 
   if (!effectiveConfig.enabled || !effectiveConfig.showOnCustomerReport) {
     return null;
   }
+  // Mirror orchestrator scope gates so the card disappears uniformly when
+  // a service line is opted out OR the report is one-time, even if a
+  // historical score row exists from a previous config.
+  if (!isServiceLineEnabled(effectiveConfig, serviceRecord)) return null;
+  if (!meetsRecurringFrequencyRequirement(effectiveConfig, serviceRecord)) return null;
 
   const showComponentBreakdown = Boolean(effectiveConfig.showComponentBreakdownToCustomer);
   const howCalculated = effectiveConfig.showHowCalculated
     ? effectiveConfig.customerExplanationText
     : null;
-
-  // Customer is allowed to submit a rating when:
-  //   - the feature is enabled (above guard)
-  //   - the report hasn't already captured one
-  // (We don't gate on showOnCustomerReport here — that's already true.)
-  const hasClientRating = serviceRecord
-    && serviceRecord.client_pest_rating !== null
-    && serviceRecord.client_pest_rating !== undefined;
-  const canCaptureClientRating = Boolean(serviceRecord) && !hasClientRating;
-  const clientRatingQuestion = canCaptureClientRating
-    ? resolveClientRatingQuestion(effectiveConfig, serviceRecord && serviceRecord.service_type)
-    : null;
-  const submittedClientRating = hasClientRating ? Number(serviceRecord.client_pest_rating) : null;
 
   if (!scoreRow || scoreRow.data_completeness === 'insufficient' || scoreRow.displayed_score === null || scoreRow.displayed_score === undefined) {
     return {
@@ -69,9 +76,6 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null 
       howCalculated,
       showComponentBreakdown,
       components: null,
-      canCaptureClientRating,
-      clientRatingQuestion,
-      submittedClientRating,
     };
   }
 
@@ -92,9 +96,6 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null 
     howCalculated,
     showComponentBreakdown,
     components: showComponentBreakdown ? scoreRow.component_scores || null : null,
-    canCaptureClientRating,
-    clientRatingQuestion,
-    submittedClientRating,
   };
 }
 
@@ -121,5 +122,6 @@ function buildPestPressureAdminView({ scoreRow }) {
 module.exports = {
   buildPestPressureCustomerView,
   buildPestPressureAdminView,
-  resolveClientRatingQuestion,
+  isServiceLineEnabled,
+  meetsRecurringFrequencyRequirement,
 };

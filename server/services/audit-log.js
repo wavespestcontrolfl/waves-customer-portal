@@ -257,6 +257,40 @@ async function auditPestPressureScoreOverride({
   });
 }
 
+/**
+ * Pest Pressure score recalculation. Called from
+ * POST /api/admin/pest-pressure/scores/:id/recalculate. Distinct from
+ * the override.set / override.remove actions so audit-log queries can
+ * tell "admin re-ran the engine on stale data" apart from "admin
+ * intentionally changed the number." CRITICAL — recalc can mutate
+ * service_records.pressure_index, which the customer-facing report
+ * surfaces directly.
+ */
+async function auditPestPressureScoreRecalculate({
+  tech_user_id, score_id, service_record_id, customer_id,
+  before, after, cleared_override = false,
+  ip_address, user_agent, trx = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id || null,
+    action: 'pest_pressure.score.recalculate',
+    resource_type: 'pest_pressure_score',
+    resource_id: score_id || null,
+    metadata: {
+      service_record_id: service_record_id || null,
+      customer_id: customer_id || null,
+      before: before || null,
+      after: after || null,
+      cleared_override: Boolean(cleared_override),
+    },
+    ip_address,
+    user_agent,
+    critical: true,
+    trx,
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -273,6 +307,7 @@ module.exports = {
   auditPaymentReconcile,
   auditServiceCatalogChange,
   auditPestPressureConfigChange,
+  auditPestPressureScoreRecalculate,
   auditPestPressureScoreOverride,
   ipFromReq,
   uaFromReq,

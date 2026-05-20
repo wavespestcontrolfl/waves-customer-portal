@@ -1,6 +1,13 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const mock = jest.fn();
+  // The admin routes wrap their writes in db.transaction(async trx => ...).
+  // For tests, the trx is the same mock so query builder stubs still work,
+  // and the wrapper just resolves with whatever the inner fn returns.
+  mock.transaction = jest.fn(async (fn) => fn(mock));
+  return mock;
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -9,6 +16,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/audit-log', () => ({
   auditPestPressureConfigChange: jest.fn().mockResolvedValue(undefined),
   auditPestPressureScoreOverride: jest.fn().mockResolvedValue(undefined),
+  auditPestPressureScoreRecalculate: jest.fn().mockResolvedValue(undefined),
   ipFromReq: jest.fn(() => '127.0.0.1'),
   uaFromReq: jest.fn(() => 'jest'),
 }));
@@ -323,6 +331,20 @@ describe('admin pest-pressure: PUT /scores/:id/override', () => {
     });
   });
 
+  test('blank/null/false displayedScore returns 400 (not silently coerced to 0)', async () => {
+    applyOverride.mockRejectedValue(new RangeError('blank coerced'));
+    await withServer(async (baseUrl) => {
+      for (const payload of [{ displayedScore: '', reason: 'r' }, { displayedScore: null, reason: 'r' }, { displayedScore: false, reason: 'r' }]) {
+        const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/override`, {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        expect(res.status).toBe(400);
+      }
+    });
+  });
+
   test('happy path persists override + writes audit row', async () => {
     applyOverride.mockResolvedValueOnce(makeScoreRow({
       is_overridden: true,
@@ -468,6 +490,29 @@ describe('admin pest-pressure: POST /scores/:id/recalculate', () => {
         body: JSON.stringify({}),
       });
       expect(res.status).toBe(404);
+    });
+  });
+
+  test('emits a pest_pressure.score.recalculate audit row on success', async () => {
+    const before = makeScoreRow({ calculated_score: 2.4, displayed_score: 2.4 });
+    loadScoreForServiceRecord
+      .mockResolvedValueOnce(before)
+      .mockResolvedValueOnce({ ...before, calculated_score: 2.6, displayed_score: 2.6 });
+    calculateAndPersistForServiceRecord.mockResolvedValueOnce({ result: { score: 2.6, displayedScore: 2.6 } });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/recalculate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      expect(auditLog.auditPestPressureScoreRecalculate).toHaveBeenCalledTimes(1);
+      const [args] = auditLog.auditPestPressureScoreRecalculate.mock.calls[0];
+      expect(args.service_record_id).toBe('svc-1');
+      expect(args.before.calculated_score).toBe(2.4);
+      expect(args.after.calculated_score).toBe(2.6);
+      expect(args.cleared_override).toBe(false);
     });
   });
 });
