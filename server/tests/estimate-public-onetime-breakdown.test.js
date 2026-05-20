@@ -666,6 +666,62 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;');
   });
 
+  test('one-time pest choice excludes WaveGuard setup from the choice price and add-on table', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          pestTiers: [{ label: 'Quarterly', mo: 32.33, ann: 387.96, pa: 97, apps: 4 }],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 32.33,
+          annualAfterDiscount: 387.96,
+          services: [{ name: 'Pest Control', mo: 32.33 }],
+        },
+        oneTime: {
+          total: 298,
+          membershipFee: 99,
+          items: [{ service: 'one_time_pest', name: 'One-Time Pest', price: 199 }],
+        },
+        specItems: [],
+      },
+    };
+    const pricing = await buildPricingBundle({
+      id: 'estimate-public-choice-pest-test',
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      monthly_total: 32.33,
+      annual_total: 387.96,
+      onetime_total: 298,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(pricing.anchorOneTimePrice).toBe(199);
+    expect(resolveAcceptOneTimeTotal({
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      onetime_total: 298,
+    }, pricing)).toBe(199);
+
+    const html = renderPage('choice-token', {
+      status: 'sent',
+      customerName: 'Rita Roldan',
+      address: '17630 Canopy Pl',
+      monthlyTotal: 32.33,
+      annualTotal: 387.96,
+      onetimeTotal: 298,
+      tier: 'Bronze',
+      showOneTimeOption: true,
+      oneTimeChoicePrice: pricing.anchorOneTimePrice,
+    }, estimateData);
+
+    expect(html).toContain('<span class="num" id="onetime-display">$199</span>');
+    expect(html).toContain('<div class="choice-treatment" data-mode-only="recurring">');
+    expect(html).toContain('<div class="choice-treatment" data-mode-only="one_time" hidden>');
+    expect(html).not.toContain('One-time items (billed separately)');
+    expect(html).not.toContain('These are scheduled after your recurring service starts.');
+  });
+
   test('server-rendered slot selection ignores clicks while a reservation is in flight', () => {
     const html = renderPage('booking-token', {
       status: 'sent',
@@ -701,6 +757,9 @@ describe('public estimate one-time breakdown', () => {
         lotSqFt: 9000,
         lawnSqFt: 5200,
         landscapeComplexity: 'MODERATE',
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
       },
       result: {
         recurring: {
@@ -718,10 +777,29 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Home', value: '2,400 sq ft' },
       { label: 'Lot', value: '9,000 sq ft' },
+      { label: 'Pool/Lanai', value: 'Yes (Medium cage)' },
       { label: 'Treatable lawn', value: '5,200 sq ft' },
       { label: 'Complexity', value: 'Moderate' },
     ]));
     expect(payload.signals).toEqual([]);
+  });
+
+  test('Waves AI payload shows Pool/Lanai when explicitly absent', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 1800,
+        lotSqFt: 7000,
+        pool: 'NO',
+        poolCage: 'NO',
+      },
+      result: {
+        recurring: { services: [{ name: 'Pest Control' }] },
+      },
+    });
+
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Pool/Lanai', value: 'No' },
+    ]));
   });
 
   test('Waves AI payload does not add customer-facing bundle copy for Bronze', () => {

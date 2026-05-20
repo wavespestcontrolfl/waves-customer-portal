@@ -1053,6 +1053,43 @@ function prettySignalValue(value) {
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
+function normalizeFeaturePresence(value) {
+  if (value === true) return 'yes';
+  if (value === false) return 'no';
+  if (value == null || value === '') return null;
+  const raw = String(value).trim().toLowerCase();
+  if (['yes', 'y', 'true', '1', 'detected', 'present'].includes(raw)) return 'yes';
+  if (['no', 'n', 'false', '0', 'none', 'not detected', 'absent'].includes(raw)) return 'no';
+  if (['possible', 'maybe', 'unknown_possible'].includes(raw)) return 'possible';
+  if (raw === 'unknown' || raw === 'n/a') return null;
+  return null;
+}
+
+function firstFeaturePresence(...values) {
+  let sawPossible = false;
+  let sawNo = false;
+  for (const value of values) {
+    const normalized = normalizeFeaturePresence(value);
+    if (normalized === 'yes') return 'yes';
+    if (normalized === 'possible') sawPossible = true;
+    if (normalized === 'no') sawNo = true;
+  }
+  if (sawPossible) return 'possible';
+  return sawNo ? 'no' : null;
+}
+
+function poolLanaiMetricValue({ pool, poolCage, poolCageSize } = {}) {
+  const poolState = normalizeFeaturePresence(pool);
+  const cageState = normalizeFeaturePresence(poolCage);
+  const size = prettySignalValue(poolCageSize);
+  const cleanSize = size && size !== 'None' ? size : null;
+  if (cageState === 'yes') return cleanSize ? `Yes (${cleanSize} cage)` : 'Yes (screened lanai)';
+  if (poolState === 'yes') return 'Yes (pool)';
+  if (cageState === 'possible' || poolState === 'possible') return 'Possible';
+  if (cageState === 'no' || poolState === 'no') return 'No';
+  return null;
+}
+
 function sentenceList(items) {
   const clean = items.map((item) => String(item || '').trim()).filter(Boolean);
   if (clean.length <= 1) return clean[0] || '';
@@ -1124,16 +1161,49 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     ? firstPositiveNumber(resultStats.tmBait?.perim, property.termitePerimeterFt, inputs.termitePerimeterFt)
     : null;
   const aiAnalysis = parsedData.aiAnalysis || estResult.aiAnalysis || {};
+  const inputFeatures = inputs.features || parsedData.features || {};
+  const propertyFeatures = property.features || {};
   const complexity = prettySignalValue(
     aiAnalysis.landscape_complexity
     || aiAnalysis.landscapeComplexity
     || property.landscapeComplexity
     || inputs.landscapeComplexity
   );
+  const poolLanaiValue = poolLanaiMetricValue({
+    pool: firstFeaturePresence(
+      inputs.pool,
+      inputs.hasPool,
+      inputFeatures.pool,
+      property.pool,
+      property.hasPool,
+      property.has_pool,
+      propertyFeatures.pool,
+      aiAnalysis.pool,
+      aiAnalysis.hasPool,
+    ),
+    poolCage: firstFeaturePresence(
+      inputs.poolCage,
+      inputs.hasPoolCage,
+      inputFeatures.poolCage,
+      property.poolCage,
+      property.hasPoolCage,
+      property.pool_cage,
+      propertyFeatures.poolCage,
+      aiAnalysis.poolCage,
+      aiAnalysis.hasPoolCage,
+    ),
+    poolCageSize: inputs.poolCageSize
+      || inputFeatures.poolCageSize
+      || property.poolCageSize
+      || property.pool_cage_size
+      || propertyFeatures.poolCageSize
+      || aiAnalysis.poolCageSize,
+  });
 
   const metrics = [
     homeSqFt ? { label: 'Home', value: `${Math.round(homeSqFt).toLocaleString()} sq ft` } : null,
     lotSqFt ? { label: 'Lot', value: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
+    poolLanaiValue ? { label: 'Pool/Lanai', value: poolLanaiValue } : null,
     lawnSqFt ? { label: 'Treatable lawn', value: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
     termitePerimeterFt ? { label: 'Termite perimeter', value: `${Math.round(termitePerimeterFt).toLocaleString()} linear ft` } : null,
     complexity ? { label: 'Complexity', value: complexity } : null,
@@ -1608,13 +1678,35 @@ function renderPage(token, estimate, estData) {
   const supplementalServiceSummaryHtml = supplementalServiceRowsHtml
     ? `<div class="supplemental-service-list" data-mode-only="recurring">${supplementalServiceRowsHtml}</div>`
     : '';
+  const recurringChoiceTreatmentHtml = (() => {
+    if (!(canChooseOneTime && serviceCardsCoverRecurringTotal && billingServiceRows.length === 1)) return '';
+    const row = billingServiceRows[0];
+    const savings = row.anchorPrice != null ? Math.max(0, Math.round((row.anchorPrice - row.price) * 100) / 100) : 0;
+    const day = row.visits > 0 ? Math.round(((row.price * row.visits / 12) / 30) * 100) / 100 : null;
+    const dayPriceHtml = day != null
+      ? `<span data-service-card-day data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(day)}</span>`
+      : '';
+    return `
+      <div class="choice-treatment" data-mode-only="recurring">
+        <div class="choice-treatment-name">${escapeHtml(row.name)}</div>
+        <div class="choice-treatment-detail">${row.detailHtml}</div>
+        <div class="big-price choice-treatment-price">
+          ${savings > 0 ? `<span class="anchor">${fmtMoney(row.anchorPrice)} / application</span>` : ''}
+          <span class="num" data-service-card-price data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}">${fmtMoney(row.price)}</span>
+          <span class="per">application</span>
+          <span class="tier-lbl">${escapeHtml(row.tierLabel)}</span>
+        </div>
+        ${savings > 0 ? `<div class="save-row"><span class="save-pill">You save <span data-service-card-savings data-service-kind="${escapeHtml(row.kind)}" data-service-visits="${Number(row.visits || 0)}" data-service-base-price="${Number(row.basePrice || 0)}" data-service-anchor-price="${Number(row.anchorPrice || 0)}">${fmtMoney(savings)}</span> / application with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
+        ${day != null ? `<div class="day-price">That\u2019s just ${dayPriceHtml}/day for ${escapeHtml(row.name.toLowerCase())}.</div>` : ''}
+      </div>`;
+  })();
   const recurringHeroPriceHtml = quoteRequired ? `
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
       <div class="day-price" data-mode-only="recurring">Inspection required before final pricing.</div>
     ` : (serviceCardsCoverRecurringTotal ? `
-      <div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>
+      ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
     ` : `
       <div class="big-price" data-mode-only="recurring">
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
@@ -1627,16 +1719,24 @@ function renderPage(token, estimate, estData) {
       ${supplementalServiceSummaryHtml}
     `);
 
-  const realOneTimeRows = oneTimeItems.map((it) => {
-    const label = String(it.name || it.label || '').toLowerCase();
-    if (it.service === 'waveguard_setup' || label.includes('waveguard setup') || label.includes('waveguard membership')) return '';
-    const price = Number(it.price || 0);
+  const separatelyBilledOneTimeItems = oneTimeItems.filter((it) => {
+    if (isWaveGuardSetupOneTimeItem(it)) return false;
+    if (canChooseOneTime && isOneTimePestChoiceItem(it)) return false;
+    return true;
+  });
+  const separatelyBilledOneTimeTotal = separatelyBilledOneTimeItems.reduce((sum, it) => {
+    const price = oneTimeItemAmount(it);
+    return price ? Math.round((sum + price) * 100) / 100 : sum;
+  }, 0);
+  const realOneTimeRows = separatelyBilledOneTimeItems.map((it) => {
+    const price = oneTimeItemAmount(it);
     if (price <= 0) return '';
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
-    return `<tr><td>${escapeHtml(it.name)}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
+    return `<tr><td>${escapeHtml(it.name || it.label || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
   }).filter(Boolean).join('');
   const hasRealOneTime = realOneTimeRows.length > 0;
   const oneTimeRows = realOneTimeRows;
+  const oneTimeRowsTotal = hasRealOneTime ? separatelyBilledOneTimeTotal : onetimeTotal;
 
   const perksHtml = (hasOnlyLawnCareServices ? LAWN_CARE_PERKS : PERKS)
     .map((p) => `<li>${escapeHtml(p)}</li>`)
@@ -1833,6 +1933,12 @@ function renderPage(token, estimate, estData) {
   .mode-btn{appearance:none;border:0;background:transparent;color:#475569;font:600 13px/1 Inter,system-ui,sans-serif;padding:10px 18px;border-radius:999px;cursor:pointer;letter-spacing:.02em;transition:background .15s,color .15s}
   .mode-btn.is-active{background:${ESTIMATE_BUTTON_BLUE};color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
+  .choice-treatment{padding:14px 0 8px;max-width:720px}
+  .choice-treatment-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
+  .choice-treatment-detail{font-size:13px;color:#6B7280;line-height:1.45;margin-top:2px}
+  .choice-treatment-price{margin-top:14px}
+  .choice-treatment .save-row{margin-top:8px}
+  .choice-treatment .day-price{margin-top:8px}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
   @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}.supplemental-service-row{grid-template-columns:1fr}.supplemental-service-row strong{white-space:normal}}
   .card{background:#F2EEE0;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #D9D3C4;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06)}
@@ -2053,13 +2159,18 @@ ${shellTopBar()}
     </div>` : ''}
     ${recurringHeroPriceHtml}
     ${canChooseOneTime ? `
-    <div class="big-price" data-mode-only="one_time" hidden>
-      <span class="num" id="onetime-display">${fmtMoney(oneTimeChoicePrice)}</span>
-      <span class="per">one-time</span>
+    <div class="choice-treatment" data-mode-only="one_time" hidden>
+      <div class="choice-treatment-name">One-Time Pest Control</div>
+      <div class="choice-treatment-detail">Single treatment</div>
+      <div class="big-price choice-treatment-price">
+        <span class="num" id="onetime-display">${fmtMoney(oneTimeChoicePrice)}</span>
+        <span class="per">one-time</span>
+      </div>
+      <div class="onetime-note">
+        One visit, pay on service day. No recurring schedule, no tier discount.
+      </div>
     </div>
-    <div class="onetime-note" data-mode-only="one_time" hidden>
-      One visit, pay on service day. No recurring schedule, no tier discount.
-    </div>` : ''}
+    ` : ''}
     ${quoteRequired ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
   </div>
@@ -2108,10 +2219,10 @@ ${shellTopBar()}
   `}
 
   ${oneTimeRows ? `
-  <div class="card" style="margin-top:24px">
+  <div class="card"${canChooseOneTime ? ' data-mode-only="recurring"' : ''} style="margin-top:24px">
     <h3>One-time items (billed separately)</h3>
     <table>${oneTimeRows}
-      <tr><td><strong>One-time total</strong></td><td style="text-align:right"><strong>${fmtMoney(onetimeTotal)}</strong></td></tr>
+      <tr><td><strong>One-time total</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
     </table>
     ${hasRealOneTime ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
   </div>` : ''}
@@ -4385,6 +4496,50 @@ const V1_LABEL_TO_LADDER = {
 // Returns null if not present.
 const ROACH_NAME_RX = /initial.*(palmetto|german|roach).*knockdown/i;
 
+function oneTimeItemSearchText(item = {}) {
+  return [
+    item.service,
+    item.key,
+    item.label,
+    item.displayName,
+    item.name,
+  ].filter(Boolean).join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+}
+
+function oneTimeItemAmount(item = {}) {
+  const raw = Number(item.amount ?? item.price ?? item.total);
+  const discounted = Number(item.priceAfterDiscount ?? item.totalAfterDiscount);
+  const amount = Number.isFinite(raw) && raw < 0
+    ? (Number.isFinite(discounted) && discounted !== 0 ? discounted : raw)
+    : (Number.isFinite(discounted) ? discounted : raw);
+  return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : 0;
+}
+
+function isWaveGuardSetupOneTimeItem(item = {}) {
+  const text = oneTimeItemSearchText(item);
+  return text.includes('waveguard setup')
+    || text.includes('waveguard membership')
+    || text.includes('membership setup fee');
+}
+
+function isOneTimePestChoiceItem(item = {}) {
+  const text = oneTimeItemSearchText(item);
+  if (text.includes('pest initial') || ROACH_NAME_RX.test(text)) return false;
+  return text.includes('one time pest')
+    || text.includes('one-time pest')
+    || text.includes('onetime pest');
+}
+
+function oneTimePestChoiceAmountFromBreakdown(breakdown = {}) {
+  const items = Array.isArray(breakdown.items) ? breakdown.items : [];
+  const total = items.reduce((sum, item) => {
+    if (!isOneTimePestChoiceItem(item) || item.quoteRequired === true) return sum;
+    const amount = oneTimeItemAmount(item);
+    return amount > 0 ? Math.round((sum + amount) * 100) / 100 : sum;
+  }, 0);
+  return total > 0 ? total : null;
+}
+
 function findInitialRoachItem(_pestTiers, estData) {
   const result = estData?.result || {};
   const buckets = [
@@ -4702,6 +4857,19 @@ function withSupplementedRecurringServices(estData) {
 }
 
 function resolveAcceptOneTimeTotal(estimate = {}, pricingBundle = null) {
+  if (estimate.show_one_time_option || estimate.showOneTimeOption) {
+    let breakdown = pricingBundle?.oneTimeBreakdown || null;
+    if (!breakdown && estimate.estimate_data) {
+      try {
+        const estData = typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data)
+          : estimate.estimate_data;
+        breakdown = normalizeOneTimeBreakdown(estData);
+      } catch { /* fall through to legacy candidates */ }
+    }
+    const choicePrice = oneTimePestChoiceAmountFromBreakdown(breakdown || {});
+    if (choicePrice) return choicePrice;
+  }
   const candidates = [
     pricingBundle?.anchorOneTimePrice,
     pricingBundle?.oneTimeBreakdown?.total,
@@ -5115,26 +5283,37 @@ async function buildPricingBundle(estimate) {
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
+  const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
+  const withChoiceOneTimePrice = (payload = {}) => {
+    if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return payload;
+    const choicePrice = oneTimePestChoiceAmountFromBreakdown(payload.oneTimeBreakdown || storedOneTimeBreakdown);
+    return choicePrice
+      ? {
+          ...payload,
+          anchorOneTimePrice: choicePrice,
+          oneTimeBreakdown: payload.oneTimeBreakdown || storedOneTimeBreakdown,
+        }
+      : payload;
+  };
   const snapshotBundle = estData?.sendSnapshot?.pricingBundle;
   if (
     snapshotBundle
     && Array.isArray(snapshotBundle.frequencies)
     && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
   ) {
-    return attachQuoteRequirement({
+    return attachQuoteRequirement(withChoiceOneTimePrice({
       ...snapshotBundle,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
-    }, estData);
+    }), estData);
   }
 
   const cached = getEstimatePricingCache(estimate);
   if (cached) {
-    return attachQuoteRequirement({ ...cached, cacheHit: true }, estData);
+    return attachQuoteRequirement(withChoiceOneTimePrice({ ...cached, cacheHit: true }), estData);
   }
 
   const prefs = normalizePrefs(estData?.preferences);
-  const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
 
   // v1 shape (admin UI estimates) — read pre-computed pestTiers directly.
   // This is the dominant path until Session 11 retires the client engine.
@@ -5182,9 +5361,12 @@ async function buildPricingBundle(estimate) {
     // suppresses that fee for non-pest estimates; strip it from the anchor
     // price too so resolveAcceptOneTimeTotal doesn't end up charging it.
     const rawV1OneTimeTotal = v1.oneTimeTotal || Number(estimate.onetime_total || 0) || null;
-    const anchorOneTimePrice = (!hasPest && rawV1OneTimeTotal && v1.membershipFee > 0)
+    const choiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption) && hasPest
+      ? oneTimePestChoiceAmountFromBreakdown(storedOneTimeBreakdown)
+      : null;
+    const anchorOneTimePrice = choiceOneTimePrice ?? ((!hasPest && rawV1OneTimeTotal && v1.membershipFee > 0)
       ? Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100)
-      : rawV1OneTimeTotal;
+      : rawV1OneTimeTotal);
 
     const payload = attachQuoteRequirement({
       frequencies: finalFreqs,
@@ -5210,6 +5392,9 @@ async function buildPricingBundle(estimate) {
   // stored totals. Not ideal but safer than fabricating a multi-frequency
   // ladder from nothing. React renders a simplified PriceCard.
   if (!engineInputs) {
+    const storedChoiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption)
+      ? oneTimePestChoiceAmountFromBreakdown(storedOneTimeBreakdown)
+      : null;
     const payload = attachQuoteRequirement({
       frequencies: [{
         key: 'quarterly',
@@ -5222,7 +5407,7 @@ async function buildPricingBundle(estimate) {
         addOns: [],
       }],
       waveGuardTier: estimate.waveguard_tier || 'Bronze',
-      anchorOneTimePrice: Number(estimate.onetime_total || 0) || null,
+      anchorOneTimePrice: storedChoiceOneTimePrice ?? (Number(estimate.onetime_total || 0) || null),
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
     }, estData);
@@ -5263,14 +5448,18 @@ async function buildPricingBundle(estimate) {
     }
   }
 
-  const anchorOneTimePrice = frequencies[0]?.oneTimeTotal
-    ?? (Number(estimate.onetime_total || 0) || null);
   const generatedOneTimeBreakdown = anchorEngineResult
     ? normalizeOneTimeBreakdown({ engineResult: anchorEngineResult })
     : { items: [], total: 0 };
   const oneTimeBreakdown = generatedOneTimeBreakdown.items.length
     ? generatedOneTimeBreakdown
     : storedOneTimeBreakdown;
+  const choiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption)
+    ? oneTimePestChoiceAmountFromBreakdown(oneTimeBreakdown)
+    : null;
+  const anchorOneTimePrice = choiceOneTimePrice
+    ?? frequencies[0]?.oneTimeTotal
+    ?? (Number(estimate.onetime_total || 0) || null);
 
   const payload = attachQuoteRequirement({
     frequencies,
