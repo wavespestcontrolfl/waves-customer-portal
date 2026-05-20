@@ -8,12 +8,22 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/audit-log', () => ({
   auditPestPressureConfigChange: jest.fn().mockResolvedValue(undefined),
+  auditPestPressureScoreOverride: jest.fn().mockResolvedValue(undefined),
   ipFromReq: jest.fn(() => '127.0.0.1'),
   uaFromReq: jest.fn(() => 'jest'),
 }));
 jest.mock('../services/pest-pressure/store', () => ({
   loadActiveConfig: jest.fn(),
   updateActiveConfig: jest.fn(),
+  loadScoreForServiceRecord: jest.fn(),
+  applyOverride: jest.fn(),
+  removeOverride: jest.fn(),
+  listRecentScores: jest.fn(),
+  listAuditEvents: jest.fn(),
+  loadHistoryForCustomer: jest.fn(),
+}));
+jest.mock('../services/pest-pressure/orchestrate', () => ({
+  calculateAndPersistForServiceRecord: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -36,7 +46,17 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const express = require('express');
 const { DEFAULT_CONFIG } = require('../services/pest-pressure/config');
-const { loadActiveConfig, updateActiveConfig } = require('../services/pest-pressure/store');
+const {
+  loadActiveConfig,
+  updateActiveConfig,
+  loadScoreForServiceRecord,
+  applyOverride,
+  removeOverride,
+  listRecentScores,
+  listAuditEvents,
+  loadHistoryForCustomer,
+} = require('../services/pest-pressure/store');
+const { calculateAndPersistForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const auditLog = require('../services/audit-log');
 const pestPressureRouter = require('../routes/admin-pest-pressure');
 
@@ -68,6 +88,31 @@ beforeEach(() => {
     id: 'cfg-1', ...config,
   }));
 });
+
+function makeScoreRow(overrides = {}) {
+  return {
+    id: 'score-1',
+    customer_id: 'cust-1',
+    service_record_id: 'svc-1',
+    service_date: '2026-05-17',
+    service_line: 'pest',
+    calculated_score: 2.4,
+    displayed_score: 2.4,
+    label_key: 'moderate',
+    label_name: 'Moderate',
+    trend: 'stable',
+    trend_delta: 0.0,
+    data_completeness: 'complete',
+    is_overridden: false,
+    original_calculated_score: null,
+    override_reason: null,
+    overridden_by: null,
+    overridden_at: null,
+    calculation_version: '1.0',
+    calculated_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
 
 describe('admin pest-pressure: auth gating', () => {
   test('GET /config requires authentication', async () => {
@@ -222,6 +267,248 @@ describe('admin pest-pressure: POST /preview', () => {
         }),
       });
       expect(res.status).toBe(422);
+    });
+  });
+});
+
+describe('admin pest-pressure: PUT /scores/:id/override', () => {
+  test('rejects empty reason', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/override`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayedScore: 2.0, reason: '   ' }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe('reason_required');
+      expect(applyOverride).not.toHaveBeenCalled();
+    });
+  });
+
+  test('rejects over-long reason', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/override`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayedScore: 2.0, reason: 'x'.repeat(501) }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe('reason_too_long');
+    });
+  });
+
+  test('rejects when overrides disabled in config', async () => {
+    loadActiveConfig.mockResolvedValueOnce({ ...DEFAULT_CONFIG, allowManualOverride: false });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/override`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayedScore: 2.0, reason: 'tech disagreement' }),
+      });
+      expect(res.status).toBe(403);
+    });
+  });
+
+  test('out-of-range displayedScore returns 400', async () => {
+    applyOverride.mockRejectedValueOnce(new RangeError('out of range'));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/override`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayedScore: 7, reason: 'test' }),
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  test('happy path persists override + writes audit row', async () => {
+    applyOverride.mockResolvedValueOnce(makeScoreRow({
+      is_overridden: true,
+      displayed_score: 1.5,
+      original_calculated_score: 2.4,
+      override_reason: 'Customer dispute',
+      overridden_by: 'admin-1',
+    }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/override`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayedScore: 1.5, reason: '  Customer dispute  ' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.score.is_overridden).toBe(true);
+      expect(body.score.displayed_score).toBe(1.5);
+
+      const [, storeArgs] = applyOverride.mock.calls[0];
+      expect(storeArgs.reason).toBe('Customer dispute');
+      expect(storeArgs.overriddenBy).toBe('admin-1');
+
+      expect(auditLog.auditPestPressureScoreOverride).toHaveBeenCalledTimes(1);
+      const [auditArgs] = auditLog.auditPestPressureScoreOverride.mock.calls[0];
+      expect(auditArgs.action_type).toBe('set');
+      expect(auditArgs.override_reason).toBe('Customer dispute');
+      expect(auditArgs.original_calculated_score).toBe(2.4);
+    });
+  });
+});
+
+describe('admin pest-pressure: DELETE /scores/:id/override', () => {
+  test('404 when no score row exists', async () => {
+    loadScoreForServiceRecord.mockResolvedValueOnce(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/missing/override`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  test('no-op + no audit when score is not overridden', async () => {
+    const existing = makeScoreRow();
+    loadScoreForServiceRecord.mockResolvedValueOnce(existing);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/override`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.removed).toBe(false);
+      expect(removeOverride).not.toHaveBeenCalled();
+      expect(auditLog.auditPestPressureScoreOverride).not.toHaveBeenCalled();
+    });
+  });
+
+  test('restores calculated score + audits', async () => {
+    const existing = makeScoreRow({
+      is_overridden: true,
+      displayed_score: 1.5,
+      original_calculated_score: 2.4,
+      override_reason: 'Customer dispute',
+    });
+    loadScoreForServiceRecord.mockResolvedValueOnce(existing);
+    removeOverride.mockResolvedValueOnce(makeScoreRow({ displayed_score: 2.4 }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/override`, {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.removed).toBe(true);
+      expect(body.score.displayed_score).toBe(2.4);
+      expect(removeOverride).toHaveBeenCalledTimes(1);
+
+      const [auditArgs] = auditLog.auditPestPressureScoreOverride.mock.calls[0];
+      expect(auditArgs.action_type).toBe('remove');
+      expect(auditArgs.original_calculated_score).toBe(2.4);
+    });
+  });
+});
+
+describe('admin pest-pressure: POST /scores/:id/recalculate', () => {
+  test('preserves override by default', async () => {
+    calculateAndPersistForServiceRecord.mockResolvedValueOnce({
+      result: { score: 2.6, displayedScore: 2.6 },
+    });
+    loadScoreForServiceRecord.mockResolvedValueOnce(makeScoreRow({ calculated_score: 2.6 }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/recalculate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      expect(calculateAndPersistForServiceRecord).toHaveBeenCalledWith('svc-1', expect.anything());
+      expect(removeOverride).not.toHaveBeenCalled();
+    });
+  });
+
+  test('clearOverride=true removes existing override and audits, then recalcs', async () => {
+    loadScoreForServiceRecord.mockResolvedValueOnce(makeScoreRow({
+      is_overridden: true,
+      displayed_score: 1.5,
+      original_calculated_score: 2.4,
+      override_reason: 'old reason',
+    }));
+    removeOverride.mockResolvedValueOnce(makeScoreRow({ displayed_score: 2.4 }));
+    calculateAndPersistForServiceRecord.mockResolvedValueOnce({
+      result: { score: 2.6, displayedScore: 2.6 },
+    });
+    loadScoreForServiceRecord.mockResolvedValueOnce(makeScoreRow({ displayed_score: 2.6 }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/svc-1/recalculate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearOverride: true }),
+      });
+      expect(res.status).toBe(200);
+      expect(removeOverride).toHaveBeenCalledTimes(1);
+      expect(auditLog.auditPestPressureScoreOverride).toHaveBeenCalledWith(
+        expect.objectContaining({ action_type: 'remove' }),
+      );
+      expect(calculateAndPersistForServiceRecord).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('404 when orchestrator returns null (no service record)', async () => {
+    calculateAndPersistForServiceRecord.mockResolvedValueOnce(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/missing/recalculate`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(404);
+    });
+  });
+});
+
+describe('admin pest-pressure: list endpoints', () => {
+  test('GET /scores/recent caps limit at 100', async () => {
+    listRecentScores.mockResolvedValueOnce([makeScoreRow()]);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/scores/recent?limit=500`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const [, opts] = listRecentScores.mock.calls[0];
+      expect(opts.limit).toBe(100);
+    });
+  });
+
+  test('GET /customers/:id/history forwards serviceLine + limit', async () => {
+    loadHistoryForCustomer.mockResolvedValueOnce([makeScoreRow()]);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/customers/cust-1/history?serviceLine=pest&limit=8`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const [, customerId, opts] = loadHistoryForCustomer.mock.calls[0];
+      expect(customerId).toBe('cust-1');
+      expect(opts).toEqual({ serviceLine: 'pest', limit: 8 });
+    });
+  });
+
+  test('GET /audit returns events', async () => {
+    listAuditEvents.mockResolvedValueOnce([
+      { id: 'a-1', action: 'pest_pressure.config.update' },
+    ]);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/pest-pressure/audit`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.events.length).toBe(1);
     });
   });
 });
