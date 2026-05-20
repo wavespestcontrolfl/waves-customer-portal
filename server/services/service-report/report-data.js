@@ -12,6 +12,10 @@ const {
   loadServiceCoverageConfig,
   normalizeServiceCoverage,
 } = require('./service-coverage');
+const {
+  loadVisitTimelineConfig,
+  buildVisitTimeline,
+} = require('./visit-timeline');
 const { resolveTechPhotoUrl } = require('../tech-photo');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const {
@@ -312,6 +316,7 @@ const SERVICE_LOCATION_STATUSES = new Set([
 const WORKFLOW_EVENT_TYPES = new Set([
   'scheduled',
   'technician_en_route',
+  'technician_on_site',
   'arrived_on_site',
   'inspection_started',
   'service_started',
@@ -786,7 +791,8 @@ function workflowLabel(type, serviceLine) {
   const labels = {
     scheduled: 'Scheduled',
     technician_en_route: 'Technician en route',
-    arrived_on_site: 'Technician arrived',
+    technician_on_site: 'Technician on site',
+    arrived_on_site: 'Technician on site',
     inspection_started: 'Inspection started',
     service_started: 'Service started',
     service_completed: 'Service completed',
@@ -802,7 +808,7 @@ function workflowLabel(type, serviceLine) {
 function workflowDescription(type, serviceLine) {
   const serviceType = coverageServiceType(serviceLine);
   if (type === 'technician_en_route') return 'Your technician was on the way to the property.';
-  if (type === 'arrived_on_site') return 'Your technician arrived at the property.';
+  if (type === 'technician_on_site' || type === 'arrived_on_site') return 'Your technician was recorded at the property.';
   if (type === 'inspection_started') {
     return serviceType === 'pest_control'
       ? 'Your technician inspected the scheduled service areas.'
@@ -810,9 +816,13 @@ function workflowDescription(type, serviceLine) {
   }
   if (type === 'service_started') return serviceType === 'lawn' ? 'Lawn service began.' : 'Service began.';
   if (type === 'service_completed') {
-    if (serviceType === 'lawn') return 'Mapped lawn areas were marked complete.';
-    if (serviceType === 'pest_control') return 'Pest control service areas were marked complete.';
-    return 'Service areas were marked complete.';
+    if (serviceLine === 'pest' || serviceType === 'pest_control') return 'Your technician completed the pest control service and finalized the report.';
+    if (serviceLine === 'lawn') return 'Your technician completed the lawn service and finalized the report.';
+    if (serviceLine === 'termite') return 'Your technician completed the termite service and finalized the report.';
+    if (serviceLine === 'tree_shrub') return 'Your technician completed the tree and shrub service and finalized the report.';
+    if (serviceLine === 'mosquito') return 'Your technician completed the mosquito service and finalized the report.';
+    if (serviceLine === 'rodent') return 'Your technician completed the rodent service and finalized the report.';
+    return 'Your technician completed the service and finalized the report.';
   }
   if (type === 'quality_reviewed') return 'The visit details were reviewed before publishing.';
   if (type === 'report_published') return 'Your service report was generated.';
@@ -1203,6 +1213,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const preloadedServiceCoverageConfig = Object.prototype.hasOwnProperty.call(opts, 'serviceCoverageConfig')
     ? opts.serviceCoverageConfig
     : undefined;
+  const preloadedVisitTimelineConfig = Object.prototype.hasOwnProperty.call(opts, 'visitTimelineConfig')
+    ? opts.visitTimelineConfig
+    : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
   const structured = parseJsonObject(service.structured_notes);
@@ -1274,10 +1287,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const serviceCoverageConfigPromise = preloadedServiceCoverageConfig === undefined
     ? loadServiceCoverageConfig(knex).catch(() => null)
     : Promise.resolve(preloadedServiceCoverageConfig);
-  const [pestPressureConfig, pestPressureRow, serviceCoverageConfig] = await Promise.all([
+  const visitTimelineConfigPromise = preloadedVisitTimelineConfig === undefined
+    ? loadVisitTimelineConfig(knex).catch(() => null)
+    : Promise.resolve(preloadedVisitTimelineConfig);
+  const [pestPressureConfig, pestPressureRow, serviceCoverageConfig, visitTimelineConfig] = await Promise.all([
     pestPressureConfigPromise,
     loadScoreForServiceRecord(knex, service.id).catch(() => null),
     serviceCoverageConfigPromise,
+    visitTimelineConfigPromise,
   ]);
   const pestPressure = buildPestPressureCustomerView({
     config: pestPressureConfig,
@@ -1352,6 +1369,26 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     structured,
     serviceData,
     serviceLine,
+  });
+  const visitTimeline = buildVisitTimeline({
+    service: {
+      ...service,
+      scheduled_en_route_at: scheduledService?.en_route_at || null,
+      scheduled_arrived_at: scheduledService?.arrived_at || null,
+      scheduled_actual_start_time: scheduledService?.actual_start_time || null,
+      scheduled_check_in_time: scheduledService?.check_in_time || null,
+      scheduled_completed_at: scheduledService?.completed_at || null,
+      scheduled_actual_end_time: scheduledService?.actual_end_time || null,
+      scheduled_check_out_time: scheduledService?.check_out_time || null,
+    },
+    scheduledService: scheduledService || {},
+    structured,
+    serviceData,
+    serviceLine,
+    serviceType: service.service_type,
+    workflowEvents,
+    customerInteraction: service.customer_interaction || structured.customerInteraction || structured.customer_interaction || null,
+    config: visitTimelineConfig,
   });
   const timingOptions = { structured, serviceData, workflowEvents };
   const arrivalTime = resolveReportArrivalTime(service, scheduledService, timingOptions);
@@ -1531,6 +1568,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     serviceCoverage,
+    visitTimeline,
     serviceLocations,
     workflowEvents,
     zones: publicZones,
@@ -1578,6 +1616,7 @@ module.exports = {
   coverageServiceType,
   serviceCoverageLocations,
   buildWorkflowEvents,
+  buildVisitTimeline,
   firstValidTimestamp,
   publicTimingFields,
   resolveReportArrivalTime,

@@ -12,6 +12,11 @@ const {
   SERVICE_COVERAGE_CONFIG_KEY,
   mergeServiceCoverageConfig,
 } = require('../services/service-report/service-coverage');
+const {
+  DEFAULT_VISIT_TIMELINE_CONFIG,
+  VISIT_TIMELINE_CONFIG_KEY,
+  mergeVisitTimelineConfig,
+} = require('../services/service-report/visit-timeline');
 
 const GBP_OAUTH_STATE_KEY = 'gbp.oauth_state';
 const GBP_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -210,6 +215,106 @@ router.post('/service-coverage/reset', adminAuthenticate, requireAdmin, async (r
       resource_type: 'system_setting',
       metadata: {
         key: SERVICE_COVERAGE_CONFIG_KEY,
+        beforeJson: beforeConfig,
+        afterJson: afterConfig,
+      },
+      ip_address: req.ip,
+      user_agent: req.get('user-agent'),
+    });
+
+    res.json({ success: true, config: afterConfig });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// Service Reports — Visit Timeline customer report configuration
+// =========================================================================
+
+router.get('/visit-timeline', adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const row = await db('system_settings').where({ key: VISIT_TIMELINE_CONFIG_KEY }).first();
+    res.json({
+      config: mergeVisitTimelineConfig(row?.value),
+      defaults: DEFAULT_VISIT_TIMELINE_CONFIG,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put('/visit-timeline', adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const beforeRow = await db('system_settings').where({ key: VISIT_TIMELINE_CONFIG_KEY }).first();
+    const beforeConfig = mergeVisitTimelineConfig(beforeRow?.value);
+    const afterConfig = mergeVisitTimelineConfig(req.body?.config || req.body || {});
+
+    await db('system_settings')
+      .insert({
+        key: VISIT_TIMELINE_CONFIG_KEY,
+        value: JSON.stringify(afterConfig),
+        category: 'service_reports',
+        description: 'Customer-facing Visit Timeline report card configuration',
+        updated_at: new Date(),
+      })
+      .onConflict('key')
+      .merge({
+        value: JSON.stringify(afterConfig),
+        category: 'service_reports',
+        description: 'Customer-facing Visit Timeline report card configuration',
+        updated_at: new Date(),
+      });
+
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: req.technicianId,
+      action: 'service_reports.visit_timeline.update',
+      resource_type: 'system_setting',
+      metadata: {
+        key: VISIT_TIMELINE_CONFIG_KEY,
+        beforeJson: beforeConfig,
+        afterJson: afterConfig,
+      },
+      ip_address: req.ip,
+      user_agent: req.get('user-agent'),
+    });
+
+    res.json({ success: true, config: afterConfig });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/visit-timeline/reset', adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const beforeRow = await db('system_settings').where({ key: VISIT_TIMELINE_CONFIG_KEY }).first();
+    const beforeConfig = mergeVisitTimelineConfig(beforeRow?.value);
+    const afterConfig = mergeVisitTimelineConfig(DEFAULT_VISIT_TIMELINE_CONFIG);
+
+    await db('system_settings')
+      .insert({
+        key: VISIT_TIMELINE_CONFIG_KEY,
+        value: JSON.stringify(afterConfig),
+        category: 'service_reports',
+        description: 'Customer-facing Visit Timeline report card configuration',
+        updated_at: new Date(),
+      })
+      .onConflict('key')
+      .merge({
+        value: JSON.stringify(afterConfig),
+        category: 'service_reports',
+        description: 'Customer-facing Visit Timeline report card configuration',
+        updated_at: new Date(),
+      });
+
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: req.technicianId,
+      action: 'service_reports.visit_timeline.reset',
+      resource_type: 'system_setting',
+      metadata: {
+        key: VISIT_TIMELINE_CONFIG_KEY,
         beforeJson: beforeConfig,
         afterJson: afterConfig,
       },

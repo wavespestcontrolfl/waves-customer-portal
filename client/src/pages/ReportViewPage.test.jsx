@@ -9,6 +9,7 @@ import {
   getReportArrivalTime,
   getReportCompletionTime,
   normalizeServiceCoverage,
+  normalizeVisitTimeline,
   quickNavigationLinks,
   readinessStatusBadge,
   reviewRequestCopy,
@@ -60,7 +61,9 @@ describe('ReportViewPage report chrome helpers', () => {
   it('omits product quick navigation when no products were applied', () => {
     const labels = quickNavigationLinks({ hasProducts: false }).map(([, label]) => label);
     expect(labels).not.toContain('Products Applied');
+    expect(labels).toContain('Visit Timeline');
     expect(labels).toContain('Service Coverage');
+    expect(labels).not.toContain('Visit Progress');
     expect(labels).not.toContain('Areas Serviced');
     expect(labels).not.toContain('Coverage Map');
   });
@@ -71,14 +74,15 @@ describe('ReportViewPage report chrome helpers', () => {
 
   it('keeps untracked customer interaction out of the timeline display', () => {
     const events = timelineEventsForDisplay([
-      { type: 'arrived_on_site', label: 'Arrived' },
+      { type: 'arrived_on_site', label: 'Arrived', timestamp: '2026-05-17T18:35:00.000Z' },
       { type: 'customer_interaction', label: 'Customer interaction' },
-      { type: 'service_completed', label: 'Completed' },
+      { type: 'service_completed', label: 'Completed', timestamp: '2026-05-17T19:05:00.000Z' },
+      { type: 'report_published', label: 'Report published' },
     ]);
-    expect(events.map((event) => event.type)).toEqual(['arrived_on_site', 'service_completed']);
+    expect(events.map((event) => event.type)).toEqual(['technician_on_site', 'service_completed']);
   });
 
-  it('routes public timing fields into the Visit Progress event list', () => {
+  it('routes public timing fields into the Visit Timeline event list', () => {
     const events = timelineEventsWithReportTiming(
       [{ type: 'report_published', timestamp: '2026-05-19T18:35:00.000Z' }],
       'tech_home_spoke_with_them',
@@ -93,13 +97,11 @@ describe('ReportViewPage report chrome helpers', () => {
     );
 
     expect(events.map((event) => event.type)).toEqual([
-      'arrived_on_site',
-      'customer_interaction',
+      'technician_on_site',
       'service_completed',
-      'report_published',
     ]);
     expect(events.find((event) => event.type === 'service_completed').customerVisibleDescription)
-      .toBe('Pest control service areas were marked complete.');
+      .toBe('Your technician completed the pest control service and finalized the report.');
   });
 
   it('uses distinct review request copy for top and bottom placements', () => {
@@ -176,6 +178,159 @@ describe('ReportViewPage service coverage helper', () => {
     });
 
     expect(coverage.enabled).toBe(false);
+  });
+});
+
+describe('ReportViewPage visit timeline helpers', () => {
+  it('always includes service_completed for a completed report and sources it from the report', () => {
+    const timeline = normalizeVisitTimeline({
+      workflowEvents: [
+        { type: 'technician_en_route', timestamp: '2026-05-17T16:44:00.000Z' },
+        { type: 'arrived_on_site', timestamp: '2026-05-17T18:35:00.000Z' },
+      ],
+      visitTiming: {},
+      timingSource: {
+        visitOutcome: 'completed',
+        serviceLine: 'pest',
+        serviceRecord: {
+          completed_at: '2026-05-17T19:05:00.000Z',
+        },
+      },
+    });
+
+    expect(timeline.title).toBe('Visit Timeline');
+    expect(timeline.events.map((event) => event.type)).toEqual([
+      'technician_en_route',
+      'technician_on_site',
+      'service_completed',
+    ]);
+    expect(timeline.events.find((event) => event.type === 'service_completed')).toMatchObject({
+      label: 'Service completed',
+      occurredAt: '2026-05-17T19:05:00.000Z',
+      source: 'service_report',
+      customerDescription: 'Your technician completed the pest control service and finalized the report.',
+    });
+  });
+
+  it('keeps same-time on-site and service-completed events without a zero-minute duration', () => {
+    const timestamp = '2026-05-17T18:35:00.000Z';
+    const timeline = normalizeVisitTimeline({
+      visitTiming: { arrivedAt: timestamp, exitedAt: timestamp },
+      timingSource: {
+        visitOutcome: 'completed',
+        serviceLine: 'pest',
+        serviceRecord: {
+          arrived_at: timestamp,
+          completed_at: timestamp,
+        },
+      },
+      config: { showDuration: true },
+    });
+
+    expect(timeline.events.map((event) => [event.type, event.displayTime])).toEqual([
+      ['technician_on_site', '2:35 PM'],
+      ['service_completed', '2:35 PM'],
+    ]);
+    expect(timeline.durationMinutes).toBeNull();
+    expect(timeline.timingNote).toBe('Exact on-site duration was not available for this visit.');
+  });
+
+  it('shows customer contact as a detail and hides report published by default', () => {
+    const timeline = normalizeVisitTimeline({
+      workflowEvents: [
+        { type: 'arrived_on_site', timestamp: '2026-05-17T18:35:00.000Z' },
+        { type: 'report_published', timestamp: '2026-05-17T18:35:00.000Z' },
+      ],
+      customerInteraction: 'tech_home_spoke_with_them',
+      timingSource: {
+        visitOutcome: 'completed',
+        serviceLine: 'pest',
+        serviceRecord: {
+          completed_at: '2026-05-17T18:35:00.000Z',
+        },
+      },
+    });
+
+    expect(timeline.events.map((event) => event.type)).toEqual(['technician_on_site', 'service_completed']);
+    expect(timeline.details).toEqual([
+      expect.objectContaining({
+        type: 'customer_contact',
+        label: 'Customer contact',
+        text: 'The technician spoke with someone at the home.',
+        showAsTimelineEvent: false,
+      }),
+    ]);
+    expect(timeline.details.some((detail) => detail.type === 'report_generated')).toBe(false);
+  });
+
+  it('can show report generated as a secondary detail when enabled', () => {
+    const timeline = normalizeVisitTimeline({
+      workflowEvents: [
+        { type: 'service_completed', timestamp: '2026-05-17T18:35:00.000Z' },
+        { type: 'report_published', timestamp: '2026-05-17T18:36:00.000Z' },
+      ],
+      timingSource: { serviceLine: 'pest' },
+      config: { showReportGenerated: true },
+    });
+
+    expect(timeline.events.map((event) => event.type)).toEqual(['service_completed']);
+    expect(timeline.details.find((detail) => detail.type === 'report_generated')).toMatchObject({
+      label: 'Report generated',
+      text: 'Report generated May 17, 2026 at 2:36 PM.',
+      showAsTimelineEvent: false,
+    });
+  });
+
+  it.each([
+    ['pest', 'Your technician completed the pest control service and finalized the report.'],
+    ['lawn', 'Your technician completed the lawn service and finalized the report.'],
+    ['termite', 'Your technician completed the termite service and finalized the report.'],
+    ['tree_shrub', 'Your technician completed the tree and shrub service and finalized the report.'],
+    ['mosquito', 'Your technician completed the mosquito service and finalized the report.'],
+    ['rodent', 'Your technician completed the rodent service and finalized the report.'],
+    ['commercial', 'Your technician completed the service and finalized the report.'],
+  ])('uses service-line-specific completed copy for %s', (serviceLine, expectedCopy) => {
+    const timeline = normalizeVisitTimeline({
+      timingSource: {
+        visitOutcome: 'completed',
+        serviceLine,
+        serviceRecord: { completed_at: '2026-05-17T18:35:00.000Z' },
+      },
+    });
+
+    expect(timeline.events.find((event) => event.type === 'service_completed').customerDescription)
+      .toBe(expectedCopy);
+  });
+
+  it('does not falsely show service_completed for an incomplete report', () => {
+    const timeline = normalizeVisitTimeline({
+      workflowEvents: [{ type: 'arrived_on_site', timestamp: '2026-05-17T18:35:00.000Z' }],
+      timingSource: {
+        status: 'scheduled',
+        serviceLine: 'pest',
+      },
+    });
+
+    expect(timeline.events.map((event) => event.type)).toEqual(['technician_on_site']);
+  });
+
+  it('shows service_completed without a misleading timestamp when completedAt is missing', () => {
+    const timeline = normalizeVisitTimeline({
+      timingSource: {
+        status: 'completed',
+        serviceLine: 'pest',
+      },
+    });
+
+    expect(timeline.events).toEqual([
+      expect.objectContaining({
+        type: 'service_completed',
+        label: 'Service completed',
+        occurredAt: null,
+        displayTime: null,
+        customerDescription: 'The service was marked complete.',
+      }),
+    ]);
   });
 });
 

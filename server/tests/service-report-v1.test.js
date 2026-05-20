@@ -7,6 +7,7 @@ const { detectServiceLine } = require('../services/service-report/service-line-c
 const {
   buildReportV1Data,
   buildWorkflowEvents,
+  buildVisitTimeline,
   locationAreaLabels,
   methodFromProduct,
   minutesFromElapsed,
@@ -941,6 +942,15 @@ describe('service report v1', () => {
       'service_completed',
       'report_published',
     ]);
+    expect(data.visitTimeline.events.map((event) => event.type)).toEqual([
+      'technician_en_route',
+      'technician_on_site',
+      'service_completed',
+    ]);
+    expect(data.visitTimeline.events.find((event) => event.type === 'service_completed')).toMatchObject({
+      source: 'service_report',
+      label: 'Service completed',
+    });
   });
 
   test('workflow wall-clock timestamps are interpreted as Eastern time', async () => {
@@ -1019,6 +1029,65 @@ describe('service report v1', () => {
       ['arrived_on_site', '2026-05-15T14:05:00.000Z'],
       ['service_completed', '2026-05-15T14:46:00.000Z'],
     ]);
+  });
+
+  test('visit timeline keeps Service completed visible when on-site and completion times match', () => {
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        service_line: 'pest',
+        en_route_at: '2026-05-17T16:44:00.000Z',
+        arrived_at: '2026-05-17T18:35:00.000Z',
+        completed_at: '2026-05-17T18:35:00.000Z',
+        report_generated_at: '2026-05-17T18:35:00.000Z',
+      },
+      serviceLine: 'pest',
+      customerInteraction: 'tech_home_spoke_with_them',
+    });
+
+    expect(timeline.events.map((event) => [event.type, event.displayTime, event.source])).toEqual([
+      ['technician_en_route', '12:44 PM', 'bouncie'],
+      ['technician_on_site', '2:35 PM', 'bouncie'],
+      ['service_completed', '2:35 PM', 'service_report'],
+    ]);
+    expect(timeline.events.find((event) => event.type === 'service_completed').customerDescription)
+      .toBe('Your technician completed the pest control service and finalized the report.');
+    expect(timeline.durationMinutes).toBeNull();
+    expect(timeline.timingNote).toBe('Exact on-site duration was not available for this visit.');
+    expect(timeline.details).toEqual([
+      expect.objectContaining({
+        type: 'customer_contact',
+        text: 'The technician spoke with someone at the home.',
+        showAsTimelineEvent: false,
+      }),
+    ]);
+  });
+
+  test('visit timeline adds Service completed for completed reports even when Bouncie has no completion event', () => {
+    const timeline = buildVisitTimeline({
+      service: {
+        status: 'completed',
+        service_line: 'lawn',
+        arrived_at: '2026-05-17T18:35:00.000Z',
+        completed_at: '2026-05-17T19:05:00.000Z',
+      },
+      serviceLine: 'lawn',
+      workflowEvents: [
+        { type: 'technician_en_route', timestamp: '2026-05-17T16:44:00.000Z' },
+        { type: 'arrived_on_site', timestamp: '2026-05-17T18:35:00.000Z' },
+      ],
+    });
+
+    expect(timeline.events.map((event) => event.type)).toEqual([
+      'technician_en_route',
+      'technician_on_site',
+      'service_completed',
+    ]);
+    expect(timeline.events.find((event) => event.type === 'service_completed')).toMatchObject({
+      occurredAt: '2026-05-17T19:05:00.000Z',
+      source: 'service_report',
+      customerDescription: 'Your technician completed the lawn service and finalized the report.',
+    });
   });
 
   test('v1 data exposes public report asset endpoints', async () => {
@@ -1132,7 +1201,13 @@ describe('service report v1', () => {
       arrived_at: '2026-05-19T13:40:00.000Z',
       completed_at: '2026-05-19T14:29:00.000Z',
     });
-    const serialized = JSON.stringify(data);
+    expect(data.visitTimeline.events.find((event) => event.type === 'technician_on_site')).toMatchObject({
+      source: 'bouncie',
+    });
+    const serialized = JSON.stringify({
+      ...data,
+      visitTimeline: undefined,
+    });
     expect(serialized).not.toMatch(/bouncie|gps|geofence|auto-arrival|arrival_source|distanceMeters/i);
   });
 

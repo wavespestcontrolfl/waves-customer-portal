@@ -1197,12 +1197,8 @@ function useReadinessNow(context, mode) {
 
 function ServiceStatusCard({ data, mode }) {
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
-  const arrivalTime = getReportArrivalTime(data);
   const completionTime = getReportCompletionTime(data);
-  const arrivalDisplayTime = formatTimelineTime(arrivalTime);
   const completionDisplayTime = formatTimelineTime(completionTime);
-  const timeOnSiteMinutes = getMinutesBetween(arrivalTime, completionTime);
-  const timeOnSiteDisplay = formatDurationMinutes(timeOnSiteMinutes);
   const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
   const readinessBadge = readinessStatusBadge(data.dynamicContext?.reentry, mode, nowMs);
   const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
@@ -1242,35 +1238,6 @@ function ServiceStatusCard({ data, mode }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
         />
-      </div>
-      <div className="service-status-timeline" aria-label="Service Timeline">
-        <div className="section-eyebrow">Service Timeline</div>
-        <div className="status-timeline-list">
-          <div className="status-timeline-item">
-            <span className="status-timeline-marker status-timeline-marker-complete" aria-hidden="true">
-              <CheckCircle2 size={15} strokeWidth={2.3} />
-            </span>
-            <div className="status-timeline-copy">
-              <div className="status-timeline-title">Technician arrived</div>
-              <div className="status-timeline-time">{arrivalDisplayTime || 'Arrival time unavailable'}</div>
-            </div>
-          </div>
-          <div className="status-timeline-item">
-            <span className={`status-timeline-marker ${completionDisplayTime ? 'status-timeline-marker-complete' : 'status-timeline-marker-pending'}`} aria-hidden="true">
-              {completionDisplayTime ? <CheckCircle2 size={15} strokeWidth={2.3} /> : <Clock size={15} strokeWidth={2.3} />}
-            </span>
-            <div className="status-timeline-copy">
-              <div className="status-timeline-title">Service completed</div>
-              <div className="status-timeline-time">{completionDisplayTime || 'In progress'}</div>
-            </div>
-          </div>
-        </div>
-        {timeOnSiteDisplay && (
-          <div className="status-timeline-summary">
-            <div className="status-timeline-summary-label">Time on site</div>
-            <div className="status-timeline-summary-value">{timeOnSiteDisplay}</div>
-          </div>
-        )}
       </div>
     </section>
   );
@@ -1445,7 +1412,7 @@ function ReportAskBox({ mode, token, serviceLine }) {
 
 export function quickNavigationLinks({ hasProducts = true } = {}) {
   return [
-    ['#service-timeline', 'Visit Progress'],
+    ['#service-timeline', 'Visit Timeline'],
     ['#service-coverage', 'Service Coverage'],
     hasProducts ? ['#products-applied', 'Products Applied'] : null,
     ['#what-to-expect', 'What to Expect'],
@@ -2800,7 +2767,7 @@ function ServiceCoverageCard({
 
 function workflowIconForType(type) {
   if (type === 'technician_en_route') return Route;
-  if (type === 'arrived_on_site') return MapPin;
+  if (type === 'technician_on_site' || type === 'arrived_on_site') return MapPin;
   if (type === 'customer_interaction') return CheckCircle2;
   if (type === 'inspection_started') return Eye;
   if (type === 'service_completed') return CheckCircle2;
@@ -2808,13 +2775,155 @@ function workflowIconForType(type) {
   return Clock;
 }
 
+const DEFAULT_VISIT_TIMELINE_CONFIG = {
+  enabled: true,
+  showOnCustomerReports: true,
+  title: 'Visit Timeline',
+  showTechnicianEnRoute: true,
+  showTechnicianOnSite: true,
+  showServiceCompleted: true,
+  serviceCompletedRequiredWhenReportCompleted: true,
+  showCustomerContact: true,
+  showCustomerContactAsTimelineEvent: false,
+  showReportGenerated: false,
+  showExactTimes: true,
+  showDuration: false,
+  minimumDurationMinutes: 5,
+  showTimingNoteWhenDurationUnavailable: true,
+  showDataSourceNote: true,
+  dataSourceNote: 'Times are based on available technician status updates, vehicle data, and report completion records.',
+};
+
+const PRIMARY_VISIT_TIMELINE_TYPES = new Set([
+  'technician_en_route',
+  'technician_on_site',
+  'arrived_on_site',
+  'service_completed',
+]);
+
+function normalizeVisitTimelineServiceLine(serviceLine, serviceType) {
+  const text = `${serviceLine || ''} ${serviceType || ''}`.toLowerCase();
+  if (text.includes('lawn')) return 'lawn';
+  if (text.includes('termite')) return 'termite';
+  if (text.includes('tree') || text.includes('shrub') || text.includes('palm')) return 'tree_shrub';
+  if (text.includes('mosquito')) return 'mosquito';
+  if (text.includes('rodent')) return 'rodent';
+  if (text.includes('commercial')) return 'commercial';
+  if (text.includes('pest') || text.includes('quarterly') || text.includes('perimeter')) return 'pest';
+  return 'default';
+}
+
+function normalizeVisitTimelineEventType(type) {
+  const key = String(type || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (key === 'arrived_on_site' || key === 'technician_arrived') return 'technician_on_site';
+  if (key === 'visit_completed') return 'service_completed';
+  return key;
+}
+
+function serviceCompletedDescription(serviceLine) {
+  const descriptions = {
+    pest: 'Your technician completed the pest control service and finalized the report.',
+    lawn: 'Your technician completed the lawn service and finalized the report.',
+    termite: 'Your technician completed the termite service and finalized the report.',
+    tree_shrub: 'Your technician completed the tree and shrub service and finalized the report.',
+    mosquito: 'Your technician completed the mosquito service and finalized the report.',
+    rodent: 'Your technician completed the rodent service and finalized the report.',
+    default: 'Your technician completed the service and finalized the report.',
+  };
+  return descriptions[serviceLine] || descriptions.default;
+}
+
+function timelineDefaultLabel(type) {
+  if (type === 'technician_en_route') return 'Technician en route';
+  if (type === 'technician_on_site') return 'Technician on site';
+  if (type === 'service_completed') return 'Service completed';
+  return formatEnumLabel(type);
+}
+
+function timelineDefaultDescription(type, serviceLine, occurredAt) {
+  if (type === 'technician_en_route') return 'Your technician was on the way to the property.';
+  if (type === 'technician_on_site') return 'Your technician was recorded at the property.';
+  if (type === 'service_completed') {
+    return occurredAt ? serviceCompletedDescription(serviceLine) : 'The service was marked complete.';
+  }
+  return '';
+}
+
+function visitTimelineSortOrder(type) {
+  if (type === 'technician_en_route') return 1;
+  if (type === 'technician_on_site') return 2;
+  if (type === 'service_completed') return 3;
+  return 99;
+}
+
+function normalizeVisitTimelineConfig(config = {}) {
+  const merged = { ...DEFAULT_VISIT_TIMELINE_CONFIG, ...(config || {}) };
+  merged.enabled = merged.enabled !== false;
+  merged.showOnCustomerReports = merged.showOnCustomerReports !== false;
+  merged.showTechnicianEnRoute = merged.showTechnicianEnRoute !== false;
+  merged.showTechnicianOnSite = merged.showTechnicianOnSite !== false;
+  merged.serviceCompletedRequiredWhenReportCompleted = merged.serviceCompletedRequiredWhenReportCompleted !== false;
+  merged.showServiceCompleted = merged.serviceCompletedRequiredWhenReportCompleted ? true : merged.showServiceCompleted !== false;
+  merged.showCustomerContact = merged.showCustomerContact !== false;
+  merged.showCustomerContactAsTimelineEvent = merged.showCustomerContactAsTimelineEvent === true;
+  merged.showReportGenerated = merged.showReportGenerated === true;
+  merged.showExactTimes = merged.showExactTimes !== false;
+  merged.showDuration = merged.showDuration === true;
+  merged.minimumDurationMinutes = Math.max(1, Number.parseInt(merged.minimumDurationMinutes, 10) || 5);
+  merged.showTimingNoteWhenDurationUnavailable = merged.showTimingNoteWhenDurationUnavailable !== false;
+  merged.showDataSourceNote = merged.showDataSourceNote !== false;
+  merged.title = String(merged.title || 'Visit Timeline').trim() || 'Visit Timeline';
+  merged.dataSourceNote = String(merged.dataSourceNote || DEFAULT_VISIT_TIMELINE_CONFIG.dataSourceNote).trim()
+    || DEFAULT_VISIT_TIMELINE_CONFIG.dataSourceNote;
+  return merged;
+}
+
+function normalizeVisitTimelineEvent(event = {}, index = 0, serviceLine = 'default', config = DEFAULT_VISIT_TIMELINE_CONFIG) {
+  const type = normalizeVisitTimelineEventType(event.type);
+  if (!PRIMARY_VISIT_TIMELINE_TYPES.has(type)) return null;
+  const occurredAt = firstValidTimelineValue(
+    event.occurredAt,
+    event.occurred_at,
+    event.timestamp,
+    event.time,
+  );
+  if (!occurredAt && type !== 'service_completed') return null;
+  const label = String(event.label || timelineDefaultLabel(type)).trim();
+  const customerDescription = String(
+    event.customerDescription
+    || event.customerVisibleDescription
+    || event.customer_visible_description
+    || timelineDefaultDescription(type, serviceLine, occurredAt)
+    || '',
+  ).trim();
+  const source = event.source || (type === 'service_completed' ? 'service_report' : 'bouncie');
+  const sortOrder = Number(event.sortOrder || event.sort_order || visitTimelineSortOrder(type) || index + 1);
+  return {
+    ...event,
+    id: event.id || `${type}-${index + 1}`,
+    type,
+    label,
+    customerDescription,
+    customerVisibleDescription: customerDescription,
+    occurredAt,
+    timestamp: occurredAt,
+    displayTime: config.showExactTimes !== false ? (event.displayTime || event.display_time || formatClockTime(occurredAt) || null) : null,
+    source,
+    confidence: event.confidence || (occurredAt ? 'high' : 'medium'),
+    status: event.status || 'completed',
+    sortOrder,
+  };
+}
+
 export function timelineEventsForDisplay(workflowEvents = []) {
   return (Array.isArray(workflowEvents) ? workflowEvents : [])
-    .filter((event) => event?.type !== 'customer_interaction');
+    .map((event, index) => normalizeVisitTimelineEvent(event, index))
+    .filter(Boolean);
 }
 
 const TIMELINE_EVENT_ORDER = [
   'technician_en_route',
+  'technician_on_site',
   'arrived_on_site',
   'customer_interaction',
   'inspection_started',
@@ -2833,6 +2942,10 @@ function sortTimelineEvents(events = []) {
   return [...events]
     .map((event, index) => ({ event, index }))
     .sort((a, b) => {
+      const orderDiff = (a.event?.sortOrder || visitTimelineSortOrder(a.event?.type))
+        - (b.event?.sortOrder || visitTimelineSortOrder(b.event?.type));
+      if (orderDiff !== 0) return orderDiff;
+
       const aTime = Date.parse(a.event?.timestamp);
       const bTime = Date.parse(b.event?.timestamp);
       const aHasTime = Number.isFinite(aTime);
@@ -2841,8 +2954,8 @@ function sortTimelineEvents(events = []) {
       if (aHasTime && bHasTime && aTime !== bTime) return aTime - bTime;
       if (aHasTime !== bHasTime) return aHasTime ? -1 : 1;
 
-      const orderDiff = timelineEventOrder(a.event?.type) - timelineEventOrder(b.event?.type);
-      if (orderDiff !== 0) return orderDiff;
+      const legacyOrderDiff = timelineEventOrder(a.event?.type) - timelineEventOrder(b.event?.type);
+      if (legacyOrderDiff !== 0) return legacyOrderDiff;
 
       return a.index - b.index;
     })
@@ -2879,7 +2992,11 @@ function timelineAnchorTimes(timingSource = {}, visitTiming = {}) {
     visitTiming?.arrived_at,
     sourceTiming?.arrivedAt,
     sourceTiming?.arrived_at,
+    sourceTiming?.onSiteAt,
+    sourceTiming?.on_site_at,
     serviceRecord?.arrived_at,
+    serviceRecord?.actual_start_time,
+    serviceRecord?.check_in_time,
     serviceRecord?.started_at,
     scheduledService?.arrivedAt,
     scheduledService?.arrived_at,
@@ -2899,6 +3016,8 @@ function timelineAnchorTimes(timingSource = {}, visitTiming = {}) {
     sourceTiming?.completedAt,
     sourceTiming?.completed_at,
     serviceRecord?.completed_at,
+    serviceRecord?.actual_end_time,
+    serviceRecord?.check_out_time,
     serviceRecord?.ended_at,
     scheduledService?.completedAt,
     scheduledService?.completed_at,
@@ -2920,93 +3039,229 @@ function timelineAnchorTimes(timingSource = {}, visitTiming = {}) {
   };
 }
 
-function timelineEventsWithCustomerInteraction(workflowEvents = [], customerInteraction, visitTiming = {}) {
-  const events = timelineEventsForDisplay(workflowEvents);
-  const interaction = customerInteractionCopy(customerInteraction);
-  if (!interaction) return events;
-  const arrived = events.find((event) => event.type === 'arrived_on_site');
-  const completed = events.find((event) => event.type === 'service_completed');
-  const timestamp = arrived?.timestamp || visitTiming.arrivedAt || completed?.timestamp || visitTiming.exitedAt || null;
-  const interactionEvent = {
-    id: 'customer_interaction',
-    type: 'customer_interaction',
-    label: 'Customer interaction',
-    timestamp,
-    status: 'completed',
-    customerVisibleDescription: interaction,
-  };
-  const insertAfter = events.findIndex((event) => event.type === 'arrived_on_site');
-  if (insertAfter >= 0) {
-    events.splice(insertAfter + 1, 0, interactionEvent);
-    return events;
-  }
-  const beforeCompleted = events.findIndex((event) => event.type === 'service_completed');
-  if (beforeCompleted >= 0) {
-    events.splice(beforeCompleted, 0, interactionEvent);
-    return events;
-  }
-  return [...events, interactionEvent];
+function firstWorkflowEventTimestamp(workflowEvents = [], type) {
+  const event = (Array.isArray(workflowEvents) ? workflowEvents : []).find((candidate) => (
+    normalizeVisitTimelineEventType(candidate?.type) === type
+    && candidate?.status !== 'pending'
+  ));
+  return firstValidTimelineValue(event?.occurredAt, event?.timestamp, event?.time);
 }
 
-export function timelineEventsWithReportTiming(workflowEvents = [], customerInteraction, visitTiming = {}, timingSource = {}) {
-  const events = timelineEventsForDisplay(workflowEvents).filter(Boolean);
-  const { arrivedAt, completedAt } = timelineAnchorTimes(timingSource, visitTiming);
-  const nextEvents = [...events];
+function completedTimelineReport(timingSource = {}, workflowEvents = []) {
+  const status = String(
+    timingSource?.status
+    || timingSource?.visitOutcome
+    || timingSource?.visitStatus
+    || timingSource?.serviceRecord?.status
+    || timingSource?.service_record?.status
+    || '',
+  ).toLowerCase();
+  if (['completed', 'complete', 'finalized', 'closed'].includes(status)) return true;
+  if (firstWorkflowEventTimestamp(workflowEvents, 'service_completed')) return true;
+  return Boolean(getReportCompletionTime(timingSource));
+}
 
-  if (arrivedAt && !nextEvents.some((event) => event.type === 'arrived_on_site')) {
+function reportGeneratedDetailText(timestamp) {
+  const dateLabel = formatDate(timestamp);
+  const timeLabel = formatClockTime(timestamp);
+  if (dateLabel && timeLabel) return `Report generated ${dateLabel.replace(/^[A-Za-z]+,\s*/, '')} at ${timeLabel}.`;
+  return 'Report generated after service completion.';
+}
+
+export function normalizeVisitTimeline({
+  visitTimeline,
+  workflowEvents = [],
+  customerInteraction,
+  visitTiming = {},
+  timingSource = {},
+  serviceType,
+  serviceLine,
+  config = {},
+} = {}) {
+  const source = visitTimeline && typeof visitTimeline === 'object' ? visitTimeline : null;
+  const resolvedConfig = normalizeVisitTimelineConfig({
+    ...(source?.config || {}),
+    ...(config || {}),
+  });
+  const normalizedServiceLine = normalizeVisitTimelineServiceLine(
+    source?.serviceLine || serviceLine || timingSource?.serviceLine || timingSource?.coverageServiceType,
+    serviceType || timingSource?.serviceType,
+  );
+  const { arrivedAt, completedAt } = timelineAnchorTimes(timingSource, visitTiming);
+  const reportCompleted = source?.status === 'completed' || completedTimelineReport(timingSource, workflowEvents);
+  const rawSourceEvents = Array.isArray(source?.events) ? source.events : workflowEvents;
+  const nextEvents = (Array.isArray(rawSourceEvents) ? rawSourceEvents : [])
+    .map((event, index) => normalizeVisitTimelineEvent(event, index, normalizedServiceLine, resolvedConfig))
+    .filter(Boolean);
+
+  const enRouteAt = firstValidTimelineValue(
+    timingSource?.en_route_at,
+    timingSource?.enRouteAt,
+    timingSource?.serviceRecord?.en_route_at,
+    timingSource?.scheduledService?.en_route_at,
+    firstWorkflowEventTimestamp(workflowEvents, 'technician_en_route'),
+  );
+
+  if (resolvedConfig.showTechnicianEnRoute && enRouteAt && !nextEvents.some((event) => event.type === 'technician_en_route')) {
     nextEvents.push({
-      id: 'arrived_on_site-derived',
-      type: 'arrived_on_site',
-      label: 'Technician arrived',
-      timestamp: arrivedAt,
+      id: 'technician_en_route-derived',
+      type: 'technician_en_route',
+      label: 'Technician en route',
+      occurredAt: enRouteAt,
+      timestamp: enRouteAt,
+      displayTime: formatClockTime(enRouteAt) || null,
+      source: 'bouncie',
       status: 'completed',
-      customerVisibleDescription: 'Your technician arrived at the property.',
+      customerDescription: 'Your technician was on the way to the property.',
+      customerVisibleDescription: 'Your technician was on the way to the property.',
+      sortOrder: 1,
     });
   }
 
-  if (completedAt && !nextEvents.some((event) => event.type === 'service_completed')) {
-    const serviceType = normalizeCoverageServiceType(
-      timingSource?.coverageServiceType || timingSource?.serviceLine || timingSource?.serviceType,
-    );
+  if (resolvedConfig.showTechnicianOnSite && arrivedAt && !nextEvents.some((event) => event.type === 'technician_on_site')) {
+    nextEvents.push({
+      id: 'technician_on_site-derived',
+      type: 'technician_on_site',
+      label: 'Technician on site',
+      occurredAt: arrivedAt,
+      timestamp: arrivedAt,
+      displayTime: formatClockTime(arrivedAt) || null,
+      source: 'bouncie',
+      status: 'completed',
+      customerDescription: 'Your technician was recorded at the property.',
+      customerVisibleDescription: 'Your technician was recorded at the property.',
+      sortOrder: 2,
+    });
+  }
+
+  if (resolvedConfig.showServiceCompleted && reportCompleted && !nextEvents.some((event) => event.type === 'service_completed')) {
     nextEvents.push({
       id: 'service_completed-derived',
       type: 'service_completed',
       label: 'Service completed',
-      timestamp: completedAt,
+      occurredAt: completedAt || null,
+      timestamp: completedAt || null,
+      displayTime: formatClockTime(completedAt) || null,
+      source: 'service_report',
+      confidence: completedAt ? 'high' : 'medium',
       status: 'completed',
-      customerVisibleDescription: serviceType === 'pest_control'
-        ? 'Pest control service areas were marked complete.'
-        : 'Service areas were marked complete.',
+      customerDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine) : 'The service was marked complete.',
+      customerVisibleDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine) : 'The service was marked complete.',
+      sortOrder: 3,
     });
   }
 
-  return sortTimelineEvents(timelineEventsWithCustomerInteraction(
-    nextEvents,
-    customerInteraction,
-    { ...visitTiming, arrivedAt, exitedAt: completedAt },
-  ));
-}
+  const events = sortTimelineEvents(nextEvents)
+    .filter((event) => {
+      if (event.type === 'technician_en_route') return resolvedConfig.showTechnicianEnRoute;
+      if (event.type === 'technician_on_site') return resolvedConfig.showTechnicianOnSite;
+      if (event.type === 'service_completed') return resolvedConfig.showServiceCompleted;
+      return false;
+    });
 
-function hasDuplicateDisplayedEventTimes(events = []) {
-  const counts = new Map();
-  for (const event of events) {
-    const label = formatClockTime(event.timestamp);
-    if (!label) continue;
-    counts.set(label, (counts.get(label) || 0) + 1);
+  const sourceDetails = Array.isArray(source?.details) ? source.details : [];
+  const interactionText = customerInteractionCopy(customerInteraction || timingSource?.customerInteraction);
+  const details = sourceDetails
+    .filter((detail) => (
+      detail
+      && detail.type !== 'report_generated'
+      && (detail.type !== 'customer_contact' || resolvedConfig.showCustomerContact)
+    ))
+    .map((detail, index) => ({
+      id: detail.id || `detail-${index + 1}`,
+      type: detail.type || 'detail',
+      label: detail.label || formatEnumLabel(detail.type || 'detail'),
+      text: detail.text || detail.customerDescription || detail.customerVisibleDescription || '',
+      occurredAt: firstValidTimelineValue(detail.occurredAt, detail.timestamp),
+      displayTime: detail.displayTime || formatClockTime(detail.occurredAt || detail.timestamp) || null,
+      showAsTimelineEvent: detail.showAsTimelineEvent === true,
+    }))
+    .filter((detail) => detail.text);
+  if (resolvedConfig.showCustomerContact && interactionText && !details.some((detail) => detail.type === 'customer_contact')) {
+    details.push({
+      id: 'customer_contact',
+      type: 'customer_contact',
+      label: 'Customer contact',
+      text: interactionText,
+      occurredAt: null,
+      displayTime: null,
+      showAsTimelineEvent: resolvedConfig.showCustomerContactAsTimelineEvent,
+    });
   }
-  return Array.from(counts.values()).some((count) => count > 1);
+
+  const reportGeneratedAt = firstValidTimelineValue(
+    source?.reportGeneratedAt,
+    timingSource?.reportGeneratedAt,
+    timingSource?.report_generated_at,
+    firstWorkflowEventTimestamp(workflowEvents, 'report_published'),
+  );
+  if (resolvedConfig.showReportGenerated && reportGeneratedAt && !details.some((detail) => detail.type === 'report_generated')) {
+    details.push({
+      id: 'report_generated',
+      type: 'report_generated',
+      label: 'Report generated',
+      text: reportGeneratedDetailText(reportGeneratedAt),
+      occurredAt: reportGeneratedAt,
+      displayTime: formatClockTime(reportGeneratedAt) || null,
+      showAsTimelineEvent: false,
+    });
+  }
+
+  const timelineOnSiteAt = arrivedAt || events.find((event) => event.type === 'technician_on_site')?.occurredAt;
+  const timelineCompletedAt = completedAt || events.find((event) => event.type === 'service_completed')?.occurredAt;
+  const rawDurationMinutes = minutesBetween(timelineOnSiteAt, timelineCompletedAt);
+  const reliableDurationMinutes = rawDurationMinutes != null && rawDurationMinutes >= resolvedConfig.minimumDurationMinutes
+    ? rawDurationMinutes
+    : null;
+  const shouldShowTimingNote = resolvedConfig.showTimingNoteWhenDurationUnavailable
+    && reportCompleted
+    && timelineOnSiteAt
+    && (!reliableDurationMinutes || rawDurationMinutes < resolvedConfig.minimumDurationMinutes);
+
+  return {
+    enabled: source?.enabled !== false && resolvedConfig.enabled && resolvedConfig.showOnCustomerReports && events.length > 0,
+    title: source?.title || resolvedConfig.title,
+    intro: source?.intro || "Here’s a simple summary of today’s service visit.",
+    serviceLine: normalizedServiceLine,
+    status: reportCompleted ? 'completed' : 'in_progress',
+    events,
+    details,
+    timingNote: source?.timingNote || (shouldShowTimingNote ? 'Exact on-site duration was not available for this visit.' : null),
+    dataSourceNote: resolvedConfig.showDataSourceNote ? (source?.dataSourceNote || resolvedConfig.dataSourceNote) : null,
+    durationMinutes: resolvedConfig.showDuration
+      ? (positiveNumber(source?.durationMinutes) || reliableDurationMinutes)
+      : null,
+    reportGeneratedAt: reportGeneratedAt || null,
+    config: resolvedConfig,
+  };
 }
 
-function ServiceTimelineSection({ serviceType, workflowEvents, customerInteraction, visitTiming, timingSource, loading = false }) {
-  const events = timelineEventsWithReportTiming(workflowEvents, customerInteraction, visitTiming, timingSource);
-  const { timeOnSiteDisplay } = timelineAnchorTimes(timingSource, visitTiming);
-  const normalizedServiceType = normalizeCoverageServiceType(serviceType);
-  const showSameTimeNote = hasDuplicateDisplayedEventTimes(events);
+export function timelineEventsWithReportTiming(workflowEvents = [], customerInteraction, visitTiming = {}, timingSource = {}) {
+  return normalizeVisitTimeline({
+    workflowEvents,
+    customerInteraction,
+    visitTiming,
+    timingSource,
+    serviceType: timingSource?.coverageServiceType || timingSource?.serviceLine || timingSource?.serviceType,
+  }).events;
+}
+
+function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, customerInteraction, visitTiming, timingSource, loading = false }) {
+  const timeline = normalizeVisitTimeline({
+    visitTimeline,
+    workflowEvents,
+    customerInteraction,
+    visitTiming,
+    timingSource,
+    serviceType,
+  });
+  const events = timeline.events;
+  const timeOnSiteDisplay = timeline.durationMinutes ? formatCompactDurationMinutes(timeline.durationMinutes) : '';
 
   if (loading) {
     return (
       <section className="sr-section service-workflow-section service-workflow-loading" id="service-timeline">
-        <h2>Visit Progress</h2>
+        <h2>Visit Timeline</h2>
         <div className="workflow-skeleton-list">
           <span />
           <span />
@@ -3020,12 +3275,8 @@ function ServiceTimelineSection({ serviceType, workflowEvents, customerInteracti
     <section className="sr-section service-workflow-section" id="service-timeline">
       <div className="coverage-section-header">
         <div>
-          <h2>Visit Progress</h2>
-          <p className="map-context-copy">
-            {normalizedServiceType === 'pest_control'
-              ? 'Here’s how today’s pest control visit progressed.'
-              : 'Here’s how today’s visit progressed.'}
-          </p>
+          <h2>{timeline.title || 'Visit Timeline'}</h2>
+          <p className="map-context-copy">{timeline.intro || "Here’s a simple summary of today’s service visit."}</p>
         </div>
       </div>
 
@@ -3044,21 +3295,32 @@ function ServiceTimelineSection({ serviceType, workflowEvents, customerInteracti
                   <div className="workflow-event-body">
                     <div className="workflow-event-heading">
                       <h3>{event.label || formatEnumLabel(event.type)}</h3>
-                      {event.timestamp && <time dateTime={event.timestamp}>{formatClockTime(event.timestamp)}</time>}
+                      {event.occurredAt && <time dateTime={event.occurredAt}>{event.displayTime || formatClockTime(event.occurredAt)}</time>}
                     </div>
-                    {event.customerVisibleDescription && <p>{event.customerVisibleDescription}</p>}
+                    {(event.customerDescription || event.customerVisibleDescription) && <p>{event.customerDescription || event.customerVisibleDescription}</p>}
                   </div>
                 </li>
               );
             })}
           </ol>
-          {showSameTimeNote && <p className="timeline-note">Some events were recorded at the same time and are shown in standard service order.</p>}
+          {timeline.details.length > 0 && (
+            <div className="visit-timeline-details" aria-label="Visit timeline details">
+              {timeline.details.map((detail) => (
+                <div className="visit-timeline-detail" key={detail.id || detail.type}>
+                  <span>{detail.label}</span>
+                  <p>{detail.text}</p>
+                </div>
+              ))}
+            </div>
+          )}
           {timeOnSiteDisplay && (
             <div className="visit-progress-summary">
               <span>Time on site</span>
               <strong>{timeOnSiteDisplay}</strong>
             </div>
           )}
+          {timeline.timingNote && <p className="timeline-note">{timeline.timingNote}</p>}
+          {timeline.dataSourceNote && <p className="timeline-note visit-timeline-data-source">{timeline.dataSourceNote}</p>}
         </>
       )}
     </section>
@@ -3068,6 +3330,7 @@ function ServiceTimelineSection({ serviceType, workflowEvents, customerInteracti
 function ServiceReportCoverageAndWorkflow({
   serviceType,
   serviceCoverage,
+  visitTimeline,
   workflowEvents,
   customerInteraction,
   visitTiming,
@@ -3080,6 +3343,7 @@ function ServiceReportCoverageAndWorkflow({
     <>
       <ServiceTimelineSection
         serviceType={serviceType}
+        visitTimeline={visitTimeline}
         workflowEvents={workflowEvents}
         customerInteraction={customerInteraction}
         visitTiming={visitTiming}
@@ -3107,10 +3371,8 @@ function SupportingDetailsSection({
 }) {
   const pressureTrend = data.dynamicContext?.pressureTrend;
   const weatherRows = conditionRows(data.conditions || {});
-  const interaction = customerInteractionCopy(data.customerInteraction);
-  const arrival = formatTimelineTime(getReportArrivalTime(data));
-  const completion = formatTimelineTime(getReportCompletionTime(data));
   const reportPublished = (data.workflowEvents || []).find((event) => event.type === 'report_published');
+  const showReportGeneratedDetail = data.visitTimeline?.config?.showReportGenerated === true;
   const pressureOpen = mode !== 'live' || showDetails;
 
   return (
@@ -3140,37 +3402,6 @@ function SupportingDetailsSection({
             The legacy multi-visit trend chart + neighborhood comparison
             still render inside the AI summary cards above. */}
 
-        {(interaction || arrival || completion) && (
-          <details className="report-accordion" open={mode !== 'live'}>
-            <summary>
-              <span>Customer interaction and timing</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              <div className="supporting-detail-grid">
-                {interaction && (
-                  <div className="sr-cell">
-                    <div className="sr-cell-label">Customer interaction</div>
-                    <div className="sr-cell-value">{interaction}</div>
-                  </div>
-                )}
-                {arrival && (
-                  <div className="sr-cell">
-                    <div className="sr-cell-label">Technician arrived</div>
-                    <div className="sr-cell-value">{arrival}</div>
-                  </div>
-                )}
-                {completion && (
-                  <div className="sr-cell">
-                    <div className="sr-cell-label">Service completed</div>
-                    <div className="sr-cell-value">{completion}</div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </details>
-        )}
-
         {showDetails && (data.metrics || []).length > 0 && (
           <details className="report-accordion">
             <summary>
@@ -3197,7 +3428,7 @@ function SupportingDetailsSection({
               <span className="accordion-action">Details</span>
             </summary>
             <div className="accordion-body supporting-metadata">
-              {reportPublished?.timestamp && <p>Report published: {formatDate(reportPublished.timestamp)} at {formatClockTime(reportPublished.timestamp)}</p>}
+              {showReportGeneratedDetail && reportPublished?.timestamp && <p>Report generated: {formatDate(reportPublished.timestamp)} at {formatClockTime(reportPublished.timestamp)}</p>}
               {data.serviceRecordId && <p>Service record: {data.serviceRecordId}</p>}
               {serviceNotes && <p className="supporting-note">{serviceNotes}</p>}
               {findings.length > 0 && (
@@ -4272,6 +4503,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--muted);
           font-size: 13px;
           line-height: 1.45;
+        }
+        .visit-timeline-details {
+          display: grid;
+          gap: 8px;
+          margin-top: 12px;
+        }
+        .visit-timeline-detail {
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: var(--wash);
+          padding: 10px 12px;
+        }
+        .visit-timeline-detail span {
+          display: block;
+          color: var(--text);
+          font-size: 13px;
+          line-height: 1.35;
+          font-weight: 850;
+        }
+        .visit-timeline-detail p {
+          margin: 3px 0 0;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
+        .visit-timeline-data-source {
+          font-size: 12px;
         }
         .visit-progress-summary {
           display: flex;
@@ -6256,6 +6514,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <ServiceReportCoverageAndWorkflow
             serviceType={data.coverageServiceType || data.serviceLine || data.serviceType}
             serviceCoverage={serviceCoverage}
+            visitTimeline={data.visitTimeline}
             workflowEvents={data.workflowEvents}
             customerInteraction={data.customerInteraction}
             visitTiming={data.visitTiming}
