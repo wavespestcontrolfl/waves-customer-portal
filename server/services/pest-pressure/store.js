@@ -204,6 +204,113 @@ async function updateActiveConfig(knex, { scope = 'global', updatedBy = null, co
   return rowToConfig(inserted);
 }
 
+/**
+ * Apply a manual override to a calculated score. Records the
+ * original_calculated_score for later restoration, sets displayed_score
+ * to the override value, captures actor + reason + timestamp, and
+ * mirrors displayed_score back to service_records.pressure_index so the
+ * customer-facing report immediately shows the overridden number.
+ *
+ * Throws if the row doesn't exist or if the supplied displayedScore is
+ * out of the 0–5 range. Validation of the reason field is the caller's
+ * responsibility (route layer enforces non-empty + length cap).
+ */
+async function applyOverride(knex, { serviceRecordId, displayedScore, reason, overriddenBy }) {
+  if (!serviceRecordId) throw new TypeError('applyOverride: serviceRecordId is required');
+  const num = Number(displayedScore);
+  if (!Number.isFinite(num) || num < 0 || num > 5) {
+    throw new RangeError('applyOverride: displayedScore must be a number between 0 and 5');
+  }
+  const existing = await loadScoreForServiceRecord(knex, serviceRecordId);
+  if (!existing) {
+    const err = new Error('score_not_found');
+    err.statusCode = 404;
+    throw err;
+  }
+  const rounded = Math.round(num * 10) / 10;
+  const original = existing.is_overridden
+    ? (existing.original_calculated_score !== null && existing.original_calculated_score !== undefined
+      ? existing.original_calculated_score
+      : existing.calculated_score)
+    : existing.calculated_score;
+
+  await knex('pest_pressure_scores').where({ id: existing.id }).update({
+    is_overridden: true,
+    displayed_score: rounded,
+    original_calculated_score: original,
+    override_reason: reason || null,
+    overridden_by: overriddenBy || null,
+    overridden_at: knex.fn.now(),
+    updated_at: knex.fn.now(),
+  });
+
+  await knex('service_records').where({ id: serviceRecordId }).update({ pressure_index: rounded });
+
+  return loadScoreForServiceRecord(knex, serviceRecordId);
+}
+
+/**
+ * Remove a manual override. Restores displayed_score to the most recent
+ * calculated_score (which is still on the row from the last engine run)
+ * and re-mirrors that to service_records.pressure_index. Returns null
+ * when no row exists or when the row isn't overridden.
+ */
+async function removeOverride(knex, { serviceRecordId }) {
+  if (!serviceRecordId) throw new TypeError('removeOverride: serviceRecordId is required');
+  const existing = await loadScoreForServiceRecord(knex, serviceRecordId);
+  if (!existing) return null;
+  if (!existing.is_overridden) return existing;
+
+  const restored = existing.calculated_score;
+  await knex('pest_pressure_scores').where({ id: existing.id }).update({
+    is_overridden: false,
+    displayed_score: restored,
+    original_calculated_score: null,
+    override_reason: null,
+    overridden_by: null,
+    overridden_at: null,
+    updated_at: knex.fn.now(),
+  });
+
+  // Always mirror the override removal to service_records.pressure_index,
+  // including the null case. With the previous guard, removing an override
+  // from an "insufficient data" score left the old overridden value in
+  // pressure_index — so customer/report surfaces reading pressure_index
+  // would continue showing the stale score after the override was cleared.
+  await knex('service_records')
+    .where({ id: serviceRecordId })
+    .update({ pressure_index: restored ?? null });
+
+  return loadScoreForServiceRecord(knex, serviceRecordId);
+}
+
+async function listRecentScores(knex, { limit = 25 } = {}) {
+  return knex('pest_pressure_scores as p')
+    .leftJoin('customers as c', 'p.customer_id', 'c.id')
+    .orderBy('p.service_date', 'desc')
+    .orderBy('p.calculated_at', 'desc')
+    .limit(limit)
+    .select(
+      'p.id', 'p.service_record_id', 'p.customer_id', 'p.service_date',
+      'p.service_line', 'p.calculated_score', 'p.displayed_score',
+      'p.label_key', 'p.label_name', 'p.trend', 'p.trend_delta',
+      'p.data_completeness', 'p.is_overridden', 'p.override_reason',
+      'p.overridden_by', 'p.overridden_at', 'p.calculation_version',
+      'p.calculated_at',
+      knex.raw("trim(both ' ' from concat_ws(' ', c.first_name, c.last_name)) as customer_name"),
+    );
+}
+
+async function listAuditEvents(knex, { limit = 50 } = {}) {
+  const hasTable = await knex.schema.hasTable('audit_log').catch(() => false);
+  if (!hasTable) return [];
+  return knex('audit_log')
+    .where('action', 'like', 'pest_pressure.%')
+    .orderBy('created_at', 'desc')
+    .limit(limit)
+    .select('id', 'actor_type', 'actor_id', 'action', 'resource_type', 'resource_id', 'metadata', 'created_at');
+}
+
 async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12 } = {}) {
   const q = knex('pest_pressure_scores')
     .where('customer_id', customerId)
@@ -225,6 +332,10 @@ module.exports = {
   loadPreviousScore,
   loadScoreForServiceRecord,
   persistScore,
+  applyOverride,
+  removeOverride,
+  listRecentScores,
+  listAuditEvents,
   loadHistoryForCustomer,
   rowToConfig,
 };

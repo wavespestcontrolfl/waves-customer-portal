@@ -2,10 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ClipboardList,
   Eye,
+  ListChecks,
+  RefreshCw,
   Save,
   RotateCcw,
+  ShieldAlert,
   Sparkles,
+  X,
 } from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -310,6 +315,17 @@ export default function PestPressureSettingsPage() {
   const [previewError, setPreviewError] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
+  const [recentScores, setRecentScores] = useState([]);
+  const [auditEvents, setAuditEvents] = useState([]);
+  const [scoresLoading, setScoresLoading] = useState(false);
+  const [scoresError, setScoresError] = useState(null);
+  const [busyRowId, setBusyRowId] = useState(null);
+  const [overrideTarget, setOverrideTarget] = useState(null);
+  const [overrideScore, setOverrideScore] = useState("");
+  const [overrideReason, setOverrideReason] = useState("");
+  const [overrideError, setOverrideError] = useState(null);
+  const [overrideSaving, setOverrideSaving] = useState(false);
+
   useEffect(() => {
     adminFetch("/admin/pest-pressure/config")
       .then((body) => {
@@ -389,6 +405,98 @@ export default function PestPressureSettingsPage() {
     if (!window.confirm("Restore all Pest Pressure settings to defaults? Unsaved changes will be lost. You will still need to click Save to commit.")) return;
     setConfig({ ...defaults });
     setSaveMessage(null);
+  };
+
+  const refreshScores = useCallback(async () => {
+    setScoresLoading(true);
+    setScoresError(null);
+    try {
+      const [recentBody, auditBody] = await Promise.all([
+        adminFetch("/admin/pest-pressure/scores/recent?limit=25"),
+        adminFetch("/admin/pest-pressure/audit?limit=25"),
+      ]);
+      setRecentScores(recentBody.scores || []);
+      setAuditEvents(auditBody.events || []);
+    } catch (err) {
+      setScoresError(err.message);
+    } finally {
+      setScoresLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { refreshScores(); }, [refreshScores]);
+
+  const handleRecalculate = async (row, clearOverride) => {
+    if (clearOverride && !window.confirm("Recalculate AND drop the existing override?")) return;
+    setBusyRowId(row.service_record_id);
+    try {
+      await adminFetch(`/admin/pest-pressure/scores/${row.service_record_id}/recalculate`, {
+        method: "POST",
+        body: JSON.stringify({ clearOverride: Boolean(clearOverride) }),
+      });
+      await refreshScores();
+    } catch (err) {
+      setScoresError(err.message);
+    } finally {
+      setBusyRowId(null);
+    }
+  };
+
+  const openOverrideModal = (row) => {
+    setOverrideTarget(row);
+    setOverrideScore(row.displayed_score != null ? String(row.displayed_score) : "");
+    setOverrideReason(row.override_reason || "");
+    setOverrideError(null);
+  };
+
+  const closeOverrideModal = () => {
+    setOverrideTarget(null);
+    setOverrideScore("");
+    setOverrideReason("");
+    setOverrideError(null);
+  };
+
+  const submitOverride = async () => {
+    if (!overrideTarget) return;
+    const num = Number(overrideScore);
+    if (!Number.isFinite(num) || num < 0 || num > 5) {
+      setOverrideError("Score must be a number between 0 and 5.");
+      return;
+    }
+    const trimmed = overrideReason.trim();
+    if (!trimmed) {
+      setOverrideError("A reason is required.");
+      return;
+    }
+    setOverrideSaving(true);
+    setOverrideError(null);
+    try {
+      await adminFetch(`/admin/pest-pressure/scores/${overrideTarget.service_record_id}/override`, {
+        method: "PUT",
+        body: JSON.stringify({ displayedScore: num, reason: trimmed }),
+      });
+      closeOverrideModal();
+      await refreshScores();
+    } catch (err) {
+      setOverrideError(err.body?.error || err.message);
+    } finally {
+      setOverrideSaving(false);
+    }
+  };
+
+  const handleRemoveOverride = async (row) => {
+    if (!window.confirm(`Remove override and restore the calculated score (${row.calculated_score})?`)) return;
+    setBusyRowId(row.service_record_id);
+    try {
+      await adminFetch(`/admin/pest-pressure/scores/${row.service_record_id}/override`, {
+        method: "DELETE",
+      });
+      await refreshScores();
+    } catch (err) {
+      setScoresError(err.message);
+    } finally {
+      setBusyRowId(null);
+    }
   };
 
   const runPreview = useCallback(async () => {
@@ -749,7 +857,227 @@ export default function PestPressureSettingsPage() {
             </div>
           ) : null}
         </Card>
+
+        {/* H. Recent Scores */}
+        <Card>
+          <SectionHeading
+            icon={ListChecks}
+            label="Recent scores"
+            description="Latest 25 calculated Pest Pressure scores across all customers. Use Recalculate to refresh with current source data; Override to set a specific number with a recorded reason."
+          />
+          {scoresError ? (
+            <div style={{ fontSize: 13, color: D.red, marginBottom: 8 }}>{scoresError}</div>
+          ) : null}
+          {scoresLoading ? (
+            <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>
+          ) : recentScores.length === 0 ? (
+            <div style={{ fontSize: 13, color: D.muted }}>
+              No Pest Pressure scores yet. They appear after the next service report completes.
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ textAlign: "left", color: D.muted, fontWeight: 600 }}>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Date</th>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Customer</th>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Line</th>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}`, textAlign: "right" }}>Calc</th>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}`, textAlign: "right" }}>Shown</th>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Label</th>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Trend</th>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>State</th>
+                    <th style={{ padding: "8px 8px", borderBottom: `1px solid ${D.border}` }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentScores.map((row) => {
+                    const busy = busyRowId === row.service_record_id;
+                    return (
+                      <tr key={row.id} style={{ borderBottom: `1px solid ${D.border}` }}>
+                        <td style={{ padding: "8px 8px", color: D.text, whiteSpace: "nowrap" }}>
+                          {row.service_date ? String(row.service_date).slice(0, 10) : "—"}
+                        </td>
+                        <td style={{ padding: "8px 8px", color: D.text }}>
+                          <a
+                            href={`/admin/customers/${row.customer_id}`}
+                            style={{ color: D.heading, textDecoration: "none" }}
+                          >
+                            {row.customer_name || row.customer_id}
+                          </a>
+                        </td>
+                        <td style={{ padding: "8px 8px", color: D.muted }}>{row.service_line || "—"}</td>
+                        <td style={{ padding: "8px 8px", color: D.muted, textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>
+                          {row.calculated_score == null ? "—" : Number(row.calculated_score).toFixed(1)}
+                        </td>
+                        <td style={{ padding: "8px 8px", color: D.heading, textAlign: "right", fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                          {row.displayed_score == null ? "—" : Number(row.displayed_score).toFixed(1)}
+                        </td>
+                        <td style={{ padding: "8px 8px", color: D.text }}>{row.label_name || "—"}</td>
+                        <td style={{ padding: "8px 8px", color: D.muted }}>{row.trend}</td>
+                        <td style={{ padding: "8px 8px" }}>
+                          {row.is_overridden
+                            ? <Pill tone="warning"><ShieldAlert size={10} /> override</Pill>
+                            : <Pill tone="neutral">calc</Pill>}
+                        </td>
+                        <td style={{ padding: "8px 8px", whiteSpace: "nowrap" }}>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => handleRecalculate(row, false)}
+                            title="Re-run the engine with current source data"
+                            style={{
+                              marginRight: 6, padding: "4px 8px", fontSize: 11,
+                              border: `1px solid ${D.inputBorder}`, borderRadius: 4,
+                              background: D.white, color: D.text, cursor: busy ? "not-allowed" : "pointer",
+                            }}
+                          >
+                            <RefreshCw size={11} style={{ verticalAlign: "middle" }} /> Recalc
+                          </button>
+                          {row.is_overridden ? (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleRemoveOverride(row)}
+                              style={{
+                                padding: "4px 8px", fontSize: 11,
+                                border: `1px solid ${D.inputBorder}`, borderRadius: 4,
+                                background: D.white, color: D.red, cursor: busy ? "not-allowed" : "pointer",
+                              }}
+                            >
+                              Remove override
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={busy || !config.allowManualOverride}
+                              onClick={() => openOverrideModal(row)}
+                              title={!config.allowManualOverride ? "Overrides disabled in General settings" : ""}
+                              style={{
+                                padding: "4px 8px", fontSize: 11,
+                                border: `1px solid ${D.inputBorder}`, borderRadius: 4,
+                                background: D.white, color: D.text,
+                                cursor: (busy || !config.allowManualOverride) ? "not-allowed" : "pointer",
+                                opacity: config.allowManualOverride ? 1 : 0.5,
+                              }}
+                            >
+                              Override
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
+        {/* I. Audit log */}
+        <Card>
+          <SectionHeading
+            icon={ClipboardList}
+            label="Audit log"
+            description="Recent admin actions on Pest Pressure: config updates and score overrides. Sourced from the generic audit_log table."
+          />
+          {auditEvents.length === 0 ? (
+            <div style={{ fontSize: 13, color: D.muted }}>No Pest Pressure audit events yet.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {auditEvents.map((evt) => (
+                <details key={evt.id} style={{ padding: "8px 12px", border: `1px solid ${D.border}`, borderRadius: 6 }}>
+                  <summary style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", fontSize: 12, color: D.text }}>
+                    <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <Pill tone={evt.action.includes("override") ? "warning" : "neutral"}>{evt.action}</Pill>
+                      <span style={{ color: D.muted }}>{evt.actor_type} {evt.actor_id ? `· ${String(evt.actor_id).slice(0, 8)}` : ""}</span>
+                    </span>
+                    <span style={{ color: D.muted, fontSize: 11 }}>{evt.created_at ? new Date(evt.created_at).toLocaleString("en-US", { timeZone: "America/New_York" }) : ""}</span>
+                  </summary>
+                  <pre style={{ marginTop: 8, fontSize: 11, color: D.text, background: D.subtle, padding: 10, borderRadius: 4, overflow: "auto" }}>
+                    {JSON.stringify(evt.metadata, null, 2)}
+                  </pre>
+                </details>
+              ))}
+            </div>
+          )}
+        </Card>
       </div>
+
+      {/* Override modal */}
+      {overrideTarget ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => { if (e.target === e.currentTarget) closeOverrideModal(); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16,
+          }}
+        >
+          <div style={{ background: D.white, borderRadius: 12, width: "100%", maxWidth: 480, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: D.heading }}>Override Pest Pressure score</h2>
+              <button type="button" onClick={closeOverrideModal} aria-label="Close" style={{ background: "none", border: 0, cursor: "pointer", color: D.muted }}>
+                <X size={18} />
+              </button>
+            </div>
+            <p style={{ fontSize: 13, color: D.muted, marginTop: 8 }}>
+              Customer: <strong style={{ color: D.text }}>{overrideTarget.customer_name || overrideTarget.customer_id}</strong>
+              {" · "}Service date: {overrideTarget.service_date ? String(overrideTarget.service_date).slice(0, 10) : "—"}
+            </p>
+            <p style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
+              Calculated: <strong style={{ color: D.text }}>{overrideTarget.calculated_score == null ? "—" : Number(overrideTarget.calculated_score).toFixed(1)}</strong>
+              {" · "}Currently shown: <strong style={{ color: D.text }}>{overrideTarget.displayed_score == null ? "—" : Number(overrideTarget.displayed_score).toFixed(1)}</strong>
+            </p>
+            <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+              <NumberField
+                label="New displayed score (0–5)"
+                value={overrideScore}
+                onChange={(v) => setOverrideScore(v === "" ? "" : String(v))}
+                min={0} max={5} step={0.1}
+              />
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: D.muted }}>
+                Reason (required, audited)
+                <textarea
+                  value={overrideReason}
+                  rows={3}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  placeholder="Why are you overriding this score? Customer dispute, data correction, etc."
+                  style={{
+                    padding: "8px 10px", border: `1px solid ${D.inputBorder}`, borderRadius: 6,
+                    fontSize: 14, color: D.text, background: D.white, fontFamily: "inherit", resize: "vertical",
+                  }}
+                />
+              </label>
+              {overrideError ? (
+                <div style={{ fontSize: 12, color: D.red }}>{overrideError}</div>
+              ) : null}
+            </div>
+            <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button
+                type="button"
+                onClick={closeOverrideModal}
+                style={{ padding: "8px 14px", border: `1px solid ${D.inputBorder}`, background: D.white, color: D.text, borderRadius: 6, fontSize: 13, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitOverride}
+                disabled={overrideSaving}
+                style={{
+                  padding: "8px 14px", border: 0, background: D.teal, color: D.white,
+                  borderRadius: 6, fontSize: 13, fontWeight: 600,
+                  cursor: overrideSaving ? "not-allowed" : "pointer", opacity: overrideSaving ? 0.7 : 1,
+                }}
+              >
+                {overrideSaving ? "Saving…" : "Save override"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
