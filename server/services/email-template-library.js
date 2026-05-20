@@ -6,6 +6,7 @@ const {
   ensureLegalTextFooter,
   ctaButton,
 } = require('./email-template');
+const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -341,7 +342,7 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   const footerNote = mode === 'marketing'
     ? null
-    : 'Questions? Reply to this email or call <a href="tel:+19412975749" style="color:#009CDE;text-decoration:none;">(941) 297-5749</a>.';
+    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:#009CDE;text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`;
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });

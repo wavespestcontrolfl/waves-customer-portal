@@ -100,6 +100,37 @@ describe('admin estimate persistence', () => {
     expect(fields.service_interest).toBe('Lawn Care + Pest Control');
   });
 
+  test('zeros persisted totals when estimate data contains quote-required lines', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 115,
+      annualTotal: 1380,
+      onetimeTotal: 250,
+      estimateData: {
+        result: {
+          quoteRequired: true,
+          specItems: [
+            {
+              service: 'commercial_pest',
+              name: 'Commercial Pest Control',
+              quoteRequired: true,
+              isCommercial: true,
+            },
+          ],
+          recurring: {
+            grandTotal: 115,
+            services: [{ service: 'mosquito', name: 'Mosquito', mo: 115 }],
+          },
+        },
+      },
+    });
+
+    expect(fields.monthly_total).toBe(0);
+    expect(fields.annual_total).toBe(0);
+    expect(fields.onetime_total).toBe(0);
+    expect(fields.service_interest).toBe('Commercial Pest Control + Mosquito');
+  });
+
   test('reuses an existing lead-linked draft instead of creating a second estimate', async () => {
     const now = () => new Date('2026-05-15T12:00:00.000Z');
     const { database, updates, inserts } = makeDatabase({

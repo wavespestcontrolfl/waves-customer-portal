@@ -14,6 +14,10 @@ const { safePdfRenderError } = require('./pdf-events');
 const { formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients } = require('../customer-contact');
 const { publicPortalUrl } = require('../../utils/portal-url');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
+
+const SERVICE_REPORT_FROM_EMAIL = 'contact@wavespestcontrol.com';
+const SERVICE_REPORT_FROM_NAME = 'Waves Pest Control';
 
 function escapeHtml(value) {
   return String(value || '')
@@ -130,9 +134,9 @@ async function sendLegacyServiceReportEmail({
       recipient_type: 'customer',
       recipient_id: customerId || null,
       recipient_email_snapshot: recipient.email,
-      from_name_snapshot: process.env.SENDGRID_FROM_NAME || 'Waves Pest Control',
-      from_email_snapshot: process.env.SENDGRID_FROM_EMAIL || 'newsletter@wavespestcontrol.com',
-      reply_to_snapshot: 'contact@wavespestcontrol.com',
+      from_name_snapshot: SERVICE_REPORT_FROM_NAME,
+      from_email_snapshot: SERVICE_REPORT_FROM_EMAIL,
+      reply_to_snapshot: SERVICE_REPORT_FROM_EMAIL,
       subject_snapshot: email.subject,
       html_snapshot: email.html,
       text_snapshot: email.text,
@@ -157,6 +161,11 @@ async function sendLegacyServiceReportEmail({
   try {
     const result = await sendgrid.sendOne({
       to: recipient.email,
+      // Service reports are transactional — name the sender explicitly
+      // instead of inheriting sendgrid-mail's `newsletter@` default, which
+      // was the wrong identity for billing-adjacent customer correspondence.
+      fromEmail: SERVICE_REPORT_FROM_EMAIL,
+      fromName: SERVICE_REPORT_FROM_NAME,
       subject: email.subject,
       html: email.html,
       text: email.text,
@@ -249,8 +258,8 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
     ctaHref: reportUrl,
     ctaLabel: 'View full report',
     footerNote: pdfAttached
-      ? 'Your PDF service report is attached. Reply to this email or call (941) 297-5749 with any questions.'
-      : 'Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call (941) 297-5749 with any questions.',
+      ? `Your PDF service report is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
+      : `Your full report is ready at the link above. A downloadable PDF will be available shortly. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`,
   });
   const text = plainText([
     `Hi ${first},`,
@@ -270,7 +279,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
     '',
     pdfAttached ? 'The PDF service report is attached.' : 'A downloadable PDF will be available shortly.',
     '',
-    'Questions? Reply to this email or call (941) 297-5749.',
+    `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     'Waves Pest Control',
   ]);
 

@@ -1,5 +1,5 @@
 const db = require('../../models/db');
-const { customerVisiblePressureIndex } = require('./pressure-index');
+const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 const PRODUCT_INSIGHTS = [
   {

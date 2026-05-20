@@ -580,6 +580,35 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('quote-required result spec rows lock public commercial manual drafts', async () => {
+    const estimateData = {
+      result: {
+        specItems: [{
+          service: 'commercial_pest',
+          name: 'Commercial Pest Control',
+          price: null,
+          quoteRequired: true,
+          reason: 'Commercial pest requires manual quote or commercial pilot pricing.',
+        }],
+      },
+    };
+
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-commercial-manual-test',
+      estimate_data: estimateData,
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(resolveEstimateQuoteRequirement(payload)).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      reason: 'Commercial pest requires manual quote or commercial pilot pricing.',
+    }));
+  });
+
   test('server-rendered quote-required page suppresses normal lock-in copy', () => {
     const html = renderPage('quote-token', {
       status: 'quote_required',
@@ -663,6 +692,63 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('bookingState.isReserving = true;');
     expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
     expect(html).toContain("toast('Choose a payment setup first.')");
+    expect(html).toContain('const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;');
+  });
+
+  test('one-time pest choice excludes WaveGuard setup from the choice price and add-on table', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          pestTiers: [{ label: 'Quarterly', mo: 32.33, ann: 387.96, pa: 97, apps: 4 }],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 32.33,
+          annualAfterDiscount: 387.96,
+          services: [{ name: 'Pest Control', mo: 32.33 }],
+        },
+        oneTime: {
+          total: 298,
+          membershipFee: 99,
+          items: [{ service: 'one_time_pest', name: 'One-Time Pest', price: 199 }],
+        },
+        specItems: [],
+      },
+    };
+    const pricing = await buildPricingBundle({
+      id: 'estimate-public-choice-pest-test',
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      monthly_total: 32.33,
+      annual_total: 387.96,
+      onetime_total: 298,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(pricing.anchorOneTimePrice).toBe(199);
+    expect(resolveAcceptOneTimeTotal({
+      show_one_time_option: true,
+      estimate_data: estimateData,
+      onetime_total: 298,
+    }, pricing)).toBe(199);
+
+    const html = renderPage('choice-token', {
+      status: 'sent',
+      customerName: 'Rita Roldan',
+      address: '17630 Canopy Pl',
+      monthlyTotal: 32.33,
+      annualTotal: 387.96,
+      onetimeTotal: 298,
+      tier: 'Bronze',
+      showOneTimeOption: true,
+      oneTimeChoicePrice: pricing.anchorOneTimePrice,
+    }, estimateData);
+
+    expect(html).toContain('<span class="num" id="onetime-display">$199</span>');
+    expect(html).toContain('<div class="choice-treatment" data-mode-only="recurring">');
+    expect(html).toContain('<div class="choice-treatment" data-mode-only="one_time" hidden>');
+    expect(html).not.toContain('One-time items (billed separately)');
+    expect(html).not.toContain('These are scheduled after your recurring service starts.');
   });
 
   test('server-rendered slot selection ignores clicks while a reservation is in flight', () => {
@@ -700,6 +786,9 @@ describe('public estimate one-time breakdown', () => {
         lotSqFt: 9000,
         lawnSqFt: 5200,
         landscapeComplexity: 'MODERATE',
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
       },
       result: {
         recurring: {
@@ -717,10 +806,29 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Home', value: '2,400 sq ft' },
       { label: 'Lot', value: '9,000 sq ft' },
+      { label: 'Pool/Lanai', value: 'Yes (Medium cage)' },
       { label: 'Treatable lawn', value: '5,200 sq ft' },
       { label: 'Complexity', value: 'Moderate' },
     ]));
     expect(payload.signals).toEqual([]);
+  });
+
+  test('Waves AI payload shows Pool/Lanai when explicitly absent', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 1800,
+        lotSqFt: 7000,
+        pool: 'NO',
+        poolCage: 'NO',
+      },
+      result: {
+        recurring: { services: [{ name: 'Pest Control' }] },
+      },
+    });
+
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Pool/Lanai', value: 'No' },
+    ]));
   });
 
   test('Waves AI payload does not add customer-facing bundle copy for Bronze', () => {
@@ -1407,6 +1515,9 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
     expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total>$219.60</strong></div>');
+    expect(html).toContain('data-first-visit-copy-total>$219.60</span>');
+    expect(html).toContain("document.querySelectorAll('[data-first-visit-copy-total]')");
+    expect(html).not.toContain('data-first-visit-grand-total');
     expect(html).toContain('let firstVisitTotal = 0;');
     expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}');
     expect(html).not.toContain('.payment-summary-row.total strong');
@@ -1508,12 +1619,14 @@ describe('public estimate one-time breakdown', () => {
     expect(html.match(/WaveGuard Membership Setup/g)).toHaveLength(2);
     expect(html).toContain('Pay the 12-month plan in full');
     expect(html).toContain('we send one prepay invoice after approval and waive the setup.');
-    expect(html).toContain('Net setup fee: $0');
+    expect(html).not.toContain('Net setup fee: $0');
     expect(html).toContain('<strong><s>$99</s> $0</strong>');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
     expect(html).not.toContain('<strong>-$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
     expect(html).toContain('data-prepay-membership-due="0">$660</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-membership-due="0">$660</span>');
+    expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
     expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 660;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
     expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be reviewed and sent after approval.");
@@ -1580,6 +1693,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="palm_injection"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="rodent_bait"');
+    expect(html).toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).toContain('data-estimate-ask-prompt="When am I charged?"');
   });
 
   test('v1 pricing bundle includes separate palm and rodent bait rows without tier discount', async () => {

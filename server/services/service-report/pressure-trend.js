@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { formatVisitLabel, normalizeDate } = require('./time-format');
-const { customerVisiblePressureIndex } = require('./pressure-index');
+const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 const SEVERITY_RANK = {
   critical: 5,

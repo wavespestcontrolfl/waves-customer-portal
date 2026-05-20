@@ -199,7 +199,8 @@ function getMosquitoTreatableCategory(mosquitoTreatableSqFt, grossLotCategory) {
 }
 
 function calculatePropertyProfile(input) {
-  const footprint = calculateFootprint(input.homeSqFt, input.stories || 1);
+  const explicitFootprint = toPositiveNumber(input.footprintSqFt ?? input.footprint);
+  const footprint = explicitFootprint || calculateFootprint(input.homeSqFt, input.stories || 1);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, input.features || {});
   const hasInputBedArea = hasNonNegativeNumber(input.bedArea);
   const estimatedBedAreaInput = hasNonNegativeNumber(input.estimatedBedAreaSf)
@@ -310,7 +311,10 @@ function calculatePropertyProfile(input) {
     isNewHomeowner: !!input.isNewHomeowner,
     fenceType: input.fenceType || null,
     outbuildingCount: input.outbuildingCount || 0,
-    attachedGarage: !!input.attachedGarage,
+    attachedGarage: !!(input.attachedGarage || input.features?.attachedGarage),
+    footprintSqFt: input.footprintSqFt,
+    buildingSqFt: input.buildingSqFt,
+    livingAreaSqFt: input.livingAreaSqFt,
     maintenanceCondition: input.maintenanceCondition || null,
     overallPestPressure: input.overallPestPressure || null,
   };

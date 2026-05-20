@@ -53,10 +53,6 @@ export default function MileageTab() {
   // IRS
   const [irsYear, setIrsYear] = useState(new Date().getFullYear());
   const [irsReport, setIrsReport] = useState(null);
-  // Geo-fences
-  const [fences, setFences] = useState([]);
-  const [fenceForm, setFenceForm] = useState(null);
-
   // ── Loaders ──────────────────────────────────────────────────
   const loadDashboard = useCallback(async () => {
     try { setLoading(true); const d = await adminFetch('/admin/mileage/dashboard'); setDash(d); } catch (e) { showToast('Failed to load dashboard'); } finally { setLoading(false); }
@@ -93,16 +89,11 @@ export default function MileageTab() {
     try { setLoading(true); const data = await adminFetch(`/admin/mileage/irs-report?year=${irsYear}`); setIrsReport(data); } catch (e) { showToast('Failed to load IRS report'); } finally { setLoading(false); }
   }, [irsYear]);
 
-  const loadFences = useCallback(async () => {
-    try { const data = await adminFetch('/admin/mileage/geo-fences'); setFences(data || []); } catch (e) { showToast('Failed to load geo-fences'); }
-  }, []);
-
   useEffect(() => {
     if (section === 'dashboard') loadDashboard();
     if (section === 'trips') loadTrips(1);
     if (section === 'monthly') loadDaily();
     if (section === 'irs') loadIrs();
-    if (section === 'fences') loadFences();
   }, [section]);
 
   // ── Actions ──────────────────────────────────────────────────
@@ -135,32 +126,12 @@ export default function MileageTab() {
     } catch (e) { showToast('Export failed'); }
   };
 
-  const saveFence = async () => {
-    if (!fenceForm) return;
-    try {
-      const { id, ...body } = fenceForm;
-      if (id) {
-        await adminFetch(`/admin/mileage/geo-fences/${id}`, { method: 'PUT', body: JSON.stringify(body) });
-      } else {
-        await adminFetch('/admin/mileage/geo-fences', { method: 'POST', body: JSON.stringify(body) });
-      }
-      setFenceForm(null);
-      loadFences();
-      showToast('Geo-fence saved');
-    } catch (e) { showToast('Save failed'); }
-  };
-
-  const deleteFence = async (id) => {
-    try { await adminFetch(`/admin/mileage/geo-fences/${id}`, { method: 'DELETE' }); loadFences(); showToast('Geo-fence removed'); } catch (e) { showToast('Delete failed'); }
-  };
-
   // ── Sub-nav ──────────────────────────────────────────────────
   const tabs = [
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'trips', label: 'Trips' },
     { key: 'monthly', label: 'Monthly' },
     { key: 'irs', label: 'IRS Report' },
-    { key: 'fences', label: 'Geo-Fences' },
   ];
 
   const navStyle = { display: 'flex', gap: 4, marginBottom: 16, background: D.card, borderRadius: 10, padding: 4, border: `1px solid ${D.border}`, overflowX: 'auto', flexWrap: 'nowrap' };
@@ -441,78 +412,6 @@ export default function MileageTab() {
     );
   };
 
-  // ── Render: Geo-Fences ───────────────────────────────────────
-  const renderFences = () => {
-    const types = ['business', 'personal', 'supplier', 'customer_zone'];
-    const typeColor = { business: D.green, personal: D.red, supplier: D.purple, customer_zone: D.teal };
-
-    return (
-      <div>
-        <div style={{ ...sCard, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: '#0F172A' }}>Geo-Fences</div>
-          <button style={sBtn(D.teal, D.white)} onClick={() => setFenceForm({ name: '', fence_type: 'business', lat: '', lng: '', radius_meters: 200, notes: '' })}>Add Fence</button>
-        </div>
-
-        {/* Fence Form */}
-        {fenceForm && (
-          <div style={sCard}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginBottom: 12 }}>{fenceForm.id ? 'Edit' : 'New'} Geo-Fence</div>
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
-              <input placeholder="Name" value={fenceForm.name} onChange={e => setFenceForm({ ...fenceForm, name: e.target.value })} style={sInput} />
-              <select value={fenceForm.fence_type} onChange={e => setFenceForm({ ...fenceForm, fence_type: e.target.value })} style={sInput}>
-                {types.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-              <input type="number" placeholder="Radius (m)" value={fenceForm.radius_meters} onChange={e => setFenceForm({ ...fenceForm, radius_meters: parseInt(e.target.value) || 200 })} style={sInput} />
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
-              <input type="number" step="0.0000001" placeholder="Latitude" value={fenceForm.lat} onChange={e => setFenceForm({ ...fenceForm, lat: e.target.value })} style={sInput} />
-              <input type="number" step="0.0000001" placeholder="Longitude" value={fenceForm.lng} onChange={e => setFenceForm({ ...fenceForm, lng: e.target.value })} style={sInput} />
-              <input placeholder="Notes" value={fenceForm.notes || ''} onChange={e => setFenceForm({ ...fenceForm, notes: e.target.value })} style={sInput} />
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button style={sBtn(D.green, D.white)} onClick={saveFence}>Save</button>
-              <button style={sBtn('transparent', D.muted)} onClick={() => setFenceForm(null)}>Cancel</button>
-            </div>
-          </div>
-        )}
-
-        {/* Fences Table */}
-        <div style={{ ...sCard, overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-            <thead>
-              <tr style={{ borderBottom: `1px solid ${D.border}` }}>
-                <th style={th}>Name</th>
-                <th style={th}>Type</th>
-                <th style={th}>Lat</th>
-                <th style={th}>Lng</th>
-                <th style={th}>Radius</th>
-                <th style={th}>Notes</th>
-                <th style={th}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {fences.map(f => (
-                <tr key={f.id} style={{ borderBottom: `1px solid ${D.border}22` }}>
-                  <td style={{ ...td, fontWeight: 600 }}>{f.name}</td>
-                  <td style={td}><span style={sBadge(typeColor[f.fence_type] || D.muted, D.white)}>{f.fence_type}</span></td>
-                  <td style={td}>{Number(f.lat).toFixed(4)}</td>
-                  <td style={td}>{Number(f.lng).toFixed(4)}</td>
-                  <td style={td}>{f.radius_meters}m</td>
-                  <td style={{ ...td, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.notes || '--'}</td>
-                  <td style={td}>
-                    <button style={{ ...sBtn('transparent', D.teal), marginRight: 4 }} onClick={() => setFenceForm({ id: f.id, name: f.name, fence_type: f.fence_type, lat: f.lat, lng: f.lng, radius_meters: f.radius_meters, notes: f.notes || '' })}>Edit</button>
-                    <button style={sBtn('transparent', D.red)} onClick={() => deleteFence(f.id)}>Delete</button>
-                  </td>
-                </tr>
-              ))}
-              {fences.length === 0 && <tr><td colSpan={7} style={{ padding: 20, textAlign: 'center', color: D.muted }}>No geo-fences configured</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  };
-
   return (
     <div>
       {/* Toast */}
@@ -530,7 +429,6 @@ export default function MileageTab() {
       {section === 'trips' && renderTrips()}
       {section === 'monthly' && renderMonthly()}
       {section === 'irs' && renderIrs()}
-      {section === 'fences' && renderFences()}
     </div>
   );
 }

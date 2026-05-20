@@ -22,6 +22,37 @@ const {
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
 } = require('./discount-engine');
+const {
+  isCommercialProperty,
+  buildCommercialManualQuoteResult,
+} = require('./commercial-helpers');
+
+function serviceSelected(value) {
+  if (value === true) return true;
+  if (!value || typeof value !== 'object') return false;
+  return value.selected === true || value.enabled === true || value.value === true;
+}
+
+function normalizeCommercialFlag(value) {
+  if (value === true) return true;
+  const raw = String(value || '').trim().toLowerCase();
+  return raw === 'true' || raw === 'yes' || raw === 'commercial';
+}
+
+function hasCommercialFlagInput(value) {
+  if (value === true || value === false) return true;
+  return String(value ?? '').trim() !== '';
+}
+
+function commercialSubtypeFromInput(input = {}, services = {}) {
+  return input.commercialSubtype ||
+    input.commercial_subtype ||
+    services.commercialPest?.commercialSubtype ||
+    services.commercialLawn?.commercialSubtype ||
+    services.pest?.commercialSubtype ||
+    services.lawn?.commercialSubtype ||
+    null;
+}
 
 function normalizeMosquitoProgram(value) {
   if (value == null || value === '') return null;
@@ -77,12 +108,35 @@ function stripBedBugInternalPricing(result) {
 
 // ── Generate Complete Estimate ────────────────────────────────
 function generateEstimate(input) {
+  const services = input.services || {};
+  const commercialSubtype = commercialSubtypeFromInput(input, services);
+  const hasExplicitCommercialFlag = hasCommercialFlagInput(input.isCommercial);
+  const inputIsCommercial = normalizeCommercialFlag(input.isCommercial);
+  const commercialContext = {
+    services,
+    isCommercial: hasExplicitCommercialFlag ? inputIsCommercial : undefined,
+    propertyType: input.propertyType,
+    category: input.category,
+    commercialSubtype,
+  };
+  const profileCommercialDetectionProperty = {
+    propertyType: input.propertyType,
+    category: input.category,
+    isCommercial: hasExplicitCommercialFlag ? inputIsCommercial : input.isCommercial,
+    commercialSubtype,
+  };
+  const profileIsCommercial = isCommercialProperty(profileCommercialDetectionProperty, commercialContext);
+
   // ── 1. Calculate property profile ──────────────────────────
+  const propertyTypeForProfile = profileIsCommercial ? 'commercial' : input.propertyType;
   const property = calculatePropertyProfile({
     homeSqFt: input.homeSqFt,
     stories: input.stories,
     storiesSource: input.storiesSource,
     lotSqFt: input.lotSqFt,
+    footprintSqFt: input.footprintSqFt ?? input.footprint,
+    buildingSqFt: input.buildingSqFt,
+    livingAreaSqFt: input.livingAreaSqFt,
     lawnSqFt: input.lawnSqFt,
     measuredTurfSf: input.measuredTurfSf,
     estimatedTurfSf: input.estimatedTurfSf,
@@ -93,7 +147,7 @@ function generateEstimate(input) {
     estimatedBedAreaPercent: input.estimatedBedAreaPercent,
     bedArea: input.bedArea,
     bedAreaSource: input.bedAreaSource,
-    propertyType: input.propertyType,
+    propertyType: propertyTypeForProfile,
     features: input.features || {},
     // v2 enriched fields (optional — null-safe)
     yearBuilt: input.yearBuilt,
@@ -118,66 +172,96 @@ function generateEstimate(input) {
   const structuralNotes = deriveNotes(property);
 
   // ── 3. Price each requested service ────────────────────────
-  const services = input.services || {};
   const lineItems = [];
   const activeServiceKeys = [];
+  if (profileIsCommercial) property.isCommercial = true;
+  else if (hasExplicitCommercialFlag) property.isCommercial = inputIsCommercial;
+  if (commercialSubtype) property.commercialSubtype = commercialSubtype;
+  const propertyForCommercialDetection = { ...property };
+  if (input.propertyType === undefined || input.propertyType === null || input.propertyType === '') {
+    delete propertyForCommercialDetection.propertyType;
+  }
+  const propertyIsCommercial = profileIsCommercial || isCommercialProperty(propertyForCommercialDetection, commercialContext);
+  const addCommercialManualQuote = (service) => {
+    const result = buildCommercialManualQuoteResult(service, property, { commercialSubtype });
+    if (!lineItems.some((line) => line.service === result.service)) {
+      lineItems.push(result);
+    }
+  };
+  const useCommercialManualQuote = (selected, service = 'pest_control') => {
+    if (!selected) return false;
+    if (!propertyIsCommercial) return false;
+    addCommercialManualQuote(service);
+    return true;
+  };
 
   // Pest Control
-  if (services.pest) {
-    const result = pricePestControl(property, {
-      frequency: services.pest.frequency || 'quarterly',
-      pricingVersion: services.pest.version || 'v1',
-      roachType: services.pest.roachType || 'none',
-      modifiers,
-    });
-    result.annual = Math.round(result.annual * 100) / 100;
-    result.monthly = Math.round(result.annual / 12 * 100) / 100;
-    result.perApp = Math.round(result.annual / result.visitsPerYear * 100) / 100;
-    if (Array.isArray(result.tiers)) {
-      result.tiers = result.tiers.map(t => {
-        const annual = Math.round(t.annual * 100) / 100;
-        return {
-          ...t,
-          perApp: Math.round(t.perApp * 100) / 100,
-          annual,
-          monthly: Math.round(annual / 12 * 100) / 100,
-        };
+  if (services.pest || serviceSelected(services.commercialPest)) {
+    if (propertyIsCommercial) {
+      // PR 1 safety gate: commercial pest has no residential fallback. Even
+      // an explicit pilot flag stays manual until the pilot pricer is built.
+      addCommercialManualQuote('pest_control');
+    } else {
+      const result = pricePestControl(property, {
+        frequency: services.pest.frequency || 'quarterly',
+        pricingVersion: services.pest.version || 'v1',
+        roachType: services.pest.roachType || 'none',
+        modifiers,
       });
-    }
-    lineItems.push(result);
-    activeServiceKeys.push('pest_control');
+      result.annual = Math.round(result.annual * 100) / 100;
+      result.monthly = Math.round(result.annual / 12 * 100) / 100;
+      result.perApp = Math.round(result.annual / result.visitsPerYear * 100) / 100;
+      if (Array.isArray(result.tiers)) {
+        result.tiers = result.tiers.map(t => {
+          const annual = Math.round(t.annual * 100) / 100;
+          return {
+            ...t,
+            perApp: Math.round(t.perApp * 100) / 100,
+            annual,
+            monthly: Math.round(annual / 12 * 100) / 100,
+          };
+        });
+      }
+      lineItems.push(result);
+      activeServiceKeys.push('pest_control');
 
-    // Auto-add the one-time Initial Roach Knockdown when recurring pest is
-    // booked with a non-none roach type. Recovers the heavier visit-1 cost
-    // upfront — replaces the old multiplicative roachModifier (now zeroed)
-    // which only paid back if the customer stayed past visit ~3.
-    const roachTypeRaw = (services.pest.roachType || 'none').toLowerCase();
-    if (roachTypeRaw !== 'none') {
-      const initialRoach = pricePestInitialRoach(property, { roachType: roachTypeRaw });
-      if (initialRoach) lineItems.push(initialRoach);
+      // Auto-add the one-time Initial Roach Knockdown when recurring pest is
+      // booked with a non-none roach type. Recovers the heavier visit-1 cost
+      // upfront — replaces the old multiplicative roachModifier (now zeroed)
+      // which only paid back if the customer stayed past visit ~3.
+      if (result.roachType && result.roachType !== 'none') {
+        const initialRoach = pricePestInitialRoach(property, { roachType: result.roachType });
+        if (initialRoach) lineItems.push(initialRoach);
+      }
     }
   }
 
   // Lawn Care
-  if (services.lawn) {
-    const result = priceLawnCare(property, {
-      track: services.lawn.track || 'st_augustine',
-      tier: services.lawn.tier || 'enhanced',
-      lawnFreq: services.lawn.lawnFreq || input.lawnFreq,
-      shadeClassification: services.lawn.shadeClassification || 'FULL_SUN',
-      useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? false,
-      targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
-      routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,
-      lawnMaterialCostPerK: services.lawn.lawnMaterialCostPerK ?? input.lawnMaterialCostPerK,
-      lawnLaborMinutesBase: services.lawn.lawnLaborMinutesBase ?? input.lawnLaborMinutesBase,
-      lawnLaborMinutesPerK: services.lawn.lawnLaborMinutesPerK ?? input.lawnLaborMinutesPerK,
-    });
-    lineItems.push(result);
-    activeServiceKeys.push('lawn_care');
+  if (services.lawn || serviceSelected(services.commercialLawn)) {
+    if (propertyIsCommercial) {
+      // PR 1 safety gate: commercial lawn treatment has no residential
+      // fallback until the small-commercial pilot pricer is implemented.
+      addCommercialManualQuote('lawn_care');
+    } else {
+      const result = priceLawnCare(property, {
+        track: services.lawn.track || 'st_augustine',
+        tier: services.lawn.tier || 'enhanced',
+        lawnFreq: services.lawn.lawnFreq || input.lawnFreq,
+        shadeClassification: services.lawn.shadeClassification || 'FULL_SUN',
+        useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? false,
+        targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
+        routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,
+        lawnMaterialCostPerK: services.lawn.lawnMaterialCostPerK ?? input.lawnMaterialCostPerK,
+        lawnLaborMinutesBase: services.lawn.lawnLaborMinutesBase ?? input.lawnLaborMinutesBase,
+        lawnLaborMinutesPerK: services.lawn.lawnLaborMinutesPerK ?? input.lawnLaborMinutesPerK,
+      });
+      lineItems.push(result);
+      activeServiceKeys.push('lawn_care');
+    }
   }
 
   // Tree & Shrub
-  if (services.treeShrub) {
+  if (services.treeShrub && !useCommercialManualQuote(services.treeShrub, 'lawn_care')) {
     const result = priceTreeShrub(property, {
       tier: services.treeShrub.tier,
       access: services.treeShrub.access || 'easy',
@@ -192,7 +276,7 @@ function generateEstimate(input) {
   }
 
   // Palm Injection
-  if (services.palm) {
+  if (services.palm && !useCommercialManualQuote(services.palm, 'lawn_care')) {
     const result = pricePalmInjection(property, { ...services.palm });
     result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -203,7 +287,7 @@ function generateEstimate(input) {
   }
 
   // Mosquito
-  if (services.mosquito) {
+  if (services.mosquito && !useCommercialManualQuote(services.mosquito, 'pest_control')) {
     const result = priceMosquito(property, {
       tier: normalizeMosquitoProgram(services.mosquito.tier || services.mosquito.program),
       modifiers,
@@ -217,7 +301,7 @@ function generateEstimate(input) {
   }
 
   // Termite Bait
-  if (services.termite) {
+  if (services.termite && !useCommercialManualQuote(services.termite, 'pest_control')) {
     const result = priceTermiteBait(property, {
       system: services.termite.system || 'advance',
       monitoringTier: services.termite.monitoringTier || 'basic',
@@ -230,7 +314,7 @@ function generateEstimate(input) {
   }
 
   // Rodent Bait
-  if (services.rodentBait) {
+  if (services.rodentBait && !useCommercialManualQuote(services.rodentBait, 'pest_control')) {
     const result = priceRodentBait(property, { modifiers });
     result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -250,30 +334,38 @@ function generateEstimate(input) {
 
   // One-time and specialty services are zone-agnostic.
   if (services.oneTimePest) {
-    const result = priceOneTimePest(property, {
-      urgency: services.oneTimePest.urgency || 'NONE',
-      afterHours: services.oneTimePest.afterHours || false,
-      isRecurringCustomer,
-      recurringPestPerApp: services.pest ? lineItems.find(l => l.service === 'pest_control')?.perApp : null,
-      roachType: services.oneTimePest.roachType || 'none',
-    });
-    lineItems.push(result);
+    if (propertyIsCommercial) {
+      addCommercialManualQuote('pest_control');
+    } else {
+      const result = priceOneTimePest(property, {
+        urgency: services.oneTimePest.urgency || 'NONE',
+        afterHours: services.oneTimePest.afterHours || false,
+        isRecurringCustomer,
+        recurringPestPerApp: services.pest ? lineItems.find(l => l.service === 'pest_control')?.perApp : null,
+        roachType: services.oneTimePest.roachType || 'none',
+      });
+      lineItems.push(result);
+    }
   }
 
   if (services.oneTimeLawn) {
-    const result = priceOneTimeLawn(property, {
-      treatmentType: services.oneTimeLawn.treatmentType || 'weed',
-      urgency: services.oneTimeLawn.urgency || 'NONE',
-      afterHours: services.oneTimeLawn.afterHours || false,
-      isRecurringCustomer,
-      track: services.oneTimeLawn.track || services.lawn?.track || 'st_augustine',
-      tier: services.oneTimeLawn.tier || services.lawn?.tier || 'enhanced',
-      lawnFreq: services.oneTimeLawn.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
-    });
-    lineItems.push(result);
+    if (propertyIsCommercial) {
+      addCommercialManualQuote('lawn_care');
+    } else {
+      const result = priceOneTimeLawn(property, {
+        treatmentType: services.oneTimeLawn.treatmentType || 'weed',
+        urgency: services.oneTimeLawn.urgency || 'NONE',
+        afterHours: services.oneTimeLawn.afterHours || false,
+        isRecurringCustomer,
+        track: services.oneTimeLawn.track || services.lawn?.track || 'st_augustine',
+        tier: services.oneTimeLawn.tier || services.lawn?.tier || 'enhanced',
+        lawnFreq: services.oneTimeLawn.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
+      });
+      lineItems.push(result);
+    }
   }
 
-  if (services.oneTimeMosquito) {
+  if (services.oneTimeMosquito && !useCommercialManualQuote(services.oneTimeMosquito, 'pest_control')) {
     const result = priceOneTimeMosquito(property, {
       stationCount: services.oneTimeMosquito.stationCount,
       dunkCount: services.oneTimeMosquito.dunkCount,
@@ -283,7 +375,7 @@ function generateEstimate(input) {
   }
 
   // Specialty services
-  if (services.rodentTrapping) {
+  if (services.rodentTrapping && !useCommercialManualQuote(services.rodentTrapping, 'pest_control')) {
     const opts = typeof services.rodentTrapping === 'object' ? services.rodentTrapping : {};
     const result = priceRodentTrapping(property, {
       pressure: opts.pressure,
@@ -291,11 +383,11 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
-  if (services.trenching) {
+  if (services.trenching && !useCommercialManualQuote(services.trenching, 'pest_control')) {
     const result = priceTrenching(property);
     lineItems.push(result);
   }
-  if (services.germanRoach) {
+  if (services.germanRoach && !useCommercialManualQuote(services.germanRoach, 'pest_control')) {
     const result = priceGermanRoach(property);
     lineItems.push(result);
   }
@@ -305,7 +397,7 @@ function generateEstimate(input) {
   // across) via the regular_standalone scale in constants.PEST.pestInitialRoach.
   // Translator skips this when recurring pest already auto-fires the same
   // knockdown via roachModifier, so no double-charge.
-  if (services.pestInitialRoach) {
+  if (services.pestInitialRoach && !useCommercialManualQuote(services.pestInitialRoach, 'pest_control')) {
     const roachTypeRaw = (services.pestInitialRoach.roachType || 'regular').toLowerCase();
     const result = pricePestInitialRoach(property, { roachType: roachTypeRaw, standalone: true });
     if (result) lineItems.push(result);
@@ -313,7 +405,7 @@ function generateEstimate(input) {
   // Legacy explicit service for old callers. The current v2 adapter relies on
   // the recurring pest auto-fire above (`pest_initial_roach`) and does not
   // inject this line, which prevents duplicate German roach first-visit fees.
-  if (services.germanRoachInitial) {
+  if (services.germanRoachInitial && !useCommercialManualQuote(services.germanRoachInitial, 'pest_control')) {
     const opts = typeof services.germanRoachInitial === 'object'
       ? services.germanRoachInitial
       : {};
@@ -324,11 +416,11 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
-  if (services.boraCare) {
+  if (services.boraCare && !useCommercialManualQuote(services.boraCare, 'pest_control')) {
     const result = priceBoraCare(services.boraCare.atticSqFt || property.footprint);
     lineItems.push(result);
   }
-  if (services.preSlab) {
+  if (services.preSlab && !useCommercialManualQuote(services.preSlab, 'pest_control')) {
     const result = pricePreSlabTermidor(
       services.preSlab.slabSqFt || property.footprint,
       services.preSlab.volumeDiscount || 'none'
@@ -339,7 +431,7 @@ function generateEstimate(input) {
     }
     lineItems.push(result);
   }
-  if (services.bedBug) {
+  if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control')) {
     const bedBugOptions = typeof services.bedBug === 'object' ? services.bedBug : {};
     const includeInternalPricing = shouldIncludeInternalPricing(input, bedBugOptions);
     const result = priceBedBugTreatment(property, {
@@ -351,11 +443,11 @@ function generateEstimate(input) {
     });
     lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
-  if (services.wdo) {
-    const result = priceWDO(property.footprint);
+  if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control')) {
+    const result = priceWDO(property);
     lineItems.push(result);
   }
-  if (services.flea || services.fleaExterior) {
+  if ((services.flea || services.fleaExterior) && !useCommercialManualQuote(services.flea || services.fleaExterior, 'pest_control')) {
     const fleaOptions = typeof services.flea === 'object' && services.flea !== null ? services.flea : {};
     const result = priceFlea({
       ...property,
@@ -373,7 +465,7 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
-  if (services.topDressing) {
+  if (services.topDressing && !useCommercialManualQuote(services.topDressing, 'lawn_care')) {
     const result = priceTopDressing(
       property.lawnSqFt,
       services.topDressing.depth || 'eighth',
@@ -381,11 +473,11 @@ function generateEstimate(input) {
     );
     lineItems.push(result);
   }
-  if (services.dethatching) {
+  if (services.dethatching && !useCommercialManualQuote(services.dethatching, 'lawn_care')) {
     const result = priceDethatching(property.lawnSqFt);
     lineItems.push(result);
   }
-  if (services.plugging) {
+  if (services.plugging && !useCommercialManualQuote(services.plugging, 'lawn_care')) {
     const result = pricePlugging(
       services.plugging.area || property.lawnSqFt,
       services.plugging.spacing || 12,
@@ -396,7 +488,7 @@ function generateEstimate(input) {
     );
     lineItems.push(result);
   }
-  if (services.foam) {
+  if (services.foam && !useCommercialManualQuote(services.foam, 'pest_control')) {
     const foamOptions = typeof services.foam === 'object' && services.foam !== null
       ? services.foam
       : {};
@@ -406,7 +498,7 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
-  if (services.stinging) {
+  if (services.stinging && !useCommercialManualQuote(services.stinging, 'pest_control')) {
     const result = priceStingingInsect({
       species: services.stinging.species || 'PAPER_WASP',
       tier: services.stinging.tier || 2,
@@ -416,11 +508,11 @@ function generateEstimate(input) {
       confined: services.stinging.confined || 'NO',
       urgency: services.stinging.urgency || 'ROUTINE',
       afterHours: services.stinging.afterHours || false,
-      hasRecurringPest: !!services.pest,
+      hasRecurringPest: activeServiceKeys.includes('pest_control'),
     });
     lineItems.push(result);
   }
-  if (services.exclusion) {
+  if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control')) {
     // Auto-waive inspection fee when any rodent service is opted in
     // alongside exclusion (trapping or sanitation). Bait stations are fully
     // excluded from rodent remediation benefits and do not waive inspection.
@@ -449,7 +541,7 @@ function generateEstimate(input) {
 
   // Rodent sanitation (bleach + wipe; tier = light/standard/heavy)
   // Legacy 'medium' resolves to 'standard' inside priceSanitation.
-  if (services.sanitation) {
+  if (services.sanitation && !useCommercialManualQuote(services.sanitation, 'pest_control')) {
     const result = priceSanitation({
       tier: services.sanitation.tier || 'standard',
       affectedSqFt: services.sanitation.affectedSqFt
@@ -462,7 +554,7 @@ function generateEstimate(input) {
   }
 
   // Legacy explicit trap-check rows are included during the active window.
-  if (services.rodentTrappingFollowups) {
+  if (services.rodentTrappingFollowups && !useCommercialManualQuote(services.rodentTrappingFollowups, 'pest_control')) {
     const followupOptions = typeof services.rodentTrappingFollowups === 'object'
       ? services.rodentTrappingFollowups
       : {};
@@ -474,13 +566,13 @@ function generateEstimate(input) {
   }
 
   // Standalone rodent inspection (paid diagnostic, creditable)
-  if (services.rodentInspection) {
+  if (services.rodentInspection && !useCommercialManualQuote(services.rodentInspection, 'pest_control')) {
     lineItems.push(priceRodentInspection());
   }
 
   // Bait station setup fee — waived when any recurring plan is on the
   // estimate; only fires if explicitly forced or no recurring services.
-  if (services.rodentBait) {
+  if (services.rodentBait && !propertyIsCommercial) {
     const hasAnyRecurring = !!(
       services.pest || services.lawn || services.treeShrub ||
       services.mosquito || services.termiteBait || services.rodentBait ||
@@ -497,7 +589,7 @@ function generateEstimate(input) {
   // Replaces the old "auto-fire $199 guarantee on any trap+exclusion" behavior.
   // Adjusts the trap/exclusion/sanitation line item prices in-place to reflect
   // the bundled total, with savings tracked in the bundle line item.
-  {
+  if (!propertyIsCommercial) {
     const trapItem = lineItems.find(i => i.service === 'rodent_trapping');
     const exclItem = lineItems.find(i => i.service === 'exclusion');
     const sanItem = lineItems.find(i => i.service === 'rodent_sanitation');
@@ -529,7 +621,7 @@ function generateEstimate(input) {
   // Rodent guarantee — gated. Caller must pass eligibility flags explicitly;
   // we no longer auto-fire on any trap + exclusion presence. Caller signals
   // intent by setting services.rodentGuarantee = { eligibility: {...} }.
-  if (services.rodentGuarantee) {
+  if (services.rodentGuarantee && !useCommercialManualQuote(services.rodentGuarantee, 'pest_control')) {
     const opts = typeof services.rodentGuarantee === 'object' ? services.rodentGuarantee : {};
     const result = priceRodentGuarantee({
       homeSqFt: opts.homeSqFt || property.footprint || 2000,
@@ -547,19 +639,19 @@ function generateEstimate(input) {
   }
 
   // ── Spec-version services (v2 missing-services spec, Apr 2026) ──
-  if (services.rodentPlugging) {
+  if (services.rodentPlugging && !useCommercialManualQuote(services.rodentPlugging, 'pest_control')) {
     const result = calculatePluggingPrice(services.rodentPlugging);
     lineItems.push(result);
   }
-  if (services.termiteFoam) {
+  if (services.termiteFoam && !useCommercialManualQuote(services.termiteFoam, 'pest_control')) {
     const result = calculateFoamPrice(services.termiteFoam);
     lineItems.push(result);
   }
-  if (services.stingingV2) {
+  if (services.stingingV2 && !useCommercialManualQuote(services.stingingV2, 'pest_control')) {
     const result = calculateStingingPrice(services.stingingV2);
     lineItems.push(result);
   }
-  if (services.exclusionV2) {
+  if (services.exclusionV2 && !useCommercialManualQuote(services.exclusionV2, 'pest_control')) {
     const result = calculateExclusionPrice({
       sqft: services.exclusionV2.sqft || property.footprint,
       stories: services.exclusionV2.stories || property.stories,
@@ -570,7 +662,7 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
-  if (services.rodentGuaranteeCombo) {
+  if (services.rodentGuaranteeCombo && !useCommercialManualQuote(services.rodentGuaranteeCombo, 'pest_control')) {
     const result = calculateRodentGuaranteeCombo({
       sqft: services.rodentGuaranteeCombo.sqft || property.footprint,
       stories: services.rodentGuaranteeCombo.stories || property.stories,

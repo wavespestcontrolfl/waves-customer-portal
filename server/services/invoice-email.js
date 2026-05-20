@@ -41,6 +41,15 @@ function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
+// SMTP is dev/staging-only — in production we hard-fail rather than bypass
+// the email_messages audit row and email_suppressions check. A
+// template-missing error in prod is a migration bug; SendGrid unconfigured
+// in prod is a deploy bug; both should page operators, not fall through to
+// a silent SMTP delivery that the system can't see.
+function smtpFallbackAllowed() {
+  return process.env.NODE_ENV !== 'production';
+}
+
 function pdfAttachment(filename, buffer) {
   return {
     filename,
@@ -202,6 +211,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     }
   }
 
+  if (!smtpFallbackAllowed()) {
+    logger.error(`[invoice-email] SMTP fallback disabled in production for ${invoice.invoice_number} — SendGrid template send required`);
+    return { ok: false, error: 'Email send unavailable: SendGrid template path failed and SMTP fallback is disabled in production', recipient: recipientPayload };
+  }
+
   const transporter = getTransporter();
   if (!transporter) return { ok: false, error: 'Email not configured', recipient: recipientPayload };
 
@@ -228,6 +242,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
 
 async function sendReceiptEmail(invoiceId, options = {}) {
   const memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
+  // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
+  // retried delivery doesn't email the customer twice; manual operator
+  // resends from /admin/invoices intentionally omit it so the operator
+  // can always force a fresh send.
+  const idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
+    ? options.idempotencyKey.trim()
+    : null;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
@@ -330,9 +351,17 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
         triggerEventId: `invoice_receipt:${invoice.id}`,
+        idempotencyKey,
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
       });
+      if (result?.blocked) {
+        return { ok: false, error: result.reason || 'Email suppressed', blocked: true };
+      }
+      if (result?.deduped) {
+        logger.info(`[invoice-email] Receipt email deduped for ${invoice.invoice_number} (idempotencyKey=${idempotencyKey})`);
+        return { ok: true, deduped: true, messageId: result.message?.provider_message_id || null };
+      }
       logger.info(`[invoice-email] Template receipt email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
       return { ok: true, messageId: result.message?.provider_message_id || null };
     } catch (err) {
@@ -342,6 +371,11 @@ async function sendReceiptEmail(invoiceId, options = {}) {
       }
       logger.warn(`[invoice-email] Template unavailable for receipt ${invoice.invoice_number}; falling back to SMTP: ${err.message}`);
     }
+  }
+
+  if (!smtpFallbackAllowed()) {
+    logger.error(`[invoice-email] SMTP fallback disabled in production for receipt ${invoice.invoice_number} — SendGrid template send required`);
+    return { ok: false, error: 'Email send unavailable: SendGrid template path failed and SMTP fallback is disabled in production' };
   }
 
   const transporter = getTransporter();

@@ -468,7 +468,7 @@ async function lookupPropertyFromAITrio(address) {
 }
 
 function buildPropertyPrompt(address) {
-  return `I need a complete property record for the residential property at this address. Find the missing facts via web search.
+  return `I need a complete property record for the property at this address. Find the missing facts via web search.
 
 Address: ${address}
 
@@ -484,9 +484,9 @@ Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
 - "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
-- If the converted lot size is above 200000 square feet, return null for lotSize so the public quote flow does not underprice acreage properties.
+- If the converted lot size is above 200000 square feet, output 200000 so the public quote flow prices at its maximum lot-size cap instead of defaulting to a small lot.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
-- "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", or null.
+- "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", "Commercial", "Office", "Retail", "Warehouse", "Restaurant", "Medical Office", "School", "Industrial", "Multifamily", "Apartment", "HOA Common Area", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
 - Do NOT use generic city/category pages such as apartment directories, short-term-rental lists, or broad "homes for sale in city" pages as the source.
 - Use null for any field you can't verify — DO NOT guess. A null is more useful than a wrong number.
@@ -494,7 +494,7 @@ Output rules:
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
   "squareFootage": <int 500-15000 or null>,
-  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed), or null>,
+  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed; cap verified oversized lots at 200000), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -523,7 +523,7 @@ function parsePropertyJSON(text) {
       bedrooms: coerceInt(raw.bedrooms, 1, 15),
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
       stories: coerceInt(raw.stories, 1, 4),
-      propertyType: coerceEnum(raw.propertyType, ['Single Family', 'Townhome', 'Condo', 'Duplex']),
+      propertyType: normalizeLookupPropertyType(raw.propertyType),
       constructionMaterial: coerceEnum(raw.constructionMaterial, ['CBS', 'WOOD_FRAME', 'BRICK', 'METAL']),
       source: typeof raw.source === 'string' ? raw.source : null,
       confidence: typeof raw.confidence === 'string' ? raw.confidence.toLowerCase() : null,
@@ -552,7 +552,10 @@ const LOT_SQFT_MAX = 200_000;
 // square feet, so we normalize here.
 //   - Strings with "acre" → first number is acres, multiply by 43560.
 //   - Strings with "sqft" / "sq ft" → first number is sqft.
-//   - Bare numbers: small (< LOT_SQFT_MIN) assumed acres, large assumed sqft.
+//   - Bare numbers: small (< LOT_SQFT_MIN) are treated as acres only when
+//     conversion stays within the public quote cap; larger ambiguous values
+//     remain null.
+//   - Verified values above the public quote max are capped, not discarded.
 //   - Strings with BOTH "acre" and "sqft" (e.g. "0.5 acres (21,780 sqft)")
 //     are accepted only when the unit-qualified values agree.
 function coerceLotSize(raw) {
@@ -560,8 +563,8 @@ function coerceLotSize(raw) {
 
   if (typeof raw === 'number') {
     if (!Number.isFinite(raw) || raw <= 0) return null;
-    const sqft = Math.round(raw < LOT_SQFT_MIN ? raw * SQFT_PER_ACRE : raw);
-    return inLotRange(sqft) ? sqft : null;
+    const sqft = coerceUnqualifiedLotSqft(raw);
+    return sqft == null ? null : clampLotSqft(Math.round(sqft));
   }
 
   const str = String(raw).toLowerCase();
@@ -577,14 +580,24 @@ function coerceLotSize(raw) {
   let sqft;
   if (hasAcre) sqft = value * SQFT_PER_ACRE;
   else if (hasSqft) sqft = value;
-  else sqft = value < LOT_SQFT_MIN ? value * SQFT_PER_ACRE : value;
+  else sqft = coerceUnqualifiedLotSqft(value);
+  if (sqft == null) return null;
 
   const rounded = Math.round(sqft);
-  return inLotRange(rounded) ? rounded : null;
+  return clampLotSqft(rounded);
 }
 
-function inLotRange(n) {
-  return n >= LOT_SQFT_MIN && n <= LOT_SQFT_MAX;
+function coerceUnqualifiedLotSqft(value) {
+  if (value < LOT_SQFT_MIN) {
+    const converted = value * SQFT_PER_ACRE;
+    return converted <= LOT_SQFT_MAX ? converted : null;
+  }
+  return value;
+}
+
+function clampLotSqft(n) {
+  if (!Number.isFinite(n) || n < LOT_SQFT_MIN) return null;
+  return Math.min(n, LOT_SQFT_MAX);
 }
 
 function coerceDualUnitLotSize(str) {
@@ -596,11 +609,11 @@ function coerceDualUnitLotSize(str) {
 
   if (acreSqft != null && roundedSqft != null) {
     if (!lotValuesAgree(acreSqft, roundedSqft)) return null;
-    return inLotRange(roundedSqft) ? roundedSqft : null;
+    return clampLotSqft(roundedSqft);
   }
 
   const candidate = roundedSqft ?? acreSqft;
-  return candidate != null && inLotRange(candidate) ? candidate : null;
+  return candidate != null ? clampLotSqft(candidate) : null;
 }
 
 function lotValuesAgree(a, b) {
@@ -656,9 +669,51 @@ function coerceEnum(raw, allowed) {
   return allowed.includes(raw) ? raw : null;
 }
 
+function normalizeLookupPropertyType(raw) {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  if (!text) return null;
+  const key = text.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!key) return null;
+
+  if (/(restaurant|food_service)/.test(key)) return 'Restaurant';
+  if (/(medical|clinic)/.test(key)) return 'Medical Office';
+  if (/(school|daycare)/.test(key)) return 'School';
+  if (/(warehouse)/.test(key)) return 'Warehouse';
+  if (/(industrial)/.test(key)) return 'Industrial';
+  if (/(government|municipal)/.test(key)) return 'Government Municipal';
+  if (/(office|retail|business|plaza|storefront|shop)/.test(key)) return 'Office';
+  if (/(apartment|apartments|multi_family|multifamily)/.test(key)) return 'Multifamily';
+  if (/(hoa_common|common_area)/.test(key)) return 'HOA Common Area';
+  if (/(commercial)/.test(key)) {
+    return 'Commercial';
+  }
+  if (/(townhome|town_home|townhouse)/.test(key)) return 'Townhome';
+  if (/duplex/.test(key)) return 'Duplex';
+  if (/(condo|condominium)/.test(key)) return 'Condo';
+  if (/(single_family|single|house|home|residential)/.test(key)) return 'Single Family';
+  return coerceEnum(text, [
+    'Single Family',
+    'Townhome',
+    'Condo',
+    'Duplex',
+    'Commercial',
+    'Office',
+    'Retail',
+    'Warehouse',
+    'Restaurant',
+    'Medical Office',
+    'School',
+    'Industrial',
+    'Multifamily',
+    'Apartment',
+    'HOA Common Area',
+  ]);
+}
+
 function hasAnyPropertyFact(parsed) {
   return !!(parsed?.squareFootage || parsed?.lotSize || parsed?.yearBuilt
-    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories);
+    || parsed?.bedrooms || parsed?.bathrooms || parsed?.stories || parsed?.propertyType);
 }
 
 // Reshape AI output to match the normalized property-record shape
@@ -995,4 +1050,9 @@ module.exports = {
   lookupPropertyFromOpenAI,
   lookupPropertyFromGemini,
   lookupPropertyFromAITrio,
+  _private: {
+    hasAnyPropertyFact,
+    normalizeLookupPropertyType,
+    parsePropertyJSON,
+  },
 };

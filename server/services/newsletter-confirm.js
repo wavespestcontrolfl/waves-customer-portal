@@ -82,6 +82,12 @@ async function sendConfirmationEmail(subscriber) {
   // Pass asmGroupId: 0 to bypass the SendGrid suppression group entirely.
   const result = await sendgrid.sendOne({
     to: subscriber.email,
+    // Newsletter confirmation is the legitimate use of the `newsletter@`
+    // identity — name it explicitly so the intent is durable rather than
+    // depending on sendgrid-mail's default (other callers should declare
+    // their own identity; defaults are not policy).
+    fromEmail: 'newsletter@wavespestcontrol.com',
+    fromName: 'The Waves Newsletter',
     subject: 'Confirm your Waves Newsletter signup',
     html,
     text,

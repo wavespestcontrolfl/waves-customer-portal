@@ -1,15 +1,15 @@
 import { useState, useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
+  Activity,
   Building2,
-  MapPinned,
+  ChevronRight,
   Plug,
   Server,
   Settings as SettingsIcon,
   ToggleLeft,
   Users,
 } from "lucide-react";
-import GeofenceSettings from "../../components/admin/GeofenceSettings";
 import MobileSettingsPage from "../../components/admin/MobileSettingsPage";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -118,7 +118,6 @@ function Toggle({ checked, onChange, label, description }) {
 const VALID_TABS = [
   "general",
   "integrations",
-  "geofence",
   "gates",
   "team",
   "system",
@@ -165,7 +164,6 @@ export default function SettingsPage() {
   const TABS = [
     { key: "general", label: "General", Icon: Building2 },
     { key: "integrations", label: "Integrations", Icon: Plug },
-    { key: "geofence", label: "Geofence Timers", Icon: MapPinned },
     { key: "gates", label: "Feature Gates", Icon: ToggleLeft },
     { key: "team", label: "Team", Icon: Users },
     { key: "system", label: "System", Icon: Server },
@@ -335,12 +333,42 @@ export default function SettingsPage() {
               ))}
             </div>{" "}
           </Card>{" "}
+          <Card>
+            <Link
+              to="/admin/settings/pest-pressure"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                textDecoration: "none",
+                color: "inherit",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div
+                  style={{
+                    width: 36, height: 36, borderRadius: 8,
+                    background: D.bg, display: "flex",
+                    alignItems: "center", justifyContent: "center",
+                  }}
+                >
+                  <Activity size={18} color={D.heading} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>Pest Pressure</div>
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                    Configure the 0–5 score on customer service reports — service-line scope, weights, labels, trend thresholds, overrides, audit log.
+                  </div>
+                </div>
+              </div>
+              <ChevronRight size={18} color={D.muted} />
+            </Link>
+          </Card>
         </div>
       )}
       {/* ── INTEGRATIONS ── */}
       {tab === "integrations" && <IntegrationsTab gates={gates} />}
-      {/* ── GEOFENCE TIMERS ── */}
-      {tab === "geofence" && <GeofenceSettings />}
       {/* ── FEATURE GATES ── */}
       {tab === "gates" && (
         <Card>

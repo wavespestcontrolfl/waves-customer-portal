@@ -155,6 +155,7 @@ const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
 const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePage'));
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
+const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
@@ -178,7 +179,6 @@ const LeadsPage = lazyWithRetry(() => import('./pages/admin/LeadsPage'));
 const ServiceLibraryPage = lazyWithRetry(() => import('./pages/admin/ServiceLibraryPage'));
 const ProjectsPage = lazyWithRetry(() => import('./pages/admin/ProjectsPage'));
 const CredentialsPage = lazyWithRetry(() => import('./pages/admin/CredentialsPage'));
-const GeofenceEventsPage = lazyWithRetry(() => import('./pages/admin/GeofenceEventsPage'));
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
 const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
 const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
@@ -318,6 +318,7 @@ export default function App() {
             <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
             <Route path="inventory" element={<AdminInventoryPage />} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
+            <Route path="settings/pest-pressure" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading Pest Pressure settings...</div>}><PestPressureSettingsPage /></Suspense>} />
             <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
             <Route path="timetracking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading time tracking...</div>}><TimeTrackingPage /></Suspense>} />
             <Route path="leads" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><LeadsPage /></Suspense>} />
@@ -327,7 +328,6 @@ export default function App() {
             <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
             <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
             <Route path="credentials" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading credentials...</div>}><CredentialsPage /></Suspense>} />
-            <Route path="geofence-events" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading geofence events...</div>}><GeofenceEventsPage /></Suspense>} />
             <Route path="newsletter" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading newsletter...</div>}><NewsletterPage /></Suspense>} />
             <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />

@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const db = require('../models/db');
-const { validateEstimateDeliveryOptions } = require('./estimate-delivery-options');
+const {
+  estimateDataHasQuoteRequirement,
+  validateEstimateDeliveryOptions,
+} = require('./estimate-delivery-options');
 const {
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
@@ -29,11 +32,12 @@ function estimateExpiresAt(now = () => new Date()) {
 }
 
 function buildEstimatePersistenceFields(body) {
+  const quoteRequired = estimateDataHasQuoteRequirement(body.estimateData);
   const serviceInterest = inferEstimateServiceInterest({
     serviceInterest: body.serviceInterest,
     estimateData: body.estimateData,
-    monthlyTotal: body.monthlyTotal,
-    onetimeTotal: body.onetimeTotal,
+    monthlyTotal: quoteRequired ? 0 : body.monthlyTotal,
+    onetimeTotal: quoteRequired ? 0 : body.onetimeTotal,
     notes: body.notes,
   });
 
@@ -44,9 +48,9 @@ function buildEstimatePersistenceFields(body) {
     customer_name: body.customerName,
     customer_phone: body.customerPhone,
     customer_email: body.customerEmail,
-    monthly_total: body.monthlyTotal,
-    annual_total: body.annualTotal,
-    onetime_total: body.onetimeTotal,
+    monthly_total: quoteRequired ? 0 : body.monthlyTotal,
+    annual_total: quoteRequired ? 0 : body.annualTotal,
+    onetime_total: quoteRequired ? 0 : body.onetimeTotal,
     waveguard_tier: body.waveguardTier,
     service_interest: serviceInterest,
     notes: body.notes,
@@ -78,13 +82,14 @@ async function createOrReuseAdminEstimate({
     annualTotal,
     estimateData,
   } = body;
+  const quoteRequired = estimateDataHasQuoteRequirement(estimateData);
   const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
     showOneTimeOption: !!showOneTimeOption,
     billByInvoice: !!billByInvoice,
-    onetimeTotal,
-    monthlyTotal,
-    annualTotal,
+    onetimeTotal: quoteRequired ? 0 : onetimeTotal,
+    monthlyTotal: quoteRequired ? 0 : monthlyTotal,
+    annualTotal: quoteRequired ? 0 : annualTotal,
     estimateData,
   });
   if (deliveryError) throw errorWithStatus(deliveryError, 400);

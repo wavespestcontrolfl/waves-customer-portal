@@ -101,6 +101,7 @@ const PEST = {
     complexity_complex: r(3),
     nearWater: r(3),
     largeDriveway: r(3),
+    attachedGarage: r(5),
   },
   // Multiplicative roach modifier zeroed out (was 0.15 across the board) —
   // we now charge a one-time `pestInitialRoach` line item on visit 1 instead,

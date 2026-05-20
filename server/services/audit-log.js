@@ -192,6 +192,71 @@ async function auditServiceCatalogChange({
   });
 }
 
+/**
+ * Pest Pressure config change. Called from PUT /api/admin/pest-pressure/config
+ * after validation passes. CRITICAL audit — the config drives customer-facing
+ * scores; a silent edit (e.g. weight knob swap) would otherwise be hard to
+ * trace if a customer disputes the score they see on a report. Caller
+ * awaits and lets failures bubble.
+ *
+ * `before` and `after` are the full config snapshots so the audit row alone
+ * is sufficient to explain any historical recalculation.
+ */
+async function auditPestPressureConfigChange({
+  tech_user_id, config_id, scope, changed_fields, before, after,
+  ip_address, user_agent, trx = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id || null,
+    action: 'pest_pressure.config.update',
+    resource_type: 'pest_pressure_config',
+    resource_id: config_id || null,
+    metadata: {
+      scope: scope || 'global',
+      changed_fields: changed_fields || [],
+      before: before || null,
+      after: after || null,
+    },
+    ip_address,
+    user_agent,
+    critical: true,
+    trx,
+  });
+}
+
+/**
+ * Pest Pressure manual override on a calculated score. Called from
+ * PUT /api/admin/pest-pressure/scores/:id/override (Phase 4). CRITICAL
+ * audit — overrides change what a customer sees on their report and
+ * must be traceable to an actor + reason.
+ */
+async function auditPestPressureScoreOverride({
+  tech_user_id, score_id, service_record_id, customer_id,
+  original_calculated_score, displayed_score, override_reason,
+  action_type = 'set',
+  ip_address, user_agent, trx = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id || null,
+    action: `pest_pressure.score.override.${action_type}`,
+    resource_type: 'pest_pressure_score',
+    resource_id: score_id || null,
+    metadata: {
+      service_record_id: service_record_id || null,
+      customer_id: customer_id || null,
+      original_calculated_score,
+      displayed_score,
+      override_reason: override_reason || null,
+    },
+    ip_address,
+    user_agent,
+    critical: true,
+    trx,
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -207,6 +272,8 @@ module.exports = {
   auditTerminalHandoffValidate,
   auditPaymentReconcile,
   auditServiceCatalogChange,
+  auditPestPressureConfigChange,
+  auditPestPressureScoreOverride,
   ipFromReq,
   uaFromReq,
 };

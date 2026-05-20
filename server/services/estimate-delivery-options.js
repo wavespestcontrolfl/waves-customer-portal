@@ -37,6 +37,22 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : null;
 }
 
+function containsQuoteRequirement(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => containsQuoteRequirement(item, depth + 1));
+  }
+  if (typeof value !== 'object') return false;
+  if (value.quoteRequired === true || value.requiresCustomQuote === true) {
+    return true;
+  }
+  return Object.values(value).some((item) => containsQuoteRequirement(item, depth + 1));
+}
+
+function estimateDataHasQuoteRequirement(estimateData) {
+  return containsQuoteRequirement(parseEstimateData(estimateData));
+}
+
 function recurringServiceRowsFromEstimateData(estimateData) {
   const data = parseEstimateData(estimateData);
   const result = data?.result && typeof data.result === 'object'
@@ -75,6 +91,7 @@ function nonPestRecurringServicesForOneTimeOption(estimateData) {
 }
 
 module.exports = {
+  estimateDataHasQuoteRequirement,
   nonPestRecurringServicesForOneTimeOption,
   validateEstimateDeliveryOptions,
 };

@@ -38,23 +38,351 @@ function laborCost(onSiteMinutes) {
   return GLOBAL.LABOR_RATE * (GLOBAL.DRIVE_TIME + onSiteMinutes) / 60;
 }
 
+function uniqueList(values = []) {
+  return [...new Set((values || []).filter(Boolean))];
+}
+
+function positiveFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function hasValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function normalizeToken(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+}
+
+function resolvePestFootprint(property = {}, options = {}) {
+  const fallback = positiveFiniteNumber(options.fallback) || 2000;
+  const manualReviewReasons = [];
+  const warnings = [];
+  const aliases = [
+    ['footprint', property.footprint],
+    ['footprintSqFt', property.footprintSqFt],
+    ['homeSqFt', property.homeSqFt],
+    ['buildingSqFt', property.buildingSqFt],
+    ['livingAreaSqFt', property.livingAreaSqFt],
+  ];
+
+  for (const [source, value] of aliases) {
+    const parsed = positiveFiniteNumber(value);
+    if (parsed !== null) {
+      return {
+        footprint: parsed,
+        source,
+        wasDefaulted: false,
+        requiresManualReview: false,
+        manualReviewReasons,
+        warnings,
+      };
+    }
+  }
+
+  const hadInvalidFootprint = aliases.some(([, value]) => hasValue(value));
+  const reason = hadInvalidFootprint
+    ? 'invalid_or_zero_pest_footprint'
+    : 'missing_pest_footprint_fallback';
+  manualReviewReasons.push(reason);
+  warnings.push(reason);
+
+  return {
+    footprint: fallback,
+    source: hadInvalidFootprint ? 'invalid_or_zero_footprint_fallback' : 'fallback_2000',
+    wasDefaulted: true,
+    requiresManualReview: true,
+    manualReviewReasons,
+    warnings,
+  };
+}
+
+function normalizePestFrequency(value) {
+  const requestedFrequency = value;
+  const raw = normalizeToken(value);
+  const aliases = {
+    qtr: 'quarterly',
+    quarter: 'quarterly',
+    quarterly: 'quarterly',
+    bi_monthly: 'bimonthly',
+    bimonthly: 'bimonthly',
+    every_other_month: 'bimonthly',
+    monthly: 'monthly',
+  };
+  const frequency = aliases[raw] || 'quarterly';
+  const frequencyWasDefaulted = raw ? !aliases[raw] : true;
+  const frequencyWarnings = raw && !aliases[raw]
+    ? ['invalid_pest_frequency_defaulted_to_quarterly']
+    : [];
+  return {
+    requestedFrequency,
+    frequency,
+    frequencyWasDefaulted,
+    frequencyWarnings,
+    frequencySource: frequencyWasDefaulted ? 'defaulted' : 'requested',
+  };
+}
+
+function normalizePestPricingVersion(value) {
+  const requestedPricingVersion = value;
+  const raw = normalizeToken(value);
+  const allowed = { v1: 'v1', v2: 'v2' };
+  const pricingVersion = allowed[raw] || 'v1';
+  const pricingVersionWasDefaulted = raw ? !allowed[raw] : true;
+  const pricingVersionWarnings = raw && !allowed[raw]
+    ? ['invalid_pest_pricing_version_defaulted_to_v1']
+    : [];
+  return {
+    requestedPricingVersion,
+    pricingVersion,
+    pricingVersionWasDefaulted,
+    pricingVersionWarnings,
+    pricingVersionSource: pricingVersionWasDefaulted ? 'defaulted' : 'requested',
+  };
+}
+
+function normalizeRoachType(value) {
+  const requestedRoachType = value;
+  const raw = normalizeToken(value);
+  const aliases = {
+    none: 'none',
+    no: 'none',
+    false: 'none',
+    regular: 'regular',
+    palmetto: 'regular',
+    american: 'regular',
+    smoky: 'regular',
+    smoky_brown: 'regular',
+    australian: 'regular',
+    florida_woods: 'regular',
+    native: 'regular',
+    german: 'german',
+    kitchen: 'german',
+    small_indoor: 'german',
+    german_roach: 'german',
+    german_cockroach: 'german',
+  };
+  const roachType = aliases[raw] || 'none';
+  const roachTypeWasDefaulted = raw ? !aliases[raw] : true;
+  const roachWarnings = raw && !aliases[raw]
+    ? ['invalid_roach_type_defaulted_to_none']
+    : [];
+  return {
+    requestedRoachType,
+    roachType,
+    roachTypeWasDefaulted,
+    roachWarnings,
+  };
+}
+
+function normalizePestDensity(value, field = 'density') {
+  const raw = normalizeToken(value);
+  const aliases = {
+    none: 'none',
+    no: 'none',
+    light: 'light',
+    low: 'light',
+    sparse: 'light',
+    moderate: 'moderate',
+    medium: 'moderate',
+    med: 'moderate',
+    standard: 'moderate',
+    heavy: 'heavy',
+    high: 'heavy',
+    dense: 'heavy',
+  };
+  const density = aliases[raw] || 'moderate';
+  const defaulted = raw ? !aliases[raw] : false;
+  const warning = field === 'trees'
+    ? 'invalid_tree_density_defaulted_to_moderate'
+    : field === 'shrubs'
+      ? 'invalid_shrub_density_defaulted_to_moderate'
+      : 'invalid_pest_density_defaulted_to_moderate';
+  return {
+    requested: value,
+    value: density,
+    wasDefaulted: defaulted,
+    warnings: defaulted ? [warning] : [],
+  };
+}
+
+function normalizePestComplexity(value) {
+  const raw = normalizeToken(value);
+  const aliases = {
+    simple: 'simple',
+    easy: 'simple',
+    low: 'simple',
+    moderate: 'moderate',
+    medium: 'moderate',
+    med: 'moderate',
+    standard: 'moderate',
+    normal: 'moderate',
+    complex: 'complex',
+    high: 'complex',
+    heavy: 'complex',
+  };
+  const complexity = aliases[raw] || 'moderate';
+  const defaulted = raw ? !aliases[raw] : false;
+  return {
+    requested: value,
+    value: complexity,
+    wasDefaulted: defaulted,
+    warnings: defaulted ? ['invalid_pest_complexity_defaulted_to_moderate'] : [],
+  };
+}
+
+function normalizePestPropertyType(value) {
+  const requestedPropertyType = value;
+  const raw = normalizeToken(value);
+  const aliases = {
+    single_family: 'single_family',
+    singlefamily: 'single_family',
+    townhouse_end: 'townhome_end',
+    townhome_end: 'townhome_end',
+    townhome_interior: 'townhome_interior',
+    townhouse_interior: 'townhome_interior',
+    duplex: 'duplex',
+    condo_ground: 'condo_ground',
+    ground_condo: 'condo_ground',
+    condo_upper: 'condo_upper',
+    upper_condo: 'condo_upper',
+  };
+  const propertyType = aliases[raw] || 'single_family';
+  const propertyTypeWasDefaulted = raw ? !aliases[raw] : true;
+  return {
+    requestedPropertyType,
+    propertyType,
+    propertyTypeWasDefaulted,
+    propertyTypeWarnings: raw && !aliases[raw]
+      ? ['invalid_property_type_defaulted_to_single_family']
+      : [],
+  };
+}
+
+function normalizePestFeatures(features = {}) {
+  const shrubs = normalizePestDensity(features.shrubs, 'shrubs');
+  const trees = normalizePestDensity(features.trees, 'trees');
+  const complexity = normalizePestComplexity(features.complexity);
+  const featureWarnings = uniqueList([
+    ...shrubs.warnings,
+    ...trees.warnings,
+    ...complexity.warnings,
+  ]);
+
+  return {
+    normalizedFeatures: {
+      ...features,
+      shrubs: shrubs.value,
+      trees: trees.value,
+      complexity: complexity.value,
+    },
+    featureWarnings,
+    featureNormalization: {
+      shrubs,
+      trees,
+      complexity,
+    },
+  };
+}
+
+function normalizePestAgeAdjustment(value) {
+  if (!hasValue(value)) {
+    return { pestAgeAdj: 0, pestAgeAdjWarnings: [] };
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return {
+      pestAgeAdj: 0,
+      pestAgeAdjWarnings: ['invalid_pest_age_adjustment_defaulted_to_zero'],
+    };
+  }
+  const clamped = Math.max(-50, Math.min(75, parsed));
+  return {
+    pestAgeAdj: clamped,
+    pestAgeAdjWarnings: clamped !== parsed ? ['pest_age_adjustment_clamped'] : [],
+  };
+}
+
 function normalizePoolCageSize(value, hasPoolCage = false) {
   const raw = String(value || '').trim().toLowerCase();
   if (['small', 'medium', 'large', 'oversized'].includes(raw)) return raw;
   return hasPoolCage ? 'medium' : 'none';
 }
 
-function poolCageAdjustment(features = {}) {
+function resolvePoolCagePricing(features = {}) {
   const hasPoolCage = !!features.poolCage;
-  const size = normalizePoolCageSize(features.poolCageSize, hasPoolCage);
-  if (!hasPoolCage || size === 'none') return 0;
+  const rawSize = String(features.poolCageSize || '').trim().toLowerCase();
+  if (!hasPoolCage) {
+    return {
+      adjustment: 0,
+      poolCageSize: 'none',
+      poolCageSizeSource: 'none',
+      poolCageSizeInferred: false,
+      warnings: [],
+    };
+  }
+  const size = ['small', 'medium', 'large', 'oversized'].includes(rawSize) ? rawSize : null;
+  if (!size) {
+    return {
+      adjustment: PEST.additionalAdjustments.poolCage || 0,
+      poolCageSize: null,
+      poolCageSizeSource: rawSize ? 'invalid' : 'missing',
+      poolCageSizeInferred: true,
+      warnings: ['pool_cage_size_missing_default_adjustment_used'],
+    };
+  }
   const key = {
     small: 'poolCageSmall',
     medium: 'poolCageMedium',
     large: 'poolCageLarge',
     oversized: 'poolCageOversized',
   }[size];
-  return PEST.additionalAdjustments[key] ?? PEST.additionalAdjustments.poolCage;
+  return {
+    adjustment: PEST.additionalAdjustments[key] ?? PEST.additionalAdjustments.poolCage,
+    poolCageSize: size,
+    poolCageSizeSource: 'explicit',
+    poolCageSizeInferred: false,
+    warnings: [],
+  };
+}
+
+function poolCageAdjustment(features = {}) {
+  return resolvePoolCagePricing(features).adjustment;
+}
+
+function hasAttachedGarageForPest(property = {}) {
+  return !!(property.attachedGarage || property.features?.attachedGarage);
+}
+
+function mapPestProductionReason(reason) {
+  return {
+    stories_estimated: 'pest_production_stories_default_or_estimated',
+    pool_cage_size_inferred: 'pest_pool_cage_size_inferred',
+    large_lot: 'pest_large_lot_manual_review',
+    very_large_lot: 'pest_low_confidence_large_lot',
+    large_pool_cage: 'pest_large_or_oversized_pool_cage',
+    oversized_pool_cage: 'pest_large_or_oversized_pool_cage',
+    complex_heavy_vegetation: 'pest_complex_heavy_landscape',
+    multiple_outbuildings: 'pest_multiple_outbuildings',
+    estimated_service_time_45_plus: 'pest_estimated_minutes_above_manual_review_threshold',
+    estimated_service_time_60_plus: 'pest_estimated_minutes_above_low_confidence_threshold',
+  }[reason] || reason;
+}
+
+function combineManualReviewMetadata(...groups) {
+  return uniqueList(groups.flatMap(group => group || []));
+}
+
+function confidenceRank(confidence) {
+  return { high: 0, medium: 1, low: 2 }[confidence] ?? 0;
+}
+
+function lowerConfidence(a, b) {
+  return confidenceRank(a) >= confidenceRank(b) ? a : b;
 }
 
 function calculatePestProductionDiagnostics(property) {
@@ -81,7 +409,7 @@ function calculatePestProductionDiagnostics(property) {
     complexity: cfg.complexityMinutes?.[f.complexity] || 0,
     largeDriveway: f.largeDriveway ? (cfg.largeDrivewayMinutes || 0) : 0,
     nearWater: f.nearWater ? (cfg.nearWaterMinutes || 0) : 0,
-    attachedGarage: property.attachedGarage ? (cfg.attachedGarageMinutes || 0) : 0,
+    attachedGarage: hasAttachedGarageForPest(property) ? (cfg.attachedGarageMinutes || 0) : 0,
     outbuildings: outbuildingCount * (cfg.outbuildingMinutes || 0),
   };
 
@@ -117,6 +445,7 @@ function calculatePestProductionDiagnostics(property) {
     manualReview: reviewReasons.length > 0,
     reviewReasons,
     manualReviewReasons: reviewReasons,
+    lowConfidenceReasons,
   };
 }
 
@@ -167,25 +496,50 @@ function normalizeMosquitoProgramKey(value) {
 // ============================================================
 function pricePestControl(property, options = {}) {
   const {
-    frequency = 'quarterly',
-    pricingVersion = 'v1',
-    roachType = 'none',
+    frequency: requestedFrequencyInput = 'quarterly',
+    pricingVersion: requestedPricingVersionInput = 'v1',
+    roachType: requestedRoachTypeInput = 'none',
     modifiers = {},
   } = options;
 
-  const footprint = property.footprint;
+  const footprintResolution = resolvePestFootprint(property);
+  const footprint = footprintResolution.footprint;
+  const frequencyMeta = normalizePestFrequency(requestedFrequencyInput);
+  const versionMeta = normalizePestPricingVersion(requestedPricingVersionInput);
+  const roachMeta = normalizeRoachType(requestedRoachTypeInput);
+  const propertyTypeMeta = normalizePestPropertyType(property.propertyType);
+  const {
+    normalizedFeatures,
+    featureWarnings,
+    featureNormalization,
+  } = normalizePestFeatures(property.features || {});
+  const pestAgeMeta = normalizePestAgeAdjustment(modifiers.pestAgeAdj);
+  const poolCageMeta = resolvePoolCagePricing(normalizedFeatures);
+  const attachedGarageAdj = hasAttachedGarageForPest({ ...property, features: normalizedFeatures })
+    ? (PEST.additionalAdjustments.attachedGarage || 0)
+    : 0;
+  const warningList = uniqueList([
+    ...footprintResolution.warnings,
+    ...frequencyMeta.frequencyWarnings,
+    ...versionMeta.pricingVersionWarnings,
+    ...roachMeta.roachWarnings,
+    ...propertyTypeMeta.propertyTypeWarnings,
+    ...featureWarnings,
+    ...pestAgeMeta.pestAgeAdjWarnings,
+    ...poolCageMeta.warnings,
+  ]);
   const footprintAdj = interpolate(
     footprint,
     PEST.footprintBrackets.map(b => [b.sqft, b.adj])
   );
 
   let additionalAdj = 0;
-  const f = property.features || {};
+  const f = normalizedFeatures;
   if (f.indoor) additionalAdj += PEST.additionalAdjustments.indoor;
   if (f.shrubs === 'heavy') additionalAdj += PEST.additionalAdjustments.shrubs_heavy;
   else if (f.shrubs === 'moderate') additionalAdj += PEST.additionalAdjustments.shrubs_moderate;
   else if (f.shrubs === 'light') additionalAdj += (PEST.additionalAdjustments.shrubs_light || 0);
-  if (f.poolCage) additionalAdj += poolCageAdjustment(f);
+  if (f.poolCage) additionalAdj += poolCageMeta.adjustment;
   else if (f.pool) additionalAdj += PEST.additionalAdjustments.poolNoCage;
   if (f.trees === 'heavy') additionalAdj += PEST.additionalAdjustments.trees_heavy;
   else if (f.trees === 'moderate') additionalAdj += PEST.additionalAdjustments.trees_moderate;
@@ -195,16 +549,19 @@ function pricePestControl(property, options = {}) {
   else if (f.complexity === 'simple') additionalAdj += (PEST.additionalAdjustments.complexity_simple || 0);
   if (f.nearWater) additionalAdj += PEST.additionalAdjustments.nearWater;
   if (f.largeDriveway) additionalAdj += PEST.additionalAdjustments.largeDriveway;
+  additionalAdj += attachedGarageAdj;
 
-  const propAdj = PROPERTY_TYPE_ADJ[property.propertyType] || 0;
-  const ageAdj = modifiers.pestAgeAdj || 0;
-  if (property.attachedGarage) additionalAdj += 5;
+  const propAdj = PROPERTY_TYPE_ADJ[propertyTypeMeta.propertyType] || 0;
+  const ageAdj = pestAgeMeta.pestAgeAdj;
   let basePrice = Math.max(PEST.floor, PEST.base + Math.round(footprintAdj) + additionalAdj + propAdj + ageAdj);
 
-  const roachMod = PEST.roachModifier[roachType] || 0;
+  const roachMod = PEST.roachModifier[roachMeta.roachType] || 0;
   // Session 11a Step 2b-3: 2-decimal rounding matches v2 (pricing-engine-v2.js:743).
   const roachAddOn = Math.round(basePrice * roachMod * 100) / 100;
 
+  const pricingVersion = versionMeta.pricingVersion;
+  const frequency = frequencyMeta.frequency;
+  const roachType = roachMeta.roachType;
   const freqDiscounts = pricingVersion === 'v2' ? PEST.frequencyDiscounts.v2 : PEST.frequencyDiscounts.v1;
   const freqMult = freqDiscounts[frequency] || 1.0;
   const visitsPerYear = PEST.frequencies[frequency] || 4;
@@ -242,13 +599,72 @@ function pricePestControl(property, options = {}) {
       monthly: Math.round(ann / 12 * 100) / 100,
       label: freqKey === 'monthly' ? 'Monthly' : freqKey === 'bimonthly' ? 'Bi-Monthly' : 'Quarterly',
       recommended: freqKey === frequency,
+      selected: freqKey === frequency,
+      isSelected: freqKey === frequency,
+      systemRecommended: false,
+      isRecommended: false,
     };
   });
+
+  const diagnosticsProperty = {
+    ...property,
+    footprint,
+    propertyType: propertyTypeMeta.propertyType,
+    attachedGarage: hasAttachedGarageForPest({ ...property, features: normalizedFeatures }),
+    features: normalizedFeatures,
+  };
+  const productionDiagnostics = calculatePestProductionDiagnostics(diagnosticsProperty);
+  const diagnosticsReasons = productionDiagnostics?.manualReviewReasons || productionDiagnostics?.reviewReasons || [];
+  const mappedDiagnosticsReasons = diagnosticsReasons.map(mapPestProductionReason);
+  const lowConfidenceReasons = productionDiagnostics?.lowConfidenceReasons || [];
+  const pricingConfidence = footprintResolution.requiresManualReview
+    ? lowerConfidence('low', productionDiagnostics?.pricingConfidence || 'high')
+    : (productionDiagnostics?.pricingConfidence || 'high');
+  const requiresManualReview = !!(
+    footprintResolution.requiresManualReview ||
+    productionDiagnostics?.manualReview ||
+    pricingConfidence === 'medium' ||
+    pricingConfidence === 'low'
+  );
+  const manualReviewReasons = combineManualReviewMetadata(
+    footprintResolution.manualReviewReasons,
+    diagnosticsReasons,
+    mappedDiagnosticsReasons
+  );
+  const diagnosticEstimatedMinutes = productionDiagnostics?.estimatedMinutes;
+  const diagnosticOnSiteLaborCost = Number.isFinite(Number(diagnosticEstimatedMinutes))
+    ? GLOBAL.LABOR_RATE * Number(diagnosticEstimatedMinutes) / 60
+    : null;
+  const diagnosticAnnualCost = diagnosticOnSiteLaborCost === null
+    ? null
+    : Math.round((diagnosticOnSiteLaborCost + materialPerVisit + driveLaborCost) * visitsPerYear + GLOBAL.ADMIN_ANNUAL);
+  const diagnosticMargin = diagnosticAnnualCost === null || annual <= 0
+    ? null
+    : Math.round(((annual - diagnosticAnnualCost) / annual) * 1000) / 1000;
 
   return {
     service: 'pest_control',
     basePrice, footprintAdj: Math.round(footprintAdj), additionalAdj, propAdj,
-    roachType, roachAddOn, freqMult, frequency, visitsPerYear, pricingVersion,
+    roachType, requestedRoachType: roachMeta.requestedRoachType, roachTypeWasDefaulted: roachMeta.roachTypeWasDefaulted,
+    roachAddOn, freqMult, frequency, visitsPerYear, pricingVersion,
+    requestedFrequency: frequencyMeta.requestedFrequency,
+    selectedFrequency: frequency,
+    frequencySource: frequencyMeta.frequencySource,
+    frequencyWasDefaulted: frequencyMeta.frequencyWasDefaulted,
+    requestedPricingVersion: versionMeta.requestedPricingVersion,
+    pricingVersionWasDefaulted: versionMeta.pricingVersionWasDefaulted,
+    requestedPropertyType: propertyTypeMeta.requestedPropertyType,
+    propertyType: propertyTypeMeta.propertyType,
+    propertyTypeWasDefaulted: propertyTypeMeta.propertyTypeWasDefaulted,
+    normalizedFeatures,
+    featureNormalization,
+    featureWarnings,
+    pestAgeAdj: ageAdj,
+    pestAgeAdjWarnings: pestAgeMeta.pestAgeAdjWarnings,
+    poolCageSize: poolCageMeta.poolCageSize,
+    poolCageSizeSource: poolCageMeta.poolCageSizeSource,
+    poolCageSizeInferred: poolCageMeta.poolCageSizeInferred,
+    attachedGarageAdj,
     perApp, annual, monthly,
     tiers,
     costs: {
@@ -262,7 +678,20 @@ function pricePestControl(property, options = {}) {
     margin: Math.round(margin * 1000) / 1000,
     marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
     initialFee: PEST.initialFee,
-    productionDiagnostics: calculatePestProductionDiagnostics(property),
+    footprintUsed: footprint,
+    footprintSource: footprintResolution.source,
+    footprintWasDefaulted: footprintResolution.wasDefaulted,
+    requiresManualReview,
+    manualReviewReasons,
+    pricingConfidence,
+    lowConfidenceReasons,
+    warnings: warningList,
+    productionDiagnostics,
+    diagnosticEstimatedMinutes,
+    diagnosticAnnualCost,
+    diagnosticMargin,
+    diagnosticMarginFloorOk: diagnosticMargin === null ? null : diagnosticMargin >= GLOBAL.MARGIN_FLOOR,
+    diagnosticPricingMode: 'shadow_only',
   };
 }
 
@@ -281,15 +710,18 @@ function pricePestControl(property, options = {}) {
 // still available for severe colonies; this is the auto-fire for the
 // everyday "I saw one or two" case.
 function pricePestInitialRoach(property, options = {}) {
-  const { roachType = 'none', standalone = false } = options;
+  const { roachType: requestedRoachTypeInput = 'none', standalone = false } = options;
+  const roachMeta = normalizeRoachType(requestedRoachTypeInput);
+  const roachType = roachMeta.roachType;
   if (roachType === 'none') return null;
+  const footprintResolution = resolvePestFootprint(property);
 
   // Standalone Cockroach Treatment (without recurring pest) uses a higher
   // scale — no future visits to amortize the heavier visit-1 burden across.
   const scaleKey = standalone && roachType === 'regular' ? 'regular_standalone' : roachType;
   const scale = PEST.pestInitialRoach?.[scaleKey];
   if (!Array.isArray(scale) || scale.length === 0) return null;
-  const footprint = property?.footprint || 0;
+  const footprint = footprintResolution.footprint;
   const bracket = scale.find((b) => footprint < b.sqft) || scale[scale.length - 1];
   const price = bracket.price;
 
@@ -310,9 +742,19 @@ function pricePestInitialRoach(property, options = {}) {
       ? 'Heavier first visit for German roaches (the small indoor / kitchen kind) — interior spray, gel bait at hot spots, and a growth regulator to break the breeding cycle.'
       : 'Heavier first visit for SWFL native roaches (American / palmetto, smoky brown, Australian, Florida woods) — interior spray, bait at hot spots, and perimeter granular.',
     price,
+    requestedRoachType: roachMeta.requestedRoachType,
     roachType,
+    roachTypeWasDefaulted: roachMeta.roachTypeWasDefaulted,
+    scaleKey,
+    standalone: !!standalone,
     oneTime: true,
     footprintBracket: bracket.sqft === Infinity ? '2500+' : `<${bracket.sqft}`,
+    footprintUsed: footprint,
+    footprintSource: footprintResolution.source,
+    footprintWasDefaulted: footprintResolution.wasDefaulted,
+    requiresManualReview: footprintResolution.requiresManualReview,
+    manualReviewReasons: footprintResolution.manualReviewReasons,
+    warnings: uniqueList([...footprintResolution.warnings, ...roachMeta.roachWarnings]),
     costs: {
       extraMaterial,
       extraLaborMin: extraOnSiteMin,
@@ -1687,22 +2129,32 @@ function priceOneTimePest(property, options = {}) {
     afterHours = false,
     isRecurringCustomer = false,
     recurringPestPerApp = null,
-    roachType = 'none',
+    roachType: requestedRoachTypeInput = 'none',
   } = options;
 
+  const roachMeta = normalizeRoachType(requestedRoachTypeInput);
+  const footprintResolution = resolvePestFootprint(property);
+  const warnings = [...roachMeta.roachWarnings, ...footprintResolution.warnings];
   let base;
-  if (recurringPestPerApp) {
-    const roachMod = PEST.roachModifier[roachType] || 0;
+  let baseSource;
+  let baselinePest = null;
+  const recurringPerApp = Number(recurringPestPerApp);
+  if (Number.isFinite(recurringPerApp) && recurringPerApp > 0) {
+    const roachMod = PEST.roachModifier[roachMeta.roachType] || 0;
     // Legacy guard: roach modifiers are currently zero, but keep the backout
     // harmless if an old saved estimate or future config reintroduces a value.
-    base = recurringPestPerApp / (1 + roachMod);
+    base = recurringPerApp / (1 + roachMod);
+    baseSource = 'recurringPestPerApp';
   } else {
-    const pestResult = pricePestControl(property, { frequency: 'quarterly', roachType: 'none' });
-    base = pestResult.basePrice;
+    if (hasValue(recurringPestPerApp)) warnings.push('invalid_recurring_pest_per_app_ignored');
+    baselinePest = pricePestControl(property, { frequency: 'quarterly', roachType: 'none' });
+    base = baselinePest.basePrice;
+    baseSource = 'computed_quarterly_baseline';
   }
 
+  const multipliedPrice = Math.round(base * ONE_TIME.pest.multiplier);
   const preUrgencyPrice = applyOneTimeFloor(
-    Math.round(base * ONE_TIME.pest.multiplier),
+    multipliedPrice,
     ONE_TIME.pest.floor
   );
   const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
@@ -1717,12 +2169,26 @@ function priceOneTimePest(property, options = {}) {
     afterHours,
     isRecurringCustomer,
     basePrice: Math.round(base * 100) / 100,
+    baseSource,
+    baselinePestBasePrice: baselinePest?.basePrice ?? null,
+    selectedFloor: ONE_TIME.pest.floor,
+    floorAppliedBeforeUrgency: preUrgencyPrice > multipliedPrice,
+    floorAppliedAfterDiscount: price > discounted.price,
+    requestedRoachType: roachMeta.requestedRoachType,
+    roachType: roachMeta.roachType,
+    roachTypeWasDefaulted: roachMeta.roachTypeWasDefaulted,
     preUrgencyPrice,
     urgencyMultiplier,
     subtotalBeforeRecurringCustomerDiscount: Math.round(discountBase),
     recurringCustomerDiscountRate: discounted.rate,
     recurringCustomerDiscountAmount: Math.max(0, Math.round(discountBase) - price),
     discountHandledByPricingFunction: true,
+    footprintUsed: baselinePest?.footprintUsed ?? footprintResolution.footprint,
+    footprintSource: baselinePest?.footprintSource ?? footprintResolution.source,
+    footprintWasDefaulted: baselinePest?.footprintWasDefaulted ?? footprintResolution.wasDefaulted,
+    requiresManualReview: !!(baselinePest?.requiresManualReview || footprintResolution.requiresManualReview),
+    manualReviewReasons: combineManualReviewMetadata(baselinePest?.manualReviewReasons, footprintResolution.manualReviewReasons),
+    warnings: uniqueList([...warnings, ...(baselinePest?.warnings || [])]),
   };
 }
 
@@ -1916,13 +2382,22 @@ function pricePreSlabTermidor(slabSqFt, volumeDiscount = 'none') {
 }
 
 function priceGermanRoach(property) {
-  const footprint = property.footprint;
+  const footprintResolution = resolvePestFootprint(property);
+  const footprint = footprintResolution.footprint;
   const adj = interpolate(footprint, SPECIALTY.germanRoach.footprintAdj);
   const price = Math.max(SPECIALTY.germanRoach.floor, SPECIALTY.germanRoach.base + Math.round(adj));
 
   return {
     service: 'german_roach',
     price,
+    pricingModel: 'german_roach_multi_visit',
+    footprintAdj: Math.round(adj),
+    footprintUsed: footprint,
+    footprintSource: footprintResolution.source,
+    footprintWasDefaulted: footprintResolution.wasDefaulted,
+    requiresManualReview: footprintResolution.requiresManualReview,
+    manualReviewReasons: footprintResolution.manualReviewReasons,
+    warnings: footprintResolution.warnings,
     setupCharge: SPECIALTY.germanRoach.setupCharge,
     total: price + SPECIALTY.germanRoach.setupCharge,
     visits: 3,
@@ -2262,6 +2737,7 @@ function buildBedBugQuoteRequired(normalized, reason, warnings = []) {
     warnings: uniqueWarnings(warnings, normalized.warnings, bedBugPrepWarnings(normalized)),
     treatmentLines: [],
     recurringDiscountEligible: false,
+    maxRecurringDiscountPct: BED_BUG.maxRecurringDiscountPct,
     recurringDiscountApplied: 0,
     requiresInspection: true,
     requiresPrepChecklist: true,
@@ -2297,6 +2773,7 @@ function bedBugCommonResult(normalized, fields) {
     price,
     multipliers: fields.multipliers,
     recurringDiscountEligible: false,
+    maxRecurringDiscountPct: BED_BUG.maxRecurringDiscountPct,
     recurringDiscountApplied: 0,
     requiresInspection: true,
     requiresPrepChecklist: true,
@@ -2524,18 +3001,46 @@ function resolveHybridPrice(property, normalized) {
 
 function priceBedBugTreatment(property, options) {
   const normalized = normalizeBedBugOptions(property, options);
+  const footprintResolution = normalized.footprint
+    ? {
+        footprint: normalized.footprint,
+        source: 'footprint',
+        wasDefaulted: false,
+        requiresManualReview: false,
+        manualReviewReasons: [],
+        warnings: [],
+      }
+    : resolvePestFootprint(property);
   const severityConfig = BED_BUG.severity[normalized.severity];
   const prepConfig = BED_BUG.prepStatus[normalized.prepStatus];
 
   if (severityConfig.quoteRequired) {
-    return buildBedBugQuoteRequired(normalized, 'SEVERE_INFESTATION', [
+    const quote = buildBedBugQuoteRequired(normalized, 'SEVERE_INFESTATION', [
       'Severe bed bug infestations require inspection and custom quote.',
     ]);
+    return {
+      ...quote,
+      footprintUsed: footprintResolution.footprint,
+      footprintSource: footprintResolution.source,
+      footprintWasDefaulted: footprintResolution.wasDefaulted,
+      requiresManualReview: true,
+      manualReviewReasons: combineManualReviewMetadata(footprintResolution.manualReviewReasons, ['SEVERE_INFESTATION']),
+      warnings: uniqueWarnings(quote.warnings, footprintResolution.warnings),
+    };
   }
   if (prepConfig.quoteRequired || prepConfig.allowed === false) {
-    return buildBedBugQuoteRequired(normalized, 'PREP_REFUSED', [
+    const quote = buildBedBugQuoteRequired(normalized, 'PREP_REFUSED', [
       'Prep refused requires inspection/manager quote before treatment.',
     ]);
+    return {
+      ...quote,
+      footprintUsed: footprintResolution.footprint,
+      footprintSource: footprintResolution.source,
+      footprintWasDefaulted: footprintResolution.wasDefaulted,
+      requiresManualReview: true,
+      manualReviewReasons: combineManualReviewMetadata(footprintResolution.manualReviewReasons, ['PREP_REFUSED']),
+      warnings: uniqueWarnings(quote.warnings, footprintResolution.warnings),
+    };
   }
 
   let result;
@@ -2546,6 +3051,12 @@ function priceBedBugTreatment(property, options) {
   if (normalized.includeInternalCostBasis && normalized.isInternal) {
     result.internalCostBasis = BED_BUG.internalCostBasis;
   }
+  result.footprintUsed = footprintResolution.footprint;
+  result.footprintSource = footprintResolution.source;
+  result.footprintWasDefaulted = footprintResolution.wasDefaulted;
+  result.requiresManualReview = footprintResolution.requiresManualReview;
+  result.manualReviewReasons = footprintResolution.manualReviewReasons;
+  result.warnings = uniqueWarnings(result.warnings, footprintResolution.warnings);
   return result;
 }
 
@@ -2566,11 +3077,39 @@ function priceBedBug(rooms, method = 'CHEMICAL', footprint = 2000) {
   });
 }
 
-function priceWDO(footprint) {
+function priceWDO(input) {
+  const property = typeof input === 'number' || typeof input === 'string'
+    ? { footprint: input }
+    : (input || {});
+  const footprintResolution = resolvePestFootprint(property);
+  const footprint = footprintResolution.footprint;
   for (const bracket of SPECIALTY.wdo.brackets) {
-    if (footprint <= bracket.maxSqFt) return { service: 'wdo_inspection', price: bracket.price };
+    if (footprint <= bracket.maxSqFt) {
+      return {
+        service: 'wdo_inspection',
+        price: bracket.price,
+        footprintUsed: footprint,
+        footprintSource: footprintResolution.source,
+        footprintWasDefaulted: footprintResolution.wasDefaulted,
+        requiresManualReview: footprintResolution.requiresManualReview,
+        manualReviewReasons: footprintResolution.manualReviewReasons,
+        warnings: footprintResolution.warnings,
+        bracketLabel: bracket.maxSqFt === Infinity ? '>3500' : `<=${bracket.maxSqFt}`,
+      };
+    }
   }
-  return { service: 'wdo_inspection', price: SPECIALTY.wdo.brackets[SPECIALTY.wdo.brackets.length - 1].price };
+  const bracket = SPECIALTY.wdo.brackets[SPECIALTY.wdo.brackets.length - 1];
+  return {
+    service: 'wdo_inspection',
+    price: bracket.price,
+    footprintUsed: footprint,
+    footprintSource: footprintResolution.source,
+    footprintWasDefaulted: footprintResolution.wasDefaulted,
+    requiresManualReview: footprintResolution.requiresManualReview,
+    manualReviewReasons: footprintResolution.manualReviewReasons,
+    warnings: footprintResolution.warnings,
+    bracketLabel: '>3500',
+  };
 }
 
 function normalizeFleaAreaSource(value) {
@@ -2614,7 +3153,9 @@ function priceFleaExterior(areaSqFt, options = {}) {
   }
   const initial = Math.round(Number(tier.initial) || 0);
   const followUp = Math.round(Number(tier.followUp) || 0);
-  const warnings = source === 'AI_ESTIMATE' ? ['Needs confirmation before final quote.'] : [];
+  const warnings = source === 'AI_ESTIMATE'
+    ? ['Needs confirmation before final quote.', 'flea_exterior_area_ai_estimate_needs_confirmation']
+    : [];
   return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial, followUp, total: initial + followUp, priced: true, requiresCustomQuote: false, customQuoteReason: null, warning: warnings[0] || null, warnings, needsConfirmation: source === 'AI_ESTIMATE' };
 }
 
@@ -2640,12 +3181,13 @@ function priceFlea(property = {}) {
   const cfg = SPECIALTY.flea;
   const services = property.services || {};
   const fleaOptions = typeof services.flea === 'object' && services.flea !== null ? services.flea : {};
-  const footprint = Number(
-    property.footprintSqFt
-    ?? property.footprint
-    ?? (property.homeSqFt ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1)) : undefined)
-    ?? 2000
-  ) || 2000;
+  const footprintResolution = resolvePestFootprint({
+    ...property,
+    homeSqFt: property.homeSqFt
+      ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1))
+      : property.homeSqFt,
+  });
+  const footprint = footprintResolution.footprint;
   const lotSqFt = Number(property.lotSqFt ?? property.lotSizeSqFt ?? 7500) || 7500;
   const features = property.features || {};
   const treeDensity = String(property.treeDensity ?? features.trees ?? 'light').toLowerCase();
@@ -2694,7 +3236,20 @@ function priceFlea(property = {}) {
   const exteriorDetail = exteriorSelected && exterior.areaSqFt > 0
     ? `Exterior flea spray — ${exterior.areaSqFt.toLocaleString()} sf${exterior.source === 'AI_ESTIMATE' ? ' AI estimate' : ''}`
     : null;
-  const warnings = exteriorSelected ? (exterior.warnings || []) : [];
+  const manualReviewReasons = [...footprintResolution.manualReviewReasons];
+  if (exteriorSelected && exterior.source === 'UNKNOWN') {
+    manualReviewReasons.push('flea_exterior_area_source_unknown');
+  }
+  if (exteriorSelected && exterior.source === 'AI_ESTIMATE') {
+    manualReviewReasons.push('flea_exterior_area_ai_estimate_needs_confirmation');
+  }
+  if (exterior.requiresCustomQuote) {
+    manualReviewReasons.push('flea_exterior_area_custom_quote_required');
+  }
+  const warnings = uniqueList([
+    ...footprintResolution.warnings,
+    ...(exteriorSelected ? (exterior.warnings || []) : []),
+  ]);
 
   return {
     service: 'flea_package',
@@ -2725,6 +3280,12 @@ function priceFlea(property = {}) {
     reason: exterior.customQuoteReason || null,
     warning: warnings[0] || null,
     warnings,
+    requiresManualReview: footprintResolution.requiresManualReview || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
+    manualReviewReasons: uniqueList(manualReviewReasons),
+    areaSource: exterior.source,
+    footprintUsed: footprint,
+    footprintSource: footprintResolution.source,
+    footprintWasDefaulted: footprintResolution.wasDefaulted,
     raw: { initial: rawInitial, followUp: rawFollowUp, total: rawTotal },
     fleaExteriorZones: property.fleaExteriorZones || services.fleaExteriorZones || fleaOptions.fleaExteriorZones || [],
     discountHandledByPricingFunction: true,
@@ -2827,6 +3388,85 @@ function priceFoamDrill(points = 5, options = {}) {
 // ============================================================
 // STINGING INSECT (wasps, hornets, bees)
 // ============================================================
+function priceWasp(property = {}, options = {}) {
+  const cfg = SPECIALTY.wasp;
+  const rawTier = options.baseTier ?? options.tier ?? 2;
+  let tierIndex = Number.isFinite(Number(rawTier))
+    ? Math.max(0, Math.min(cfg.tiers.length - 1, Number(rawTier) - 1))
+    : cfg.tiers.findIndex((_, idx) => normalizeToken(rawTier) === `tier_${idx + 1}`);
+  if (tierIndex < 0) tierIndex = 1;
+  const safeTierIndex = tierIndex;
+  let basePrice = cfg.tiers[safeTierIndex];
+  const addOns = [];
+  const warnings = [];
+
+  const addFlat = (name, amount) => {
+    const value = Number(amount) || 0;
+    if (value > 0) {
+      basePrice += value;
+      addOns.push({ name, amount: value });
+    }
+  };
+
+  const aggressive = normalizeToken(options.aggressiveness ?? options.aggressive ?? 'NO').toUpperCase();
+  if (aggressive === 'MILD') addFlat('aggressiveness', cfg.addons.aggressiveness[0]);
+  else if (aggressive === 'HIGH') addFlat('aggressiveness', cfg.addons.aggressiveness[1]);
+  else if (aggressive === 'EXTREME') addFlat('aggressiveness', cfg.addons.aggressiveness[2]);
+
+  const height = normalizeToken(options.height ?? 'GROUND').toUpperCase();
+  if (height === 'MID') addFlat('height', cfg.addons.height[0]);
+  else if (height === 'HIGH') addFlat('height', cfg.addons.height[1]);
+
+  const confined = normalizeToken(options.confinedSpace ?? options.confined ?? 'NO').toUpperCase();
+  if (confined === 'YES' || confined === 'TRUE') {
+    addFlat('confinedSpace', safeTierIndex + 1 >= 3 ? cfg.addons.confinedSpace[1] : cfg.addons.confinedSpace[0]);
+  }
+
+  const urgency = normalizeToken(options.urgency ?? 'ROUTINE').toUpperCase();
+  if (options.sameDay === true || urgency === 'SOON') addFlat('sameDay', cfg.addons.sameDay);
+  else if (options.urgent === true || urgency === 'URGENT') {
+    basePrice = Math.round(basePrice * cfg.addons.urgent);
+    addOns.push({ name: 'urgent', multiplier: cfg.addons.urgent });
+  }
+  if (options.afterHours === true) addFlat('afterHours', cfg.addons.afterHours);
+
+  const removalKey = normalizeToken(options.removalType ?? options.removal ?? 'NONE');
+  const removalPrice = cfg.removal?.[removalKey] || 0;
+  if (removalPrice > 0) addOns.push({ name: `removal_${removalKey}`, amount: removalPrice });
+
+  const hasRecurringPest = !!(options.hasRecurringPest ?? property.hasRecurringPest);
+  const freeWithRecurringPest = options.freeWithRecurringPest ?? cfg.freeWithRecurringPest;
+  const highRiskRemovalSelected = removalPrice > 0 || addOns.length > 0;
+  const freeWithRecurringPestApplied = !!(
+    freeWithRecurringPest &&
+    hasRecurringPest &&
+    safeTierIndex === 0 &&
+    !highRiskRemovalSelected
+  );
+  if (freeWithRecurringPest && hasRecurringPest && highRiskRemovalSelected) {
+    warnings.push('wasp_bundle_not_applied_to_high_risk_removal');
+  }
+
+  const subtotal = basePrice + removalPrice;
+  const price = freeWithRecurringPestApplied ? 0 : subtotal;
+  return {
+    service: 'wasp',
+    price,
+    baseTier: safeTierIndex + 1,
+    basePrice: cfg.tiers[safeTierIndex],
+    addOns,
+    freeWithRecurringPestApplied,
+    requiresManualReview: false,
+    manualReviewReasons: [],
+    warnings,
+    pricingBreakdown: {
+      subtotal,
+      removal: removalPrice,
+      bundledCredit: freeWithRecurringPestApplied ? subtotal : 0,
+    },
+  };
+}
+
 function priceStingingInsect(options = {}) {
   const {
     species = 'PAPER_WASP', tier = 2, removal = 'NONE',
@@ -2870,8 +3510,13 @@ function priceStingingInsect(options = {}) {
   else if (removal === 'RELOCATE') { removalPrice = 450; removalLabel = 'Live bee relocation'; }
 
   const total = price + removalPrice;
+  const highRiskRemovalSelected = removalPrice > 0 || mods.length > 0;
   const includedOnProgram = cfg.freeWithRecurringPest && hasRecurringPest
-    && (species === 'PAPER_WASP' || species === 'MUD_DAUBER') && tier <= 1;
+    && (species === 'PAPER_WASP' || species === 'MUD_DAUBER') && tier <= 1
+    && !highRiskRemovalSelected;
+  const warnings = cfg.freeWithRecurringPest && hasRecurringPest && highRiskRemovalSelected
+    ? ['wasp_bundle_not_applied_to_high_risk_removal']
+    : [];
 
   return {
     service: 'stinging_insect',
@@ -2881,6 +3526,8 @@ function priceStingingInsect(options = {}) {
     species, tier, mods,
     removal: removalPrice > 0 ? { name: removalLabel, price: removalPrice } : null,
     includedOnProgram,
+    freeWithRecurringPestApplied: includedOnProgram,
+    warnings,
   };
 }
 
@@ -3315,7 +3962,7 @@ module.exports = {
   priceTrenching, priceBoraCare, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
-  pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
+  pricePlugging, priceFoamDrill, priceWasp, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   // Spec functions (Apr 2026)
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
@@ -3326,5 +3973,12 @@ module.exports = {
   recommendTreeShrubTier,
   evaluateTreeShrubTierRecommendation,
   resolveTreeShrubBedArea,
+  resolvePestFootprint,
+  normalizePestFrequency,
+  normalizePestPricingVersion,
+  normalizeRoachType,
+  normalizePestDensity,
+  normalizePestComplexity,
+  normalizePestPropertyType,
   TS_PREMIUM_DEPRECATED_WARNING_CODE,
 };

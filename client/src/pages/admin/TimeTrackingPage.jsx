@@ -2550,11 +2550,10 @@ function TeamTab({ showToast }) {
             </div>{" "}
           </div>
           {/* Auto-flip opt-out (Phase 2E). Default ON. When OFF, the
-              geofence EXIT pipeline skips this tech entirely — useful
+              vehicle-exit pipeline skips this tech entirely — useful
               for a tech generating false-positive auto-flip SMS while
               ops fine-tunes thresholds. Customer-side opt-out lives on
-              Customer 360. Master toggle is geofence.auto_flip_on_departure
-              in system_settings. */}
+              Customer 360. Master toggle lives in system_settings. */}
           <label
             style={{
               display: "flex",

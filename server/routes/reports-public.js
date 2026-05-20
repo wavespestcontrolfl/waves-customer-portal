@@ -129,9 +129,19 @@ async function recordServiceReportEvent(service, eventName, channel, req, metada
 async function buildServiceReportV1ResponseData(service, token, { mode = 'live' } = {}) {
   const data = await buildReportV1Data(service, token);
   if (service?.report_template_version !== 'service_report_v1') return data;
+
+  // buildPestPressureCustomerView returns null only when Pest Pressure
+  // is hidden from the customer (feature disabled, showOnCustomerReport
+  // off, service_line outside allow list, or requireRecurringFrequency
+  // excludes this report). buildServiceReportDynamicContext computes the
+  // same decision internally when omitPestPressureContext is undefined,
+  // but we pass the resolved value to avoid a redundant DB roundtrip
+  // (the visibility check loads config + score row).
+  const omitPestPressureContext = data.pestPressure === null;
   const dynamicContext = await buildServiceReportDynamicContext({
     recordId: service.id,
     mode,
+    omitPestPressureContext,
   });
   return { ...data, dynamicContext };
 }

@@ -6,7 +6,13 @@ const propertyCalculator = require('./property-calculator');
 const servicePricing = require('./service-pricing');
 const discountEngine = require('./discount-engine');
 const { generateEstimate, quickQuote } = require('./estimate-engine');
-const { syncConstantsFromDB, needsSync, invalidatePricingConfigCache } = require('./db-bridge');
+const {
+  syncConstantsFromDB,
+  needsSync,
+  invalidatePricingConfigCache,
+  validatePestPricingConfig,
+  assertValidPestPricingConfig,
+} = require('./db-bridge');
 const modifiers = require('./modifiers');
 
 module.exports = {
@@ -27,6 +33,8 @@ module.exports = {
   syncConstantsFromDB,
   needsSync,
   invalidatePricingConfigCache,
+  validatePestPricingConfig,
+  assertValidPestPricingConfig,
 
   // Property-driven modifiers (v2 port) — expose for admin tools
   modifiers,

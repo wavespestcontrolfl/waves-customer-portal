@@ -10,7 +10,7 @@
 //
 // Destinations that already exist as standalone routes are linked
 // directly. Tabs that only live inside SettingsPage (general, integrations,
-// geofence, gates, team, system) deep-link via ?tab=X — the desktop
+// gates, team, system) deep-link via ?tab=X — the desktop
 // SettingsPage now reads that param on mount.
 
 import { useMemo, useState } from "react";
@@ -35,11 +35,6 @@ const SECTIONS = [
     key: "integrations",
     label: "Integrations",
     to: "/admin/settings?tab=integrations",
-  },
-  {
-    key: "automation",
-    label: "Automation",
-    to: "/admin/settings?tab=geofence",
   },
   { key: "account", label: "Account", to: "/admin/settings?tab=general" },
   { key: "system", label: "System", to: "/admin/settings?tab=system" },
