@@ -21,6 +21,15 @@ import { LeadsSection } from "./LeadsTabs";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
 import { MarginCalculator } from "./PricingLogicPage";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
+import {
+  buildManualDiscountPayload,
+  buildServiceSpecificDiscountPayloads,
+  discountPresetAmountLabel,
+  isCustomDiscountTemplate,
+  isEstimatorManualDiscount,
+  isServiceSpecificCredit,
+  manualDiscountTypeForCatalogRow,
+} from "../../lib/discountCatalog";
 
 const COMMERCIAL_WARNING_TEXT =
   "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
@@ -696,6 +705,10 @@ function EstimateToolView() {
     manualDiscountType: "NONE",
     manualDiscountValue: "",
     manualDiscountLabel: "",
+    manualDiscountInternalReason: "",
+    manualDiscountEligibilityConfirmed: false,
+    manualDiscountEligibilityOverrideReason: "",
+    serviceSpecificDiscountKeys: [],
     grassType: "st_augustine",
     otLawnType: "FERT",
     exclSimple: "0",
@@ -733,6 +746,7 @@ function EstimateToolView() {
     svcInjection: false,
     svcMosquito: false,
     svcTermiteBait: false,
+    svcWdo: false,
     svcRodentBait: false,
     svcOnetimePest: false,
     svcOnetimeLawn: false,
@@ -981,6 +995,7 @@ function EstimateToolView() {
 
   /* ── Manual discount presets (pulled from /admin/discounts) ── */
   const [discountPresets, setDiscountPresets] = useState([]);
+  const [serviceCreditPresets, setServiceCreditPresets] = useState([]);
   useEffect(() => {
     (async () => {
       try {
@@ -988,9 +1003,13 @@ function EstimateToolView() {
         if (!r.ok) return;
         const rows = await r.json();
         const manual = (rows || [])
-          .filter((d) => d.is_active && !d.is_waveguard_tier_discount)
+          .filter(isEstimatorManualDiscount)
+          .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
+        const serviceCredits = (rows || [])
+          .filter(isServiceSpecificCredit)
           .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
         setDiscountPresets(manual);
+        setServiceCreditPresets(serviceCredits);
       } catch {
         /* ignore */
       }
@@ -998,20 +1017,52 @@ function EstimateToolView() {
   }, []);
 
   function applyDiscountPreset(key) {
-    if (key === "__custom__" || !key) {
-      setForm((f) => ({ ...f, manualDiscountPreset: key || "" }));
+    if (!key) {
+      setForm((f) => ({
+        ...f,
+        manualDiscountPreset: "",
+        manualDiscountType: "NONE",
+        manualDiscountValue: "",
+        manualDiscountLabel: "",
+        manualDiscountInternalReason: "",
+        manualDiscountEligibilityConfirmed: false,
+        manualDiscountEligibilityOverrideReason: "",
+      }));
+      return;
+    }
+    if (key === "__custom__") {
+      setForm((f) => ({
+        ...f,
+        manualDiscountPreset: key,
+        manualDiscountEligibilityConfirmed: false,
+        manualDiscountEligibilityOverrideReason: "",
+      }));
       return;
     }
     const d = discountPresets.find((x) => x.discount_key === key);
     if (!d) return;
+    const manualType = manualDiscountTypeForCatalogRow(d);
     setForm((f) => ({
       ...f,
       manualDiscountPreset: key,
-      manualDiscountType:
-        d.discount_type === "percentage" ? "PERCENT" : "FIXED",
-      manualDiscountValue: String(d.amount || 0),
+      manualDiscountType: manualType,
+      manualDiscountValue: isCustomDiscountTemplate(d) ? "" : String(d.amount || 0),
       manualDiscountLabel: d.name,
+      manualDiscountEligibilityConfirmed: false,
+      manualDiscountEligibilityOverrideReason: "",
     }));
+  }
+
+  function toggleServiceSpecificDiscount(key) {
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+    setForm((f) => {
+      const current = new Set(Array.isArray(f.serviceSpecificDiscountKeys) ? f.serviceSpecificDiscountKeys : []);
+      if (current.has(key)) current.delete(key);
+      else current.add(key);
+      return { ...f, serviceSpecificDiscountKeys: Array.from(current) };
+    });
   }
 
   async function doLookup() {
@@ -1287,6 +1338,7 @@ function EstimateToolView() {
       form.svcInjection,
       form.svcMosquito,
       form.svcTermiteBait,
+      form.svcWdo,
       form.svcRodentBait,
       form.svcOnetimePest,
       form.svcOnetimeLawn,
@@ -1323,6 +1375,7 @@ function EstimateToolView() {
     const canUseServerForBedBug =
       enrichedProfile ||
       (form.svcBedbug && (bedBugOnlyManual || hasManualPropertyDimensions));
+    const hasServerOnlyService = !!form.svcWdo;
 
     if (form.svcBedbug && hasLawnPricedService && !enrichedProfile && !hasManualLawnDimensions) {
       alert("Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.");
@@ -1336,7 +1389,7 @@ function EstimateToolView() {
 
     // Bed bug pricing is server-only. Without lookup data, keep the legacy
     // dimension guard for any non-bed-bug services still selected.
-    if (enrichedProfile || canUseServerForBedBug) {
+    if (enrichedProfile || canUseServerForBedBug || hasServerOnlyService) {
       try {
         // Don't overwrite lookup status — keep property specs visible
 
@@ -1348,6 +1401,7 @@ function EstimateToolView() {
         if (form.svcInjection) selectedServices.push("PALM_INJECTION");
         if (form.svcMosquito) selectedServices.push("MOSQUITO");
         if (form.svcTermiteBait) selectedServices.push("TERMITE_BAIT");
+        if (form.svcWdo) selectedServices.push("WDO");
         if (form.svcRodentBait) selectedServices.push("RODENT_BAIT");
         if (form.svcOnetimePest) selectedServices.push("OT_PEST");
         if (form.svcOnetimeLawn) selectedServices.push("OT_LAWN");
@@ -1371,16 +1425,40 @@ function EstimateToolView() {
         const manualDiscountValue =
           Number(overrides.manualDiscountValue ?? form.manualDiscountValue) ||
           0;
-        const manualDiscount =
-          manualDiscountType &&
+        const selectedManualPreset = discountPresets.find(
+          (x) => x.discount_key === form.manualDiscountPreset,
+        );
+        if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
+          alert("Manual discount amount must be greater than zero.");
+          return null;
+        }
+        if (
           manualDiscountType !== "NONE" &&
-          manualDiscountValue > 0
-            ? {
-                type: manualDiscountType,
-                value: manualDiscountValue,
-                label: form.manualDiscountLabel || "",
-              }
-            : null;
+          manualDiscountValue > 0 &&
+          (!selectedManualPreset || isCustomDiscountTemplate(selectedManualPreset)) &&
+          !String(form.manualDiscountInternalReason || "").trim()
+        ) {
+          alert("Enter an internal reason for custom discounts.");
+          return null;
+        }
+        if (
+          manualDiscountType !== "NONE" &&
+          manualDiscountValue > 0 &&
+          selectedManualPreset?.warnings?.some((warning) => String(warning).startsWith("manual_discount_requires_")) &&
+          form.manualDiscountEligibilityConfirmed !== true
+        ) {
+          alert("Confirm eligibility or enter an approved override before applying this discount.");
+          return null;
+        }
+        const manualDiscount = buildManualDiscountPayload({
+          form: { ...form, manualDiscountType },
+          selectedPreset: selectedManualPreset,
+          valueOverride: manualDiscountValue,
+        });
+        const serviceSpecificDiscounts = buildServiceSpecificDiscountPayloads({
+          form,
+          presets: serviceCreditPresets,
+        });
         const termiteFootprintSqFt = parsePositiveNumber(form.termiteFootprintSqFt);
         const termitePerimeterLF = parsePositiveNumber(form.termitePerimeterLF);
         const trenchingPerimeterLF = parsePositiveNumber(form.trenchingPerimeterLF);
@@ -1394,6 +1472,7 @@ function EstimateToolView() {
           lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq) || 9,
           pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq) || 4,
           manualDiscount,
+          serviceSpecificDiscounts,
           roachModifier: form.roachModifier || "NONE",
           recurringRoachType: form.roachModifier || "NONE",
           urgency: form.urgency || "ROUTINE",
@@ -1605,9 +1684,44 @@ function EstimateToolView() {
     }
 
     // Fallback: use v1 client-side calculation
+    const manualDiscountType =
+      overrides.manualDiscountType ?? form.manualDiscountType;
+    const manualDiscountValue =
+      Number(overrides.manualDiscountValue ?? form.manualDiscountValue) || 0;
+    const selectedManualPreset = discountPresets.find(
+      (x) => x.discount_key === form.manualDiscountPreset,
+    );
+    if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
+      alert("Manual discount amount must be greater than zero.");
+      return;
+    }
+    if (
+      manualDiscountType !== "NONE" &&
+      manualDiscountValue > 0 &&
+      (!selectedManualPreset || isCustomDiscountTemplate(selectedManualPreset)) &&
+      !String(form.manualDiscountInternalReason || "").trim()
+    ) {
+      alert("Enter an internal reason for custom discounts.");
+      return;
+    }
+    if (
+      manualDiscountType !== "NONE" &&
+      manualDiscountValue > 0 &&
+      selectedManualPreset?.warnings?.some((warning) => String(warning).startsWith("manual_discount_requires_")) &&
+      form.manualDiscountEligibilityConfirmed !== true
+    ) {
+      alert("Confirm eligibility or enter an approved override before applying this discount.");
+      return;
+    }
+    const manualDiscount = buildManualDiscountPayload({
+      form: { ...form, manualDiscountType },
+      selectedPreset: selectedManualPreset,
+      valueOverride: manualDiscountValue,
+    });
     const yesNo = (v) => v === "YES" || v === true;
     const inputs = {
       ...form,
+      manualDiscount,
       hasPool: yesNo(form.hasPool),
       hasPoolCage: yesNo(form.hasPoolCage),
       hasLargeDriveway: yesNo(form.hasLargeDriveway),
@@ -1637,6 +1751,10 @@ function EstimateToolView() {
       const quoteRequired = estimateRequiresQuote(E);
       const monthlyTotal = quoteRequired ? 0 : E.recurring?.grandTotal || 0;
       const onetimeTotal = quoteRequired ? 0 : E.oneTime?.total || 0;
+      const estimateSummary = {
+        manualDiscount: E.manualDiscount || E.totals?.manualDiscount || null,
+        serviceSpecificDiscounts: E.serviceSpecificDiscounts || E.totals?.serviceSpecificDiscounts || [],
+      };
       const r = await fetch("/api/admin/estimates", {
         method: "POST",
         headers: authHeaders,
@@ -1645,7 +1763,7 @@ function EstimateToolView() {
           customerName: customerSearch || form.customerName || "",
           customerPhone: form.customerPhone || "",
           customerEmail: form.customerEmail || "",
-          estimateData: { inputs: form, result: E },
+          estimateData: { inputs: form, result: E, summary: estimateSummary },
           monthlyTotal,
           annualTotal: monthlyTotal * 12,
           onetimeTotal,
@@ -1830,6 +1948,7 @@ function EstimateToolView() {
   const R = E?.results || {};
   const hasAnyTermiteSelection =
     !!form.svcTermiteBait ||
+    !!form.svcWdo ||
     !!form.svcTrenching ||
     !!form.svcBoracare ||
     !!form.svcPreslab;
@@ -2735,6 +2854,7 @@ function EstimateToolView() {
               <div style={{ ...sSvcSection, color: C.red, fontSize: 11 }}>
                 Termite
               </div>{" "}
+              <Checkbox k="svcWdo" label="WDO / Termite Inspection" />{" "}
               <Checkbox k="svcTrenching" label="Termite Trenching" />{" "}
               <Checkbox k="svcBoracare" label="Termite Attic Remediation" />
               <Checkbox k="svcPreslab" label="Pre-Slab Termite Treatment" />
@@ -3030,7 +3150,7 @@ function EstimateToolView() {
             {/* Manual discount (stacks on top of WaveGuard bundle discount) */}
             <div style={{ ...sPanel, borderColor: C.border, marginBottom: 14 }}>
               {" "}
-              <div style={sPanelTitle}>Manual Discount (optional)</div>{" "}
+              <div style={sPanelTitle}>Manual Recurring Discount (optional)</div>{" "}
               <div style={{ marginBottom: 10 }}>
                 {" "}
                 <Field label="Preset">
@@ -3051,10 +3171,7 @@ function EstimateToolView() {
                     {" "}
                     <option value="">— None —</option>
                     {discountPresets.map((d) => {
-                      const amt =
-                        d.discount_type === "percentage"
-                          ? `${Number(d.amount).toFixed(0)}%`
-                          : `$${Number(d.amount).toFixed(2)}`;
+                      const amt = discountPresetAmountLabel(d);
                       return (
                         <option key={d.id} value={d.discount_key}>
                           {d.name} — {amt}
@@ -3101,11 +3218,61 @@ function EstimateToolView() {
                   />{" "}
                 </Field>{" "}
               </div>{" "}
+              <div style={{ marginTop: 10 }}>
+                <Field label="Internal reason">
+                  <Input
+                    k="manualDiscountInternalReason"
+                    placeholder="Required for custom or eligibility override"
+                  />
+                </Field>
+                <label style={{ ...sCheckbox, marginTop: 2 }}>
+                  <input
+                    type="checkbox"
+                    checked={form.manualDiscountEligibilityConfirmed === true}
+                    onChange={(e) =>
+                      setForm((f) => ({
+                        ...f,
+                        manualDiscountEligibilityConfirmed: e.target.checked,
+                      }))
+                    }
+                    style={sCb}
+                  />
+                  Eligibility confirmed or approved override
+                </label>
+                {form.manualDiscountEligibilityConfirmed && (
+                  <Field label="Override reason">
+                    <Input
+                      k="manualDiscountEligibilityOverrideReason"
+                      placeholder="e.g. verified ID, referral noted, annual prepay confirmed"
+                    />
+                  </Field>
+                )}
+              </div>
               <div style={{ fontSize: 12, color: C.gray, marginTop: 4 }}>
                 Applies after WaveGuard bundle discount. Re-click Generate
                 Estimate to recalculate.
               </div>{" "}
             </div>
+            {serviceCreditPresets.length > 0 && (
+              <div style={{ ...sPanel, borderColor: C.border, marginBottom: 14 }}>
+                <div style={sPanelTitle}>Service-Specific Credits</div>
+                {serviceCreditPresets.map((credit) => {
+                  const key = credit.discount_key || credit.key;
+                  const checked = (form.serviceSpecificDiscountKeys || []).includes(key);
+                  return (
+                    <label key={credit.id || key} style={{ ...sCheckbox, justifyContent: "space-between" }}>
+                      <span>{credit.name}</span>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleServiceSpecificDiscount(key)}
+                        style={sCb}
+                      />
+                    </label>
+                  );
+                })}
+              </div>
+            )}
             {/* Action buttons */}
             <div
               className="estimate-actions"

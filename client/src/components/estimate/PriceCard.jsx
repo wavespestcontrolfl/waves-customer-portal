@@ -85,6 +85,12 @@ export default function PriceCard({ frequency, waveGuardTier }) {
   const anchorPrice = Number(frequency.perVisit || 0);
   const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
   const dayPrice = monthly == null ? null : Math.round((Number(monthly) / 30) * 100) / 100;
+  const manualDiscount = frequency.manualDiscount && Number(frequency.manualDiscount.amount) > 0
+    ? frequency.manualDiscount
+    : null;
+  const manualDiscountInterval = manualDiscount
+    ? Math.round((Number(manualDiscount.amount) / 12) * intervalMonths * 100) / 100
+    : 0;
   const treatmentRows = Array.isArray(frequency.perServiceTreatments)
     ? frequency.perServiceTreatments
       .map((row) => ({ ...row, displayPrice: Number(row.displayPrice ?? row.perTreatment) }))
@@ -143,6 +149,27 @@ export default function PriceCard({ frequency, waveGuardTier }) {
       {annual ? (
         <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
           {fmtMoney(annual)} / year
+        </div>
+      ) : null}
+
+      {manualDiscount && manualDiscountInterval > 0 ? (
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          gap: 12,
+          alignItems: 'center',
+          marginTop: 12,
+          padding: '10px 12px',
+          border: '1px solid #DCFCE7',
+          borderRadius: 10,
+          background: '#F0FDF4',
+          color: W.green,
+          fontSize: 14,
+          fontWeight: 800,
+          lineHeight: 1.35,
+        }}>
+          <span>{manualDiscount.label || 'Discount'}</span>
+          <strong style={{ whiteSpace: 'nowrap' }}>-{fmtMoney(manualDiscountInterval)}{periodLabel}</strong>
         </div>
       ) : null}
 

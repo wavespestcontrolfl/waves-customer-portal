@@ -423,6 +423,8 @@ function mapV1ToLegacyShape(v1Result) {
       if (li.addOns !== undefined) item.addOns = li.addOns;
       if (!quoteRequired && li.renewal !== undefined) item.renewal = li.renewal;
       if (!quoteRequired && li.renewalLabel !== undefined) item.renewalLabel = li.renewalLabel;
+      if (li.serviceSpecificDiscountApplied !== undefined) item.serviceSpecificDiscountApplied = !!li.serviceSpecificDiscountApplied;
+      if (li.serviceSpecificDiscounts !== undefined) item.serviceSpecificDiscounts = li.serviceSpecificDiscounts;
       v1OtItems.push(item);
       if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
@@ -438,6 +440,8 @@ function mapV1ToLegacyShape(v1Result) {
         customQuoteReason: li.customQuoteReason || null,
         fleaExteriorZones: li.fleaExteriorZones || [],
         addOns: li.addOns || [],
+        serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied,
+        serviceSpecificDiscounts: li.serviceSpecificDiscounts || [],
         warrantyExtendedSelected: li.warrantyExtendedSelected,
         warrantyExtendedPrice: li.warrantyExtendedPrice,
         warrantyAdd: li.warrantyAdd,
@@ -578,7 +582,7 @@ function mapV1ToLegacyShape(v1Result) {
     oneTime: {
       items: v1OtItems,
       specItems: v1SpecItems
-        .filter(s => !s.onProg && (s.quoteRequired || s.price > 0))
+        .filter(s => !s.onProg && (s.quoteRequired || s.price > 0 || s.serviceSpecificDiscountApplied))
         .map(s => ({
           service: s.service,
           name: s.name,
@@ -618,6 +622,8 @@ function mapV1ToLegacyShape(v1Result) {
           requiresMeasurement: !!s.requiresMeasurement,
           inputSourceSummary: s.inputSourceSummary,
           addOns: s.addOns,
+          serviceSpecificDiscountApplied: !!s.serviceSpecificDiscountApplied,
+          serviceSpecificDiscounts: s.serviceSpecificDiscounts || [],
           warrantyExtendedSelected: s.warrantyExtendedSelected,
           warrantyExtendedPrice: s.warrantyExtendedPrice,
         })),
@@ -634,8 +640,10 @@ function mapV1ToLegacyShape(v1Result) {
       year2: quoteRequired ? 0 : year2,
       year2mo: quoteRequired ? 0 : year2Monthly,
       manualDiscount: summary.manualDiscount || null,
+      serviceSpecificDiscounts: summary.serviceSpecificDiscounts || [],
     },
     manualDiscount: summary.manualDiscount || null,
+    serviceSpecificDiscounts: summary.serviceSpecificDiscounts || [],
     results: R,
     specItems: v1SpecItems,
   };

@@ -1,0 +1,192 @@
+const { generateEstimate } = require('../services/pricing-engine');
+
+function baseInput(overrides = {}) {
+  return {
+    homeSqFt: 2000,
+    stories: 1,
+    lotSqFt: 10000,
+    propertyType: 'single_family',
+    features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+    services: { pest: { frequency: 'quarterly' } },
+    ...overrides,
+  };
+}
+
+describe('pricing engine manual recurring discount', () => {
+  test('custom percentage applies after WaveGuard and snapshots identity', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', tier: 'enhanced' },
+      },
+      manualDiscount: {
+        source: 'custom',
+        presetId: 'discount-custom-percent',
+        presetKey: 'custom_percent',
+        catalogName: 'Custom Percentage Discount',
+        catalogCategory: 'custom_template',
+        type: 'PERCENT',
+        value: 10,
+        label: 'Custom Percentage Discount',
+      },
+    }));
+
+    expect(estimate.waveGuard.tier).toBe('silver');
+    expect(estimate.summary.manualDiscount).toEqual(expect.objectContaining({
+      source: 'custom',
+      presetId: 'discount-custom-percent',
+      presetKey: 'custom_percent',
+      catalogName: 'Custom Percentage Discount',
+      catalogCategory: 'custom_template',
+      type: 'PERCENT',
+      value: 10,
+      scope: 'recurring_annual_after_waveguard',
+      stackingOrder: 'after_waveguard',
+    }));
+    expect(estimate.summary.manualDiscount.amount).toBeCloseTo(
+      estimate.summary.manualDiscount.discountableBase * 0.10,
+      2,
+    );
+  });
+
+  test('custom dollar discount caps to discountable recurring base', () => {
+    const estimate = generateEstimate(baseInput({
+      manualDiscount: {
+        source: 'custom',
+        type: 'FIXED',
+        value: 5000,
+        label: 'Custom Dollar Discount',
+      },
+    }));
+
+    expect(estimate.summary.manualDiscount).toEqual(expect.objectContaining({
+      type: 'FIXED',
+      value: 5000,
+      capped: true,
+      capReason: 'discountable_base',
+    }));
+    expect(estimate.summary.manualDiscount.amount).toBe(estimate.summary.manualDiscount.discountableBase);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(0);
+  });
+
+  test('manual percentage above 100 is rejected server-side', () => {
+    expect(() => generateEstimate(baseInput({
+      manualDiscount: { type: 'PERCENT', value: 101 },
+    }))).toThrow('Manual percentage discount cannot exceed 100');
+  });
+
+  test('manual percentage excludes palm and rodent recurring add-ons', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        pest: { frequency: 'quarterly' },
+        palm: { palmCount: 2, treatmentType: 'combo', palmSize: 'medium' },
+        rodentBait: { stationCount: 2 },
+      },
+      manualDiscount: { type: 'PERCENT', value: 10, label: 'Manual' },
+    }));
+
+    expect(estimate.summary.manualDiscount.eligibleServices).toEqual(['pest_control']);
+    expect(estimate.summary.manualDiscount.excludedServices).toEqual(expect.arrayContaining([
+      'palm_injection',
+      'rodent_bait',
+    ]));
+    expect(estimate.summary.manualDiscount.amount).toBeCloseTo(
+      estimate.summary.manualDiscount.discountableBase * 0.10,
+      2,
+    );
+  });
+
+  test('free termite inspection is a service-specific credit, not a recurring manual discount', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        pest: { frequency: 'quarterly' },
+        wdo: true,
+      },
+      serviceSpecificDiscounts: [{
+        source: 'catalog_preset',
+        presetId: 'free-termite',
+        presetKey: 'free_termite_inspection',
+        catalogName: 'Free Termite Inspection',
+        catalogCategory: 'service_specific_credit',
+        discountType: 'free_service',
+        service: 'wdo_inspection',
+        label: 'Free Termite Inspection',
+      }],
+    }));
+
+    expect(estimate.summary.manualDiscount).toBeNull();
+    expect(estimate.summary.serviceSpecificDiscounts).toHaveLength(1);
+    expect(estimate.summary.serviceSpecificDiscounts[0]).toEqual(expect.objectContaining({
+      service: 'wdo_inspection',
+      amount: expect.any(Number),
+      capReason: 'service_line_price',
+    }));
+    expect(estimate.summary.oneTimeTotal).toBe(0);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBeGreaterThan(0);
+  });
+
+  test('free termite inspection mechanisms do not stack on the same service line', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        pest: { frequency: 'quarterly' },
+        wdo: true,
+      },
+      serviceSpecificDiscounts: [
+        {
+          source: 'catalog_preset',
+          presetKey: 'free_termite_inspection',
+          catalogName: 'Free Termite Inspection',
+          catalogCategory: 'service_specific_credit',
+          discountType: 'free_service',
+          service: 'wdo_inspection',
+          label: 'Free Termite Inspection',
+        },
+        {
+          source: 'catalog_preset',
+          presetKey: 'waveguard_member_termite_inspection',
+          catalogName: 'WaveGuard Member Discount (Termite Inspection)',
+          catalogCategory: 'service_specific_credit',
+          discountType: 'percentage',
+          service: 'wdo_inspection',
+          label: 'WaveGuard Member Discount (Termite Inspection)',
+        },
+      ],
+    }));
+
+    const applied = estimate.summary.serviceSpecificDiscounts.filter((credit) => credit.amount > 0);
+    const skipped = estimate.summary.serviceSpecificDiscounts.find((credit) => credit.warnings.includes('service_specific_discount_duplicate_skipped'));
+
+    expect(applied).toHaveLength(1);
+    expect(skipped).toEqual(expect.objectContaining({
+      amount: 0,
+      capReason: 'duplicate_service_line_credit',
+    }));
+    expect(estimate.summary.oneTimeTotal).toBe(0);
+  });
+
+  test('manual eligibility-gated discounts require confirmation', () => {
+    expect(() => generateEstimate(baseInput({
+      manualDiscount: {
+        source: 'catalog_preset',
+        catalogName: 'Military Discount',
+        type: 'PERCENT',
+        value: 5,
+        eligibility: { requiresMilitary: true },
+      },
+    }))).toThrow('Manual discount eligibility must be confirmed');
+
+    const estimate = generateEstimate(baseInput({
+      manualDiscount: {
+        source: 'catalog_preset',
+        catalogName: 'Military Discount',
+        type: 'PERCENT',
+        value: 5,
+        eligibility: { requiresMilitary: true },
+        eligibilityConfirmed: true,
+        eligibilityOverrideReason: 'Verified military ID',
+      },
+    }));
+    expect(estimate.summary.manualDiscount.amount).toBeGreaterThan(0);
+    expect(estimate.summary.manualDiscount.eligibilityConfirmed).toBe(true);
+  });
+});

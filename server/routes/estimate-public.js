@@ -52,16 +52,19 @@ const ESTIMATE_ASK_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 // View-count hygiene. We surface view_count + last_viewed_at on the admin
 // estimates dashboard, so the count needs to mean "the customer opened it"
 // — not "iMessage unfurled the link" or "Virginia previewed it from the
-// office." Two filters, applied to BOTH the view_count increment and the
+// office." Three filters, applied to BOTH the view_count increment and the
 // per-open estimate_views insert:
 //   1. UA allowlist: drop anything whose user-agent matches a known bot /
 //      preview / scanner / CLI client (shared with public-shortlinks via
 //      utils/bot-ua so the shortlink click counter applies the same rules).
 //   2. Admin marker cookie: a long-lived signed JWT set by /api/admin/auth
 //      on every login + /me. Per-device, per-browser; survives network
-//      changes. Replaces the old WAVES_ADMIN_IPS env-var allowlist.
+//      changes.
+//   3. Admin IP allowlist: legacy WAVES_ADMIN_IPS support for office/network
+//      previews that do not carry the marker cookie.
 // First-view side-effects (status flip, office SMS, admin notification)
-// have their own gating downstream and are unaffected.
+// use the same gate; a filtered preview must not make the estimate look
+// customer-opened.
 const { isBotUserAgent } = require('../utils/bot-ua');
 
 function clientIp(req) {
@@ -92,14 +95,20 @@ function hasAdminMarker(req) {
   } catch { return false; }
 }
 
-function shouldCountView(req) {
-  if (isBotUserAgent(req.get('user-agent'))) return false;
+function requestUserAgent(req) {
+  if (typeof req?.get === 'function') return req.get('user-agent');
+  return req?.headers?.['user-agent'] || req?.headers?.['User-Agent'] || '';
+}
+
+function shouldCountView(req, ip) {
+  if (isBotUserAgent(requestUserAgent(req))) return false;
   if (hasAdminMarker(req)) return false;
+  if (isAdminIp(ip)) return false;
   return true;
 }
 
 function shouldApplyFirstViewSideEffects(req, ip) {
-  return !hasAdminMarker(req) && !isAdminIp(ip);
+  return shouldCountView(req, ip);
 }
 
 function hashEstimateToken(token) {
@@ -663,6 +672,58 @@ function monthlyForRecurringParts(parts = {}, tier, monthlyOff = 0, discountReso
   return Math.max(0, Math.round(total * 100) / 100);
 }
 
+function normalizeManualDiscountSummary(estData = {}) {
+  const result = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : estData);
+  const candidates = [
+    result?.manualDiscount,
+    result?.totals?.manualDiscount,
+    result?.summary?.manualDiscount,
+    estData?.summary?.manualDiscount,
+  ];
+  const manual = candidates.find((item) => item && Number(item.amount) > 0);
+  if (!manual) return null;
+  const amount = Math.round(Number(manual.amount) * 100) / 100;
+  return {
+    ...manual,
+    amount,
+    label: manual.label || manual.catalogName || (manual.type === 'PERCENT' ? `Discount (${manual.value}%)` : 'Discount'),
+    scope: manual.scope || 'recurring_annual_after_waveguard',
+    stackingOrder: manual.stackingOrder || 'after_waveguard',
+  };
+}
+
+function manualDiscountMonthlyAmount(estData = {}) {
+  const manual = normalizeManualDiscountSummary(estData);
+  return manual ? Math.round((manual.amount / 12) * 100) / 100 : 0;
+}
+
+function manualDiscountForRecurringBase(manualDiscount = null, discountableAnnualBase = 0) {
+  if (!manualDiscount || !(discountableAnnualBase > 0)) return null;
+  const type = manualDiscount.type === 'PERCENT' ? 'PERCENT' : 'FIXED';
+  const value = Number(manualDiscount.value);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const requestedAmount = type === 'PERCENT'
+    ? Math.round(discountableAnnualBase * (value / 100) * 100) / 100
+    : Math.round(value * 100) / 100;
+  const amount = Math.min(requestedAmount, Math.round(discountableAnnualBase * 100) / 100);
+  if (!(amount > 0)) return null;
+  return {
+    ...manualDiscount,
+    type,
+    value,
+    requestedAmount,
+    amount,
+    monthlyAmount: Math.round((amount / 12) * 100) / 100,
+    discountableBase: Math.round(discountableAnnualBase * 100) / 100,
+    capped: requestedAmount > amount,
+    capReason: requestedAmount > amount ? 'discountable_base' : manualDiscount.capReason || null,
+    scope: manualDiscount.scope || 'recurring_annual_after_waveguard',
+    stackingOrder: manualDiscount.stackingOrder || 'after_waveguard',
+  };
+}
+
 function resolveBaseMonthly(estimate, parsedData) {
   const parts = resolveRecurringMonthlyParts(estimate, parsedData);
   return { baseMonthly: parts.baseMonthly, source: parts.source };
@@ -892,6 +953,14 @@ function recurringServiceReceivesTierDiscount(svc = {}) {
   if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
   if (key === 'palm_injection' || key === 'rodent_bait') return false;
   return true;
+}
+
+function recurringServiceReceivesManualDiscount(svc = {}) {
+  const key = recurringServiceKey(svc);
+  return ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito'].includes(key) &&
+    svc.noRecurringDiscount !== true &&
+    svc.discountEligible !== false &&
+    svc.excludeFromPctDiscount !== true;
 }
 
 function recurringServiceCountsTowardTier(svc = {}) {
@@ -1313,6 +1382,8 @@ function renderPage(token, estimate, estData) {
   const showPrefs = !!(pestRecurring || hasPestOneTime);
   const prefs = normalizePrefs(estData?.preferences);
   const { monthlyOff: prefMonthlyOff, oneTimeOff: prefOneTimeOff } = computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
+  const manualDiscount = normalizeManualDiscountSummary(estData);
+  const manualDiscountMonthly = manualDiscount ? Math.round((manualDiscount.amount / 12) * 100) / 100 : 0;
   const hasOnlyLawnCareServices = hasOnlyLawnCareServiceMix(recurring, oneTimeItems);
   const pageCopy = hasOnlyLawnCareServices
     ? {
@@ -1376,27 +1447,25 @@ function renderPage(token, estimate, estData) {
     ? recurring.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))
     : recurring;
   const baseMonthly = displayPestOnly ? Number(pestRecurring.monthlyBase || 0) : storedBaseMonthly;
-  const recurringMonthlyBeforePrefs = displayPestOnly
+  const recurringMonthlyBeforeDiscounts = displayPestOnly
     ? Math.round(baseMonthly * (1 - estimateTierDiscount) * 100) / 100
-    : Number(est.monthlyTotal || 0);
+    : Math.max(0, Math.round((Number(est.monthlyTotal || 0) + manualDiscountMonthly + prefMonthlyOff) * 100) / 100);
 
   const tierPrices = {};
   const discountResolver = (t) => tierDiscountForEstimate(estData, t);
   ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
     tierPrices[t] = displayPestOnly
-      ? Math.max(0, Math.round((baseMonthly * (1 - discountResolver(t)) - prefMonthlyOff) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, t, prefMonthlyOff, discountResolver);
+      ? Math.max(0, Math.round((baseMonthly * (1 - discountResolver(t)) - manualDiscountMonthly - prefMonthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, t, manualDiscountMonthly + prefMonthlyOff, discountResolver);
   });
 
-  const monthlyTotal = Math.max(0, recurringMonthlyBeforePrefs - prefMonthlyOff);
-  const annualTotal = displayPestOnly
-    ? Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100)
-    : Math.max(0, Number(est.annualTotal || monthlyTotal * 12) - prefMonthlyOff * 12);
+  const monthlyTotal = Math.max(0, Math.round((recurringMonthlyBeforeDiscounts - manualDiscountMonthly - prefMonthlyOff) * 100) / 100);
+  const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
   const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
   const quoteRequired = est.quoteRequired === true || est.status === 'quote_required';
   const locked = est.status === 'accepted' || quoteRequired;
 
-  const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
+  const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
   const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
 
   const inputs = estData?.inputs || {};
@@ -1498,6 +1567,10 @@ function renderPage(token, estimate, estData) {
   const recurringDisplayTotal = intervalPriceFromMonthly(monthlyTotal, selectedRecurringFrequencyKey);
   const recurringDisplayBase = intervalPriceFromMonthly(baseMonthly, selectedRecurringFrequencyKey);
   const recurringDisplaySavings = intervalPriceFromMonthly(savingsPerMo, selectedRecurringFrequencyKey);
+  const recurringDisplayManualDiscount = intervalPriceFromMonthly(manualDiscountMonthly, selectedRecurringFrequencyKey);
+  const manualDiscountHtml = manualDiscount && recurringDisplayManualDiscount > 0
+    ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>-${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
+    : '';
 
   // WaveGuard Membership. Recurring pest and lawn-care-only estimates include
   // the $99 membership; one-off and non-WaveGuard recurring add-ons do not.
@@ -1715,6 +1788,7 @@ function renderPage(token, estimate, estData) {
         <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
       </div>
       ${savingsPerMo > 0 ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
+      ${manualDiscountHtml}
       <div class="day-price" data-mode-only="recurring">${hasOnlyLawnCareServices ? `That\u2019s just ${fmtMoney(dayPrice)}/day to stop lawn pests before they turn green grass brown.` : `That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.`}</div>
       ${supplementalServiceSummaryHtml}
     `);
@@ -1730,9 +1804,11 @@ function renderPage(token, estimate, estData) {
   }, 0);
   const realOneTimeRows = separatelyBilledOneTimeItems.map((it) => {
     const price = oneTimeItemAmount(it);
-    if (price <= 0) return '';
+    const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
+    if (price <= 0 && !includedByServiceCredit) return '';
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
-    return `<tr><td>${escapeHtml(it.name || it.label || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${fmtMoney(price)}</td></tr>`;
+    const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
+    return `<tr><td>${escapeHtml(it.name || it.label || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
   }).filter(Boolean).join('');
   const hasRealOneTime = realOneTimeRows.length > 0;
   const oneTimeRows = realOneTimeRows;
@@ -1996,6 +2072,8 @@ function renderPage(token, estimate, estData) {
   .payment-summary-row.payment-summary-total{border-top:1px solid #1B2C5B;margin-top:4px;padding-top:12px}
   .payment-summary-row.payment-summary-total span{color:#1B2C5B}
   .payment-summary-row.payment-summary-total strong{font-size:15px;color:#1B2C5B}
+  .manual-discount-row{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:12px 0 0;padding:10px 12px;border:1px solid #DCFCE7;border-radius:10px;background:#F0FDF4;color:${BRAND.green};font-size:14px;font-weight:800}
+  .manual-discount-row strong{white-space:nowrap;font-size:14px}
   .payment-choice-cta{margin-top:auto;width:100%;border:1px solid ${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
   .payment-choice-cta:hover:not([disabled]),.payment-choice-cta[aria-pressed="true"]{background:#121E3D;border-color:#121E3D}
   .payment-choice-cta.primary{background:${ESTIMATE_BUTTON_BLUE};border-color:${ESTIMATE_BUTTON_BLUE};color:#fff}
@@ -3180,7 +3258,7 @@ async function handleEstimateView(req, res, next) {
     // IPs are filtered upstream by shouldCountView so the dashboard count
     // reflects actual customer opens.
     const requestIp = clientIp(req);
-    const countThisView = shouldCountView(req);
+    const countThisView = shouldCountView(req, requestIp);
     if (countThisView) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
@@ -3983,10 +4061,11 @@ router.put('/:token/select-tier', async (req, res, next) => {
     // below so the next tier flip on this row is a no-op for resolution.
     const recurringMonthlyParts = resolveRecurringMonthlyParts(estimate, parsedData);
     const { baseMonthly, source: baseSource } = recurringMonthlyParts;
+    const manualMonthlyOff = manualDiscountMonthlyAmount(parsedData);
     const monthlyTotal = monthlyForRecurringParts(
       recurringMonthlyParts,
       selectedTier,
-      0,
+      manualMonthlyOff,
       (tierName) => tierDiscountForEstimate(parsedData, tierName),
     );
     const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
@@ -4080,17 +4159,21 @@ router.put('/:token/preferences', async (req, res, next) => {
     const currentDiscount = preferenceDiscountResolver(currentTier);
 
     const { monthlyOff, oneTimeOff } = computePrefDiscount(nextPrefs, pestRecurring, hasPestOneTime, pestOneTimeTotal);
+    const manualMonthlyOff = manualDiscountMonthlyAmount(parsedData);
+    const recurringMonthlyBeforeManualAndPrefs = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
+      ? Math.max(0, Math.round(baseMonthly * (1 - currentDiscount) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, 0, preferenceDiscountResolver);
     const monthlyTotal = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - monthlyOff) * 100) / 100)
-      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, monthlyOff, preferenceDiscountResolver);
+      ? Math.max(0, Math.round((baseMonthly * (1 - currentDiscount) - manualMonthlyOff - monthlyOff) * 100) / 100)
+      : monthlyForRecurringParts(recurringMonthlyParts, currentTier, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
     const annualTotal  = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
     const onetimeBase = Number(parsedData.onetimeTotalBase || estimate.onetime_total || 0);
     const onetimeTotal = Math.max(0, Math.round((onetimeBase - oneTimeOff) * 100) / 100);
     const tierPrices = {};
     ['Bronze', 'Silver', 'Gold', 'Platinum'].forEach((t) => {
       tierPrices[t] = estimate.show_one_time_option && Number(pestRecurring?.monthlyBase || 0) > 0
-        ? Math.max(0, Math.round((baseMonthly * (1 - preferenceDiscountResolver(t)) - monthlyOff) * 100) / 100)
-        : monthlyForRecurringParts(recurringMonthlyParts, t, monthlyOff, preferenceDiscountResolver);
+        ? Math.max(0, Math.round((baseMonthly * (1 - preferenceDiscountResolver(t)) - manualMonthlyOff - monthlyOff) * 100) / 100)
+        : monthlyForRecurringParts(recurringMonthlyParts, t, manualMonthlyOff + monthlyOff, preferenceDiscountResolver);
     });
 
     // Persist — merge new prefs + self-healed baseMonthly back onto the blob.
@@ -4127,7 +4210,7 @@ router.put('/:token/preferences', async (req, res, next) => {
       prefMeta[k] = { offDesc: cfg.offDesc, savingsLabel };
     }
 
-    const savingsPerMo = Math.max(0, Math.round((baseMonthly - monthlyTotal) * 100) / 100);
+    const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeManualAndPrefs) * 100) / 100);
 
     logger.info(`[estimate] ${estimate.customer_name} toggled ${Object.keys(patch).join(', ')} -> ${JSON.stringify(patch)} ($${monthlyTotal}/mo)`);
     res.json({
@@ -4321,13 +4404,13 @@ router.put('/:token/decline', async (req, res, next) => {
 // =========================================================================
 // Same-origin auth model as the HTML handler: token is the only gate.
 // Ported view-side-effects:
-//   - view_count++ + last_viewed_at + estimate_views row: ALWAYS on every
-//     200 (React refetches count as views; rate limit + per-open log
-//     together make this noisy-but-safe)
+//   - view_count++ + last_viewed_at + estimate_views row: every real customer
+//     200. Bot scanners, link previews, admin-cookie previews, and admin IPs
+//     are filtered out.
 //   - First-view transition (status='draft' → 'viewed', viewed_at stamp,
 //     office SMS, admin notification): fires only when viewed_at IS NULL
-//     AND request IP isn't in the admin allowlist. Keeps Virginia's
-//     preview clicks from triggering "customer just opened" alerts.
+//     AND the request passes the same real-customer-view gate. Keeps preview
+//     clicks from triggering "customer just opened" alerts.
 //
 // Admin allowlist: WAVES_ADMIN_IPS env var, comma-separated. Unset =
 // fire-for-everyone (fail open — matches current HTML behavior).
@@ -4412,6 +4495,12 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
   const monthly = summary.recurringMonthlyAfterDiscount ?? null;
   const annual = summary.recurringAnnualAfterDiscount ?? null;
   const onetime = summary.oneTimeTotal ?? null;
+  const manualDiscount = summary.manualDiscount && Number(summary.manualDiscount.amount) > 0
+    ? {
+        ...summary.manualDiscount,
+        monthlyAmount: Math.round((Number(summary.manualDiscount.amount) / 12) * 100) / 100,
+      }
+    : null;
 
   // Per-treatment breakdown — pull perApp/visitsPerYear off each recurring
   // line item the engine emitted. Labels match the displayed service name;
@@ -4468,6 +4557,7 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
     annual: annual != null ? Number(annual) : null,
     perVisit: lineItems.find((li) => li?.service === 'pest_control')?.perApp ?? null,
     oneTimeTotal: onetime != null ? Number(onetime) : null,
+    manualDiscount,
     included,
     addOns,
     perServiceTreatments,
@@ -4591,7 +4681,8 @@ function normalizeOneTimeBreakdown(estData) {
       const amount = Number.isFinite(rawPrice) && rawPrice < 0
         ? (Number.isFinite(discounted) && discounted !== 0 ? discounted : rawPrice)
         : (Number.isFinite(discounted) ? discounted : rawPrice);
-      if (!quoteRequired && (!Number.isFinite(amount) || amount === 0)) continue;
+      const includedByServiceCredit = item.serviceSpecificDiscountApplied === true;
+      if (!quoteRequired && (!Number.isFinite(amount) || (amount === 0 && !includedByServiceCredit))) continue;
 
       const label = String(item.label || item.displayName || item.name || item.service || 'One-time service').trim();
       const service = item.service || (ROACH_NAME_RX.test(label) ? 'pest_initial_roach' : null);
@@ -4608,7 +4699,7 @@ function normalizeOneTimeBreakdown(estData) {
         label,
         amount: quoteRequired ? null : Math.round(amount * 100) / 100,
         detail,
-        kind: quoteRequired ? 'quote_required' : (amount < 0 ? 'discount' : 'charge'),
+        kind: quoteRequired ? 'quote_required' : (includedByServiceCredit ? 'included' : (amount < 0 ? 'discount' : 'charge')),
         quoteRequired,
         reason: item.reason || null,
       });
@@ -5104,6 +5195,7 @@ function readV1Shape(estData) {
     membershipFee: Number(result.oneTime?.membershipFee) || 0,
     recurringMonthlyTotal: Number(recurring.monthlyTotal) || 0,
     recurringAnnualAfter: Number(recurring.annualAfterDiscount) || 0,
+    manualDiscount: normalizeManualDiscountSummary(estData),
   };
 }
 
@@ -5182,7 +5274,16 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
   const nonPestMoAfter = pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
     return sum + discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc);
   }, 0);
-  const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - monthlyOff) * 100) / 100);
+  const manualDiscountableAnnual = Math.round((
+    (pestTier ? pestMoAfter * 12 : 0) +
+    (pestOnly ? 0 : nonPestServices.reduce((sum, svc) => {
+      if (!recurringServiceReceivesManualDiscount(svc)) return sum;
+      return sum + discountMonthly(Number(svc?.mo || svc?.monthly || 0), svc) * 12;
+    }, 0))
+  ) * 100) / 100;
+  const manualDiscount = manualDiscountForRecurringBase(v1.manualDiscount, manualDiscountableAnnual);
+  const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
+  const totalMoAfter = Math.max(0, Math.round((pestMoAfter + nonPestMoAfter - manualDiscountMonthly - monthlyOff) * 100) / 100);
   const totalAnnAfter = Math.round(totalMoAfter * 12 * 100) / 100;
   const treatmentDisplayPrice = (perTreatment, svc) => {
     const amount = Number(perTreatment);
@@ -5252,6 +5353,7 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     annual: totalAnnAfter,
     perVisit: pestTier ? (Number(pestTier.pa) || null) : null,
     oneTimeTotal: v1.oneTimeTotal || null,
+    manualDiscount,
     included,
     addOns,
     perServiceTreatments,
@@ -5285,6 +5387,23 @@ async function buildPricingBundle(estimate) {
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
   const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
+  const withManualDiscount = (payload = {}) => {
+    const manual = normalizeManualDiscountSummary(estData);
+    if (!manual) return payload;
+    const manualWithMonthly = {
+      ...manual,
+      monthlyAmount: Math.round((manual.amount / 12) * 100) / 100,
+    };
+    return {
+      ...payload,
+      manualDiscount: payload.manualDiscount || manualWithMonthly,
+      frequencies: Array.isArray(payload.frequencies)
+        ? payload.frequencies.map((frequency) => (
+            frequency?.manualDiscount ? frequency : { ...frequency, manualDiscount: manualWithMonthly }
+          ))
+        : payload.frequencies,
+    };
+  };
   const withChoiceOneTimePrice = (payload = {}) => {
     if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return payload;
     const choicePrice = oneTimePestChoiceAmountFromBreakdown(payload.oneTimeBreakdown || storedOneTimeBreakdown);
@@ -5302,16 +5421,16 @@ async function buildPricingBundle(estimate) {
     && Array.isArray(snapshotBundle.frequencies)
     && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
   ) {
-    return attachQuoteRequirement(withChoiceOneTimePrice({
+    return attachQuoteRequirement(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
-    }), estData);
+    })), estData);
   }
 
   const cached = getEstimatePricingCache(estimate);
   if (cached) {
-    return attachQuoteRequirement(withChoiceOneTimePrice({ ...cached, cacheHit: true }), estData);
+    return attachQuoteRequirement(withChoiceOneTimePrice(withManualDiscount({ ...cached, cacheHit: true })), estData);
   }
 
   const prefs = normalizePrefs(estData?.preferences);
@@ -5369,7 +5488,7 @@ async function buildPricingBundle(estimate) {
       ? Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100)
       : rawV1OneTimeTotal);
 
-    const payload = attachQuoteRequirement({
+    const payload = attachQuoteRequirement(withManualDiscount({
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice,
@@ -5379,7 +5498,7 @@ async function buildPricingBundle(estimate) {
       firstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       source: 'v1_engine_shape',
-    }, estData);
+    }), estData);
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
@@ -5396,7 +5515,8 @@ async function buildPricingBundle(estimate) {
     const storedChoiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption)
       ? oneTimePestChoiceAmountFromBreakdown(storedOneTimeBreakdown)
       : null;
-    const payload = attachQuoteRequirement({
+    const manualDiscount = normalizeManualDiscountSummary(estData);
+    const payload = attachQuoteRequirement(withManualDiscount({
       frequencies: [{
         key: 'quarterly',
         label: 'Quarterly',
@@ -5404,6 +5524,7 @@ async function buildPricingBundle(estimate) {
         annual: Number(estimate.annual_total || 0) || null,
         perVisit: null,
         oneTimeTotal: Number(estimate.onetime_total || 0) || null,
+        manualDiscount,
         included: [],
         addOns: [],
       }],
@@ -5411,7 +5532,7 @@ async function buildPricingBundle(estimate) {
       anchorOneTimePrice: storedChoiceOneTimePrice ?? (Number(estimate.onetime_total || 0) || null),
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
-    }, estData);
+    }), estData);
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
@@ -5462,13 +5583,13 @@ async function buildPricingBundle(estimate) {
     ?? frequencies[0]?.oneTimeTotal
     ?? (Number(estimate.onetime_total || 0) || null);
 
-  const payload = attachQuoteRequirement({
+  const payload = attachQuoteRequirement(withManualDiscount({
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,
     oneTimeBreakdown,
     source: 'engine_invocation',
-  }, estData);
+  }), estData);
   setEstimatePricingCache(estimate, payload);
   return payload;
 }
@@ -5491,7 +5612,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // drift on estimate_views or a locked row shouldn't break the
     // customer-facing endpoint.
     const ip = extractRequestIp(req);
-    if (shouldCountView(req)) {
+    if (shouldCountView(req, ip)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
@@ -5689,6 +5810,7 @@ module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePay
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
+module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
 module.exports.sameDayVisitTotalForPricingFrequency = sameDayVisitTotalForPricingFrequency;
 module.exports.resolveAnnualPrepayInvoiceAmount = resolveAnnualPrepayInvoiceAmount;
 module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement;

@@ -280,6 +280,32 @@ describe('public estimate one-time breakdown', () => {
     expect(breakdown.total).toBe(499);
   });
 
+  test('keeps free service-specific inspection rows visible in one-time breakdown', () => {
+    const breakdown = normalizeOneTimeBreakdown({
+      result: {
+        oneTime: {
+          total: 0,
+          specItems: [{
+            service: 'wdo_inspection',
+            name: 'WDO Inspection',
+            price: 0,
+            serviceSpecificDiscountApplied: true,
+          }],
+        },
+      },
+    });
+
+    expect(breakdown.items).toEqual([
+      expect.objectContaining({
+        service: 'wdo_inspection',
+        label: 'WDO Inspection',
+        amount: 0,
+        kind: 'included',
+      }),
+    ]);
+    expect(breakdown.total).toBe(0);
+  });
+
   test('uses nonzero discounted negative line item amounts', () => {
     const breakdown = normalizeOneTimeBreakdown({
       engineResult: {
@@ -375,6 +401,78 @@ describe('public estimate one-time breakdown', () => {
       label: 'Initial Roach Knockdown',
       amount: 119,
     }));
+  });
+
+  test('public pricing bundle preserves saved manual recurring discounts', async () => {
+    const estimateData = savedAdminEstimateData();
+    estimateData.result.manualDiscount = {
+      source: 'catalog_preset',
+      presetKey: 'military',
+      catalogName: 'Military Discount',
+      catalogCategory: 'manual_recurring_estimate_discount',
+      type: 'PERCENT',
+      value: 10,
+      amount: 60,
+      label: 'Military Discount',
+    };
+    estimateData.result.totals = { manualDiscount: estimateData.result.manualDiscount };
+
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-manual-discount-test',
+      estimate_data: estimateData,
+      monthly_total: 45,
+      annual_total: 540,
+      onetime_total: 2084,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.frequencies[0]).toEqual(expect.objectContaining({
+      monthly: 45,
+      annual: 540,
+      manualDiscount: expect.objectContaining({
+        label: 'Military Discount',
+        amount: 60,
+        monthlyAmount: 5,
+      }),
+    }));
+  });
+
+  test('server-rendered customer estimate shows manual recurring discount row', () => {
+    const html = renderPage('manual-discount-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 45,
+      annualTotal: 540,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        manualDiscount: {
+          source: 'catalog_preset',
+          presetKey: 'military',
+          catalogName: 'Military Discount',
+          catalogCategory: 'manual_recurring_estimate_discount',
+          type: 'PERCENT',
+          value: 10,
+          amount: 60,
+          label: 'Military Discount',
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 45,
+          annualAfterDiscount: 540,
+          services: [{ name: 'Pest Control', mo: 50 }],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+
+    expect(html).toContain('manual-discount-row');
+    expect(html).toContain('Military Discount');
+    expect(html).toContain('-$15 / quarter');
   });
 
   test('public pricing bundle exposes annual prepay for lawn-only estimates', async () => {
@@ -2573,6 +2671,14 @@ describe('public estimate one-time breakdown', () => {
     );
     const req = {
       headers: { cookie: `waves_admin=${encodeURIComponent(token)}` },
+    };
+
+    expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10')).toBe(false);
+  });
+
+  test('preview user agents suppress first-view customer side effects', () => {
+    const req = {
+      headers: { 'user-agent': 'Slackbot-LinkExpanding 1.0' },
     };
 
     expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10')).toBe(false);

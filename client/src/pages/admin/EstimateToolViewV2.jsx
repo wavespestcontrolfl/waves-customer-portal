@@ -46,6 +46,15 @@ import {
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
+import {
+  buildManualDiscountPayload,
+  buildServiceSpecificDiscountPayloads,
+  discountPresetAmountLabel,
+  isCustomDiscountTemplate,
+  isEstimatorManualDiscount,
+  isServiceSpecificCredit,
+  manualDiscountTypeForCatalogRow,
+} from "../../lib/discountCatalog";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -1513,6 +1522,10 @@ export default function EstimateToolViewV2({
     manualDiscountType: "NONE",
     manualDiscountValue: "",
     manualDiscountLabel: "",
+    manualDiscountInternalReason: "",
+    manualDiscountEligibilityConfirmed: false,
+    manualDiscountEligibilityOverrideReason: "",
+    serviceSpecificDiscountKeys: [],
     grassType: "st_augustine",
     mosquitoProgram: "monthly12",
     mosquitoStationCount: "0",
@@ -1556,6 +1569,7 @@ export default function EstimateToolViewV2({
     svcInjection: false,
     svcMosquito: false,
     svcTermiteBait: false,
+    svcWdo: false,
     svcRodentBait: false,
     svcOnetimePest: false,
     svcOnetimeLawn: false,
@@ -2019,18 +2033,21 @@ export default function EstimateToolViewV2({
   ]);
 
   const [discountPresets, setDiscountPresets] = useState([]);
+  const [serviceCreditPresets, setServiceCreditPresets] = useState([]);
   useEffect(() => {
     (async () => {
       try {
         const r = await adminFetch("/admin/discounts");
         if (!r.ok) return;
         const rows = await r.json();
-        // Exclude WaveGuard tier discounts — those are auto-assigned by
-        // the engine based on service count, not manually picked here.
         const manual = (rows || [])
-          .filter((d) => d.is_active && !d.is_waveguard_tier_discount)
+          .filter(isEstimatorManualDiscount)
+          .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
+        const serviceCredits = (rows || [])
+          .filter(isServiceSpecificCredit)
           .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999));
         setDiscountPresets(manual);
+        setServiceCreditPresets(serviceCredits);
       } catch {
         /* ignore */
       }
@@ -2041,20 +2058,52 @@ export default function EstimateToolViewV2({
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
-    if (key === "__custom__" || !key) {
-      setForm((f) => ({ ...f, manualDiscountPreset: key || "" }));
+    if (!key) {
+      setForm((f) => ({
+        ...f,
+        manualDiscountPreset: "",
+        manualDiscountType: "NONE",
+        manualDiscountValue: "",
+        manualDiscountLabel: "",
+        manualDiscountInternalReason: "",
+        manualDiscountEligibilityConfirmed: false,
+        manualDiscountEligibilityOverrideReason: "",
+      }));
+      return;
+    }
+    if (key === "__custom__") {
+      setForm((f) => ({
+        ...f,
+        manualDiscountPreset: key,
+        manualDiscountEligibilityConfirmed: false,
+        manualDiscountEligibilityOverrideReason: "",
+      }));
       return;
     }
     const d = discountPresets.find((x) => x.discount_key === key);
     if (!d) return;
+    const manualType = manualDiscountTypeForCatalogRow(d);
     setForm((f) => ({
       ...f,
       manualDiscountPreset: key,
-      manualDiscountType:
-        d.discount_type === "percentage" ? "PERCENT" : "FIXED",
-      manualDiscountValue: String(d.amount || 0),
+      manualDiscountType: manualType,
+      manualDiscountValue: isCustomDiscountTemplate(d) ? "" : String(d.amount || 0),
       manualDiscountLabel: d.name,
+      manualDiscountEligibilityConfirmed: false,
+      manualDiscountEligibilityOverrideReason: "",
     }));
+  }
+
+  function toggleServiceSpecificDiscount(key) {
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+    setForm((f) => {
+      const current = new Set(Array.isArray(f.serviceSpecificDiscountKeys) ? f.serviceSpecificDiscountKeys : []);
+      if (current.has(key)) current.delete(key);
+      else current.add(key);
+      return { ...f, serviceSpecificDiscountKeys: Array.from(current) };
+    });
   }
 
   async function doLookup() {
@@ -2343,6 +2392,7 @@ export default function EstimateToolViewV2({
       if (form.svcInjection) selectedServices.push("PALM_INJECTION");
       if (form.svcMosquito) selectedServices.push("MOSQUITO");
       if (form.svcTermiteBait) selectedServices.push("TERMITE_BAIT");
+      if (form.svcWdo) selectedServices.push("WDO");
       if (form.svcRodentBait) selectedServices.push("RODENT_BAIT");
       if (form.svcOnetimePest) selectedServices.push("OT_PEST");
       if (form.svcOnetimeLawn) selectedServices.push("OT_LAWN");
@@ -2366,16 +2416,40 @@ export default function EstimateToolViewV2({
         overrides.manualDiscountType ?? form.manualDiscountType;
       const manualDiscountValue =
         Number(overrides.manualDiscountValue ?? form.manualDiscountValue) || 0;
-      const manualDiscount =
-        manualDiscountType &&
+      const selectedManualPreset = discountPresets.find(
+        (x) => x.discount_key === form.manualDiscountPreset,
+      );
+      if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
+        alert("Manual discount amount must be greater than zero.");
+        return null;
+      }
+      if (
         manualDiscountType !== "NONE" &&
-        manualDiscountValue > 0
-          ? {
-              type: manualDiscountType,
-              value: manualDiscountValue,
-              label: form.manualDiscountLabel || "",
-            }
-          : null;
+        manualDiscountValue > 0 &&
+        (!selectedManualPreset || isCustomDiscountTemplate(selectedManualPreset)) &&
+        !String(form.manualDiscountInternalReason || "").trim()
+      ) {
+        alert("Enter an internal reason for custom discounts.");
+        return null;
+      }
+      if (
+        manualDiscountType !== "NONE" &&
+        manualDiscountValue > 0 &&
+        selectedManualPreset?.warnings?.some((warning) => String(warning).startsWith("manual_discount_requires_")) &&
+        form.manualDiscountEligibilityConfirmed !== true
+      ) {
+        alert("Confirm eligibility or enter an approved override before applying this discount.");
+        return null;
+      }
+      const manualDiscount = buildManualDiscountPayload({
+        form: { ...form, manualDiscountType },
+        selectedPreset: selectedManualPreset,
+        valueOverride: manualDiscountValue,
+      });
+      const serviceSpecificDiscounts = buildServiceSpecificDiscountPayloads({
+        form,
+        presets: serviceCreditPresets,
+      });
       const formIsCommercial = isCommercialEstimateInput(form);
       const termiteFootprintSqFt = parsePositiveNumber(form.termiteFootprintSqFt);
       const termitePerimeterLF = parsePositiveNumber(form.termitePerimeterLF);
@@ -2391,6 +2465,7 @@ export default function EstimateToolViewV2({
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
+        serviceSpecificDiscounts,
         roachModifier: form.roachModifier || "NONE",
         recurringRoachType: form.roachModifier || "NONE",
         mosquitoProgram: form.mosquitoProgram || "monthly12",
@@ -2687,6 +2762,10 @@ export default function EstimateToolViewV2({
       const quoteRequired = estimateRequiresQuote(E);
       const monthlyTotal = quoteRequired ? 0 : E.recurring?.grandTotal || 0;
       const onetimeTotal = quoteRequired ? 0 : E.oneTime?.total || 0;
+      const estimateSummary = {
+        manualDiscount: E.manualDiscount || E.totals?.manualDiscount || null,
+        serviceSpecificDiscounts: E.serviceSpecificDiscounts || E.totals?.serviceSpecificDiscounts || [],
+      };
       const r = await fetch("/api/admin/estimates", {
         method: "POST",
         headers: authHeaders,
@@ -2697,7 +2776,7 @@ export default function EstimateToolViewV2({
           customerEmail: form.customerEmail || "",
           leadId: form.leadId || null,
           customerId: form.customerId || existingCustomerMatch?.id || null,
-          estimateData: { inputs: form, result: E },
+          estimateData: { inputs: form, result: E, summary: estimateSummary },
           monthlyTotal,
           annualTotal: monthlyTotal * 12,
           onetimeTotal,
@@ -2983,6 +3062,7 @@ export default function EstimateToolViewV2({
     turfReviewReasons.length > 0;
   const hasAnyTermiteSelection =
     !!form.svcTermiteBait ||
+    !!form.svcWdo ||
     !!form.svcTrenching ||
     !!form.svcBoracare ||
     !!form.svcPreslab;
@@ -3986,6 +4066,7 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcTopdress" label="Top Dressing" />{" "}
               <CheckboxV2 k="svcDethatch" label="Dethatching" />{" "}
               <SubGroupLabel className="mt-3">Termite</SubGroupLabel>{" "}
+              <CheckboxV2 k="svcWdo" label="WDO / Termite Inspection" />{" "}
               <CheckboxV2 k="svcTrenching" label="Termite Trenching" />{" "}
               <CheckboxV2 k="svcBoracare" label="Termite Attic Remediation" />
               <CheckboxV2 k="svcPreslab" label="Pre-Slab Termite Treatment" />
@@ -4443,7 +4524,7 @@ export default function EstimateToolViewV2({
             {/* Manual Discount */}
             <div>
               {" "}
-              <PanelTitle>Manual Discount (optional)</PanelTitle>{" "}
+              <PanelTitle>Manual Recurring Discount (optional)</PanelTitle>{" "}
               <FieldV2 label="Preset">
                 {" "}
                 <select
@@ -4457,10 +4538,7 @@ export default function EstimateToolViewV2({
                   {" "}
                   <option value="">— None —</option>
                   {discountPresets.map((d) => {
-                    const amt =
-                      d.discount_type === "percentage"
-                        ? `${Number(d.amount).toFixed(0)}%`
-                        : `$${Number(d.amount).toFixed(2)}`;
+                    const amt = discountPresetAmountLabel(d);
                     return (
                       <option key={d.id} value={d.discount_key}>
                         {d.name} — {amt}
@@ -4514,12 +4592,71 @@ export default function EstimateToolViewV2({
                     />{" "}
                   </FieldV2>{" "}
                 </div>{" "}
+                <div className="col-span-2">
+                  {" "}
+                  <FieldV2 label="Internal reason">
+                    {" "}
+                    <InputV2
+                      k="manualDiscountInternalReason"
+                      placeholder="Required for custom or eligibility override"
+                    />{" "}
+                  </FieldV2>{" "}
+                </div>{" "}
               </div>{" "}
+              <label className="flex items-center gap-2 text-12 text-zinc-900 mt-1">
+                <input
+                  type="checkbox"
+                  checked={form.manualDiscountEligibilityConfirmed === true}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      manualDiscountEligibilityConfirmed: e.target.checked,
+                    }))
+                  }
+                  className="h-3.5 w-3.5 accent-zinc-900"
+                />
+                Eligibility confirmed or approved override
+              </label>
+              {form.manualDiscountEligibilityConfirmed && (
+                <div className="mt-2">
+                  <FieldV2 label="Override reason">
+                    <InputV2
+                      k="manualDiscountEligibilityOverrideReason"
+                      placeholder="e.g. verified ID, referral noted, annual prepay confirmed"
+                    />
+                  </FieldV2>
+                </div>
+              )}
               <div className="text-11 text-ink-tertiary mt-2">
                 Applies after bundle discount. Re-click Generate Estimate to
                 recalculate.
               </div>{" "}
             </div>
+            {serviceCreditPresets.length > 0 && (
+              <div>
+                <PanelTitle>Service-Specific Credits</PanelTitle>
+                <div className="grid gap-2">
+                  {serviceCreditPresets.map((credit) => {
+                    const key = credit.discount_key || credit.key;
+                    const checked = (form.serviceSpecificDiscountKeys || []).includes(key);
+                    return (
+                      <label
+                        key={credit.id || key}
+                        className="flex items-center justify-between gap-3 rounded-xs border-hairline border-zinc-300 bg-white px-3 py-2 text-12 text-zinc-900"
+                      >
+                        <span>{credit.name}</span>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleServiceSpecificDiscount(key)}
+                          className="h-3.5 w-3.5 accent-zinc-900"
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {/* Action buttons */}
             <div
               className={cn(
