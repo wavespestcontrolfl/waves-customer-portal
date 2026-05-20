@@ -668,8 +668,7 @@ function shouldPreferAfterUnitValue(str, afterMatch, afterValue, beforeValue, un
   if (unitKind === 'acre' && Number.isInteger(beforeValue)) return true;
 
   return (beforeSqft < LOT_SQFT_MIN || beforeSqft > LOT_SQFT_MAX)
-    && afterSqft >= LOT_SQFT_MIN
-    && afterSqft <= LOT_SQFT_MAX;
+    && afterSqft >= LOT_SQFT_MIN;
 }
 
 function parseUnitPrefixLotNumber(rawNumber, fullStr, matchIndex) {
