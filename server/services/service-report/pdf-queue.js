@@ -9,6 +9,7 @@ const {
   putReportPdf,
   reportPdfStorageKey,
 } = require('./pdf-storage');
+const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
 const {
   emitPdfRenderTerminalFailure,
   safePdfRenderError,
@@ -71,6 +72,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   req,
   knex = db,
   allowUnstoredPdf = false,
+  pestPressureConfig: providedPestPressureConfig,
 } = {}) {
   const service = await loadServiceRecordForPdf(recordId, knex);
   if (!service) throw new Error('Service record not found');
@@ -84,19 +86,41 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const reportToken = token || await ensureReportToken(recordId, knex);
   if (!reportToken) throw new Error('Missing report token');
 
-  const data = await buildReportV1Data(service, reportToken, knex);
-  data.dynamicContext = await buildServiceReportDynamicContext({
-    recordId,
-    mode: 'static',
-  });
-  const pdf = await renderServiceReportV1Pdf(data, {
-    token: reportToken,
-    req,
-    logger,
-    serviceRecordId: recordId,
-  });
+  let pestPressureConfig = providedPestPressureConfig === undefined
+    ? await loadActiveConfig(knex).catch(() => null)
+    : providedPestPressureConfig;
+  let visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
+  let pdf;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const renderSignature = visibilitySignature;
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig });
+    data.dynamicContext = await buildServiceReportDynamicContext({
+      recordId,
+      mode: 'static',
+      pestPressureConfig,
+      knex,
+    });
+    pdf = await renderServiceReportV1Pdf(data, {
+      token: reportToken,
+      req,
+      logger,
+      serviceRecordId: recordId,
+    });
+
+    const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
+    const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
+    if (latestVisibilitySignature === renderSignature) break;
+
+    if (attempt === 1) {
+      const err = new Error('Pest Pressure config changed during PDF render');
+      err.code = 'pest_pressure_config_changed_during_pdf_render';
+      throw err;
+    }
+    pestPressureConfig = latestPestPressureConfig;
+    visibilitySignature = latestVisibilitySignature;
+  }
   try {
-    const key = await putReportPdf(recordId, pdf);
+    const key = await putReportPdf(recordId, pdf, { visibilitySignature });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
   } catch (err) {
@@ -116,7 +140,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
 
 async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } = {}) {
   const service = await knex('service_records').where({ id: recordId }).first('id', 'pdf_storage_key');
-  const expectedPdfStorageKey = service?.id ? reportPdfStorageKey(service.id) : null;
+  const pestPressureConfig = await loadActiveConfig(knex).catch(() => null);
+  const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
+  const expectedPdfStorageKey = service?.id ? reportPdfStorageKey(service.id, { visibilitySignature }) : null;
   const stored = service?.pdf_storage_key === expectedPdfStorageKey
     ? await getHealthyStoredReportPdf(service.pdf_storage_key)
     : null;
@@ -127,6 +153,7 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } =
     req,
     knex,
     allowUnstoredPdf: true,
+    pestPressureConfig,
   });
   return {
     pdf: rendered.pdf,

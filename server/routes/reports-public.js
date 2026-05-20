@@ -16,6 +16,7 @@ const {
   putReportPdf,
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
+const { loadActiveConfig, pestPressureVisibilitySignature } = require('../services/pest-pressure/store');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -126,8 +127,8 @@ async function recordServiceReportEvent(service, eventName, channel, req, metada
   });
 }
 
-async function buildServiceReportV1ResponseData(service, token, { mode = 'live' } = {}) {
-  const data = await buildReportV1Data(service, token);
+async function buildServiceReportV1ResponseData(service, token, { mode = 'live', pestPressureConfig } = {}) {
+  const data = await buildReportV1Data(service, token, db, { pestPressureConfig });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
   // buildPestPressureCustomerView returns null only when Pest Pressure
@@ -142,6 +143,7 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live' 
     recordId: service.id,
     mode,
     omitPestPressureContext,
+    pestPressureConfig,
   });
   return { ...data, dynamicContext };
 }
@@ -426,7 +428,15 @@ router.get('/:token', async (req, res, next) => {
     await trackServiceReportView(service);
 
     if (service.report_template_version === 'service_report_v1') {
-      const expectedPdfStorageKey = reportPdfStorageKey(service.id);
+      // Embed a hash of Pest Pressure visibility-affecting config in the
+      // PDF storage key. When admin flips enabled / showOnCustomerReport /
+      // enabledServiceLines / requireRecurringFrequency, the signature
+      // changes, the expected key no longer matches the stored key, and
+      // the cached PDF is treated as a miss — forcing a re-render with
+      // the new visibility decision applied.
+      let pestPressureConfig = await loadActiveConfig(db).catch(() => null);
+      let visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
+      const expectedPdfStorageKey = reportPdfStorageKey(service.id, { visibilitySignature });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
         : null;
@@ -438,15 +448,30 @@ router.get('/:token', async (req, res, next) => {
         return res.send(storedPdf);
       }
 
-      const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf' });
       let pdf;
       try {
-        pdf = await renderServiceReportV1Pdf(data, {
-          token: req.params.token,
-          req,
-          logger,
-          serviceRecordId: service.id,
-        });
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const renderSignature = visibilitySignature;
+          const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', pestPressureConfig });
+          pdf = await renderServiceReportV1Pdf(data, {
+            token: req.params.token,
+            req,
+            logger,
+            serviceRecordId: service.id,
+          });
+
+          const latestPestPressureConfig = await loadActiveConfig(db).catch(() => null);
+          const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
+          if (latestVisibilitySignature === renderSignature) break;
+
+          if (attempt === 1) {
+            const err = new Error('Pest Pressure config changed during PDF render');
+            err.code = 'pest_pressure_config_changed_during_pdf_render';
+            throw err;
+          }
+          pestPressureConfig = latestPestPressureConfig;
+          visibilitySignature = latestVisibilitySignature;
+        }
       } catch (renderErr) {
         const errorMessage = safePdfRenderError(renderErr);
         logger.warn(`[reports-public] PDF render not ready for ${service.id}: ${errorMessage}`);
@@ -463,7 +488,7 @@ router.get('/:token', async (req, res, next) => {
         });
       }
       try {
-        const key = await putReportPdf(service.id, pdf);
+        const key = await putReportPdf(service.id, pdf, { visibilitySignature });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {
         logger.warn(`[reports-public] PDF storage skipped for ${service.id}: ${storageErr.message}`);

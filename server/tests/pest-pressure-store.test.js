@@ -9,10 +9,11 @@
  *   reading pressure_index would continue showing the stale score.
  *
  * These tests pin: pressure_index is ALWAYS mirrored when an override is
- * removed, including the null restored case.
+ * removed, including the null restored case, and cached report PDFs are
+ * invalidated in the same service_records write.
  */
 
-const { removeOverride } = require('../services/pest-pressure/store');
+const { applyOverride, removeOverride } = require('../services/pest-pressure/store');
 
 function buildKnex({ existing, recordsUpdate, scoresUpdate } = {}) {
   // Track the last update payload for each table so tests can assert what
@@ -40,7 +41,7 @@ function buildKnex({ existing, recordsUpdate, scoresUpdate } = {}) {
   // Sequence the calls. `removeOverride` does:
   //   1. loadScoreForServiceRecord (uses pest_pressure_scores .where().first())
   //   2. pest_pressure_scores.where().update() — set is_overridden=false etc.
-  //   3. service_records.where().update() — mirror pressure_index
+  //   3. service_records.where().update() — mirror pressure_index + clear cached PDF
   //   4. loadScoreForServiceRecord again (return value)
   const reloadedAfter = { ...existing, is_overridden: false, displayed_score: existing.calculated_score };
   const scoresCalls = [scoresChain(existing), scoresChain(existing), scoresChain(reloadedAfter)];
@@ -81,7 +82,7 @@ describe('removeOverride — pressure_index mirror (codex P1 regression guard)',
   test('non-null restored score: pressure_index gets the restored value', async () => {
     const { knex, updates } = buildKnex({ existing: overriddenScoreRow({ calculated_score: 3.1 }) });
     await removeOverride(knex, { serviceRecordId: 'svc-1' });
-    expect(updates.service_records).toEqual({ pressure_index: 3.1 });
+    expect(updates.service_records).toEqual({ pressure_index: 3.1, pdf_storage_key: null });
   });
 
   test('null restored score (insufficient-data case): pressure_index is cleared to null', async () => {
@@ -92,13 +93,13 @@ describe('removeOverride — pressure_index mirror (codex P1 regression guard)',
     // showing the stale score.
     const { knex, updates } = buildKnex({ existing: overriddenScoreRow({ calculated_score: null }) });
     await removeOverride(knex, { serviceRecordId: 'svc-1' });
-    expect(updates.service_records).toEqual({ pressure_index: null });
+    expect(updates.service_records).toEqual({ pressure_index: null, pdf_storage_key: null });
   });
 
   test('undefined restored score: pressure_index is cleared to null (defensive)', async () => {
     const { knex, updates } = buildKnex({ existing: overriddenScoreRow({ calculated_score: undefined }) });
     await removeOverride(knex, { serviceRecordId: 'svc-1' });
-    expect(updates.service_records).toEqual({ pressure_index: null });
+    expect(updates.service_records).toEqual({ pressure_index: null, pdf_storage_key: null });
   });
 
   test('no-op cases still skip the pressure_index update', async () => {
@@ -109,6 +110,20 @@ describe('removeOverride — pressure_index mirror (codex P1 regression guard)',
     await removeOverride(knex, { serviceRecordId: 'svc-1' });
     expect(updates.service_records).toBeNull();
     expect(updates.pest_pressure_scores).toBeNull();
+  });
+});
+
+describe('applyOverride — pressure_index mirror + PDF cache invalidation', () => {
+  test('manual override mirrors rounded score and clears cached PDF in one write', async () => {
+    const { knex, updates } = buildKnex({ existing: overriddenScoreRow({ calculated_score: 3.1 }) });
+    await applyOverride(knex, {
+      serviceRecordId: 'svc-1',
+      displayedScore: 4.24,
+      reason: 'admin correction',
+      overriddenBy: 'tech-1',
+    });
+
+    expect(updates.service_records).toEqual({ pressure_index: 4.2, pdf_storage_key: null });
   });
 });
 
@@ -141,6 +156,8 @@ describe('orchestrate.js — pressure_index mirror source-text regression guard 
     expect(src).toMatch(/const\s+persisted\s*=\s*await\s+persistScore\b/);
     // The pressure_index UPDATE uses the persisted field.
     expect(src).toMatch(/pressure_index:\s*persisted\.displayed_score\b/);
+    // Recalculated scores also invalidate cached report PDFs.
+    expect(src).toMatch(/pdf_storage_key:\s*null\b/);
     // And does NOT read from the raw engine result.
     expect(src).not.toMatch(/pressure_index:\s*result\.displayedScore\b/);
   });

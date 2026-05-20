@@ -49,6 +49,7 @@ async function buildServiceReportDynamicContext({
   // showOnCustomerReport + the service-line/recurrence scope without
   // having to thread the flag through manually.
   omitPestPressureContext,
+  pestPressureConfig,
   knex = db,
 } = {}) {
   const record = await loadServiceRecordForDynamicContext(recordId, knex);
@@ -60,8 +61,11 @@ async function buildServiceReportDynamicContext({
     // every caller of dynamic-context (PDF, email, public JSON) gets the
     // same answer without having to compute it themselves.
     try {
+      const configPromise = pestPressureConfig === undefined
+        ? loadActiveConfig(knex).catch(() => null)
+        : Promise.resolve(pestPressureConfig);
       const [config, scoreRow] = await Promise.all([
-        loadActiveConfig(knex).catch(() => null),
+        configPromise,
         loadScoreForServiceRecord(knex, record.id).catch(() => null),
       ]);
       const view = buildPestPressureCustomerView({ config, scoreRow, serviceRecord: record });
