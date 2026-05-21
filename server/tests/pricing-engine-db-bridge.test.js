@@ -471,6 +471,14 @@ describe('pricing engine DB bridge', () => {
     snapshot.SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost = 0;
     snapshot.SPECIALTY.preSlabTermiticide.products.bifen_it.productOzPer10SqFt = -1;
     snapshot.SPECIALTY.preSlabTermiticide.products.talstar_p.marginDivisor = 1;
+    snapshot.SPECIALTY.preSlabTermiticide.minimums.standalone = [
+      { maxSqFt: 500, floor: 225 },
+      { maxSqFt: 250, floor: 150 },
+      { maxSqFt: 'Infinity', floor: 600 },
+    ];
+    snapshot.SPECIALTY.preSlabTermiticide.minimums.builderBatch = [
+      { maxSqFt: 250, floor: 150 },
+    ];
 
     const result = validatePestPricingConfig(snapshot);
 
@@ -490,6 +498,8 @@ describe('pricing engine DB bridge', () => {
       'SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost must be positive',
       'SPECIALTY.preSlabTermiticide.products.bifen_it.productOzPer10SqFt must be positive',
       'SPECIALTY.preSlabTermiticide.products.talstar_p.marginDivisor must be positive and less than 1',
+      'SPECIALTY.preSlabTermiticide.minimums.standalone must be sorted by ascending maxSqFt',
+      'SPECIALTY.preSlabTermiticide.minimums.builderBatch must end with terminal Infinity maxSqFt',
     ]));
   });
 

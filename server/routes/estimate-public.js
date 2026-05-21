@@ -551,6 +551,21 @@ const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this quote.",
     },
   },
+  pre_slab_termiticide: {
+    headline: "Hey {first}, here's your pre-slab termite treatment quote.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed the slab area before pricing this estimate',
+    aiBody: 'We priced the pre-slab soil treatment from the measured slab area, selected product, and warranty option.',
+    askChips: [
+      'What product is used?',
+      'Do I get documentation?',
+      'What warranty is selected?',
+      'When should this be done?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this quote.",
+    },
+  },
   lawn_care: {
     headline: "Hey {first}, choose your lawn care option.",
     aiEyebrow: 'Waves AI',
@@ -1089,6 +1104,7 @@ function recurringServiceKey(svc = {}) {
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
+  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('preslab') || /\bpre\s+slab\b/.test(words)) return 'pre_slab_termiticide';
   if (raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw)) return 'termite_trenching';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
@@ -5950,6 +5966,7 @@ function isTermiteTrenchingServiceName(name) {
   const key = recurringServiceKey({ name });
   if (key === 'termite_trenching') return true;
   const n = String(name || '').toLowerCase();
+  if (n.includes('pre-slab') || n.includes('pre slab') || n.includes('preslab')) return false;
   return n.includes('termite')
     && !n.includes('bait')
     && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(n);
@@ -5996,6 +6013,7 @@ function categoryForRecurringServiceKey(key) {
     case 'tree_shrub': return 'tree_shrub';
     case 'mosquito': return 'mosquito';
     case 'termite_bait': return 'termite_bait';
+    case 'pre_slab_termiticide': return 'pre_slab_termiticide';
     case 'rodent': return 'rodent';
     case 'rodent_bait': return 'rodent';
     case 'termite_trenching': return 'termite_trenching';
@@ -6011,6 +6029,7 @@ function serviceLabelForCategory(category, fallback = null) {
     case 'tree_shrub': return 'Tree & Shrub';
     case 'mosquito': return 'Mosquito Control';
     case 'termite_bait': return 'Termite Bait Stations';
+    case 'pre_slab_termiticide': return 'Pre-Slab Termiticide Treatment';
     case 'termite_trenching': return 'Termite Trenching';
     case 'rodent': return 'Rodent Remediation';
     case 'bundle': return 'Recurring services';
@@ -6025,6 +6044,7 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || isPestServiceName(name)) return 'pest_control';
   if (isTermiteInstallItem(item)) return 'termite_bait';
+  if (isPreSlabOneTimeItem(item) || service.includes('pre_slab') || service.includes('preslab')) return 'pre_slab_termiticide';
   if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
   if (isRodentServiceName(name) || service.includes('rodent')) return 'rodent';
   if (isTreeShrubServiceName(name) || service.includes('tree') || service.includes('shrub') || service.includes('palm')) return 'tree_shrub';
@@ -6058,6 +6078,7 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     services.treeShrub || services.tree_shrub || inputs.svcTreeShrub ? 'tree_shrub' : null,
     services.mosquito || services.oneTimeMosquito || inputs.svcMosquito || inputs.svcOnetimeMosquito ? 'mosquito' : null,
     services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,
+    services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab || inputs.svcPreslab ? 'pre_slab_termiticide' : null,
     services.trenching || inputs.svcTrenching ? 'termite_trenching' : null,
     services.rodent || inputs.svcRodent ? 'rodent' : null,
   ].filter(Boolean);

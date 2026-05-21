@@ -1008,6 +1008,53 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('pre-slab one-time quotes use pre-slab category and copy instead of trenching', async () => {
+    expect(deriveServiceCategory({}, [], [{
+      service: 'pre_slab_termiticide',
+      name: 'Pre-Slab Termiticide Treatment',
+      price: 225,
+    }])).toBe('pre_slab_termiticide');
+    expect(deriveServiceCategory({}, [{ name: 'Pre-Slab Termite Treatment' }], []))
+      .toBe('pre_slab_termiticide');
+    expect(deriveServiceCategory({ inputs: { services: { preSlabTermiticide: true } } }, [], []))
+      .toBe('pre_slab_termiticide');
+
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-preslab-category-test',
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 225,
+            items: [{
+              service: 'pre_slab_termiticide',
+              name: 'Pre-Slab Termiticide Treatment',
+              price: 225,
+              warrantyStatus: 'No extended warranty selected.',
+            }],
+          },
+          recurring: { services: [] },
+        },
+      },
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 225,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'pre_slab_termiticide',
+      label: 'Pre-Slab Termiticide Treatment',
+      isRecurring: false,
+      isPest: false,
+      copy: expect.objectContaining({
+        headline: "Hey {first}, here's your pre-slab termite treatment quote.",
+      }),
+    }));
+    expect(payload.askChips).toContain('Do I get documentation?');
+    expect(payload.askChips).not.toContain('How long does the barrier last?');
+  });
+
   test('deriveServiceCategory returns pest, trenching, and bundle categories from normalized services', () => {
     expect(deriveServiceCategory({}, [{ name: 'Pest Control' }], [])).toBe('pest_control');
     expect(deriveServiceCategory({}, [{ name: 'Rodent Remediation' }], [])).toBe('rodent');

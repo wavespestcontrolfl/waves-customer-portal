@@ -49,6 +49,10 @@ function isNonNegativeNumber(value) {
   return isFiniteNumber(value) && Number(value) >= 0;
 }
 
+function isTerminalInfinity(value) {
+  return value === Infinity || value === 'Infinity';
+}
+
 function validateSortedBrackets(errors, name, rows, key, valueKey, options = {}) {
   if (!Array.isArray(rows) || rows.length === 0) {
     errors.push(`${name} must contain at least one bracket`);
@@ -330,14 +334,27 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!Array.isArray(tiers) || tiers.length === 0) {
       errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context} is required`);
     } else {
+      let previousMax = 0;
       tiers.forEach((tier, index) => {
-        if (!isPositiveNumber(tier.maxSqFt) && tier.maxSqFt !== Infinity && tier.maxSqFt !== 'Infinity') {
+        const terminal = isTerminalInfinity(tier.maxSqFt);
+        const maxSqFt = terminal ? Infinity : Number(tier.maxSqFt);
+        if (!terminal && !isPositiveNumber(tier.maxSqFt)) {
           errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context}.${index}.maxSqFt must be positive`);
         }
+        if (terminal && index !== tiers.length - 1) {
+          errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context}.${index}.maxSqFt terminal Infinity must be last`);
+        }
+        if (!terminal && Number.isFinite(maxSqFt) && maxSqFt <= previousMax) {
+          errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context} must be sorted by ascending maxSqFt`);
+        }
+        previousMax = maxSqFt;
         if (!isNonNegativeNumber(tier.floor)) {
           errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context}.${index}.floor must be non-negative`);
         }
       });
+      if (!isTerminalInfinity(tiers[tiers.length - 1]?.maxSqFt)) {
+        errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context} must end with terminal Infinity maxSqFt`);
+      }
     }
     if (typeof preSlabTermiticide.includeDriveCostByContext?.[context] !== 'boolean') {
       errors.push(`SPECIALTY.preSlabTermiticide.includeDriveCostByContext.${context} must be boolean`);
