@@ -20,6 +20,9 @@ const { ensureCustomerGeocoded } = require('../services/geocoder');
 const { recordAuditEvent } = require('../services/audit-log');
 const detector = require('../services/gps-arrival-detector');
 
+const SAMPLE_TIME = new Date().toISOString();
+const EN_ROUTE_TIME = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
 function serviceQueryMock(service) {
   return {
     leftJoin: jest.fn().mockReturnThis(),
@@ -47,10 +50,32 @@ function baseService(overrides = {}) {
     cancelled_at: null,
     completed_at: null,
     arrived_at: null,
+    en_route_at: EN_ROUTE_TIME,
     service_lat: 27.4386,
     service_lng: -82.3719,
     customer_latitude: null,
     customer_longitude: null,
+    ...overrides,
+  };
+}
+
+function baseTechStatus(overrides = {}) {
+  return {
+    tech_id: 'tech-1',
+    current_job_id: 'svc-1',
+    lat: 27.4386,
+    lng: -82.3719,
+    location_updated_at: SAMPLE_TIME,
+    ...overrides,
+  };
+}
+
+function basePoint(overrides = {}) {
+  return {
+    lat: 27.4386,
+    lng: -82.3719,
+    speed_mph: 0,
+    reported_at: SAMPLE_TIME,
     ...overrides,
   };
 }
@@ -118,18 +143,11 @@ describe('gps-arrival-detector', () => {
     const query = installServiceLookup(baseService());
 
     const result = await detector.maybeMarkArrivedFromGps({
-      techStatus: {
-        tech_id: 'tech-1',
-        current_job_id: 'svc-1',
-        lat: 27.4386,
-        lng: -82.3719,
-      },
-      point: {
-        lat: 27.4386,
-        lng: -82.3719,
+      techStatus: baseTechStatus(),
+      point: basePoint({
         speed_mph: 3,
         ignition: true,
-      },
+      }),
       configOverride: detector._test.DEFAULT_CONFIG,
     });
 
@@ -157,18 +175,11 @@ describe('gps-arrival-detector', () => {
     installServiceLookup(baseService());
 
     const result = await detector.maybeMarkArrivedFromGps({
-      techStatus: {
-        tech_id: 'tech-1',
-        current_job_id: 'svc-1',
-        lat: 27.4386,
-        lng: -82.3719,
-      },
-      point: {
-        lat: 27.4386,
-        lng: -82.3719,
+      techStatus: baseTechStatus(),
+      point: basePoint({
         speed_mph: 32,
         ignition: true,
-      },
+      }),
       configOverride: detector._test.DEFAULT_CONFIG,
     });
 
@@ -190,18 +201,11 @@ describe('gps-arrival-detector', () => {
     ensureCustomerGeocoded.mockResolvedValue({ lat: 27.4386, lng: -82.3719 });
 
     const result = await detector.maybeMarkArrivedFromGps({
-      techStatus: {
-        tech_id: 'tech-1',
-        current_job_id: 'svc-1',
-        lat: 27.4386,
-        lng: -82.3719,
-      },
-      point: {
-        lat: 27.4386,
-        lng: -82.3719,
+      techStatus: baseTechStatus(),
+      point: basePoint({
         speed_mph: 0,
         ignition: false,
-      },
+      }),
       configOverride: detector._test.DEFAULT_CONFIG,
     });
 
@@ -217,17 +221,10 @@ describe('gps-arrival-detector', () => {
 
   test('does not scan stale en-route jobs without a current job pointer', async () => {
     const result = await detector.maybeMarkArrivedFromGps({
-      techStatus: {
-        tech_id: 'tech-1',
+      techStatus: baseTechStatus({
         current_job_id: null,
-        lat: 27.4386,
-        lng: -82.3719,
-      },
-      point: {
-        lat: 27.4386,
-        lng: -82.3719,
-        speed_mph: 0,
-      },
+      }),
+      point: basePoint(),
       configOverride: detector._test.DEFAULT_CONFIG,
     });
 
@@ -244,17 +241,8 @@ describe('gps-arrival-detector', () => {
     }));
 
     const result = await detector.maybeMarkArrivedFromGps({
-      techStatus: {
-        tech_id: 'tech-1',
-        current_job_id: 'svc-1',
-        lat: 27.4386,
-        lng: -82.3719,
-      },
-      point: {
-        lat: 27.4386,
-        lng: -82.3719,
-        speed_mph: 0,
-      },
+      techStatus: baseTechStatus(),
+      point: basePoint(),
       configOverride: detector._test.DEFAULT_CONFIG,
     });
 
@@ -269,17 +257,8 @@ describe('gps-arrival-detector', () => {
     }));
 
     const result = await detector.maybeMarkArrivedFromGps({
-      techStatus: {
-        tech_id: 'tech-1',
-        current_job_id: 'svc-1',
-        lat: 27.4386,
-        lng: -82.3719,
-      },
-      point: {
-        lat: 27.4386,
-        lng: -82.3719,
-        speed_mph: 0,
-      },
+      techStatus: baseTechStatus(),
+      point: basePoint(),
       configOverride: detector._test.DEFAULT_CONFIG,
     });
 
@@ -289,17 +268,8 @@ describe('gps-arrival-detector', () => {
 
   test('can be disabled through config', async () => {
     const result = await detector.maybeMarkArrivedFromGps({
-      techStatus: {
-        tech_id: 'tech-1',
-        current_job_id: 'svc-1',
-        lat: 27.4386,
-        lng: -82.3719,
-      },
-      point: {
-        lat: 27.4386,
-        lng: -82.3719,
-        speed_mph: 0,
-      },
+      techStatus: baseTechStatus(),
+      point: basePoint(),
       configOverride: { enabled: false },
     });
 
@@ -310,21 +280,49 @@ describe('gps-arrival-detector', () => {
 
   test('does not act on a GPS point that tech_status rejected as stale', async () => {
     const result = await detector.maybeMarkArrivedFromGps({
-      techStatus: {
-        tech_id: 'tech-1',
-        current_job_id: 'svc-1',
-        lat: 27.4386,
-        lng: -82.3719,
-      },
-      point: {
+      techStatus: baseTechStatus(),
+      point: basePoint({
         lat: 27.5,
         lng: -82.5,
-        speed_mph: 0,
-      },
+      }),
       configOverride: detector._test.DEFAULT_CONFIG,
     });
 
     expect(db).not.toHaveBeenCalled();
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, reason: 'stale_location_sample' });
+  });
+
+  test('does not act on a GPS point reported before the job went en route', async () => {
+    installServiceLookup(baseService());
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus({
+        location_updated_at: new Date(Date.now() - 8 * 60 * 1000).toISOString(),
+      }),
+      point: basePoint({
+        reported_at: new Date(Date.now() - 8 * 60 * 1000).toISOString(),
+      }),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, reason: 'sample_before_en_route' });
+  });
+
+  test('requires provider timestamps to match the accepted tech_status row', async () => {
+    installServiceLookup(baseService());
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus({
+        location_updated_at: SAMPLE_TIME,
+      }),
+      point: basePoint({
+        reported_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      }),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
     expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: false, reason: 'stale_location_sample' });
   });
