@@ -2127,6 +2127,150 @@ function assertPositiveInteger(value, name) {
   return value;
 }
 
+function hasPalmCountCandidate(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function parsePositivePalmInteger(value) {
+  if (!hasPalmCountCandidate(value)) return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function resolvePalmCount(property = {}, options = {}) {
+  const warnings = [];
+  const manualReviewReasons = [];
+  const invalidCandidates = [];
+  const addInvalid = (source, value) => {
+    invalidCandidates.push({ source, value });
+    warnings.push('invalid_palm_count');
+    manualReviewReasons.push('invalid_palm_count');
+  };
+  const readCandidate = (source, value) => {
+    if (!hasPalmCountCandidate(value)) return null;
+    const palmCount = parsePositivePalmInteger(value);
+    if (palmCount) return { palmCount, source };
+    addInvalid(source, value);
+    return null;
+  };
+
+  const serviceDirectPresent = hasPalmCountCandidate(options.palmCount);
+  const serviceMeasurementPresent = hasPalmCountCandidate(options.measurements?.palmCount);
+  const propertyDirect = readCandidate('property_palm_count', property.palmCount);
+  const propertyInventory = readCandidate('property_palm_inventory', property.palmInventory?.palmCount);
+
+  // palmCount is required for every palm injection price. The service-level
+  // value means palms treated for this line; property-level count is only a
+  // default/prefill because not every palm on the property is necessarily treated.
+  if (serviceDirectPresent) {
+    const serviceDirect = readCandidate('service_manual_override', options.palmCount);
+    if (serviceDirect) {
+      warnings.push('palm_count_manual_override_used');
+      const propertyPalmCount = propertyDirect?.palmCount ?? propertyInventory?.palmCount;
+      const differs = parsePositivePalmInteger(propertyPalmCount) && serviceDirect.palmCount !== propertyPalmCount;
+      if (differs) warnings.push('service_palm_count_differs_from_property_palm_count');
+      return {
+        ...serviceDirect,
+        wasManualOverride: true,
+        wasDefaulted: false,
+        requiresMeasurement: false,
+        requiresManualReview: false,
+        manualReviewReasons: [...new Set(manualReviewReasons)],
+        warnings: [...new Set(warnings)],
+        servicePalmCountDiffersFromPropertyPalmCount: differs,
+        propertyPalmCount: propertyPalmCount || undefined,
+        invalidCandidates,
+      };
+    }
+    return {
+      palmCount: undefined,
+      source: 'missing',
+      wasManualOverride: false,
+      wasDefaulted: false,
+      requiresMeasurement: true,
+      requiresManualReview: true,
+      manualReviewReasons: [...new Set(manualReviewReasons)],
+      warnings: [...new Set(warnings)],
+      invalidCandidates,
+    };
+  }
+
+  if (serviceMeasurementPresent) {
+    const serviceMeasurement = readCandidate('service_manual_override', options.measurements.palmCount);
+    if (serviceMeasurement) {
+      warnings.push('palm_count_manual_override_used');
+      const propertyPalmCount = propertyDirect?.palmCount ?? propertyInventory?.palmCount;
+      const differs = parsePositivePalmInteger(propertyPalmCount) && serviceMeasurement.palmCount !== propertyPalmCount;
+      if (differs) warnings.push('service_palm_count_differs_from_property_palm_count');
+      return {
+        ...serviceMeasurement,
+        wasManualOverride: true,
+        wasDefaulted: false,
+        requiresMeasurement: false,
+        requiresManualReview: false,
+        manualReviewReasons: [...new Set(manualReviewReasons)],
+        warnings: [...new Set(warnings)],
+        servicePalmCountDiffersFromPropertyPalmCount: differs,
+        propertyPalmCount: propertyPalmCount || undefined,
+        invalidCandidates,
+      };
+    }
+    return {
+      palmCount: undefined,
+      source: 'missing',
+      wasManualOverride: false,
+      wasDefaulted: false,
+      requiresMeasurement: true,
+      requiresManualReview: true,
+      manualReviewReasons: [...new Set(manualReviewReasons)],
+      warnings: [...new Set(warnings)],
+      invalidCandidates,
+    };
+  }
+
+  if (propertyDirect) {
+    return {
+      ...propertyDirect,
+      wasManualOverride: false,
+      wasDefaulted: true,
+      requiresMeasurement: false,
+      requiresManualReview: false,
+      manualReviewReasons: [...new Set(manualReviewReasons)],
+      warnings: [...new Set(warnings)],
+      servicePalmCountDiffersFromPropertyPalmCount: false,
+      invalidCandidates,
+    };
+  }
+
+  if (propertyInventory) {
+    return {
+      ...propertyInventory,
+      wasManualOverride: false,
+      wasDefaulted: true,
+      requiresMeasurement: false,
+      requiresManualReview: false,
+      manualReviewReasons: [...new Set(manualReviewReasons)],
+      warnings: [...new Set(warnings)],
+      servicePalmCountDiffersFromPropertyPalmCount: false,
+      invalidCandidates,
+    };
+  }
+
+  warnings.push('missing_palm_count');
+  manualReviewReasons.push('missing_palm_count');
+  return {
+    palmCount: undefined,
+    source: 'missing',
+    wasManualOverride: false,
+    wasDefaulted: false,
+    requiresMeasurement: true,
+    requiresManualReview: true,
+    manualReviewReasons: [...new Set(manualReviewReasons)],
+    warnings: [...new Set(warnings)],
+    invalidCandidates,
+  };
+}
+
 function assertPositiveNumber(value, name) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     throw buildPricingError(`${name} must be a positive number`, { field: name, value });
@@ -5463,6 +5607,7 @@ module.exports = {
   resolveTermiteFootprint,
   resolveTermiteBaitPerimeter,
   resolveTrenchingMeasurements,
+  resolvePalmCount,
   normalizeTrenchingTermiticideProduct,
   normalizeTrenchingApplicationRate,
   resolveBoraCareSqFt,

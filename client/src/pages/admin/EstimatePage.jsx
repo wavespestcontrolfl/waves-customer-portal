@@ -579,6 +579,16 @@ function parsePositiveNumber(value) {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+function parsePositiveInteger(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return undefined;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function hasInvalidPositiveInteger(value) {
+  return value !== undefined && value !== null && String(value).trim() !== "" && parsePositiveInteger(value) === undefined;
+}
+
 function parseNonNegativeNumber(value) {
   if (value === undefined || value === null || value === "") return undefined;
   const n = Number(value);
@@ -762,6 +772,9 @@ function EstimateToolView() {
     isRecurringCustomer: "NO",
     bedArea: "",
     palmCount: "",
+    palmTreatmentCount: "",
+    palmTreatmentType: "combo",
+    palmSize: "medium",
     treeCount: "",
     roachModifier: "NONE",
     lawnFreq: "9",
@@ -888,10 +901,13 @@ function EstimateToolView() {
         45,
         Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30),
       );
-    if (form.svcInjection)
-      approx.injection = Math.round(
-        (Math.max(Math.max(1, Math.round((Number(form.palmCount) || 3) * 0.30)) * 75, 75) * 2) / 12,
-      );
+    if (form.svcInjection) {
+      const treatmentCount = parsePositiveInteger(form.palmTreatmentCount)
+        ?? (String(form.palmTreatmentCount || "").trim() === "" ? parsePositiveInteger(form.palmCount) : undefined);
+      if (treatmentCount) {
+        approx.injection = Math.round((Math.max(treatmentCount * 75, 75) * 2) / 12);
+      }
+    }
     if (form.svcMosquito)
       approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
     if (form.svcTermiteBait) approx.termiteBait = 50;
@@ -983,17 +999,29 @@ function EstimateToolView() {
   /* ── field setter ─────────────────────────────────────────── */
   const set = useCallback(
     (key, val) =>
-      setForm((f) => ({
-        ...f,
-        [key]: val,
-        ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
-        ...(key === "stories" ? { _storiesEdited: true } : {}),
-        ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
-      })),
+      setForm((f) => {
+        const next = {
+          ...f,
+          [key]: val,
+          ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
+          ...(key === "stories" ? { _storiesEdited: true } : {}),
+          ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
+        };
+        if (key === "palmCount" && String(f.palmTreatmentCount || "").trim() === "") {
+          next.palmTreatmentCount = val;
+        }
+        return next;
+      }),
     [],
   );
   const toggle = useCallback((key) => {
-    setForm((f) => ({ ...f, [key]: !f[key] }));
+    setForm((f) => {
+      const next = { ...f, [key]: !f[key] };
+      if (key === "svcInjection" && !f.svcInjection && String(f.palmTreatmentCount || "").trim() === "") {
+        next.palmTreatmentCount = f.palmCount || "";
+      }
+      return next;
+    });
     // Reset generated estimate so bottom preview bar updates
     if (key.startsWith("svc")) {
       setEstimate(null);
@@ -1197,14 +1225,20 @@ function EstimateToolView() {
       if (ep.estimatedPalmCount) upd.palmCount = String(ep.estimatedPalmCount);
       if (ep.estimatedTreeCount) upd.treeCount = String(ep.estimatedTreeCount);
 
-      setForm((f) => ({
-        ...f,
-        ...upd,
-        _boracareAuto: true,
-        _preslabAuto: true,
-        _poolCageSizeEdited: false,
-        _storiesEdited: false,
-      }));
+      setForm((f) => {
+        const next = {
+          ...f,
+          ...upd,
+          _boracareAuto: true,
+          _preslabAuto: true,
+          _poolCageSizeEdited: false,
+          _storiesEdited: false,
+        };
+        if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
+          next.palmTreatmentCount = upd.palmCount;
+        }
+        return next;
+      });
 
       // Auto-detect existing customer by address
       try {
@@ -1384,7 +1418,13 @@ function EstimateToolView() {
       if (data.slab_sqft || data.slabSqFt)
         upd.preslabSqft = String(Math.round(data.slab_sqft || data.slabSqFt));
 
-      setForm((f) => ({ ...f, ...upd }));
+      setForm((f) => {
+        const next = { ...f, ...upd };
+        if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
+          next.palmTreatmentCount = upd.palmCount;
+        }
+        return next;
+      });
 
       const verify = (data.fieldVerify || []).length;
       const conf =
@@ -1541,6 +1581,20 @@ function EstimateToolView() {
         const trenchingConcretePct = parseNonNegativeNumber(form.trenchingConcretePct);
         const boracareSqft = parsePositiveNumber(form.boracareSqft);
         const preslabSqft = parsePositiveNumber(form.preslabSqft);
+        const propertyPalmCount = parsePositiveInteger(form.palmCount);
+        const palmTreatmentCountBlank = String(form.palmTreatmentCount || "").trim() === "";
+        const palmTreatmentCount = parsePositiveInteger(form.palmTreatmentCount)
+          ?? (palmTreatmentCountBlank ? propertyPalmCount : undefined);
+        if (form.svcInjection) {
+          if (hasInvalidPositiveInteger(form.palmCount) || hasInvalidPositiveInteger(form.palmTreatmentCount)) {
+            alert("Palm count must be a positive whole number.");
+            return null;
+          }
+          if (!palmTreatmentCount) {
+            alert("Palm count is required for palm injection pricing.");
+            return null;
+          }
+        }
         const options = {
           grassType: form.grassType || "st_augustine",
           lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq) || 9,
@@ -1596,6 +1650,15 @@ function EstimateToolView() {
           commercialPricingMode: form.commercialPricingMode || "manual_quote",
           commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
         };
+        if (form.svcInjection) {
+          options.palmInjection = {
+            selected: true,
+            treatmentType: form.palmTreatmentType || "combo",
+            palmCount: palmTreatmentCount,
+            measurements: { palmCount: palmTreatmentCount },
+            palmSize: form.palmSize || "medium",
+          };
+        }
 
         // Override enriched profile with any manual form edits. When bed bug is
         // the only service, a minimal manual profile is enough for the server.
@@ -1611,7 +1674,11 @@ function EstimateToolView() {
         profile.lotSqFt = manualNumber(form.lotSqFt, Number(profile.lotSqFt) || 0);
         profile.stories = manualNumber(form.stories, Number(profile.stories) || 1);
         if (form.bedArea) profile.estimatedBedAreaSf = parseInt(form.bedArea);
-        if (form.palmCount) profile.estimatedPalmCount = parseInt(form.palmCount);
+        if (propertyPalmCount) {
+          profile.palmCount = propertyPalmCount;
+          profile.estimatedPalmCount = propertyPalmCount;
+          profile.palmInventory = { ...(profile.palmInventory || {}), palmCount: propertyPalmCount };
+        }
         if (form.treeCount) profile.estimatedTreeCount = parseInt(form.treeCount);
         if (profile.homeSqFt > 0) {
           profile.footprint = Math.round(
@@ -1970,6 +2037,9 @@ function EstimateToolView() {
       isRecurringCustomer: "NO",
       bedArea: "",
       palmCount: "",
+      palmTreatmentCount: "",
+      palmTreatmentType: "combo",
+      palmSize: "medium",
       treeCount: "",
       boracareSqft: "",
       preslabSqft: "",
@@ -2196,6 +2266,9 @@ function EstimateToolView() {
                       nearWater: "NO",
                       bedArea: "",
                       palmCount: "",
+                      palmTreatmentCount: "",
+                      palmTreatmentType: "combo",
+                      palmSize: "medium",
                       treeCount: "",
                     }));
                     setLookupStatus({ type: "", msg: "" });
@@ -2609,18 +2682,20 @@ function EstimateToolView() {
               <Field label="Lot Sq Ft">
                 <Input k="lotSqFt" type="number" placeholder="8000" />
               </Field>
-              {form.svcTs && (
+              {(form.svcTs || form.svcInjection) && (
                 <div style={sRow}>
                   {" "}
-                  <Field label="Bed Area (sq ft)">
-                    <Input
-                      k="bedArea"
-                      type="number"
-                      placeholder="Auto-estimate"
-                    />
-                  </Field>{" "}
-                  <Field label="Palm Count">
-                    <Input k="palmCount" type="number" placeholder="Auto" />
+                  {form.svcTs && (
+                    <Field label="Bed Area (sq ft)">
+                      <Input
+                        k="bedArea"
+                        type="number"
+                        placeholder="Auto-estimate"
+                      />
+                    </Field>
+                  )}{" "}
+                  <Field label="Palms on property">
+                    <Input k="palmCount" type="number" placeholder="Manual override" />
                   </Field>{" "}
                 </div>
               )}
@@ -2843,6 +2918,55 @@ function EstimateToolView() {
               )}
               <Checkbox k="svcTs" label="Tree & Shrub" />{" "}
               <Checkbox k="svcInjection" label="Palm Injection" />{" "}
+              {form.svcInjection && (
+                <div
+                  style={{
+                    marginLeft: 28,
+                    marginBottom: 8,
+                    padding: 12,
+                    background: "rgba(255,255,255,0.05)",
+                    borderRadius: 8,
+                  }}
+                >
+                  <div style={sRow}>
+                    <Field label="Treatment Type">
+                      <Select
+                        k="palmTreatmentType"
+                        options={[
+                          { value: "nutrition", label: "Palm Nutrition Injection" },
+                          { value: "insecticide", label: "Preventive Palm Insecticide" },
+                          { value: "combo", label: "Nutrition + Insecticide" },
+                        ]}
+                      />
+                    </Field>
+                    <Field label="Palms to treat">
+                      <Input k="palmTreatmentCount" type="number" placeholder={form.palmCount || "Required"} />
+                    </Field>
+                  </div>
+                  {(form.palmTreatmentType === "insecticide" || form.palmTreatmentType === "combo") && (
+                    <Field label="Palm size for this treatment">
+                      <Select
+                        k="palmSize"
+                        options={[
+                          { value: "small", label: "Small" },
+                          { value: "medium", label: "Medium" },
+                          { value: "large", label: "Large" },
+                        ]}
+                      />
+                    </Field>
+                  )}
+                  {(hasInvalidPositiveInteger(form.palmCount) ||
+                    hasInvalidPositiveInteger(form.palmTreatmentCount) ||
+                    !(
+                      parsePositiveInteger(form.palmTreatmentCount) ||
+                      (String(form.palmTreatmentCount || "").trim() === "" && parsePositiveInteger(form.palmCount))
+                    )) && (
+                    <div style={{ color: C.warn, fontSize: 12 }}>
+                      Palm count is required for palm injection pricing.
+                    </div>
+                  )}
+                </div>
+              )}
               <Checkbox k="svcMosquito" label="Mosquito Program" />{" "}
               <Checkbox k="svcTermiteBait" label="Termite Bait Stations" />{" "}
               <Checkbox k="svcRodentBait" label="Rodent Bait Stations" />

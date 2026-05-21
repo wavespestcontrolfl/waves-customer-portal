@@ -155,28 +155,39 @@ describe('estimate v2 service toggle adapter', () => {
     }));
   });
 
-  test('maps palm injection selection with explicit medium palm size for strict tiered pricing', () => {
+  test('maps palm injection selection with editable property and service palm counts', () => {
     const input = translateV2CallToV1Input(
       {
         ...baseProfile(),
-        estimatedPalmCount: 8,
+        palmCount: 8,
       },
       ['PALM_INJECTION'],
-      {}
+      {
+        palmInjection: {
+          palmCount: 5,
+          treatmentType: 'combo',
+          palmSize: 'medium',
+        },
+      }
     );
 
-    expect(input.services.palm).toEqual({
-      palmCount: 2,
+    expect(input.palmCount).toBe(8);
+    expect(input.services.palm).toEqual(expect.objectContaining({
+      palmCount: 5,
+      measurements: { palmCount: 5 },
       treatmentType: 'combo',
       palmSize: 'medium',
-    });
+    }));
 
     const estimate = generateEstimate(input);
     const palm = estimate.lineItems.find((line) => line.service === 'palm_injection');
     expect(palm).toEqual(expect.objectContaining({
+      palmCount: 5,
       treatmentType: 'combo',
       palmSize: 'medium',
       pricePerPalm: 75,
+      palmCountSource: 'service_manual_override',
+      servicePalmCountDiffersFromPropertyPalmCount: true,
     }));
 
     const mapped = mapV1ToLegacyShape(estimate);
@@ -184,18 +195,32 @@ describe('estimate v2 service toggle adapter', () => {
       pricePerPalm: 75,
       appsPerYear: 2,
       palmSize: 'medium',
+      palmCountSource: 'service_manual_override',
+      servicePalmCountDiffersFromPropertyPalmCount: true,
       detail: expect.stringContaining('$75/palm'),
     }));
+  });
+
+  test('palm injection without service or property palm count returns a clear validation error', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['PALM_INJECTION'],
+      {}
+    );
+
+    expect(input.services.palm.palmCount).toBeUndefined();
+    expect(() => generateEstimate(input)).toThrow(/Palm count is required/);
   });
 
   test('maps Gold palm credits onto the legacy palm line item and totals', () => {
     const input = translateV2CallToV1Input(
       {
         ...baseProfile(),
-        estimatedPalmCount: 10,
+        palmCount: 3,
       },
       ['PEST', 'LAWN', 'MOSQUITO', 'PALM_INJECTION'],
       {
+        palmInjection: { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' },
         manualDiscount: { type: 'FIXED', value: 100, label: 'Manual promo' },
       }
     );

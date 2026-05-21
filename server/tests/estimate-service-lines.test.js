@@ -38,6 +38,48 @@ describe('estimate service line inference', () => {
       .toBe('Pest Control');
   });
 
+  test('surfaces palm injection count metadata from saved legacy estimate results', () => {
+    const lines = inferEstimateServiceLines({
+      estimateData: {
+        result: {
+          recurring: {
+            palmInjectionMo: 31.25,
+            services: [],
+          },
+          results: {
+            injection: {
+              palms: 5,
+              mo: 31.25,
+              measurements: {
+                palmCount: { value: 5, source: 'service_manual_override' },
+              },
+              palmCountSource: 'service_manual_override',
+              palmCountWasManualOverride: true,
+              servicePalmCountDiffersFromPropertyPalmCount: true,
+              measurementWarnings: ['service_palm_count_differs_from_property_palm_count'],
+            },
+          },
+        },
+      },
+    });
+
+    expect(lines).toEqual([
+      expect.objectContaining({
+        key: 'palm_injection',
+        amount: 31.25,
+        amountBasis: 'monthly',
+        measurements: {
+          palmCount: { value: 5, source: 'service_manual_override' },
+        },
+        palmCountSource: 'service_manual_override',
+        palmCountWasManualOverride: true,
+        servicePalmCountDiffersFromPropertyPalmCount: true,
+        measurementWarnings: ['service_palm_count_differs_from_property_palm_count'],
+      }),
+    ]);
+    expect(inferEstimateServiceInterest({ estimateData: { inputs: { svcInjection: true } } })).toBe('Palm Injection');
+  });
+
   test('surfaces unknown service data instead of assigning pest', () => {
     expect(inferEstimateServiceLines({ monthlyTotal: 99 })).toEqual([
       { key: 'unknown', amount: null, amountBasis: 'unknown' },

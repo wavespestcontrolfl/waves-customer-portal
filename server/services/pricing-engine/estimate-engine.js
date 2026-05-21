@@ -18,6 +18,7 @@ const {
   pricePlugging, priceFoamDrill, priceStingingInsect, priceExclusion, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
+  resolvePalmCount,
   normalizeRoachType,
 } = require('./service-pricing');
 const {
@@ -44,6 +45,42 @@ function uniqueStrings(values = []) {
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function buildPalmCountError(resolution) {
+  const err = new Error('Palm count is required for palm injection pricing.');
+  err.name = 'PricingError';
+  err.status = 400;
+  err.statusCode = 400;
+  err.code = 'PALM_COUNT_REQUIRED';
+  err.isOperational = true;
+  err.metadata = resolution;
+  return err;
+}
+
+function attachPalmCountMetadata(result, resolution) {
+  result.measurements = {
+    ...(result.measurements || {}),
+    palmCount: {
+      value: resolution.palmCount,
+      source: resolution.source,
+    },
+  };
+  result.palmCountSource = resolution.source;
+  result.palmCountWasManualOverride = !!resolution.wasManualOverride;
+  result.palmCountWasDefaulted = !!resolution.wasDefaulted;
+  result.servicePalmCountDiffersFromPropertyPalmCount = !!resolution.servicePalmCountDiffersFromPropertyPalmCount;
+  result.measurementWarnings = uniqueStrings([
+    ...(result.measurementWarnings || []),
+    ...(resolution.warnings || []),
+  ]);
+  result.requiresMeasurement = !!result.requiresMeasurement || !!resolution.requiresMeasurement;
+  result.requiresManualReview = !!result.requiresManualReview || !!resolution.requiresManualReview;
+  result.manualReviewReasons = uniqueStrings([
+    ...(result.manualReviewReasons || []),
+    ...(resolution.manualReviewReasons || []),
+  ]);
+  return result;
 }
 
 const MANUAL_RECURRING_DISCOUNT_ELIGIBLE = new Set([
@@ -362,6 +399,8 @@ function generateEstimate(input) {
     estimatedBedAreaPercent: input.estimatedBedAreaPercent,
     bedArea: input.bedArea,
     bedAreaSource: input.bedAreaSource,
+    palmCount: input.palmCount,
+    palmInventory: input.palmInventory,
     propertyType: propertyTypeForProfile,
     features: input.features || {},
     // v2 enriched fields (optional — null-safe)
@@ -543,8 +582,20 @@ function generateEstimate(input) {
   }
 
   // Palm Injection
-  if (services.palm && !useCommercialManualQuote(services.palm, 'lawn_care')) {
-    const result = pricePalmInjection(property, { ...services.palm });
+  const palmService = services.palmInjection || services.palm;
+  if (palmService && !useCommercialManualQuote(palmService, 'lawn_care')) {
+    const palmOptions = serviceOptions(palmService);
+    const palmCountResolution = resolvePalmCount(property, palmOptions);
+    if (!Number.isInteger(palmCountResolution.palmCount) || palmCountResolution.palmCount <= 0) {
+      throw buildPalmCountError(palmCountResolution);
+    }
+    const result = pricePalmInjection(property, {
+      ...palmOptions,
+      // Do not default palmCount to 1. Service-level count prices the number of
+      // palms treated for this line; property-level count is only a resolver fallback.
+      palmCount: palmCountResolution.palmCount,
+    });
+    attachPalmCountMetadata(result, palmCountResolution);
     result.annual = Math.round(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.annualBeforeCredits = result.annual;
@@ -874,7 +925,7 @@ function generateEstimate(input) {
     const hasAnyRecurring = !!(
       services.pest || services.lawn || services.treeShrub ||
       services.mosquito || services.termiteBait || services.rodentBait ||
-      services.palm
+      palmService
     );
     const setup = priceBaitSetup({
       waived: hasAnyRecurring && !services.rodentBaitSetupForce,

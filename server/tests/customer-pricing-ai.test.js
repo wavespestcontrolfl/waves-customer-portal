@@ -75,6 +75,25 @@ describe('customer pricing AI helpers', () => {
     expect(result.options.some(option => option.monthly > 0)).toBe(true);
   });
 
+  test('palm injection pricing prompts for palm count instead of defaulting to one', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: null,
+      prompt: 'I am interested in palm injection',
+      customer: {
+        id: 'cust-palm',
+        waveguard_tier: 'Bronze',
+        monthly_rate: 55,
+        property_sqft: 2200,
+        lot_sqft: 7000,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('PROPERTY_DETAILS_NEEDED');
+    expect(result.message).toBe('Palm count is required for palm injection pricing.');
+  });
+
   test('uses lookup-provided stories when customer stories are missing', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
