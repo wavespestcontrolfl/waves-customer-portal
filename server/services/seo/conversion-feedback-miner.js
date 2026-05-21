@@ -102,11 +102,17 @@ function revenueRealizationScore({ estimated_revenue, leads_total }) {
 class ConversionFeedbackMiner {
   async mineWindow({ windowDays = 90, persist = true } = {}) {
     const windowEndDate = etDateString(new Date());
-    // ET-pinned cutoff: leads.first_contact_at + call_log.created_at
-    // are timestamptz columns. Comparing them against an ET date STRING
-    // would let Postgres convert at UTC-midnight, shifting the window
-    // 4–5 hours. Build an actual Date at ET-midnight N days ago so the
-    // driver serializes it with timezone info.
+    // ET-pinned cutoff for timestamptz columns (leads.first_contact_at
+    // and call_log.created_at). `since` is built as an absolute Date
+    // representing 00:00 ET on the cutoff day — knex serializes Date
+    // objects via toISOString() (UTC with offset), so Postgres compares
+    // timestamptz >= the right UTC instant and the 90-day window
+    // boundary stays aligned to ET-midnight (not UTC-midnight, which
+    // would shift records by 4–5 hours). The etDateString → parseETDateTime
+    // round-trip is intentional: etDateString gives us today's ET
+    // calendar day, addETDays walks back N ET-days correctly across DST,
+    // and parseETDateTime turns "YYYY-MM-DDT00:00" into the absolute
+    // Date at ET-midnight on that day.
     const sinceETString = etDateString(addETDays(new Date(), -windowDays));
     const since = parseETDateTime(`${sinceETString}T00:00`);
 
@@ -175,9 +181,19 @@ class ConversionFeedbackMiner {
         // the denominator (expired = sent but customer never decided).
         const estSent = r.estimate_status && ['sent', 'viewed', 'accepted', 'declined', 'expired'].includes(r.estimate_status) ? 1 : 0;
         const estAccepted = r.estimate_status === 'accepted' ? 1 : 0;
-        const revenue = estAccepted
-          ? (parseFloat(r.estimate_monthly || 0) * 12) + parseFloat(r.estimate_annual || 0) + parseFloat(r.estimate_onetime || 0)
-          : 0;
+        // Annualized accepted-estimate revenue. Per the existing dashboard
+        // pattern (server/routes/admin-dashboard.js + admin-customers.js):
+        // estimates.annual_total is the annual EQUIVALENT of any
+        // recurring portion of the estimate (the customer-facing
+        // "annual" view of a monthly plan), NOT additive to monthly *
+        // 12. Summing monthly*12 + annual double-counts the recurring
+        // line. Use monthly*12 when monthly is set; else annual; then
+        // add the one-time portion.
+        const monthlyTotal = parseFloat(r.estimate_monthly || 0);
+        const annualTotal = parseFloat(r.estimate_annual || 0);
+        const onetimeTotal = parseFloat(r.estimate_onetime || 0);
+        const recurringAnnualized = monthlyTotal > 0 ? monthlyTotal * 12 : annualTotal;
+        const revenue = estAccepted ? recurringAnnualized + onetimeTotal : 0;
 
         const patch = {
           leads_total: 1,
