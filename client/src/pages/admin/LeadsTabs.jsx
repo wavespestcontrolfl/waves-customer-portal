@@ -186,20 +186,17 @@ function MetricCard({ label, value, sub, color }) {
   );
 }
 
-function PipelineStatusCard({ label, value, active, onClick }) {
+function PipelineStatusCard({ label, value }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <div
       style={{
         flex: "1 1 140px",
         minWidth: 140,
         background: C.card,
-        border: `1px solid ${active ? C.heading : C.border}`,
+        border: `1px solid ${C.border}`,
         borderRadius: 6,
         padding: 14,
         textAlign: "left",
-        cursor: "pointer",
         fontFamily: ROBOTO,
       }}
     >
@@ -226,7 +223,7 @@ function PipelineStatusCard({ label, value, active, onClick }) {
       <div style={{ fontSize: 22, fontWeight: 500, color: C.heading, ...mono }}>
         {value}
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -881,15 +878,6 @@ export function LeadsSection() {
               key={f.stage}
               label={f.label || f.stage.replace(/_/g, " ")}
               value={f.count}
-              active={filters.status === f.stage}
-              onClick={() => {
-                setPipelineView("table");
-                setFilters((current) => ({
-                  ...current,
-                  status: current.status === f.stage ? "" : f.stage,
-                  page: 1,
-                }));
-              }}
             />
           ))}
         </div>
