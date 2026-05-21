@@ -186,6 +186,50 @@ function MetricCard({ label, value, sub, color }) {
   );
 }
 
+function PipelineStatusCard({ label, value, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        flex: "1 1 140px",
+        minWidth: 140,
+        background: C.card,
+        border: `1px solid ${active ? C.heading : C.border}`,
+        borderRadius: 6,
+        padding: 14,
+        textAlign: "left",
+        cursor: "pointer",
+        fontFamily: ROBOTO,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          marginBottom: 4,
+        }}
+      >
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: 0,
+            color: C.muted,
+          }}
+        >
+          {label}
+        </span>
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 500, color: C.heading, ...mono }}>
+        {value}
+      </div>
+    </button>
+  );
+}
+
 function LeadsWorkspaceNav({ active, onChange, counts }) {
   const tabs = [
     {
@@ -737,31 +781,20 @@ export function LeadsSection() {
   const renderPipeline = () => {
     const ov = overview || {};
     const pipelineOrder = [
-      "new",
-      "contacted",
-      "estimate_sent",
-      "won",
-      "lost",
-      "unresponsive",
-      "disqualified",
+      { stage: "new", label: "New Leads" },
+      { stage: "contacted", label: "Contacted" },
+      { stage: "estimate_sent", label: "Estimate Sent" },
+      { stage: "won", label: "Won" },
+      { stage: "lost", label: "Lost" },
     ];
-    const funnelData = pipelineOrder
-      .map(
-        (s) =>
-          funnel.find((f) => f.stage === s) || {
-            stage: s,
-            label: s.replace(/_/g, " "),
-            count: 0,
-          },
-      )
-      .filter(
-        (f) =>
-          f.count > 0 ||
-          ["new", "contacted", "estimate_sent", "won", "lost"].includes(
-            f.stage,
-          ),
-      );
-    const maxPipelineCount = Math.max(...funnelData.map((d) => d.count), 1);
+    const funnelData = pipelineOrder.map(
+      ({ stage, label }) =>
+        funnel.find((f) => f.stage === stage) || {
+          stage,
+          label,
+          count: 0,
+        },
+    );
     const draggingLead = draggingLeadId
       ? leads.find((lead) => lead.id === draggingLeadId)
       : null;
@@ -834,80 +867,32 @@ export function LeadsSection() {
           />{" "}
         </div>
         {/* Pipeline status */}
-        <Card style={{ marginBottom: 24 }}>
-          {" "}
-          <h2
-            style={{
-              margin: "0 0 6px",
-              color: C.heading,
-              fontSize: 12,
-              fontWeight: 500,
-              fontFamily: ROBOTO,
-              letterSpacing: "0.02em",
-            }}
-          >
-            Pipeline Status
-          </h2>{" "}
-          <div style={{ margin: "0 0 14px", color: C.muted, fontSize: 12 }}>
-            Current lead counts by status for the selected month.
-          </div>{" "}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-end",
-              gap: 6,
-              height: 130,
-            }}
-          >
-            {funnelData.map((f) => {
-              const h = Math.max(18, (f.count / maxPipelineCount) * 104);
-              return (
-                <div
-                  key={f.stage}
-                  style={{
-                    flex: "1 1 84px",
-                    minWidth: 70,
-                    textAlign: "center",
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{
-                      fontSize: 18,
-                      fontWeight: 700,
-                      color: C.heading,
-                      ...mono,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {f.count}
-                  </div>{" "}
-                  <div
-                    style={{
-                      height: h,
-                      backgroundColor: STATUS_COLORS[f.stage] || C.teal,
-                      borderRadius: "6px 6px 0 0",
-                      margin: "0 auto",
-                      width: "70%",
-                      minWidth: 30,
-                      transition: "height 0.3s",
-                    }}
-                  />{" "}
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: C.muted,
-                      marginTop: 6,
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {f.label || f.stage.replace(/_/g, " ")}
-                  </div>{" "}
-                </div>
-              );
-            })}
-          </div>{" "}
-        </Card>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            marginBottom: 16,
+            flexWrap: "wrap",
+          }}
+        >
+          {funnelData.map((f) => (
+            <PipelineStatusCard
+              key={f.stage}
+              label={f.label || f.stage.replace(/_/g, " ")}
+              value={f.count}
+              active={filters.status === f.stage}
+              onClick={() => {
+                setPipelineView("table");
+                setFilters((current) => ({
+                  ...current,
+                  status: current.status === f.stage ? "" : f.stage,
+                  page: 1,
+                }));
+              }}
+            />
+          ))}
+        </div>
         {/* Filters + Actions */}
         <div
           style={{
