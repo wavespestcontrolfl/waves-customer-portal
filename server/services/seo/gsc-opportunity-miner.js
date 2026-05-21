@@ -423,15 +423,24 @@ class GscOpportunityMiner {
 
     const out = [];
     for (const q of queries) {
-      // Find own URLs that match service+city for this query.
+      // Find own URLs that match service+city and carry material
+      // impressions. The per-page HAVING filters out URLs that only
+      // surface for the query incidentally; the JS-side length check
+      // then enforces the ≥ cannibalizationMinUrls floor.
+      //
+      // Earlier iteration had `havingRaw('count(distinct page_url) >= 2')`
+      // here after `groupBy('page_url')` — but that always evaluates to 1
+      // per group, so the bucket silently produced zero results. The
+      // correct per-page filter is on impressions; URL count is a
+      // post-query JS check.
       const ownPages = await db('gsc_pages')
         .where('date', '>=', since)
         .where('service_category', q.service_category || '')
         .where('city_target', q.city_target || '')
-        .havingRaw('count(distinct page_url) >= ?', [THRESHOLDS.cannibalizationMinUrls])
         .select('page_url')
         .sum('impressions as impressions')
-        .groupBy('page_url');
+        .groupBy('page_url')
+        .havingRaw('sum(impressions) > ?', [10]);
       if (ownPages.length < THRESHOLDS.cannibalizationMinUrls) continue;
 
       const city = normalizeCity(q.city_target);
@@ -582,20 +591,28 @@ class GscOpportunityMiner {
       .sum('impressions as impressions')
       .groupBy('query', 'service_category', 'city_target');
 
+    // Group prior baseline by the same (query, service, city) tuple as
+    // the recent window — grouping by `query` alone would mix demand
+    // across cities/services and either suppress legitimate localized
+    // rising trends or invent false ones when one city rises while
+    // others fall.
+    const priorKey = (q, s, c) => `${q}\x00${s || ''}\x00${c || ''}`;
     const priorMap = new Map();
     const prior = await db('gsc_queries')
       .where('date', '>=', priorSince)
       .where('date', '<', recentSince)
       .where('is_branded', false)
-      .select('query')
+      .select('query', 'service_category', 'city_target')
       .sum('impressions as impressions')
-      .groupBy('query');
-    for (const p of prior) priorMap.set(p.query, parseInt(p.impressions, 10));
+      .groupBy('query', 'service_category', 'city_target');
+    for (const p of prior) {
+      priorMap.set(priorKey(p.query, p.service_category, p.city_target), parseInt(p.impressions, 10));
+    }
 
     const out = [];
     for (const r of recent) {
       const recentImp = parseInt(r.impressions, 10);
-      const priorImp = priorMap.get(r.query) || 0;
+      const priorImp = priorMap.get(priorKey(r.query, r.service_category, r.city_target)) || 0;
       if (priorImp < THRESHOLDS.minImpressionsToScore) continue;
       const growth = (recentImp - priorImp) / priorImp;
       if (growth < 0.5) continue;
@@ -696,6 +713,11 @@ class GscOpportunityMiner {
     }
 
     for (const o of winners.values()) {
+      // Gate at scoring-config threshold so the queue only holds rows
+      // worth acting on. mineAll's return still exposes every candidate
+      // (including the dropped ones) so calibration / tuning can see
+      // why the cut landed where it did.
+      if (o.score < THRESHOLDS.minScoreToAct) continue;
       const row = {
         bucket: o.bucket,
         action_type: o.action_type,
