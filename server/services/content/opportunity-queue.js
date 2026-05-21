@@ -99,8 +99,13 @@ class OpportunityQueue {
       updated_at: new Date(),
     };
     if (notes) updates.notes = db.raw('COALESCE(notes, \'\') || ?', [`\n[done] ${notes}`]);
+    // Only transition rows that are still in 'claimed' state. Without
+    // this guard a stale claim recovered + re-claimed by another worker
+    // could be force-completed by the late first worker, overwriting
+    // active state and causing lost / duplicate processing.
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
+      .where('status', 'claimed')
       .update(updates);
     return updated > 0;
   }
@@ -111,8 +116,12 @@ class OpportunityQueue {
    */
   async skip(opportunityId, reason) {
     if (!reason) throw new Error('opportunity-queue: skip requires a reason');
+    // Same claimed-only guard as complete() — prevents a delayed or
+    // duplicate worker from kicking a pending/re-claimed row to
+    // skipped while another runner is actively handling it.
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
+      .where('status', 'claimed')
       .update({
         status: 'skipped',
         skip_reason: reason,

@@ -15,7 +15,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
@@ -366,16 +366,24 @@ class ContentBriefBuilder {
 
 function nextWeekday9amET() {
   // 9am ET on the next Monday–Friday that's at least 6 hours away.
+  // Earlier iteration hardcoded UTC 13:00 as "9am ET" which is only
+  // true during EDT; in EST it scheduled at 8am ET — wrong for half
+  // the year. parseETDateTime("YYYY-MM-DDT09:00") anchors to actual
+  // 9am ET regardless of DST.
   // Crude — the autonomous-runner (later phase) will replace with a
   // calendar-aware slot picker that avoids already-scheduled days.
   const now = new Date();
-  let target = new Date(now);
-  target.setUTCHours(13, 0, 0, 0); // 9am ET ≈ 13:00 UTC (EDT) — accept skew
-  if (target - now < 6 * 3600 * 1000) target.setUTCDate(target.getUTCDate() + 1);
-  while (target.getUTCDay() === 0 || target.getUTCDay() === 6) {
-    target.setUTCDate(target.getUTCDate() + 1);
+  for (let offset = 0; offset < 14; offset++) {
+    const etDay = etDateString(addETDays(now, offset));
+    const target = parseETDateTime(`${etDay}T09:00`);
+    if (target - now < 6 * 3600 * 1000) continue;
+    // Skip weekends in ET.
+    const etWeekday = target.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
+    if (etWeekday === 'Sat' || etWeekday === 'Sun') continue;
+    return target;
   }
-  return target;
+  // Fallback (shouldn't hit — 14 days always contains a weekday).
+  return parseETDateTime(`${etDateString(addETDays(now, 1))}T09:00`);
 }
 
 module.exports = new ContentBriefBuilder();
