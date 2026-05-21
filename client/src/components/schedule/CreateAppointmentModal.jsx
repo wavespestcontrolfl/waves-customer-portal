@@ -243,6 +243,9 @@ export function formatScheduleEstimateAmount(estimate) {
   return '';
 }
 
+export const ESTIMATE_SOURCE_LABEL = 'Estimate source';
+export const MANUAL_SERVICE_ENTRY_LABEL = 'No estimate - choose services manually';
+
 export function pickAutoScheduleEstimate({
   customerId,
   estimates = [],
@@ -1293,7 +1296,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
           {selectedCustomer && (
             <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${D.border}` }}>
-              <label style={labelStyle}>Won estimate</label>
+              <label style={labelStyle}>{ESTIMATE_SOURCE_LABEL}</label>
               {scheduleEstimatesLoading ? (
                 <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>Loading won estimates...</div>
               ) : scheduleEstimateError ? (
@@ -1305,7 +1308,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     onChange={(e) => applyScheduleEstimate(e.target.value)}
                     style={inputStyle}
                   >
-                    <option value="">Manual service entry</option>
+                    <option value="">{MANUAL_SERVICE_ENTRY_LABEL}</option>
                     {scheduleEstimates.map((estimate) => (
                       <option key={estimate.id} value={String(estimate.id)}>
                         {formatScheduleEstimateLabel(estimate)}
@@ -1330,7 +1333,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 </>
               ) : (
                 <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>
-                  No accepted estimates found for this customer.
+                  No won estimates found. Choose services manually below.
                 </div>
               )}
             </div>
