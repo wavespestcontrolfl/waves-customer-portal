@@ -76,9 +76,15 @@ exports.up = async function (knex) {
       t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
       t.date('week_start_date').notNullable();
       t.string('query', 500).notNullable();
-      t.string('city_target', 40);
-      t.string('service_category', 40);
-      t.string('device', 20).defaultTo('all');
+      // All three dimensions below are NOT NULL with sentinel defaults
+      // so the unique constraint actually dedupes. Postgres treats NULL
+      // as distinct in unique indexes, which would let the same weekly
+      // row insert repeatedly for cityless / serviceless GSC queries
+      // (the majority of long-tail traffic) and inflate the snapshots
+      // table indefinitely.
+      t.string('city_target', 40).notNullable().defaultTo('_global');
+      t.string('service_category', 40).notNullable().defaultTo('_global');
+      t.string('device', 20).notNullable().defaultTo('all');
       t.integer('clicks_total').notNullable().defaultTo(0);
       t.integer('impressions_total').notNullable().defaultTo(0);
       t.decimal('ctr_avg', 8, 4);
