@@ -4,11 +4,8 @@ exports.up = async function (knex) {
 
   const hasTechStatus = await knex.schema.hasTable('tech_status');
   const hasAuditLog = await knex.schema.hasTable('audit_log');
+  const hasJobStatusHistory = await knex.schema.hasTable('job_status_history');
   const hasTrackTokenExpiresAt = await knex.schema.hasColumn('scheduled_services', 'track_token_expires_at');
-
-  const currentJobsCte = hasTechStatus
-    ? 'SELECT DISTINCT current_job_id FROM tech_status WHERE current_job_id IS NOT NULL'
-    : 'SELECT NULL::uuid AS current_job_id WHERE false';
 
   const expirePastTokenSql = hasTrackTokenExpiresAt
     ? `,
@@ -22,7 +19,6 @@ exports.up = async function (knex) {
   await knex.transaction(async (trx) => {
     await trx.raw(`
       CREATE TEMP TABLE stale_en_route_cleanup ON COMMIT DROP AS
-      WITH current_jobs AS (${currentJobsCte})
       SELECT
         s.id,
         s.track_state AS previous_track_state,
@@ -31,13 +27,18 @@ exports.up = async function (knex) {
         s.technician_id,
         s.customer_id
       FROM scheduled_services s
-      LEFT JOIN current_jobs cj ON cj.current_job_id = s.id
       WHERE (s.track_state = 'en_route' OR s.status = 'en_route')
-        AND (
-          s.scheduled_date < (NOW() AT TIME ZONE 'America/New_York')::date
-          OR cj.current_job_id IS NULL
-        )
+        AND s.scheduled_date < (NOW() AT TIME ZONE 'America/New_York')::date
     `);
+
+    if (hasJobStatusHistory) {
+      await trx.raw(`
+        INSERT INTO job_status_history (job_id, from_status, to_status, transitioned_by)
+        SELECT id, previous_status, 'confirmed', NULL
+        FROM stale_en_route_cleanup
+        WHERE previous_status = 'en_route'
+      `);
+    }
 
     await trx.raw(`
       UPDATE scheduled_services s

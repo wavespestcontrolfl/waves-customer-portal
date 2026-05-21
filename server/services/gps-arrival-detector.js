@@ -22,6 +22,9 @@ const DEFAULT_CONFIG = {
 
 const CONFIG_CACHE_MS = 60 * 1000;
 const GEOCODE_TIMEOUT_MS = 1200;
+const MAX_SAMPLE_AGE_MS = 10 * 60 * 1000;
+const SAMPLE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
+const EN_ROUTE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
 
 let configCache = null;
 
@@ -166,6 +169,36 @@ function isAcceptedCurrentSample({ techLat, techLng, point }) {
   return sampleDistance != null && sampleDistance <= 15;
 }
 
+function timestampMs(value) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function validateSampleTiming({ techStatus, point, service, now = Date.now() }) {
+  const pointMs = timestampMs(point?.reported_at);
+  const techMs = timestampMs(techStatus?.location_updated_at);
+  const enRouteMs = timestampMs(service?.en_route_at);
+
+  if (pointMs == null || techMs == null) {
+    return { ok: false, reason: 'missing_location_timestamp' };
+  }
+  if (enRouteMs == null) {
+    return { ok: false, reason: 'missing_en_route_timestamp' };
+  }
+  if (now - pointMs > MAX_SAMPLE_AGE_MS) {
+    return { ok: false, reason: 'stale_location_sample' };
+  }
+  if (Math.abs(pointMs - techMs) > SAMPLE_TIMESTAMP_TOLERANCE_MS) {
+    return { ok: false, reason: 'stale_location_sample' };
+  }
+  if (pointMs < enRouteMs - EN_ROUTE_TIMESTAMP_TOLERANCE_MS) {
+    return { ok: false, reason: 'sample_before_en_route' };
+  }
+
+  return { ok: true };
+}
+
 async function withTimeout(promise, timeoutMs, fallbackValue = null) {
   let timeoutId;
   const timeout = new Promise((resolve) => {
@@ -225,6 +258,7 @@ async function loadCurrentService(currentJobId) {
       's.cancelled_at',
       's.completed_at',
       's.arrived_at',
+      's.en_route_at',
       's.lat as service_lat',
       's.lng as service_lng',
       'c.latitude as customer_latitude',
@@ -290,6 +324,10 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
   if (!isEnRouteService(service)) {
     return { ok: false, reason: 'service_not_en_route' };
   }
+  const sampleTiming = validateSampleTiming({ techStatus, point, service });
+  if (!sampleTiming.ok) {
+    return { ok: false, reason: sampleTiming.reason };
+  }
 
   const destination = await resolveDestination(service);
   if (!destination) {
@@ -342,6 +380,7 @@ module.exports = {
     distanceMeters,
     finiteNumber,
     isAcceptedCurrentSample,
+    validateSampleTiming,
     loadConfig,
     resetConfigCache,
   },
