@@ -11,8 +11,8 @@
  * State shape (kept in this one component — the subcomponents are
  * presentational):
  *   data, loading, error
- *   selectedFrequency    — one of { quarterly | bi_monthly | monthly }
- *   selectedAddOns       — Set of addon keys
+ *   selected             — { [section.key]: frequencyKey }
+ *   selectedAddOns       — { [section.key]: Set(addon keys) }
  *   selectedSlotId       — string | null
  *   ctaPhase             — 'configure' | 'review' | 'submitting' | 'success' | 'slot_conflict' | 'reservation_expired'
  *   reservation          — { scheduledServiceId, expiresAt } | null
@@ -36,6 +36,7 @@ import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceBu
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
+import { estimateCopyFor } from '../lib/estimate-copy';
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -51,6 +52,57 @@ function fmtMoney(n) {
   if (n == null) return '—';
   const v = Math.round(Number(n) * 100) / 100;
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+}
+
+function pricingServices(pricing = {}) {
+  if (Array.isArray(pricing?.services) && pricing.services.length > 0) return pricing.services;
+  const frequencies = Array.isArray(pricing?.frequencies) ? pricing.frequencies : [];
+  if (!frequencies.length) return [];
+  return [{
+    key: 'pest_control',
+    label: 'Pest Control',
+    isRecurring: true,
+    isPest: true,
+    defaultFrequencyKey: frequencies[0]?.key || null,
+    frequencies,
+    setupFee: pricing?.setupFee || null,
+    oneTimeContribution: null,
+    intelligence: { metrics: [], chips: [] },
+    quoteRequired: pricing?.quoteRequired === true,
+    copy: null,
+  }];
+}
+
+function defaultSelectedForServices(services = [], previous = {}, preserveSelection = false) {
+  return services.reduce((next, section) => {
+    const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
+    const previousKey = previous?.[section.key];
+    const canPreserve = preserveSelection && previousKey && frequencies.some((frequency) => frequency.key === previousKey);
+    next[section.key] = canPreserve
+      ? previousKey
+      : (section.defaultFrequencyKey || frequencies[0]?.key || null);
+    return next;
+  }, {});
+}
+
+function selectedFrequencyForSection(section, selected) {
+  const frequencies = Array.isArray(section?.frequencies) ? section.frequencies : [];
+  const selectedKey = selected?.[section?.key];
+  return frequencies.find((frequency) => frequency.key === selectedKey) || frequencies[0] || null;
+}
+
+function selectedAddOnsForServices(services = [], selected = {}) {
+  return services.reduce((next, section) => {
+    const frequency = selectedFrequencyForSection(section, selected);
+    next[section.key] = new Set((frequency?.addOns || []).filter((addOn) => addOn.preChecked).map((addOn) => addOn.key));
+    return next;
+  }, {});
+}
+
+function primarySelectedFrequencyKey(services = [], selected = {}) {
+  const pestSection = services.find((section) => section.key === 'pest_control');
+  const primary = pestSection || services.find((section) => section.isRecurring) || services[0];
+  return primary ? selected[primary.key] || primary.defaultFrequencyKey || primary.frequencies?.[0]?.key || null : null;
 }
 
 function Page({ children }) {
@@ -119,8 +171,10 @@ function NotFoundCard() {
   );
 }
 
-function Header({ customerFirstName, address, serviceLabel, canChooseOneTime }) {
+function Header({ customerFirstName, address, serviceLabel, canChooseOneTime, headline }) {
   const firstName = customerFirstName || 'there';
+  const fallbackHeadline = `Hey {first}, ${canChooseOneTime ? 'choose your pest control option.' : "here's your custom quote."}`;
+  const headlineText = String(headline || fallbackHeadline).replace('{first}', firstName);
   return (
     <div style={{ padding: '8px 0 24px' }}>
       <div style={{
@@ -142,7 +196,7 @@ function Header({ customerFirstName, address, serviceLabel, canChooseOneTime }) 
         color: ESTIMATE_TEXT,
         margin: 0,
       }}>
-        Hey {firstName}, {canChooseOneTime ? 'choose your pest control option.' : "here's your custom quote."}
+        {headlineText}
       </h1>
       {address ? (
         <div style={{ fontSize: 20, color: '#3F4A65', marginTop: 16, lineHeight: 1.35 }}>{address}</div>
@@ -151,7 +205,7 @@ function Header({ customerFirstName, address, serviceLabel, canChooseOneTime }) 
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy }) {
   if (!intelligence) return null;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
@@ -182,7 +236,7 @@ function WaveGuardIntelligenceCard({ intelligence, address }) {
             fontWeight: 700,
             marginBottom: 6,
           }}>
-            {intelligence.eyebrow || 'Waves AI'}
+            {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
           </div>
           <h2 style={{
             fontFamily: FONTS.serif,
@@ -193,7 +247,7 @@ function WaveGuardIntelligenceCard({ intelligence, address }) {
             margin: 0,
             letterSpacing: 0,
           }}>
-            {intelligence.title || 'Waves AI reviewed your property before pricing this estimate'}
+            {intelligence.title || copy?.aiTitle || 'Waves AI reviewed your property before pricing this estimate'}
           </h2>
         </div>
       </div>
@@ -204,7 +258,7 @@ function WaveGuardIntelligenceCard({ intelligence, address }) {
         fontSize: 14,
         lineHeight: 1.55,
       }}>
-        {intelligence.body}
+        {intelligence.body || copy?.aiBody || 'We reviewed the available property details and pricing rules before preparing this estimate.'}
       </p>
 
       {satelliteUrl ? (
@@ -300,11 +354,14 @@ const ESTIMATE_ASK_PROMPTS = [
   'Who is Waves?',
 ];
 
-function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring' }) {
+export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring', chips }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
   const [failed, setFailed] = useState(false);
+  const prompts = Array.isArray(chips) && chips.length > 0
+    ? chips.map((chip) => String(chip || '').trim()).filter(Boolean).slice(0, 6)
+    : ESTIMATE_ASK_PROMPTS;
 
   const ask = useCallback(async (prompt) => {
     const q = String(prompt ?? question).trim();
@@ -418,7 +475,7 @@ function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'rec
       </form>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }} aria-label="Example questions">
-        {ESTIMATE_ASK_PROMPTS.map((prompt) => (
+        {prompts.map((prompt) => (
           <button
             key={prompt}
             type="button"
@@ -827,14 +884,117 @@ function SlotIssueBanner({ kind = 'conflict', onRetry }) {
   );
 }
 
+function AcceptanceModeCard({ acceptance }) {
+  if (!acceptance || acceptance.mode === 'standard_slot_pick') return null;
+  const title = acceptance.mode === 'quote_required'
+    ? 'This treatment needs a custom quote.'
+    : 'Waves will help schedule this estimate.';
+  const body = acceptance.mode === 'inspection_request'
+    ? 'This plan needs an inspection before a normal service slot can be reserved online.'
+    : 'Call Waves and we will finish the next step with you.';
+  return (
+    <div style={{
+      background: COLORS.white,
+      borderRadius: 16,
+      padding: 24,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      marginBottom: 16,
+    }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>{title}</div>
+      <div style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55 }}>{body}</div>
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={{
+        display: 'inline-block',
+        marginTop: 14,
+        padding: '12px 18px',
+        background: ESTIMATE_BUTTON_BG,
+        color: COLORS.white,
+        borderRadius: 10,
+        textDecoration: 'none',
+        fontSize: 14,
+        fontWeight: 700,
+      }}>
+        {acceptance.ctaLabel || 'Call Waves'}
+      </a>
+    </div>
+  );
+}
+
+export function ServiceSection({
+  section,
+  servicesLength = 1,
+  selectedFrequencyKey,
+  selectedAddOns = new Set(),
+  onFrequencyChange,
+  onAddOnToggle,
+  disabled = false,
+  renderFlags = {},
+  waveGuardTier,
+  afterPrice = null,
+}) {
+  if (!section) return null;
+  const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
+  const current = frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
+  const copy = section.copy || {};
+  const showSlider = frequencies.length > 1;
+  const showAddOns = section.isPest
+    && section.isRecurring
+    && renderFlags.showPestRecurringAddOns === true
+    && Array.isArray(current?.addOns)
+    && current.addOns.length > 0;
+
+  return (
+    <section>
+      {servicesLength > 1 ? (
+        <h3 style={{
+          fontSize: 18,
+          color: ESTIMATE_TEXT,
+          margin: '20px 0 12px',
+          fontWeight: 800,
+        }}>
+          {section.label || 'Service'}
+        </h3>
+      ) : null}
+
+      {showSlider ? (
+        <FrequencySlider
+          frequencies={frequencies}
+          selected={selectedFrequencyKey}
+          onChange={(next) => onFrequencyChange(section.key, next)}
+          disabled={disabled}
+        />
+      ) : null}
+
+      {current ? (
+        <PriceCard
+          frequency={current}
+          waveGuardTier={renderFlags.showWaveGuardTierUi ? waveGuardTier : null}
+          wording={copy.priceWording}
+        />
+      ) : null}
+
+      {afterPrice}
+
+      <IncludedChecklist included={current?.included || []} />
+
+      {showAddOns ? (
+        <AddOnsBlock
+          addOns={current?.addOns || []}
+          selectedKeys={selectedAddOns}
+          onToggle={(key) => onAddOnToggle(section.key, key)}
+        />
+      ) : null}
+    </section>
+  );
+}
+
 export default function EstimateViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
-  const [selectedFrequency, setSelectedFrequency] = useState(null);
-  const [selectedAddOns, setSelectedAddOns] = useState(new Set());
+  const [selected, setSelected] = useState({});
+  const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
   // serviceMode: 'recurring' | 'one_time'. Most estimates default to
   // recurring; structurally one-time estimates are forced to one_time after
@@ -849,8 +1009,21 @@ export default function EstimateViewPage() {
 
   const [countdownSeconds, setCountdownSeconds] = useState(0);
   const countdownRef = useRef(null);
+  const selectedRef = useRef({});
   const selectedFrequencyRef = useRef(null);
   const reserveAttemptRef = useRef(0);
+
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
+  const services = useMemo(() => pricingServices(data?.pricing), [data]);
+  const selectedFrequency = useMemo(() => primarySelectedFrequencyKey(services, selected), [services, selected]);
+  const currentFrequency = useMemo(() => {
+    const pestSection = services.find((section) => section.key === 'pest_control');
+    const primarySection = pestSection || services.find((section) => section.isRecurring) || services[0];
+    return selectedFrequencyForSection(primarySection, selected);
+  }, [services, selected]);
 
   useEffect(() => {
     selectedFrequencyRef.current = selectedFrequency;
@@ -875,19 +1048,10 @@ export default function EstimateViewPage() {
       if (preserveSelection) return prev;
       return defaultServiceMode === 'one_time' ? 'one_time' : 'recurring';
     });
-    const frequencies = body?.pricing?.frequencies || [];
-    const firstFreq = frequencies[0];
-    setSelectedFrequency((prev) => {
-      if (preserveSelection && prev && frequencies.some((f) => f.key === prev)) return prev;
-      return firstFreq?.key || prev;
-    });
-    const preservedFrequency = selectedFrequencyRef.current;
-    const freqForAddOns = (preserveSelection && preservedFrequency
-      ? frequencies.find((f) => f.key === preservedFrequency)
-      : firstFreq) || firstFreq;
-    if (freqForAddOns) {
-      setSelectedAddOns(new Set((freqForAddOns.addOns || []).filter((a) => a.preChecked).map((a) => a.key)));
-    }
+    const nextServices = pricingServices(body?.pricing);
+    const nextSelected = defaultSelectedForServices(nextServices, selectedRef.current, preserveSelection);
+    setSelected(nextSelected);
+    setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
   }, [token]);
 
   // Fetch on mount
@@ -907,16 +1071,6 @@ export default function EstimateViewPage() {
   // only defaults, not clobbering their selections outright. Simpler v1:
   // reset to the new frequency's defaults. Revisit if Virginia reports
   // "I kept unchecking inside spray and it kept re-checking."
-  const currentFrequency = useMemo(() => {
-    if (!data || !selectedFrequency) return null;
-    return data.pricing?.frequencies?.find((f) => f.key === selectedFrequency) || null;
-  }, [data, selectedFrequency]);
-
-  useEffect(() => {
-    if (!currentFrequency) return;
-    setSelectedAddOns(new Set((currentFrequency.addOns || []).filter((a) => a.preChecked).map((a) => a.key)));
-  }, [currentFrequency]);
-
   // Countdown timer tied to reservation.expiresAt
   useEffect(() => {
     if (!reservation?.expiresAt) {
@@ -941,12 +1095,14 @@ export default function EstimateViewPage() {
     return () => clearInterval(countdownRef.current);
   }, [reservation]);
 
-  const onToggleAddOn = useCallback(async (key) => {
-    const nextChecked = !selectedAddOns.has(key);
+  const onToggleAddOn = useCallback(async (sectionKey, key) => {
+    const sectionAddOns = selectedAddOns[sectionKey] || new Set();
+    const nextChecked = !sectionAddOns.has(key);
     setSelectedAddOns((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
+      const current = prev[sectionKey] || new Set();
+      const nextForSection = new Set(current);
+      if (nextForSection.has(key)) nextForSection.delete(key); else nextForSection.add(key);
+      return { ...prev, [sectionKey]: nextForSection };
     });
     try {
       const r = await fetch(`${API_BASE}/estimates/${token}/preferences`, {
@@ -959,9 +1115,10 @@ export default function EstimateViewPage() {
     } catch (err) {
       setError(err.message);
       setSelectedAddOns((prev) => {
-        const next = new Set(prev);
-        if (nextChecked) next.delete(key); else next.add(key);
-        return next;
+        const current = prev[sectionKey] || new Set();
+        const nextForSection = new Set(current);
+        if (nextChecked) nextForSection.delete(key); else nextForSection.add(key);
+        return { ...prev, [sectionKey]: nextForSection };
       });
     }
   }, [loadEstimate, selectedAddOns, token]);
@@ -1027,9 +1184,15 @@ export default function EstimateViewPage() {
     }
   }, [loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
 
-  const handleFrequencyChange = useCallback((nextFrequency) => {
+  const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
-    setSelectedFrequency(nextFrequency);
+    setSelected((prev) => ({ ...prev, [sectionKey]: nextFrequency }));
+    const section = services.find((item) => item.key === sectionKey);
+    const frequency = section?.frequencies?.find((item) => item.key === nextFrequency);
+    setSelectedAddOns((prev) => ({
+      ...prev,
+      [sectionKey]: new Set((frequency?.addOns || []).filter((addOn) => addOn.preChecked).map((addOn) => addOn.key)),
+    }));
     setSelectedSlotId(null);
     setPaymentPreference(null);
     setReservation(null);
@@ -1037,7 +1200,7 @@ export default function EstimateViewPage() {
     setError(null);
     setCtaPhase('configure');
     setSlotsRefreshSignal((v) => v + 1);
-  }, []);
+  }, [services]);
 
   const handleConfirm = useCallback(async () => {
     setCtaPhase('submitting');
@@ -1104,18 +1267,25 @@ export default function EstimateViewPage() {
   const { estimate, pricing, cta } = data;
   const canAccept = cta?.canAccept === true;
   const showAskBar = !['accepted', 'declined', 'expired'].includes(cta?.terminalState);
+  const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
+  const copy = estimateCopyFor(serviceCategory);
+  const renderFlags = pricing?.renderFlags || {};
+  const acceptance = estimate?.acceptance || { mode: 'standard_slot_pick' };
+  const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
+  const waveGuardTier = renderFlags.showWaveGuardTierUi === false ? null : (pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier);
 
   if (!canAccept) {
     return (
       <Page>
-        <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
-        <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} />
+        <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
+        <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
         {showAskBar ? (
           <EstimateAskBar
             token={token}
             askToken={estimate.askToken}
             selectedFrequency={selectedFrequency}
             serviceMode={serviceMode}
+            chips={pricing.askChips}
           />
         ) : null}
         <TerminalStateCard
@@ -1131,7 +1301,7 @@ export default function EstimateViewPage() {
   if (ctaPhase === 'success') {
     return (
       <Page>
-        <Header customerFirstName={estimate.customerFirstName} address={estimate.address} />
+        <Header customerFirstName={estimate.customerFirstName} address={estimate.address} headline={copy.headline} />
         <SuccessCard acceptResult={acceptResult} />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
@@ -1145,15 +1315,17 @@ export default function EstimateViewPage() {
         address={estimate.address}
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
         canChooseOneTime={estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0}
+        headline={copy.headline}
       />
 
-      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} />
+      <WaveGuardIntelligenceCard intelligence={estimate.intelligence} address={estimate.address} copy={copy} />
 
       <EstimateAskBar
         token={token}
         askToken={estimate.askToken}
         selectedFrequency={selectedFrequency}
         serviceMode={serviceMode}
+        chips={pricing.askChips}
       />
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
@@ -1199,57 +1371,90 @@ export default function EstimateViewPage() {
 
           {serviceMode === 'recurring' ? (
             <>
-              {pricing.frequencies && pricing.frequencies.length > 1 ? (
-                <FrequencySlider
-                  frequencies={pricing.frequencies}
-                  selected={selectedFrequency}
-                  onChange={handleFrequencyChange}
-                  disabled={ctaPhase === 'submitting'}
-                />
+              {services.map((section) => {
+                const setupFees = renderFlags.showWaveGuardSetupFee && section.isPest
+                  ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+                    ? pricing.firstVisitFees
+                    : (pricing.setupFee ? [pricing.setupFee] : []))
+                  : [];
+                const afterPrice = services.length === 1 ? (
+                  <>
+                    {setupFees.map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)}
+                    {!estimate.showOneTimeOption ? (
+                      <OneTimeBreakdownCard
+                        breakdown={pricing.oneTimeBreakdown}
+                        excludeServices={setupFees.map((fee) => fee.service)}
+                      />
+                    ) : null}
+                  </>
+                ) : null;
+                return (
+                  <ServiceSection
+                    key={section.key}
+                    section={section}
+                    servicesLength={services.length}
+                    selectedFrequencyKey={selected[section.key]}
+                    selectedAddOns={selectedAddOns[section.key] || new Set()}
+                    onFrequencyChange={handleFrequencyChange}
+                    onAddOnToggle={onToggleAddOn}
+                    disabled={ctaPhase === 'submitting'}
+                    renderFlags={renderFlags}
+                    waveGuardTier={waveGuardTier}
+                    afterPrice={afterPrice}
+                  />
+                );
+              })}
+
+              {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
+                (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+                  ? pricing.firstVisitFees
+                  : (pricing.setupFee ? [pricing.setupFee] : [])
+                ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)
               ) : null}
 
-              <PriceCard
-                frequency={currentFrequency}
-                waveGuardTier={pricing.waveGuardTier}
-              />
-
-              {(pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-                ? pricing.firstVisitFees
-                : (pricing.setupFee ? [pricing.setupFee] : [])
-              ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} />)}
-
-              {!estimate.showOneTimeOption ? (
+              {services.length > 1 && !estimate.showOneTimeOption ? (
                 <OneTimeBreakdownCard
                   breakdown={pricing.oneTimeBreakdown}
                   excludeServices={(pricing.firstVisitFees || []).map((fee) => fee.service)}
                 />
               ) : null}
-
-              <IncludedChecklist included={currentFrequency?.included || []} />
-
-              <AddOnsBlock
-                addOns={currentFrequency?.addOns || []}
-                selectedKeys={selectedAddOns}
-                onToggle={onToggleAddOn}
-              />
             </>
           ) : (
             <>
               <OneTimePriceCard oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0} />
               <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+              {renderFlags.showOneTimePestAddOns === true ? (
+                services
+                  .filter((section) => section.isPest)
+                  .map((section) => {
+                    const frequency = selectedFrequencyForSection(section, selected);
+                    return (
+                      <AddOnsBlock
+                        key={`${section.key}-one-time-addons`}
+                        addOns={frequency?.addOns || []}
+                        selectedKeys={selectedAddOns[section.key] || new Set()}
+                        onToggle={(key) => onToggleAddOn(section.key, key)}
+                      />
+                    );
+                  })
+              ) : null}
             </>
           )}
 
-          <SlotPicker
-            token={token}
-            selectedSlotId={selectedSlotId}
-            onSelect={setSelectedSlotId}
-            refreshSignal={slotsRefreshSignal}
-            serviceMode={serviceMode}
-            selectedFrequency={selectedFrequency}
-          />
+          {canShowSlotPicker ? (
+            <SlotPicker
+              token={token}
+              selectedSlotId={selectedSlotId}
+              onSelect={setSelectedSlotId}
+              refreshSignal={slotsRefreshSignal}
+              serviceMode={serviceMode}
+              selectedFrequency={selectedFrequency}
+            />
+          ) : (
+            <AcceptanceModeCard acceptance={acceptance} />
+          )}
 
-          {selectedSlotId ? (
+          {canShowSlotPicker && selectedSlotId ? (
             <PaymentPreferenceButtons
               onSelect={handlePaymentChoice}
               disabled={ctaPhase === 'submitting'}

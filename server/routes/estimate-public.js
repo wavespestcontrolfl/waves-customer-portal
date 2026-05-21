@@ -460,6 +460,127 @@ const SERVICE_PREFS = {
 const SERVICE_PREF_KEYS = Object.keys(SERVICE_PREFS);
 const DEFAULT_PREFS = SERVICE_PREF_KEYS.reduce((a, k) => (a[k] = true, a), {});
 
+const SERVICE_COPY = {
+  pest_control: {
+    headline: "Hey {first}, choose your pest control option.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your property before pricing this estimate',
+    aiBody: 'We reviewed your home, lot, and pest-risk factors before pricing this plan.',
+    askChips: [
+      'What products do you use?',
+      'Are pets and kids safe?',
+      'When am I charged?',
+      'What happens after approval?',
+    ],
+    priceWording: {},
+  },
+  rodent: {
+    headline: "Hey {first}, here's your rodent remediation plan.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed rodent activity signals at your property',
+    aiBody: 'We reviewed property conditions linked to rodent pressure and entry risk.',
+    askChips: [
+      'Trapping vs exclusion?',
+      'Do I need sanitation?',
+      'Is the inspection fee credited?',
+      "How long until they're gone?",
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
+  tree_shrub: {
+    headline: "Hey {first}, choose your tree & shrub option.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your beds and trees before pricing this estimate',
+    aiBody: 'We reviewed your beds, trees, and treatment needs before pricing this plan.',
+    askChips: [
+      'Which trees get treated?',
+      'What gets applied?',
+      'When do visits start?',
+      'Can I prepay annually?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
+  mosquito: {
+    headline: "Hey {first}, choose your mosquito control option.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your lot and mosquito pressure before pricing this estimate',
+    aiBody: 'We reviewed your lot, resting zones, and mosquito pressure before pricing this plan.',
+    askChips: [
+      'How long does each visit last?',
+      'Pet & kid safe?',
+      'When does the season start?',
+      'What about my pool area?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
+  termite_bait: {
+    headline: "Hey {first}, choose your termite protection option.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your termite perimeter before pricing this estimate',
+    aiBody: 'We reviewed your home, lot, and termite perimeter before pricing this plan.',
+    askChips: [
+      "What's monitored?",
+      'How often are stations checked?',
+      'Basic vs Premier?',
+      'What about active termites?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
+  termite_trenching: {
+    headline: "Hey {first}, here's your termite trenching quote.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI mapped your trenching path and confirmed required linear feet',
+    aiBody: 'We measured the trenching path and linear footage used for this quote.',
+    askChips: [
+      'How long does the barrier last?',
+      'What product is used?',
+      "What's covered?",
+      'Do you renew it?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this quote.",
+    },
+  },
+  lawn_care: {
+    headline: "Hey {first}, choose your lawn care option.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your lawn before pricing this estimate',
+    aiBody: 'We reviewed your lawn size, turf type, and treatment needs before pricing this plan.',
+    askChips: [
+      'What gets applied each visit?',
+      'When do visits start?',
+      'What about weeds?',
+      'Is it safe for my dog?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for lawn care.",
+    },
+  },
+  bundle: {
+    headline: "Hey {first}, here's your custom Waves plan.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your property before pricing this estimate',
+    aiBody: 'We reviewed the services, property details, and pricing rules used for this plan.',
+    askChips: [
+      'What is included?',
+      'Are pets and kids safe?',
+      'When am I charged?',
+      'What happens after approval?',
+    ],
+    priceWording: {
+      dayLine: "That's about {amount}/day for this plan.",
+    },
+  },
+};
+
 // Map a recurring frequency label → visits per year. Used to convert
 // per-visit discount into the monthly-displayed discount so the
 // estimator math stays honest (quarterly customers see $3.33/mo per
@@ -946,18 +1067,20 @@ function recurringServiceKey(svc = {}) {
     || raw.includes('rodent_monitoring')
     || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
   ) return 'rodent_bait';
+  if (/\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(words)) return 'rodent';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('termite') && raw.includes('bait')) return 'termite_bait';
+  if (raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw)) return 'termite_trenching';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
 function recurringServiceReceivesTierDiscount(svc = {}) {
   const key = recurringServiceKey(svc);
   if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
-  if (key === 'palm_injection' || key === 'rodent_bait') return false;
+  if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
   return true;
 }
 
@@ -984,6 +1107,7 @@ function recurringServiceDisplayName(key) {
     case 'termite_bait': return 'Termite Bait';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
+    case 'rodent': return 'Rodent Remediation';
     default: return null;
   }
 }
@@ -1275,14 +1399,26 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
       || aiAnalysis.poolCageSize,
   });
 
-  const metrics = [
+  const dedupeMetrics = (items) => {
+    const seen = new Set();
+    const result = [];
+    for (const metric of items.filter(Boolean)) {
+      const key = String(metric.label || '').trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      result.push(metric);
+    }
+    return result.slice(0, 6);
+  };
+
+  const metrics = dedupeMetrics([
     homeSqFt ? { label: 'Home', value: `${Math.round(homeSqFt).toLocaleString()} sq ft` } : null,
     lotSqFt ? { label: 'Lot', value: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
     poolLanaiValue ? { label: 'Pool/Lanai', value: poolLanaiValue } : null,
     lawnSqFt ? { label: 'Treatable lawn', value: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
     termitePerimeterFt ? { label: 'Termite perimeter', value: `${Math.round(termitePerimeterFt).toLocaleString()} linear ft` } : null,
     complexity ? { label: 'Complexity', value: complexity } : null,
-  ].filter(Boolean);
+  ]);
 
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
   return {
@@ -1474,20 +1610,8 @@ function renderPage(token, estimate, estData) {
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
   const dayPrice = Math.round((monthlyTotal / 30) * 100) / 100;
 
-  const inputs = estData?.inputs || {};
   const R = estResult?.results || {};
-  const homeSqFt = Number(inputs.homeSqFt) || Number(estResult?.property?.footprint * (Number(inputs.stories) || 1)) || null;
-  const lotSqFt = Number(inputs.lotSqFt) || Number(estResult?.property?.lotSqFt) || null;
-  const hasLawn = recurring.some((s) => String(s.name || '').toLowerCase().includes('lawn'));
-  const lawnSqFt = hasLawn ? (Number(inputs.lawnSqFt) || Number(estResult?.property?.lawnSqFt) || null) : null;
   const hasTermiteBait = recurring.some((s) => isTermiteBaitServiceName(s.name || s.label || s.service));
-  const termitePerimeterFt = Number(R.tmBait?.perim) || null;
-  const propertyLine = [
-    homeSqFt ? `${Math.round(homeSqFt).toLocaleString()} sq ft home` : null,
-    lotSqFt ? `${Math.round(lotSqFt).toLocaleString()} sq ft lot` : null,
-    lawnSqFt ? `${Math.round(lawnSqFt).toLocaleString()} sq ft treatable lawn` : null,
-    hasTermiteBait && termitePerimeterFt ? `${Math.round(termitePerimeterFt).toLocaleString()} linear ft termite perimeter` : null,
-  ].filter(Boolean).join(' \u00B7 ');
 
   // Bundle upsell ladder:
   //   1 svc  → offer the complementary one  → Silver (10%)
@@ -1986,7 +2110,6 @@ function renderPage(token, estimate, estData) {
   .hero{padding:10px 0 28px;max-width:900px}
   .hero .addr{color:#3F4A65;font-size:17px;margin-top:8px}
   .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#6B7280;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
-  .hero .prop-meta{color:#6B7280;font-size:16px;margin-top:4px}
   .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
   .service-price-card{padding:18px 20px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06);display:flex;flex-direction:column}
   .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
@@ -2248,7 +2371,6 @@ ${shellTopBar()}
     ${address ? `<div class="hero-contact">${address}</div>` : ''}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
     ${customerPhoneDisplay ? `<div class="hero-contact">${customerPhoneDisplay}</div>` : ''}
-    ${propertyLine ? `<div class="prop-meta">${escapeHtml(propertyLine)}</div>` : ''}
     ${canChooseOneTime ? `
     <div class="mode-toggle" role="group" aria-label="Pest control service type">
       <button type="button" class="mode-btn is-active" data-mode-set="recurring" aria-pressed="true">${escapeHtml(pestTierCadence || 'Recurring')} Pest Control</button>
@@ -3318,19 +3440,20 @@ async function handleEstimateView(req, res, next) {
     }
 
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
-    const quoteRequirement = resolveEstimateQuoteRequirement(null, estData);
+    let pricingBundleForView = null;
+    try {
+      pricingBundleForView = await buildPricingBundle(estimate);
+    } catch (e) {
+      logger.warn(`[estimate-view] pricing bundle quote guard skipped: ${e.message}`);
+    }
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundleForView, estData);
 
     // One-time alternative price for the inline toggle. Mirrors the
     // resolveAcceptOneTimeTotal logic on accept so the customer sees the
     // same number that gets committed if they pick "single visit".
     let oneTimeChoicePrice = 0;
     if (estimate.show_one_time_option) {
-      try {
-        const bundle = await buildPricingBundle(estimate);
-        oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, bundle);
-      } catch (e) {
-        oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, null);
-      }
+      oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, pricingBundleForView);
     }
 
     sendEstimatePage(res, req.params.token, {
@@ -5237,12 +5360,40 @@ function shapePreferenceAddOns(prefs, pestTier) {
 }
 
 function isPestServiceName(name) {
-  return /pest/i.test(String(name || ''));
+  return recurringServiceKey({ name }) === 'pest_control';
 }
 
 function isTermiteBaitServiceName(name) {
+  return recurringServiceKey({ name }) === 'termite_bait';
+}
+
+function isRodentServiceName(name) {
+  const key = recurringServiceKey({ name });
+  if (key === 'rodent_bait' || key === 'rodent') return true;
   const n = String(name || '').toLowerCase();
-  return n.includes('termite') && n.includes('bait');
+  return /\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(n);
+}
+
+function isTreeShrubServiceName(name) {
+  const key = recurringServiceKey({ name });
+  return key === 'tree_shrub' || key === 'palm_injection';
+}
+
+function isMosquitoServiceName(name) {
+  return recurringServiceKey({ name }) === 'mosquito';
+}
+
+function isLawnServiceName(name) {
+  return recurringServiceKey({ name }) === 'lawn_care';
+}
+
+function isTermiteTrenchingServiceName(name) {
+  const key = recurringServiceKey({ name });
+  if (key === 'termite_trenching') return true;
+  const n = String(name || '').toLowerCase();
+  return n.includes('termite')
+    && !n.includes('bait')
+    && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(n);
 }
 
 function isTermiteInstallItem(item) {
@@ -5272,6 +5423,382 @@ function formatTermiteBaitDetail(tmBait, existingDetail = '') {
     parts.push(`${Math.round(perimeter).toLocaleString()} linear ft perimeter`);
   }
   return parts.join(' \u00B7 ') || null;
+}
+
+function normalizeWaveGuardTierLabel(value) {
+  const raw = String(value || '').replace(/^WaveGuard\s+/i, '').trim();
+  return ['Bronze', 'Silver', 'Gold', 'Platinum'].find((tier) => tier.toLowerCase() === raw.toLowerCase()) || 'Bronze';
+}
+
+function categoryForRecurringServiceKey(key) {
+  switch (key) {
+    case 'pest_control': return 'pest_control';
+    case 'lawn_care': return 'lawn_care';
+    case 'tree_shrub': return 'tree_shrub';
+    case 'mosquito': return 'mosquito';
+    case 'termite_bait': return 'termite_bait';
+    case 'rodent': return 'rodent';
+    case 'rodent_bait': return 'rodent';
+    case 'termite_trenching': return 'termite_trenching';
+    case 'palm_injection': return 'tree_shrub';
+    default: return null;
+  }
+}
+
+function serviceLabelForCategory(category, fallback = null) {
+  switch (category) {
+    case 'pest_control': return 'Pest Control';
+    case 'lawn_care': return 'Lawn Care';
+    case 'tree_shrub': return 'Tree & Shrub';
+    case 'mosquito': return 'Mosquito Control';
+    case 'termite_bait': return 'Termite Bait Stations';
+    case 'termite_trenching': return 'Termite Trenching';
+    case 'rodent': return 'Rodent Remediation';
+    case 'bundle': return 'Recurring services';
+    default: return fallback || recurringServiceDisplayName(category) || 'Service';
+  }
+}
+
+function serviceCategoryForOneTimeItem(item = {}) {
+  const name = item?.name || item?.label || item?.service || '';
+  const service = String(item?.service || '').toLowerCase();
+  if (!name && !service) return null;
+  if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
+  if (service === 'pest_initial_roach' || service === 'one_time_pest' || isPestServiceName(name)) return 'pest_control';
+  if (isTermiteInstallItem(item)) return 'termite_bait';
+  if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
+  if (isRodentServiceName(name) || service.includes('rodent')) return 'rodent';
+  if (isTreeShrubServiceName(name) || service.includes('tree') || service.includes('shrub') || service.includes('palm')) return 'tree_shrub';
+  if (isMosquitoServiceName(name) || service.includes('mosquito')) return 'mosquito';
+  if (isLawnServiceName(name) || service.includes('lawn')) return 'lawn_care';
+  return null;
+}
+
+function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItems = []) {
+  const categories = new Set();
+  const recurring = Array.isArray(recurringServices) ? recurringServices : [];
+  recurring.forEach((svc) => {
+    const category = categoryForRecurringServiceKey(recurringServiceKey(svc));
+    if (category) categories.add(category);
+  });
+
+  const items = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  items.forEach((item) => {
+    const category = serviceCategoryForOneTimeItem(item);
+    if (category) categories.add(category);
+  });
+
+  if (categories.size > 1) return 'bundle';
+  if (categories.size === 1) return Array.from(categories)[0];
+
+  const inputs = estData?.inputs || estData?.engineInputs || {};
+  const services = inputs.services || {};
+  const inferred = [
+    services.pest || inputs.svcPest ? 'pest_control' : null,
+    services.lawn || services.lawnCare || inputs.svcLawn ? 'lawn_care' : null,
+    services.treeShrub || services.tree_shrub || inputs.svcTreeShrub ? 'tree_shrub' : null,
+    services.mosquito || inputs.svcMosquito ? 'mosquito' : null,
+    services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,
+    services.trenching || inputs.svcTrenching ? 'termite_trenching' : null,
+    services.rodent || inputs.svcRodent ? 'rodent' : null,
+  ].filter(Boolean);
+  return inferred.length > 1 ? 'bundle' : (inferred[0] || 'pest_control');
+}
+
+function chipsForServiceCategory(category) {
+  return SERVICE_COPY[category]?.askChips || SERVICE_COPY.bundle.askChips;
+}
+
+function mergeAskChips(categories = []) {
+  const merged = [];
+  const seen = new Set();
+  const add = (chip) => {
+    const clean = String(chip || '').trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(clean);
+  };
+  categories.forEach((category) => chipsForServiceCategory(category).forEach(add));
+  if (!merged.length) SERVICE_COPY.pest_control.askChips.forEach(add);
+  return merged.slice(0, 6);
+}
+
+function quoteRequiredFromFrequency(frequency = {}) {
+  return frequency?.quoteRequired === true
+    || frequency?.kind === 'quote_required'
+    || (frequency?.monthly == null && frequency?.annual == null && frequency?.perTreatment == null && frequency?.quoteRequired !== false);
+}
+
+function finiteNumberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function shapeServiceFrequency(frequency = {}, { allowAddOns = false } = {}) {
+  const monthly = finiteNumberOrNull(frequency.monthly);
+  const explicitAnnual = finiteNumberOrNull(frequency.annual);
+  const annual = explicitAnnual != null ? explicitAnnual : (monthly != null ? roundMonthly(monthly * 12) : null);
+  const perTreatment = finiteNumberOrNull(frequency.perTreatment ?? frequency.perVisit);
+  const explicitMonthlyBase = finiteNumberOrNull(frequency.monthlyBase);
+  const monthlyBase = explicitMonthlyBase != null ? explicitMonthlyBase : (pestMonthlyBaseForFrequency(frequency) ?? monthly);
+  const explicitVisitsPerYear = finiteNumberOrNull(frequency.visitsPerYear);
+  const visitsPerYear = explicitVisitsPerYear != null ? explicitVisitsPerYear : (pestVisitsForFrequency(frequency) || null);
+  return {
+    ...frequency,
+    monthlyBase,
+    monthly,
+    annual,
+    perTreatment,
+    visitsPerYear,
+    included: Array.isArray(frequency.included) ? frequency.included : [],
+    addOns: allowAddOns && Array.isArray(frequency.addOns) ? frequency.addOns : [],
+    quoteRequired: quoteRequiredFromFrequency({ ...frequency, monthly, annual, perTreatment }),
+  };
+}
+
+function defaultFrequencyKeyFor(frequencies = []) {
+  if (!Array.isArray(frequencies) || frequencies.length === 0) return null;
+  return frequencies[0]?.key || null;
+}
+
+function oneTimeContributionForCategory(oneTimeBreakdown = {}, category) {
+  const items = (Array.isArray(oneTimeBreakdown?.items) ? oneTimeBreakdown.items : [])
+    .filter((item) => serviceCategoryForOneTimeItem(item) === category);
+  if (!items.length) return null;
+  const subtotal = items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  return {
+    items,
+    subtotal: roundMonthly(subtotal),
+  };
+}
+
+function buildServiceSection({ key, category, label, isRecurring, isPest, frequencies, setupFee, oneTimeBreakdown, quoteRequired }) {
+  const shapedFrequencies = (Array.isArray(frequencies) ? frequencies : [])
+    .map((frequency) => shapeServiceFrequency(frequency, { allowAddOns: isPest && isRecurring }));
+  const sectionQuoteRequired = quoteRequired === true || shapedFrequencies.some((frequency) => frequency.quoteRequired === true);
+  return {
+    key,
+    label: label || serviceLabelForCategory(category || key),
+    isRecurring: !!isRecurring,
+    isPest: !!isPest,
+    isWaveGuardQualifier: PRICING_WAVEGUARD.qualifyingServices.includes(key),
+    excludeFromPctDiscount: PRICING_WAVEGUARD.excludedFromPercentDiscount[key] === true,
+    defaultFrequencyKey: defaultFrequencyKeyFor(shapedFrequencies),
+    frequencies: shapedFrequencies,
+    setupFee: setupFee || null,
+    oneTimeContribution: oneTimeContributionForCategory(oneTimeBreakdown, category || key),
+    intelligence: {
+      metrics: [],
+      chips: chipsForServiceCategory(category || key),
+    },
+    quoteRequired: sectionQuoteRequired,
+    copy: SERVICE_COPY[category || key] || SERVICE_COPY.bundle,
+  };
+}
+
+function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
+  const estResult = estData?.result || estData?.engineResult || estData || {};
+  const recurringServices = recurringServicesWithSupplements(estResult);
+  const oneTimeBreakdown = payload.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
+  const oneTimeItems = Array.isArray(oneTimeBreakdown?.items) ? oneTimeBreakdown.items : [];
+  const serviceCategory = deriveServiceCategory(estData, recurringServices, oneTimeItems);
+  const frequencies = Array.isArray(payload.frequencies) ? payload.frequencies : [];
+  const recurringKeys = Array.from(new Set(
+    recurringServices
+      .map(recurringServiceKey)
+      .filter(Boolean)
+  ));
+  const hasRecurringPest = recurringKeys.includes('pest_control')
+    || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
+  const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
+  const waveGuardSetupFee = (payload.firstVisitFees || []).find((fee) => fee?.service === 'waveguard_setup') || payload.setupFee || null;
+
+  if (!isOneTimeOnly && hasRecurringPest && recurringKeys.filter((key) => key !== 'pest_control').length === 0) {
+    return [buildServiceSection({
+      key: 'pest_control',
+      category: 'pest_control',
+      label: 'Pest Control',
+      isRecurring: true,
+      isPest: true,
+      frequencies,
+      setupFee: waveGuardSetupFee,
+      oneTimeBreakdown,
+      quoteRequired: payload.quoteRequired === true,
+    })];
+  }
+
+  if (!isOneTimeOnly && recurringKeys.length === 1) {
+    const key = recurringKeys[0];
+    const category = categoryForRecurringServiceKey(key) || serviceCategory;
+    return [buildServiceSection({
+      key,
+      category,
+      label: recurringServiceDisplayName(key) || serviceLabelForCategory(category),
+      isRecurring: true,
+      isPest: key === 'pest_control',
+      frequencies,
+      setupFee: key === 'pest_control' ? waveGuardSetupFee : null,
+      oneTimeBreakdown,
+      quoteRequired: payload.quoteRequired === true,
+    })];
+  }
+
+  if (!isOneTimeOnly && recurringKeys.length > 1) {
+    return [buildServiceSection({
+      key: 'bundle',
+      category: 'bundle',
+      label: 'Recurring services',
+      isRecurring: true,
+      isPest: hasRecurringPest,
+      frequencies,
+      setupFee: hasRecurringPest ? waveGuardSetupFee : null,
+      oneTimeBreakdown,
+      quoteRequired: payload.quoteRequired === true,
+    })];
+  }
+
+  if (!isOneTimeOnly && recurringKeys.length === 0 && frequencies.length > 0) {
+    const fallbackCategory = deriveServiceCategory(estData, [], []);
+    return [buildServiceSection({
+      key: fallbackCategory,
+      category: fallbackCategory,
+      label: serviceLabelForCategory(fallbackCategory),
+      isRecurring: true,
+      isPest: fallbackCategory === 'pest_control',
+      frequencies,
+      setupFee: fallbackCategory === 'pest_control' ? waveGuardSetupFee : null,
+      oneTimeBreakdown,
+      quoteRequired: payload.quoteRequired === true,
+    })];
+  }
+
+  const category = serviceCategory === 'bundle'
+    ? (serviceCategoryForOneTimeItem(oneTimeItems[0]) || 'bundle')
+    : serviceCategory;
+  return [buildServiceSection({
+    key: category,
+    category,
+    label: serviceLabelForCategory(category),
+    isRecurring: false,
+    isPest: category === 'pest_control',
+    frequencies: [],
+    setupFee: null,
+    oneTimeBreakdown,
+    quoteRequired: payload.quoteRequired === true || oneTimeBreakdown.quoteRequired === true,
+  })];
+}
+
+function defaultFrequencyForSection(section = {}) {
+  const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
+  return frequencies.find((frequency) => frequency.key === section.defaultFrequencyKey) || frequencies[0] || null;
+}
+
+function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, services = []) {
+  const recurringSections = services.filter((section) => section?.isRecurring);
+  if (!recurringSections.length) return null;
+
+  const estResult = estData?.result || estData?.engineResult || estData || {};
+  const recurringServices = recurringServicesWithSupplements(estResult);
+  const qualifyingKeys = new Set(
+    recurringServices
+      .filter(recurringServiceCountsTowardTier)
+      .map(recurringServiceKey)
+  );
+  const tierLabel = normalizeWaveGuardTierLabel(payload.waveGuardTier || estimate.waveguard_tier || estimate.waveGuardTier || estimate.tier || 'Bronze');
+  const frequency = defaultFrequencyForSection(recurringSections[0]);
+  const monthlySubtotal = roundMonthly(firstPositiveNumber(
+    frequency?.monthly,
+    estimate.monthly_total,
+    estimate.monthlyTotal,
+  ) || 0);
+  const annualSubtotal = roundMonthly(firstPositiveNumber(
+    frequency?.annual,
+    estimate.annual_total,
+    estimate.annualTotal,
+    monthlySubtotal ? monthlySubtotal * 12 : null,
+  ) || 0);
+  const parts = resolveRecurringMonthlyParts(estimate, estData);
+  const manualDiscount = payload.manualDiscount || frequency?.manualDiscount || normalizeManualDiscountSummary(estData);
+  const baseMonthly = Number(parts.baseMonthly || parts.discountableBaseMonthly || 0);
+  const savingsPerMonth = baseMonthly > 0 ? Math.max(0, roundMonthly(baseMonthly - monthlySubtotal)) : 0;
+
+  return {
+    waveGuardTier: tierLabel.toLowerCase(),
+    waveGuardTierLabel: tierLabel,
+    qualifyingCount: qualifyingKeys.size,
+    waveGuardDiscountPct: tierDiscountForEstimate(estData, tierLabel),
+    monthlySubtotal,
+    annualSubtotal,
+    discountableBase: roundMonthly(parts.discountableBaseMonthly || 0),
+    excludedBase: roundMonthly(parts.nonDiscountableMonthly || 0),
+    savingsPerMonth,
+    manualDiscount: manualDiscount || null,
+  };
+}
+
+function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
+  const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
+  const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
+  const qualifyingCount = Number(combinedRecurring?.qualifyingCount || 0);
+  const hasDiscountContext = Number(combinedRecurring?.waveGuardDiscountPct || 0) > 0
+    || Number(combinedRecurring?.savingsPerMonth || 0) > 0;
+  return {
+    showRecurringSummary: combinedRecurring != null,
+    showWaveGuardTierUi: hasRecurringPest || hasDiscountContext || qualifyingCount > 1,
+    showWaveGuardPerks: hasRecurringPest || qualifyingCount > 1 || hasDiscountContext,
+    showWaveGuardSetupFee: hasRecurringPest,
+    showPestRecurringAddOns: hasRecurringPest && !payload.quoteRequired,
+    showOneTimePestAddOns: false && hasPestOneTime,
+  };
+}
+
+function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
+  const services = buildPricingServices(payload, estimate, estData);
+  const combinedRecurring = buildCombinedRecurring(payload, estimate, estData, services);
+  const serviceCategories = services.length > 1
+    ? ['bundle']
+    : services.map((section) => (section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)));
+  const askChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], payload.oneTimeBreakdown?.items || [])]);
+  const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
+  return {
+    ...payload,
+    services,
+    combinedRecurring,
+    renderFlags: buildRenderFlags(payload, services, combinedRecurring),
+    askChips,
+    quoteRequired: payload.quoteRequired === true || sectionQuoteRequired,
+  };
+}
+
+function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
+  const withQuoteState = attachQuoteRequirement(payload, estData);
+  const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);
+  const quoteState = resolveEstimateQuoteRequirement(withContract);
+  return {
+    ...withContract,
+    quoteRequired: quoteState.quoteRequired,
+    quoteRequiredReason: quoteState.reason,
+    quoteRequiredItems: quoteState.items,
+    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring),
+  };
+}
+
+function buildEstimateAcceptanceContract({ quoteRequirement = {} } = {}) {
+  if (quoteRequirement.quoteRequired) {
+    return {
+      mode: 'quote_required',
+      ctaLabel: 'Call Waves',
+      reason: quoteRequirement.reason || 'quote_required',
+    };
+  }
+  return {
+    mode: 'standard_slot_pick',
+    ctaLabel: 'Pick appointment',
+    reason: null,
+  };
 }
 
 function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
@@ -5443,16 +5970,16 @@ async function buildPricingBundle(estimate) {
     && Array.isArray(snapshotBundle.frequencies)
     && pricingBundleMatchesEstimateTotals(snapshotBundle, estimate)
   ) {
-    return attachQuoteRequirement(withChoiceOneTimePrice(withManualDiscount({
+    return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
-    })), estData);
+    })), estimate, estData);
   }
 
   const cached = getEstimatePricingCache(estimate);
   if (cached) {
-    return attachQuoteRequirement(withChoiceOneTimePrice(withManualDiscount({ ...cached, cacheHit: true })), estData);
+    return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({ ...cached, cacheHit: true })), estimate, estData);
   }
 
   const prefs = normalizePrefs(estData?.preferences);
@@ -5510,7 +6037,7 @@ async function buildPricingBundle(estimate) {
       ? Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100)
       : rawV1OneTimeTotal);
 
-    const payload = attachQuoteRequirement(withManualDiscount({
+    const payload = finalizePricingBundle(withManualDiscount({
       frequencies: finalFreqs,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice,
@@ -5520,7 +6047,7 @@ async function buildPricingBundle(estimate) {
       firstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       source: 'v1_engine_shape',
-    }), estData);
+    }), estimate, estData);
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
@@ -5538,7 +6065,7 @@ async function buildPricingBundle(estimate) {
       ? oneTimePestChoiceAmountFromBreakdown(storedOneTimeBreakdown)
       : null;
     const manualDiscount = normalizeManualDiscountSummary(estData);
-    const payload = attachQuoteRequirement(withManualDiscount({
+    const payload = finalizePricingBundle(withManualDiscount({
       frequencies: [{
         key: 'quarterly',
         label: 'Quarterly',
@@ -5554,7 +6081,7 @@ async function buildPricingBundle(estimate) {
       anchorOneTimePrice: storedChoiceOneTimePrice ?? (Number(estimate.onetime_total || 0) || null),
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
-    }), estData);
+    }), estimate, estData);
     setEstimatePricingCache(estimate, payload);
     return payload;
   }
@@ -5610,14 +6137,14 @@ async function buildPricingBundle(estimate) {
       estimate.onetime_total,
     );
 
-  const payload = attachQuoteRequirement(withManualDiscount({
+  const payload = finalizePricingBundle(withManualDiscount({
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,
     defaultServiceMode: oneTimeOnly ? 'one_time' : 'recurring',
     oneTimeBreakdown,
     source: 'engine_invocation',
-  }), estData);
+  }), estimate, estData);
   setEstimatePricingCache(estimate, payload);
   return payload;
 }
@@ -5695,6 +6222,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const pricingBundle = await buildPricingBundle(estimate);
     const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const recurringServicesForIntelligence = recurringServicesWithSupplements(
+      estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
+    );
+    const serviceCategory = deriveServiceCategory(
+      estimateDataForIntelligence,
+      recurringServicesForIntelligence,
+      pricingBundle?.oneTimeBreakdown?.items || []
+    );
+    const acceptance = buildEstimateAcceptanceContract({ quoteRequirement });
     const intelligence = buildWaveGuardIntelligencePayload(
       {
         ...estimate,
@@ -5702,7 +6238,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         tier: estimate.waveguard_tier || null,
       },
       estimateDataForIntelligence,
-      { pricingBundle },
+      { pricingBundle, recurringServices: recurringServicesForIntelligence },
     );
     try {
       const assistantContext = buildEstimateAssistantContext({
@@ -5750,6 +6286,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         isOneTimeOnly: defaultServiceMode === 'one_time',
         defaultServiceMode,
         billByInvoice: !!estimate.bill_by_invoice,
+        serviceCategory,
+        acceptance,
       },
       pricing: {
         ...pricingBundle,
@@ -5834,6 +6372,8 @@ module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.buildPricingBundle = buildPricingBundle;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
+module.exports.deriveServiceCategory = deriveServiceCategory;
+module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
@@ -5866,3 +6406,8 @@ module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.estimateHasBeenSent = estimateHasBeenSent;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;
 module.exports.renderEditableSmsTemplate = renderEditableSmsTemplate;
+module.exports.isRodentServiceName = isRodentServiceName;
+module.exports.isTreeShrubServiceName = isTreeShrubServiceName;
+module.exports.isMosquitoServiceName = isMosquitoServiceName;
+module.exports.isLawnServiceName = isLawnServiceName;
+module.exports.isTermiteTrenchingServiceName = isTermiteTrenchingServiceName;

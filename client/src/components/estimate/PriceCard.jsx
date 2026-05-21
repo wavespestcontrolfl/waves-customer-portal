@@ -74,17 +74,24 @@ function serviceInclusions(row = {}) {
   return SERVICE_INCLUSIONS[serviceKey(row)] || SERVICE_INCLUSIONS.pest_control;
 }
 
-export default function PriceCard({ frequency, waveGuardTier }) {
+const DEFAULT_WORDING = {
+  dayLine: "That's just {amount}/day for complete home protection.",
+  guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
+};
+
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING }) {
   if (!frequency) return null;
 
   const monthly = frequency.monthly;
   const annual = frequency.annual;
+  const quoteRequired = frequency.quoteRequired === true;
   const intervalMonths = frequency.key === 'quarterly' ? 3 : frequency.key === 'bi_monthly' ? 2 : 1;
-  const periodLabel = frequency.key === 'quarterly' ? '/quarter' : frequency.key === 'bi_monthly' ? '/bi-monthly' : '/mo';
-  const cadencePrice = monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
+  const periodLabel = wording?.periodLabelByKey?.[frequency.key]
+    || (frequency.key === 'quarterly' ? '/quarter' : frequency.key === 'bi_monthly' ? '/bi-monthly' : '/mo');
+  const cadencePrice = quoteRequired || monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
   const anchorPrice = Number(frequency.perVisit || 0);
   const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
-  const dayPrice = monthly == null ? null : Math.round((Number(monthly) / 30) * 100) / 100;
+  const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) / 30) * 100) / 100;
   const manualDiscount = frequency.manualDiscount && Number(frequency.manualDiscount.amount) > 0
     ? frequency.manualDiscount
     : null;
@@ -116,14 +123,16 @@ export default function PriceCard({ frequency, waveGuardTier }) {
         ) : null}
         <span style={{
           fontFamily: "'Source Serif 4', Georgia, serif",
-          fontSize: 58,
+          fontSize: quoteRequired ? 42 : 58,
           fontWeight: 500,
           color: W.blueDeeper,
           lineHeight: 1,
         }}>
-        {fmtMoney(cadencePrice)}
+        {quoteRequired ? 'Quote required' : fmtMoney(cadencePrice)}
         </span>
-        <span style={{ fontSize: 24, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
+        {!quoteRequired ? (
+          <span style={{ fontSize: 24, fontWeight: 500, color: '#6B7280' }}>{periodLabel}</span>
+        ) : null}
         {waveGuardTier ? (
           <span style={{
             display: 'inline-block',
@@ -146,7 +155,7 @@ export default function PriceCard({ frequency, waveGuardTier }) {
         </div>
       ) : null}
 
-      {annual ? (
+      {!quoteRequired && annual ? (
         <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
           {fmtMoney(annual)} / year
         </div>
@@ -175,12 +184,12 @@ export default function PriceCard({ frequency, waveGuardTier }) {
 
       {dayPrice ? (
         <div style={{ fontSize: 15, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-          That's just {fmtMoney(dayPrice)}/day for complete home protection.
+          {(wording?.dayLine || DEFAULT_WORDING.dayLine).replace('{amount}', fmtMoney(dayPrice))}
         </div>
       ) : null}
 
       <div style={{ fontSize: 16, color: W.blueDeeper, marginTop: 14, lineHeight: 1.5 }}>
-        Try us risk-free — 90-day money-back guarantee.
+        {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
       </div>
 
       {treatmentRows.length ? (

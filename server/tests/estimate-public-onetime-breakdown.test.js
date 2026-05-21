@@ -8,9 +8,11 @@ const {
   buildAcceptSuccessPayload,
   acceptanceServiceLists,
   buildEstimateAskQueryLog,
+  buildEstimateAcceptanceContract,
   buildPricingBundle,
   buildWaveGuardIntelligencePayload,
   defaultServiceModeForEstimate,
+  deriveServiceCategory,
   isEstimateAcceptActive,
   isEstimateAskAnswerable,
   isAnnualPrepayEligibleServiceMix,
@@ -402,6 +404,269 @@ describe('public estimate one-time breakdown', () => {
       label: 'Initial Roach Knockdown',
       amount: 119,
     }));
+  });
+
+  test('phase 0 pricing contract emits a single pest service alongside legacy frequencies', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-contract-test',
+      estimate_data: savedAdminEstimateData(),
+      monthly_total: 50,
+      annual_total: 600,
+      onetime_total: 2084,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.frequencies).toHaveLength(3);
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'pest_control',
+      label: 'Pest Control',
+      isPest: true,
+      isRecurring: true,
+      defaultFrequencyKey: 'quarterly',
+    }));
+    expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: payload.frequencies[0].monthly,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: payload.frequencies[0].monthly,
+      waveGuardTierLabel: 'Bronze',
+      qualifyingCount: 1,
+    }));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardSetupFee: true,
+      showPestRecurringAddOns: true,
+      showOneTimePestAddOns: false,
+    }));
+    expect(payload.askChips).toEqual([
+      'What products do you use?',
+      'Are pets and kids safe?',
+      'When am I charged?',
+      'What happens after approval?',
+    ]);
+  });
+
+  test('phase 0 pest bundles preserve pest setup and add-on render signals', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-pest-bundle-contract-test',
+      estimate_data: {
+        result: {
+          results: {
+            pestTiers: [
+              { label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 90,
+            annualAfterDiscount: 1080,
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 40 },
+            ],
+          },
+          oneTime: {
+            total: 99,
+            membershipFee: 99,
+            items: [],
+          },
+        },
+      },
+      monthly_total: 90,
+      annual_total: 1080,
+      onetime_total: 99,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'bundle',
+      isPest: true,
+      isRecurring: true,
+      setupFee: expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
+    }));
+    expect(payload.services[0].frequencies[0].addOns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'interior_spray' }),
+      expect.objectContaining({ key: 'exterior_sweep' }),
+    ]));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardSetupFee: true,
+      showPestRecurringAddOns: true,
+      showOneTimePestAddOns: false,
+    }));
+  });
+
+  test('phase 0 no-engine recurring fallback keeps stored frequency pricing in services', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-stored-recurring-fallback-test',
+      estimate_data: {},
+      monthly_total: 80,
+      annual_total: 960,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.frequencies).toHaveLength(1);
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'pest_control',
+      isRecurring: true,
+      isPest: true,
+    }));
+    expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 80,
+      annual: 960,
+      quoteRequired: false,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 80,
+      annualSubtotal: 960,
+    }));
+  });
+
+  test('phase 0 generic rodent recurring estimates do not use pest copy or gates', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-rodent-recurring-test',
+      estimate_data: {
+        result: {
+          recurring: {
+            monthlyTotal: 49,
+            annualAfterDiscount: 588,
+            services: [{ name: 'Rodent Remediation', mo: 49 }],
+          },
+        },
+      },
+      monthly_total: 49,
+      annual_total: 588,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'rodent',
+      label: 'Rodent Remediation',
+      isRecurring: true,
+      isPest: false,
+    }));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardTierUi: false,
+      showWaveGuardPerks: false,
+      showWaveGuardSetupFee: false,
+      showPestRecurringAddOns: false,
+    }));
+    expect(payload.askChips).toContain('Trapping vs exclusion?');
+    expect(payload.askChips).not.toContain('What products do you use?');
+  });
+
+  test('phase 0 render flags do not expose WaveGuard setup or pest add-ons for one-time-only quotes', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-onetime-guard-test',
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 725,
+            items: [{ service: 'termite_trenching', name: 'Termite Trenching', price: 725 }],
+          },
+          recurring: { services: [] },
+        },
+      },
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 725,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'termite_trenching',
+      isRecurring: false,
+      isPest: false,
+    }));
+    expect(payload.combinedRecurring).toBeNull();
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardSetupFee: false,
+      showWaveGuardTierUi: false,
+      showWaveGuardPerks: false,
+      showPestRecurringAddOns: false,
+      showOneTimePestAddOns: false,
+    }));
+  });
+
+  test('deriveServiceCategory returns pest, trenching, and bundle categories from normalized services', () => {
+    expect(deriveServiceCategory({}, [{ name: 'Pest Control' }], [])).toBe('pest_control');
+    expect(deriveServiceCategory({}, [{ name: 'Rodent Remediation' }], [])).toBe('rodent');
+    expect(deriveServiceCategory({}, [], [{ service: 'trenching', name: 'Trenching', price: 500 }]))
+      .toBe('termite_trenching');
+    expect(deriveServiceCategory({}, [{ service: 'lawn_care', name: 'Lawn Care' }], [{ service: 'one_time_pest', name: 'One-Time Pest', price: 200 }]))
+      .toBe('bundle');
+  });
+
+  test('quote-required frequencies preserve null pricing and roll up to pricing quote state', async () => {
+    const pricing = await buildPricingBundle({
+      id: 'estimate-public-phase-0-quote-frequency-contract-test',
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'snapshot_fixture',
+            waveGuardTier: 'Bronze',
+            frequencies: [{
+              key: 'manual',
+              label: 'Manual quote',
+              kind: 'quote_required',
+              monthly: null,
+              annual: null,
+            }],
+          },
+        },
+        result: {
+          recurring: {
+            services: [{ name: 'Pest Control' }],
+          },
+        },
+      },
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(pricing.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'manual',
+      monthly: null,
+      annual: null,
+      quoteRequired: true,
+    }));
+    expect(pricing.quoteRequired).toBe(true);
+    expect(resolveEstimateQuoteRequirement(pricing)).toEqual(expect.objectContaining({
+      quoteRequired: true,
+    }));
+  });
+
+  test('quote-required pricing rolls into the acceptance contract', async () => {
+    const pricing = await buildPricingBundle({
+      id: 'estimate-public-phase-0-quote-contract-test',
+      estimate_data: {
+        result: {
+          specItems: [{
+            service: 'commercial_pest',
+            name: 'Commercial Pest Control',
+            price: null,
+            quoteRequired: true,
+            reason: 'Commercial pest requires manual quote.',
+          }],
+        },
+      },
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricing);
+
+    expect(pricing.quoteRequired).toBe(true);
+    expect(buildEstimateAcceptanceContract({ quoteRequirement })).toEqual({
+      mode: 'quote_required',
+      ctaLabel: 'Call Waves',
+      reason: 'Commercial pest requires manual quote.',
+    });
   });
 
   test('public pricing bundle preserves saved manual recurring discounts', async () => {
