@@ -23,6 +23,7 @@ const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
+const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
@@ -739,6 +740,44 @@ function composeCompletionSmsBody({ recapText, body, suffix = '', maxSegments = 
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// GET /api/admin/dispatch/:serviceId/tech-rating-allowed
+// Tech-readable boolean reflecting whether the rating picker should be
+// shown for THIS specific scheduled service. Returns `{ allowed: bool }`.
+//
+// Single source of truth: the server applies the same gates the
+// completion handler would apply on write — (a) feature flag
+// `allowTechnicianClientRatingEntry`, (b) service_line resolved via the
+// SAME `detectServiceLine` classifier the completion path uses, against
+// the active `enabledServiceLines` allow-list. The client previously
+// gated locally with `detectServiceCategory`, but that classifier maps
+// rodent labels to `pest` while the backend records them as `rodent` —
+// resulting in a picker that shows up only to have its data silently
+// dropped on completion. Computing the result per-service on the server
+// keeps the UI and the write path in agreement.
+//
+// 404 on unknown service; admin-dispatch's existing requireTechOrAdmin
+// gate covers auth.
+router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .first('id', 'service_type');
+    if (!svc) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+    const config = await loadPestPressureConfig(db);
+    const techEntryAllowed = !!(config
+      && config.allowTechnicianClientRatingEntry === true);
+    const enabledLines = Array.isArray(config && config.enabledServiceLines)
+      ? config.enabledServiceLines
+      : [];
+    const serviceLine = detectServiceLine(svc.service_type);
+    const serviceLineAllowed = enabledLines.length === 0
+      || (serviceLine && enabledLines.includes(serviceLine));
+    res.json({ allowed: techEntryAllowed && serviceLineAllowed });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/recap-preview
 router.post('/recap-preview', async (req, res, next) => {
   try {
@@ -1299,11 +1338,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       invoiceAlreadySent = false,
       lawnAssessmentId = null,
       completionPhotos = [],
+      clientPestRating = null,
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
         error: `visitOutcome must be one of: ${Array.from(VALID_VISIT_OUTCOMES).join(', ')}`,
       });
+    }
+    // Tech-side Pest Pressure rating capture — companion to the customer-side
+    // POST /api/reports/:token/pest-pressure/client-rating endpoint. The tech
+    // observed the property and can submit a 0-5 activity rating that feeds
+    // the same `service_records.client_pest_rating` column with
+    // `source='technician'`. Both flows share the engine's client-rating
+    // component. The Pest Pressure config flag
+    // `allowTechnicianClientRatingEntry` gates whether the field is honored
+    // here; UI gating is separate (CompletionPanel hides the picker when
+    // the flag is off).
+    //
+    // Strict validation: integer 0-5 or null. No silent rounding, no
+    // coercion. AGENTS.md strict-validation rule applies even though this
+    // is an admin route (we still want clean data going into the column).
+    if (clientPestRating != null) {
+      if (!Number.isInteger(clientPestRating) || clientPestRating < 0 || clientPestRating > 5) {
+        return res.status(400).json({
+          error: 'clientPestRating must be an integer 0-5 (or null/omitted)',
+          code: 'client_pest_rating_invalid',
+        });
+      }
     }
     if (completionPhotos != null && !Array.isArray(completionPhotos)) {
       return res.status(400).json({
@@ -1649,6 +1710,37 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
           if (serviceRecordCols.completion_source) recordInsert.completion_source = 'detailed_form';
           if (serviceRecordCols.protocol_defaults_used) recordInsert.protocol_defaults_used = false;
+
+          // Tech-side Pest Pressure rating capture — write iff (a) the
+          // request supplied a valid integer 0-5 (validated near top of
+          // handler), (b) the active config has
+          // `allowTechnicianClientRatingEntry` enabled, AND (c) this
+          // record's `service_line` is in the config's
+          // `enabledServiceLines` allow-list. The engine's score calc
+          // skips lines outside the allow-list anyway, so writing the
+          // rating for a tree-shrub or termite visit would dead-end the
+          // data (column gets set but never read). Inline-load the
+          // config inside the txn so we read a consistent snapshot with
+          // the score calc that runs a few lines below.
+          if (clientPestRating != null
+            && serviceRecordCols.client_pest_rating
+            && serviceRecordCols.client_pest_rating_source) {
+            const pestPressureConfig = await loadPestPressureConfig(trx);
+            const techEntryAllowed = !!(pestPressureConfig
+              && pestPressureConfig.allowTechnicianClientRatingEntry === true);
+            const enabledLines = Array.isArray(pestPressureConfig && pestPressureConfig.enabledServiceLines)
+              ? pestPressureConfig.enabledServiceLines
+              : [];
+            const serviceLineAllowed = enabledLines.length === 0
+              || (reportServiceLine && enabledLines.includes(reportServiceLine));
+            if (techEntryAllowed && serviceLineAllowed) {
+              recordInsert.client_pest_rating = clientPestRating;
+              recordInsert.client_pest_rating_source = 'technician';
+              if (serviceRecordCols.client_pest_rating_at) {
+                recordInsert.client_pest_rating_at = trx.fn.now();
+              }
+            }
+          }
 
         // 1. service_record — the canonical "completion happened" audit.
         // scheduled_service_id is the FK back to the source row so

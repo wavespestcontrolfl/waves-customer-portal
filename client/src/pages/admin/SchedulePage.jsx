@@ -4713,6 +4713,42 @@ export function CompletionPanel({
   const [areasServiced, setAreasServiced] = useState([]);
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
+  // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
+  // capture on the public service report — both flows write to
+  // service_records.client_pest_rating with their respective source.
+  // Null = not entered; 0-5 = explicit rating; backend ignores when the
+  // config flag `allowTechnicianClientRatingEntry` is off.
+  const [clientPestRating, setClientPestRating] = useState(null);
+  // `null` = unknown (still loading or fetch failed). The picker only
+  // renders when this is explicitly `true`, so a config-flag flip OFF
+  // hides the UI rather than letting the tech enter data the backend
+  // will silently drop.
+  const [techRatingAllowed, setTechRatingAllowed] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    // Per-service `allowed` boolean from the server. The endpoint
+    // applies the SAME `detectServiceLine` classifier and
+    // `enabledServiceLines` allow-list that the completion handler
+    // uses on write — so the picker's visibility matches what the
+    // backend will actually persist. Avoids the
+    // detectServiceCategory ↔ detectServiceLine drift (e.g. rodent
+    // labels classify as `pest` client-side but `rodent` server-side).
+    if (!service || !service.id) return undefined;
+    adminFetch(`/admin/dispatch/${service.id}/tech-rating-allowed`)
+      .then((body) => {
+        if (cancelled) return;
+        setTechRatingAllowed(!!(body && body.allowed === true));
+      })
+      .catch(() => {
+        // Fetch failure — keep the picker hidden so the tech can still
+        // complete the visit without it, and the customer-side capture
+        // path is unaffected.
+        if (!cancelled) setTechRatingAllowed(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [service && service.id]);
   const [nextVisit, setNextVisit] = useState(null);
   const [nextVisitNote, setNextVisitNote] = useState("");
   const [showNextVisitNote, setShowNextVisitNote] = useState(false);
@@ -5816,6 +5852,13 @@ export function CompletionPanel({
       };
       if (isCustomerConcernInteraction(customerInteraction) && customerConcern) {
         body.customerConcernText = customerConcern;
+      }
+      // Only include the rating when the tech actually entered one — null
+      // means "no opinion" and lets the engine fall back to customer-side
+      // input (or no input at all). Send as a real integer so backend's
+      // strict validation passes.
+      if (clientPestRating != null && Number.isInteger(clientPestRating)) {
+        body.clientPestRating = clientPestRating;
       }
       if (nextVisitNote) {
         body.nextVisitAdjustmentNote = nextVisitNote;
@@ -7334,6 +7377,67 @@ export function CompletionPanel({
                     style={{ ...mInput, marginTop: 8 }}
                   />
                 )}
+              </Field>
+            )}
+            {/* Tech-side Pest Pressure rating — companion to the
+                customer-side capture; either source feeds the engine's
+                client-rating component. Optional — leave null to defer
+                to the customer's input.
+
+                Gated entirely on `techRatingAllowed`, which is computed
+                server-side per-service against the SAME classifiers and
+                allow-list the completion handler enforces on write
+                (feature flag + `enabledServiceLines` via
+                `detectServiceLine`). No local category check — the
+                client used to use `detectServiceCategory` but that maps
+                rodent labels to `pest` while the backend resolves them
+                to `rodent`, which produced a picker whose data would be
+                silently dropped on completion. `null` (still loading or
+                fetch failed) keeps the picker hidden too. */}
+            {techRatingAllowed === true && !quickComplete && (
+              <Field label="Pest activity rating (0–5, optional)">
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {[0, 1, 2, 3, 4, 5].map((n) => {
+                    const selected = clientPestRating === n;
+                    return (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() =>
+                          setClientPestRating(selected ? null : n)
+                        }
+                        style={{
+                          minWidth: 44,
+                          height: 44,
+                          borderRadius: 12,
+                          background: selected ? M.ink : M.card,
+                          color: selected ? M.actionFg : M.ink,
+                          border: `1px solid ${
+                            selected ? M.ink : M.hairline
+                          }`,
+                          fontFamily: font,
+                          fontSize: 16,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                        aria-pressed={selected}
+                        aria-label={`Rate pest activity ${n} out of 5`}
+                      >
+                        {n}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div
+                  style={{
+                    marginTop: 6,
+                    fontSize: 12,
+                    color: M.muted,
+                    fontFamily: font,
+                  }}
+                >
+                  0 = none, 5 = severe. Tap a number again to clear.
+                </div>
               </Field>
             )}
             {/* Lawn measurements */}
@@ -8899,6 +9003,60 @@ export function CompletionPanel({
                   style={{ ...inputStyle, marginTop: 8 }}
                 />
               )}
+            </div>
+          )}
+          {/* Tech-side Pest Pressure rating — desktop variant. Mirrors the
+              mobile picker at line ~7392. Same `techRatingAllowed`
+              server-computed gate, same payload field, same null-clear
+              behavior. The duplication is the cost of the existing
+              dual-render architecture (mobile + desktop) in this file —
+              keeping both paths in sync prevents desktop techs from
+              missing the data-capture entirely (codex-review P2 on the
+              first push of #1013). */}
+          {techRatingAllowed === true && !quickComplete && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>
+                Pest activity rating (0–5, optional)
+              </label>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[0, 1, 2, 3, 4, 5].map((n) => {
+                  const selected = clientPestRating === n;
+                  return (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() =>
+                        setClientPestRating(selected ? null : n)
+                      }
+                      style={{
+                        minWidth: 44,
+                        height: 40,
+                        borderRadius: 10,
+                        background: selected ? D.teal + "18" : D.card,
+                        color: selected ? D.teal : D.text,
+                        border: `1px solid ${selected ? D.teal : D.border}`,
+                        fontSize: 14,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        transition: "all 0.15s",
+                      }}
+                      aria-pressed={selected}
+                      aria-label={`Rate pest activity ${n} out of 5`}
+                    >
+                      {n}
+                    </button>
+                  );
+                })}
+              </div>
+              <div
+                style={{
+                  marginTop: 6,
+                  fontSize: 12,
+                  color: D.muted,
+                }}
+              >
+                0 = none, 5 = severe. Tap a number again to clear.
+              </div>
             </div>
           )}
           {/* Lawn Measurements — hidden in quick complete */}
