@@ -66,11 +66,13 @@ import {
   Mail,
   MessageSquare,
   PhoneCall,
+  Zap,
 } from "lucide-react";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import { SmsTemplatesTabV2, CSRCoachTabV2 } from "./CommunicationsTabsV2";
 import EmailTemplatesPanelV2 from "./EmailTemplatesPanelV2";
+import NotificationEventsTabV2 from "./NotificationEventsTabV2";
 import PushSettingsV2 from "../../components/admin/PushSettingsV2";
 import CallBridgeLink from "../../components/admin/CallBridgeLink";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
@@ -173,6 +175,12 @@ function getCustomerOptionName(customer) {
 }
 
 const TABS = [
+  {
+    key: "events",
+    label: "Events",
+    Icon: Zap,
+    className: "hidden md:inline-flex",
+  },
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "calls", label: "Calls", Icon: PhoneCall },
   {
@@ -1913,6 +1921,19 @@ export default function CommunicationsPageV2() {
   const [tab, setTab] = useState("sms");
   const tabs = TABS;
 
+  useEffect(() => {
+    const applyHashTab = () => {
+      const raw = window.location.hash.replace(/^#/, "");
+      if (!raw) return;
+      const params = new URLSearchParams(raw);
+      const nextTab = params.get("tab");
+      if (nextTab && tabs.some((item) => item.key === nextTab)) setTab(nextTab);
+    };
+    applyHashTab();
+    window.addEventListener("hashchange", applyHashTab);
+    return () => window.removeEventListener("hashchange", applyHashTab);
+  }, [tabs]);
+
   return (
     <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1300px] mx-auto">
       {" "}
@@ -1923,8 +1944,9 @@ export default function CommunicationsPageV2() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Communications section"
-        navGridClassName="grid-cols-2 md:grid-cols-6"
+        navGridClassName="grid-cols-2 md:grid-cols-7"
       />
+      {tab === "events" && <NotificationEventsTabV2 />}
       {tab === "sms" && <SmsTab />}
       {tab === "calls" && <CallLogTabV2 />}
       {tab === "templates" && <SmsTemplatesTabV2 />}

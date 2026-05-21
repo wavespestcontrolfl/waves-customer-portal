@@ -7,6 +7,18 @@ const { TEMPLATES: CLEAN_DEFAULT_SMS_TEMPLATES } = require('../models/migrations
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+const PROTECTED_SMS_TEMPLATE_KEYS = new Set(CLEAN_DEFAULT_SMS_TEMPLATES.map((template) => template.template_key));
+
+function canDeleteSmsTemplate(template) {
+  return !!template
+    && template.category === 'custom'
+    && !PROTECTED_SMS_TEMPLATE_KEYS.has(template.template_key);
+}
+
+function decorateTemplate(template) {
+  return template ? { ...template, can_delete: canDeleteSmsTemplate(template) } : template;
+}
+
 // Auto-create table if missing + seed any new default templates that don't exist yet
 let _seededThisProcess = false;
 async function ensureTable() {
@@ -19,10 +31,18 @@ async function ensureTable() {
       t.text('body').notNullable();
       t.text('description');
       t.jsonb('variables');
+      t.string('trigger_event_key', 120).nullable();
       t.boolean('is_active').defaultTo(true);
       t.boolean('is_internal').defaultTo(false);
       t.integer('sort_order').defaultTo(100);
       t.timestamps(true, true);
+      t.index(['trigger_event_key']);
+    });
+  }
+  if (!(await db.schema.hasColumn('sms_templates', 'trigger_event_key'))) {
+    await db.schema.alterTable('sms_templates', t => {
+      t.string('trigger_event_key', 120).nullable();
+      t.index(['trigger_event_key']);
     });
   }
   if (_seededThisProcess) return;
@@ -47,7 +67,7 @@ router.get('/', async (req, res, next) => {
     let query = db('sms_templates').orderBy('category').orderBy('sort_order');
     if (category) query = query.where({ category });
     const templates = await query;
-    res.json({ templates });
+    res.json({ templates: templates.map(decorateTemplate) });
   } catch (err) { next(err); }
 });
 
@@ -56,18 +76,21 @@ router.get('/:id', async (req, res, next) => {
   try {
     const template = await db('sms_templates').where({ id: req.params.id }).first();
     if (!template) return res.status(404).json({ error: 'Template not found' });
-    res.json(template);
+    res.json(decorateTemplate(template));
   } catch (err) { next(err); }
 });
 
 // PUT /:id — update template body
 router.put('/:id', async (req, res, next) => {
   try {
-    const { body, name, is_active } = req.body;
+    const { body, name, is_active, trigger_event_key } = req.body;
     const updates = { updated_at: new Date() };
     if (body !== undefined) updates.body = body;
     if (name !== undefined) updates.name = name;
     if (is_active !== undefined) updates.is_active = is_active;
+    if (trigger_event_key !== undefined) {
+      updates.trigger_event_key = trigger_event_key ? String(trigger_event_key).trim() || null : null;
+    }
     await db('sms_templates').where({ id: req.params.id }).update(updates);
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -83,13 +106,18 @@ router.post('/', async (req, res, next) => {
       description, variables: variables ? JSON.stringify(variables) : null,
       is_internal: is_internal || false,
     }).returning('*');
-    res.status(201).json(template);
+    res.status(201).json(decorateTemplate(template));
   } catch (err) { next(err); }
 });
 
 // DELETE /:id — delete template
 router.delete('/:id', async (req, res, next) => {
   try {
+    const template = await db('sms_templates').where({ id: req.params.id }).first();
+    if (!template) return res.status(404).json({ error: 'Template not found' });
+    if (!canDeleteSmsTemplate(template)) {
+      return res.status(409).json({ error: 'template is protected from hard delete' });
+    }
     await db('sms_templates').where({ id: req.params.id }).del();
     res.json({ success: true });
   } catch (err) { next(err); }

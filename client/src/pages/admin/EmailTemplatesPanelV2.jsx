@@ -40,9 +40,19 @@ function adminFetch(path, options = {}) {
     ...options,
   }).then(async (r) => {
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+    if (!r.ok) {
+      const err = new Error(data?.error || `HTTP ${r.status}`);
+      err.status = r.status;
+      err.body = data;
+      throw err;
+    }
     return data;
   });
+}
+
+function hashParams() {
+  if (typeof window === "undefined") return new URLSearchParams();
+  return new URLSearchParams(window.location.hash.replace(/^#/, ""));
 }
 
 function asArray(value) {
@@ -103,6 +113,18 @@ function ModeBadge({ mode }) {
 
 function templateIsActive(template) {
   return String(template?.status || "draft").toLowerCase() === "active";
+}
+
+function canDeleteEmailTemplate(template) {
+  if (template?.can_delete !== undefined) return template.can_delete === true;
+  const status = String(template?.status || "draft").toLowerCase();
+  return status === "draft" || status === "archived";
+}
+
+function canDeleteEmailAutomation(automation) {
+  if (automation?.can_delete !== undefined) return automation.can_delete === true;
+  const status = String(automation?.status || "draft").toLowerCase();
+  return status === "draft" || status === "archived";
 }
 
 function TemplateStatusBadge({ status }) {
@@ -996,6 +1018,7 @@ function AutomationsPanel({
   onSelectRuns,
   onRefreshRuns,
   onProcessDue,
+  onDelete,
 }) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState("");
@@ -1248,6 +1271,17 @@ function AutomationsPanel({
                       <Button variant="primary" size="sm" className="gap-2" onClick={() => onSave(row.automation_key, draft)} disabled={busy}>
                         <Save size={14} /> Save
                       </Button>
+                      {canDeleteEmailAutomation(row) ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-2"
+                          onClick={() => onDelete(row.automation_key)}
+                          disabled={busy}
+                        >
+                          <Trash2 size={14} /> Delete
+                        </Button>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -1271,7 +1305,7 @@ function AutomationsPanel({
   );
 }
 
-function TemplateList({ templates, selectedKey, onSelect, filter, onFilter, onToggleStatus, busy }) {
+function TemplateList({ templates, selectedKey, onSelect, filter, onFilter, onToggleStatus, onDelete, busy }) {
   const modes = ["all", "service", "marketing"];
   const filtered = templates.filter((t) => filter === "all" || t.mode === filter);
   return (
@@ -1297,6 +1331,7 @@ function TemplateList({ templates, selectedKey, onSelect, filter, onFilter, onTo
           return (
             <div
               key={t.template_key}
+              id={`email-template-row-${t.template_key}`}
               role="button"
               tabIndex={0}
               onClick={() => onSelect(t.template_key)}
@@ -1329,6 +1364,21 @@ function TemplateList({ templates, selectedKey, onSelect, filter, onFilter, onTo
                     onChange={(next) => onToggleStatus(t, next)}
                   />
                   <ModeBadge mode={t.mode} />
+                  {canDeleteEmailTemplate(t) ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="px-2"
+                      aria-label={`Delete ${t.name}`}
+                      disabled={busy}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete(t);
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                  ) : null}
                 </div>
               </div>
               <div className="mt-2 flex items-center gap-2 text-11 text-ink-tertiary">
@@ -1510,8 +1560,20 @@ export default function EmailTemplatesPanelV2() {
     return adminFetch("/admin/email-templates")
       .then((d) => {
         const rows = d.templates || [];
+        const params = hashParams();
+        const hashKey = params.get("tab") === "email_templates" ? params.get("key") : null;
+        const hashView = params.get("tab") === "email_templates" ? params.get("view") : null;
+        const hashTemplate = hashKey ? rows.find((t) => t.template_key === hashKey) : null;
+        if (hashView === "automations") setActiveView("automations");
+        if (hashTemplate?.mode) setFilter(hashTemplate.mode);
         setTemplates(rows);
-        setSelectedKey((prev) => prev || rows.find((t) => t.mode === "service")?.template_key || rows[0]?.template_key || null);
+        setSelectedKey((prev) =>
+          hashTemplate?.template_key ||
+          prev ||
+          rows.find((t) => t.mode === "service")?.template_key ||
+          rows[0]?.template_key ||
+          null,
+        );
       })
       .catch((e) => setToast(`Load failed: ${e.message}`))
       .finally(() => setLoading(false));
@@ -1615,6 +1677,18 @@ export default function EmailTemplatesPanelV2() {
   useEffect(() => {
     loadDetail(selectedKey);
   }, [selectedKey, loadDetail]);
+
+  useEffect(() => {
+    if (!selectedKey) return;
+    const params = hashParams();
+    if (params.get("tab") !== "email_templates" || params.get("key") !== selectedKey) return;
+    window.setTimeout(() => {
+      document.getElementById(`email-template-row-${selectedKey}`)?.scrollIntoView({
+        block: "center",
+        behavior: "smooth",
+      });
+    }, 80);
+  }, [selectedKey, templates]);
 
   useEffect(() => {
     if (activeView === "history") loadHistory();
@@ -1863,6 +1937,31 @@ export default function EmailTemplatesPanelV2() {
     }
   };
 
+  const deleteTemplate = async (template) => {
+    if (!template?.template_key) return;
+    if (!window.confirm("Delete this email template? This can't be undone.")) return;
+    setBusy(true);
+    setToast("");
+    try {
+      await adminFetch(`/admin/email-templates/${template.template_key}`, { method: "DELETE" });
+      setTemplates((prev) => prev.filter((row) => row.template_key !== template.template_key));
+      if (selectedKey === template.template_key) {
+        setSelectedKey(null);
+        setDetail(null);
+      }
+      await loadTemplates();
+      setToast("Email template deleted");
+    } catch (e) {
+      if (e.status === 409 && e.body?.automations?.length) {
+        setToast(`In use by automation(s): ${e.body.automations.join(", ")}. Delete those first.`);
+      } else {
+        setToast(`Template delete failed: ${e.message}`);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const createSuppression = async () => {
     setBusy(true);
     setToast("");
@@ -2030,6 +2129,31 @@ export default function EmailTemplatesPanelV2() {
     }
   };
 
+  const deleteAutomation = async (key) => {
+    if (!key) return;
+    if (!window.confirm("Delete this email automation? This can't be undone.")) return;
+    setBusy(true);
+    setToast("");
+    try {
+      await adminFetch(`/admin/email-templates/automations/${key}`, { method: "DELETE" });
+      setAutomationDrafts((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      if (selectedRunsKey === key) {
+        setSelectedRunsKey(null);
+        setAutomationRuns([]);
+      }
+      await loadAutomations();
+      setToast("Automation deleted");
+    } catch (e) {
+      setToast(`Automation delete failed: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const dryRunAutomation = async (key) => {
     setBusy(true);
     setToast("");
@@ -2147,6 +2271,7 @@ export default function EmailTemplatesPanelV2() {
           onSelectRuns={selectAutomationRuns}
           onRefreshRuns={() => loadAutomationRuns(selectedRunsKey)}
           onProcessDue={processDueAutomationRuns}
+          onDelete={deleteAutomation}
         />
       ) : activeView === "history" ? (
         <SendHistoryPanel messages={history} loading={historyLoading} onRefresh={loadHistory} />
@@ -2193,6 +2318,7 @@ export default function EmailTemplatesPanelV2() {
               filter={filter}
               onFilter={setFilter}
               onToggleStatus={toggleTemplateStatus}
+              onDelete={deleteTemplate}
               busy={busy}
             />
 
