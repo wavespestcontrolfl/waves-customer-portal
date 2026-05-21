@@ -291,6 +291,8 @@ function calculatePropertyProfile(input) {
     bedAreaPricingConfidence,
     bedAreaCapped,
     ...(uncappedBedAreaEstimate !== undefined ? { uncappedBedAreaEstimate } : {}),
+    palmCount: input.palmCount,
+    palmInventory: input.palmInventory,
     perimeter,
     perimeterSource,
     lotCategory,

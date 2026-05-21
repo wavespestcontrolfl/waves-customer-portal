@@ -326,6 +326,25 @@ describe('pricing engine DB bridge', () => {
     expect(constants.PALM.flatCreditMinTier).toBe('silver');
   });
 
+  test('validates PALM treatment protocol config invariants', () => {
+    expect(validatePestPricingConfig(constants)).toEqual(expect.objectContaining({ valid: true }));
+
+    constants.PALM.tierQualifier = true;
+    constants.PALM.excludeFromPctDiscount = false;
+    constants.PALM.treatments.nutrition.allowedAppsPerYear = [2];
+    constants.PALM.treatments.insecticide.tiers = constants.PALM.treatments.insecticide.tiers
+      .filter(t => t.size !== 'large');
+
+    const result = validatePestPricingConfig(constants);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      'PALM.tierQualifier must remain false',
+      'PALM.excludeFromPctDiscount must remain true',
+      'PALM.treatments.nutrition.allowedAppsPerYear must include 1 and 2',
+      'PALM.treatments.insecticide.tiers must include large',
+    ]));
+  });
+
   test('syncs complete bed bug specialty pricing protocol from pricing_config', async () => {
     const db = pricingConfigDb([{
       config_key: 'onetime_bed_bug',

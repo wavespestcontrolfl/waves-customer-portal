@@ -139,6 +139,10 @@ function measurementMetadataFields(li = {}) {
     'setupCharge',
     'total',
     'scaleKey',
+    'palmCountSource',
+    'palmCountWasManualOverride',
+    'palmCountWasDefaulted',
+    'servicePalmCountDiffersFromPropertyPalmCount',
   ].forEach((field) => {
     if (li[field] !== undefined) fields[field] = li[field];
   });
@@ -353,6 +357,15 @@ function mapV1ToLegacyShape(v1Result) {
       annualAfterCredits: palmAnnualAfterCredits,
       monthlyAfterCredits: palmMonthlyAfterCredits,
       treatmentLabel: palmLI.treatmentLabel,
+      measurements: palmLI.measurements,
+      palmCountSource: palmLI.palmCountSource,
+      palmCountWasManualOverride: palmLI.palmCountWasManualOverride,
+      palmCountWasDefaulted: palmLI.palmCountWasDefaulted,
+      servicePalmCountDiffersFromPropertyPalmCount: palmLI.servicePalmCountDiffersFromPropertyPalmCount,
+      measurementWarnings: palmLI.measurementWarnings || [],
+      requiresMeasurement: !!palmLI.requiresMeasurement,
+      requiresManualReview: !!palmLI.requiresManualReview,
+      manualReviewReasons: palmLI.manualReviewReasons || [],
       detail: parts.join(' · '),
     };
   }

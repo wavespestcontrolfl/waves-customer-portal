@@ -75,9 +75,16 @@ function validateSortedBrackets(errors, name, rows, key, valueKey, options = {})
   }
 }
 
+function requirePalmTierSizes(errors, treatment, name) {
+  const sizes = new Set((treatment?.tiers || []).map(t => t.size));
+  for (const size of ['small', 'medium', 'large']) {
+    if (!sizes.has(size)) errors.push(`PALM.treatments.${name}.tiers must include ${size}`);
+  }
+}
+
 function validatePestPricingConfig(snapshot = constants) {
   const errors = [];
-  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE } = snapshot;
+  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE, PALM, WAVEGUARD } = snapshot;
 
   if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
   if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
@@ -285,6 +292,52 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!isNonNegativeNumber(product.floorAfterVolumeDiscount)) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorAfterVolumeDiscount must be non-negative`);
     }
+  }
+
+  const palm = PALM || {};
+  const palmTreatments = palm.treatments || palm.treatmentTypes || {};
+  if (!isPositiveNumber(palm.minPerVisit)) errors.push('PALM.minPerVisit must be positive');
+  if (!isNonNegativeNumber(palm.flatCreditPerPalm)) errors.push('PALM.flatCreditPerPalm must be non-negative');
+  if (!WAVEGUARD?.tiers?.[palm.flatCreditMinTier]) errors.push('PALM.flatCreditMinTier must be a valid WaveGuard tier');
+  if (palm.tierQualifier !== false) errors.push('PALM.tierQualifier must remain false');
+  if (palm.excludeFromPctDiscount !== true) errors.push('PALM.excludeFromPctDiscount must remain true');
+
+  for (const key of ['nutrition', 'insecticide', 'combo', 'fungal', 'lethalBronzing', 'treeAge']) {
+    if (!palmTreatments[key]?.pricingType) errors.push(`PALM.treatments.${key}.pricingType is required`);
+  }
+  const nutrition = palmTreatments.nutrition || {};
+  if (!isPositiveNumber(nutrition.pricePerPalm)) errors.push('PALM.treatments.nutrition.pricePerPalm must be positive');
+  if (!Array.isArray(nutrition.allowedAppsPerYear) || !nutrition.allowedAppsPerYear.includes(1) || !nutrition.allowedAppsPerYear.includes(2)) {
+    errors.push('PALM.treatments.nutrition.allowedAppsPerYear must include 1 and 2');
+  }
+  requirePalmTierSizes(errors, palmTreatments.insecticide, 'insecticide');
+  requirePalmTierSizes(errors, palmTreatments.combo, 'combo');
+  const fungal = palmTreatments.fungal || {};
+  if (!isPositiveNumber(fungal.floorPerPalm)) errors.push('PALM.treatments.fungal.floorPerPalm must be positive');
+  if (!Array.isArray(fungal.products) || !fungal.products.includes('PHOSPHO-Jet') || !fungal.products.includes('Propizol')) {
+    errors.push('PALM.treatments.fungal.products must include PHOSPHO-Jet and Propizol');
+  }
+  const lethalBronzing = palmTreatments.lethalBronzing || {};
+  if (!isPositiveNumber(lethalBronzing.floorPerPalm)) errors.push('PALM.treatments.lethalBronzing.floorPerPalm must be positive');
+  if (Number(lethalBronzing.intervalMonths) !== 3) errors.push('PALM.treatments.lethalBronzing.intervalMonths must be 3');
+  if (Number(lethalBronzing.appsPerYear) !== 4) errors.push('PALM.treatments.lethalBronzing.appsPerYear must be 4');
+  if (Number(lethalBronzing.minimumProgramMonths) !== 24) errors.push('PALM.treatments.lethalBronzing.minimumProgramMonths must be 24');
+  if (!Array.isArray(lethalBronzing.eligibleStatuses) || lethalBronzing.eligibleStatuses.length === 0) {
+    errors.push('PALM.treatments.lethalBronzing.eligibleStatuses must be non-empty');
+  }
+  if (!Array.isArray(lethalBronzing.ineligibleStatuses) || lethalBronzing.ineligibleStatuses.length === 0) {
+    errors.push('PALM.treatments.lethalBronzing.ineligibleStatuses must be non-empty');
+  }
+  const treeAge = palmTreatments.treeAge || {};
+  if (!isPositiveNumber(treeAge.floorPerPalm)) errors.push('PALM.treatments.treeAge.floorPerPalm must be positive');
+  if (Number(treeAge.intervalMonths) !== 24) errors.push('PALM.treatments.treeAge.intervalMonths must be 24');
+  if (Number(treeAge.appsPerYear) !== 0.5) errors.push('PALM.treatments.treeAge.appsPerYear must be 0.5');
+  const dbhMaxes = new Set((treeAge.tiers || []).map(t => t.dbhMax));
+  for (const max of [10, 15, 20, null]) {
+    if (!dbhMaxes.has(max)) errors.push(`PALM.treatments.treeAge.tiers must include DBH max ${max}`);
+  }
+  if (!palm.internalCostBasis || typeof palm.internalCostBasis !== 'object') {
+    errors.push('PALM.internalCostBasis is required');
   }
 
   return { valid: errors.length === 0, errors };
