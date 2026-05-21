@@ -1031,7 +1031,7 @@ describe('service report v1', () => {
     ]);
   });
 
-  test('visit timeline keeps Service completed visible when on-site and completion times match', () => {
+  test('visit timeline collapses same-time on-site and completion events', () => {
     const timeline = buildVisitTimeline({
       service: {
         status: 'completed',
@@ -1047,7 +1047,6 @@ describe('service report v1', () => {
 
     expect(timeline.events.map((event) => [event.type, event.displayTime, event.source])).toEqual([
       ['technician_en_route', '12:44 PM', 'bouncie'],
-      ['technician_on_site', '2:35 PM', 'bouncie'],
       ['service_completed', '2:35 PM', 'service_report'],
     ]);
     expect(timeline.events.find((event) => event.type === 'service_completed').customerDescription)

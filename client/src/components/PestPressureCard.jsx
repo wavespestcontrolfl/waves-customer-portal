@@ -179,6 +179,9 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
       marginTop: 12, marginBottom: 4, padding: 14,
       background: '#FAF8F3', border: '1px solid #E7E2D7', borderRadius: 10,
     }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: 4 }}>
+        Help us calibrate your Pest Pressure score
+      </div>
       <div style={{ fontSize: 13, fontWeight: 600, color: '#1B2C5B', marginBottom: 8 }}>
         {question}
       </div>
@@ -212,7 +215,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
   );
 }
 
-function SubmittedRatingNote({ rating }) {
+function SubmittedRatingNote() {
   return (
     <div style={{
       marginTop: 12, padding: 10,
@@ -220,7 +223,7 @@ function SubmittedRatingNote({ rating }) {
       display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#15803D',
     }}>
       <CheckCircle2 size={14} aria-hidden="true" />
-      <span>Thanks — you reported activity level <strong>{rating}</strong> for this period.</span>
+      <span>Thanks — your feedback helps us compare technician findings with what you are seeing at home.</span>
     </div>
   );
 }
@@ -268,7 +271,7 @@ export default function PestPressureCard({ data, token }) {
             Pest Pressure
           </div>
           <h2 style={{ margin: '4px 0 0', fontSize: 18, fontWeight: 700, color: '#1B2C5B' }}>
-            {isInsufficient ? 'Score not yet available' : `${labelName || 'Score'} — ${scoreNum.toFixed(1)} / ${MAX_SCORE}`}
+            {isInsufficient ? 'Pest Pressure is being calculated' : `${labelName || 'Score'} — ${scoreNum.toFixed(1)} / ${MAX_SCORE}`}
           </h2>
           {dateText ? (
             <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>As of {dateText}</div>
@@ -292,13 +295,13 @@ export default function PestPressureCard({ data, token }) {
       {effective.canCaptureClientRating && token ? (
         <ClientRatingPicker
           token={token}
-          question={effective.clientRatingQuestion || 'Since your last service, how much pest activity have you noticed?'}
+          question={effective.clientRatingQuestion || 'Over the past 3 months, how much pest activity have you noticed?'}
           onSubmitted={(updated) => setOverride(updated || effective)}
         />
       ) : null}
 
       {effective.submittedClientRating !== null && effective.submittedClientRating !== undefined ? (
-        <SubmittedRatingNote rating={effective.submittedClientRating} />
+        <SubmittedRatingNote />
       ) : null}
 
       {effective.showComponentBreakdown && effective.components ? (
