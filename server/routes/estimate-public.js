@@ -62,9 +62,8 @@ const ESTIMATE_ASK_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 //      changes.
 //   3. Admin IP allowlist: legacy WAVES_ADMIN_IPS support for office/network
 //      previews that do not carry the marker cookie.
-// First-view side-effects (status flip, office SMS, admin notification)
-// use the same gate; a filtered preview must not make the estimate look
-// customer-opened.
+// First-view side-effects (status flip + admin in-app notification) use the
+// same gate; a filtered preview must not make the estimate look customer-opened.
 const { isBotUserAgent } = require('../utils/bot-ua');
 
 function clientIp(req) {
@@ -100,15 +99,21 @@ function requestUserAgent(req) {
   return req?.headers?.['user-agent'] || req?.headers?.['User-Agent'] || '';
 }
 
-function shouldCountView(req, ip) {
+function estimateHasBeenSent(estimate) {
+  if (!estimate) return true;
+  return !!estimate.sent_at;
+}
+
+function shouldCountView(req, ip, estimate = null) {
+  if (!estimateHasBeenSent(estimate)) return false;
   if (isBotUserAgent(requestUserAgent(req))) return false;
   if (hasAdminMarker(req)) return false;
   if (isAdminIp(ip)) return false;
   return true;
 }
 
-function shouldApplyFirstViewSideEffects(req, ip) {
-  return shouldCountView(req, ip);
+function shouldApplyFirstViewSideEffects(req, ip, estimate = null) {
+  return shouldCountView(req, ip, estimate);
 }
 
 function hashEstimateToken(token) {
@@ -3272,7 +3277,7 @@ async function handleEstimateView(req, res, next) {
     // IPs are filtered upstream by shouldCountView so the dashboard count
     // reflects actual customer opens.
     const requestIp = clientIp(req);
-    const countThisView = shouldCountView(req, requestIp);
+    const countThisView = shouldCountView(req, requestIp, estimate);
     if (countThisView) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
@@ -3294,10 +3299,10 @@ async function handleEstimateView(req, res, next) {
       } catch (e) { logger.warn(`[estimate-view] estimate_views insert skipped: ${e.message}`); }
     }
 
-    // First-view actions: set viewed_at/status, notify admin + SMS office.
+    // First-view actions: set viewed_at/status and notify admin in-app.
     // Admin preview links should render the exact customer page without
     // making the estimate look customer-opened.
-    if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, requestIp) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, requestIp, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       await db('estimates').where({ id: estimate.id }).update({ viewed_at: db.fn.now(), status: 'viewed' });
       try {
         await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
@@ -3309,12 +3314,6 @@ async function handleEstimateView(req, res, next) {
         const NotificationService = require('../services/notification-service');
         await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
-
-      try {
-        await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
-          `\u{1F440} ${estimate.customer_name} just opened their estimate ($${estimate.monthly_total || 0}/mo ${estimate.waveguard_tier || ''}). Great time to follow up! ${estimate.customer_phone || ''}`
-        );
-      } catch (e) { logger.error(`[estimate-view] office SMS failed: ${e.message}`); }
     }
 
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
@@ -3723,35 +3722,6 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) {
         logger.error(`[estimate-accept] Linked lead conversion failed for estimate ${estimate.id}: ${e.message}`);
       }
-    }
-
-    // Notify office
-    if (customerId) {
-      try {
-        const officeVars = {
-          customer_name: estimate.customer_name || '',
-          address: estimate.address || '',
-          waveguard_tier: estimate.waveguard_tier || 'Bronze',
-          monthly_total: estimate.monthly_total || 0,
-        };
-        officeVars.monthly_total = effectiveMonthlyTotal || officeVars.monthly_total;
-        const officeFallback = buildAcceptOfficeFallback({
-          customerName: officeVars.customer_name,
-          address: officeVars.address,
-          waveguardTier: officeVars.waveguard_tier,
-          monthlyTotal: officeVars.monthly_total,
-          serviceLabel: oneTimeList[0]?.name || 'service',
-          treatAsOneTime,
-          billByInvoice,
-          reservationCommitted,
-          billingTerm,
-          annualPrepayAmount: annualPrepayInvoiceAmount,
-        });
-        const officeBody = annualPrepaySelected
-          ? officeFallback
-          : await renderTemplate('estimate_accepted_office', officeVars, officeFallback);
-        await TwilioService.sendSMS(WAVES_OFFICE_PHONE, officeBody);
-      } catch (e) { logger.error(`Estimate accept SMS failed: ${e.message}`); }
     }
 
     // Send acceptance SMS to customer. Invoice-mode sends its own SMS
@@ -4421,10 +4391,10 @@ router.put('/:token/decline', async (req, res, next) => {
 //   - view_count++ + last_viewed_at + estimate_views row: every real customer
 //     200. Bot scanners, link previews, admin-cookie previews, and admin IPs
 //     are filtered out.
-//   - First-view transition (status='draft' → 'viewed', viewed_at stamp,
-//     office SMS, admin notification): fires only when viewed_at IS NULL
-//     AND the request passes the same real-customer-view gate. Keeps preview
-//     clicks from triggering "customer just opened" alerts.
+//   - First-view transition (status='sent' → 'viewed', viewed_at stamp,
+//     admin in-app notification): fires only when viewed_at IS NULL AND the
+//     request passes the same real-customer-view gate. Keeps preview clicks
+//     from triggering "customer just opened" alerts.
 //
 // Admin allowlist: WAVES_ADMIN_IPS env var, comma-separated. Unset =
 // fire-for-everyone (fail open — matches current HTML behavior).
@@ -5636,7 +5606,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // drift on estimate_views or a locked row shouldn't break the
     // customer-facing endpoint.
     const ip = extractRequestIp(req);
-    if (shouldCountView(req, ip)) {
+    if (shouldCountView(req, ip, estimate)) {
       try {
         await db('estimates').where({ id: estimate.id }).update({
           view_count: db.raw('COALESCE(view_count, 0) + 1'),
@@ -5655,9 +5625,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       } catch (e) { logger.warn(`[estimate-data] estimate_views insert skipped: ${e.message}`); }
     }
 
-    // First-view transition — keep admin preview clicks from firing the
-    // "customer just opened their estimate" office SMS.
-    if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    // First-view transition — keep admin preview clicks from making the
+    // estimate look customer-opened.
+    if (!estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       await db('estimates').where({ id: estimate.id }).update({
         viewed_at: db.fn.now(),
         status: 'viewed',
@@ -5677,13 +5647,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
         );
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
-
-      try {
-        await TwilioService.sendSMS(
-          WAVES_OFFICE_PHONE,
-          `\u{1F440} ${estimate.customer_name} just opened their estimate ($${estimate.monthly_total || 0}/mo ${estimate.waveguard_tier || ''}). Great time to follow up! ${estimate.customer_phone || ''}`
-        );
-      } catch (e) { logger.error(`[estimate-data] office SMS failed: ${e.message}`); }
     }
 
     let estimateDataForIntelligence = {};
@@ -5866,5 +5829,6 @@ module.exports.withSupplementedRecurringServices = withSupplementedRecurringServ
 module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
+module.exports.estimateHasBeenSent = estimateHasBeenSent;
 module.exports.shouldApplyFirstViewSideEffects = shouldApplyFirstViewSideEffects;
 module.exports.renderEditableSmsTemplate = renderEditableSmsTemplate;

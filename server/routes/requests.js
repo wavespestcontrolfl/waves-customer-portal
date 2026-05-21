@@ -3,13 +3,11 @@ const router = express.Router();
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const TwilioService = require('../services/twilio');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-
-const WAVES_OFFICE_PHONE = '+19413187612';
 
 const VALID_CATEGORIES = ['pest_issue', 'lawn_concern', 'add_service', 'schedule_change', 'billing', 'cancellation', 'pause', 'upgrade', 'other'];
 const VALID_URGENCIES = ['routine', 'urgent'];
@@ -125,21 +123,32 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     const photoCount = photoData.length;
     const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
 
-    // Notify office via SMS
+    // Internal admin alert only. Service requests should surface in the admin
+    // notification feed, not text the office number.
     try {
       const urgencyTag = validUrgency === 'urgent' ? '🚨 URGENT ' : '';
-      await TwilioService.sendSMS(
-        WAVES_OFFICE_PHONE,
-        `${urgencyTag}New service request from ${customerName}\n\n` +
+      await NotificationService.notifyAdmin(
+        'service',
+        `${urgencyTag}New service request from ${customerName}`,
         `Category: ${categoryLabel}\n` +
-        `Subject: ${cleanSubject}\n` +
-        (locationLabel ? `Location: ${locationLabel}\n` : '') +
-        (photoCount > 0 ? `📸 ${photoCount} photo(s) attached\n` : '') +
-        (descPreview ? `\n"${descPreview}${cleanDescription.length > 100 ? '...' : ''}"\n` : '') +
-        `\nCheck the admin panel.`
+          `Subject: ${cleanSubject}` +
+          (locationLabel ? `\nLocation: ${locationLabel}` : '') +
+          (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
+          (descPreview ? `\n\n"${descPreview}${cleanDescription.length > 100 ? '...' : ''}"` : ''),
+        {
+          icon: validUrgency === 'urgent' ? '🚨' : '🏠',
+          link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,
+          metadata: {
+            requestId: request.id,
+            customerId: req.customer.id,
+            category,
+            urgency: validUrgency,
+            photoCount,
+          },
+        }
       );
-    } catch (smsErr) {
-      logger.error(`Failed to send office SMS for request ${request.id}: ${smsErr.message}`);
+    } catch (notifErr) {
+      logger.error(`Failed to create admin notification for request ${request.id}: ${notifErr.message}`);
     }
 
     // Send customer confirmation SMS

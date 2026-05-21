@@ -486,6 +486,7 @@ router.get('/', async (req, res, next) => {
   try {
     const { status, search, source, page = 1, limit = 50, archived: archivedRaw } = req.query;
     const includePricingRisk = ['1', 'true', 'yes'].includes(String(req.query.pricingRisk || '').toLowerCase());
+    const sentOnly = ['1', 'true', 'yes'].includes(String(req.query.sentOnly || req.query.sent_only || '').toLowerCase());
     // archived=only → archived-only view. archived=all → include both.
     // Default (unset / any other value) → hide archived.
     const archived = archivedRaw === 'only' || archivedRaw === '1' || archivedRaw === 'true'
@@ -500,6 +501,7 @@ router.get('/', async (req, res, next) => {
       .orderBy('estimates.created_at', 'desc');
 
     if (status) query = query.where('estimates.status', status);
+    if (sentOnly) query = query.whereNotNull('estimates.sent_at');
     if (source) {
       const sources = source.split(',');
       query = query.whereIn('estimates.source', sources);
@@ -614,6 +616,7 @@ router.get('/', async (req, res, next) => {
         if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = null; } }
         const monthlyTotal = parseFloat(e.monthly_total || 0);
         const onetimeTotal = parseFloat(e.onetime_total || 0);
+        const hasBeenSent = !!e.sent_at;
         const serviceLines = inferEstimateServiceLines({
           ...e,
           estimateData: estData,
@@ -651,12 +654,14 @@ router.get('/', async (req, res, next) => {
           updatedAt: e.updated_at,
           monthlyTotal,
           tier: e.waveguard_tier, createdBy: e.created_by_name,
-          sentAt: e.sent_at, viewedAt: e.viewed_at, acceptedAt: e.accepted_at,
+          sentAt: e.sent_at,
+          viewedAt: hasBeenSent ? e.viewed_at : null,
+          acceptedAt: e.accepted_at,
           scheduledAt: e.scheduled_at,
           sendMethod: e.send_method,
           declinedAt: e.declined_at,
-          viewCount: e.view_count || 0,
-          lastViewedAt: e.last_viewed_at,
+          viewCount: hasBeenSent ? e.view_count || 0 : 0,
+          lastViewedAt: hasBeenSent ? e.last_viewed_at : null,
           clickCount: parseInt(clickStats.get(e.id)?.click_count || 0, 10),
           lastClickedAt: clickStats.get(e.id)?.last_clicked_at || null,
           createdAt: e.created_at,

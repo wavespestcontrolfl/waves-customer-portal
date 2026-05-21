@@ -1329,8 +1329,8 @@ function EstimatePipelineViewV2() {
     // cluttering the pipeline.
     const qs =
       filter === "archived"
-        ? `?archived=only&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
-        : `?limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
+        ? `?archived=only&sentOnly=1&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
+        : `?sentOnly=1&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
     setLoading(true);
     setError(null);
     adminFetch(`/admin/estimates${qs}`)
@@ -1650,11 +1650,11 @@ function EstimatePipelineViewV2() {
           {/* Estimates list */}
           {filtered.length === 0 ? (
             <div className="p-10 text-center text-13 text-ink-secondary">
-              No estimates{" "}
+              No sent estimates{" "}
               {filter !== "all"
                 ? `in "${estimateFilterLabel(filter) || filter}"`
                 : "yet"}
-              . Create one using the Create Estimate tab.
+              . Send an estimate from Create Estimate before it appears here.
             </div>
           ) : (
             <div className="flex flex-col gap-2">
@@ -2813,8 +2813,8 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
   const refreshEstimates = useCallback(() => {
     const qs =
       filter === "archived"
-        ? `?archived=only&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
-        : `?limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
+        ? `?archived=only&sentOnly=1&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`
+        : `?sentOnly=1&limit=${ESTIMATE_PIPELINE_LIMIT}&pricingRisk=1`;
     setError(null);
     adminFetch(`/admin/estimates${qs}`)
       .then((d) => setEstimates(d.estimates || []))
@@ -3134,12 +3134,12 @@ function EstimatesMobileListView({ onNew, onCreateFromAddress }) {
             {" "}
             <div className="text-14 text-ink-primary mb-1">
               {estimates.length === 0
-                ? "No estimates yet"
+                ? "No sent estimates yet"
                 : "No estimates found"}
             </div>{" "}
             <div className="text-13 text-ink-tertiary">
               {estimates.length === 0
-                ? "Tap Add Estimate to create one"
+                ? "Send an estimate before it appears here"
                 : "Try adjusting your filters"}
             </div>{" "}
           </CardBody>{" "}
