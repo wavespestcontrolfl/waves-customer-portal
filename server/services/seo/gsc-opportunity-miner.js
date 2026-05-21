@@ -641,8 +641,14 @@ class GscOpportunityMiner {
   }
 
   async mineSeasonalRising(periodDays) {
-    const recentSince = sinceDate(14);
-    const priorSince = sinceDate(28);
+    // Honor the caller's lookback window. Earlier iteration hardcoded
+    // 14 / 28 days; when run-opportunity-miner.js was called with
+    // --period=7 the other buckets used 7d but seasonal-rising silently
+    // used a different dataset, producing inconsistent counts.
+    // Half the window = recent; full window = prior baseline.
+    const recentDays = Math.max(1, Math.round(periodDays / 2));
+    const recentSince = sinceDate(recentDays);
+    const priorSince = sinceDate(periodDays);
 
     const recent = await db('gsc_queries')
       .where('date', '>=', recentSince)
