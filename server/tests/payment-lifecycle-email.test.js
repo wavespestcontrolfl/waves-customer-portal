@@ -157,7 +157,7 @@ describe('payment lifecycle email sender', () => {
 
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'payment.method_updated',
-      idempotencyKey: 'payment.method_updated:cust-1:pm-new:2026-05-20',
+      idempotencyKey: 'payment.method_updated:cust-1:pm-old:pm-new:2026-05-20',
       payload: expect.objectContaining({
         old_payment_method_label: 'Visa ending in 1881',
         new_payment_method_label: 'Visa ending in 4242',
@@ -271,7 +271,7 @@ describe('payment lifecycle email sender', () => {
     expect(JSON.stringify(payload)).not.toMatch(/pi_sensitive|re_sensitive|pm_/);
   });
 
-  test('does not send when customer email is disabled for service notices', async () => {
+  test('still sends required payment notices when general customer email is disabled', async () => {
     const interaction = chain();
     setDbQueues({
       ...lifecycleQueues({ prefs: { email_enabled: false }, interaction }),
@@ -283,11 +283,14 @@ describe('payment lifecycle email sender', () => {
       plan: {},
     });
 
-    expect(result).toMatchObject({ skipped: true, reason: 'customer_email_disabled' });
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, messageId: 'sg-123' });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.plan_confirmed',
+      suppressionGroupKey: 'transactional_required',
+    }));
     expect(interaction.insert).toHaveBeenCalledWith(expect.objectContaining({
       interaction_type: 'email_outbound',
-      subject: 'payment.plan_confirmed email skipped',
+      subject: 'payment.plan_confirmed email sent',
     }));
   });
 

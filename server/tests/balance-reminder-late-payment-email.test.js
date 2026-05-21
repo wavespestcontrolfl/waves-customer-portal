@@ -221,6 +221,29 @@ describe('late-payment email sidecar', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('still sends required late-payment email when general customer email is disabled', async () => {
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      notification_prefs: [chain({ first: { email_enabled: false } })],
+      customer_interactions: [chain()],
+    });
+
+    await BalanceReminder.sendLatePaymentEmail({
+      customer: customer(),
+      invoice: invoice(),
+      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
+      smsTemplateKey: 'late_payment_30d',
+      invoiceTitle: 'Quarterly Pest Control',
+      serviceDateClause: '',
+      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'billing_late_payment_30_day',
+      suppressionGroupKey: 'transactional_required',
+    }));
+  });
+
   test('email failure is logged and does not block the late-payment SMS path', async () => {
     EmailTemplates.sendTemplate.mockRejectedValueOnce(new Error('sendgrid down'));
     const emailFailureInteraction = chain();

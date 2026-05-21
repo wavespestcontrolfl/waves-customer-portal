@@ -48,6 +48,14 @@ function stableDateKey(value) {
   return dateOnlyString(value) || (value ? String(value).slice(0, 10) : dateOnlyString(new Date()));
 }
 
+function stableEventKey(value) {
+  if (!value) return new Date().toISOString();
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime()) && String(value).includes('T')) return parsed.toISOString();
+  return String(value).replace(/[^a-zA-Z0-9_.:-]/g, '_');
+}
+
 function money(value) {
   if (value == null || value === '') return '';
   return currency(value);
@@ -181,21 +189,6 @@ async function sendLifecycleTemplate({
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
   const prefs = await loadPrefs(customer.id);
-  if (prefs?.email_enabled === false) {
-    await logPaymentLifecycleEmailAttempt({
-      customerId: customer.id,
-      invoiceId,
-      paymentId,
-      paymentMethodId,
-      refundId,
-      paymentPlanId,
-      templateKey,
-      eventType,
-      status: 'skipped',
-      failureReason: 'customer_email_disabled',
-    });
-    return { ok: false, skipped: true, reason: 'customer_email_disabled' };
-  }
 
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
     .filter((entry) => isEmailLike(entry.email));
@@ -299,7 +292,7 @@ async function sendAutopayEnabled({ customerId, paymentMethodId, enabledDate = n
     eventType: 'payment.autopay_enabled',
     payload,
     paymentMethodId: paymentMethodId || null,
-    idempotencyKey: idempotencyKey || `payment.autopay_enabled:${customerId}:${paymentMethodId || 'none'}:${stableDateKey(enabledDate)}`,
+    idempotencyKey: idempotencyKey || `payment.autopay_enabled:${customerId}:${paymentMethodId || 'none'}:${stableEventKey(enabledDate)}`,
   });
 }
 
@@ -326,7 +319,7 @@ async function sendPaymentMethodUpdated({
     eventType: 'payment.method_updated',
     payload,
     paymentMethodId: newPaymentMethodId || null,
-    idempotencyKey: idempotencyKey || `payment.method_updated:${customerId}:${newPaymentMethodId || 'none'}:${stableDateKey(updatedAt)}`,
+    idempotencyKey: idempotencyKey || `payment.method_updated:${customerId}:${oldPaymentMethodId || 'none'}:${newPaymentMethodId || 'none'}:${stableEventKey(updatedAt)}`,
   });
 }
 

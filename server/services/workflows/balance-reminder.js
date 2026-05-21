@@ -308,17 +308,6 @@ class BalanceReminder {
         logger.warn(`[balance-reminder] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
         return null;
       });
-    if (prefs?.email_enabled === false) {
-      await logLatePaymentEmailAttempt({
-        customerId: customer.id,
-        invoiceId: latestInvoice.id,
-        templateKey: config.templateKey,
-        stageDays: config.stageDays,
-        status: "skipped",
-        failureReason: "customer_email_disabled",
-      });
-      return { ok: false, skipped: true, reason: "customer_email_disabled" };
-    }
 
     const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
       .filter((entry) => isEmailLike(entry.email));
