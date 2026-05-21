@@ -267,14 +267,46 @@ function classifyQuestion(text) {
   return null;
 }
 
-// crude PII redaction for any example we surface
+// PII redaction for any example we surface. Mirrors the production
+// pii-redactor.js (which lives on Step 3's branch and isn't importable
+// from here) — structured patterns + an aggressive standalone name pair
+// pass guarded by a small allowlist of SWFL cities, staff, and common
+// non-name capitalized words. False-positive redactions are cheap;
+// false-negative name leaks in the calibration report are not.
+const NAME_ALLOWLIST = new Set([
+  'Bradenton', 'Sarasota', 'Venice', 'Parrish', 'Palmetto', 'North', 'Port',
+  'Charlotte', 'Lakewood', 'Ranch', 'Manatee', 'Anna', 'Maria', 'Longboat',
+  'Siesta', 'Key', 'Island', 'Wave', 'Waves', 'Pest', 'Control', 'Lawn',
+  'Care', 'Mosquito', 'Termite', 'Rodent', 'Ant', 'Roach', 'Spider',
+  'Florida', 'Friday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
+  'Saturday', 'Sunday', 'January', 'February', 'March', 'April', 'May',
+  'June', 'July', 'August', 'September', 'October', 'November', 'December',
+  'Saint', 'St', 'Google', 'Facebook', 'Yelp', 'BBB', 'YouTube', 'Stripe',
+  'Twilio', 'Adam', 'Virginia', 'Jose', 'Jacob', 'Alvarado', 'Heaton',
+]);
+
+function looksLikeAllowlist(first, last) {
+  if (!first || !last) return true;
+  if (NAME_ALLOWLIST.has(first) || NAME_ALLOWLIST.has(last)) return true;
+  if (first === first.toUpperCase() || last === last.toUpperCase()) return true;
+  if (first.length < 2 || last.length < 2) return true;
+  return false;
+}
+
 function redact(text) {
   if (!text) return '';
-  return String(text)
-    .replace(/\b\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g, '[phone]')
-    .replace(/[\w._%+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '[email]')
-    .replace(/\b\d{1,5}\s+([A-Z][a-z]+\s)+(St|Ave|Blvd|Rd|Dr|Ln|Way|Ct)\b/g, '[address]')
-    .slice(0, 220);
+  let out = String(text);
+  // Structured patterns.
+  out = out.replace(/\b\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g, '[phone]');
+  out = out.replace(/[\w._%+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '[email]');
+  out = out.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]');
+  out = out.replace(/\b\d{1,6}\s+([A-Z][a-zA-Z]+\s+){1,4}(St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Cir|Circle|Pl|Place|Pkwy|Parkway|Hwy|Highway|Ter|Terrace|Trl|Trail)\.?\b/g, '[address]');
+  out = out.replace(/\b(FL|Florida)\s+\d{5}(-\d{4})?\b/g, '[zip]');
+  // Aggressive standalone first+last name pair (allowlist filtered).
+  out = out.replace(/\b([A-Z][a-z]{1,15})\s+([A-Z][a-z]{1,20})\b/g, (m, f, l) =>
+    looksLikeAllowlist(f, l) ? m : '[name]'
+  );
+  return out.slice(0, 220);
 }
 
 async function pickCustomerClusters() {
@@ -287,46 +319,108 @@ async function pickCustomerClusters() {
     clusters.set(key, c);
   };
 
-  // SMS — inbound, recent
+  // Eligibility audit for the report — mirrors the production
+  // customer-insights-miner gates so calibration output can't surface
+  // sources the production engine would refuse to mine.
+  const eligibility = { records_seen: 0, excluded: {} };
+  const reject = (reason) => {
+    eligibility.excluded[reason] = (eligibility.excluded[reason] || 0) + 1;
+  };
+
+  // Pre-load suppression list + check whether the consent column exists.
+  // FL 934.03 + FTC data-minimization: don't surface call examples
+  // without explicit recording consent, and don't surface SMS from
+  // opted-out senders.
+  let consentColumnPresent = false;
+  try {
+    const cols = await db('information_schema.columns')
+      .where({ table_name: 'call_log', table_schema: 'public' })
+      .pluck('column_name');
+    consentColumnPresent = cols.includes('call_recording_consent_disclaimer_played');
+  } catch { /* */ }
+
+  let suppressedPhones = new Set();
+  try {
+    const rows = await db('messaging_suppression').where('active', true).pluck('phone');
+    suppressedPhones = new Set(rows.map((p) => String(p || '').replace(/\D/g, '').replace(/^1/, '')));
+  } catch { /* table absent */ }
+
+  // SMS — inbound, recent, sender not suppressed.
   try {
     const sms = await db('messages')
-      .where('direction', 'inbound')
-      .where('channel', 'sms')
-      .where('created_at', '>=', new Date(Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000))
-      .select('body')
+      .where('messages.direction', 'inbound')
+      .where('messages.channel', 'sms')
+      .where('messages.author_type', 'customer')
+      .where('messages.created_at', '>=', new Date(Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000))
+      .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+      .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+      .select(
+        'messages.body',
+        db.raw('COALESCE(conversations.contact_phone, customers.phone) as from_phone')
+      )
       .limit(2000);
     for (const m of sms) {
+      eligibility.records_seen++;
+      const fromPhone = String(m.from_phone || '').replace(/\D/g, '').replace(/^1/, '');
+      if (!fromPhone) { reject('suppression_lookup_unavailable'); continue; }
+      if (suppressedPhones.has(fromPhone)) { reject('suppressed_sender'); continue; }
       const topic = classifyQuestion(m.body);
       if (topic) bump(topic, null, 'sms', m.body);
     }
   } catch { /* table absent or schema drift */ }
 
-  // Call lead_synopsis
+  // Call lead_synopsis — degrade closed when consent column missing.
+  // Production miner does the same; calibration must match so the
+  // report doesn't surface unconsented call snippets.
   try {
-    const calls = await db('call_log')
-      .where('direction', 'inbound')
-      .where('created_at', '>=', new Date(Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000))
-      .whereNotNull('lead_synopsis')
-      .select('lead_synopsis')
-      .limit(2000);
-    for (const c of calls) {
-      const topic = classifyQuestion(c.lead_synopsis);
-      if (topic) bump(topic, null, 'call', c.lead_synopsis);
+    if (!consentColumnPresent) {
+      // Count and reject without ever reading lead_synopsis.
+      const count = await db('call_log')
+        .where('direction', 'inbound')
+        .where('created_at', '>=', new Date(Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000))
+        .whereNotNull('lead_synopsis')
+        .count('* as c')
+        .first();
+      const n = parseInt(count?.c || 0, 10);
+      eligibility.records_seen += n;
+      if (n > 0) eligibility.excluded.consent_column_missing = n;
+    } else {
+      const calls = await db('call_log')
+        .where('direction', 'inbound')
+        .where('created_at', '>=', new Date(Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000))
+        .whereNotNull('lead_synopsis')
+        .select('lead_synopsis', 'call_outcome', 'call_recording_consent_disclaimer_played')
+        .limit(2000);
+      for (const c of calls) {
+        eligibility.records_seen++;
+        if (c.call_recording_consent_disclaimer_played !== true) { reject('consent_not_played'); continue; }
+        if (['wrong_number', 'spam'].includes(c.call_outcome)) { reject('non_service_call'); continue; }
+        const topic = classifyQuestion(c.lead_synopsis);
+        if (topic) bump(topic, null, 'call', c.lead_synopsis);
+      }
     }
   } catch { /* */ }
 
-  // Google reviews
+  // Google reviews — public content; still gate against low-star
+  // (cherry-picking complaints is bad faith) and JSON-blob review_text
+  // rows (Step 0 surfaced ~3 such rows in google_reviews).
   try {
     const reviews = await db('google_reviews')
       .where('review_created_at', '>=', new Date(Date.now() - 365 * 86400_000))
       .whereNotNull('review_text')
-      .select('review_text', 'location_id')
+      .select('review_text', 'star_rating', 'location_id')
       .limit(2000);
     for (const r of reviews) {
+      eligibility.records_seen++;
+      if (typeof r.star_rating === 'number' && r.star_rating < 3) { reject('low_star_complaint'); continue; }
+      if (/^\s*\{[\s\S]*\}\s*$/.test(r.review_text)) { reject('json_blob_in_text'); continue; }
       const topic = classifyQuestion(r.review_text);
       if (topic) bump(topic, r.location_id, 'review', r.review_text);
     }
   } catch { /* */ }
+
+  // Stash eligibility on the function for the report writer to surface.
+  pickCustomerClusters.lastEligibility = eligibility;
 
   return Array.from(clusters.values())
     .map((c) => ({
@@ -443,8 +537,21 @@ function writePagesSection(title, rows, withDecay) {
 function writeClustersSection(clusters) {
   log(`## 4. Customer-question clusters (top 20)`);
   log('');
+
+  // Eligibility audit: matches the production customer-insights-miner
+  // gates (FL 934.03 call-recording consent, messaging suppression,
+  // cherry-pick review guard). Calibration must surface these exclusions
+  // so the report is honest about what was filtered before redaction.
+  const e = pickCustomerClusters.lastEligibility || { records_seen: 0, excluded: {} };
+  log(`Source eligibility (production gates applied):`);
+  log(`- records seen: ${e.records_seen}`);
+  for (const [reason, n] of Object.entries(e.excluded || {})) {
+    log(`- excluded \`${reason}\`: ${n}`);
+  }
+  log('');
+
   if (!clusters.length) {
-    log(`_No clusters detected. Either inbound message volume is low, regex patterns need tuning, or source tables are absent._`);
+    log(`_No clusters detected. Either inbound message volume is low, regex patterns need tuning, all sources were gated out (e.g., consent column absent), or source tables are absent._`);
     log('');
     return;
   }
