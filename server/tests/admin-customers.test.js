@@ -1,12 +1,16 @@
 const adminCustomersRoute = require('../routes/admin-customers');
 
 const {
+  adminMembershipDailyIdempotencyKey,
+  adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,
   cadenceFromEstimateLine,
   customerSearchTerms,
+  hasMembership,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapPipelineCustomer,
+  membershipDetailsChanged,
   scheduleLinesFromEstimate,
 } = adminCustomersRoute._private;
 
@@ -66,6 +70,63 @@ describe('admin customers route helpers', () => {
     expect(cadenceFromEstimateLine({ frequency: 'Triannual (every 4 months)' }, 'quarterly')).toBe('triannual');
     expect(cadenceFromEstimateLine({ frequency: 'Semi-Annual' }, 'quarterly')).toBe('semiannual');
     expect(cadenceFromEstimateLine({ frequency: 'Monthly' }, 'quarterly')).toBe('monthly');
+  });
+
+  test('does not treat one-time or none tiers as memberships', () => {
+    expect(hasMembership({ tier: 'One-Time', monthlyRate: 0 })).toBe(false);
+    expect(hasMembership({ waveguard_tier: 'one_time', monthly_rate: 0 })).toBe(false);
+    expect(hasMembership({ waveguard_tier: 'none', monthly_rate: 129 })).toBe(false);
+    expect(hasMembership({ tier: 'Gold', monthlyRate: 0 })).toBe(true);
+    expect(hasMembership({ monthlyRate: 129 })).toBe(true);
+  });
+
+  test('normalizes membership details before deciding lifecycle sends', () => {
+    expect(membershipDetailsChanged(
+      { waveguard_tier: 'Gold', monthly_rate: '129.50' },
+      { waveguard_tier: 'Gold', monthly_rate: 129.5 },
+    )).toBe(false);
+    expect(membershipDetailsChanged(
+      { waveguard_tier: 'Gold', monthly_rate: '129.50' },
+      { waveguard_tier: 'none', monthly_rate: 0 },
+    )).toBe(true);
+    expect(membershipDetailsChanged(
+      { waveguard_tier: 'One-Time', monthly_rate: 0 },
+      { waveguard_tier: null, monthly_rate: 0 },
+    )).toBe(false);
+  });
+
+  test('builds admin membership idempotency keys on the ET business date', () => {
+    const eventAt = new Date('2026-05-21T01:30:00.000Z');
+    expect(adminMembershipDailyIdempotencyKey(
+      'membership.canceled',
+      'customer-1',
+      'admin',
+      eventAt,
+    )).toBe('membership.canceled:customer-1:admin:2026-05-20');
+
+    expect(adminMembershipStartIdempotencyKey(
+      'customer-1',
+      { waveguard_tier: 'none', monthly_rate: 0 },
+      { waveguard_tier: 'Gold', monthly_rate: 129 },
+      eventAt,
+    )).toBe('membership.started:customer-1:admin:2026-05-20:2026-05-21T01:30:00.000Z:none:0:gold:12900');
+  });
+
+  test('scopes admin membership-start keys to each admin event', () => {
+    const before = { waveguard_tier: 'none', monthly_rate: 0 };
+    const after = { waveguard_tier: 'Gold', monthly_rate: 129 };
+
+    expect(adminMembershipStartIdempotencyKey(
+      'customer-1',
+      before,
+      after,
+      new Date('2026-05-20T14:00:00.000Z'),
+    )).not.toBe(adminMembershipStartIdempotencyKey(
+      'customer-1',
+      before,
+      after,
+      new Date('2026-05-20T14:05:00.000Z'),
+    ));
   });
 
   test('excludes billing-only one-time estimate rows from scheduling', () => {

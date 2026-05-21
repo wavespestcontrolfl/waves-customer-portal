@@ -2,7 +2,11 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-converter', () => ({ convertEstimate: jest.fn() }));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccepted: jest.fn() }));
+jest.mock('../services/account-membership-email', () => ({
+  sendMembershipStarted: jest.fn().mockResolvedValue({ sent: true }),
+}));
 
+const AccountMembershipEmail = require('../services/account-membership-email');
 const {
   markEstimateManuallyAccepted,
 } = require('../services/estimate-manual-acceptance');
@@ -57,6 +61,10 @@ function makeDb(estimate) {
 }
 
 describe('estimate manual acceptance', () => {
+  beforeEach(() => {
+    AccountMembershipEmail.sendMembershipStarted.mockClear();
+  });
+
   test('stamps accepted_at, clears lost metadata, and runs won hooks', async () => {
     const estimate = {
       id: 'estimate-1',
@@ -72,7 +80,12 @@ describe('estimate manual acceptance', () => {
     };
     const { database, updates, inserts } = makeDb(estimate);
     const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
-    const estimateConverter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-1' }) };
+    const membershipEmail = {
+      customerId: 'customer-1',
+      sourceId: `estimate:${estimate.id}`,
+      membershipTier: 'Gold',
+    };
+    const estimateConverter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-1', membershipEmail }) };
 
     const result = await markEstimateManuallyAccepted({
       estimateId: estimate.id,
@@ -108,7 +121,9 @@ describe('estimate manual acceptance', () => {
       database,
       skipAutoSchedule: true,
       skipSetupInvoice: true,
+      skipMembershipEmail: true,
     });
+    expect(AccountMembershipEmail.sendMembershipStarted).toHaveBeenCalledWith(membershipEmail);
     expect(inserts).toEqual([
       expect.objectContaining({
         table: 'activity_log',
@@ -159,6 +174,7 @@ describe('estimate manual acceptance', () => {
       waveguardTier: null,
     });
     expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
     expect(result.warnings).toEqual([]);
   });
 
@@ -273,6 +289,7 @@ describe('estimate manual acceptance', () => {
       accepted_at: 'NOW',
     });
     expect(leadLinkService.markLinkedLeadEstimateAccepted).not.toHaveBeenCalled();
+    expect(AccountMembershipEmail.sendMembershipStarted).not.toHaveBeenCalled();
   });
 
   test('rejects unlinked lead estimates before closing them accepted', async () => {

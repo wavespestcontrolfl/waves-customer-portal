@@ -4,6 +4,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const AccountMembershipEmail = require('../services/account-membership-email');
 
 // Cap the JSON body for this route family. The global limit is generous;
 // property preferences never need more than a few KB.
@@ -72,6 +73,47 @@ const ALLOWED_FIELDS = [
   'hoa_inspection_period',
   'access_notes', 'special_instructions',
 ];
+
+const CUSTOMER_EMAIL_FIELDS = {
+  preferred_day: 'Preferred service day',
+  preferred_time: 'Preferred service time',
+  contact_preference: 'Service contact preference',
+  blackout_start: 'Blackout start date',
+  blackout_end: 'Blackout end date',
+  irrigation_system: 'Irrigation system',
+  watering_days: 'Watering days',
+  irrigation_system_type: 'Irrigation system type',
+  rain_sensor: 'Rain sensor',
+};
+
+function displayPrefValue(value) {
+  if (value == null || value === '') return 'Not set';
+  if (typeof value === 'boolean') return value ? 'On' : 'Off';
+  if (Array.isArray(value)) return value.length ? value.join(', ') : 'Not set';
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed.length ? parsed.join(', ') : 'Not set';
+    } catch {
+      // Keep the original value below.
+    }
+    return value.replace(/_/g, ' ').replace(/\b\w/g, (ch) => ch.toUpperCase());
+  }
+  return String(value);
+}
+
+function propertyChangeItems(updates = {}, existing = {}) {
+  return Object.keys(updates)
+    .filter((field) => CUSTOMER_EMAIL_FIELDS[field])
+    .filter((field) => displayPrefValue(existing?.[field]) !== displayPrefValue(updates[field]))
+    .map((field) => ({
+      key: field,
+      label: CUSTOMER_EMAIL_FIELDS[field],
+      oldValue: displayPrefValue(existing?.[field]),
+      newValue: displayPrefValue(updates[field]),
+      scope: 'Property profile',
+    }));
+}
 
 function camelToSnake(str) {
   return str.replace(/[A-Z]/g, l => `_${l.toLowerCase()}`);
@@ -195,6 +237,15 @@ router.put('/preferences', async (req, res, next) => {
 
     const { id, customer_id, created_at, ...fields } = prefs;
     const camelFields = transformKeys(fields, snakeToCamel);
+    const emailItems = propertyChangeItems(updates, existing || {});
+    if (emailItems.length) {
+      void AccountMembershipEmail.sendAccountUpdated({
+        customerId: req.customerId,
+        changedItems: emailItems,
+        changeSummary: `${emailItems.length === 1 ? 'A property preference was' : 'Property preferences were'} updated for future service visits.`,
+        accountSection: 'Property profile',
+      }).catch((emailErr) => logger.warn(`[property] account.updated email failed for ${req.customerId}: ${emailErr.message}`));
+    }
 
     res.json({ preferences: camelFields, saved: true });
   } catch (err) {
@@ -203,3 +254,8 @@ router.put('/preferences', async (req, res, next) => {
 });
 
 module.exports = router;
+
+module.exports._private = {
+  propertyChangeItems,
+  displayPrefValue,
+};

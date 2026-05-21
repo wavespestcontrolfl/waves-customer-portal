@@ -20,6 +20,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
+const AccountMembershipEmail = require('../services/account-membership-email');
 
 router.use(express.json({ limit: '8kb' }));
 router.use(authenticate);
@@ -34,6 +35,20 @@ function normalize(raw) {
     }
   }
   return out;
+}
+
+function changeItems(changed = [], previous = {}, next = {}) {
+  const labels = {
+    interior_spray: 'Interior spraying',
+    exterior_sweep: 'Exterior eave sweep',
+  };
+  return changed.map((key) => ({
+    key,
+    label: labels[key] || key,
+    oldValue: previous[key] === false ? 'Off' : 'On',
+    newValue: next[key] === false ? 'Off' : 'On',
+    scope: 'Service preferences',
+  }));
 }
 
 async function readPrefs(customerId) {
@@ -98,6 +113,12 @@ router.put('/', async (req, res, next) => {
       } catch (e) {
         logger.warn(`[service-preferences] admin notification failed: ${e.message}`);
       }
+      void AccountMembershipEmail.sendAccountUpdated({
+        customerId: req.customerId,
+        changedItems: changeItems(changed, previous, next),
+        changeSummary: `${changed.length === 1 ? 'A service preference was' : 'Service preferences were'} updated for future visits.`,
+        accountSection: 'Service preferences',
+      }).catch((e) => logger.warn(`[service-preferences] account.updated email failed: ${e.message}`));
     }
 
     logger.info(`[service-preferences] customer ${req.customerId} updated: ${JSON.stringify(next)}`);

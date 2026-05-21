@@ -9,6 +9,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('../services/audit-log');
 const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
+const AccountMembershipEmail = require('../services/account-membership-email');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -16,6 +17,55 @@ function dateOnlyForApi(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).split('T')[0].slice(0, 10);
+}
+
+const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
+
+function membershipTierKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function comparableMembershipTier(value) {
+  const tierKey = membershipTierKey(value);
+  return NON_MEMBERSHIP_TIER_KEYS.has(tierKey) ? '' : tierKey;
+}
+
+function comparableMonthlyRate(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
+
+function hasMembership(customer = {}) {
+  const rawTier = customer.waveguard_tier ?? customer.tier;
+  const tierKey = membershipTierKey(rawTier);
+  if (tierKey && NON_MEMBERSHIP_TIER_KEYS.has(tierKey)) return false;
+  if (tierKey) return true;
+  return Number(customer.monthly_rate ?? customer.monthlyRate ?? 0) > 0;
+}
+
+function membershipDetailsChanged(before = {}, after = {}) {
+  return comparableMembershipTier(before.waveguard_tier ?? before.tier) !== comparableMembershipTier(after.waveguard_tier ?? after.tier)
+    || comparableMonthlyRate(before.monthly_rate ?? before.monthlyRate) !== comparableMonthlyRate(after.monthly_rate ?? after.monthlyRate);
+}
+
+function membershipChangeFingerprint(before = {}, after = {}) {
+  return [
+    comparableMembershipTier(before.waveguard_tier ?? before.tier) || 'none',
+    comparableMonthlyRate(before.monthly_rate ?? before.monthlyRate),
+    comparableMembershipTier(after.waveguard_tier ?? after.tier) || 'none',
+    comparableMonthlyRate(after.monthly_rate ?? after.monthlyRate),
+  ].join(':');
+}
+
+function adminMembershipDailyIdempotencyKey(eventType, customerId, source, eventAt = new Date()) {
+  return `${eventType}:${customerId}:${source}:${etDateString(eventAt)}`;
+}
+
+function adminMembershipStartIdempotencyKey(customerId, before = {}, after = {}, eventAt = new Date()) {
+  const eventStamp = eventAt instanceof Date && !Number.isNaN(eventAt.getTime())
+    ? eventAt.toISOString()
+    : new Date().toISOString();
+  return `membership.started:${customerId}:admin:${etDateString(eventAt)}:${eventStamp}:${membershipChangeFingerprint(before, after)}`;
 }
 
 const CUSTOMER_STAGES = [
@@ -1701,6 +1751,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       require('../services/geocoder').ensureCustomerGeocoded(customer.id).catch(() => {});
     }
 
+    if (hasMembership(normalized)) {
+      void AccountMembershipEmail.sendMembershipStarted({
+        customerId: customer.id,
+        effectiveDate: customer.member_since || new Date(),
+        membershipTier: normalized.tier,
+        monthlyRate: normalized.monthlyRate,
+        sourceId: `admin_customer_create:${customer.id}`,
+      }).catch(err => logger.warn(`[customers] membership.started email failed for ${customer.id}: ${err.message}`));
+    }
+
     res.status(201).json({
       id: customer.id,
       referralCode: code,
@@ -1768,6 +1828,52 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           fields: changed,
           sensitiveFieldsChanged: changed.filter(field => sensitiveFields.includes(field)),
         }, true);
+      }
+      const after = { ...before, ...updates };
+      const beforeHasMembership = hasMembership(before);
+      const afterHasMembership = hasMembership(after);
+      const membershipFieldChanged = membershipDetailsChanged(before, after);
+      const membershipEventAt = new Date();
+      if (updates.active === false && before.active !== false && hasMembership(before)) {
+        void AccountMembershipEmail.sendMembershipCanceled({
+          customerId: req.params.id,
+          effectiveDate: membershipEventAt,
+          reason: req.body.churnReason || 'Account deactivated',
+          membershipTier: before.waveguard_tier,
+          monthlyRate: before.monthly_rate,
+          idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin', membershipEventAt),
+        }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
+      } else if (updates.active === true && before.active === false && hasMembership(after)) {
+        void AccountMembershipEmail.sendMembershipReactivated({
+          customerId: req.params.id,
+          effectiveDate: membershipEventAt,
+          idempotencyKey: adminMembershipDailyIdempotencyKey('membership.reactivated', req.params.id, 'admin', membershipEventAt),
+        }).catch(err => logger.warn(`[customers] membership.reactivated email failed for ${req.params.id}: ${err.message}`));
+      } else if (membershipFieldChanged && !beforeHasMembership && afterHasMembership) {
+        void AccountMembershipEmail.sendMembershipStarted({
+          customerId: req.params.id,
+          effectiveDate: membershipEventAt,
+          membershipTier: after.waveguard_tier,
+          monthlyRate: after.monthly_rate,
+          sourceId: `admin_membership_start:${req.params.id}:${etDateString(membershipEventAt)}`,
+          idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, before, after, membershipEventAt),
+        }).catch(err => logger.warn(`[customers] membership.started email failed for ${req.params.id}: ${err.message}`));
+      } else if (membershipFieldChanged && beforeHasMembership && !afterHasMembership) {
+        void AccountMembershipEmail.sendMembershipCanceled({
+          customerId: req.params.id,
+          effectiveDate: membershipEventAt,
+          reason: 'Membership removed',
+          membershipTier: before.waveguard_tier,
+          monthlyRate: before.monthly_rate,
+          idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin_membership_removed', membershipEventAt),
+        }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
+      } else if (membershipFieldChanged && afterHasMembership) {
+        void AccountMembershipEmail.sendMembershipUpdated({
+          customerId: req.params.id,
+          before,
+          after,
+          effectiveDate: membershipEventAt,
+        }).catch(err => logger.warn(`[customers] membership.updated email failed for ${req.params.id}: ${err.message}`));
       }
     }
 
@@ -1991,12 +2097,16 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  adminMembershipDailyIdempotencyKey,
+  adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,
   cadenceFromEstimateLine,
   customerSearchTerms,
+  hasMembership,
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   mapPipelineCustomer,
+  membershipDetailsChanged,
   scheduleLinesFromEstimate,
 };
 

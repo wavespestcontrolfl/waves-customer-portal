@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const EstimateConverter = require('./estimate-converter');
+const AccountMembershipEmail = require('./account-membership-email');
 const { markLinkedLeadEstimateAccepted } = require('./lead-estimate-link');
 
 const MANUAL_ACCEPTABLE_STATUSES = new Set(['sent', 'viewed']);
@@ -135,6 +136,7 @@ async function markEstimateManuallyAccepted({
           database: trx,
           skipAutoSchedule: true,
           skipSetupInvoice: true,
+          skipMembershipEmail: true,
         });
       } catch (err) {
         logger.warn(`[estimate-manual-acceptance] EstimateConverter failed for estimate ${updatedEstimate.id}: ${err.message}`);
@@ -172,6 +174,11 @@ async function markEstimateManuallyAccepted({
     } catch (err) {
       logger.warn(`[estimate-manual-acceptance] linked lead conversion failed for estimate ${acceptedEstimate.id}: ${err.message}`);
       warnings.push('Linked lead was not marked won automatically.');
+    }
+
+    if (conversion?.membershipEmail) {
+      void AccountMembershipEmail.sendMembershipStarted(conversion.membershipEmail)
+        .catch((err) => logger.warn(`[estimate-manual-acceptance] membership.started email failed for estimate ${acceptedEstimate.id}: ${err.message}`));
     }
   }
 

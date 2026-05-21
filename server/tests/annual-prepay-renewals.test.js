@@ -10,12 +10,60 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(),
 }));
+jest.mock('../services/account-membership-email', () => ({
+  sendMembershipRenewalReminder: jest.fn(),
+}));
 
 const db = require('../models/db');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const AccountMembershipEmail = require('../services/account-membership-email');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { _private } = AnnualPrepayRenewals;
 
+function query({ first, returning, columnInfo } = {}) {
+  const q = {};
+  [
+    'whereIn',
+    'whereNull',
+    'whereBetween',
+    'whereNotIn',
+    'orderBy',
+    'select',
+  ].forEach((method) => {
+    q[method] = jest.fn(() => q);
+  });
+  q.where = jest.fn((arg) => {
+    if (typeof arg === 'function') arg.call(q);
+    return q;
+  });
+  q.orWhere = jest.fn(() => q);
+  q.update = jest.fn(() => q);
+  q.insert = jest.fn(() => q);
+  q.first = jest.fn(async () => first);
+  q.returning = jest.fn(async () => returning || []);
+  q.columnInfo = jest.fn(async () => columnInfo || {});
+  q.catch = jest.fn(() => Promise.resolve());
+  q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+  return q;
+}
+
+function setDbQueues(queues) {
+  const tableQueues = new Map(Object.entries(queues));
+  db.mockImplementation((table) => {
+    const queue = tableQueues.get(table);
+    if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+    return queue.shift();
+  });
+  return tableQueues;
+}
+
 describe('annual prepay renewal helpers', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+  });
+
   test('keeps PostgreSQL DATE objects on their calendar day', () => {
     expect(_private.dateOnly(new Date('2026-05-14T00:00:00.000Z'))).toBe('2026-05-14');
   });
@@ -129,5 +177,62 @@ describe('annual prepay renewal helpers', () => {
     expect(chain.where).toHaveBeenCalledWith({ id: 'term-1' });
     expect(chain.whereIn).toHaveBeenCalledWith('status', ['active', 'renewal_pending']);
     expect(chain.whereNull).toHaveBeenCalledWith('renewal_decision');
+  });
+
+  test('sends renewal email when SMS cannot be delivered because the customer has no phone', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      notice_30_sent_at: null,
+      notice_30_claimed_at: null,
+      renewal_decision: null,
+    };
+    const refreshedTerm = {
+      ...term,
+      status: 'active',
+      last_scheduled_service_id: null,
+      last_scheduled_service_date: null,
+    };
+    const claimQuery = query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] });
+    const markNoticeQuery = query();
+    setDbQueues({
+      scheduled_services: [
+        query({ first: null }),
+        query({ columnInfo: {} }),
+      ],
+      annual_prepay_terms: [
+        query({ returning: [refreshedTerm] }),
+        claimQuery,
+        markNoticeQuery,
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', email: 'stan@example.com', phone: null } }),
+      ],
+    });
+    AccountMembershipEmail.sendMembershipRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 30)).resolves.toMatchObject({
+      sent: true,
+      termId: 'term-1',
+      channel: 'email',
+      sms: false,
+    });
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(AccountMembershipEmail.sendMembershipRenewalReminder).toHaveBeenCalledWith({
+      customerId: 'customer-1',
+      renewalDate: '2027-05-20',
+      daysOut: 30,
+      termId: 'term-1',
+      lastServiceDate: null,
+    });
+    expect(markNoticeQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      notice_30_sent_at: expect.any(Date),
+      notice_30_claimed_at: null,
+    }));
   });
 });
