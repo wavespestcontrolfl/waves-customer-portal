@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -340,6 +341,7 @@ function LeadsWorkspaceNav({ active, onChange, counts }) {
 function Btn({ children, onClick, color, small, style, disabled }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
       style={{
@@ -596,6 +598,7 @@ export function LeadsSection() {
   });
   const [pipelineView, setPipelineView] = useState("table");
   const [draggingLeadId, setDraggingLeadId] = useState(null);
+  const [deletingLeadId, setDeletingLeadId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
@@ -708,6 +711,38 @@ export function LeadsSection() {
       loadLeads();
     } catch (e) {
       alert("Status update failed: " + e.message);
+    }
+  };
+
+  const deleteLead = async (lead) => {
+    const label =
+      [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() ||
+      lead.phone ||
+      lead.email ||
+      "this lead";
+    if (
+      !window.confirm(
+        `Delete ${label} from the lead pipeline?\n\nThis removes the lead and its activity timeline. Existing estimates stay in Estimates.`,
+      )
+    ) {
+      return;
+    }
+
+    setDeletingLeadId(lead.id);
+    try {
+      await adminFetch(`/admin/leads/${lead.id}`, { method: "DELETE" });
+      setLeads((rows) => rows.filter((row) => row.id !== lead.id));
+      setLeadsTotal((total) => Math.max(0, total - 1));
+      if (expandedLead === lead.id) {
+        setExpandedLead(null);
+        setLeadActivities([]);
+      }
+      loadAnalytics();
+      loadSources();
+    } catch (e) {
+      alert("Delete failed: " + e.message);
+    } finally {
+      setDeletingLeadId(null);
     }
   };
 
@@ -1046,6 +1081,7 @@ export function LeadsSection() {
                       "Urgency",
                       "Status",
                       "Response",
+                      "Actions",
                     ].map((h) => (
                       <th
                         key={h}
@@ -1201,10 +1237,48 @@ export function LeadsSection() {
                               fmtTime(lead.response_time_minutes)
                             )}
                           </td>{" "}
+                          <td
+                            style={{ padding: "12px 16px" }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              aria-label={`Delete lead for ${
+                                [lead.first_name, lead.last_name]
+                                  .filter(Boolean)
+                                  .join(" ") || "unknown"
+                              }`}
+                              title="Delete lead"
+                              disabled={deletingLeadId === lead.id}
+                              onClick={() => deleteLead(lead)}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 6,
+                                border: `1px solid ${C.red}33`,
+                                borderRadius: 6,
+                                padding: "5px 8px",
+                                background: C.white,
+                                color: C.red,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                cursor:
+                                  deletingLeadId === lead.id
+                                    ? "not-allowed"
+                                    : "pointer",
+                                opacity: deletingLeadId === lead.id ? 0.5 : 1,
+                              }}
+                            >
+                              <Trash2 size={14} strokeWidth={1.8} />
+                              {deletingLeadId === lead.id
+                                ? "Deleting"
+                                : "Delete"}
+                            </button>
+                          </td>{" "}
                         </tr>
                         {isExpanded && (
                           <tr>
-                            <td colSpan={6} style={{ padding: 0 }}>
+                            <td colSpan={7} style={{ padding: 0 }}>
                               {" "}
                               <div
                                 style={{
@@ -1584,6 +1658,22 @@ export function LeadsSection() {
                                     }}
                                   >
                                     Assign
+                                  </Btn>{" "}
+                                  <Btn
+                                    small
+                                    color={C.red}
+                                    disabled={deletingLeadId === lead.id}
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                    }}
+                                    onClick={() => deleteLead(lead)}
+                                  >
+                                    <Trash2 size={14} strokeWidth={1.8} />
+                                    {deletingLeadId === lead.id
+                                      ? "Deleting"
+                                      : "Delete Lead"}
                                   </Btn>{" "}
                                 </div>
                                 {/* Inline SMS Compose */}
@@ -2078,6 +2168,41 @@ export function LeadsSection() {
                             />
                           )}
                         </div>{" "}
+                        <button
+                          type="button"
+                          aria-label={`Delete lead for ${
+                            [lead.first_name, lead.last_name]
+                              .filter(Boolean)
+                              .join(" ") || "unknown"
+                          }`}
+                          title="Delete lead"
+                          disabled={deletingLeadId === lead.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteLead(lead);
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 5,
+                            marginTop: 10,
+                            border: `1px solid ${C.red}33`,
+                            borderRadius: 6,
+                            padding: "4px 7px",
+                            background: C.white,
+                            color: C.red,
+                            fontSize: 11,
+                            fontWeight: 600,
+                            cursor:
+                              deletingLeadId === lead.id
+                                ? "not-allowed"
+                                : "pointer",
+                            opacity: deletingLeadId === lead.id ? 0.5 : 1,
+                          }}
+                        >
+                          <Trash2 size={13} strokeWidth={1.8} />
+                          {deletingLeadId === lead.id ? "Deleting" : "Delete"}
+                        </button>
                       </div>
                     ))}
                     {stageLeads.length === 0 && (

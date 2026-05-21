@@ -690,6 +690,31 @@ router.put('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// DELETE /api/admin/leads/:id - remove a lead from the pipeline.
+// Lead activity rows are operational notes, so they are removed with the
+// lead. Agent response history is retained but detached to satisfy its FK.
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const lead = await db('leads').where('id', req.params.id).first();
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    await db.transaction(async (trx) => {
+      const hasAgentResponses = await trx.schema.hasTable('lead_agent_responses').catch(() => false);
+      if (hasAgentResponses) {
+        await trx('lead_agent_responses')
+          .where({ lead_id: req.params.id })
+          .update({ lead_id: null });
+      }
+
+      await trx('lead_activities').where({ lead_id: req.params.id }).del();
+      await trx('leads').where({ id: req.params.id }).del();
+    });
+
+    logger.info(`[leads] Deleted lead ${req.params.id}`);
+    res.json({ success: true, deleted: true });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/leads/:id/activity — log activity
 router.post('/:id/activity', async (req, res, next) => {
   try {

@@ -182,6 +182,90 @@ describe('admin estimate persistence', () => {
     expect(getEstimatePricingCache('estimate-draft')).toBeNull();
   });
 
+  test('creates a new estimate when the lead-linked prior estimate is archived', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, updates, inserts } = makeDatabase({
+      lead: {
+        id: 'lead-1',
+        status: 'estimate_sent',
+        phone: '9415550101',
+        estimate_id: 'estimate-old',
+      },
+      estimate: {
+        id: 'estimate-old',
+        status: 'sent',
+        archived_at: '2026-05-14T15:00:00.000Z',
+        customer_phone: '(941) 555-0101',
+      },
+    });
+
+    const result = await createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody, monthlyTotal: 155 },
+      technicianId: 'tech-1',
+      technician: { first_name: 'Ava', last_name: 'Tech' },
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    });
+
+    expect(result.reused).toBe(false);
+    expect(result.estimate).toMatchObject({
+      id: 'estimate-new',
+      customer_phone: '(941) 555-0101',
+      monthly_total: 155,
+    });
+    expect(inserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'estimates',
+        row: expect.objectContaining({ token: '1234567890abcdef1234567890abcdef' }),
+      }),
+      expect.objectContaining({
+        table: 'lead_activities',
+        row: expect.objectContaining({
+          lead_id: 'lead-1',
+          activity_type: 'estimate_created',
+        }),
+      }),
+    ]));
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'leads',
+        clause: { id: 'lead-1' },
+        patch: expect.objectContaining({ estimate_id: 'estimate-new' }),
+      }),
+    ]));
+  });
+
+  test('rejects a new estimate when the linked prior estimate is still active', async () => {
+    const { database, updates, inserts } = makeDatabase({
+      lead: {
+        id: 'lead-1',
+        status: 'estimate_sent',
+        phone: '9415550101',
+        estimate_id: 'estimate-active',
+      },
+      estimate: {
+        id: 'estimate-active',
+        status: 'sent',
+        archived_at: null,
+        customer_phone: '(941) 555-0101',
+      },
+    });
+
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: baseBody,
+      technicianId: 'tech-1',
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining('Archive or delete'),
+    });
+
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
   test('rejects a reused draft when the current lead contact no longer matches', async () => {
     const { database, updates, inserts } = makeDatabase({
       lead: {

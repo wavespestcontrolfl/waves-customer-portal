@@ -1092,7 +1092,12 @@ router.delete('/:id', async (req, res, next) => {
     if (estimate.status !== 'draft') {
       return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
     }
-    await db('estimates').where({ id: req.params.id }).del();
+    await db.transaction(async (trx) => {
+      await trx('leads')
+        .where({ estimate_id: req.params.id })
+        .update({ estimate_id: null, updated_at: new Date() });
+      await trx('estimates').where({ id: req.params.id }).del();
+    });
     logger.info(`[estimates] Deleted estimate ${req.params.id}`);
     res.json({ success: true });
   } catch (err) { next(err); }
