@@ -295,28 +295,59 @@ describe('termite measurement overrides and safeguards', () => {
     const termidor = pricePreSlabTermiticide(2500, { productKey: 'termidor_sc', labelConfirmed: true });
     expect(termidor.productOz).toBe(200);
     expect(termidor.units).toBe(3);
-    expect(termidor.productCost).toBe(524.16);
-    expect(termidor.price).toBe(1367);
+    expect(termidor.productCost).toBe(448);
+    expect(termidor.price).toBe(1279);
 
     const taurus = pricePreSlabTermiticide(2500, { productKey: 'taurus_sc', labelConfirmed: true });
     expect(taurus.productOz).toBe(200);
     expect(taurus.units).toBe(3);
-    expect(taurus.productCost).toBe(285);
-    expect(taurus.price).toBe(835);
+    expect(taurus.productCost).toBe(243.59);
+    expect(taurus.price).toBe(825);
 
     const bifen = pricePreSlabTermiticide(2500, { productKey: 'bifen_it', labelConfirmed: true });
     expect(bifen.productOz).toBe(250);
     expect(bifen.units).toBe(2);
-    expect(bifen.productCost).toBe(83.06);
-    expect(bifen.rawPrice).toBe(386);
+    expect(bifen.productCost).toBe(81.11);
+    expect(bifen.rawPrice).toBe(464);
     expect(bifen.price).toBe(600);
 
     const talstar = pricePreSlabTermiticide(2500, { productKey: 'talstar_p', labelConfirmed: true });
     expect(talstar.productOz).toBe(250);
     expect(talstar.units).toBe(2);
-    expect(talstar.productCost).toBe(77.98);
-    expect(talstar.rawPrice).toBe(375);
+    expect(talstar.productCost).toBe(76.15);
+    expect(talstar.rawPrice).toBe(453);
     expect(talstar.price).toBe(600);
+  });
+
+  test('Pre-Slab Termiticide uses contextual small-slab minimums', () => {
+    const standalone = pricePreSlabTermiticide(100, {
+      productKey: 'bifen_it',
+      jobContext: 'standalone',
+      labelConfirmed: true,
+    });
+    expect(standalone.productOz).toBe(10);
+    expect(standalone.productCost).toBe(3.24);
+    expect(standalone.contextualFloor).toBe(225);
+    expect(standalone.price).toBe(225);
+    expect(standalone.price).not.toBe(600);
+
+    const builderBatch = pricePreSlabTermiticide(100, {
+      productKey: 'bifen_it',
+      jobContext: 'builderBatch',
+      labelConfirmed: true,
+    });
+    expect(builderBatch.contextualFloor).toBe(150);
+    expect(builderBatch.price).toBe(174);
+    expect(builderBatch.price).not.toBe(600);
+
+    const sameTripAddOn = pricePreSlabTermiticide(100, {
+      productKey: 'bifen_it',
+      jobContext: 'sameTripAddOn',
+      labelConfirmed: true,
+    });
+    expect(sameTripAddOn.contextualFloor).toBe(125);
+    expect(sameTripAddOn.price).toBe(174);
+    expect(sameTripAddOn.price).not.toBe(600);
   });
 
   test('Pre-Slab Termiticide applies volume floors, warranty metadata, and measurement guards', () => {
@@ -326,7 +357,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(termidorTenPlus.units).toBe(2);
-    expect(termidorTenPlus.price).toBe(801);
+    expect(termidorTenPlus.price).toBe(797);
     expect(termidorTenPlus.volumeDiscountMultiplier).toBe(0.85);
 
     const taurusTenPlus = pricePreSlabTermiticide(1800, {
@@ -334,23 +365,24 @@ describe('termite measurement overrides and safeguards', () => {
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(taurusTenPlus.price).toBe(510);
+    expect(taurusTenPlus.price).toBe(519);
 
     const bifenTenPlus = pricePreSlabTermiticide(1800, {
       productKey: 'bifen_it',
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(bifenTenPlus.priceBeforeVolumeDiscount).toBe(600);
-    expect(bifenTenPlus.price).toBe(510);
+    expect(bifenTenPlus.contextualFloor).toBe(500);
+    expect(bifenTenPlus.priceBeforeVolumeDiscount).toBe(500);
+    expect(bifenTenPlus.price).toBe(500);
 
     const talstarTenPlus = pricePreSlabTermiticide(1800, {
       productKey: 'talstar_p',
       volumeDiscount: '10plus',
       labelConfirmed: true,
     });
-    expect(talstarTenPlus.priceBeforeVolumeDiscount).toBe(600);
-    expect(talstarTenPlus.price).toBe(510);
+    expect(talstarTenPlus.priceBeforeVolumeDiscount).toBe(500);
+    expect(talstarTenPlus.price).toBe(500);
 
     const override = pricePreSlabTermiticide({}, {
       productKey: 'termidor_sc',
@@ -360,7 +392,7 @@ describe('termite measurement overrides and safeguards', () => {
     });
     expect(override.slabSqFt).toBe(2500);
     expect(override.slabSqFtSource).toBe('manual_override');
-    expect(override.price).toBe(1567);
+    expect(override.price).toBe(1479);
     expect(override.warrantyExtendedSelected).toBe(true);
     expect(override.warrantyExtendedPrice).toBe(200);
     expect(override.addOns[0].code).toBe('pre_slab_extended_warranty');
@@ -390,7 +422,7 @@ describe('termite measurement overrides and safeguards', () => {
     const legacy = pricePreSlabTermidor(2500, 'none');
     expect(legacy.productKey).toBe('termidor_sc');
     expect(legacy.legacyService).toBe('pre_slab_termidor');
-    expect(legacy.price).toBe(1367);
+    expect(legacy.price).toBe(1279);
   });
 
   test('estimate engine and v1 adapter carry termite measurement metadata', () => {

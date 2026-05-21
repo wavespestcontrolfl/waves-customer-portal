@@ -635,6 +635,53 @@ function normalizePreSlabWarranty(value) {
   };
 }
 
+function normalizePreSlabJobContext(value, volumeDiscount = 'none') {
+  const requestedJobContext = value;
+  const raw = normalizeToken(value || '');
+  const aliases = {
+    standalone: 'standalone',
+    one_off: 'standalone',
+    oneoff: 'standalone',
+    single_job: 'standalone',
+    builder: 'builderBatch',
+    builderbatch: 'builderBatch',
+    builder_batch: 'builderBatch',
+    batch: 'builderBatch',
+    same_site: 'builderBatch',
+    same_trip: 'sameTripAddOn',
+    sametripaddon: 'sameTripAddOn',
+    same_trip_add_on: 'sameTripAddOn',
+    same_trip_addon: 'sameTripAddOn',
+    addon: 'sameTripAddOn',
+    add_on: 'sameTripAddOn',
+  };
+  const jobContext = aliases[raw] || (
+    volumeDiscount === '5plus' || volumeDiscount === '10plus' ? 'builderBatch' : 'standalone'
+  );
+  return {
+    requestedJobContext,
+    jobContext,
+    warnings: raw && !aliases[raw] ? ['invalid_pre_slab_job_context_defaulted'] : [],
+  };
+}
+
+function lookupPreSlabMinimum(slabSqFt, jobContext) {
+  const cfg = SPECIALTY.preSlabTermiticide || {};
+  const minimums = cfg.minimums || {};
+  const tiers = minimums[jobContext] || minimums.standalone || [{ maxSqFt: Infinity, floor: 600 }];
+  const tier = tiers.find(row => Number(slabSqFt) <= Number(row.maxSqFt)) || tiers[tiers.length - 1];
+  const labels = {
+    standalone: 'Standalone one-off job',
+    builderBatch: 'Builder batch / same site',
+    sameTripAddOn: 'Same-trip add-on',
+  };
+  return {
+    floor: Number(tier.floor) || 0,
+    maxSqFt: tier.maxSqFt,
+    basis: `${labels[jobContext] || labels.standalone}, ${Number(tier.maxSqFt) === Infinity ? 'over 1,250' : `up to ${tier.maxSqFt}`} sqft`,
+  };
+}
+
 function normalizePreSlabTermiticideProduct(value, options = {}) {
   const cfg = SPECIALTY.preSlabTermiticide || {};
   const requestedProductKey = value;
@@ -3874,19 +3921,10 @@ function pricePreSlabTermiticide(input, options = {}) {
       : (hasValue(options.warrantyTier) ? options.warrantyTier : options.preslabWarranty)
   );
   const volumeDiscountMultiplier = cfg.volumeDiscounts[volumeResolution.volumeDiscount] || 1.0;
+  const jobContextResolution = normalizePreSlabJobContext(options.jobContext || options.preSlabJobContext, volumeResolution.volumeDiscount);
   const productOzPer10SqFt = optionPositiveNumber(options, 'customProductOzPer10SqFt', product.productOzPer10SqFt);
   const containerCost = optionPositiveNumber(options, 'customContainerCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
-  const floorBeforeVolumeDiscount = optionNonNegativeNumber(
-    options,
-    'customFloorBeforeVolumeDiscount',
-    product.floorBeforeVolumeDiscount || 0,
-  );
-  const floorAfterVolumeDiscount = optionNonNegativeNumber(
-    options,
-    'customFloorAfterVolumeDiscount',
-    product.floorAfterVolumeDiscount || 0,
-  );
   const laborCfg = cfg.labor || {};
   const warrantyExtendedSelected = !!(
     options.includeWarrantyExtended ||
@@ -3913,13 +3951,29 @@ function pricePreSlabTermiticide(input, options = {}) {
     ...volumeResolution.warnings,
     ...productResolution.warnings,
     ...warrantyResolution.warnings,
+    ...jobContextResolution.warnings,
   ]);
   const manualReviewReasons = uniqueList([
     ...measurement.manualReviewReasons,
     ...volumeResolution.warnings,
     ...productResolution.manualReviewReasons,
+    ...warrantyResolution.warnings,
+    ...jobContextResolution.warnings,
     ...labelManualReviewReasons,
   ]);
+  const contextualMinimum = measurement.value === null
+    ? lookupPreSlabMinimum(0, jobContextResolution.jobContext)
+    : lookupPreSlabMinimum(measurement.value, jobContextResolution.jobContext);
+  const floorBeforeVolumeDiscount = optionNonNegativeNumber(
+    options,
+    'customFloorBeforeVolumeDiscount',
+    contextualMinimum.floor,
+  );
+  const floorAfterVolumeDiscount = optionNonNegativeNumber(
+    options,
+    'customFloorAfterVolumeDiscount',
+    contextualMinimum.floor,
+  );
   const baseResult = {
     service: 'pre_slab_termiticide',
     legacyService: productResolution.productKey === 'termidor_sc' ? 'pre_slab_termidor' : null,
@@ -3936,16 +3990,28 @@ function pricePreSlabTermiticide(input, options = {}) {
     productOz: null,
     units: null,
     bottles: null,
+    containersRequired: null,
     containerOz,
     containerCost,
+    chemicalCostPerOz: roundMoney(containerCost / containerOz),
+    allocatedProductCost: null,
     productCost: null,
+    fullContainerProductCost: null,
     laborHrs: null,
     laborCost: null,
     equipCost: cfg.equipCost,
+    complianceAdminCost: cfg.complianceAdminCost || 0,
+    driveCost: null,
+    includeDriveCost: cfg.includeDriveCostByContext?.[jobContextResolution.jobContext] === true,
     cost: null,
     marginDivisor: product.marginDivisor,
     targetMargin: 1 - product.marginDivisor,
     rawPrice: null,
+    jobContext: jobContextResolution.jobContext,
+    preSlabJobContext: jobContextResolution.jobContext,
+    requestedJobContext: jobContextResolution.requestedJobContext,
+    contextualFloor: contextualMinimum.floor,
+    contextualMinimumBasis: contextualMinimum.basis,
     floorBeforeVolumeDiscount,
     floorAfterVolumeDiscount,
     priceBeforeVolumeDiscount: null,
@@ -3963,6 +4029,7 @@ function pricePreSlabTermiticide(input, options = {}) {
     warrantyAdd: warrantyAdder,
     warrantyExtendedSelected,
     warrantyExtendedPrice,
+    warrantyStatus: warrantyExtendedSelected ? 'Extended 5-year warranty' : 'No extended warranty selected',
     addOns: warrantyExtendedSelected
       ? [{
           code: 'pre_slab_extended_warranty',
@@ -3979,11 +4046,13 @@ function pricePreSlabTermiticide(input, options = {}) {
       ...measurement.warnings,
       ...volumeResolution.warnings,
       ...productResolution.warnings,
+      ...jobContextResolution.warnings,
     ]),
     requiresMeasurement: measurement.requiresMeasurement,
     requiresManualReview: measurement.requiresManualReview ||
       volumeResolution.warnings.length > 0 ||
       productResolution.requiresManualReview ||
+      jobContextResolution.warnings.length > 0 ||
       labelManualReviewReasons.length > 0,
     manualReviewReasons,
     measurements: {
@@ -4004,13 +4073,19 @@ function pricePreSlabTermiticide(input, options = {}) {
   const slabSqFt = measurement.value;
   const productOz = slabSqFt / 10 * productOzPer10SqFt;
   const units = Math.max(1, Math.ceil(productOz / containerOz));
-  const productCost = units * containerCost;
+  const chemicalCostPerOz = containerCost / containerOz;
+  const allocatedProductCost = productOz * chemicalCostPerOz;
+  const fullContainerProductCost = units * containerCost;
   const laborHrs = Math.min(
     laborCfg.maxHours || 5,
     Math.max(laborCfg.minHours || 1, (laborCfg.baseHours || 0.5) + slabSqFt * (laborCfg.hoursPerSqFt || (1 / 1500))),
   );
   const laborCost = laborHrs * GLOBAL.LABOR_RATE;
-  const cost = productCost + laborCost + cfg.equipCost;
+  const complianceAdminCost = Number(cfg.complianceAdminCost || 0);
+  const driveCost = cfg.includeDriveCostByContext?.[jobContextResolution.jobContext] === true
+    ? GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60
+    : 0;
+  const cost = allocatedProductCost + laborCost + cfg.equipCost + complianceAdminCost + driveCost;
   const rawPrice = Math.round(cost / product.marginDivisor);
   const priceBeforeVolumeDiscount = Math.max(rawPrice, floorBeforeVolumeDiscount);
   const priceAfterVolumeDiscount = Math.max(
@@ -4024,9 +4099,15 @@ function pricePreSlabTermiticide(input, options = {}) {
     productOz: roundMoney(productOz),
     units,
     bottles: units,
-    productCost: roundMoney(productCost),
+    containersRequired: units,
+    chemicalCostPerOz: roundMoney(chemicalCostPerOz),
+    allocatedProductCost: roundMoney(allocatedProductCost),
+    productCost: roundMoney(allocatedProductCost),
+    fullContainerProductCost: roundMoney(fullContainerProductCost),
     laborHrs: roundMoney(laborHrs),
     laborCost: roundMoney(laborCost),
+    complianceAdminCost: roundMoney(complianceAdminCost),
+    driveCost: roundMoney(driveCost),
     cost: roundMoney(cost),
     rawPrice,
     priceBeforeVolumeDiscount,

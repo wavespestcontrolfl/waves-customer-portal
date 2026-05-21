@@ -179,8 +179,18 @@ const TERMITICIDE_METADATA_FIELDS = [
   'productOzPer10SqFt',
   'productOz',
   'units',
+  'containersRequired',
   'containerOz',
+  'chemicalCostPerOz',
+  'allocatedProductCost',
+  'productCost',
+  'fullContainerProductCost',
   'rawPrice',
+  'jobContext',
+  'preSlabJobContext',
+  'requestedJobContext',
+  'contextualFloor',
+  'contextualMinimumBasis',
   'floorBeforeVolumeDiscount',
   'floorAfterVolumeDiscount',
   'priceBeforeVolumeDiscount',
@@ -189,6 +199,10 @@ const TERMITICIDE_METADATA_FIELDS = [
   'priceAfterVolumeDiscount',
   'warrantyExtendedSelected',
   'warrantyExtendedPrice',
+  'warrantyStatus',
+  'complianceAdminCost',
+  'driveCost',
+  'includeDriveCost',
   'certificateOfComplianceRequired',
   'addOns',
 ];
@@ -223,7 +237,7 @@ function termiticideDetail(li = {}, fallback = '') {
       li.productLabel,
       li.productOz ? `${li.productOz} oz` : null,
       li.units ? `${li.units} unit${li.units === 1 ? '' : 's'}` : null,
-      li.warrantyTier === 'none' ? li.warrantyLabel : null,
+      li.warrantyLabel || (li.warrantyExtendedSelected ? 'Extended 5-year warranty' : 'No extended warranty'),
     ].filter(Boolean).join(' | ');
     return [slabDetail, productDetail].filter(Boolean).join(' | ') || fallback;
   }

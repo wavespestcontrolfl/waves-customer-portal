@@ -549,6 +549,32 @@ function getServiceLabel(frequency, estimate, pricing) {
   return 'Custom quote';
 }
 
+function isPreSlabBreakdownItem(item = {}) {
+  const raw = [item.service, item.label, item.name, item.detail]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('pre slab')
+    && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
+}
+
+function oneTimePriceCopy(breakdown = {}) {
+  const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+  const preSlabItems = items.filter(isPreSlabBreakdownItem);
+  if (preSlabItems.length > 0) {
+    const hasExtendedWarranty = preSlabItems.some((item) => {
+      const raw = [item.warrantyStatus, item.detail].filter(Boolean).join(' ').toLowerCase();
+      if (item.warrantyExtendedSelected === true) return true;
+      if (raw.includes('no extended')) return false;
+      return raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr');
+    });
+    return 'Includes pre-slab soil treatment for the measured slab area. Certificate/termite-treatment documentation is provided when required. Warranty terms depend on the selected warranty option.'
+      + (hasExtendedWarranty ? '' : ' No extended warranty selected.');
+  }
+  return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
+}
+
 function SetupFeeCard({ fee }) {
   if (!fee) return null;
   return (
@@ -612,7 +638,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
   );
 }
 
-function OneTimePriceCard({ oneTimePrice }) {
+function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
     <div style={{
       padding: '14px 0 24px',
@@ -625,8 +651,7 @@ function OneTimePriceCard({ oneTimePrice }) {
         <span style={{ fontSize: 24, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
       <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 14, lineHeight: 1.55 }}>
-        One visit, pay on service day. No recurring schedule, no tier discount.
-        Includes a 30-day callback period if pests return after this visit.
+        {oneTimePriceCopy(breakdown)}
       </div>
     </div>
   );
@@ -1558,7 +1583,10 @@ export default function EstimateViewPage() {
             </>
           ) : (
             <>
-              <OneTimePriceCard oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0} />
+              <OneTimePriceCard
+                oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+                breakdown={pricing.oneTimeBreakdown}
+              />
               <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
               {renderFlags.showOneTimePestAddOns === true ? (
                 services

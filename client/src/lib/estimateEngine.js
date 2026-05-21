@@ -396,8 +396,6 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerOz: 78,
     productOzPer10SqFt: 0.8,
     marginDivisor: 0.45,
-    floorBeforeVolumeDiscount: 600,
-    floorAfterVolumeDiscount: 500,
     warning: 'Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.',
   },
   taurus_sc: {
@@ -410,8 +408,6 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerOz: 78,
     productOzPer10SqFt: 0.8,
     marginDivisor: 0.45,
-    floorBeforeVolumeDiscount: 600,
-    floorAfterVolumeDiscount: 500,
     warning: 'Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.',
   },
   bifen_it: {
@@ -424,8 +420,6 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerOz: 128,
     productOzPer10SqFt: 1.0,
     marginDivisor: 0.45,
-    floorBeforeVolumeDiscount: 600,
-    floorAfterVolumeDiscount: 500,
     warning: 'Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.',
   },
   talstar_p: {
@@ -438,10 +432,42 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerOz: 128,
     productOzPer10SqFt: 1.0,
     marginDivisor: 0.45,
-    floorBeforeVolumeDiscount: 600,
-    floorAfterVolumeDiscount: 500,
     warning: 'Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.',
   },
+};
+
+const PRE_SLAB_TERMITICIDE_MINIMUMS = {
+  standalone: [
+    { maxSqFt: 250, floor: 225 },
+    { maxSqFt: 750, floor: 325 },
+    { maxSqFt: 1250, floor: 425 },
+    { maxSqFt: Infinity, floor: 600 },
+  ],
+  builderBatch: [
+    { maxSqFt: 250, floor: 150 },
+    { maxSqFt: 750, floor: 250 },
+    { maxSqFt: 1250, floor: 350 },
+    { maxSqFt: Infinity, floor: 500 },
+  ],
+  sameTripAddOn: [
+    { maxSqFt: 250, floor: 125 },
+    { maxSqFt: 750, floor: 225 },
+    { maxSqFt: 1250, floor: 325 },
+    { maxSqFt: Infinity, floor: 500 },
+  ],
+};
+
+const PRE_SLAB_JOB_CONTEXT_LABELS = {
+  standalone: 'Standalone one-off job',
+  builderBatch: 'Builder batch / same site',
+  sameTripAddOn: 'Same-trip add-on',
+};
+
+const PRE_SLAB_COMPLIANCE_ADMIN_COST = 25;
+const PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT = {
+  standalone: true,
+  builderBatch: false,
+  sameTripAddOn: false,
 };
 
 const TRENCHING_TERMITICIDE_PRODUCTS = {
@@ -599,6 +625,44 @@ function normalizePreSlabWarranty(value) {
   return { tier, label: labels[tier] };
 }
 
+function normalizePreSlabJobContext(value, volumeKey = 'none') {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/-]+/g, '_')
+    .replace(/_+/g, '_');
+  const aliases = {
+    standalone: 'standalone',
+    one_off: 'standalone',
+    oneoff: 'standalone',
+    single_job: 'standalone',
+    builder: 'builderBatch',
+    builderbatch: 'builderBatch',
+    builder_batch: 'builderBatch',
+    batch: 'builderBatch',
+    same_site: 'builderBatch',
+    same_trip: 'sameTripAddOn',
+    sametripaddon: 'sameTripAddOn',
+    same_trip_add_on: 'sameTripAddOn',
+    same_trip_addon: 'sameTripAddOn',
+    addon: 'sameTripAddOn',
+    add_on: 'sameTripAddOn',
+  };
+  if (aliases[raw]) return aliases[raw];
+  return volumeKey === '5plus' || volumeKey === '10plus' ? 'builderBatch' : 'standalone';
+}
+
+function lookupPreSlabMinimum(slabSqFt, jobContext) {
+  const tiers = PRE_SLAB_TERMITICIDE_MINIMUMS[jobContext] || PRE_SLAB_TERMITICIDE_MINIMUMS.standalone;
+  const tier = tiers.find(row => slabSqFt <= row.maxSqFt) || tiers[tiers.length - 1];
+  return {
+    floor: tier.floor,
+    maxSqFt: tier.maxSqFt,
+    basis: `${PRE_SLAB_JOB_CONTEXT_LABELS[jobContext] || PRE_SLAB_JOB_CONTEXT_LABELS.standalone}, ` +
+      `${tier.maxSqFt === Infinity ? 'over 1,250' : `up to ${tier.maxSqFt}`} sqft`,
+  };
+}
+
 function resolveLawnFreq(freq) {
   const parsed = Number(freq);
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
@@ -698,6 +762,7 @@ export function calculateEstimate(inputs) {
     preslabSqft: psSqft,
     preslabWarranty,
     preslabVolume,
+    preslabJobContext,
     preslabProductKey,
     preslabLabelConfirmed,
     foamPoints: _foamPoints,
@@ -1595,30 +1660,40 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     const productKey = normalizePreSlabProductKey(preslabProductKey);
     const product = PRE_SLAB_TERMITICIDE_PRODUCTS[productKey];
+    const vol = normalizePreSlabVolume(preslabVolume);
+    const jobContext = normalizePreSlabJobContext(preslabJobContext, vol.key);
+    const contextualMinimum = lookupPreSlabMinimum(psSqft, jobContext);
     const productOz = psSqft / 10 * product.productOzPer10SqFt;
     const units = Math.max(1, Math.ceil(productOz / product.containerOz));
-    const productCost = units * product.containerCost;
+    const chemicalCostPerOz = product.containerCost / product.containerOz;
+    const allocatedProductCost = productOz * chemicalCostPerOz;
+    const fullContainerProductCost = units * product.containerCost;
     const lhr = Math.min(5, Math.max(1, 0.5 + psSqft / 1500));
     const laborCost = lhr * LABOR;
     const equipCost = 15;
-    const cost = productCost + laborCost + equipCost;
+    const complianceAdminCost = PRE_SLAB_COMPLIANCE_ADMIN_COST;
+    const driveCost = PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT[jobContext] ? LABOR * DRIVE / 60 : 0;
+    const cost = allocatedProductCost + laborCost + equipCost + complianceAdminCost + driveCost;
     const rawPrice = Math.round(cost / product.marginDivisor);
-    const priceBeforeVolumeDiscount = Math.max(rawPrice, product.floorBeforeVolumeDiscount);
-    const vol = normalizePreSlabVolume(preslabVolume);
+    const priceBeforeVolumeDiscount = Math.max(rawPrice, contextualMinimum.floor);
     const priceAfterVolumeDiscount = Math.max(
       Math.round(priceBeforeVolumeDiscount * vol.multiplier),
-      product.floorAfterVolumeDiscount,
+      contextualMinimum.floor,
     );
     const warranty = normalizePreSlabWarranty(preslabWarranty);
     const warrAdd = warranty.tier === 'EXTENDED' ? 200 : 0;
     const basePreSlabPrice = priceAfterVolumeDiscount;
     const fp = basePreSlabPrice + warrAdd;
     const labelConfirmed = preslabLabelConfirmed === true || preslabLabelConfirmed === 'true';
+    const warrantyStatus = warranty.tier === 'EXTENDED'
+      ? 'Extended 5-year warranty'
+      : warranty.label;
     const detail = [
       psSqft.toLocaleString() + ' sf',
       product.shortLabel,
       Math.round(productOz * 100) / 100 + ' oz',
       units + (units === 1 ? ' unit' : ' units'),
+      warrantyStatus,
       vol.key !== 'none' ? 'vol disc' : null,
     ].filter(Boolean).join(' | ');
     otItems.push({
@@ -1635,13 +1710,28 @@ export function calculateEstimate(inputs) {
       productOz: Math.round(productOz * 100) / 100,
       units,
       btl: units,
+      containersRequired: units,
       containerOz: product.containerOz,
       containerCost: product.containerCost,
-      productCost: Math.round(productCost * 100) / 100,
+      chemicalCostPerOz: Math.round(chemicalCostPerOz * 10000) / 10000,
+      allocatedProductCost: Math.round(allocatedProductCost * 100) / 100,
+      productCost: Math.round(allocatedProductCost * 100) / 100,
+      fullContainerProductCost: Math.round(fullContainerProductCost * 100) / 100,
       laborHrs: Math.round(lhr * 100) / 100,
       laborCost: Math.round(laborCost * 100) / 100,
       equipCost,
+      complianceAdminCost,
+      driveCost: Math.round(driveCost * 100) / 100,
+      includeDriveCost: PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT[jobContext] === true,
+      cost: Math.round(cost * 100) / 100,
       rawPrice,
+      jobContext,
+      preSlabJobContext: jobContext,
+      preSlabJobContextLabel: PRE_SLAB_JOB_CONTEXT_LABELS[jobContext] || PRE_SLAB_JOB_CONTEXT_LABELS.standalone,
+      contextualFloor: contextualMinimum.floor,
+      contextualMinimumBasis: contextualMinimum.basis,
+      floorBeforeVolumeDiscount: contextualMinimum.floor,
+      floorAfterVolumeDiscount: contextualMinimum.floor,
       priceBeforeVolumeDiscount,
       priceAfterVolumeDiscount,
       volDisc: vol.key !== 'none',
@@ -1651,6 +1741,8 @@ export function calculateEstimate(inputs) {
       warrAdd,
       warrantyTier: warranty.tier,
       warrantyLabel: warranty.label,
+      warrantyStatus,
+      warrantyExtendedSelected: warranty.tier === 'EXTENDED',
       labelConfirmed,
       requiresManualReview: !labelConfirmed,
       manualReviewReasons: labelConfirmed ? [] : ['pre_slab_label_confirmation_required'],

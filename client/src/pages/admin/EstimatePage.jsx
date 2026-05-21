@@ -67,24 +67,38 @@ const PRE_SLAB_PRODUCT_OPTIONS = [
   { value: "talstar_p", label: "Talstar P - Bifenthrin, branded repellent barrier" },
 ];
 
+const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
+  { value: "standalone", label: "Standalone one-off job" },
+  { value: "builderBatch", label: "Builder batch / same site" },
+  { value: "sameTripAddOn", label: "Same-trip add-on" },
+];
+
 const PRE_SLAB_PRODUCT_META = {
   termidor_sc: {
     warning: "Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.",
-    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | $600 floor",
+    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | contextual minimum",
   },
   taurus_sc: {
     warning: "Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.",
-    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | $600 floor",
+    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | contextual minimum",
   },
   bifen_it: {
     warning: "Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.",
-    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | $600 floor",
+    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | contextual minimum",
   },
   talstar_p: {
     warning: "Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.",
-    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | $600 floor",
+    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | contextual minimum",
   },
 };
+
+function resolvePreSlabJobContextForForm(form) {
+  if (form?._preslabJobContextEdited) return form.preslabJobContext || "standalone";
+  const volume = String(form?.preslabVolume || "NONE").trim().toUpperCase();
+  return volume === "5" || volume === "10" || volume === "5PLUS" || volume === "10PLUS"
+    ? "builderBatch"
+    : "standalone";
+}
 
 const AI_SOURCE_LABELS = {
   claude: "Claude",
@@ -824,6 +838,8 @@ function EstimateToolView() {
     preslabLabelConfirmed: false,
     preslabWarranty: "BASIC",
     preslabVolume: "NONE",
+    preslabJobContext: "standalone",
+    _preslabJobContextEdited: false,
     foamPoints: "5",
     roachType: "REGULAR",
     // services
@@ -1003,6 +1019,10 @@ function EstimateToolView() {
         const next = {
           ...f,
           [key]: val,
+          ...(key === "preslabJobContext" ? { _preslabJobContextEdited: true } : {}),
+          ...(key === "preslabVolume" && !f._preslabJobContextEdited
+            ? { preslabJobContext: String(val || "NONE").toUpperCase() === "NONE" ? "standalone" : "builderBatch" }
+            : {}),
           ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
           ...(key === "stories" ? { _storiesEdited: true } : {}),
           ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
@@ -1629,6 +1649,7 @@ function EstimateToolView() {
           preslabLabelConfirmed: !!form.preslabLabelConfirmed,
           preslabWarranty: form.preslabWarranty || "BASIC",
           preslabVolume: form.preslabVolume || "NONE",
+          preslabJobContext: resolvePreSlabJobContextForForm(form),
           includePreSlabWarrantyExtended: form.preslabWarranty === "EXTENDED",
           foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
           bedbugRooms: parseInt(form.bedbugRooms) || 1,
@@ -2045,6 +2066,10 @@ function EstimateToolView() {
       preslabSqft: "",
       preslabProductKey: "termidor_sc",
       preslabLabelConfirmed: false,
+      preslabWarranty: "BASIC",
+      preslabVolume: "NONE",
+      preslabJobContext: "standalone",
+      _preslabJobContextEdited: false,
       termiteFootprintSqFt: "",
       termitePerimeterLF: "",
       termiteBaitComplexity: "",
@@ -3240,6 +3265,12 @@ function EstimateToolView() {
                           ]}
                         />
                       </Field>{" "}
+                      <Field label="Pre-Slab Job Context">
+                        <Select
+                          k="preslabJobContext"
+                          options={PRE_SLAB_JOB_CONTEXT_OPTIONS}
+                        />
+                      </Field>
                       <Checkbox
                         k="preslabLabelConfirmed"
                         label="Label rate and finished dilution confirmed"
@@ -4746,8 +4777,7 @@ function EstimateToolView() {
                                 </TierGrid>
                                 {!item.warrAdd && String(item.warrantyTier || "BASIC").toUpperCase() !== "NONE" && (
                                   <div style={sModNote}>
-                                    Includes 1-yr builder warranty | $225/yr
-                                    renewal after
+                                    {item.warrantyStatus || "No extended warranty selected"}
                                   </div>
                                 )}
                                 {!item.warrAdd && String(item.warrantyTier || "").toUpperCase() === "NONE" && (
@@ -4759,7 +4789,7 @@ function EstimateToolView() {
                                 <div style={sSeasonal}>
                                   Certificate of Compliance required{item.labelConfirmed ? " | Label confirmed" : " | Label review required"}
                                   {item.productCost !== undefined && item.rawPrice !== undefined
-                                    ? ` | Material $${item.productCost.toFixed(2)} | Raw $${item.rawPrice} | Floor $${item.priceBeforeVolumeDiscount}`
+                                    ? ` | ${item.preSlabJobContextLabel || item.jobContext || "Standalone"} | ${item.productOz} oz | Allocated material $${item.productCost.toFixed(2)} | Raw $${item.rawPrice} | Floor $${item.contextualFloor || item.priceBeforeVolumeDiscount}`
                                     : ""}
                                 </div>
                               </div>

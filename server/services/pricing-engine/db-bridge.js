@@ -325,6 +325,27 @@ function validatePestPricingConfig(snapshot = constants) {
       errors.push(`SPECIALTY.preSlabTermiticide.volumeDiscounts.${key} is required`);
     }
   }
+  for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
+    const tiers = preSlabTermiticide.minimums?.[context];
+    if (!Array.isArray(tiers) || tiers.length === 0) {
+      errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context} is required`);
+    } else {
+      tiers.forEach((tier, index) => {
+        if (!isPositiveNumber(tier.maxSqFt) && tier.maxSqFt !== Infinity && tier.maxSqFt !== 'Infinity') {
+          errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context}.${index}.maxSqFt must be positive`);
+        }
+        if (!isNonNegativeNumber(tier.floor)) {
+          errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context}.${index}.floor must be non-negative`);
+        }
+      });
+    }
+    if (typeof preSlabTermiticide.includeDriveCostByContext?.[context] !== 'boolean') {
+      errors.push(`SPECIALTY.preSlabTermiticide.includeDriveCostByContext.${context} must be boolean`);
+    }
+  }
+  if (!isNonNegativeNumber(preSlabTermiticide.complianceAdminCost)) {
+    errors.push('SPECIALTY.preSlabTermiticide.complianceAdminCost must be non-negative');
+  }
   for (const key of ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p']) {
     const product = products[key] || {};
     if (!isPositiveNumber(product.containerCost)) {
@@ -339,10 +360,10 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!isPositiveNumber(product.marginDivisor) || Number(product.marginDivisor) >= 1) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.marginDivisor must be positive and less than 1`);
     }
-    if (!isNonNegativeNumber(product.floorBeforeVolumeDiscount)) {
+    if (product.floorBeforeVolumeDiscount !== undefined && !isNonNegativeNumber(product.floorBeforeVolumeDiscount)) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorBeforeVolumeDiscount must be non-negative`);
     }
-    if (!isNonNegativeNumber(product.floorAfterVolumeDiscount)) {
+    if (product.floorAfterVolumeDiscount !== undefined && !isNonNegativeNumber(product.floorAfterVolumeDiscount)) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorAfterVolumeDiscount must be non-negative`);
     }
   }
@@ -1095,7 +1116,29 @@ async function syncConstantsFromDB(dbInstance) {
       const termiticide = constants.SPECIALTY.preSlabTermiticide;
       setString(termiticide, 'defaultProductKey', ps.defaultProductKey ?? ps.default_product_key);
       setNumber(termiticide, 'equipCost', ps.ps_equip ?? ps.equipCost ?? ps.equip_cost, Number);
+      setNumber(termiticide, 'complianceAdminCost', ps.complianceAdminCost ?? ps.compliance_admin_cost, money);
       setNumber(termiticide, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
+      const minimumsOverlay = ps.minimums || ps.minimums_by_context;
+      if (minimumsOverlay && typeof minimumsOverlay === 'object' && !Array.isArray(minimumsOverlay)) {
+        for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
+          const tiers = minimumsOverlay[context];
+          if (!Array.isArray(tiers)) continue;
+          termiticide.minimums[context] = tiers
+            .map((tier) => ({
+              maxSqFt: tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity' || tier.max_sqft === Infinity || tier.max_sqft === 'Infinity'
+                ? 'Infinity'
+                : Number(tier.maxSqFt ?? tier.max_sqft),
+              floor: money(tier.floor ?? tier.minimum),
+            }))
+            .filter((tier) => (Number.isFinite(tier.maxSqFt) || tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity') && Number.isFinite(tier.floor));
+        }
+      }
+      const includeDriveOverlay = ps.includeDriveCostByContext || ps.include_drive_cost_by_context;
+      if (includeDriveOverlay && typeof includeDriveOverlay === 'object' && !Array.isArray(includeDriveOverlay)) {
+        for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
+          setBoolean(termiticide.includeDriveCostByContext, context, includeDriveOverlay[context]);
+        }
+      }
       const productOverlays = ps.products || ps.product_costs || {};
       const productKeys = ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'];
       const applyPreSlabProductOverlay = (key, data = {}) => {

@@ -1643,6 +1643,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       slabSqFt: o.preslabSqft,
       measurements: preSlabMeasurements,
       volumeDiscount: o.preslabVolume && o.preslabVolume !== 'NONE' ? o.preslabVolume.toLowerCase() : 'none',
+      jobContext: o.preslabJobContext || o.preSlabJobContext,
       warranty: o.preslabWarranty || 'BASIC',
       includeWarrantyExtended: !!o.includePreSlabWarrantyExtended || o.preslabWarranty === 'EXTENDED',
       labelConfirmed: o.preslabLabelConfirmed === true || o.preSlabLabelConfirmed === true ||

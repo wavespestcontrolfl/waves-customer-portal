@@ -1138,6 +1138,31 @@ function isLawnCareOneTimeItem(item = {}) {
   return /\blawn|turf|weed|fertili[sz]|chinch|fung/.test(raw);
 }
 
+function isPreSlabOneTimeItem(item = {}) {
+  const raw = [item.service, item.name, item.label, item.displayName, item.detail, item.det]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('pre slab')
+    && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
+}
+
+function preSlabCustomerCopy(items = []) {
+  const preSlabItems = (Array.isArray(items) ? items : []).filter(isPreSlabOneTimeItem);
+  const hasExtendedWarranty = preSlabItems.some((item) => {
+    const raw = [item.warrantyStatus, item.detail, item.det]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    if (item.warrantyExtendedSelected === true) return true;
+    if (raw.includes('no extended')) return false;
+    return raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr');
+  });
+  return 'Includes pre-slab soil treatment for the measured slab area. Certificate/termite-treatment documentation is provided when required. Warranty terms depend on the selected warranty option.'
+    + (hasExtendedWarranty ? '' : ' No extended warranty selected.');
+}
+
 function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
@@ -1925,6 +1950,8 @@ function renderPage(token, estimate, estData) {
   );
   const recurring = recurringServicesWithSupplements(estResult);
   const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+  const hasPreSlabOneTime = oneTimeItems.some(isPreSlabOneTimeItem);
+  const preSlabOneTimeCopy = hasPreSlabOneTime ? preSlabCustomerCopy(oneTimeItems) : '';
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
   const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
 
@@ -2211,7 +2238,7 @@ function renderPage(token, estimate, estData) {
     ? `${pestTierCadence ? `${pestTierCadence} ` : ''}Pest Control or One-Time Pest Control`
     : null;
   const quotedServiceNames = recurring.map((s) => labelWithFreq(s.name)).filter(Boolean);
-  const quotedOneTimeNames = oneTimeItems.map((it) => it.name).filter(Boolean);
+  const quotedOneTimeNames = oneTimeItems.map((it) => it.displayName || it.name).filter(Boolean);
   const quotedServicesLabel = pestChoiceLabel || (quotedServiceNames.length
     ? quotedServiceNames.join(' + ')
     : (quotedOneTimeNames.length ? quotedOneTimeNames.join(' + ') : `WaveGuard ${tier}`));
@@ -2428,13 +2455,13 @@ function renderPage(token, estimate, estData) {
   const oneTimeOnlyHeroPriceHtml = `
       <div class="choice-treatment">
         <div class="choice-treatment-name">${escapeHtml(quotedOneTimeNames[0] || quotedServicesLabel || 'One-time service')}</div>
-        <div class="choice-treatment-detail">One-time service</div>
+        <div class="choice-treatment-detail">${escapeHtml(hasPreSlabOneTime ? 'Pre-slab soil treatment' : 'One-time service')}</div>
         <div class="big-price choice-treatment-price">
           <span class="num" id="onetime-display">${fmtMoney(onetimeTotal || oneTimeChoicePrice)}</span>
           <span class="per">one-time</span>
         </div>
         <div class="onetime-note">
-          One visit, pay on service day. No recurring schedule.
+          ${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : 'One visit, pay on service day. No recurring schedule.')}
         </div>
       </div>
     `;
@@ -2921,7 +2948,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${isOneTimeOnly ? `<div class="mini-guarantee">Includes a 30-day callback period if pests return after this visit.</div>` : ''}
+    ${isOneTimeOnly ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabOneTimeCopy : 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
   </div>
 
@@ -5370,6 +5397,8 @@ function normalizeOneTimeBreakdown(estData) {
         kind: quoteRequired ? 'quote_required' : (includedByServiceCredit ? 'included' : (amount < 0 ? 'discount' : 'charge')),
         quoteRequired,
         reason: item.reason || null,
+        warrantyStatus: item.warrantyStatus || null,
+        warrantyExtendedSelected: item.warrantyExtendedSelected === true,
       });
     }
   };

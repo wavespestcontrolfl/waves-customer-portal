@@ -940,8 +940,6 @@ const SPECIALTY = {
         productOzPer10SqFt: 0.8,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.45,
-        floorBeforeVolumeDiscount: 600,
-        floorAfterVolumeDiscount: 500,
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -961,8 +959,6 @@ const SPECIALTY = {
         productOzPer10SqFt: 0.8,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.45,
-        floorBeforeVolumeDiscount: 600,
-        floorAfterVolumeDiscount: 500,
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -981,8 +977,6 @@ const SPECIALTY = {
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.45,
-        floorBeforeVolumeDiscount: 600,
-        floorAfterVolumeDiscount: 500,
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -1001,8 +995,6 @@ const SPECIALTY = {
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.45,
-        floorBeforeVolumeDiscount: 600,
-        floorAfterVolumeDiscount: 500,
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -1011,7 +1003,33 @@ const SPECIALTY = {
         ],
       },
     },
+    minimums: {
+      standalone: [
+        { maxSqFt: 250, floor: 225 },
+        { maxSqFt: 750, floor: 325 },
+        { maxSqFt: 1250, floor: 425 },
+        { maxSqFt: 'Infinity', floor: 600 },
+      ],
+      builderBatch: [
+        { maxSqFt: 250, floor: 150 },
+        { maxSqFt: 750, floor: 250 },
+        { maxSqFt: 1250, floor: 350 },
+        { maxSqFt: 'Infinity', floor: 500 },
+      ],
+      sameTripAddOn: [
+        { maxSqFt: 250, floor: 125 },
+        { maxSqFt: 750, floor: 225 },
+        { maxSqFt: 1250, floor: 325 },
+        { maxSqFt: 'Infinity', floor: 500 },
+      ],
+    },
     equipCost: 15,
+    complianceAdminCost: 25,
+    includeDriveCostByContext: {
+      standalone: true,
+      builderBatch: false,
+      sameTripAddOn: false,
+    },
     labor: {
       baseHours: 0.5,
       hoursPerSqFt: 1 / 1500,
