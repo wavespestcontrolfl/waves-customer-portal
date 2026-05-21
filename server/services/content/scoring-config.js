@@ -1,0 +1,112 @@
+/**
+ * scoring-config.js — single source of truth for opportunity scoring.
+ *
+ * Step 0 calibration reads these; the production miners (gsc-opportunity-miner,
+ * serp-profiler, decision-router, content-quality-gate) read these too. Tuning
+ * happens here, not scattered through service files.
+ *
+ * Edit after reading reports/calibration-*.md.
+ */
+
+const WEIGHTS = {
+  // Positive signals — sum to ~175 max if every box is checked.
+  gscOpportunity: 35,
+  serpFit: 25,
+  customerDemand: 25,
+  localRevenue: 20,
+  seasonality: 15,
+  contentGap: 15,
+  conversionIntent: 15,
+  refreshLift: 15,
+  leadQuality: 20,
+  closeRate: 15,
+  revenueRealization: 20,
+
+  // Penalties — subtracted.
+  cannibalizationRisk: 35,
+  serpMismatch: 40,
+  redundancy: 25,
+  privacyRisk: 25,
+  weakLocalProof: 20,
+};
+
+const THRESHOLDS = {
+  // Minimum total score to enter the action queue at all.
+  minScoreToAct: 75,
+
+  // GSC bucket cutoffs.
+  minImpressionsToScore: 50,
+  strikingDistancePositionMin: 4,
+  strikingDistancePositionMax: 15,
+  ctrRewriteMaxCtr: 0.02,
+  ctrRewritePositionMax: 8,
+  ctrRewriteMinImpressions: 200,
+  decayMinDropPct: 0.25,
+  cannibalizationMinUrls: 2,
+
+  // Recency / dedupe.
+  recencyBlocklistDays: 60,
+
+  // Uniqueness gate (anti-doorway).
+  uniquenessJaccardMax: 0.55,
+  uniqueLocalDifferentiatorsMin: 3,
+
+  // Customer cluster.
+  customerClusterMinSize: 10,
+  customerClusterRecencyDays: 90,
+
+  // Trust-build.
+  autoPublishAfterApprovedRuns: 3,
+};
+
+const REVENUE_PRIORITY = {
+  // Higher = more revenue-weighted. Used by localRevenueScore.
+  termite: 1.0,
+  rodent: 0.9,
+  mosquito: 0.8,
+  pest: 0.75,
+  lawn: 0.6,
+  'tree-shrub': 0.5,
+  specialty: 0.4,
+};
+
+const CITIES = [
+  'Bradenton',
+  'Lakewood Ranch',
+  'Sarasota',
+  'Venice',
+  'Parrish',
+  'North Port',
+  'Palmetto',
+  'Port Charlotte',
+];
+
+const SERP_SAMPLE_CITIES = ['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'Parrish'];
+
+const ACTION_TYPES = [
+  'refresh_existing_page',
+  'create_or_refresh_city_service_page',
+  'create_customer_question_page',
+  'rewrite_title_meta',
+  'add_internal_links',
+  'gbp_post',
+  'new_supporting_blog',
+  'do_not_publish',
+];
+
+const WEEKLY_MIX = {
+  refresh_existing_page: 2,
+  create_or_refresh_city_service_page: 1,
+  create_customer_question_page: 1,
+  rewrite_title_meta_or_link_or_gbp: 1,
+};
+
+module.exports = {
+  WEIGHTS,
+  THRESHOLDS,
+  REVENUE_PRIORITY,
+  CITIES,
+  SERP_SAMPLE_CITIES,
+  ACTION_TYPES,
+  WEEKLY_MIX,
+};

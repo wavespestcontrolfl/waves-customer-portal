@@ -14,3 +14,6 @@ coverage/
 
 # Reconcile-script outputs — contain row-level subscriber PII. Never commit.
 tmp-beehiiv-reconcile-*.json
+
+# Calibration script output — may contain redacted-but-still-sensitive snippets.
+reports/
