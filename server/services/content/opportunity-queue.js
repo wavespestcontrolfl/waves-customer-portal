@@ -60,16 +60,16 @@ class OpportunityQueue {
     // First, recover stale claims so they're eligible again.
     await this.recoverStaleClaims();
 
-    // Atomic claim via UPDATE ... RETURNING. The earlier iteration
-    // appended a `notes` audit string, but opportunity_queue has no
-    // `notes` column (the migration in #1021 only defines status /
-    // skip_reason / timestamps). Audit lives in the logger instead.
+    // Atomic claim via UPDATE ... RETURNING.
     const whereActionType = actionType ? `AND action_type = ?` : '';
+    const params = [claimedBy, new Date(), minScore];
+    if (actionType) params.push(actionType);
 
     const result = await db.raw(
       `UPDATE opportunity_queue
          SET status = 'claimed',
              claimed_at = ?,
+             notes = COALESCE(notes, '') || '\n[claimed by ' || ? || ' at ' || now() || ']',
              updated_at = now()
        WHERE id = (
          SELECT id FROM opportunity_queue
@@ -81,10 +81,9 @@ class OpportunityQueue {
          LIMIT 1
        )
        RETURNING *`,
-      [new Date(), minScore].concat(actionType ? [actionType] : [])
+      [new Date(), claimedBy, minScore].concat(actionType ? [actionType] : [])
     );
     const row = result.rows?.[0];
-    if (row) logger.info(`[opportunity-queue] claimed ${row.id} (${row.bucket}/${row.action_type}, score ${row.score}) by ${claimedBy}`);
     return row ? parseRow(row) : null;
   }
 
@@ -93,32 +92,15 @@ class OpportunityQueue {
    * about what the runner did (e.g. "drafted brief abc-123, sent for
    * human review").
    */
-  async complete(opportunityId, { notes, claimToken } = {}) {
-    if (!claimToken) {
-      throw new Error('opportunity-queue.complete: claimToken required (pass the claimed_at value returned by claimNext)');
-    }
+  async complete(opportunityId, { notes } = {}) {
     const updates = {
       status: 'done',
       completed_at: new Date(),
       updated_at: new Date(),
     };
-    if (notes) logger.info(`[opportunity-queue] done ${opportunityId}: ${notes}`);
-    // Two-step guard:
-    //   - status='claimed' prevents finalizing a pending / done row.
-    //   - claimed_at = claimToken binds the transition to the SAME
-    //     claim acquired by claimNext. If a stale claim was recovered
-    //     and the row was re-claimed by another worker, claimed_at
-    //     has shifted and this update affects 0 rows — the late
-    //     first worker can't overwrite the active attempt.
-    //
-    // claimToken is REQUIRED on purpose: making it optional means
-    // callers can forget it and silently regress to a no-guarantee
-    // transition, which would silently lose or misattribute work
-    // under stale-claim recovery.
+    if (notes) updates.notes = db.raw('COALESCE(notes, \'\') || ?', [`\n[done] ${notes}`]);
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
-      .where('status', 'claimed')
-      .where('claimed_at', claimToken)
       .update(updates);
     return updated > 0;
   }
@@ -127,16 +109,10 @@ class OpportunityQueue {
    * Mark a claimed opportunity as skipped (won't be retried). reason
    * is required — surfaced in dashboards.
    */
-  async skip(opportunityId, reason, { claimToken } = {}) {
+  async skip(opportunityId, reason) {
     if (!reason) throw new Error('opportunity-queue: skip requires a reason');
-    if (!claimToken) {
-      throw new Error('opportunity-queue.skip: claimToken required (pass the claimed_at value returned by claimNext)');
-    }
-    // Same claimed-only + claim-token guard as complete().
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
-      .where('status', 'claimed')
-      .where('claimed_at', claimToken)
       .update({
         status: 'skipped',
         skip_reason: reason,
@@ -148,19 +124,12 @@ class OpportunityQueue {
 
   /**
    * Release a claim WITHOUT skipping — used when a runner crashes
-   * gracefully or wants to defer. Row returns to pending. claimToken
-   * is required so a worker that has lost the active claim (via
-   * stale-claim recovery + re-claim by another worker) can't bounce
-   * the row back to pending and disrupt the active attempt.
+   * gracefully or wants to defer. Row returns to pending.
    */
-  async release(opportunityId, { claimToken } = {}) {
-    if (!claimToken) {
-      throw new Error('opportunity-queue.release: claimToken required (pass the claimed_at value returned by claimNext)');
-    }
+  async release(opportunityId) {
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
-      .where('claimed_at', claimToken)
       .update({
         status: 'pending',
         claimed_at: null,
@@ -172,8 +141,7 @@ class OpportunityQueue {
   /**
    * Recover claims that have been held longer than STALE_CLAIM_MS by
    * returning them to pending. Called inline by claimNext(); also safe
-   * to call from a janitor cron. Operates on rows whose claim is
-   * stale by definition, so no claimToken applies.
+   * to call from a janitor cron.
    */
   async recoverStaleClaims() {
     const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
@@ -183,9 +151,10 @@ class OpportunityQueue {
       .update({
         status: 'pending',
         claimed_at: null,
+        notes: db.raw('COALESCE(notes, \'\') || ?', [`\n[stale claim recovered at ${new Date().toISOString()}]`]),
         updated_at: new Date(),
       });
-    if (recovered > 0) logger.info(`[opportunity-queue] recovered ${recovered} stale claim(s) (cutoff ${cutoff.toISOString()})`);
+    if (recovered > 0) logger.info(`[opportunity-queue] recovered ${recovered} stale claim(s)`);
     return recovered;
   }
 

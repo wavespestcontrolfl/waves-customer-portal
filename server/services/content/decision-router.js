@@ -203,29 +203,11 @@ function route(opportunity, signals = {}) {
   };
 }
 
-// SERP page-type → brief template key. SERP profiler emits values
-// like 'blog' / 'faq' / 'service' / 'city-service' / 'directory' /
-// 'home' / 'page'. brief templates are keyed as 'city-service',
-// 'customer-question', 'supporting-blog', 'refresh', 'metadata'. The
-// raw values must be normalized or _composeBrief falls back to empty
-// required_sections / schema_types and the refresh draft loses its
-// structural guidance.
-const REFRESH_PAGE_TYPE_BY_SERP = {
-  blog: 'supporting-blog',
-  faq: 'customer-question',
-  'city-service': 'city-service',
-  service: 'city-service', // closest brief template for a service page
-  // directory / home / page / unknown → keep the generic 'refresh' template
-};
-
 function derivePageType(action, serp_profile) {
   if (action === 'create_or_refresh_city_service_page') return 'city-service';
   if (action === 'create_customer_question_page') return 'customer-question';
   if (action === 'new_supporting_blog') return 'supporting-blog';
-  if (action === 'refresh_existing_page') {
-    const raw = serp_profile?.dominant_page_type;
-    return REFRESH_PAGE_TYPE_BY_SERP[raw] || 'refresh';
-  }
+  if (action === 'refresh_existing_page') return serp_profile?.dominant_page_type || 'refresh';
   if (action === 'rewrite_title_meta') return 'metadata';
   if (action === 'add_internal_links') return 'links';
   if (action === 'gbp_post') return 'gbp';
