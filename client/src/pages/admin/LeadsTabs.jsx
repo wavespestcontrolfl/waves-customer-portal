@@ -777,21 +777,32 @@ export function LeadsSection() {
   // ═════════════════════════════════════════════════════════════════════════
   const renderPipeline = () => {
     const ov = overview || {};
+    const funnelByStage = new Map(funnel.map((f) => [f.stage, f]));
+    const countStages = (stages) =>
+      stages.reduce(
+        (sum, stage) => sum + Number(funnelByStage.get(stage)?.count || 0),
+        0,
+      );
     const pipelineOrder = [
-      { stage: "new", label: "New Leads" },
-      { stage: "contacted", label: "Contacted" },
-      { stage: "estimate_sent", label: "Estimate Sent" },
-      { stage: "won", label: "Won" },
-      { stage: "lost", label: "Lost" },
+      { stage: "new", label: "New Leads", count: countStages(["new"]) },
+      {
+        stage: "contacted",
+        label: "Contacted",
+        count: countStages(["contacted"]),
+      },
+      {
+        stage: "estimate_sent",
+        label: "Estimate Sent",
+        count: countStages(["estimate_sent", "estimate_viewed", "negotiating"]),
+      },
+      { stage: "won", label: "Won", count: countStages(["won"]) },
+      {
+        stage: "lost",
+        label: "Lost",
+        count: countStages(["lost", "unresponsive", "disqualified", "duplicate"]),
+      },
     ];
-    const funnelData = pipelineOrder.map(
-      ({ stage, label }) =>
-        funnel.find((f) => f.stage === stage) || {
-          stage,
-          label,
-          count: 0,
-        },
-    );
+    const funnelData = pipelineOrder;
     const draggingLead = draggingLeadId
       ? leads.find((lead) => lead.id === draggingLeadId)
       : null;
@@ -864,6 +875,23 @@ export function LeadsSection() {
           />{" "}
         </div>
         {/* Pipeline status */}
+        <div style={{ marginBottom: 10 }}>
+          <h2
+            style={{
+              margin: "0 0 6px",
+              color: C.heading,
+              fontSize: 12,
+              fontWeight: 500,
+              fontFamily: ROBOTO,
+              letterSpacing: "0.02em",
+            }}
+          >
+            Pipeline Status
+          </h2>
+          <div style={{ margin: 0, color: C.muted, fontSize: 12 }}>
+            Current lead counts by status for the selected month.
+          </div>
+        </div>
         <div
           style={{
             display: "flex",
