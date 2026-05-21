@@ -148,6 +148,21 @@ const VOICE_CONSTRAINTS = {
   ],
 };
 
+// Canonical URL slug component per service for city-service pages.
+// pest → "pest-control" (so URL is /pest-control-bradenton-fl/)
+// lawn → "lawn-care" (NOT lawn-control — that's not a real page)
+// tree-shrub doesn't ship as a city-service slug today; surface no
+// link instead of fabricating one.
+const SERVICE_CITY_SLUG = {
+  pest: 'pest-control',
+  lawn: 'lawn-care',
+  mosquito: 'mosquito-control',
+  termite: 'termite-control',
+  rodent: 'rodent-control',
+  // tree-shrub / specialty: no canonical city-service slug pattern;
+  // fall back to the service hub link only.
+};
+
 const SERVICE_HUB_LINKS = {
   pest: ['/pest-control-services/', '/waveguard-memberships/', '/pest-library/'],
   lawn: ['/lawn-care/', '/lawn-care/fertilizer-blackout-manatee-county/'],
@@ -379,9 +394,17 @@ class ContentBriefBuilder {
     const links = new Set();
     const hubs = SERVICE_HUB_LINKS[opportunity.service] || [];
     for (const h of hubs) links.add(h);
+    // City-service link uses the canonical service slug, NOT
+    // `${service}-control-` (lawn would produce /lawn-control-…-fl/
+    // which isn't a real page; the real slug is /lawn-care-…-fl/).
+    // Services without a canonical city-service slug pattern (e.g.
+    // tree-shrub, specialty) get only the hub link.
     if (opportunity.city && opportunity.service) {
-      const citySlug = opportunity.city.toLowerCase().replace(/\s+/g, '-');
-      links.add(`/${opportunity.service}-control-${citySlug}-fl/`);
+      const slug = SERVICE_CITY_SLUG[opportunity.service];
+      if (slug) {
+        const citySlug = opportunity.city.toLowerCase().replace(/\s+/g, '-');
+        links.add(`/${slug}-${citySlug}-fl/`);
+      }
     }
     return Array.from(links).slice(0, 5);
   }

@@ -93,6 +93,9 @@ class OpportunityQueue {
    * human review").
    */
   async complete(opportunityId, { notes, claimToken } = {}) {
+    if (!claimToken) {
+      throw new Error('opportunity-queue.complete: claimToken required (pass the claimed_at value returned by claimNext)');
+    }
     const updates = {
       status: 'done',
       completed_at: new Date(),
@@ -106,10 +109,15 @@ class OpportunityQueue {
     //     and the row was re-claimed by another worker, claimed_at
     //     has shifted and this update affects 0 rows — the late
     //     first worker can't overwrite the active attempt.
+    //
+    // claimToken is REQUIRED on purpose: making it optional means
+    // callers can forget it and silently regress to a no-guarantee
+    // transition, which would silently lose or misattribute work
+    // under stale-claim recovery.
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
-      .modify((qb) => { if (claimToken) qb.where('claimed_at', claimToken); })
+      .where('claimed_at', claimToken)
       .update(updates);
     return updated > 0;
   }
@@ -120,13 +128,14 @@ class OpportunityQueue {
    */
   async skip(opportunityId, reason, { claimToken } = {}) {
     if (!reason) throw new Error('opportunity-queue: skip requires a reason');
-    // Same claimed-only + claim-token guard as complete() — prevents
-    // a delayed or duplicate worker from kicking a pending/re-claimed
-    // row to skipped while another runner is actively handling it.
+    if (!claimToken) {
+      throw new Error('opportunity-queue.skip: claimToken required (pass the claimed_at value returned by claimNext)');
+    }
+    // Same claimed-only + claim-token guard as complete().
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
-      .modify((qb) => { if (claimToken) qb.where('claimed_at', claimToken); })
+      .where('claimed_at', claimToken)
       .update({
         status: 'skipped',
         skip_reason: reason,
