@@ -7,6 +7,7 @@ const { logAutopay } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
+const AccountMembershipEmail = require('./account-membership-email');
 
 /**
  * Billing Cron Service
@@ -449,10 +450,16 @@ const BillingCron = {
           // customers with service_paused_at set) and so dispatch can see the
           // billing issue before dispatching the next visit.
           try {
+            const pausedAt = new Date();
             await db('customers').where({ id: payment.customer_id }).update({
-              service_paused_at: new Date(),
+              service_paused_at: pausedAt,
               service_pause_reason: 'autopay_final_failure',
             });
+            void AccountMembershipEmail.sendMembershipPaused({
+              customerId: payment.customer_id,
+              effectiveDate: pausedAt,
+              reason: 'Payment retry attempts were exhausted',
+            }).catch((emailErr) => logger.warn(`[billing-cron] service pause email failed for customer ${payment.customer_id}: ${emailErr.message}`));
           } catch (pauseErr) {
             logger.error(`[billing-cron] Service pause failed: ${pauseErr.message}`);
           }

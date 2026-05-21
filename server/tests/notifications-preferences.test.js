@@ -13,10 +13,13 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+jest.mock('../services/account-membership-email', () => ({
+  sendAccountUpdated: jest.fn(),
+}));
 
 const notificationsRoute = require('../routes/notifications');
 
-const { notificationPrefsDbUpdates } = notificationsRoute._private;
+const { notificationPrefsDbUpdates, preferenceChangeItems } = notificationsRoute._private;
 
 describe('notification preference updates', () => {
   test('clears stale billing contact name when billing email changes without a replacement name', () => {
@@ -84,5 +87,22 @@ describe('notification preference updates', () => {
     expect(updates).toEqual({
       billing_contact_name: 'Accounts Payable',
     });
+  });
+
+  test('labels a 72-hour reminder toggle for account.updated emails', () => {
+    const items = preferenceChangeItems(
+      { serviceReminder72h: false },
+      { service_reminder_72h: true },
+      { serviceReminder72h: false },
+      { scope: 'Account' },
+    );
+
+    expect(items).toEqual([{
+      key: 'serviceReminder72h',
+      label: '72-Hour Appointment Reminder',
+      oldValue: 'On',
+      newValue: 'Off',
+      scope: 'Account',
+    }]);
   });
 });

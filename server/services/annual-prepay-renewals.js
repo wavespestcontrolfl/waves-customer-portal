@@ -3,6 +3,7 @@ const logger = require('./logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const AccountMembershipEmail = require('./account-membership-email');
 
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
@@ -537,15 +538,55 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
       .catch((err) => logger.warn(`[annual-prepay] notice claim release failed for term ${claimedTerm.id}: ${err.message}`));
   };
 
-  let smsDelivered = false;
+  let noticeRecorded = false;
   try {
     const customer = await db('customers').where({ id: claimedTerm.customer_id }).first();
+    const lastServiceDate = dateOnly(claimedTerm.last_scheduled_service_date);
+    if (!customer) {
+      await releaseClaim();
+      return { sent: false, reason: 'customer_not_found' };
+    }
+
+    const sendRenewalEmail = async () => {
+      try {
+        const result = await AccountMembershipEmail.sendMembershipRenewalReminder({
+          customerId: customer.id,
+          renewalDate: claimedTerm.term_end,
+          daysOut,
+          termId: claimedTerm.id,
+          lastServiceDate,
+        });
+        if (result?.sent === false || result?.ok === false) {
+          logger.warn(`[annual-prepay] renewal email not sent for term ${claimedTerm.id}: ${result.reason || 'not_sent'}`);
+        }
+        return result?.sent === true || result?.ok === true;
+      } catch (err) {
+        logger.warn(`[annual-prepay] renewal email failed for term ${claimedTerm.id}: ${err.message}`);
+        return false;
+      }
+    };
+    const markNoticeSent = async (sentAt = new Date()) => {
+      await db('annual_prepay_terms')
+        .where({ id: claimedTerm.id })
+        .whereNull(noticeCol)
+        .update({
+          [noticeCol]: sentAt,
+          [claimCol]: null,
+          updated_at: sentAt,
+        });
+      noticeRecorded = true;
+    };
+
     if (!customer?.phone) {
+      const emailSent = await sendRenewalEmail();
+      if (emailSent) {
+        await markNoticeSent();
+        return { sent: true, termId: claimedTerm.id, channel: 'email', sms: false };
+      }
       await releaseClaim();
       return { sent: false, reason: 'no_phone' };
     }
 
-    const lastServiceDate = dateOnly(claimedTerm.last_scheduled_service_date);
     const lastServiceSentence = lastServiceDate && isLastServiceNearTermEnd(claimedTerm)
       ? ` The last service currently on your schedule for this prepaid term is ${formatDateLabel(lastServiceDate)}.`
       : '';
@@ -559,6 +600,12 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     );
     if (!body) {
       logger.warn(`[annual-prepay] annual_prepay_renewal_reminder template missing/disabled for customer ${customer.id}`);
+      const emailSent = await sendRenewalEmail();
+      if (emailSent) {
+        await markNoticeSent();
+        return { sent: true, termId: claimedTerm.id, channel: 'email', sms: false, reason: 'missing_sms_template' };
+      }
+      await releaseClaim();
       return { sent: false, reason: 'missing_sms_template' };
     }
 
@@ -585,21 +632,18 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     });
 
     if (!smsResult.sent) {
-      await releaseClaim();
       logger.warn(`[annual-prepay] renewal SMS blocked/failed for term ${claimedTerm.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      const emailSent = await sendRenewalEmail();
+      if (emailSent) {
+        await markNoticeSent();
+        return { sent: true, termId: claimedTerm.id, channel: 'email', sms: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
+      }
+      await releaseClaim();
       return { sent: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
     }
-    smsDelivered = true;
 
     const sentAt = new Date();
-    await db('annual_prepay_terms')
-      .where({ id: claimedTerm.id })
-      .whereNull(noticeCol)
-      .update({
-        [noticeCol]: sentAt,
-        [claimCol]: null,
-        updated_at: sentAt,
-      });
+    await markNoticeSent(sentAt);
 
     await db('customer_interactions').insert({
       customer_id: customer.id,
@@ -609,9 +653,11 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
       notes: `Automated annual prepay renewal reminder sent (${daysOut} days out)`,
     }).catch((err) => logger.warn(`[annual-prepay] interaction insert failed: ${err.message}`));
 
+    void sendRenewalEmail();
+
     return { sent: true, termId: claimedTerm.id };
   } catch (err) {
-    if (!smsDelivered) await releaseClaim();
+    if (!noticeRecorded) await releaseClaim();
     throw err;
   }
 }

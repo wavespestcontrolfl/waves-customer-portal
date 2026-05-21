@@ -15,6 +15,7 @@ const {
   inferFrequencyKeyFromEstimateData,
   resolveBillingCadence,
 } = require('./billing-cadence');
+const AccountMembershipEmail = require('./account-membership-email');
 
 /**
  * Pick the first service date for a freshly-converted customer.
@@ -368,7 +369,36 @@ const EstimateConverter = {
 
     logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${monthlyRate}/mo, ${scheduledCount} services scheduled, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
 
-    return { customerId, tier, discount, monthlyRate, serviceCount, scheduledCount, billingTerm, draftInvoiceId, draftInvoiceAmount };
+    const membershipEmail = {
+      customerId,
+      effectiveDate: termStartDate || new Date(),
+      sourceId: `estimate:${estimateId}`,
+      membershipTier: tier,
+      monthlyRate,
+      billingCadence: billingCadence?.periodLabel || (billingTerm === 'prepay_annual' ? 'annual prepay' : 'monthly'),
+      includedServices: recurringServices
+        .map((svc) => svc.name || svc.serviceName || svc.service_name || svc.label)
+        .filter(Boolean)
+        .join(', '),
+    };
+
+    if (opts.skipMembershipEmail !== true) {
+      void AccountMembershipEmail.sendMembershipStarted(membershipEmail)
+        .catch((err) => logger.warn(`[estimate-converter] membership.started email failed for customer ${customerId}: ${err.message}`));
+    }
+
+    return {
+      customerId,
+      tier,
+      discount,
+      monthlyRate,
+      serviceCount,
+      scheduledCount,
+      billingTerm,
+      draftInvoiceId,
+      draftInvoiceAmount,
+      membershipEmail,
+    };
   },
 };
 

@@ -4,6 +4,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const AccountMembershipEmail = require('../services/account-membership-email');
 
 router.use(authenticate);
 
@@ -80,6 +81,95 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.paymentConfirmationSms !== undefined) dbUpdates.payment_confirmation_sms = updates.paymentConfirmationSms;
   if (updates.serviceReportNotifyPrimary !== undefined) dbUpdates.service_report_notify_primary = updates.serviceReportNotifyPrimary;
   return dbUpdates;
+}
+
+const ACCOUNT_PREF_LABELS = {
+  appointmentConfirmation: 'New Appointment Confirmation',
+  serviceReminder72h: '72-Hour Appointment Reminder',
+  serviceReminder24h: '24-Hour Service Reminder',
+  techEnRoute: 'Tech En Route Alert',
+  appointmentNotifyPrimary: 'Primary Account Appointment Copies',
+  autoFlipEnRoute: 'Auto En Route from GPS',
+  serviceCompleted: 'Service Complete Report',
+  billingReminder: 'Billing Reminder',
+  seasonalTips: 'Seasonal Lawn Tips',
+  smsEnabled: 'Text Messages',
+  emailEnabled: 'Email Messages',
+  billingEmail: 'Billing Recipient Email',
+  billingContactName: 'Billing Contact Name',
+  paymentConfirmationSms: 'Payment Confirmation Texts',
+  serviceReportNotifyPrimary: 'Primary Account Service Report Copies',
+};
+
+const DB_FIELD_BY_PREF = {
+  appointmentConfirmation: 'appointment_confirmation',
+  serviceReminder72h: 'service_reminder_72h',
+  serviceReminder24h: 'service_reminder_24h',
+  techEnRoute: 'tech_en_route',
+  appointmentNotifyPrimary: 'appointment_notify_primary',
+  autoFlipEnRoute: 'auto_flip_en_route',
+  serviceCompleted: 'service_completed',
+  billingReminder: 'billing_reminder',
+  seasonalTips: 'seasonal_tips',
+  smsEnabled: 'sms_enabled',
+  emailEnabled: 'email_enabled',
+  billingEmail: 'billing_email',
+  billingContactName: 'billing_contact_name',
+  paymentConfirmationSms: 'payment_confirmation_sms',
+  serviceReportNotifyPrimary: 'service_report_notify_primary',
+};
+
+function prefDisplayValue(key, value) {
+  if (key === 'billingEmail' || key === 'billingContactName') return value || 'Not set';
+  return value === false ? 'Off' : 'On';
+}
+
+function preferenceChangeItems(updates = {}, before = {}, afterPrefs = {}, options = {}) {
+  const items = [];
+  for (const key of Object.keys(updates)) {
+    if (key === 'serviceContact') continue;
+    const label = ACCOUNT_PREF_LABELS[key];
+    if (!label) continue;
+    const dbField = DB_FIELD_BY_PREF[key];
+    const oldRaw = dbField ? before?.[dbField] : undefined;
+    const oldValue = key === 'billingEmail' || key === 'billingContactName'
+      ? oldRaw || ''
+      : oldRaw !== false;
+    const newValue = afterPrefs?.[key];
+    if (prefDisplayValue(key, oldValue) === prefDisplayValue(key, newValue)) continue;
+    items.push({
+      key,
+      label,
+      oldValue: prefDisplayValue(key, oldValue),
+      newValue: prefDisplayValue(key, newValue),
+      scope: options.scope || 'Account',
+    });
+  }
+  if (updates.serviceContact) {
+    items.push({
+      key: 'serviceContact',
+      label: 'On-location Contact',
+      oldValue: 'Previous contact',
+      newValue: 'Updated',
+      scope: options.scope || 'Property',
+    });
+  }
+  return items;
+}
+
+function sendAccountUpdatedForPrefs({ req, targetCustomerId, propertyLabel, items, section }) {
+  if (!items.length) return;
+  const summary = items.length === 1
+    ? `${items[0].label} was set to ${items[0].newValue}.`
+    : `${items.length} Waves account settings were updated.`;
+  void AccountMembershipEmail.sendAccountUpdated({
+    customerId: targetCustomerId || req.customerId,
+    recipientCustomerId: req.customerId,
+    changedItems: items,
+    changeSummary: summary,
+    accountSection: section,
+    propertyLabel,
+  }).catch((err) => logger.warn(`[notifications] account.updated email failed for ${req.customerId}: ${err.message}`));
 }
 
 async function ensurePrefs(customerId) {
@@ -197,7 +287,7 @@ router.put('/preferences', async (req, res, next) => {
 
     const updates = await schema.validateAsync(req.body);
 
-    const existing = await db('notification_prefs').where({ customer_id: req.customerId }).first();
+    const existing = await ensurePrefs(req.customerId);
     const dbUpdates = {
       ...notificationPrefsDbUpdates(updates, existing || {}),
       updated_at: new Date(),
@@ -219,10 +309,17 @@ router.put('/preferences', async (req, res, next) => {
     })}`);
 
     const prefs = await db('notification_prefs').where({ customer_id: req.customerId }).first();
+    const payload = preferencePayload(prefs);
+    sendAccountUpdatedForPrefs({
+      req,
+      targetCustomerId: req.customerId,
+      items: preferenceChangeItems(updates, existing || {}, payload, { scope: 'Account' }),
+      section: 'Notification preferences',
+    });
 
     res.json({
       success: true,
-      preferences: preferencePayload(prefs),
+      preferences: payload,
     });
   } catch (err) {
     next(err);
@@ -250,6 +347,9 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       }),
     }).min(1);
     const updates = await schema.validateAsync(req.body);
+    const targetCustomer = await db('customers')
+      .where({ id: req.params.customerId })
+      .first('id', 'profile_label', 'address_line1', 'city');
     const dbUpdates = { updated_at: new Date() };
     if (updates.appointmentConfirmation !== undefined) dbUpdates.appointment_confirmation = updates.appointmentConfirmation;
     if (updates.serviceReminder72h !== undefined) dbUpdates.service_reminder_72h = updates.serviceReminder72h;
@@ -268,7 +368,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       });
     }
 
-    const existing = await db('notification_prefs').where({ customer_id: req.params.customerId }).first();
+    const existing = await ensurePrefs(req.params.customerId);
     if (existing) {
       await db('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
     } else {
@@ -276,7 +376,15 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     }
 
     const prefs = await ensurePrefs(req.params.customerId);
-    res.json({ success: true, preferences: preferencePayload(prefs) });
+    const payload = preferencePayload(prefs);
+    sendAccountUpdatedForPrefs({
+      req,
+      targetCustomerId: req.params.customerId,
+      propertyLabel: targetCustomer?.profile_label || targetCustomer?.address_line1 || targetCustomer?.city || 'Service property',
+      items: preferenceChangeItems(updates, existing || {}, payload, { scope: 'Property' }),
+      section: 'Property notifications',
+    });
+    res.json({ success: true, preferences: payload });
   } catch (err) {
     next(err);
   }
@@ -285,6 +393,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
 router._private = {
   comparableEmail,
   notificationPrefsDbUpdates,
+  preferenceChangeItems,
 };
 
 module.exports = router;

@@ -8,6 +8,7 @@ const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+const AccountMembershipEmail = require('../services/account-membership-email');
 
 const VALID_CATEGORIES = ['pest_issue', 'lawn_concern', 'add_service', 'schedule_change', 'billing', 'cancellation', 'pause', 'upgrade', 'other'];
 const VALID_URGENCIES = ['routine', 'urgent'];
@@ -152,8 +153,8 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     }
 
     // Send customer confirmation SMS
+    const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
     try {
-      const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
       const body = await renderRequiredSmsTemplate('service_request_confirmation', {
         first_name: req.customer.first_name || 'there',
         category: categoryLabel,
@@ -180,6 +181,14 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
     } catch (smsErr) {
       logger.error(`Failed to send confirmation SMS for request ${request.id}: ${smsErr.message}`);
     }
+
+    void AccountMembershipEmail.sendRequestReceived({
+      customerId: req.customer.id,
+      request,
+      responseTime,
+    }).catch((emailErr) => {
+      logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
+    });
 
     res.status(201).json({
       success: true,
