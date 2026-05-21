@@ -16,9 +16,41 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { THRESHOLDS } = require('./scoring-config');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
+
+// ── keyword overlap helpers for customer-cluster topic match ────────
+
+const KEYWORD_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'with',
+  'of', 'is', 'are', 'do', 'does', 'how', 'what', 'why', 'when', 'where',
+  'my', 'your', 'our', 'this', 'that', 'near', 'me', 'us', 'pest',
+  // 'pest' is too generic to be a useful topic-match anchor — it's
+  // already the dominant service in the brief; topic match should pull
+  // on more specific words.
+]);
+
+function extractKeywords(text) {
+  if (!text) return new Set();
+  return new Set(
+    String(text)
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 3 && !KEYWORD_STOP_WORDS.has(w))
+  );
+}
+
+function sharesKeyword(clusterText, opportunityKeywords) {
+  if (!opportunityKeywords.size) return false;
+  const clusterWords = extractKeywords(clusterText);
+  for (const w of clusterWords) {
+    if (opportunityKeywords.has(w)) return true;
+  }
+  return false;
+}
 
 // Lazily-loaded dependencies — these may not all exist on every
 // branch in the stack, so we defer until first use.
@@ -216,16 +248,46 @@ class ContentBriefBuilder {
 
   async _matchCustomerCluster(opportunity) {
     if (!opportunity.service && !opportunity.city) return null;
+    // Recency filter: stale clusters can hold a misleading high
+    // total_count long past their useful window. customerClusterRecencyDays
+    // is the cap that customer-insights-miner uses on the read side too.
+    const sinceLastSeen = new Date(
+      Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000
+    );
     let q = db('customer_insight_clusters').orderBy('total_count', 'desc');
     if (opportunity.city) q = q.where('city', opportunity.city);
     if (opportunity.service) q = q.where('service', opportunity.service);
-    const row = await q.first();
-    if (!row) return null;
+    q = q.where('last_seen', '>=', sinceLastSeen);
+
+    // Topic match: when the opportunity has a query/keyword, prefer
+    // clusters whose topic / normalized_question shares a content word
+    // with it. Without this, the highest-total cluster for the (city,
+    // service) pair gets attached even if the topic is unrelated —
+    // can incorrectly boost customerDemand and reroute new_supporting_blog
+    // → create_customer_question_page on a mismatched question.
+    const rows = await q.limit(20).select('*');
+    if (!rows.length) return null;
+    const opportunityKeywords = extractKeywords(opportunity.query || opportunity.target_keyword || '');
+
+    let chosen = null;
+    if (opportunityKeywords.size > 0) {
+      for (const r of rows) {
+        const clusterText = `${r.topic || ''} ${r.normalized_question || ''}`;
+        if (sharesKeyword(clusterText, opportunityKeywords)) { chosen = r; break; }
+      }
+    }
+    // If nothing topic-matched, fall back to the highest-count cluster
+    // for this (city, service) pair — only when the opportunity itself
+    // doesn't carry a discernible topic (e.g. local_gap or refresh of
+    // a generic page).
+    if (!chosen && opportunityKeywords.size === 0) chosen = rows[0];
+    if (!chosen) return null;
+
     return {
-      ...row,
-      source_counts: typeof row.source_counts === 'string'
-        ? JSON.parse(row.source_counts)
-        : (row.source_counts || {}),
+      ...chosen,
+      source_counts: typeof chosen.source_counts === 'string'
+        ? JSON.parse(chosen.source_counts)
+        : (chosen.source_counts || {}),
     };
   }
 
@@ -324,6 +386,15 @@ class ContentBriefBuilder {
     return Array.from(links).slice(0, 5);
   }
 
+  /**
+   * Persist the brief. Throws on failure — earlier iteration swallowed
+   * insert errors and returned null, so compose() resolved as if the
+   * brief was saved when content_briefs was missing / mis-migrated or
+   * an (opportunity_id, version) conflict fired. That silently dropped
+   * the brief from the audit trail and let the pipeline continue
+   * state transitions against a phantom brief. Now any persistence
+   * failure rejects compose() so the runner can act on it.
+   */
   async _persist(brief) {
     try {
       const [row] = await db('content_briefs')
@@ -356,8 +427,11 @@ class ContentBriefBuilder {
         .returning('id');
       return row?.id || row;
     } catch (err) {
-      logger.warn(`[brief-builder] persist failed: ${err.message}`);
-      return null;
+      // Log + rethrow. compose() bubbles this up; the runner records
+      // a failed brief outcome and the queue row gets released for
+      // retry instead of silently advancing to publish.
+      logger.warn(`[brief-builder] persist failed for opp ${brief.opportunity_id}: ${err.message}`);
+      throw new Error(`content_briefs persist failed: ${err.message}`);
     }
   }
 }

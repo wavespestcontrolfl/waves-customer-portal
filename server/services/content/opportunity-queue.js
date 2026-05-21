@@ -92,20 +92,24 @@ class OpportunityQueue {
    * about what the runner did (e.g. "drafted brief abc-123, sent for
    * human review").
    */
-  async complete(opportunityId, { notes } = {}) {
+  async complete(opportunityId, { notes, claimToken } = {}) {
     const updates = {
       status: 'done',
       completed_at: new Date(),
       updated_at: new Date(),
     };
     if (notes) updates.notes = db.raw('COALESCE(notes, \'\') || ?', [`\n[done] ${notes}`]);
-    // Only transition rows that are still in 'claimed' state. Without
-    // this guard a stale claim recovered + re-claimed by another worker
-    // could be force-completed by the late first worker, overwriting
-    // active state and causing lost / duplicate processing.
+    // Two-step guard:
+    //   - status='claimed' prevents finalizing a pending / done row.
+    //   - claimed_at = claimToken binds the transition to the SAME
+    //     claim acquired by claimNext. If a stale claim was recovered
+    //     and the row was re-claimed by another worker, claimed_at
+    //     has shifted and this update affects 0 rows — the late
+    //     first worker can't overwrite the active attempt.
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
+      .modify((qb) => { if (claimToken) qb.where('claimed_at', claimToken); })
       .update(updates);
     return updated > 0;
   }
@@ -114,14 +118,15 @@ class OpportunityQueue {
    * Mark a claimed opportunity as skipped (won't be retried). reason
    * is required — surfaced in dashboards.
    */
-  async skip(opportunityId, reason) {
+  async skip(opportunityId, reason, { claimToken } = {}) {
     if (!reason) throw new Error('opportunity-queue: skip requires a reason');
-    // Same claimed-only guard as complete() — prevents a delayed or
-    // duplicate worker from kicking a pending/re-claimed row to
-    // skipped while another runner is actively handling it.
+    // Same claimed-only + claim-token guard as complete() — prevents
+    // a delayed or duplicate worker from kicking a pending/re-claimed
+    // row to skipped while another runner is actively handling it.
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
+      .modify((qb) => { if (claimToken) qb.where('claimed_at', claimToken); })
       .update({
         status: 'skipped',
         skip_reason: reason,
@@ -135,10 +140,11 @@ class OpportunityQueue {
    * Release a claim WITHOUT skipping — used when a runner crashes
    * gracefully or wants to defer. Row returns to pending.
    */
-  async release(opportunityId) {
+  async release(opportunityId, { claimToken } = {}) {
     const updated = await db('opportunity_queue')
       .where('id', opportunityId)
       .where('status', 'claimed')
+      .modify((qb) => { if (claimToken) qb.where('claimed_at', claimToken); })
       .update({
         status: 'pending',
         claimed_at: null,
