@@ -288,6 +288,40 @@ describe('estimate v2 service toggle adapter', () => {
     expect(mosquito.detail).toContain('4 Bti dunk tablets (+$16/yr)');
   });
 
+  test('persists both tree and shrub tiers for the public estimate slider', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        shrubDensity: 'LIGHT',
+        treeDensity: 'LIGHT',
+        landscapeComplexity: 'SIMPLE',
+      },
+      ['TREE_SHRUB'],
+      {}
+    );
+
+    const mapped = mapV1ToLegacyShape(generateEstimate(input));
+
+    expect(mapped.results.ts.map((row) => row.name)).toEqual(['Standard', 'Enhanced']);
+    expect(mapped.results.ts).toEqual([
+      expect.objectContaining({
+        name: 'Standard',
+        tier: 'standard',
+        selected: true,
+        isSelected: true,
+        v: 6,
+      }),
+      expect.objectContaining({
+        name: 'Enhanced',
+        tier: 'enhanced',
+        selected: false,
+        isSelected: false,
+        v: 9,
+      }),
+    ]);
+    expect(mapped.results.ts[1].mo).toBeGreaterThan(mapped.results.ts[0].mo);
+  });
+
   test('does not double-bill recurring German roach initial when standalone German roach is also selected', () => {
     const input = translateV2CallToV1Input(
       baseProfile(),
