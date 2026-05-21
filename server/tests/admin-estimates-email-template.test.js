@@ -134,4 +134,16 @@ describe('admin estimate email delivery', () => {
       },
     })).toThrow(/Quote-required estimates need manual review/);
   });
+
+  test('sent-only estimate scope includes delivery attempts but not generated drafts', () => {
+    const { estimateMatchesSentOnlyScope } = router._internals;
+
+    expect(estimateMatchesSentOnlyScope({ status: 'draft', sent_at: null })).toBe(false);
+    expect(estimateMatchesSentOnlyScope({ status: 'draft', sent_at: '2026-05-20T12:00:00.000Z' })).toBe(true);
+    expect(estimateMatchesSentOnlyScope({ status: 'sent', sent_at: '2026-05-20T12:00:00.000Z' })).toBe(true);
+    expect(estimateMatchesSentOnlyScope({ status: 'viewed', sent_at: '2026-05-20T12:00:00.000Z' })).toBe(true);
+    expect(estimateMatchesSentOnlyScope({ status: 'scheduled', sent_at: null })).toBe(true);
+    expect(estimateMatchesSentOnlyScope({ status: 'sending', sent_at: null })).toBe(true);
+    expect(estimateMatchesSentOnlyScope({ status: 'send_failed', sent_at: null })).toBe(true);
+  });
 });
