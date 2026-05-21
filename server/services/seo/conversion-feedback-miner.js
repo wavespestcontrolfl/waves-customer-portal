@@ -25,7 +25,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { WEIGHTS, CITIES } = require('../content/scoring-config');
 
 // ── normalization (pure, test-friendly) ──────────────────────────────
@@ -101,8 +101,14 @@ function revenueRealizationScore({ estimated_revenue, leads_total }) {
 
 class ConversionFeedbackMiner {
   async mineWindow({ windowDays = 90, persist = true } = {}) {
-    const since = etDateString(addETDays(new Date(), -windowDays));
     const windowEndDate = etDateString(new Date());
+    // ET-pinned cutoff: leads.first_contact_at + call_log.created_at
+    // are timestamptz columns. Comparing them against an ET date STRING
+    // would let Postgres convert at UTC-midnight, shifting the window
+    // 4–5 hours. Build an actual Date at ET-midnight N days ago so the
+    // driver serializes it with timezone info.
+    const sinceETString = etDateString(addETDays(new Date(), -windowDays));
+    const since = parseETDateTime(`${sinceETString}T00:00`);
 
     const rolls = new Map(); // key: city||_global :: service||_global → row
 
@@ -164,7 +170,10 @@ class ConversionFeedbackMiner {
         const service = normalizeService(r.service_interest);
 
         const isForm = (r.source_type === 'form' || r.first_contact_channel === 'form' || r.first_contact_channel === 'web');
-        const estSent = r.estimate_status && ['sent', 'viewed', 'accepted', 'declined'].includes(r.estimate_status) ? 1 : 0;
+        // Include 'expired' — it's a post-send terminal state. Earlier
+        // iteration excluded it, which inflated close_rate by shrinking
+        // the denominator (expired = sent but customer never decided).
+        const estSent = r.estimate_status && ['sent', 'viewed', 'accepted', 'declined', 'expired'].includes(r.estimate_status) ? 1 : 0;
         const estAccepted = r.estimate_status === 'accepted' ? 1 : 0;
         const revenue = estAccepted
           ? (parseFloat(r.estimate_monthly || 0) * 12) + parseFloat(r.estimate_annual || 0) + parseFloat(r.estimate_onetime || 0)
