@@ -6089,6 +6089,17 @@ function shapeServiceFrequency(frequency = {}, { allowAddOns = false } = {}) {
   };
 }
 
+function normalizePricingFrequencyTotals(frequency = {}) {
+  if (!frequency || typeof frequency !== 'object') return frequency;
+  const monthly = finiteNumberOrNull(frequency.monthly);
+  const annual = finiteNumberOrNull(frequency.annual);
+  if (annual != null || monthly == null) return frequency;
+  return {
+    ...frequency,
+    annual: roundMonthly(monthly * 12),
+  };
+}
+
 function defaultFrequencyKeyFor(frequencies = []) {
   if (!Array.isArray(frequencies) || frequencies.length === 0) return null;
   return frequencies[0]?.key || null;
@@ -6103,6 +6114,200 @@ function oneTimeContributionForCategory(oneTimeBreakdown = {}, category) {
     items,
     subtotal: roundMonthly(subtotal),
   };
+}
+
+const RECURRING_SECTION_ORDER = [
+  'pest_control',
+  'lawn_care',
+  'tree_shrub',
+  'mosquito',
+  'termite_bait',
+  'palm_injection',
+  'rodent_bait',
+  'rodent',
+];
+
+function recurringSectionOrder(key) {
+  const index = RECURRING_SECTION_ORDER.indexOf(key);
+  return index === -1 ? RECURRING_SECTION_ORDER.length : index;
+}
+
+function recurringServiceRowsByKey(recurringServices = []) {
+  const rowsByKey = new Map();
+  (Array.isArray(recurringServices) ? recurringServices : []).forEach((svc) => {
+    const key = recurringServiceKey(svc);
+    if (key && !rowsByKey.has(key)) rowsByKey.set(key, svc);
+  });
+  return Array.from(rowsByKey.entries())
+    .sort(([a], [b]) => recurringSectionOrder(a) - recurringSectionOrder(b));
+}
+
+function recurringLineKey(row = {}) {
+  return recurringServiceKey({
+    service: row.service,
+    key: row.key,
+    name: row.name || row.label || row.displayName,
+  });
+}
+
+function treatmentRowForServiceFrequency(frequency = {}, key) {
+  const rows = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments
+    : [];
+  return rows.find((row) => recurringLineKey(row) === key) || null;
+}
+
+function frequencyHasTreatmentRowsForServices(frequency = {}, keys = []) {
+  const rows = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments
+    : [];
+  if (!rows.length) return false;
+  const rowKeys = new Set(rows.map(recurringLineKey).filter(Boolean));
+  return keys.every((key) => rowKeys.has(key));
+}
+
+function frequencyServiceRowsMonthlyTotal(frequency = {}, keys = []) {
+  const total = keys.reduce((sum, key) => {
+    if (sum == null) return null;
+    const row = treatmentRowForServiceFrequency(frequency, key);
+    if (!row) return null;
+    const visitsPerYear = firstPositiveNumber(row.visitsPerYear, row.visits, row.frequency);
+    const displayPrice = firstPositiveNumber(row.displayPrice, row.perTreatment, row.perVisit);
+    if (visitsPerYear == null || displayPrice == null) return null;
+    return sum + ((displayPrice * visitsPerYear) / 12);
+  }, 0);
+  return total == null ? null : roundMonthly(total);
+}
+
+function frequencyServiceRowsMatchMonthly(frequency = {}, keys = []) {
+  if (!frequencyHasTreatmentRowsForServices(frequency, keys)) return false;
+  const monthly = Number(frequency?.monthly);
+  if (!Number.isFinite(monthly)) return false;
+  const rowsMonthly = frequencyServiceRowsMonthlyTotal(frequency, keys);
+  return rowsMonthly != null && Math.abs(roundMonthly(monthly) - rowsMonthly) <= 0.01;
+}
+
+function canSplitRecurringSelectableLadder(frequencies = [], recurringKeys = []) {
+  const selectable = Array.isArray(frequencies)
+    ? frequencies.filter((frequency) => frequency?.key)
+    : [];
+  if (!selectable.length) return false;
+  return selectable.every((frequency) => frequencyServiceRowsMatchMonthly(frequency, recurringKeys));
+}
+
+function includedRowsForServiceFrequency(frequency = {}, key, recurringService = {}) {
+  const included = Array.isArray(frequency?.included) ? frequency.included : [];
+  const rows = included.filter((item) => recurringLineKey(item) === key);
+  if (rows.length) return rows;
+  const label = recurringService.displayName
+    || recurringServiceDisplayName(key)
+    || recurringService.name
+    || serviceLabelForCategory(categoryForRecurringServiceKey(key) || key);
+  const detail = isTermiteBaitServiceName(label)
+    ? formatTermiteBaitDetail(null, recurringService.detail)
+    : (recurringService.detail || recurringService.cadenceLabel || null);
+  return [{
+    key,
+    label,
+    detail,
+    includedAtThisFrequency: true,
+  }];
+}
+
+function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringService = {}, { allowAddOns = false, useBaseFrequencyKey = false } = {}) {
+  const visitsPerYear = firstPositiveNumber(
+    row.visitsPerYear,
+    recurringService.visitsPerYear,
+    recurringService.visits,
+    recurringService.frequency,
+  );
+  const displayPrice = firstPositiveNumber(row.displayPrice, row.perTreatment, recurringService.perTreatment, recurringService.perVisit);
+  const anchorPrice = firstPositiveNumber(row.perTreatment, row.perVisit, recurringService.perTreatment, recurringService.perVisit);
+  const monthly = displayPrice && visitsPerYear
+    ? roundMonthly((displayPrice * visitsPerYear) / 12)
+    : null;
+  const monthlyBase = anchorPrice && visitsPerYear
+    ? roundMonthly((anchorPrice * visitsPerYear) / 12)
+    : monthly;
+  if (monthly == null && monthlyBase == null) return null;
+
+  const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
+  const fallbackLabel = recurringService.tierLabel
+    || recurringService.cadenceLabel
+    || row.label
+    || recurringServiceDisplayName(key)
+    || 'Recurring service';
+  return {
+    key: useSelectableCadence ? baseFrequency.key : 'recurring',
+    label: useSelectableCadence
+      ? (baseFrequency.label || fallbackLabel)
+      : fallbackLabel,
+    monthlyBase,
+    monthly,
+    annual: monthly != null ? roundMonthly(monthly * 12) : null,
+    perTreatment: displayPrice || null,
+    perVisit: key === 'pest_control' ? (anchorPrice || null) : null,
+    visitsPerYear: visitsPerYear || null,
+    included: includedRowsForServiceFrequency(baseFrequency, key, recurringService),
+    addOns: allowAddOns && Array.isArray(baseFrequency.addOns) ? baseFrequency.addOns : [],
+    quoteRequired: false,
+  };
+}
+
+function frequencyFromRecurringService(recurringService = {}, key, recurringDiscount = 0) {
+  const rawMonthly = firstPositiveNumber(recurringService.monthly, recurringService.mo);
+  const receivesDiscount = recurringServiceReceivesTierDiscount(recurringService);
+  const monthly = rawMonthly
+    ? roundMonthly(rawMonthly * (receivesDiscount ? (1 - recurringDiscount) : 1))
+    : null;
+  const annual = firstPositiveNumber(recurringService.annualAfterCredits, recurringService.annualAfterDiscount, recurringService.annual, recurringService.ann, monthly ? monthly * 12 : null);
+  const visitsPerYear = firstPositiveNumber(recurringService.visitsPerYear, recurringService.visits, recurringService.frequency);
+  const perTreatment = firstPositiveNumber(
+    recurringService.perTreatment,
+    recurringService.perVisit,
+    visitsPerYear && annual ? annual / visitsPerYear : null,
+  );
+  if (monthly == null && annual == null && perTreatment == null) return null;
+  return {
+    key: key === 'pest_control' ? 'quarterly' : 'recurring',
+    label: recurringService.tierLabel || recurringService.cadenceLabel || recurringServiceDisplayName(key) || 'Recurring service',
+    monthlyBase: rawMonthly || monthly,
+    monthly,
+    annual: annual != null ? roundMonthly(annual) : (monthly != null ? roundMonthly(monthly * 12) : null),
+    perTreatment: perTreatment || null,
+    perVisit: key === 'pest_control' ? (perTreatment || null) : null,
+    visitsPerYear: visitsPerYear || null,
+    included: includedRowsForServiceFrequency({}, key, recurringService),
+    addOns: [],
+    quoteRequired: false,
+  };
+}
+
+function sectionFrequenciesForRecurringService(key, recurringService = {}, baseFrequencies = [], recurringDiscount = 0, { preserveSelectableKeys = false } = {}) {
+  const allowAddOns = key === 'pest_control';
+  if (key === 'pest_control') {
+    const pestFrequencies = baseFrequencies
+      .map((frequency) => {
+        const row = treatmentRowForServiceFrequency(frequency, key);
+        return row ? frequencyFromTreatmentRow(frequency, key, row, recurringService, { allowAddOns }) : null;
+      })
+      .filter(Boolean);
+    if (pestFrequencies.length) return pestFrequencies;
+  } else {
+    const rowFrequencies = baseFrequencies
+      .map((frequency) => {
+        const row = treatmentRowForServiceFrequency(frequency, key);
+        return row ? frequencyFromTreatmentRow(frequency, key, row, recurringService, {
+          allowAddOns: false,
+          useBaseFrequencyKey: preserveSelectableKeys,
+        }) : null;
+      })
+      .filter(Boolean);
+    if (rowFrequencies.length) return preserveSelectableKeys ? rowFrequencies : [rowFrequencies[0]];
+  }
+
+  const fallback = frequencyFromRecurringService(recurringService, key, recurringDiscount);
+  return fallback ? [fallback] : [];
 }
 
 function buildServiceSection({ key, category, label, isRecurring, isPest, frequencies, setupFee, oneTimeBreakdown, quoteRequired }) {
@@ -6145,6 +6350,8 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
     || frequencies.some((frequency) => pestTreatmentRowForFrequency(frequency));
   const isOneTimeOnly = payload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate);
   const waveGuardSetupFee = (payload.firstVisitFees || []).find((fee) => fee?.service === 'waveguard_setup') || payload.setupFee || null;
+  const recurringRows = recurringServiceRowsByKey(recurringServices);
+  const recurringDiscount = Number(estResult?.recurring?.discount || payload?.recurring?.discount || 0) || 0;
 
   if (!isOneTimeOnly && hasRecurringPest && recurringKeys.filter((key) => key !== 'pest_control').length === 0) {
     return [buildServiceSection({
@@ -6177,6 +6384,33 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   }
 
   if (!isOneTimeOnly && recurringKeys.length > 1) {
+    if (canSplitRecurringSelectableLadder(frequencies, recurringKeys)) {
+      const hasRecurringPestSection = recurringKeys.includes('pest_control');
+      const hasSelectableLadder = frequencies.filter((frequency) => frequency?.key).length > 1;
+      const splitSections = recurringRows.map(([key, recurringService]) => {
+        const category = categoryForRecurringServiceKey(key) || key;
+        const sectionFrequencies = sectionFrequenciesForRecurringService(key, recurringService, frequencies, recurringDiscount, {
+          preserveSelectableKeys: !hasRecurringPestSection || hasSelectableLadder,
+        });
+        if (!sectionFrequencies.length && payload.quoteRequired !== true) return null;
+        return buildServiceSection({
+          key,
+          category,
+          label: recurringService.displayName || recurringServiceDisplayName(key) || serviceLabelForCategory(category),
+          isRecurring: true,
+          isPest: key === 'pest_control',
+          frequencies: sectionFrequencies,
+          setupFee: key === 'pest_control' ? waveGuardSetupFee : null,
+          oneTimeBreakdown,
+          quoteRequired: payload.quoteRequired === true,
+        });
+      }).filter(Boolean);
+
+      if (splitSections.length === recurringKeys.length) {
+        return splitSections;
+      }
+    }
+
     return [buildServiceSection({
       key: 'bundle',
       category: 'bundle',
@@ -6239,19 +6473,24 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
   );
   const tierLabel = normalizeWaveGuardTierLabel(payload.waveGuardTier || estimate.waveguard_tier || estimate.waveGuardTier || estimate.tier || 'Bronze');
   const frequency = defaultFrequencyForSection(recurringSections[0]);
+  const legacyDefaultFrequency = Array.isArray(payload.frequencies) && payload.frequencies.length
+    ? payload.frequencies[0]
+    : null;
   const monthlySubtotal = roundMonthly(firstPositiveNumber(
+    legacyDefaultFrequency?.monthly,
     frequency?.monthly,
     estimate.monthly_total,
     estimate.monthlyTotal,
   ) || 0);
   const annualSubtotal = roundMonthly(firstPositiveNumber(
-    frequency?.annual,
+    legacyDefaultFrequency?.annual,
     estimate.annual_total,
     estimate.annualTotal,
     monthlySubtotal ? monthlySubtotal * 12 : null,
+    frequency?.annual,
   ) || 0);
   const parts = resolveRecurringMonthlyParts(estimate, estData);
-  const manualDiscount = payload.manualDiscount || frequency?.manualDiscount || normalizeManualDiscountSummary(estData);
+  const manualDiscount = payload.manualDiscount || legacyDefaultFrequency?.manualDiscount || frequency?.manualDiscount || normalizeManualDiscountSummary(estData);
   const baseMonthly = Number(parts.baseMonthly || parts.discountableBaseMonthly || 0);
   const savingsPerMonth = baseMonthly > 0 ? Math.max(0, roundMonthly(baseMonthly - monthlySubtotal)) : 0;
 
@@ -6286,20 +6525,23 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
 }
 
 function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
-  const services = buildPricingServices(payload, estimate, estData);
-  const combinedRecurring = buildCombinedRecurring(payload, estimate, estData, services);
-  const serviceCategories = services.length > 1
-    ? ['bundle']
-    : services.map((section) => (section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)));
-  const askChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], payload.oneTimeBreakdown?.items || [])]);
+  const contractPayload = Array.isArray(payload.frequencies)
+    ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
+    : payload;
+  const services = buildPricingServices(contractPayload, estimate, estData);
+  const combinedRecurring = buildCombinedRecurring(contractPayload, estimate, estData, services);
+  const serviceCategories = services.map((section) => (
+    section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)
+  ));
+  const askChips = mergeAskChips(serviceCategories.length ? serviceCategories : [deriveServiceCategory(estData, [], contractPayload.oneTimeBreakdown?.items || [])]);
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
   return {
-    ...payload,
+    ...contractPayload,
     services,
     combinedRecurring,
-    renderFlags: buildRenderFlags(payload, services, combinedRecurring),
+    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring),
     askChips,
-    quoteRequired: payload.quoteRequired === true || sectionQuoteRequired,
+    quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
   };
 }
 

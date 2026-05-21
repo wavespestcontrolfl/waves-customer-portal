@@ -447,16 +447,48 @@ describe('public estimate one-time breakdown', () => {
     ]);
   });
 
-  test('phase 0 pest bundles preserve pest setup and add-on render signals', async () => {
+  test('multi-service recurring bundles emit stacked service sections while preserving combined total', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-pest-bundle-contract-test',
       estimate_data: {
-        result: {
-          results: {
-            pestTiers: [
-              { label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 },
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'complete_service_rows_snapshot',
+            waveGuardTier: 'Bronze',
+            firstVisitFees: [
+              { service: 'waveguard_setup', label: 'WaveGuard Membership Setup', amount: 99 },
+            ],
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 90,
+                annual: 1080,
+                perServiceTreatments: [
+                  {
+                    service: 'pest_control',
+                    label: 'Pest Control (Quarterly)',
+                    displayPrice: 150,
+                    perTreatment: 150,
+                    visitsPerYear: 4,
+                  },
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care',
+                    displayPrice: 120,
+                    perTreatment: 120,
+                    visitsPerYear: 4,
+                  },
+                ],
+                included: [
+                  { service: 'pest_control', label: 'Pest Control', detail: 'Quarterly service' },
+                  { service: 'lawn_care', label: 'Lawn Care', detail: 'Recurring turf applications' },
+                ],
+              },
             ],
           },
+        },
+        result: {
           recurring: {
             monthlyTotal: 90,
             annualAfterDiscount: 1080,
@@ -478,21 +510,358 @@ describe('public estimate one-time breakdown', () => {
       waveguard_tier: 'Bronze',
     });
 
-    expect(payload.services).toHaveLength(1);
+    expect(payload.frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 90,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 90,
+      annualSubtotal: 1080,
+    }));
+    expect(payload.services.map((section) => section.key)).toEqual(['pest_control', 'lawn_care']);
     expect(payload.services[0]).toEqual(expect.objectContaining({
-      key: 'bundle',
+      key: 'pest_control',
+      label: 'Pest Control',
       isPest: true,
       isRecurring: true,
       setupFee: expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
     }));
-    expect(payload.services[0].frequencies[0].addOns).toEqual(expect.arrayContaining([
-      expect.objectContaining({ key: 'interior_spray' }),
-      expect.objectContaining({ key: 'exterior_sweep' }),
-    ]));
+    expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 50,
+      perVisit: 150,
+    }));
+    expect(payload.services[1]).toEqual(expect.objectContaining({
+      key: 'lawn_care',
+      label: 'Lawn Care',
+      isPest: false,
+      isRecurring: true,
+      setupFee: null,
+    }));
+    expect(payload.services[1].frequencies).toHaveLength(1);
+    expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'recurring',
+      monthly: 40,
+      perTreatment: 120,
+      perVisit: null,
+      addOns: [],
+    }));
     expect(payload.renderFlags).toEqual(expect.objectContaining({
       showWaveGuardSetupFee: true,
       showPestRecurringAddOns: true,
       showOneTimePestAddOns: false,
+    }));
+    expect(payload.askChips).toEqual(expect.arrayContaining([
+      'What products do you use?',
+      'What gets applied each visit?',
+    ]));
+  });
+
+  test('multi-service pest bundles preserve non-pest cadence rows when split', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-mixed-pest-non-pest-cadence-test',
+      monthly_total: 90,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'complete_mixed_service_rows_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 90,
+                perServiceTreatments: [
+                  {
+                    service: 'pest_control',
+                    label: 'Pest Control (Quarterly)',
+                    displayPrice: 150,
+                    perTreatment: 150,
+                    visitsPerYear: 4,
+                  },
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care (Quarterly)',
+                    displayPrice: 120,
+                    perTreatment: 120,
+                    visitsPerYear: 4,
+                  },
+                ],
+              },
+              {
+                key: 'monthly',
+                label: 'Monthly',
+                monthly: 110,
+                perServiceTreatments: [
+                  {
+                    service: 'pest_control',
+                    label: 'Pest Control (Monthly)',
+                    displayPrice: 60,
+                    perTreatment: 60,
+                    visitsPerYear: 12,
+                  },
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care (Monthly)',
+                    displayPrice: 50,
+                    perTreatment: 50,
+                    visitsPerYear: 12,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        result: {
+          recurring: {
+            monthlyTotal: 90,
+            annualAfterDiscount: 1080,
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 40 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 90,
+      annual: 1080,
+    }));
+    expect(payload.frequencies[1]).toEqual(expect.objectContaining({
+      key: 'monthly',
+      monthly: 110,
+      annual: 1320,
+    }));
+    expect(payload.services.map((section) => section.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(payload.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services[1].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 40,
+      perTreatment: 120,
+      perVisit: null,
+    }));
+    expect(payload.services[1].frequencies[1]).toEqual(expect.objectContaining({
+      key: 'monthly',
+      monthly: 50,
+      perTreatment: 50,
+      perVisit: null,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 90,
+      annualSubtotal: 1080,
+    }));
+  });
+
+  test('multi-service non-pest bundles preserve selectable cadence rows when split', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-non-pest-multi-cadence-test',
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'complete_non_pest_service_rows_snapshot',
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 50,
+                annual: 600,
+                perServiceTreatments: [
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care',
+                    displayPrice: 90,
+                    perTreatment: 90,
+                    visitsPerYear: 4,
+                  },
+                  {
+                    service: 'mosquito',
+                    label: 'Mosquito',
+                    displayPrice: 60,
+                    perTreatment: 60,
+                    visitsPerYear: 4,
+                  },
+                ],
+              },
+              {
+                key: 'monthly',
+                label: 'Monthly',
+                monthly: 60,
+                annual: 720,
+                perServiceTreatments: [
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care',
+                    displayPrice: 35,
+                    perTreatment: 35,
+                    visitsPerYear: 12,
+                  },
+                  {
+                    service: 'mosquito',
+                    label: 'Mosquito',
+                    displayPrice: 25,
+                    perTreatment: 25,
+                    visitsPerYear: 12,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        result: {
+          recurring: {
+            monthlyTotal: 50,
+            annualAfterDiscount: 600,
+            services: [
+              { name: 'Lawn Care', mo: 30 },
+              { name: 'Mosquito', mo: 20 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services.map((section) => section.key)).toEqual(['lawn_care', 'mosquito']);
+    expect(payload.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services[1].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 30,
+      perTreatment: 90,
+      perVisit: null,
+    }));
+    expect(payload.services[0].frequencies[1]).toEqual(expect.objectContaining({
+      key: 'monthly',
+      monthly: 35,
+      perTreatment: 35,
+      perVisit: null,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 50,
+      annualSubtotal: 600,
+    }));
+  });
+
+  test('multi-service snapshots keep legacy bundle when service rows do not cover selectable ladder', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-multi-service-snapshot-ladder-test',
+      monthly_total: 90,
+      annual_total: 1080,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'old_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [
+              { key: 'quarterly', label: 'Quarterly', monthly: 90, annual: 1080 },
+              { key: 'bi_monthly', label: 'Bi-monthly', monthly: 110, annual: 1320 },
+              { key: 'monthly', label: 'Monthly', monthly: 130, annual: 1560 },
+            ],
+          },
+        },
+        result: {
+          results: {
+            pestTiers: [
+              { label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 40 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'bundle',
+      isRecurring: true,
+      isPest: true,
+    }));
+    expect(payload.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 90,
+      annualSubtotal: 1080,
+    }));
+  });
+
+  test('multi-service snapshots keep legacy bundle when service rows do not match adjusted total', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-multi-service-adjusted-total-test',
+      monthly_total: 83.33,
+      annual_total: 999.96,
+      estimate_data: {
+        preferences: { interior_spray: false },
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'adjusted_total_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 83.33,
+                annual: 999.96,
+                perServiceTreatments: [
+                  {
+                    service: 'pest_control',
+                    label: 'Pest Control (Quarterly)',
+                    displayPrice: 150,
+                    perTreatment: 150,
+                    visitsPerYear: 4,
+                  },
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care',
+                    displayPrice: 120,
+                    perTreatment: 120,
+                    visitsPerYear: 4,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        result: {
+          recurring: {
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 40 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'bundle',
+      isRecurring: true,
+      isPest: true,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 83.33,
+      annualSubtotal: 999.96,
     }));
   });
 
@@ -748,6 +1117,11 @@ describe('public estimate one-time breakdown', () => {
         amount: 60,
         monthlyAmount: 5,
       }),
+    }));
+    expect(payload.combinedRecurring?.manualDiscount).toEqual(expect.objectContaining({
+      label: 'Military Discount',
+      amount: 60,
+      monthlyAmount: 5,
     }));
   });
 
@@ -2818,6 +3192,18 @@ describe('public estimate one-time breakdown', () => {
     const pricing = await buildPricingBundle(estimate);
 
     expect(pricing.frequencies[0].monthly).toBe(149);
+    expect(pricing.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 149,
+      annualSubtotal: 1788,
+      qualifyingCount: 1,
+    }));
+    expect(pricing.services).toHaveLength(1);
+    expect(pricing.services[0]).toEqual(expect.objectContaining({
+      key: 'bundle',
+      isPest: true,
+      isRecurring: true,
+    }));
+    expect(pricing.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
     expect(pricing.frequencies[0].perServiceTreatments).toEqual(expect.arrayContaining([
       expect.objectContaining({
         service: 'palm_injection',

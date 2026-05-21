@@ -105,6 +105,19 @@ function primarySelectedFrequencyKey(services = [], selected = {}) {
   return primary ? selected[primary.key] || primary.defaultFrequencyKey || primary.frequencies?.[0]?.key || null : null;
 }
 
+function selectedPricingFrequencyKey(pricing = {}, services = [], selected = {}) {
+  const sectionKey = primarySelectedFrequencyKey(services, selected);
+  const frequencies = Array.isArray(pricing?.frequencies) ? pricing.frequencies : [];
+  if (!frequencies.length) return sectionKey;
+  if (frequencies.some((frequency) => frequency.key === sectionKey)) return sectionKey;
+  return frequencies[0]?.key || null;
+}
+
+function selectedCombinedFrequency(pricing = {}, selectedFrequencyKey) {
+  const frequencies = Array.isArray(pricing?.frequencies) ? pricing.frequencies : [];
+  return frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
+}
+
 function Page({ children }) {
   return (
     <div style={{
@@ -684,6 +697,110 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   );
 }
 
+function manualDiscountMonthlyAmount(manualDiscount) {
+  if (!manualDiscount) return 0;
+  const monthly = Number(manualDiscount.monthlyAmount);
+  if (Number.isFinite(monthly) && monthly > 0) return Math.round(monthly * 100) / 100;
+  const amount = Number(manualDiscount.amount);
+  return Number.isFinite(amount) && amount > 0 ? Math.round((amount / 12) * 100) / 100 : 0;
+}
+
+function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier }) {
+  if (!combined) return null;
+  const quoteRequired = selectedFrequency?.quoteRequired === true;
+  const monthly = quoteRequired ? null : (selectedFrequency?.monthly ?? combined.monthlySubtotal);
+  const annual = quoteRequired ? null : (selectedFrequency?.annual ?? combined.annualSubtotal);
+  const manualDiscount = combined.manualDiscount && Number(combined.manualDiscount.amount) > 0
+    ? combined.manualDiscount
+    : null;
+  const manualDiscountMonthly = manualDiscountMonthlyAmount(manualDiscount);
+  return (
+    <section style={{
+      background: COLORS.white,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      borderRadius: 16,
+      padding: 24,
+      margin: '4px 0 16px',
+      boxShadow: '0 8px 24px rgba(15,23,42,.06)',
+    }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: 18,
+        alignItems: 'flex-start',
+        flexWrap: 'wrap',
+      }}>
+        <div>
+          <div style={{
+            fontSize: 14,
+            fontWeight: 700,
+            color: ESTIMATE_MUTED,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            marginBottom: 6,
+          }}>
+            Recurring total
+          </div>
+          <div style={{ fontSize: 15, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+            Combined recurring services before any one-time items.
+          </div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{
+            fontFamily: FONTS.serif,
+            fontSize: quoteRequired ? 34 : 46,
+            lineHeight: 1,
+            color: ESTIMATE_TEXT,
+            fontWeight: 500,
+          }}>
+            {quoteRequired ? 'Quote required' : fmtMoney(monthly)}
+            {!quoteRequired ? <span style={{ fontFamily: FONT_BODY, fontSize: 20, color: ESTIMATE_MUTED }}> /mo</span> : null}
+          </div>
+          {!quoteRequired && annual ? (
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8 }}>
+              {fmtMoney(annual)} / year
+            </div>
+          ) : null}
+          {waveGuardTier ? (
+            <div style={{
+              display: 'inline-block',
+              marginTop: 10,
+              padding: '5px 11px',
+              background: '#EEF2FF',
+              color: ESTIMATE_TEXT,
+              borderRadius: 6,
+              fontSize: 14,
+              fontWeight: 700,
+            }}>
+              WaveGuard {waveGuardTier}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      {!quoteRequired && manualDiscount && manualDiscountMonthly > 0 ? (
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          gap: 12,
+          alignItems: 'center',
+          marginTop: 16,
+          padding: '10px 12px',
+          border: '1px solid #DCFCE7',
+          borderRadius: 10,
+          background: '#F0FDF4',
+          color: COLORS.green,
+          fontSize: 14,
+          fontWeight: 800,
+          lineHeight: 1.35,
+        }}>
+          <span>{manualDiscount.label || 'Discount'}</span>
+          <strong style={{ whiteSpace: 'nowrap' }}>-{fmtMoney(manualDiscountMonthly)} /mo</strong>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function CountdownLine({ secondsRemaining }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
@@ -1018,7 +1135,7 @@ export default function EstimateViewPage() {
   }, [selected]);
 
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
-  const selectedFrequency = useMemo(() => primarySelectedFrequencyKey(services, selected), [services, selected]);
+  const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   const currentFrequency = useMemo(() => {
     const pestSection = services.find((section) => section.key === 'pest_control');
     const primarySection = pestSection || services.find((section) => section.isRecurring) || services[0];
@@ -1186,12 +1303,21 @@ export default function EstimateViewPage() {
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
-    setSelected((prev) => ({ ...prev, [sectionKey]: nextFrequency }));
-    const section = services.find((item) => item.key === sectionKey);
-    const frequency = section?.frequencies?.find((item) => item.key === nextFrequency);
+    const affectedSections = services.filter((section) => (
+      section.key === sectionKey
+      || section.frequencies?.some((item) => item.key === nextFrequency)
+    ));
+    setSelected((prev) => affectedSections.reduce((next, section) => ({
+      ...next,
+      [section.key]: nextFrequency,
+    }), { ...prev }));
     setSelectedAddOns((prev) => ({
       ...prev,
-      [sectionKey]: new Set((frequency?.addOns || []).filter((addOn) => addOn.preChecked).map((addOn) => addOn.key)),
+      ...affectedSections.reduce((next, section) => {
+        const frequency = section.frequencies?.find((item) => item.key === nextFrequency);
+        next[section.key] = new Set((frequency?.addOns || []).filter((addOn) => addOn.preChecked).map((addOn) => addOn.key));
+        return next;
+      }, {}),
     }));
     setSelectedSlotId(null);
     setPaymentPreference(null);
@@ -1273,6 +1399,7 @@ export default function EstimateViewPage() {
   const acceptance = estimate?.acceptance || { mode: 'standard_slot_pick' };
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
   const waveGuardTier = renderFlags.showWaveGuardTierUi === false ? null : (pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier);
+  const combinedFrequency = selectedCombinedFrequency(pricing, selectedFrequency);
 
   if (!canAccept) {
     return (
@@ -1404,6 +1531,14 @@ export default function EstimateViewPage() {
                   />
                 );
               })}
+
+              {services.length > 1 && renderFlags.showRecurringSummary ? (
+                <CombinedRecurringPriceCard
+                  combined={pricing.combinedRecurring}
+                  selectedFrequency={combinedFrequency}
+                  waveGuardTier={waveGuardTier}
+                />
+              ) : null}
 
               {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
                 (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
