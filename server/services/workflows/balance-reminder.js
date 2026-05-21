@@ -6,6 +6,94 @@ const { shortenOrPassthrough } = require("../short-url");
 const { sendCustomerMessage } = require("../messaging/send-customer-message");
 const { renderSmsTemplate } = require("../sms-template-renderer");
 const { publicPortalUrl } = require("../../utils/portal-url");
+const EmailTemplateLibrary = require("../email-template-library");
+const { currency } = require("../email-template");
+const { getInvoiceEmailRecipients } = require("../customer-contact");
+const { formatDateOnly } = require("../../utils/date-only");
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../../constants/business");
+
+const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
+  late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
+  late_payment_14d: { templateKey: "billing_late_payment_14_day", stageDays: 14 },
+  late_payment_30d: { templateKey: "billing_late_payment_30_day", stageDays: 30 },
+  late_payment_60d: { templateKey: "billing_late_payment_60_day", stageDays: 60 },
+  late_payment_90d: { templateKey: "billing_late_payment_90_day", stageDays: 90 },
+};
+
+const EMAIL_ELIGIBLE_INVOICE_STATUSES = new Set(["sent", "viewed", "overdue", "unpaid"]);
+const CONTACT_EMAIL = "contact@wavespestcontrol.com";
+
+function clean(value) {
+  return String(value || "").trim();
+}
+
+function cleanEmail(value) {
+  return clean(value).toLowerCase();
+}
+
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
+}
+
+function invoiceCanReceiveLatePaymentEmail(invoice) {
+  if (!invoice?.id || !invoice?.token) return false;
+  const status = String(invoice.status || "").toLowerCase();
+  if (!EMAIL_ELIGIBLE_INVOICE_STATUSES.has(status)) return false;
+  if (invoice.deleted_at || invoice.written_off_at || invoice.write_off_at || invoice.cancelled_at || invoice.canceled_at) return false;
+  if (invoice.paid_at) return false;
+  return true;
+}
+
+function latePaymentPayload({ customer, invoice, balance, invoiceTitle, serviceDateClause, payUrl }) {
+  const fallbackDueDate = invoice.due_date || balance.oldestDueDate || invoice.created_at;
+  return {
+    first_name: customer.first_name || "there",
+    invoice_title: invoiceTitle || invoice.title || invoice.service_type || "your service",
+    service_date_clause: serviceDateClause || "",
+    pay_url: payUrl,
+    amount_due: currency(balance.totalBalance || invoice.total || 0),
+    due_date: formatDateOnly(fallbackDueDate, { fallback: "" }),
+    invoice_number: invoice.invoice_number || "",
+    customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    company_email: CONTACT_EMAIL,
+  };
+}
+
+async function logLatePaymentEmailAttempt({
+  customerId,
+  invoiceId,
+  templateKey,
+  stageDays,
+  status,
+  providerMessageId = null,
+  sentAt = null,
+  failureReason = null,
+}) {
+  try {
+    await db("customer_interactions").insert({
+      customer_id: customerId,
+      interaction_type: "email_outbound",
+      subject: `${stageDays}-day late payment email ${status}`,
+      body: failureReason
+        ? `Late payment email ${status}: ${failureReason}`
+        : `${stageDays}-day late payment email ${status}.`,
+      metadata: JSON.stringify({
+        invoice_id: invoiceId,
+        customer_id: customerId,
+        template_key: templateKey,
+        overdue_stage_days: stageDays,
+        channel: "email",
+        provider_message_id: providerMessageId,
+        status,
+        sent_at: sentAt,
+        failure_reason: failureReason,
+      }),
+    });
+  } catch (err) {
+    logger.warn(`[balance-reminder] late-payment email audit log failed for invoice ${invoiceId}: ${err.message}`);
+  }
+}
 
 class BalanceReminder {
   async dailyCheck() {
@@ -188,6 +276,134 @@ class BalanceReminder {
     }
   }
 
+  async sendLatePaymentEmail({
+    customer,
+    invoice,
+    balance,
+    smsTemplateKey,
+    invoiceTitle,
+    serviceDateClause,
+    payUrl,
+  }) {
+    const config = LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE[smsTemplateKey];
+    if (!config) return { ok: false, skipped: true, reason: "no_email_template_mapping" };
+
+    const latestInvoice = await db("invoices").where({ id: invoice.id }).first();
+    if (!invoiceCanReceiveLatePaymentEmail(latestInvoice)) {
+      logger.info(
+        `[balance-reminder] late-payment email skipped for invoice ${invoice.id}: invoice status is ${latestInvoice?.status || "missing"}`,
+      );
+      return { ok: false, skipped: true, reason: "invoice_not_eligible" };
+    }
+
+    if (!payUrl) {
+      logger.warn(`[balance-reminder] late-payment email skipped for invoice ${invoice.id}: missing pay_url`);
+      return { ok: false, skipped: true, reason: "missing_pay_url" };
+    }
+
+    const prefs = await db("notification_prefs")
+      .where({ customer_id: customer.id })
+      .first()
+      .catch((err) => {
+        logger.warn(`[balance-reminder] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
+        return null;
+      });
+    if (prefs?.email_enabled === false) {
+      await logLatePaymentEmailAttempt({
+        customerId: customer.id,
+        invoiceId: latestInvoice.id,
+        templateKey: config.templateKey,
+        stageDays: config.stageDays,
+        status: "skipped",
+        failureReason: "customer_email_disabled",
+      });
+      return { ok: false, skipped: true, reason: "customer_email_disabled" };
+    }
+
+    const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
+      .filter((entry) => isEmailLike(entry.email));
+    if (!recipient?.email) {
+      logger.info(`[balance-reminder] late-payment email skipped for customer ${customer.id}: no valid billing email`);
+      return { ok: false, skipped: true, reason: "missing_email" };
+    }
+
+    const payload = latePaymentPayload({
+      customer: { ...customer, first_name: recipient.name || customer.first_name },
+      invoice: latestInvoice,
+      balance,
+      invoiceTitle,
+      serviceDateClause,
+      payUrl,
+    });
+    if (!payload.due_date) {
+      logger.warn(`[balance-reminder] late-payment email skipped for invoice ${latestInvoice.id}: missing due date`);
+      return { ok: false, skipped: true, reason: "missing_due_date" };
+    }
+
+    const triggerEventId = `late_payment:${latestInvoice.id}:${config.stageDays}`;
+    const idempotencyKey = `late_payment_email:${latestInvoice.id}:${config.stageDays}`;
+    try {
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: config.templateKey,
+        to: recipient.email,
+        payload,
+        recipientType: "customer",
+        recipientId: customer.id,
+        triggerEventId,
+        idempotencyKey,
+        categories: [
+          "billing",
+          "late_payment",
+          `late_payment_${config.stageDays}d`,
+        ],
+        suppressionGroupKey: "transactional_required",
+      });
+
+      if (result.deduped) {
+        return {
+          ok: !!result.sent,
+          deduped: true,
+          blocked: !!result.blocked,
+          messageId: result.message?.provider_message_id || null,
+        };
+      }
+
+      const status = result.sent ? "sent" : result.blocked ? "blocked" : "failed";
+      await logLatePaymentEmailAttempt({
+        customerId: customer.id,
+        invoiceId: latestInvoice.id,
+        templateKey: config.templateKey,
+        stageDays: config.stageDays,
+        status,
+        providerMessageId: result.message?.provider_message_id || null,
+        sentAt: result.message?.sent_at || null,
+        failureReason: result.sent ? null : result.reason || result.message?.error_message || "email_not_sent",
+      });
+
+      if (!result.sent) {
+        return {
+          ok: false,
+          blocked: !!result.blocked,
+          reason: result.reason || "email_not_sent",
+        };
+      }
+
+      logger.info(`[balance-reminder] late-payment ${config.stageDays}d email sent for invoice ${latestInvoice.id}`);
+      return { ok: true, messageId: result.message?.provider_message_id || null };
+    } catch (err) {
+      await logLatePaymentEmailAttempt({
+        customerId: customer.id,
+        invoiceId: latestInvoice.id,
+        templateKey: config.templateKey,
+        stageDays: config.stageDays,
+        status: "failed",
+        failureReason: err.message,
+      });
+      logger.error(`[balance-reminder] late-payment ${config.stageDays}d email failed for invoice ${latestInvoice.id}: ${err.message}`);
+      return { ok: false, error: err.message };
+    }
+  }
+
   async latePaymentCheck() {
     const customers = await db("customers")
       .where({ active: true })
@@ -325,6 +541,19 @@ class BalanceReminder {
         );
         continue;
       }
+      await this.sendLatePaymentEmail({
+        customer,
+        invoice: oldestInvoice,
+        balance,
+        smsTemplateKey: templateKey,
+        invoiceTitle,
+        serviceDateClause: dateClause,
+        payUrl: link,
+      }).catch((err) => {
+        logger.error(
+          `[balance-reminder] late-payment email sidecar failed for customer ${customer.id}: ${err.message}`,
+        );
+      });
       await db("customer_interactions").insert({
         customer_id: customer.id,
         interaction_type: "sms_outbound",

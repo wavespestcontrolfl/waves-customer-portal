@@ -6,6 +6,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { logAutopay } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
+const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 
 /**
  * Billing Cron Service
@@ -295,6 +296,16 @@ const BillingCron = {
         } catch (smsErr) {
           logger.error(`[billing-cron] SMS notification failed: ${smsErr.message}`);
         }
+
+        if (failedPayment) {
+          await PaymentLifecycleEmail.sendPaymentRetryNotice({
+            customerId: customer.id,
+            paymentId: failedPayment.id,
+            retryDate: retryAt,
+          }).catch((emailErr) => {
+            logger.warn(`[billing-cron] Retry notice email failed for payment ${failedPayment.id}: ${emailErr.message}`);
+          });
+        }
       }
     }
 
@@ -517,6 +528,14 @@ const BillingCron = {
           } catch (smsErr) {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);
           }
+
+          await PaymentLifecycleEmail.sendPaymentRetryNotice({
+            customerId: customer.id,
+            paymentId: payment.id,
+            retryDate: nextRetry,
+          }).catch((emailErr) => {
+            logger.warn(`[billing-cron] Retry notice email failed for payment ${payment.id}: ${emailErr.message}`);
+          });
         }
       }
     }

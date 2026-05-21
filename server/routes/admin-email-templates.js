@@ -17,6 +17,7 @@ const PRIORITIES = new Set(['critical', 'normal', 'bulk']);
 const SENSITIVITIES = new Set(['normal', 'financial', 'account', 'health_safety', 'property_sensitive']);
 const SUPPRESSION_TYPES = new Set(['unsubscribe', 'bounce', 'spam_complaint', 'manual', 'do_not_email']);
 const AUTOMATION_STATUSES = new Set(['draft', 'active', 'paused', 'archived']);
+const TEMPLATE_STATUSES = new Set(['draft', 'active', 'paused', 'archived']);
 const STREAMS = new Set([
   'transactional_required',
   'service_operational',
@@ -107,7 +108,7 @@ function normalizeTemplateInput(body, existing = {}) {
     allowed_variables: JSON.stringify(cleanArray(body.allowedVariables ?? body.allowed_variables ?? existing.allowed_variables)),
     required_variables: JSON.stringify(cleanArray(body.requiredVariables ?? body.required_variables ?? existing.required_variables)),
     optional_variables: JSON.stringify(cleanArray(body.optionalVariables ?? body.optional_variables ?? existing.optional_variables)),
-    status: cleanString(body.status, existing.status || 'draft'),
+    status: assertOneOf(body.status ?? existing.status, TEMPLATE_STATUSES, 'status', existing.status || 'draft'),
   };
 }
 

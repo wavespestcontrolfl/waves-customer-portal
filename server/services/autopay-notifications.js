@@ -4,6 +4,7 @@ const { logAutopay, eventExistsRecently } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 
 /**
  * Autopay Notifications
@@ -115,15 +116,28 @@ async function sendCardExpiryWarnings() {
 
   for (const r of rows) {
     try {
-      if (!r.phone) { skipped++; continue; }
-
       const expDate = new Date(r.exp_year, r.exp_month, 0);
       const expired = expDate < now;
       const eventType = expired ? 'card_expired' : 'card_expiring_soon';
+      const daysUntil = Math.ceil((expDate.getTime() - now.getTime()) / 86400000);
+      const reminderStage = expired ? 'expired' : (daysUntil <= 7 ? '7_day' : (daysUntil <= 30 ? '30_day' : null));
+
+      const emailPromise = reminderStage
+        ? PaymentLifecycleEmail.sendPaymentMethodExpiring({
+          customerId: r.customer_id,
+          paymentMethodId: r.payment_method_id,
+          reminderStage,
+          now,
+        }).catch((emailErr) => {
+          logger.warn(`[autopay-notifications] expiry email failed for ${r.customer_id}: ${emailErr.message}`);
+        })
+        : Promise.resolve();
+
+      if (!r.phone) { await emailPromise; skipped++; continue; }
 
       // Dedup: one per card per 30 days
       const already = await eventExistsRecently(r.customer_id, eventType, 30, r.payment_method_id);
-      if (already) { skipped++; continue; }
+      if (already) { await emailPromise; skipped++; continue; }
 
       const expStr = `${String(r.exp_month).padStart(2, '0')}/${String(r.exp_year).slice(-2)}`;
       const templateKey = expired ? 'autopay_card_expired' : 'autopay_card_expiring';
@@ -138,6 +152,7 @@ async function sendCardExpiryWarnings() {
       );
       if (!body) {
         logger.warn(`[autopay-notifications] ${templateKey} template missing/disabled for customer ${r.customer_id}`);
+        await emailPromise;
         skipped++; continue;
       }
 
@@ -159,6 +174,7 @@ async function sendCardExpiryWarnings() {
         paymentMethodId: r.payment_method_id,
         details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4 },
       });
+      await emailPromise;
       sent++;
     } catch (err) {
       logger.error(`[autopay-notifications] expiry warning failed for ${r.customer_id}: ${err.message}`);

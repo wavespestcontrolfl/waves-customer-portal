@@ -455,6 +455,16 @@ function shouldRetryExistingMessage(message) {
   return !DEDUPE_STATUSES.has(String(message?.status || '').toLowerCase());
 }
 
+function assertTemplateSendable(template, { test = false } = {}) {
+  if (test) return;
+  const status = String(template?.status || 'active').toLowerCase();
+  if (status === 'active') return;
+  const err = new Error(`email template ${template?.template_key || 'unknown'} is ${status || 'disabled'}`);
+  err.status = 409;
+  err.code = 'EMAIL_TEMPLATE_DISABLED';
+  throw err;
+}
+
 async function sendTemplate({
   templateKey,
   versionId,
@@ -481,10 +491,12 @@ async function sendTemplate({
     version = row;
   } else {
     const loaded = await loadTemplateByKey(templateKey);
-    if (!loaded?.template || !loaded?.activeVersion) throw new Error('active template not found');
+    if (!loaded?.template) throw new Error('template not found');
     template = loaded.template;
     version = loaded.activeVersion;
   }
+  assertTemplateSendable(template, { test });
+  if (!version) throw new Error('active template not found');
 
   let retryMessage = null;
   if (idempotencyKey) {

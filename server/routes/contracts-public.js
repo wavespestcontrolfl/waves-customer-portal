@@ -4,6 +4,8 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { logAutopay } = require('../services/autopay-log');
 const { hashContractToken, serializeContract } = require('../services/contracts');
+const logger = require('../services/logger');
+const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -220,6 +222,14 @@ router.post('/:token/sign', async (req, res, next) => {
       await logAutopay(response.body.contract.customerId, 'payment_method_changed', {
         paymentMethodId: response.body.contract.paymentMethodId,
         details: { reason: 'contract_signed', contract_id: response.body.contract.id },
+      });
+      PaymentLifecycleEmail.sendAutopayEnabled({
+        customerId: response.body.contract.customerId,
+        paymentMethodId: response.body.contract.paymentMethodId,
+        enabledDate: new Date(),
+        idempotencyKey: `payment.autopay_enabled:${response.body.contract.customerId}:${response.body.contract.paymentMethodId}:contract:${response.body.contract.id}`,
+      }).catch((emailErr) => {
+        logger.warn(`[contracts-public] autopay enabled email failed for contract ${response.body.contract.id}: ${emailErr.message}`);
       });
     }
 

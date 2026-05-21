@@ -6,6 +6,8 @@ const PaymentRouter = require('../services/payment-router');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
+const logger = require('../services/logger');
+const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
 router.use(authenticate);
 
@@ -122,6 +124,13 @@ router.post('/cards', async (req, res, next) => {
 
     const { paymentMethodId } = await schema.validateAsync(req.body);
 
+    const currentDefault = await db('payment_methods')
+      .where({ customer_id: req.customerId, is_default: true })
+      .first('id');
+    const currentCustomer = await db('customers')
+      .where({ id: req.customerId })
+      .first('autopay_enabled');
+
     const card = await StripeService.savePaymentMethod(req.customerId, paymentMethodId);
 
     // Record consent — the portal add-card modal shows SaveCardConsent
@@ -139,7 +148,26 @@ router.post('/cards', async (req, res, next) => {
         userAgent: req.get('user-agent') || null,
       });
     } catch (consentErr) {
-      require('../services/logger').error(`[billing-v2] Consent record failed: ${consentErr.message}`);
+      logger.error(`[billing-v2] Consent record failed: ${consentErr.message}`);
+    }
+
+    if (currentCustomer?.autopay_enabled && !currentDefault?.id) {
+      PaymentLifecycleEmail.sendAutopayEnabled({
+        customerId: req.customerId,
+        paymentMethodId: card.id,
+        enabledDate: card.created_at || new Date(),
+      }).catch((emailErr) => {
+        logger.warn(`[billing-v2] autopay enabled email failed for customer ${req.customerId}: ${emailErr.message}`);
+      });
+    } else {
+      PaymentLifecycleEmail.sendPaymentMethodUpdated({
+        customerId: req.customerId,
+        oldPaymentMethodId: currentDefault?.id || null,
+        newPaymentMethodId: card.id,
+        updatedAt: card.created_at || new Date(),
+      }).catch((emailErr) => {
+        logger.warn(`[billing-v2] payment method update email failed for customer ${req.customerId}: ${emailErr.message}`);
+      });
     }
 
     res.json({
@@ -241,6 +269,10 @@ router.get('/balance', async (req, res, next) => {
 // =========================================================================
 router.put('/cards/:id/default', async (req, res, next) => {
   try {
+    const currentDefault = await db('payment_methods')
+      .where({ customer_id: req.customerId, is_default: true })
+      .first('id');
+
     const card = await db('payment_methods')
       .where({ id: req.params.id, customer_id: req.customerId })
       .first();
@@ -254,6 +286,17 @@ router.put('/cards/:id/default', async (req, res, next) => {
     await db('payment_methods')
       .where({ id: req.params.id })
       .update({ is_default: true });
+
+    if (currentDefault?.id !== card.id) {
+      PaymentLifecycleEmail.sendPaymentMethodUpdated({
+        customerId: req.customerId,
+        oldPaymentMethodId: currentDefault?.id || null,
+        newPaymentMethodId: card.id,
+        updatedAt: new Date(),
+      }).catch((emailErr) => {
+        logger.warn(`[billing-v2] default payment method email failed for customer ${req.customerId}: ${emailErr.message}`);
+      });
+    }
 
     res.json({ success: true });
   } catch (err) {

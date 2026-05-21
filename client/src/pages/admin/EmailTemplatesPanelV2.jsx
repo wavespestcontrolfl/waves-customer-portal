@@ -24,6 +24,7 @@ import {
   CardTitle,
   Input,
   Select,
+  Switch,
   Textarea,
   cn,
 } from "../../components/ui";
@@ -96,6 +97,19 @@ function ModeBadge({ mode }) {
   return (
     <Badge tone={mode === "marketing" ? "strong" : "neutral"}>
       {mode || "service"}
+    </Badge>
+  );
+}
+
+function templateIsActive(template) {
+  return String(template?.status || "draft").toLowerCase() === "active";
+}
+
+function TemplateStatusBadge({ status }) {
+  const normalized = String(status || "draft").toLowerCase();
+  return (
+    <Badge tone={normalized === "active" ? "strong" : "neutral"}>
+      {normalized === "active" ? "on" : normalized}
     </Badge>
   );
 }
@@ -1257,7 +1271,7 @@ function AutomationsPanel({
   );
 }
 
-function TemplateList({ templates, selectedKey, onSelect, filter, onFilter }) {
+function TemplateList({ templates, selectedKey, onSelect, filter, onFilter, onToggleStatus, busy }) {
   const modes = ["all", "service", "marketing"];
   const filtered = templates.filter((t) => filter === "all" || t.mode === filter);
   return (
@@ -1278,33 +1292,52 @@ function TemplateList({ templates, selectedKey, onSelect, filter, onFilter }) {
         </Select>
       </CardHeader>
       <div className="divide-y divide-zinc-100">
-        {filtered.map((t) => (
-          <button
-            key={t.template_key}
-            type="button"
-            onClick={() => onSelect(t.template_key)}
-            className={cn(
-              "w-full text-left px-4 py-3 hover:bg-zinc-50 transition-colors",
-              selectedKey === t.template_key && "bg-zinc-50",
-            )}
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-13 font-medium text-zinc-900 truncate">
-                  {t.name}
+        {filtered.map((t) => {
+          const active = templateIsActive(t);
+          return (
+            <div
+              key={t.template_key}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(t.template_key)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelect(t.template_key);
+                }
+              }}
+              className={cn(
+                "w-full text-left px-4 py-3 hover:bg-zinc-50 transition-colors cursor-pointer",
+                selectedKey === t.template_key && "bg-zinc-50",
+              )}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-13 font-medium text-zinc-900 truncate">
+                    {t.name}
+                  </div>
+                  <div className="text-11 text-ink-tertiary truncate">
+                    {t.template_key}
+                  </div>
                 </div>
-                <div className="text-11 text-ink-tertiary truncate">
-                  {t.template_key}
+                <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                  <TemplateStatusBadge status={t.status} />
+                  <Switch
+                    checked={active}
+                    disabled={busy}
+                    aria-label={`${active ? "Disable" : "Enable"} ${t.name}`}
+                    onChange={(next) => onToggleStatus(t, next)}
+                  />
+                  <ModeBadge mode={t.mode} />
                 </div>
               </div>
-              <ModeBadge mode={t.mode} />
+              <div className="mt-2 flex items-center gap-2 text-11 text-ink-tertiary">
+                <span>{t.purpose}</span>
+                <span>{t.draft_count ? `${t.draft_count} draft` : "no draft"}</span>
+              </div>
             </div>
-            <div className="mt-2 flex items-center gap-2 text-11 text-ink-tertiary">
-              <span>{t.purpose}</span>
-              <span>{t.draft_count ? `${t.draft_count} draft` : "no draft"}</span>
-            </div>
-          </button>
-        ))}
+          );
+        })}
       </div>
     </Card>
   );
@@ -1798,6 +1831,38 @@ export default function EmailTemplatesPanelV2() {
     }
   };
 
+  const toggleTemplateStatus = async (template, nextActive) => {
+    const key = template?.template_key || selectedKey;
+    if (!key) return;
+    const nextStatus = nextActive ? "active" : "paused";
+    setBusy(true);
+    setToast("");
+    try {
+      const d = await adminFetch(`/admin/email-templates/${key}`, {
+        method: "PUT",
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      const updated = d.template || { ...template, status: nextStatus };
+      setTemplates((prev) =>
+        prev.map((row) =>
+          row.template_key === key
+            ? { ...row, status: updated.status || nextStatus }
+            : row,
+        ),
+      );
+      setDetail((prev) =>
+        prev?.template?.template_key === key
+          ? { ...prev, template: { ...prev.template, ...updated } }
+          : prev,
+      );
+      setToast(`${updated.name || template?.name || key} ${nextStatus === "active" ? "enabled" : "paused"}`);
+    } catch (e) {
+      setToast(`Template toggle failed: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const createSuppression = async () => {
     setBusy(true);
     setToast("");
@@ -2127,6 +2192,8 @@ export default function EmailTemplatesPanelV2() {
               onSelect={setSelectedKey}
               filter={filter}
               onFilter={setFilter}
+              onToggleStatus={toggleTemplateStatus}
+              busy={busy}
             />
 
             <div className="space-y-4">
@@ -2135,6 +2202,7 @@ export default function EmailTemplatesPanelV2() {
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <CardTitle>{detail?.template?.name || "Email template"}</CardTitle>
+                <TemplateStatusBadge status={detail?.template?.status} />
                 <ModeBadge mode={detail?.template?.mode} />
                 <VersionBadge version={selectedVersion} />
               </div>
