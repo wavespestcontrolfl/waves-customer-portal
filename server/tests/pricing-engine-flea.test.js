@@ -24,17 +24,17 @@ describe('flea treatment pricing', () => {
 
   test.each([
     [0, 0],
-    [2500, 90],
-    [5000, 120],
-    [7500, 155],
-    [10000, 190],
-    [15000, 255],
-    [20000, 320],
+    [2500, 125],
+    [5000, 155],
+    [7500, 195],
+    [10000, 240],
+    [15000, 325],
+    [20000, 395],
   ])('prices exterior tier helper for %s sq ft', (area, total) => {
     expect(priceFleaExterior(area, { source: 'CONFIRMED_SQ_FT' }).total).toBe(total);
   });
 
-  test('default package plus 5,000 sf exterior totals $470', () => {
+  test('default package plus 5,000 sf exterior totals $505', () => {
     const result = priceFlea({
       services: { flea: true, fleaExterior: true },
       footprintSqFt: 2000,
@@ -43,10 +43,10 @@ describe('flea treatment pricing', () => {
       fleaExteriorAreaSource: 'CONFIRMED_SQ_FT',
     });
 
-    expect(result.initial).toBe(300);
-    expect(result.followUp).toBe(170);
-    expect(result.total).toBe(470);
-    expect(result.adjustments.exteriorArea.total).toBe(120);
+    expect(result.initial).toBe(320);
+    expect(result.followUp).toBe(185);
+    expect(result.total).toBe(505);
+    expect(result.adjustments.exteriorArea.total).toBe(155);
     expect(result.display.exteriorDetail).toBe('Exterior flea spray — 5,000 sf');
   });
 
@@ -78,7 +78,8 @@ describe('flea treatment pricing', () => {
     });
 
     expect(result.requiresCustomQuote).toBe(true);
-    expect(result.customQuoteReason).toContain('exceeds 20,000');
+    expect(result.customQuoteReason).toContain('20,000');
+    expect(result.customQuoteReason).toContain('custom quote');
   });
 
   test('unknown source does not auto-price exterior spray and returns confirmation warning', () => {
@@ -92,7 +93,7 @@ describe('flea treatment pricing', () => {
 
     expect(result.adjustments.exteriorArea.total).toBe(0);
     expect(result.total).toBe(350);
-    expect(result.warning).toContain('needs confirmation');
+    expect(result.warning).toContain('confirmed treatable lawn area');
   });
 
   test('urgency and recurring-customer modifiers apply after exterior add-on', () => {
@@ -106,12 +107,12 @@ describe('flea treatment pricing', () => {
       isRecurringCustomer: true,
     });
 
-    expect(result.raw.total).toBe(470);
+    expect(result.raw.total).toBe(505);
     expect(result.modifiers).toEqual({
       urgencyMultiplier: 1.25,
       recurringCustomerMultiplier: 0.85,
     });
-    expect(result.total).toBe(Math.round(470 * 1.25 * 0.85));
+    expect(result.total).toBe(Math.round(505 * 1.25 * 0.85));
   });
 
   test('generateEstimate keeps server flea total authoritative without a second discount pass', () => {
@@ -130,9 +131,9 @@ describe('flea treatment pricing', () => {
     });
     const item = estimate.lineItems.find((line) => line.service === 'flea_package');
 
-    expect(item.total).toBe(470);
-    expect(item.totalAfterDiscount).toBe(470);
+    expect(item.total).toBe(505);
+    expect(item.totalAfterDiscount).toBe(505);
     expect(estimate.summary.oneTimeTotal).toBe(0);
-    expect(estimate.summary.specialtyTotal).toBe(470);
+    expect(estimate.summary.specialtyTotal).toBe(505);
   });
 });

@@ -134,6 +134,72 @@ function fleaExteriorSourceLabel(source) {
   return FLEA_EXTERIOR_SOURCE_OPTIONS.find((option) => option.value === source)?.label || "Unknown";
 }
 
+function getFleaExteriorPreview(areaSqFt, source, fleaPricingConfig) {
+  const area = Math.max(0, Math.round(Number(areaSqFt) || 0));
+  const normalizedSource = FLEA_EXTERIOR_SOURCE_OPTIONS.some((option) => option.value === source)
+    ? source
+    : "UNKNOWN";
+  const exteriorConfig = fleaPricingConfig?.exterior || {};
+  const maxSqFt = Number(exteriorConfig.maxSqFt ?? exteriorConfig.max_sqft);
+  const tiers = Array.isArray(exteriorConfig.tiers) ? exteriorConfig.tiers : [];
+  const customQuoteWarning = Number.isFinite(maxSqFt)
+    ? `Properties above ${maxSqFt.toLocaleString()} sq ft require a custom quote due to product volume and treatment time.`
+    : "Properties above the configured exterior flea limit require a custom quote due to product volume and treatment time.";
+
+  if (exteriorConfig.enabled === false || !Number.isFinite(maxSqFt) || !tiers.length) {
+    return {
+      priceable: false,
+      configUnavailable: true,
+      warning: "Exterior flea pricing config is unavailable. Generate the estimate for authoritative pricing.",
+    };
+  }
+
+  if (area <= 0) {
+    return {
+      priceable: false,
+      warning: "Treatable lawn area must be confirmed before exterior flea pricing.",
+    };
+  }
+
+  if (area > maxSqFt) {
+    return {
+      priceable: false,
+      customQuote: true,
+      maxSqFt,
+      warning: customQuoteWarning,
+    };
+  }
+
+  if (normalizedSource === "UNKNOWN") {
+    return {
+      priceable: false,
+      warning: "Exterior flea pricing needs a confirmed treatable lawn area.",
+    };
+  }
+
+  const tier = tiers.find((item) => area >= Number(item.min) && area <= Number(item.max));
+  if (!tier) {
+    return {
+      priceable: false,
+      customQuote: true,
+      maxSqFt,
+      warning: customQuoteWarning,
+    };
+  }
+
+  return {
+    priceable: true,
+    initial: Math.round(Number(tier.initial) || 0),
+    followUp: Math.round(Number(tier.followUp ?? tier.followup) || 0),
+    total: Math.round(Number(tier.initial) || 0) + Math.round(Number(tier.followUp ?? tier.followup) || 0),
+    reviewRequired: normalizedSource === "AI_ESTIMATE",
+    warning:
+      normalizedSource === "AI_ESTIMATE"
+        ? "AI estimate detected. Please confirm before finalizing the quote."
+        : null,
+  };
+}
+
 const AI_SOURCE_LABELS = {
   claude: "Claude",
   openai: "ChatGPT",
@@ -2093,6 +2159,7 @@ export default function EstimateToolViewV2({
 
   const [discountPresets, setDiscountPresets] = useState([]);
   const [serviceCreditPresets, setServiceCreditPresets] = useState([]);
+  const [fleaPricingConfig, setFleaPricingConfig] = useState(null);
   useEffect(() => {
     (async () => {
       try {
@@ -2111,6 +2178,23 @@ export default function EstimateToolViewV2({
         /* ignore */
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/onetime_flea");
+        if (!r.ok) return;
+        const row = await r.json();
+        if (active) setFleaPricingConfig(row?.data || null);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      active = false;
+    };
   }, []);
 
   function applyDiscountPreset(key) {
@@ -3097,15 +3181,22 @@ export default function EstimateToolViewV2({
   );
   const plugAreaSqFt = parseNonNegativeInteger(form.plugArea);
   const fleaExteriorAreaSqFt = parseNonNegativeInteger(form.fleaExteriorAreaSqFt) ?? 0;
+  const fleaExteriorAreaSource = form.fleaExteriorAreaSource || "UNKNOWN";
+  const fleaExteriorMaxSqFt =
+    parseNonNegativeInteger(fleaPricingConfig?.exterior?.maxSqFt) ??
+    parseNonNegativeInteger(fleaPricingConfig?.exterior?.max_sqft) ??
+    20000;
+  const fleaExteriorSliderMarks = [0, 2500, 5000, 10000, 15000, fleaExteriorMaxSqFt].filter(
+    (value, index, marks) => value <= fleaExteriorMaxSqFt && marks.indexOf(value) === index,
+  );
+  const fleaExteriorPreview = getFleaExteriorPreview(
+    fleaExteriorAreaSqFt,
+    fleaExteriorAreaSource,
+    fleaPricingConfig,
+  );
   const fleaExteriorWarning = !form.svcFleaExterior
     ? null
-    : fleaExteriorAreaSqFt <= 0
-        ? "Enter or confirm the exterior flea spray area to price this add-on."
-        : form.fleaExteriorAreaSource === "UNKNOWN"
-          ? "Exterior flea spray area needs confirmation before final quote."
-          : fleaExteriorAreaSqFt > 20000
-            ? "Exterior flea spray area exceeds 20,000 sf. Custom quote required."
-            : null;
+    : fleaExteriorPreview.warning;
   const pluggingUsesTurfFallback = !!form.svcPlugging && !(plugAreaSqFt > 0);
   const hasTurfPricedSelection =
     (!commercialDetected && (!!form.svcLawn || !!form.svcOnetimeLawn)) ||
@@ -4393,59 +4484,111 @@ export default function EstimateToolViewV2({
                   {form.svcFleaExterior && (
                     <>
                       <div className="flex items-center justify-between gap-3 mb-2">
-                        <div className="text-12 font-semibold text-zinc-900">
-                          Exterior Flea Spray Area
+                        <div>
+                          <div className="text-12 font-semibold text-zinc-900">
+                            Treatable Lawn Area
+                          </div>
+                          <div className="mt-0.5 text-11 text-ink-secondary leading-snug">
+                            Price exterior flea treatment based on treatable turf and yard area, not the full property lot.
+                          </div>
                         </div>
                         <Badge variant="neutral" className="text-10 u-nums">
-                          Max 20,000 sf
+                          Max {fleaExteriorMaxSqFt.toLocaleString()} sf
                         </Badge>
                       </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <FieldV2 label="Source" className="mb-0">
-                          <select
-                            value={form.fleaExteriorAreaSource || "UNKNOWN"}
-                            onChange={(e) => set("fleaExteriorAreaSource", e.target.value)}
-                            className={cn(
-                              INPUT_CLS,
-                              "cursor-pointer appearance-none pr-8 bg-no-repeat bg-[right_0.75rem_center]",
-                            )}
-                            style={{
-                              backgroundImage:
-                                "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2371717A' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
-                            }}
-                          >
-                            {FLEA_EXTERIOR_SOURCE_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>
+                      <div className="mb-3">
+                        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                          Area source
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {FLEA_EXTERIOR_SOURCE_OPTIONS.map((option) => {
+                            const active = fleaExteriorAreaSource === option.value;
+                            return (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => set("fleaExteriorAreaSource", option.value)}
+                                className={cn(
+                                  "h-8 px-2.5 rounded-sm border-hairline text-11 font-medium u-focus-ring",
+                                  active
+                                    ? "bg-zinc-900 border-zinc-900 text-white"
+                                    : "bg-white border-zinc-300 text-zinc-700 hover:bg-zinc-100",
+                                )}
+                              >
                                 {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </FieldV2>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
                         <FieldV2 label="Area" className="mb-0">
-                          <div className="h-10 px-3 flex items-center rounded-sm border-hairline border-zinc-300 bg-white text-14 text-zinc-900 u-nums">
-                            {formatSqFt(fleaExteriorAreaSqFt)}
-                          </div>
+                          <input
+                            type="number"
+                            min="0"
+                            step="250"
+                            value={form.fleaExteriorAreaSqFt || ""}
+                            onChange={(e) => set("fleaExteriorAreaSqFt", e.target.value)}
+                            placeholder="Treatable sq ft"
+                            className={INPUT_CLS}
+                          />
                         </FieldV2>
+                        <div className="h-10 px-3 flex items-center rounded-sm border-hairline border-zinc-300 bg-white text-14 text-zinc-900 u-nums">
+                          {formatSqFt(fleaExteriorAreaSqFt)}
+                        </div>
                       </div>
                       <input
                         type="range"
                         min="0"
-                        max="20000"
+                        max={fleaExteriorMaxSqFt}
                         step="250"
-                        value={Math.min(fleaExteriorAreaSqFt, 20000)}
+                        value={Math.min(fleaExteriorAreaSqFt, fleaExteriorMaxSqFt)}
                         onChange={(e) => set("fleaExteriorAreaSqFt", e.target.value)}
                         className="mt-3 w-full accent-zinc-900"
                       />
-                      <div className="mt-1 grid grid-cols-6 gap-1 text-10 text-ink-secondary">
-                        {["0 sf", "2,500", "5,000", "10,000", "15,000", "20,000 sf"].map((mark) => (
-                          <span key={mark} className="first:text-left last:text-right text-center">
-                            {mark}
+                      <div
+                        className="mt-1 grid gap-1 text-10 text-ink-secondary"
+                        style={{ gridTemplateColumns: `repeat(${fleaExteriorSliderMarks.length}, minmax(0, 1fr))` }}
+                      >
+                        {fleaExteriorSliderMarks.map((mark, index) => (
+                          <span
+                            key={mark}
+                            className={cn(
+                              index === 0 ? "text-left" : "",
+                              index === fleaExteriorSliderMarks.length - 1 ? "text-right" : "text-center",
+                            )}
+                          >
+                            {index === 0 || index === fleaExteriorSliderMarks.length - 1
+                              ? `${mark.toLocaleString()} sf`
+                              : mark.toLocaleString()}
                           </span>
                         ))}
                       </div>
                       <div className="mt-2 text-12 text-zinc-900 u-nums">
-                        Using {fleaExteriorSourceLabel(form.fleaExteriorAreaSource)}:{" "}
+                        Using {fleaExteriorSourceLabel(fleaExteriorAreaSource)}:{" "}
                         {formatSqFt(fleaExteriorAreaSqFt)}
+                      </div>
+                      <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs">
+                        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-1">
+                          Exterior flea add-on
+                        </div>
+                        {fleaExteriorPreview.priceable ? (
+                          <div className="text-13 text-zinc-900 u-nums">
+                            ${fleaExteriorPreview.initial} initial + ${fleaExteriorPreview.followUp} follow-up = ${fleaExteriorPreview.total} total
+                          </div>
+                        ) : fleaExteriorPreview.configUnavailable ? (
+                          <div className="text-13 text-zinc-900">
+                            Exterior flea pricing config is unavailable.
+                          </div>
+                        ) : fleaExteriorPreview.customQuote ? (
+                          <div className="text-13 text-zinc-900">
+                            {(fleaExteriorPreview.maxSqFt || fleaExteriorMaxSqFt).toLocaleString()}+ sf. Custom quote required.
+                          </div>
+                        ) : (
+                          <div className="text-13 text-zinc-900">
+                            Pricing needs a confirmed treatable lawn area.
+                          </div>
+                        )}
                       </div>
                       {fleaExteriorWarning && (
                         <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">

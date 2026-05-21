@@ -4459,29 +4459,29 @@ function priceFleaExterior(areaSqFt, options = {}) {
   const cfg = SPECIALTY.flea.exterior || {};
   const area = Math.max(0, Math.round(Number(areaSqFt) || 0));
   const source = normalizeFleaAreaSource(options.source || options.fleaExteriorAreaSource || 'UNKNOWN');
-  const warningForZero = 'Enter or confirm the exterior flea spray area to price this add-on.';
+  const warningForZero = 'Treatable lawn area must be confirmed before exterior flea pricing.';
   if (cfg.enabled === false || area <= 0) {
     return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial: 0, followUp: 0, total: 0, priced: false, requiresCustomQuote: false, customQuoteReason: null, warning: area <= 0 ? warningForZero : null, warnings: area <= 0 ? [warningForZero] : [], needsConfirmation: area <= 0 };
   }
   if (area > Number(cfg.maxSqFt || 20000)) {
-    const reason = 'Exterior flea spray area exceeds 20,000 sq ft';
-    const warning = 'Exterior flea spray area exceeds 20,000 sf. Custom quote required.';
+    const reason = 'Exterior flea treatment over 20,000 sq ft requires a custom quote';
+    const warning = 'Properties above 20,000 sq ft require a custom quote due to product volume and treatment time.';
     return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial: 0, followUp: 0, total: 0, priced: false, requiresCustomQuote: true, customQuoteReason: reason, warning, warnings: [warning], needsConfirmation: true };
   }
   if (source === 'UNKNOWN') {
-    const warning = 'Exterior flea spray area needs confirmation before final quote.';
+    const warning = 'Exterior flea pricing needs a confirmed treatable lawn area.';
     return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial: 0, followUp: 0, total: 0, priced: false, requiresCustomQuote: false, customQuoteReason: null, warning, warnings: [warning], needsConfirmation: true };
   }
   const tier = (cfg.tiers || []).find(t => area >= Number(t.min) && area <= Number(t.max));
   if (!tier) {
-    const reason = 'Exterior flea spray area exceeds 20,000 sq ft';
-    const warning = 'Exterior flea spray area exceeds 20,000 sf. Custom quote required.';
+    const reason = 'Exterior flea treatment over 20,000 sq ft requires a custom quote';
+    const warning = 'Properties above 20,000 sq ft require a custom quote due to product volume and treatment time.';
     return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial: 0, followUp: 0, total: 0, priced: false, requiresCustomQuote: true, customQuoteReason: reason, warning, warnings: [warning], needsConfirmation: true };
   }
   const initial = Math.round(Number(tier.initial) || 0);
   const followUp = Math.round(Number(tier.followUp) || 0);
   const warnings = source === 'AI_ESTIMATE'
-    ? ['Needs confirmation before final quote.', 'flea_exterior_area_ai_estimate_needs_confirmation']
+    ? ['AI estimate detected. Please confirm before finalizing the quote.', 'flea_exterior_area_ai_estimate_needs_confirmation']
     : [];
   return { areaSqFt: area, source, sourceLabel: fleaSourceLabel(source), initial, followUp, total: initial + followUp, priced: true, requiresCustomQuote: false, customQuoteReason: null, warning: warnings[0] || null, warnings, needsConfirmation: source === 'AI_ESTIMATE' };
 }
