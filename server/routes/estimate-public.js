@@ -5081,21 +5081,24 @@ function buildAcceptOfficeFallback({
   billingTerm = 'standard',
   annualPrepayAmount = null,
 } = {}) {
+  const safeCustomerName = String(customerName || '').trim() || 'Unknown customer';
+  const safeAddress = String(address || '').trim() || 'address unavailable';
+
   if (billByInvoice) {
     const label = treatAsOneTime
       ? `${serviceLabel} one-time service`
       : `${waveguardTier} WaveGuard $${monthlyTotal}/mo`;
-    return `Estimate accepted by ${customerName} at ${address} - ${label}. Invoice mode selected.`;
+    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${label}. Invoice mode selected.`;
   }
   if (treatAsOneTime) {
     const nextStep = reservationCommitted ? 'Appointment confirmed.' : 'Booking link sent.';
-    return `One-time estimate accepted by ${customerName} at ${address} - ${serviceLabel}. ${nextStep}`;
+    return `One-time estimate accepted by ${safeCustomerName} at ${safeAddress} - ${serviceLabel}. ${nextStep}`;
   }
   if (billingTerm === 'prepay_annual') {
     const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
-    return `Estimate accepted by ${customerName} at ${address} - ${waveguardTier} WaveGuard annual prepay${amountText}. Invoice follow-up needed.`;
+    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard annual prepay${amountText}. Invoice follow-up needed.`;
   }
-  return `Estimate accepted by ${customerName} at ${address} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Onboarding link sent.`;
+  return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard $${monthlyTotal}/mo. Onboarding link sent.`;
 }
 
 function buildAcceptNotificationPayload({

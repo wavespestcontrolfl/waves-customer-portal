@@ -22,6 +22,7 @@ jest.mock('../services/twilio-failure-alerts', () => ({
 
 const { isEnabled } = require('../config/feature-gates');
 const TwilioService = require('../services/twilio');
+const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const {
   triggerAdminFollowupCall,
   _internals,
@@ -70,6 +71,7 @@ describe('admin follow-up call workflow', () => {
     delete process.env.RAILWAY_PUBLIC_DOMAIN;
     isEnabled.mockImplementation((gate) => gate === 'twilioVoice' || gate === 'leadAutoBridge');
     TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'SM_test' });
+    alertTwilioFailure.mockResolvedValue({ ok: true });
   });
 
   test('auto-bridges through the same admin prompt used by quote requests', async () => {
@@ -179,6 +181,47 @@ describe('admin follow-up call workflow', () => {
     expect(result).toEqual({ called: false, sms: true, reason: 'twilio_voice_disabled' });
     expect(create).not.toHaveBeenCalled();
     expect(TwilioService.sendSMS).toHaveBeenCalled();
+  });
+
+  test('marks a precreated auto-bridge call log failed when Twilio rejects the call', async () => {
+    const { database, updates } = makeDatabase();
+    const create = jest.fn(async () => {
+      throw new Error('bad request for +19415550199');
+    });
+    const twilioFactory = jest.fn(() => ({ calls: { create } }));
+
+    const result = await triggerAdminFollowupCall({
+      customerId: 'customer-1',
+      customerName: 'Ada Lovelace',
+      customerPhone: '(941) 555-0199',
+      source: 'estimate-accept',
+      eventLabel: 'Estimate accepted',
+      now: daytime(),
+      database,
+      twilioFactory,
+    });
+
+    expect(result).toEqual({
+      called: false,
+      sms: true,
+      reason: 'call_failed',
+      error: 'bad request for [phone]',
+    });
+    expect(updates).toEqual([
+      {
+        table: 'call_log',
+        clause: { id: 'call-log-1' },
+        patch: expect.objectContaining({
+          status: 'failed',
+          notes: 'Twilio create failed: bad request for [phone]',
+          updated_at: expect.any(Date),
+        }),
+      },
+    ]);
+    expect(TwilioService.sendSMS).toHaveBeenCalled();
+    expect(alertTwilioFailure).toHaveBeenCalledWith(expect.objectContaining({
+      errorMessage: 'bad request for [phone]',
+    }));
   });
 
   test('normalizes US phone inputs', () => {

@@ -135,6 +135,7 @@ async function triggerAdminFollowupCall({
   const domain = publicDomain();
   const firstName = String(customerName || '').trim().split(/\s+/)[0] || 'a customer';
   const autoBridge = isEnabled('leadAutoBridge');
+  let pendingAutoBridgeCallLogId = null;
 
   try {
     if (autoBridge) {
@@ -159,6 +160,7 @@ async function triggerAdminFollowupCall({
         })
         .returning(['id']);
       const callLogId = callLogRow?.id;
+      pendingAutoBridgeCallLogId = callLogId || null;
 
       const promptParams = new URLSearchParams({
         customerNumber: normalizedCustomerPhone,
@@ -225,6 +227,15 @@ async function triggerAdminFollowupCall({
     return { called: true, mode: 'announce', callSid: call.sid };
   } catch (callErr) {
     const safeError = scrubProviderError(callErr.message);
+    if (pendingAutoBridgeCallLogId) {
+      await database('call_log').where({ id: pendingAutoBridgeCallLogId }).update({
+        status: 'failed',
+        notes: `Twilio create failed: ${safeError}`,
+        updated_at: new Date(),
+      }).catch((logErr) => {
+        logger.warn(`[admin-followup-call] call_log failure mark failed for ${source}: ${logErr.message}`);
+      });
+    }
     logger.error(`[admin-followup-call] call failed for ${source}, falling back to SMS: ${safeError}`);
     notifyTwilioFailure({
       channel: 'voice',
