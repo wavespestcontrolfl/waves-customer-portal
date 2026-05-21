@@ -10,6 +10,9 @@ jest.mock('../services/bouncie-mileage', () => ({
 jest.mock('../services/tech-status', () => ({
   pingTechLocation: jest.fn().mockResolvedValue(null),
 }));
+jest.mock('../services/gps-arrival-detector', () => ({
+  maybeMarkArrivedFromGps: jest.fn().mockResolvedValue({ ok: false, reason: 'no_current_job' }),
+}));
 jest.mock('../services/bouncie-webhook-security', () => ({
   inspectBouncieWebhook: jest.fn(),
   stringifyBounciePayload: jest.fn((payload) => JSON.stringify(payload)),
@@ -18,6 +21,7 @@ jest.mock('../services/bouncie-webhook-security', () => ({
 const db = require('../models/db');
 const mileageService = require('../services/bouncie-mileage');
 const { pingTechLocation } = require('../services/tech-status');
+const gpsArrivalDetector = require('../services/gps-arrival-detector');
 const router = require('../routes/webhooks-bouncie');
 
 function tableMock({ first, update } = {}) {
@@ -242,6 +246,14 @@ describe('Bouncie tracking webhook trip-metrics processing', () => {
   });
 
   test('updates live location from official tripData nested gps samples', async () => {
+    const techStatus = {
+      tech_id: 'tech-1',
+      status: 'en_route',
+      current_job_id: 'svc-1',
+      lat: 27.2,
+      lng: -82.2,
+    };
+    pingTechLocation.mockResolvedValueOnce(techStatus);
     const technicianLookup = tableMock({
       first: { id: 'tech-1', name: 'Tech One', bouncie_imei: 'imei-1', active: true },
     });
@@ -288,6 +300,14 @@ describe('Bouncie tracking webhook trip-metrics processing', () => {
       lng: -82.2,
       speed_mph: 18,
     }));
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).toHaveBeenCalledWith({
+      techStatus,
+      point: expect.objectContaining({
+        lat: 27.2,
+        lng: -82.2,
+        speed_mph: 18,
+      }),
+    });
     expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
   });
 
