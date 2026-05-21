@@ -366,6 +366,18 @@ describe('termite measurement overrides and safeguards', () => {
     expect(override.addOns[0].code).toBe('pre_slab_extended_warranty');
     expect(override.certificateOfComplianceRequired).toBe(true);
 
+    const noWarranty = pricePreSlabTermiticide(1800, {
+      productKey: 'termidor_sc',
+      warranty: 'NONE',
+      labelConfirmed: true,
+    });
+    expect(noWarranty.warrantyTier).toBe('none');
+    expect(noWarranty.warrantyLabel).toBe('No warranty');
+    expect(noWarranty.warrantyExtendedSelected).toBe(false);
+    expect(noWarranty.warrantyAdder).toBe(0);
+    expect(noWarranty.price).toBe(noWarranty.treatmentPrice);
+    expect(noWarranty.addOns).toEqual([]);
+
     const missing = pricePreSlabTermiticide({}, {});
     expect(missing.quoteRequired).toBe(true);
     expect(missing.price).toBeNull();
@@ -432,8 +444,26 @@ describe('termite measurement overrides and safeguards', () => {
     expect(mappedPreSlab.productKey).toBe('taurus_sc');
     expect(mappedPreSlab.labelConfirmed).toBe(true);
     expect(mappedPreSlab.certificateOfComplianceRequired).toBe(true);
+    expect(mappedPreSlab.warrantyTier).toBe('extended');
+    expect(mappedPreSlab.warrantyAdder).toBe(200);
     expect(mappedPreSlab.detail).toContain('Taurus');
     expect(mappedPreSlab.addOns[0].price).toBe(200);
+
+    const noWarrantyInput = translateV2CallToV1Input(
+      { homeSqFt: 2400, stories: 1, lotSqFt: 9000 },
+      ['PRESLAB'],
+      {
+        preslabSqft: 1800,
+        preslabProductKey: 'termidor_sc',
+        preslabWarranty: 'NONE',
+        preslabLabelConfirmed: true,
+      }
+    );
+    const noWarrantyMapped = mapV1ToLegacyShape(generateEstimate(noWarrantyInput));
+    const mappedNoWarrantyPreSlab = noWarrantyMapped.oneTime.specItems.find((item) => item.service === 'pre_slab_termiticide');
+    expect(mappedNoWarrantyPreSlab.warrantyTier).toBe('none');
+    expect(mappedNoWarrantyPreSlab.warrantyAdder).toBe(0);
+    expect(mappedNoWarrantyPreSlab.detail).toContain('No warranty');
   });
 
   test('estimate engine does not silently use computed perimeter for trenching', () => {

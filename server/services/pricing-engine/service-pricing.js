@@ -600,6 +600,41 @@ function normalizePreSlabVolumeDiscount(value) {
   };
 }
 
+function normalizePreSlabWarranty(value) {
+  const requestedWarrantyTier = value;
+  const raw = normalizeToken(value || 'basic');
+  const aliases = {
+    none: 'none',
+    no: 'none',
+    no_warranty: 'none',
+    basic: 'basic',
+    basic_1yr: 'basic',
+    basic_1_year: 'basic',
+    one_year: 'basic',
+    one_year_included: 'basic',
+    included: 'basic',
+    extended: 'extended',
+    extended_5yr: 'extended',
+    extended_5_year: 'extended',
+    five_year: 'extended',
+    five_year_extended: 'extended',
+    '5yr': 'extended',
+    '5_year': 'extended',
+  };
+  const warrantyTier = aliases[raw] || 'basic';
+  const labels = {
+    none: 'No warranty',
+    basic: 'Basic 1-yr warranty',
+    extended: 'Extended 5-yr warranty',
+  };
+  return {
+    requestedWarrantyTier,
+    warrantyTier,
+    warrantyLabel: labels[warrantyTier],
+    warnings: raw && !aliases[raw] ? ['invalid_pre_slab_warranty_defaulted_to_basic'] : [],
+  };
+}
+
 function normalizePreSlabTermiticideProduct(value, options = {}) {
   const cfg = SPECIALTY.preSlabTermiticide || {};
   const requestedProductKey = value;
@@ -3833,6 +3868,11 @@ function pricePreSlabTermiticide(input, options = {}) {
   const product = cfg.products[productResolution.productKey] || cfg.products[cfg.defaultProductKey];
   const measurement = resolvePreSlabSqFt(input, options);
   const volumeResolution = normalizePreSlabVolumeDiscount(options.volumeDiscount || 'none');
+  let warrantyResolution = normalizePreSlabWarranty(
+    hasValue(options.warranty)
+      ? options.warranty
+      : (hasValue(options.warrantyTier) ? options.warrantyTier : options.preslabWarranty)
+  );
   const volumeDiscountMultiplier = cfg.volumeDiscounts[volumeResolution.volumeDiscount] || 1.0;
   const productOzPer10SqFt = optionPositiveNumber(options, 'customProductOzPer10SqFt', product.productOzPer10SqFt);
   const containerCost = optionPositiveNumber(options, 'customContainerCost', product.containerCost);
@@ -3851,9 +3891,17 @@ function pricePreSlabTermiticide(input, options = {}) {
   const warrantyExtendedSelected = !!(
     options.includeWarrantyExtended ||
     options.warrantyExtended ||
-    options.warranty === 'EXTENDED'
+    warrantyResolution.warrantyTier === 'extended'
   );
+  if (warrantyExtendedSelected && warrantyResolution.warrantyTier !== 'extended') {
+    warrantyResolution = {
+      ...warrantyResolution,
+      warrantyTier: 'extended',
+      warrantyLabel: 'Extended 5-yr warranty',
+    };
+  }
   const warrantyExtendedPrice = warrantyExtendedSelected ? cfg.warrantyExtended : 0;
+  const warrantyAdder = warrantyExtendedPrice;
   const labelConfirmed = optionBooleanTrue(options.labelConfirmed);
   const requiresLabelConfirmation = product.requiresLabelConfirmation === true;
   const labelManualReviewReasons = requiresLabelConfirmation && !labelConfirmed
@@ -3864,6 +3912,7 @@ function pricePreSlabTermiticide(input, options = {}) {
     ...measurement.warnings,
     ...volumeResolution.warnings,
     ...productResolution.warnings,
+    ...warrantyResolution.warnings,
   ]);
   const manualReviewReasons = uniqueList([
     ...measurement.manualReviewReasons,
@@ -3907,6 +3956,11 @@ function pricePreSlabTermiticide(input, options = {}) {
     priceAfterVolumeDiscount: null,
     treatmentPrice: null,
     price: null,
+    warrantyTier: warrantyResolution.warrantyTier,
+    requestedWarrantyTier: warrantyResolution.requestedWarrantyTier,
+    warrantyLabel: warrantyResolution.warrantyLabel,
+    warrantyAdder,
+    warrantyAdd: warrantyAdder,
     warrantyExtendedSelected,
     warrantyExtendedPrice,
     addOns: warrantyExtendedSelected

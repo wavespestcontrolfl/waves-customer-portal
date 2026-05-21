@@ -169,6 +169,7 @@ const TERMITICIDE_METADATA_FIELDS = [
   'requestedWarrantyTier',
   'warrantyLabel',
   'warrantyAdder',
+  'warrantyAdd',
   'priceBeforeWarranty',
   'labelConfirmed',
   'requiresLabelConfirmation',
@@ -222,6 +223,7 @@ function termiticideDetail(li = {}, fallback = '') {
       li.productLabel,
       li.productOz ? `${li.productOz} oz` : null,
       li.units ? `${li.units} unit${li.units === 1 ? '' : 's'}` : null,
+      li.warrantyTier === 'none' ? li.warrantyLabel : null,
     ].filter(Boolean).join(' | ');
     return [slabDetail, productDetail].filter(Boolean).join(' | ') || fallback;
   }
