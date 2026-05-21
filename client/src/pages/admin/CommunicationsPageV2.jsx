@@ -200,8 +200,18 @@ const TABS = [
     className: "hidden md:inline-flex",
   },
 ];
+const SMS_LOG_PAGE_SIZE = 500;
 
 // ── V2 helpers ────────────────────────────────────────────────
+
+function smsThreadKey(phone) {
+  return String(phone || "").replace(/\D/g, "").slice(-10) || "unknown";
+}
+
+function mergeSmsMessages(existing, incoming) {
+  const seen = new Set(existing.map((m) => m.id));
+  return [...existing, ...incoming.filter((m) => !seen.has(m.id))];
+}
 
 function StatCardV2({ label, value, sub, active, alert, onClick }) {
   const clickable = typeof onClick === "function";
@@ -578,16 +588,39 @@ function SmsTab() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [threadLock, setThreadLock] = useState(null);
   const [selected360Id, setSelected360Id] = useState(null);
+  const [smsPage, setSmsPage] = useState(1);
+  const [smsHasMore, setSmsHasMore] = useState(false);
+  const [smsLoadingMore, setSmsLoadingMore] = useState(false);
+  const smsSearchRef = useRef("");
+  const smsLoadSeqRef = useRef(0);
 
-  const loadData = useCallback((search = "") => {
-    const logUrl = search
-      ? `/admin/communications/log?search=${encodeURIComponent(search)}&limit=1000`
-      : "/admin/communications/log";
-    Promise.all([
+  const loadData = useCallback((search = "", options = {}) => {
+    const normalizedSearch = search.trim();
+    const page = options.page || 1;
+    const append = !!options.append;
+    const requestSeq = ++smsLoadSeqRef.current;
+    const params = new URLSearchParams({
+      limit: String(SMS_LOG_PAGE_SIZE),
+      page: String(page),
+    });
+    if (normalizedSearch) params.set("search", normalizedSearch);
+    const logUrl = `/admin/communications/log?${params.toString()}`;
+    return Promise.all([
       adminFetch(logUrl).catch(() => ({ messages: [] })),
       adminFetch("/admin/communications/stats").catch(() => null),
     ]).then(([logData, statsData]) => {
-      setMessages(logData.messages || []);
+      if (
+        requestSeq !== smsLoadSeqRef.current ||
+        normalizedSearch !== smsSearchRef.current
+      ) {
+        return;
+      }
+      const nextMessages = logData.messages || [];
+      setMessages((prev) =>
+        append ? mergeSmsMessages(prev, nextMessages) : nextMessages,
+      );
+      setSmsPage(logData.page || page);
+      setSmsHasMore(!!logData.hasMore);
       setStats(statsData);
       setLoading(false);
     });
@@ -598,6 +631,7 @@ function SmsTab() {
   }, [loadData]);
 
   useEffect(() => {
+    smsSearchRef.current = smsSearch.trim();
     const t = setTimeout(() => {
       loadData(smsSearch.trim());
     }, 300);
@@ -805,7 +839,7 @@ function SmsTab() {
       setAttachments([]);
       setSendTiming("now");
       setSendCustomAt("");
-      loadData();
+      loadData(smsSearch.trim());
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
@@ -949,7 +983,7 @@ function SmsTab() {
         contactPhone = m.to;
         ourNumber = m.from;
       }
-      const key = contactPhone?.replace(/\D/g, "").slice(-10) || "unknown";
+      const key = smsThreadKey(contactPhone);
       if (!threadMap[key]) {
         threadMap[key] = {
           contactPhone,
@@ -987,6 +1021,16 @@ function SmsTab() {
     );
     return threadList;
   }, [messages]);
+
+  useEffect(() => {
+    if (!activeThread) return;
+    const nextThread = threads.find(
+      (t) => smsThreadKey(t.contactPhone) === smsThreadKey(activeThread.contactPhone),
+    );
+    if (nextThread && nextThread.messages.length !== activeThread.messages.length) {
+      setActiveThread(nextThread);
+    }
+  }, [threads, activeThread?.contactPhone, activeThread?.messages?.length]);
 
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
@@ -1069,6 +1113,30 @@ function SmsTab() {
     if (typeFilter !== "all" && m.messageType !== typeFilter) return false;
     return true;
   });
+
+  const handleLoadMoreSmsHistory = async () => {
+    if (smsLoadingMore || !smsHasMore) return;
+    setSmsLoadingMore(true);
+    try {
+      await loadData(smsSearch.trim(), { page: smsPage + 1, append: true });
+    } finally {
+      setSmsLoadingMore(false);
+    }
+  };
+
+  const renderLoadMore = (label) =>
+    smsHasMore ? (
+      <div className="pt-4 flex justify-center">
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={handleLoadMoreSmsHistory}
+          disabled={smsLoadingMore}
+        >
+          {smsLoadingMore ? "Loading..." : label}
+        </Button>
+      </div>
+    ) : null;
 
   if (loading) {
     return (
@@ -1585,7 +1653,10 @@ function SmsTab() {
           type="text"
           placeholder="Search all SMS by name, phone, or message text…"
           value={smsSearch}
-          onChange={(e) => setSmsSearch(e.target.value)}
+          onChange={(e) => {
+            smsSearchRef.current = e.target.value.trim();
+            setSmsSearch(e.target.value);
+          }}
           className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
         />{" "}
       </div>
@@ -1603,6 +1674,7 @@ function SmsTab() {
             }}
             onOpenProfile={(id) => setSelected360Id(id)}
           />{" "}
+          {renderLoadMore("Load older SMS history")}
         </Card>
       ) : smsView === "threads" ? (
         <Card className="p-5">
@@ -1763,6 +1835,7 @@ function SmsTab() {
               })
             )}
           </div>{" "}
+          {renderLoadMore("Load older conversations")}
         </Card>
       ) : (
         <Card className="p-5">
@@ -1820,6 +1893,7 @@ function SmsTab() {
               ))
             )}
           </div>{" "}
+          {renderLoadMore("Load older messages")}
         </Card>
       )}
 

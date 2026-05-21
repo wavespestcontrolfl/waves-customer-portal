@@ -30,8 +30,59 @@ jest.mock('../services/twilio-failure-alerts', () => ({
 }));
 
 const express = require('express');
+const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+
+function makeQueryBuilder(rows = []) {
+  const calls = { limit: [], offset: [] };
+  const builder = {
+    calls,
+    leftJoin: jest.fn(() => builder),
+    where: jest.fn((arg) => {
+      if (typeof arg === 'function') arg.call(builder, builder);
+      return builder;
+    }),
+    select: jest.fn(() => builder),
+    orderBy: jest.fn(() => builder),
+    whereNot: jest.fn(() => builder),
+    orWhereNull: jest.fn(() => builder),
+    orWhere: jest.fn(() => builder),
+    orWhereRaw: jest.fn(() => builder),
+    limit: jest.fn((value) => {
+      calls.limit.push(value);
+      return builder;
+    }),
+    offset: jest.fn((value) => {
+      calls.offset.push(value);
+      return builder;
+    }),
+    then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+  };
+  return builder;
+}
+
+function smsMessageRow(overrides = {}) {
+  return {
+    id: 'message-1',
+    conversation_id: 'conversation-1',
+    direction: 'inbound',
+    body: 'Hello',
+    status: 'received',
+    message_type: 'manual',
+    created_at: new Date('2026-05-20T12:00:00Z'),
+    media: null,
+    is_read: false,
+    read_at: null,
+    customer_id: 'customer-1',
+    our_endpoint_id: '+19413187612',
+    contact_phone: '+15551234567',
+    first_name: 'Ada',
+    last_name: 'Lovelace',
+    customer_phone: '+15551234567',
+    ...overrides,
+  };
+}
 
 function appServer() {
   const app = express();
@@ -57,6 +108,7 @@ async function withServer(fn) {
 describe('admin communications SMS route', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    db.mockReset();
   });
 
   test('returns a readable error when policy blocks a send', async () => {
@@ -119,6 +171,74 @@ describe('admin communications SMS route', () => {
           adminUserId: 'admin-1',
         }),
       }));
+    });
+  });
+
+  test('bounds the SMS log by default and returns pagination metadata', async () => {
+    const builder = makeQueryBuilder([smsMessageRow()]);
+    db.mockReturnValue(builder);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.messages).toHaveLength(1);
+      expect(body).toMatchObject({
+        page: 1,
+        limit: 500,
+        hasMore: false,
+        nextPage: null,
+      });
+      expect(builder.calls.limit).toEqual([501]);
+      expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test('bounds searched SMS log results when no limit is supplied', async () => {
+    const builder = makeQueryBuilder([smsMessageRow()]);
+    db.mockReturnValue(builder);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?search=Ada`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.messages).toHaveLength(1);
+      expect(body.limit).toBe(500);
+      expect(builder.calls.limit).toEqual([501]);
+      expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test('keeps explicit SMS log pagination available for callers that request it', async () => {
+    const builder = makeQueryBuilder([
+      smsMessageRow({ id: 'message-1' }),
+      smsMessageRow({ id: 'message-2' }),
+      smsMessageRow({ id: 'message-3' }),
+    ]);
+    db.mockReturnValue(builder);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?limit=2&page=3`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.messages.map((m) => m.id)).toEqual(['message-1', 'message-2']);
+      expect(body).toMatchObject({
+        page: 3,
+        limit: 2,
+        hasMore: true,
+        nextPage: 4,
+      });
+      expect(builder.calls.limit).toEqual([3]);
+      expect(builder.calls.offset).toEqual([4]);
     });
   });
 });

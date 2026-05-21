@@ -21,6 +21,8 @@ const ADMIN_PHONES = [
   `+1${ADMIN_PHONE_RAW}`, `1${ADMIN_PHONE_RAW}`, ADMIN_PHONE_RAW,
   ...(process.env.ADAM_PHONE ? [process.env.ADAM_PHONE] : []),
 ];
+const DEFAULT_SMS_LOG_LIMIT = 500;
+const MAX_SMS_LOG_LIMIT = 500;
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((alertErr) => {
@@ -35,6 +37,11 @@ function phoneDigits(value) {
 function maskPhone(value) {
   const digits = phoneDigits(value);
   return digits ? `***${digits.slice(-4)}` : 'unknown';
+}
+
+function parsePositiveInt(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 async function findSingleCustomerForPhone(phone) {
@@ -243,7 +250,7 @@ router.post('/call', async (req, res, next) => {
 // table since PR 2; sms_log still gets dual-written for legacy consumers).
 router.get('/log', async (req, res, next) => {
   try {
-    const { customerId, direction, messageType, page = 1, limit = 50, search } = req.query;
+    const { customerId, direction, messageType, page, limit, search } = req.query;
 
     let query = db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
@@ -287,9 +294,14 @@ router.get('/log', async (req, res, next) => {
       );
     }
 
-    const effectiveLimit = searchTerm ? Math.max(parseInt(limit), 1000) : parseInt(limit);
-    const offset = searchTerm ? 0 : (parseInt(page) - 1) * parseInt(limit);
-    const rows = await query.limit(effectiveLimit).offset(offset);
+    const requestedPage = parsePositiveInt(page) || 1;
+    const requestedLimit = parsePositiveInt(limit) || DEFAULT_SMS_LOG_LIMIT;
+    const effectiveLimit = Math.min(requestedLimit, MAX_SMS_LOG_LIMIT);
+    const rowsPlusOne = await query
+      .limit(effectiveLimit + 1)
+      .offset((requestedPage - 1) * effectiveLimit);
+    const hasMore = rowsPlusOne.length > effectiveLimit;
+    const rows = hasMore ? rowsPlusOne.slice(0, effectiveLimit) : rowsPlusOne;
 
     const messages = await Promise.all(rows.map(async (m) => {
       const customerName = m.first_name ? `${m.first_name} ${m.last_name || ''}`.trim() : null;
@@ -308,7 +320,13 @@ router.get('/log', async (req, res, next) => {
       };
     }));
 
-    res.json({ messages });
+    res.json({
+      messages,
+      page: requestedPage,
+      limit: effectiveLimit,
+      hasMore,
+      nextPage: hasMore ? requestedPage + 1 : null,
+    });
   } catch (err) { next(err); }
 });
 
