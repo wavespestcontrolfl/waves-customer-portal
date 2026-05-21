@@ -26,10 +26,9 @@ const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-pro
 const serviceLibrary = require('../services/service-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-const { wrapEmail, formatDate, plainText } = require('../services/email-template');
+const ProjectEmail = require('../services/project-email');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
-const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -152,15 +151,6 @@ async function logProjectActivity(req, project, action, description, metadata = 
   } catch (err) {
     logger.warn(`[projects] activity_log insert failed for ${project.id}: ${err.message}`);
   }
-}
-
-function escapeHtml(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 function normalizeDateOnly(value) {
@@ -1309,75 +1299,19 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       channels.sms = { ok: false, error: 'No phone on file' };
     }
 
-    // Email (via SendGrid, service-tier ASM group)
-    if (customer?.email) {
+    // Email (through editable Waves template library)
+    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
+    if (emailRecipient.email) {
       try {
-        const sendgrid = require('../services/sendgrid-mail');
-        if (!sendgrid.isConfigured()) {
-          channels.email = { ok: false, error: 'SendGrid not configured' };
-        } else {
-          const serviceGid = parseInt(process.env.SENDGRID_ASM_GROUP_SERVICE) || null;
-          const safeTypeLabel = escapeHtml(typeLabel);
-          const safeFirstName = escapeHtml(firstName);
-          const safeTitle = project.title ? escapeHtml(project.title) : '';
-          const clientName = `${customer?.first_name || ''} ${customer?.last_name || ''}`.trim();
-          const fullAddress = [
-            customer?.address_line1,
-            [customer?.city, customer?.state].filter(Boolean).join(', '),
-            customer?.zip,
-          ].filter(Boolean).join(' ');
-          const heading = `Your ${safeTypeLabel} report is ready`;
-          const intro = `Hi ${safeFirstName}, your technician's report is posted. You can review the visit summary, photos, findings, and recommendations online.`;
-          const projectDate = normalizeDateOnly(project.project_date) || normalizeDateOnly(project.created_at);
-          const lines = [
-            ['Report', safeTypeLabel],
-            safeTitle ? ['Title', safeTitle] : null,
-            projectDate ? ['Inspection date', formatDate(projectDate)] : null,
-            clientName ? ['Client', escapeHtml(clientName)] : null,
-            customer?.email ? ['Email', escapeHtml(customer.email)] : null,
-            customer?.phone ? ['Phone', escapeHtml(customer.phone)] : null,
-            fullAddress ? ['Property', escapeHtml(fullAddress)] : null,
-            ['Prepared', formatDate(project.sent_at || new Date())],
-          ].filter(Boolean);
-          const html = wrapEmail({
-            preheader: `Your Waves ${typeLabel} report is ready.`,
-            heading,
-            intro,
-            lines,
-            ctaHref: reportUrl,
-            ctaLabel: 'View report',
-            footerNote: `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
-          });
-          const text = plainText([
-            `Hi ${firstName},`,
-            '',
-            intro,
-            '',
-            `Report: ${typeLabel}`,
-            project.title ? `Title: ${project.title}` : null,
-            projectDate ? `Inspection date: ${formatDate(projectDate)}` : null,
-            clientName ? `Client: ${clientName}` : null,
-            customer?.email ? `Email: ${customer.email}` : null,
-            customer?.phone ? `Phone: ${customer.phone}` : null,
-            fullAddress ? `Property: ${fullAddress}` : null,
-            `View report: ${reportUrl}`,
-            '',
-            `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
-            '— Waves Pest Control',
-          ]);
-          const result = await sendgrid.sendOne({
-            to: customer.email,
-            fromEmail: 'reports@wavespestcontrol.com',
-            fromName: 'Waves Pest Control',
-            replyTo: 'contact@wavespestcontrol.com',
-            subject: `Your Waves ${typeLabel} report is ready`,
-            html,
-            text,
-            categories: ['project_report', `type_${project.project_type}`],
-            asmGroupId: serviceGid,
-          });
-          channels.email = { ok: true, messageId: result.messageId };
-        }
+        const result = await ProjectEmail.sendProjectReportReady({
+          project: updatedProject,
+          customer,
+          reportUrl,
+          isResend: Boolean(project.sent_at || project.status === 'sent'),
+        });
+        channels.email = result.ok
+          ? { ok: true, messageId: result.messageId || null }
+          : { ok: false, error: result.reason || result.error || 'Email send blocked/failed' };
       } catch (e) {
         logger.error(`[projects] send email failed: ${e.message}`);
         channels.email = { ok: false, error: e.message };
@@ -1388,7 +1322,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     const availableChannels = [
       customer?.phone ? 'sms' : null,
-      customer?.email ? 'email' : null,
+      emailRecipient.email ? 'email' : null,
     ].filter(Boolean);
     const successfulChannelCount = availableChannels.filter(channel => channels[channel]?.ok).length;
     const deliveryStatus = successfulChannelCount === 0
@@ -1441,6 +1375,126 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       sent: delivered,
       ...(readiness.missing.length > 0 ? { readiness_override: hasReadinessOverride } : {}),
     });
+  } catch (err) { next(err); }
+});
+
+function projectEmailFailureMessage(result) {
+  return result?.reason || result?.error || 'Email send blocked/failed';
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/:id/send-prep-guide — send mapped prep email
+// ---------------------------------------------------------------------------
+router.post('/:id/send-prep-guide', requireAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const customer = project.customer_id
+      ? await db('customers').where({ id: project.customer_id }).first()
+      : null;
+    if (!customer) return res.status(400).json({ error: 'Project has no customer' });
+
+    const requestedTemplateKey = String(req.body?.template_key || '').trim();
+    const templateKey = requestedTemplateKey || ProjectEmail.prepTemplateForProjectType(project.project_type);
+    if (!templateKey || !ProjectEmail.isPrepTemplateKey(templateKey)) {
+      return res.status(400).json({ error: 'No prep guide is configured for this project type' });
+    }
+
+    const recipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+    if (!recipient.email) return res.status(400).json({ error: 'Customer has no valid email on file' });
+
+    const result = await ProjectEmail.sendPrepGuide({ project, customer, templateKey });
+    const typeLabel = getProjectType(project.project_type)?.label || project.project_type;
+    if (result.ok) {
+      await logProjectActivity(
+        req,
+        project,
+        'project_prep_guide_sent',
+        `Prep guide sent: ${typeLabel}`,
+        {
+          channel: 'email',
+          template_key: templateKey,
+          recipient_role: recipient.role,
+          provider_message_id: result.messageId || null,
+        },
+      );
+      return res.json({
+        ok: true,
+        sent: true,
+        template_key: templateKey,
+        message_id: result.messageId || null,
+      });
+    }
+
+    const failure = projectEmailFailureMessage(result);
+    await logProjectActivity(
+      req,
+      project,
+      'project_prep_guide_failed',
+      `Prep guide email failed: ${typeLabel}`,
+      {
+        channel: 'email',
+        template_key: templateKey,
+        recipient_role: recipient.role,
+        failure_reason: failure,
+      },
+    );
+    return res.status(result.skipped ? 400 : 502).json({ error: failure, template_key: templateKey });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/:id/send-portal-invite — send customer portal invite
+// ---------------------------------------------------------------------------
+router.post('/:id/send-portal-invite', requireAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const customer = project.customer_id
+      ? await db('customers').where({ id: project.customer_id }).first()
+      : null;
+    if (!customer) return res.status(400).json({ error: 'Project has no customer' });
+
+    const recipient = ProjectEmail.resolvePortalInviteRecipient(customer);
+    if (!recipient.email) return res.status(400).json({ error: 'Customer has no valid email on file' });
+
+    const result = await ProjectEmail.sendPortalInvite({ project, customer });
+    const typeLabel = getProjectType(project.project_type)?.label || project.project_type;
+    if (result.ok) {
+      await logProjectActivity(
+        req,
+        project,
+        'project_portal_invite_sent',
+        `Portal invite sent: ${typeLabel}`,
+        {
+          channel: 'email',
+          template_key: 'portal.invite',
+          recipient_role: recipient.role,
+          provider_message_id: result.messageId || null,
+        },
+      );
+      return res.json({
+        ok: true,
+        sent: true,
+        template_key: 'portal.invite',
+        message_id: result.messageId || null,
+      });
+    }
+
+    const failure = projectEmailFailureMessage(result);
+    await logProjectActivity(
+      req,
+      project,
+      'project_portal_invite_failed',
+      `Portal invite email failed: ${typeLabel}`,
+      {
+        channel: 'email',
+        template_key: 'portal.invite',
+        recipient_role: recipient.role,
+        failure_reason: failure,
+      },
+    );
+    return res.status(result.skipped ? 400 : 502).json({ error: failure, template_key: 'portal.invite' });
   } catch (err) { next(err); }
 });
 

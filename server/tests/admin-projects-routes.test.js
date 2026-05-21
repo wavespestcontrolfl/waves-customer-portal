@@ -42,6 +42,33 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
+jest.mock('../services/project-email', () => ({
+  PREP_TEMPLATE_BY_PROJECT_TYPE: { rodent_exclusion: 'prep.rodent' },
+  resolveProjectEmailRecipient: jest.fn((customer = {}) => ({
+    email: customer.email || '',
+    name: customer.first_name || '',
+    role: 'primary',
+  })),
+  resolvePortalInviteRecipient: jest.fn((customer = {}) => ({
+    email: customer.email || '',
+    name: customer.first_name || '',
+    role: 'primary',
+  })),
+  sendProjectReportReady: jest.fn(async () => ({ ok: true, messageId: 'sg-report' })),
+  sendPrepGuide: jest.fn(async () => ({ ok: true, messageId: 'sg-prep' })),
+  sendPortalInvite: jest.fn(async () => ({ ok: true, messageId: 'sg-invite' })),
+  prepTemplateForProjectType: jest.fn((projectType) => (
+    projectType === 'rodent_exclusion' ? 'prep.rodent' : null
+  )),
+  isPrepTemplateKey: jest.fn((key) => [
+    'prep.rodent',
+    'prep.flea',
+    'prep.mosquito',
+    'prep.lawn',
+    'prep.termite',
+    'prep.interior_pest',
+  ].includes(key)),
+}));
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn().mockImplementation(() => ({ send: mockS3Send })),
   PutObjectCommand: jest.fn(),
@@ -61,6 +88,7 @@ jest.mock('../services/property-lookup/ai-property-lookup', () => ({
 const express = require('express');
 const db = require('../models/db');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
+const ProjectEmail = require('../services/project-email');
 const projectsRouter = require('../routes/admin-projects');
 
 function chain(overrides = {}) {
@@ -552,6 +580,197 @@ describe('admin projects routes', () => {
         customer_id: 'customer-1',
         action: 'project_report_delivery_failed',
         metadata: expect.objectContaining({ project_id: 'project-1', channels: body.channels, delivery_status: 'failed' }),
+      }));
+    });
+  });
+
+  test('send uses the project report email template when email is available', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        project_type: 'rodent_exclusion',
+        project_date: '2026-05-06',
+        title: 'Rodent report',
+        findings: { entry_points_found: 'Garage door seal' },
+        recommendations: 'Seal entry points and monitor traps.',
+        report_token: 'abcdef123456abcdef123456abcdef12',
+        sent_at: null,
+      }),
+    });
+    const markToken = chain();
+    const updatedProjectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        project_type: 'rodent_exclusion',
+        project_date: '2026-05-06',
+        title: 'Rodent report',
+        findings: { entry_points_found: 'Garage door seal' },
+        recommendations: 'Seal entry points and monitor traps.',
+        report_token: 'abcdef123456abcdef123456abcdef12',
+        sent_at: null,
+      }),
+    });
+    const sequenceRead = chain();
+    const persistDelivery = chain();
+    const activityInsert = chain();
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'customer-1',
+        first_name: 'Van',
+        last_name: 'Lee',
+        phone: null,
+        email: 'van@example.com',
+      }),
+    });
+    const projectQueries = [projectRead, markToken, updatedProjectRead, sequenceRead, persistDelivery];
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectQueries.shift();
+      if (table === 'customers') return customerRead;
+      if (table === 'activity_log') return activityInsert;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.channels.email).toEqual({ ok: true, messageId: 'sg-report' });
+      expect(ProjectEmail.sendProjectReportReady).toHaveBeenCalledWith(expect.objectContaining({
+        project: expect.objectContaining({ id: 'project-1' }),
+        customer: expect.objectContaining({ email: 'van@example.com' }),
+        reportUrl: expect.stringContaining('/report/project/'),
+        isResend: false,
+      }));
+      expect(persistDelivery.update).toHaveBeenCalledWith(expect.objectContaining({
+        delivery_status: 'sent',
+        status: 'sent',
+      }));
+    });
+  });
+
+  test('admin can send a project prep guide email', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        project_type: 'rodent_exclusion',
+      }),
+    });
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'customer-1',
+        first_name: 'Van',
+        email: 'van@example.com',
+      }),
+    });
+    const activityInsert = chain();
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'customers') return customerRead;
+      if (table === 'activity_log') return activityInsert;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-prep-guide`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({ sent: true, template_key: 'prep.rodent' });
+      expect(ProjectEmail.sendPrepGuide).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'prep.rodent',
+        project: expect.objectContaining({ id: 'project-1' }),
+        customer: expect.objectContaining({ id: 'customer-1' }),
+      }));
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'project_prep_guide_sent',
+        metadata: expect.objectContaining({
+          project_id: 'project-1',
+          template_key: 'prep.rodent',
+          channel: 'email',
+        }),
+      }));
+    });
+  });
+
+  test('prep guide route rejects project types without a mapped guide', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        project_type: 'bed_bug',
+      }),
+    });
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'customer-1', email: 'van@example.com' }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-prep-guide`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toMatch(/No prep guide/);
+      expect(ProjectEmail.sendPrepGuide).not.toHaveBeenCalled();
+    });
+  });
+
+  test('admin can send a project portal invite email', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-1',
+        customer_id: 'customer-1',
+        project_type: 'pest_inspection',
+      }),
+    });
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'customer-1',
+        first_name: 'Van',
+        email: 'van@example.com',
+      }),
+    });
+    const activityInsert = chain();
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'customers') return customerRead;
+      if (table === 'activity_log') return activityInsert;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-portal-invite`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({ sent: true, template_key: 'portal.invite' });
+      expect(ProjectEmail.sendPortalInvite).toHaveBeenCalledWith(expect.objectContaining({
+        project: expect.objectContaining({ id: 'project-1' }),
+        customer: expect.objectContaining({ id: 'customer-1' }),
+      }));
+      expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'project_portal_invite_sent',
+        metadata: expect.objectContaining({
+          project_id: 'project-1',
+          template_key: 'portal.invite',
+          channel: 'email',
+        }),
       }));
     });
   });

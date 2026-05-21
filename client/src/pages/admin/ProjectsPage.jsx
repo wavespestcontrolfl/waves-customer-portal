@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Calendar, ClipboardList, Plus } from "lucide-react";
+import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
@@ -60,6 +60,13 @@ const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
 const GENERAL_PROJECT_TYPES = Object.keys(GENERAL_TYPE_LABELS);
+const PROJECT_TYPES_WITH_PREP_GUIDES = new Set([
+  "termite_inspection",
+  "pest_inspection",
+  "flea",
+  "rodent_exclusion",
+  "pre_treatment_termite_certificate",
+]);
 const BOOK_URL = "https://www.wavespestcontrol.com/book/";
 const REQUIRED_RECOMMENDATION_SECTION_HEADINGS = [
   "WHAT WE INSPECTED",
@@ -1357,6 +1364,9 @@ function ProjectDetail({
   const project = data?.project;
   const typeCfg =
     project && typesRegistry ? typesRegistry[project.project_type] : null;
+  const hasPrepGuide = project
+    ? PROJECT_TYPES_WITH_PREP_GUIDES.has(project.project_type)
+    : false;
 
   useEffect(() => {
     if (!typeCfg?.findingsFields || !hasCatalogBackedProjectFields(typeCfg.findingsFields) || productCatalog.length) return;
@@ -1379,6 +1389,21 @@ function ProjectDetail({
       ...(hasActiveIngredientField && activeIngredient ? { active_ingredient: activeIngredient } : {}),
     }));
     setDirty(true);
+  }
+
+  async function saveDirtyProjectEdits(fallbackMessage) {
+    if (!dirty) return;
+    const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
+      method: "PUT",
+      body: {
+        title: editTitle || null,
+        project_date: editProjectDate || null,
+        findings: editFindings,
+        recommendations: editRecs || null,
+      },
+    });
+    await readJsonResponse(saveRes, fallbackMessage);
+    setDirty(false);
   }
 
   async function saveEdits() {
@@ -1453,22 +1478,7 @@ function ProjectDetail({
       // Persist any dirty edits (including an AI-drafted Recommendations block)
       // before delivery runs — otherwise the customer sees the pre-edit version
       // at the public link.
-      if (dirty) {
-        const saveRes = await adminFetch(`/admin/projects/${projectId}`, {
-          method: "PUT",
-          body: {
-            title: editTitle || null,
-            project_date: editProjectDate || null,
-            findings: editFindings,
-            recommendations: editRecs || null,
-          },
-        });
-        await readJsonResponse(
-          saveRes,
-          "Could not save project before sending",
-        );
-        setDirty(false);
-      }
+      await saveDirtyProjectEdits("Could not save project before sending");
       const r = await adminFetch(`/admin/projects/${projectId}/send`, {
         method: "POST",
         body: overrideReason ? { override_reason: overrideReason } : {},
@@ -1487,6 +1497,60 @@ function ProjectDetail({
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send report");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSendPrepGuide() {
+    if (!canAdminActions) {
+      setError("Admin access required to send prep guides.");
+      return;
+    }
+    if (!PROJECT_TYPES_WITH_PREP_GUIDES.has(project?.project_type)) {
+      setError("No default prep guide is configured for this project type.");
+      return;
+    }
+    if (!confirm("Send the prep guide email for this project?")) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await saveDirtyProjectEdits("Could not save project before sending prep guide");
+      const r = await adminFetch(`/admin/projects/${projectId}/send-prep-guide`, {
+        method: "POST",
+      });
+      const d = await readJsonResponse(r, "Could not send prep guide");
+      setNotice(`Prep guide sent${d.template_key ? ` (${d.template_key})` : ""}.`);
+      await load({ preserveEdits: true });
+      onChanged?.();
+    } catch (e) {
+      setError(e.message || "Could not send prep guide");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSendPortalInvite() {
+    if (!canAdminActions) {
+      setError("Admin access required to send portal invites.");
+      return;
+    }
+    if (!confirm("Send a customer portal invite email for this project?")) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await saveDirtyProjectEdits("Could not save project before sending portal invite");
+      const r = await adminFetch(`/admin/projects/${projectId}/send-portal-invite`, {
+        method: "POST",
+      });
+      await readJsonResponse(r, "Could not send portal invite");
+      setNotice("Portal invite sent.");
+      await load({ preserveEdits: true });
+      onChanged?.();
+    } catch (e) {
+      setError(e.message || "Could not send portal invite");
     } finally {
       setSaving(false);
     }
@@ -2232,10 +2296,46 @@ function ProjectDetail({
           borderTop: `1px solid ${D.border}`,
           display: "flex",
           gap: 10,
+          flexWrap: "wrap",
           justifyContent: "flex-end",
           alignItems: "center",
         }}
       >
+        {canAdminActions && (
+          <button
+            type="button"
+            onClick={handleSendPortalInvite}
+            disabled={saving}
+            style={{
+              ...btnSecondary,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              opacity: saving ? 0.5 : 1,
+            }}
+          >
+            <Mail size={16} />
+            Portal invite
+          </button>
+        )}
+        {canAdminActions && (
+          <button
+            type="button"
+            onClick={handleSendPrepGuide}
+            disabled={saving || !hasPrepGuide}
+            title={hasPrepGuide ? "Send prep guide" : "No default prep guide for this project type"}
+            style={{
+              ...btnSecondary,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              opacity: saving || !hasPrepGuide ? 0.45 : 1,
+            }}
+          >
+            <BookOpen size={16} />
+            Prep guide
+          </button>
+        )}
         {canAdminActions && project.status !== "closed" && (
           <button
             type="button"
@@ -2288,6 +2388,10 @@ const PROJECT_ACTIVITY_LABELS = {
   project_updated: "Updated",
   project_report_sent: "Sent",
   project_report_resent: "Resent",
+  project_prep_guide_sent: "Prep guide sent",
+  project_prep_guide_failed: "Prep guide failed",
+  project_portal_invite_sent: "Portal invite sent",
+  project_portal_invite_failed: "Portal invite failed",
   project_closed: "Closed",
   project_followup_recorded: "Follow-up",
   project_photo_uploaded: "Photo uploaded",
