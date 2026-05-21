@@ -1042,6 +1042,50 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('id="booking-card"');
   });
 
+  test('server-rendered termite trenching quote-required page avoids zero-price acceptance copy', () => {
+    const html = renderPage('termite-trenching-quote-token', {
+      status: 'quote_required',
+      quoteRequired: true,
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 725,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{
+            service: 'trenching',
+            name: 'Termite Trenching',
+            price: 725,
+            quoteRequired: true,
+          }, {
+            service: 'inspection_fee',
+            name: 'Inspection Fee',
+            price: 50,
+          }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('termite trenching quote');
+    expect(html).toContain('Quote Required');
+    expect(html).toContain('Inspection required before final pricing.');
+    expect(html).toContain('Inspection required to finish this quote');
+    expect(html).not.toContain('$0.00');
+    expect(html).not.toContain('$0</span>');
+    expect(html).not.toContain('$725');
+    expect(html).not.toContain('$50');
+    expect(html).not.toContain('$775');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('Find a date & time that works for you');
+  });
+
   test('server-rendered booking review buttons use explicit click listeners', () => {
     const html = renderPage('booking-token', {
       status: 'sent',
@@ -1375,6 +1419,32 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Termite perimeter', value: '180 linear ft' },
       { label: 'Complexity', value: 'Moderate' },
     ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload uses termite-specific copy and perimeter for termite-bait-only estimates', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2200,
+        lotSqFt: 7800,
+        termitePerimeterFt: 185,
+        services: { termiteBait: true },
+        pool: 'NO',
+        poolCage: 'NO',
+      },
+      result: {
+        recurring: {
+          services: [{ name: 'Termite Bait Stations' }],
+        },
+      },
+    });
+
+    expect(payload.title).toBe('Waves AI reviewed your termite perimeter before pricing this estimate');
+    expect(payload.body).toContain('termite perimeter details');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Termite perimeter', value: '185 linear ft' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
   });
 
@@ -2258,6 +2328,56 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Ready to start tree &amp; shrub?');
     expect(html).not.toContain('Ready to start pest control?');
     expect(html).not.toContain('Skip parts you don&#39;t need');
+  });
+
+  test('server-rendered termite-bait-only estimate uses termite-specific desktop copy', () => {
+    const html = renderPage('termite-bait-only-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 45,
+      annualTotal: 540,
+      onetimeTotal: 420,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/termite.png',
+    }, {
+      inputs: {
+        homeSqFt: 2200,
+        lotSqFt: 7800,
+        termitePerimeterFt: 185,
+        services: { termiteBait: true },
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Termite Bait Stations', mo: 45, perTreatment: 135, visitsPerYear: 4 },
+          ],
+        },
+        oneTime: {
+          items: [{ service: 'termite_bait_installation', name: 'Termite bait installation', price: 420 }],
+          specItems: [],
+        },
+        specItems: [],
+        results: {
+          tmBait: { perim: 185, sta: 24 },
+        },
+      },
+    });
+
+    expect(html).toContain('termite protection estimate');
+    expect(html).toContain('Waves AI reviewed your termite perimeter before pricing this estimate');
+    expect(html).toContain('Termite perimeter');
+    expect(html).toContain('185 linear ft');
+    expect(html).toContain('Pick your first termite protection visit');
+    expect(html).toContain('What your termite protection plan includes');
+    expect(html).toContain('Ready to start termite protection?');
+    expect(html).toContain('How does the bait work?');
+    expect(html).not.toContain('Ready to start pest control?');
+    expect(html).not.toContain('Go Waves! Wave Goodbye to Pests!');
+    expect(html).not.toContain('Skip parts you don&#39;t need');
+    expect(html).not.toContain('Free annual termite inspection');
+    expect(html).not.toContain('What WaveGuard members get');
+    expect(html).not.toContain('Your WaveGuard membership goes beyond routine visits');
   });
 
   test('server-rendered estimate promotes separate palm and rodent bait recurring services', () => {

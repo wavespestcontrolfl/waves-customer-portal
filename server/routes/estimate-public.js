@@ -924,6 +924,13 @@ const LAWN_CARE_PERKS = [
   'Owner-operator accountability on every visit',
 ];
 
+const TERMITE_BAIT_PERKS = [
+  'Termite station service matched to your home perimeter',
+  'Visit notes after completed termite protection visits',
+  'Locked-in pricing for 12 months',
+  'Owner-operator accountability on every visit',
+];
+
 // Canonical SWFL stores — name, physical address, ZIPs, spoke page slug
 // on wavespestcontrol.com, and Google Place ID for map links. Mirrors
 // server/config/locations.js but kept inline so the SSR estimate page
@@ -1148,6 +1155,56 @@ function hasOnlyTreeShrubServiceMix(recurring = [], oneTimeItems = []) {
     && recurringRows.every((svc) => recurringServiceKey(svc) === 'tree_shrub')
     && !detectPestOneTime(oneTimeRows)
     && oneTimeRows.every(isTreeShrubOneTimeItem);
+}
+
+function isTermiteBaitOneTimeItem(item = {}) {
+  const category = serviceCategoryForOneTimeItem(item);
+  if (category === 'termite_bait') return true;
+  const raw = [item.service, item.name, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  if (!raw || raw.includes('waveguard setup') || raw.includes('membership')) return true;
+  return raw.includes('termite') && /(bait|station|install|trelona|advance)/.test(raw);
+}
+
+function hasOnlyTermiteBaitServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  return recurringRows.length > 0
+    && recurringRows.every((svc) => recurringServiceKey(svc) === 'termite_bait')
+    && !detectPestOneTime(oneTimeRows)
+    && oneTimeRows.every(isTermiteBaitOneTimeItem);
+}
+
+function isTermiteTrenchingOneTimeItem(item = {}) {
+  const category = serviceCategoryForOneTimeItem(item);
+  if (category === 'termite_trenching') return true;
+  const raw = [item.service, item.name, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('termite') && /(trench|trenching|liquid|barrier|termidor|treatment)/.test(raw);
+}
+
+function isInspectionReviewOneTimeItem(item = {}) {
+  const raw = [item.service, item.name, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return /(inspection|field review|office review)/.test(raw);
+}
+
+function hasOnlyTermiteTrenchingServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  return recurringRows.length === 0
+    && oneTimeRows.length > 0
+    && oneTimeRows.some(isTermiteTrenchingOneTimeItem)
+    && oneTimeRows.every((item) => isTermiteTrenchingOneTimeItem(item) || isInspectionReviewOneTimeItem(item));
 }
 
 function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
@@ -1515,6 +1572,9 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const hasTermiteBait = serviceNames.some((name) => isTermiteBaitServiceName(name))
     || !!inputServices.termiteBait
     || !!inputServices.termite;
+  const isTermiteBaitOnly = hasTermiteBait
+    && serviceKeys.length > 0
+    && serviceKeys.every((key) => key === 'termite_bait');
   const hasTreeShrub = serviceKeys.includes('tree_shrub')
     || !!inputServices.treeShrub
     || !!inputServices.tree_shrub
@@ -1625,24 +1685,32 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   ]);
 
   const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
-  return {
-    eyebrow: 'Waves AI',
-    title: isLawnOnly
-      ? 'Waves AI reviewed your lawn before pricing this estimate'
-      : (isTreeShrubOnly
-        ? 'Waves AI reviewed your beds and trees before pricing this estimate'
-        : 'Waves AI reviewed your property before pricing this estimate'),
-    body: isLawnOnly
+  const intelligenceTitle = isLawnOnly
+    ? 'Waves AI reviewed your lawn before pricing this estimate'
+    : (isTreeShrubOnly
+      ? 'Waves AI reviewed your beds and trees before pricing this estimate'
+      : (isTermiteBaitOnly
+        ? 'Waves AI reviewed your termite perimeter before pricing this estimate'
+        : 'Waves AI reviewed your property before pricing this estimate'));
+  const intelligenceBody = isLawnOnly
+    ? (satelliteUrl || metrics.length
+      ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
+      : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your lawn care plan.')
+    : (isTreeShrubOnly
       ? (satelliteUrl || metrics.length
-        ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
-        : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your lawn care plan.')
-      : (isTreeShrubOnly
+        ? 'Waves AI reviews satellite imagery, property records, and visible bed and tree conditions to shape your tree & shrub plan.'
+        : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your tree & shrub plan.')
+      : (isTermiteBaitOnly
         ? (satelliteUrl || metrics.length
-          ? 'Waves AI reviews satellite imagery, property records, and visible bed and tree conditions to shape your tree & shrub plan.'
-          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your tree & shrub plan.')
+          ? 'Waves AI reviews satellite imagery, property records, and termite perimeter details to shape your termite protection plan.'
+          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your termite protection plan.')
         : (satelliteUrl || metrics.length
           ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
-          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')),
+          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')));
+  return {
+    eyebrow: 'Waves AI',
+    title: intelligenceTitle,
+    body: intelligenceBody,
     satelliteUrl,
     metrics,
     signals: [],
@@ -1738,6 +1806,8 @@ function renderPage(token, estimate, estData) {
   const manualDiscountMonthly = manualDiscount ? Math.round((manualDiscount.amount / 12) * 100) / 100 : 0;
   const hasOnlyLawnCareServices = hasOnlyLawnCareServiceMix(recurring, oneTimeItems);
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
+  const hasOnlyTermiteBaitServices = hasOnlyTermiteBaitServiceMix(recurring, oneTimeItems);
+  const hasOnlyTermiteTrenchingServices = hasOnlyTermiteTrenchingServiceMix(recurring, oneTimeItems);
   const pageCopy = hasOnlyLawnCareServices
     ? {
         heroSuffix: "here's your lawn care estimate.",
@@ -1759,6 +1829,7 @@ function renderPage(token, estimate, estData) {
         cardConfirmTitle: 'Confirm and save card',
         cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
         perksHeading: 'What your lawn care plan includes',
+        perksBody: 'Your plan includes visit notes, locked-in pricing, and treatment timing for Southwest Florida lawns.',
         finalHeading: 'Ready to start lawn care?',
         finalSubhead: "Let's get your lawn on the schedule.",
         finalBody: 'No payment today. No surprise increases.',
@@ -1784,34 +1855,88 @@ function renderPage(token, estimate, estData) {
           cardConfirmTitle: 'Confirm and save card',
           cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
           perksHeading: 'What your tree & shrub plan includes',
+          perksBody: 'Your plan includes ornamental treatments, visit notes, and service timing for Southwest Florida landscapes.',
           finalHeading: 'Ready to start tree & shrub?',
           finalSubhead: "Let's get your tree & shrub plan on the schedule.",
           finalBody: 'No payment today. No surprise increases.',
         }
-      : {
-          heroSuffix: "here's your custom quote.",
-          recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
-          aggregateDayLabel: 'complete home protection',
-          billingHeading: 'Choose how you want to pay',
-          billingLede: null,
-          payAfterTitle: 'Pay after each visit',
-          payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
-          noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
-          bookingTitle: 'Find a date & time that works for you',
-          bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
-          payPrefHeading: 'Choose how you want to pay',
-          payPrefCardTitle: 'Pay after each visit',
-          payPrefCardSub: 'Billed after each completed service through autopay.',
-          prepayTitle: 'Pay the 12-month plan in full',
-          prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
-          prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
-          cardConfirmTitle: 'Confirm and save card',
-          cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
-          perksHeading: 'What WaveGuard members get',
-          finalHeading: 'Go Waves! Wave Goodbye to Pests!',
-          finalSubhead: '',
-          finalBody: '',
-        });
+      : (hasOnlyTermiteBaitServices
+        ? {
+            heroSuffix: "here's your termite protection estimate.",
+            recurringAssurance: 'Your plan includes termite station service and treatment timing matched to your home perimeter.',
+            aggregateDayLabel: 'termite protection',
+            billingHeading: 'Choose how you want to pay',
+            billingLede: null,
+            payAfterTitle: 'Pay after each visit',
+            payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+            noPaymentCopy: 'No payment is charged on this page. Your first termite protection visit will be billed after completion.',
+            bookingTitle: 'Pick your first termite protection visit',
+            bookingSubhead: 'Choose a window to get your termite protection plan started.',
+            payPrefHeading: 'Choose how you want to pay',
+            payPrefCardTitle: 'Pay after each visit',
+            payPrefCardSub: 'Billed after each completed service through autopay.',
+            prepayTitle: 'Pay the 12-month plan in full',
+            prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval.',
+            prepayButtonSub: 'Approve annual prepay for the termite protection plan.',
+            cardConfirmTitle: 'Confirm and save card',
+            cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+            perksHeading: 'What your termite protection plan includes',
+            perksBody: 'Your plan includes termite station service, visit notes, and treatment details tied to your home perimeter.',
+            finalHeading: 'Ready to start termite protection?',
+            finalSubhead: "Let's get your termite protection plan on the schedule.",
+            finalBody: 'No payment today. No surprise increases.',
+          }
+        : (hasOnlyTermiteTrenchingServices
+          ? {
+              heroSuffix: "here's your termite trenching quote.",
+              recurringAssurance: 'This trenching quote is based on the measured treatment path and office review.',
+              aggregateDayLabel: 'termite trenching',
+              billingHeading: 'Choose how you want to pay',
+              billingLede: null,
+              payAfterTitle: 'Pay after service',
+              payAfterBody: 'Approve now, then save a card for autopay after the completed service visit.',
+              noPaymentCopy: 'No payment is charged on this page. Waves will finish the inspection review before pricing is finalized.',
+              bookingTitle: 'Review your termite trenching quote with Waves',
+              bookingSubhead: 'Waves will confirm the treatment path before a normal service slot is reserved online.',
+              payPrefHeading: 'Choose how you want to pay',
+              payPrefCardTitle: 'Pay after service',
+              payPrefCardSub: 'Billed after completed service through autopay.',
+              prepayTitle: 'Pay in full',
+              prepayBody: 'Waves will confirm final pricing before collecting payment.',
+              prepayButtonSub: 'Approve termite trenching follow-up.',
+              cardConfirmTitle: 'Confirm and save card',
+              cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+              perksHeading: 'What this termite trenching quote includes',
+              perksBody: 'This quote uses the measured trenching path and any field review needed before final approval.',
+              finalHeading: 'Ready to review termite trenching?',
+              finalSubhead: "Let's finish the trenching review with Waves.",
+              finalBody: 'No payment today. No surprise increases.',
+            }
+          : {
+              heroSuffix: "here's your custom quote.",
+              recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
+              aggregateDayLabel: 'complete home protection',
+              billingHeading: 'Choose how you want to pay',
+              billingLede: null,
+              payAfterTitle: 'Pay after each visit',
+              payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+              noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
+              bookingTitle: 'Find a date & time that works for you',
+              bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
+              payPrefHeading: 'Choose how you want to pay',
+              payPrefCardTitle: 'Pay after each visit',
+              payPrefCardSub: 'Billed after each completed service through autopay.',
+              prepayTitle: 'Pay the 12-month plan in full',
+              prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
+              prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
+              cardConfirmTitle: 'Confirm and save card',
+              cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+              perksHeading: 'What WaveGuard members get',
+              perksBody: 'Your WaveGuard membership goes beyond routine visits - priority service, locked-in pricing, and protection between treatments.',
+              finalHeading: 'Go Waves! Wave Goodbye to Pests!',
+              finalSubhead: '',
+              finalBody: '',
+            })));
 
   // One-time toggle — admin opted this estimate into letting the customer
   // pick "single visit" instead of a recurring plan. Only renders when the
@@ -2152,12 +2277,12 @@ function renderPage(token, estimate, estData) {
         </div>
       </div>
     `;
-  const recurringHeroPriceHtml = isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (quoteRequired ? `
+  const recurringHeroPriceHtml = quoteRequired ? `
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
       <div class="day-price" data-mode-only="recurring">Inspection required before final pricing.</div>
-    ` : (serviceCardsCoverRecurringTotal ? `
+    ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
       ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
     ` : `
       <div class="big-price" data-mode-only="recurring">
@@ -2177,11 +2302,14 @@ function renderPage(token, estimate, estData) {
     if (canChooseOneTime && isOneTimePestChoiceItem(it)) return false;
     return true;
   });
-  const separatelyBilledOneTimeTotal = separatelyBilledOneTimeItems.reduce((sum, it) => {
+  const displayableOneTimeItems = quoteRequired
+    ? []
+    : separatelyBilledOneTimeItems.filter((it) => it.quoteRequired !== true);
+  const separatelyBilledOneTimeTotal = displayableOneTimeItems.reduce((sum, it) => {
     const price = oneTimeItemAmount(it);
     return price ? Math.round((sum + price) * 100) / 100 : sum;
   }, 0);
-  const realOneTimeRows = separatelyBilledOneTimeItems.map((it) => {
+  const realOneTimeRows = displayableOneTimeItems.map((it) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     if (price <= 0 && !includedByServiceCredit) return '';
@@ -2193,7 +2321,9 @@ function renderPage(token, estimate, estData) {
   const oneTimeRows = realOneTimeRows;
   const oneTimeRowsTotal = hasRealOneTime ? separatelyBilledOneTimeTotal : onetimeTotal;
 
-  const perksHtml = (hasOnlyLawnCareServices ? LAWN_CARE_PERKS : PERKS)
+  const perksHtml = (hasOnlyLawnCareServices
+    ? LAWN_CARE_PERKS
+    : (hasOnlyTermiteBaitServices ? TERMITE_BAIT_PERKS : PERKS))
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
   const reviewFallbacks = LOCATIONS.slice(0, 3).map((l) => ({
@@ -2685,7 +2815,7 @@ ${shellTopBar()}
 
   ${quoteRequired || isOneTimeOnly ? '' : `<div class="card" data-mode-only="recurring">
     <h2>${escapeHtml(pageCopy.perksHeading)}</h2>
-    <p class="ai-blurb">Your WaveGuard membership goes beyond routine visits — priority service, locked-in pricing, and protection between treatments.</p>
+    <p class="ai-blurb">${escapeHtml(pageCopy.perksBody)}</p>
     <ul class="perks-list">${perksHtml}</ul>
   </div>`}
 
