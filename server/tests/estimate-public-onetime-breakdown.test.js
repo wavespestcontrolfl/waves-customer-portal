@@ -1540,6 +1540,54 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics.some((metric) => metric.label === 'Termite perimeter')).toBe(false);
   });
 
+  test('Waves AI payload keeps bundle copy when recurring mosquito includes non-mosquito one-time rows', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2100,
+        lotSqFt: 9400,
+        services: { mosquito: { tier: 'monthly12' } },
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'LARGE',
+      },
+      result: {
+        recurring: {
+          services: [{ name: 'Mosquito (Monthly Mosquito Program)' }],
+        },
+        oneTime: {
+          total: 225,
+          items: [{
+            service: 'one_time_pest',
+            name: 'One-Time Pest Treatment',
+            price: 225,
+          }],
+          specItems: [],
+        },
+        results: {
+          mq: [
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, recommended: true },
+          ],
+          mqMeta: {
+            pr: 1.35,
+            ri: 0,
+            treatableSqFt: 7800,
+          },
+        },
+      },
+    });
+
+    expect(payload.title).toBe('Waves AI reviewed your property before pricing this estimate');
+    expect(payload.body).toContain('WaveGuard plan');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Home', value: '2,100 sq ft' },
+      { label: 'Lot', value: '9,400 sq ft' },
+      { label: 'Pool/Lanai', value: 'Yes (Large cage)' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito treatment area')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito program')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito pressure')).toBe(false);
+  });
+
   test('Waves AI payload shows Pool/Lanai when explicitly absent', () => {
     const payload = buildWaveGuardIntelligencePayload({}, {
       inputs: {

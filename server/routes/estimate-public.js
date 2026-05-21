@@ -1664,10 +1664,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     || inputs.svcOnetimeMosquito === true
     || oneTimeCategories.has('mosquito');
   const isMosquitoOnly = hasMosquito
-    && (
-      (serviceKeys.length > 0 && serviceKeys.every((key) => key === 'mosquito'))
-      || (serviceKeys.length === 0 && oneTimeCategories.size === 1 && oneTimeCategories.has('mosquito'))
-    );
+    && hasOnlyMosquitoServiceMix(recurringServices, intelligenceOneTimeItems);
   const hasTermiteBait = serviceNames.some((name) => isTermiteBaitServiceName(name))
     || !!inputServices.termiteBait
     || !!inputServices.termite;
