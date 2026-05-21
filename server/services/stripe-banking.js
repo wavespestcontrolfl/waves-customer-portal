@@ -87,12 +87,36 @@ async function getBalance() {
       amount: b.amount / 100,
     }));
 
-    // Get next pending payout
+    // Get next active payout. Stripe's list filter accepts `pending`, but not
+    // `in_transit`, so query pending directly and page through recent payouts
+    // for in-transit rows.
     let nextPayout = null;
     try {
-      const payouts = await stripe.payouts.list({ limit: 1, status: 'in_transit' });
-      if (payouts.data.length > 0) {
-        const p = payouts.data[0];
+      const activePayouts = [];
+      const seenPayoutIds = new Set();
+      const addActivePayout = (p) => {
+        if (!p || seenPayoutIds.has(p.id)) return;
+        if (!['pending', 'in_transit'].includes(p.status)) return;
+        seenPayoutIds.add(p.id);
+        activePayouts.push(p);
+      };
+
+      const pendingPayouts = await stripe.payouts.list({ limit: 100, status: 'pending' });
+      pendingPayouts.data.forEach(addActivePayout);
+
+      let startingAfter = null;
+      for (let page = 0; page < 5; page += 1) {
+        const params = { limit: 100 };
+        if (startingAfter) params.starting_after = startingAfter;
+        const payouts = await stripe.payouts.list(params);
+        payouts.data.forEach(addActivePayout);
+        if (!payouts.has_more || !payouts.data.length) break;
+        startingAfter = payouts.data[payouts.data.length - 1].id;
+      }
+
+      const p = activePayouts
+        .sort((a, b) => (a.arrival_date || 0) - (b.arrival_date || 0))[0];
+      if (p) {
         nextPayout = {
           id: p.id,
           amount: p.amount / 100,
