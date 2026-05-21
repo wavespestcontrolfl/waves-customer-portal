@@ -1,0 +1,269 @@
+/**
+ * Unit tests for the pure helpers exported by gsc-opportunity-miner.
+ *
+ * No DB / no network. Each test calls the bare function with controlled
+ * inputs and asserts the deterministic output. The async bucket miners
+ * are not exercised here — they hit gsc_queries/gsc_pages and are
+ * validated by the smoke-test script against real data.
+ */
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(),
+}));
+
+const {
+  normalizeCity,
+  inferServiceFromQuery,
+  inferServiceFromUrl,
+  inferCityFromUrl,
+  inferCityFromQuery,
+  inferPageType,
+  recomputeCtr,
+  gscOpportunityScore,
+  localRevenueScore,
+  conversionIntentScore,
+  impressionsBoost,
+  actionForOpportunity,
+  dedupeKey,
+  scoreOpportunity,
+} = require('../services/seo/gsc-opportunity-miner')._internals;
+
+const { WEIGHTS } = require('../services/content/scoring-config');
+
+// ── normalizeCity ────────────────────────────────────────────────────
+
+describe('normalizeCity', () => {
+  test.each([
+    ['bradenton', 'Bradenton'],
+    ['Bradenton', 'Bradenton'],
+    ['lakewood_ranch', 'Lakewood Ranch'],
+    ['lakewood-ranch', 'Lakewood Ranch'],
+    ['Port Charlotte', 'Port Charlotte'],
+  ])('canonicalizes %j → %j', (input, expected) => {
+    expect(normalizeCity(input)).toBe(expected);
+  });
+
+  test.each([
+    ['local_intent', null],
+    ['unknown', null],
+    ['none', null],
+    ['', null],
+    [null, null],
+    [undefined, null],
+    ['tampa', null], // not a Waves service city
+  ])('rejects non-city / overload values: %j → %j', (input, expected) => {
+    expect(normalizeCity(input)).toBe(expected);
+  });
+});
+
+// ── inferServiceFromQuery ────────────────────────────────────────────
+
+describe('inferServiceFromQuery', () => {
+  test('matches termite-specific terms', () => {
+    expect(inferServiceFromQuery('termite inspection bradenton')).toBe('termite');
+    expect(inferServiceFromQuery('wdo report')).toBe('termite');
+  });
+  test('matches rodent variants', () => {
+    expect(inferServiceFromQuery('rat in attic')).toBe('rodent');
+    expect(inferServiceFromQuery('mice control near me')).toBe('rodent');
+  });
+  test('falls back to generic pest for "exterminator"', () => {
+    expect(inferServiceFromQuery('exterminator bradenton fl')).toBe('pest');
+  });
+  test('matches lawn for fertilizer / aeration', () => {
+    expect(inferServiceFromQuery('lawn fertilizer service')).toBe('lawn');
+    expect(inferServiceFromQuery('lawn aeration sarasota')).toBe('lawn');
+  });
+  test('returns null for non-service queries', () => {
+    expect(inferServiceFromQuery('best restaurants bradenton')).toBeNull();
+    expect(inferServiceFromQuery('')).toBeNull();
+    expect(inferServiceFromQuery(null)).toBeNull();
+  });
+});
+
+// ── inferServiceFromUrl + inferCityFromUrl ──────────────────────────
+
+describe('URL inference', () => {
+  test('reads service from city-service slug', () => {
+    expect(inferServiceFromUrl('https://www.wavespestcontrol.com/mosquito-control-bradenton-fl/')).toBe('mosquito');
+    expect(inferServiceFromUrl('https://www.wavespestcontrol.com/termite-inspection-sarasota-fl/')).toBe('termite');
+  });
+  test('reads city from city-service slug', () => {
+    expect(inferCityFromUrl('https://www.wavespestcontrol.com/pest-control-bradenton-fl/')).toBe('Bradenton');
+    expect(inferCityFromUrl('https://www.wavespestcontrol.com/lawn-care-lakewood-ranch-fl/')).toBe('Lakewood Ranch');
+  });
+  test('returns null on non-service URLs', () => {
+    expect(inferServiceFromUrl('https://www.wavespestcontrol.com/about/')).toBeNull();
+    expect(inferCityFromUrl('https://www.wavespestcontrol.com/about/')).toBeNull();
+  });
+});
+
+// ── inferPageType (URL fallback per Step-0 finding) ─────────────────
+
+describe('inferPageType', () => {
+  test('honors declared page_type when present', () => {
+    expect(inferPageType('https://x/blog/foo/', 'service')).toBe('service');
+  });
+  test('detects /blog/ URLs even when declared is null', () => {
+    expect(inferPageType('https://www.wavespestcontrol.com/blog/get-rid-of-ghost-ants/', null)).toBe('blog');
+  });
+  test('detects city-service slug as city', () => {
+    expect(inferPageType('https://www.wavespestcontrol.com/pest-control-bradenton-fl/', null)).toBe('city');
+  });
+  test('detects static pages', () => {
+    expect(inferPageType('https://www.wavespestcontrol.com/about/', null)).toBe('static');
+  });
+});
+
+// ── recomputeCtr (Step-0 trust issue) ───────────────────────────────
+
+describe('recomputeCtr', () => {
+  test('uses clicks/impressions, not stored ctr', () => {
+    expect(recomputeCtr(10, 100)).toBeCloseTo(0.1);
+    expect(recomputeCtr(0, 100)).toBe(0);
+    expect(recomputeCtr(5, 0)).toBe(0);   // divide-by-zero protection
+    expect(recomputeCtr(null, null)).toBe(0);
+  });
+});
+
+// ── scoring math ────────────────────────────────────────────────────
+
+describe('impressionsBoost', () => {
+  test('higher impressions → higher boost', () => {
+    expect(impressionsBoost(500)).toBe(1.0);
+    expect(impressionsBoost(200)).toBe(0.85);
+    expect(impressionsBoost(100)).toBe(0.7);
+    expect(impressionsBoost(60)).toBe(0.55);
+  });
+  test('below threshold → zero boost', () => {
+    expect(impressionsBoost(10)).toBe(0);
+    expect(impressionsBoost(0)).toBe(0);
+  });
+});
+
+describe('gscOpportunityScore', () => {
+  test('striking_distance: closer to top = higher', () => {
+    const closeIn = gscOpportunityScore('striking_distance', 4, 1.0);
+    const farOut = gscOpportunityScore('striking_distance', 15, 1.0);
+    expect(closeIn).toBeGreaterThan(farOut);
+  });
+  test('unknown bucket returns 0', () => {
+    expect(gscOpportunityScore('made_up_bucket', 5, 1.0)).toBe(0);
+  });
+});
+
+describe('localRevenueScore', () => {
+  test('termite > pest > tree-shrub', () => {
+    expect(localRevenueScore('termite')).toBeGreaterThan(localRevenueScore('pest'));
+    expect(localRevenueScore('pest')).toBeGreaterThan(localRevenueScore('tree-shrub'));
+  });
+  test('unknown service uses default weight (0.5 × W)', () => {
+    expect(localRevenueScore('chimney-sweep')).toBe(Math.round(WEIGHTS.localRevenue * 0.5));
+  });
+});
+
+describe('conversionIntentScore', () => {
+  test('emergency intent scores highest', () => {
+    expect(conversionIntentScore('emergency pest control near me')).toBe(WEIGHTS.conversionIntent);
+  });
+  test('transactional intent scores high', () => {
+    expect(conversionIntentScore('pest control cost bradenton'))
+      .toBeGreaterThan(conversionIntentScore('signs of termite damage'));
+  });
+  test('informational intent scores low', () => {
+    expect(conversionIntentScore('how to identify a termite'))
+      .toBeLessThan(WEIGHTS.conversionIntent * 0.5);
+  });
+});
+
+// ── actionForOpportunity ────────────────────────────────────────────
+
+describe('actionForOpportunity', () => {
+  test('cannibalization always do_not_publish', () => {
+    expect(actionForOpportunity({ bucket: 'cannibalization', query: 'x', service: 'pest', city: 'Bradenton' }))
+      .toBe('do_not_publish');
+  });
+  test('page_type_mismatch always do_not_publish (human review)', () => {
+    expect(actionForOpportunity({ bucket: 'page_type_mismatch', page_url: 'x', service: 'pest', city: 'Bradenton' }))
+      .toBe('do_not_publish');
+  });
+  test('ctr_rewrite with page → rewrite_title_meta', () => {
+    expect(actionForOpportunity({ bucket: 'ctr_rewrite', page_url: 'x', service: 'pest', city: 'Bradenton' }))
+      .toBe('rewrite_title_meta');
+  });
+  test('decay_refresh with page → refresh_existing_page', () => {
+    expect(actionForOpportunity({ bucket: 'decay_refresh', page_url: 'x', service: 'pest', city: 'Bradenton' }))
+      .toBe('refresh_existing_page');
+  });
+  test('local_gap → create_or_refresh_city_service_page', () => {
+    expect(actionForOpportunity({ bucket: 'local_gap', service: 'pest', city: 'Bradenton' }))
+      .toBe('create_or_refresh_city_service_page');
+  });
+  test('striking_distance: page present → refresh', () => {
+    expect(actionForOpportunity({
+      bucket: 'striking_distance', page_url: 'x', service: 'pest', city: 'Bradenton',
+    })).toBe('refresh_existing_page');
+  });
+  test('striking_distance: no page + city+service → city service page', () => {
+    expect(actionForOpportunity({
+      bucket: 'striking_distance', service: 'pest', city: 'Bradenton',
+    })).toBe('create_or_refresh_city_service_page');
+  });
+  test('striking_distance: no page + no city → supporting blog', () => {
+    expect(actionForOpportunity({
+      bucket: 'striking_distance', service: 'pest',
+    })).toBe('new_supporting_blog');
+  });
+});
+
+// ── dedupeKey ───────────────────────────────────────────────────────
+
+describe('dedupeKey', () => {
+  test('stable for same inputs regardless of order', () => {
+    const k1 = dedupeKey({ bucket: 'striking_distance', service: 'pest', city: 'Bradenton', query: 'pest control bradenton' });
+    const k2 = dedupeKey({ bucket: 'striking_distance', service: 'pest', city: 'Bradenton', query: 'pest control bradenton' });
+    expect(k1).toBe(k2);
+  });
+  test('different buckets → different keys', () => {
+    const a = dedupeKey({ bucket: 'striking_distance', service: 'pest', city: 'Bradenton', query: 'x' });
+    const b = dedupeKey({ bucket: 'ctr_rewrite', service: 'pest', city: 'Bradenton', query: 'x' });
+    expect(a).not.toBe(b);
+  });
+  test('handles missing fields without throwing', () => {
+    expect(() => dedupeKey({ bucket: 'no_content_yet', service: 'pest', query: 'x' })).not.toThrow();
+  });
+  test('lowercases / slugs city for stability', () => {
+    const a = dedupeKey({ bucket: 'local_gap', service: 'pest', city: 'Lakewood Ranch' });
+    expect(a).toContain('lakewood-ranch');
+  });
+});
+
+// ── scoreOpportunity integration of breakdown ───────────────────────
+
+describe('scoreOpportunity', () => {
+  test('cannibalization gets cannibalizationRisk penalty applied', () => {
+    const o = { bucket: 'cannibalization', service: 'pest', query: 'pest control', city: 'Bradenton' };
+    const { total, breakdown } = scoreOpportunity(o, { position: 5, impressions: 200 });
+    expect(breakdown._penalty).toBe(WEIGHTS.cannibalizationRisk);
+    expect(total).toBeLessThan(
+      Object.entries(breakdown).filter(([k]) => k !== '_penalty').reduce((a, [, v]) => a + v, 0)
+    );
+  });
+  test('local_gap gets contentGap bonus', () => {
+    const o = { bucket: 'local_gap', service: 'pest', city: 'Bradenton' };
+    const { breakdown } = scoreOpportunity(o, { position: 25, impressions: 200 });
+    expect(breakdown.contentGap).toBe(WEIGHTS.contentGap);
+  });
+  test('decay_refresh gets refreshLift bonus', () => {
+    const o = { bucket: 'decay_refresh', service: 'pest', page_url: '/x/' };
+    const { breakdown } = scoreOpportunity(o, { position: 8, impressions: 300 });
+    expect(breakdown.refreshLift).toBe(WEIGHTS.refreshLift);
+  });
+  test('higher impressions → higher total score (ceteris paribus)', () => {
+    const o = { bucket: 'striking_distance', service: 'pest', query: 'pest control bradenton', city: 'Bradenton' };
+    const low = scoreOpportunity(o, { position: 6, impressions: 60 }).total;
+    const high = scoreOpportunity(o, { position: 6, impressions: 500 }).total;
+    expect(high).toBeGreaterThan(low);
+  });
+});

@@ -1,0 +1,778 @@
+/**
+ * gsc-opportunity-miner.js — emits ranked content opportunities from
+ * Google Search Console signals.
+ *
+ * Eight buckets, each surfaces a different actionable pattern. One run
+ * mines all buckets, scores each candidate against scoring-config
+ * thresholds, then persists the survivors to opportunity_queue. The
+ * autonomous runner pulls top-scoring rows daily.
+ *
+ * Buckets:
+ *   striking_distance   query at pos 4–15 with ≥minImpressions
+ *   ctr_rewrite         pos 1–8, high impressions, ctr < 2%
+ *   decay_refresh       page clicks down ≥25% vs prior period
+ *   cannibalization     2+ own URLs ranking for same query (low-confidence)
+ *   page_type_mismatch  URL type doesn't match query intent (heuristic only
+ *                       until SERP profiler ships in Step 2)
+ *   local_gap           {city, service} has impressions but no own page
+ *   seasonal_rising     query impressions up 50%+ vs prior 14d window
+ *   no_content_yet      query has impressions but no own page anywhere
+ *
+ * Defensive about Step-0 data quality findings:
+ *   - city_target == 'local_intent' is normalized to null (overload from
+ *     GSC sync classifier)
+ *   - CTR is recomputed from clicks/impressions, not trusted from row
+ *   - page_type fallback uses URL pattern when gsc_pages.page_type is null
+ *
+ * Read-only against gsc_*; writes only to opportunity_queue.
+ */
+
+const db = require('../../models/db');
+const logger = require('../logger');
+const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES } =
+  require('../content/scoring-config');
+
+// ── normalization helpers (pure, test-friendly) ─────────────────────
+
+const CITY_NORM_MAP = (() => {
+  const m = new Map();
+  for (const c of CITIES) {
+    m.set(c.toLowerCase(), c);
+    m.set(c.toLowerCase().replace(/\s+/g, '_'), c);
+    m.set(c.toLowerCase().replace(/\s+/g, '-'), c);
+  }
+  return m;
+})();
+
+function normalizeCity(raw) {
+  if (!raw) return null;
+  const key = String(raw).trim().toLowerCase();
+  if (!key || key === 'local_intent' || key === 'unknown' || key === 'none') return null;
+  return CITY_NORM_MAP.get(key) || null;
+}
+
+const SERVICE_KEYWORDS = [
+  { service: 'termite', re: /\btermite|wdo|wood\s*destroying\b/i },
+  { service: 'rodent', re: /\b(rodent|rats?|mice|mouse|exterminator for rodents)\b/i },
+  { service: 'mosquito', re: /\b(mosquito|mosquitoes)\b/i },
+  { service: 'lawn', re: /\b(lawn|grass|fertiliz|weed control|aeration)\b/i },
+  { service: 'tree-shrub', re: /\b(tree|shrub|palm|ornamental)\b/i },
+  { service: 'pest', re: /\b(pest|exterminator|bug|roach|ant|spider|cockroach)\b/i },
+];
+
+function inferServiceFromQuery(query) {
+  if (!query) return null;
+  for (const { service, re } of SERVICE_KEYWORDS) {
+    if (re.test(query)) return service;
+  }
+  return null;
+}
+
+function inferServiceFromUrl(url) {
+  if (!url) return null;
+  const u = String(url).toLowerCase();
+  if (/\btermite|wdo\b/.test(u)) return 'termite';
+  if (/\brodent|rats?|mice\b/.test(u)) return 'rodent';
+  if (/\bmosquito\b/.test(u)) return 'mosquito';
+  if (/\blawn|fertiliz|aeration\b/.test(u)) return 'lawn';
+  if (/\btree|shrub\b/.test(u)) return 'tree-shrub';
+  if (/\bpest|exterminator\b/.test(u)) return 'pest';
+  return null;
+}
+
+function inferCityFromUrl(url) {
+  if (!url) return null;
+  const u = String(url).toLowerCase();
+  for (const c of CITIES) {
+    const slug = c.toLowerCase().replace(/\s+/g, '-');
+    if (u.includes(`-${slug}-fl`) || u.includes(`/${slug}-fl/`) || u.includes(`/${slug}/`)) return c;
+  }
+  return null;
+}
+
+function inferCityFromQuery(query) {
+  if (!query) return null;
+  const q = String(query).toLowerCase();
+  for (const c of CITIES) {
+    const slug = c.toLowerCase();
+    if (q.includes(slug)) return c;
+  }
+  return null;
+}
+
+function inferPageType(url, declared) {
+  if (declared && declared !== '') return declared;
+  if (!url) return null;
+  const u = String(url).toLowerCase();
+  if (/\/blog\//.test(u)) return 'blog';
+  if (/\/pest-control-[a-z-]+-fl\/?(\?|$)/.test(u)) return 'city';
+  if (/-[a-z-]+-fl\/?(\?|$)/.test(u)) return 'city';
+  if (/\/(services?|lawn-care|mosquito|termite|rodent)\//.test(u)) return 'service';
+  if (/\/(careers|about|contact|reviews|sitemap)/.test(u)) return 'static';
+  return null;
+}
+
+function recomputeCtr(clicks, impressions) {
+  const c = parseInt(clicks || 0, 10);
+  const i = parseInt(impressions || 0, 10);
+  return i > 0 ? c / i : 0;
+}
+
+// ── scoring (pure, test-friendly) ────────────────────────────────────
+
+function gscOpportunityScore(bucket, position, impressionsBoost) {
+  const W = WEIGHTS.gscOpportunity;
+  if (bucket === 'striking_distance') {
+    const distance = Math.max(0, position - 3);
+    return Math.round(W * (1 - distance / 15) * impressionsBoost);
+  }
+  if (bucket === 'ctr_rewrite') return Math.round(W * 0.85 * impressionsBoost);
+  if (bucket === 'decay_refresh') return Math.round(W * 0.75 * impressionsBoost);
+  if (bucket === 'cannibalization') return Math.round(W * 0.5 * impressionsBoost);
+  if (bucket === 'page_type_mismatch') return Math.round(W * 0.6 * impressionsBoost);
+  if (bucket === 'local_gap') return Math.round(W * 0.8 * impressionsBoost);
+  if (bucket === 'seasonal_rising') return Math.round(W * 0.7 * impressionsBoost);
+  if (bucket === 'no_content_yet') return Math.round(W * 0.65 * impressionsBoost);
+  return 0;
+}
+
+function localRevenueScore(service) {
+  const priority = REVENUE_PRIORITY[(service || '').toLowerCase()] ?? 0.5;
+  return Math.round(WEIGHTS.localRevenue * priority);
+}
+
+function conversionIntentScore(query) {
+  if (!query) return Math.round(WEIGHTS.conversionIntent * 0.4);
+  const q = query.toLowerCase();
+  const emergency = /\b(emergency|same.?day|today|right now|asap|24.?hour)\b/.test(q);
+  const transactional = /\b(near me|cost|price|quote|estimate|hire|company|service|free inspection)\b/.test(q);
+  const informational = /\b(how|what|why|when|signs?|identify|prevent|safe for|diy)\b/.test(q);
+  if (emergency) return WEIGHTS.conversionIntent;
+  if (transactional) return Math.round(WEIGHTS.conversionIntent * 0.85);
+  if (informational) return Math.round(WEIGHTS.conversionIntent * 0.3);
+  return Math.round(WEIGHTS.conversionIntent * 0.6);
+}
+
+function impressionsBoost(impressions) {
+  const i = parseInt(impressions || 0, 10);
+  if (i >= 500) return 1.0;
+  if (i >= 200) return 0.85;
+  if (i >= 100) return 0.7;
+  if (i >= THRESHOLDS.minImpressionsToScore) return 0.55;
+  return 0;
+}
+
+function actionForOpportunity({ bucket, query, page_url, city, service }) {
+  if (bucket === 'cannibalization' || bucket === 'page_type_mismatch') {
+    return 'do_not_publish'; // always human review for these
+  }
+  if (bucket === 'ctr_rewrite' && page_url) return 'rewrite_title_meta';
+  if (bucket === 'decay_refresh' && page_url) return 'refresh_existing_page';
+  if (bucket === 'local_gap') return 'create_or_refresh_city_service_page';
+  if (bucket === 'no_content_yet') {
+    if (city && service) return 'create_or_refresh_city_service_page';
+    return 'new_supporting_blog';
+  }
+  if (bucket === 'striking_distance') {
+    if (page_url) return 'refresh_existing_page';
+    if (city && service) return 'create_or_refresh_city_service_page';
+    return 'new_supporting_blog';
+  }
+  if (bucket === 'seasonal_rising') {
+    return page_url ? 'refresh_existing_page' : 'new_supporting_blog';
+  }
+  return 'do_not_publish';
+}
+
+function dedupeKey({ bucket, service, city, query, page_url }) {
+  const parts = [
+    bucket,
+    service || '_',
+    (city || '_').toLowerCase().replace(/\s+/g, '-'),
+    (page_url || query || '_').slice(0, 120),
+  ];
+  return parts.join('::');
+}
+
+function scoreOpportunity(opportunity, extraSignals = {}) {
+  const breakdown = {
+    gscOpportunity: gscOpportunityScore(
+      opportunity.bucket,
+      extraSignals.position || 10,
+      impressionsBoost(extraSignals.impressions || 0)
+    ),
+    localRevenue: localRevenueScore(opportunity.service),
+    conversionIntent: conversionIntentScore(opportunity.query || opportunity.page_url),
+    contentGap: opportunity.bucket === 'local_gap' || opportunity.bucket === 'no_content_yet'
+      ? WEIGHTS.contentGap
+      : 0,
+    refreshLift: opportunity.bucket === 'decay_refresh' || opportunity.bucket === 'ctr_rewrite'
+      ? WEIGHTS.refreshLift
+      : 0,
+  };
+  // Penalties surface in later steps (cannibalizationRisk needs SERP, etc.).
+  // Cannibalization bucket pre-applies its own risk inline:
+  let penalty = 0;
+  if (opportunity.bucket === 'cannibalization') penalty += WEIGHTS.cannibalizationRisk;
+  if (opportunity.bucket === 'page_type_mismatch') penalty += WEIGHTS.serpMismatch;
+
+  const total = Object.values(breakdown).reduce((a, b) => a + b, 0) - penalty;
+  return { total, breakdown: { ...breakdown, _penalty: penalty } };
+}
+
+// ── miner class ──────────────────────────────────────────────────────
+
+class GscOpportunityMiner {
+  async mineAll({ periodDays = 28, persist = true } = {}) {
+    const since = sinceDate(periodDays);
+    const priorSince = sinceDate(periodDays * 2);
+
+    const buckets = {};
+    const errors = {};
+
+    const runs = [
+      ['striking_distance', () => this.mineStrikingDistance(since)],
+      ['ctr_rewrite', () => this.mineCtrRewrite(since)],
+      ['decay_refresh', () => this.mineDecayRefresh(since, priorSince)],
+      ['cannibalization', () => this.mineCannibalization(since)],
+      ['page_type_mismatch', () => this.minePageTypeMismatch(since)],
+      ['local_gap', () => this.mineLocalGap(since)],
+      ['seasonal_rising', () => this.mineSeasonalRising(periodDays)],
+      ['no_content_yet', () => this.mineNoContentYet(since)],
+    ];
+
+    for (const [name, fn] of runs) {
+      try {
+        buckets[name] = await fn();
+      } catch (err) {
+        logger.warn(`[gsc-opp-miner] ${name} failed: ${err.message}`);
+        errors[name] = err.message;
+        buckets[name] = [];
+      }
+    }
+
+    const allOpportunities = Object.values(buckets).flat();
+    const counts = Object.fromEntries(
+      Object.entries(buckets).map(([k, v]) => [k, v.length])
+    );
+
+    let persisted = 0;
+    if (persist) persisted = await this.persistAll(allOpportunities);
+
+    return { counts, errors, persisted, opportunities: allOpportunities };
+  }
+
+  // ── bucket miners ──────────────────────────────────────────────────
+
+  async mineStrikingDistance(since) {
+    const rows = await db('gsc_queries')
+      .where('date', '>=', since)
+      .where('is_branded', false)
+      .select('query', 'service_category', 'city_target', 'intent_type')
+      .sum('clicks as clicks')
+      .sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('query', 'service_category', 'city_target', 'intent_type')
+      .havingRaw('avg(position) BETWEEN ? AND ?', [
+        THRESHOLDS.strikingDistancePositionMin,
+        THRESHOLDS.strikingDistancePositionMax,
+      ])
+      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
+
+    return rows.map((r) => {
+      const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
+      const service = r.service_category || inferServiceFromQuery(r.query);
+      const opp = {
+        bucket: 'striking_distance',
+        query: r.query,
+        page_url: null,
+        service,
+        city,
+        signal_metadata: {
+          clicks: parseInt(r.clicks, 10),
+          impressions: parseInt(r.impressions, 10),
+          avg_position: parseFloat(r.avg_position),
+          ctr: recomputeCtr(r.clicks, r.impressions),
+          intent_type: r.intent_type,
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: opp.signal_metadata.avg_position,
+        impressions: opp.signal_metadata.impressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      return opp;
+    });
+  }
+
+  async mineCtrRewrite(since) {
+    const rows = await db('gsc_queries')
+      .where('date', '>=', since)
+      .where('is_branded', false)
+      .select('query', 'service_category', 'city_target')
+      .sum('clicks as clicks')
+      .sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('query', 'service_category', 'city_target')
+      .havingRaw('avg(position) <= ?', [THRESHOLDS.ctrRewritePositionMax])
+      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.ctrRewriteMinImpressions]);
+
+    const filtered = rows.filter(
+      (r) => recomputeCtr(r.clicks, r.impressions) < THRESHOLDS.ctrRewriteMaxCtr
+    );
+
+    return filtered.map((r) => {
+      const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
+      const service = r.service_category || inferServiceFromQuery(r.query);
+      const opp = {
+        bucket: 'ctr_rewrite',
+        query: r.query,
+        page_url: null, // resolved at action time by finding the URL ranking for this query
+        service,
+        city,
+        signal_metadata: {
+          clicks: parseInt(r.clicks, 10),
+          impressions: parseInt(r.impressions, 10),
+          avg_position: parseFloat(r.avg_position),
+          ctr: recomputeCtr(r.clicks, r.impressions),
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: opp.signal_metadata.avg_position,
+        impressions: opp.signal_metadata.impressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      return opp;
+    });
+  }
+
+  async mineDecayRefresh(since, priorSince) {
+    const recent = await db('gsc_pages')
+      .where('date', '>=', since)
+      .select('page_url', 'page_type', 'service_category', 'city_target')
+      .sum('clicks as clicks')
+      .sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('page_url', 'page_type', 'service_category', 'city_target');
+
+    const priorMap = new Map();
+    const prior = await db('gsc_pages')
+      .where('date', '>=', priorSince)
+      .where('date', '<', since)
+      .select('page_url')
+      .sum('clicks as clicks')
+      .groupBy('page_url');
+    for (const p of prior) priorMap.set(p.page_url, parseInt(p.clicks, 10));
+
+    const out = [];
+    for (const r of recent) {
+      const recentClicks = parseInt(r.clicks, 10);
+      const priorClicks = priorMap.get(r.page_url) || 0;
+      if (priorClicks < 5) continue; // no comparable prior
+      const drop = (priorClicks - recentClicks) / priorClicks;
+      if (drop < THRESHOLDS.decayMinDropPct) continue;
+
+      const city = normalizeCity(r.city_target) || inferCityFromUrl(r.page_url);
+      const service = r.service_category || inferServiceFromUrl(r.page_url);
+      const opp = {
+        bucket: 'decay_refresh',
+        query: null,
+        page_url: r.page_url,
+        service,
+        city,
+        signal_metadata: {
+          page_type: inferPageType(r.page_url, r.page_type),
+          clicks_recent: recentClicks,
+          clicks_prior: priorClicks,
+          decay_pct: drop,
+          impressions: parseInt(r.impressions, 10),
+          avg_position: parseFloat(r.avg_position),
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: opp.signal_metadata.avg_position,
+        impressions: opp.signal_metadata.impressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
+  async mineCannibalization(since) {
+    // Heuristic: queries with significant impressions where the site
+    // owns 2+ URLs both ranking in the same period at similar service+city.
+    // True query→page mapping isn't in GSC's BigQuery export schema we
+    // have locally; this is an upper-bound flag for human review.
+    const queries = await db('gsc_queries')
+      .where('date', '>=', since)
+      .where('is_branded', false)
+      .select('query', 'service_category', 'city_target')
+      .sum('impressions as impressions')
+      .groupBy('query', 'service_category', 'city_target')
+      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore * 4]);
+
+    const out = [];
+    for (const q of queries) {
+      // Find own URLs that match service+city for this query.
+      const ownPages = await db('gsc_pages')
+        .where('date', '>=', since)
+        .where('service_category', q.service_category || '')
+        .where('city_target', q.city_target || '')
+        .havingRaw('count(distinct page_url) >= ?', [THRESHOLDS.cannibalizationMinUrls])
+        .select('page_url')
+        .sum('impressions as impressions')
+        .groupBy('page_url');
+      if (ownPages.length < THRESHOLDS.cannibalizationMinUrls) continue;
+
+      const city = normalizeCity(q.city_target);
+      const service = q.service_category;
+      const opp = {
+        bucket: 'cannibalization',
+        query: q.query,
+        page_url: null,
+        service,
+        city,
+        signal_metadata: {
+          competing_urls: ownPages.slice(0, 8).map((p) => ({
+            page_url: p.page_url,
+            impressions: parseInt(p.impressions, 10),
+          })),
+          impressions: parseInt(q.impressions, 10),
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: 5,
+        impressions: opp.signal_metadata.impressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
+  async minePageTypeMismatch(since) {
+    // Heuristic until SERP profiler ships:
+    //   a blog URL is ranking for a query that has explicit city + service
+    //   intent (transactional-local SERP wants a city-service page).
+    const pages = await db('gsc_pages')
+      .where('date', '>=', since)
+      .select('page_url', 'page_type', 'service_category', 'city_target')
+      .sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('page_url', 'page_type', 'service_category', 'city_target')
+      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
+
+    const out = [];
+    for (const p of pages) {
+      const pageType = inferPageType(p.page_url, p.page_type);
+      if (pageType !== 'blog') continue;
+      const city = normalizeCity(p.city_target) || inferCityFromUrl(p.page_url);
+      const service = p.service_category || inferServiceFromUrl(p.page_url);
+      if (!city || !service) continue;
+
+      // Has it surfaced in queries with transactional-local intent?
+      const localQueries = await db('gsc_queries')
+        .where('date', '>=', since)
+        .where('city_target', p.city_target || '')
+        .where('service_category', p.service_category || '')
+        .where('intent_type', 'service')
+        .sum('impressions as impressions')
+        .first();
+
+      if (!localQueries || parseInt(localQueries.impressions || 0, 10) < THRESHOLDS.minImpressionsToScore) continue;
+
+      const opp = {
+        bucket: 'page_type_mismatch',
+        query: null,
+        page_url: p.page_url,
+        service,
+        city,
+        signal_metadata: {
+          page_type: pageType,
+          impressions: parseInt(p.impressions, 10),
+          avg_position: parseFloat(p.avg_position),
+          local_query_impressions: parseInt(localQueries.impressions, 10),
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: opp.signal_metadata.avg_position,
+        impressions: opp.signal_metadata.impressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
+  async mineLocalGap(since) {
+    // {city, service} pairs with impression demand but no own page in
+    // gsc_pages matching that pair.
+    const queries = await db('gsc_queries')
+      .where('date', '>=', since)
+      .where('is_branded', false)
+      .whereNotNull('city_target')
+      .whereNot('city_target', 'local_intent')
+      .whereNotNull('service_category')
+      .select('city_target', 'service_category')
+      .sum('impressions as impressions')
+      .groupBy('city_target', 'service_category')
+      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
+
+    const out = [];
+    for (const q of queries) {
+      const city = normalizeCity(q.city_target);
+      const service = q.service_category;
+      if (!city || !service) continue;
+
+      // Is there an existing page covering this?
+      const existing = await db('gsc_pages')
+        .where('date', '>=', since)
+        .where('city_target', q.city_target)
+        .where('service_category', q.service_category)
+        .first();
+      if (existing) continue;
+
+      const opp = {
+        bucket: 'local_gap',
+        query: null,
+        page_url: null,
+        service,
+        city,
+        signal_metadata: {
+          impressions: parseInt(q.impressions, 10),
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: 25, // assumed deep since no own page
+        impressions: opp.signal_metadata.impressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
+  async mineSeasonalRising(periodDays) {
+    const recentSince = sinceDate(14);
+    const priorSince = sinceDate(28);
+
+    const recent = await db('gsc_queries')
+      .where('date', '>=', recentSince)
+      .where('is_branded', false)
+      .select('query', 'service_category', 'city_target')
+      .sum('impressions as impressions')
+      .groupBy('query', 'service_category', 'city_target');
+
+    const priorMap = new Map();
+    const prior = await db('gsc_queries')
+      .where('date', '>=', priorSince)
+      .where('date', '<', recentSince)
+      .where('is_branded', false)
+      .select('query')
+      .sum('impressions as impressions')
+      .groupBy('query');
+    for (const p of prior) priorMap.set(p.query, parseInt(p.impressions, 10));
+
+    const out = [];
+    for (const r of recent) {
+      const recentImp = parseInt(r.impressions, 10);
+      const priorImp = priorMap.get(r.query) || 0;
+      if (priorImp < THRESHOLDS.minImpressionsToScore) continue;
+      const growth = (recentImp - priorImp) / priorImp;
+      if (growth < 0.5) continue;
+
+      const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
+      const service = r.service_category || inferServiceFromQuery(r.query);
+      const opp = {
+        bucket: 'seasonal_rising',
+        query: r.query,
+        page_url: null,
+        service,
+        city,
+        signal_metadata: {
+          impressions_recent_14d: recentImp,
+          impressions_prior_14d: priorImp,
+          growth_pct: growth,
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: 8,
+        impressions: recentImp,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
+  async mineNoContentYet(since) {
+    // Queries with impressions on the property but no own page even
+    // appearing in gsc_pages for the matching service+city.
+    const queries = await db('gsc_queries')
+      .where('date', '>=', since)
+      .where('is_branded', false)
+      .select('query', 'service_category', 'city_target', 'intent_type')
+      .sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('query', 'service_category', 'city_target', 'intent_type')
+      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore])
+      .havingRaw('avg(position) > ?', [THRESHOLDS.strikingDistancePositionMax]);
+
+    const out = [];
+    for (const q of queries) {
+      const city = normalizeCity(q.city_target) || inferCityFromQuery(q.query);
+      const service = q.service_category || inferServiceFromQuery(q.query);
+      if (!service) continue;
+
+      const owned = await db('gsc_pages')
+        .where('date', '>=', since)
+        .where('service_category', q.service_category || '')
+        .modify((qb) => {
+          if (q.city_target) qb.where('city_target', q.city_target);
+        })
+        .first();
+      if (owned) continue;
+
+      const opp = {
+        bucket: 'no_content_yet',
+        query: q.query,
+        page_url: null,
+        service,
+        city,
+        signal_metadata: {
+          impressions: parseInt(q.impressions, 10),
+          avg_position: parseFloat(q.avg_position),
+          intent_type: q.intent_type,
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: opp.signal_metadata.avg_position,
+        impressions: opp.signal_metadata.impressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
+  // ── persistence ────────────────────────────────────────────────────
+
+  async persistAll(opportunities) {
+    if (!opportunities.length) return 0;
+    let count = 0;
+    const now = new Date();
+    const expiresAt = new Date(Date.now() + 14 * 86400_000);
+
+    // Group by dedupe_key, keep highest-score entry per key.
+    const winners = new Map();
+    for (const o of opportunities) {
+      const existing = winners.get(o.dedupe_key);
+      if (!existing || o.score > existing.score) winners.set(o.dedupe_key, o);
+    }
+
+    for (const o of winners.values()) {
+      const row = {
+        bucket: o.bucket,
+        action_type: o.action_type,
+        query: o.query || null,
+        page_url: o.page_url || null,
+        service: o.service || null,
+        city: o.city || null,
+        score: o.score,
+        score_breakdown: JSON.stringify(o.score_breakdown),
+        signal_metadata: JSON.stringify(o.signal_metadata),
+        status: 'pending',
+        mined_at: now,
+        expires_at: expiresAt,
+        dedupe_key: o.dedupe_key,
+      };
+
+      // ON CONFLICT (dedupe_key) DO UPDATE — keeps latest score + mined_at,
+      // resets status back to pending unless the row is already claimed/done.
+      const result = await db.raw(
+        `INSERT INTO opportunity_queue
+           (bucket, action_type, query, page_url, service, city,
+            score, score_breakdown, signal_metadata, status,
+            mined_at, expires_at, dedupe_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, now(), now())
+         ON CONFLICT (dedupe_key) DO UPDATE
+           SET score = EXCLUDED.score,
+               score_breakdown = EXCLUDED.score_breakdown,
+               signal_metadata = EXCLUDED.signal_metadata,
+               mined_at = EXCLUDED.mined_at,
+               expires_at = EXCLUDED.expires_at,
+               action_type = EXCLUDED.action_type,
+               status = CASE WHEN opportunity_queue.status IN ('claimed', 'done')
+                             THEN opportunity_queue.status
+                             ELSE 'pending'
+                        END,
+               updated_at = now()
+        `,
+        [
+          row.bucket, row.action_type, row.query, row.page_url, row.service, row.city,
+          row.score, row.score_breakdown, row.signal_metadata, row.status,
+          row.mined_at, row.expires_at, row.dedupe_key,
+        ]
+      );
+      count += result.rowCount || 1;
+    }
+    return count;
+  }
+
+  async expireStale() {
+    const result = await db('opportunity_queue')
+      .where('status', 'pending')
+      .where('expires_at', '<', new Date())
+      .update({ status: 'expired', updated_at: new Date() });
+    return result;
+  }
+}
+
+function sinceDate(days) {
+  return new Date(Date.now() - days * 86400_000).toISOString().slice(0, 10);
+}
+
+module.exports = new GscOpportunityMiner();
+module.exports.GscOpportunityMiner = GscOpportunityMiner;
+// Exposed for unit tests — pure functions, no DB.
+module.exports._internals = {
+  normalizeCity,
+  inferServiceFromQuery,
+  inferServiceFromUrl,
+  inferCityFromUrl,
+  inferCityFromQuery,
+  inferPageType,
+  recomputeCtr,
+  gscOpportunityScore,
+  localRevenueScore,
+  conversionIntentScore,
+  impressionsBoost,
+  actionForOpportunity,
+  dedupeKey,
+  scoreOpportunity,
+};
