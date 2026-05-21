@@ -1,9 +1,11 @@
 const {
   buildServiceRecordInsert,
+  buildServiceRecordProjectCompletionUpdate,
   hasMembership,
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
   projectReviewedForPortalAttachment,
+  serviceRecordMatchesScheduledService,
   shouldAttachProjectToPortal,
 } = require('../services/project-completion');
 
@@ -52,6 +54,21 @@ describe('project completion helpers', () => {
     })).toBe(99);
     expect(prepaidCoversAmount({ prepaid_amount: '350.00' }, 350)).toBe(true);
     expect(prepaidCoversAmount({ prepaid_amount: '100.00' }, 350)).toBe(false);
+  });
+
+  test('existing service record reuse requires the same scheduled service link', () => {
+    expect(serviceRecordMatchesScheduledService(
+      { id: 'record-1', scheduled_service_id: 'svc-1' },
+      { id: 'svc-1' },
+    )).toBe(true);
+    expect(serviceRecordMatchesScheduledService(
+      { id: 'record-1', scheduled_service_id: 'svc-other' },
+      { id: 'svc-1' },
+    )).toBe(false);
+    expect(serviceRecordMatchesScheduledService(
+      { id: 'record-1' },
+      { id: 'svc-1' },
+    )).toBe(false);
   });
 
   test('service record insert marks project completion without creating a routine report token', () => {
@@ -109,6 +126,78 @@ describe('project completion helpers', () => {
       portalAttached: true,
       projectReport: {
         url: '/report/project/customer-0123456789ab',
+      },
+    });
+  });
+
+  test('existing service record update converts routine report fields to project completion', () => {
+    const update = buildServiceRecordProjectCompletionUpdate({
+      serviceRecord: {
+        id: 'record-1',
+        structured_notes: JSON.stringify({ existingNote: true }),
+        service_data: JSON.stringify({ existingData: true }),
+        report_view_token: 'legacy-report-token',
+        report_template_version: 'service_report_v1',
+      },
+      project: {
+        id: 'project-1',
+        project_type: 'rodent_trapping',
+        title: 'Rodent trapping',
+        report_token: '0123456789abcdef0123456789abcdef',
+        findings: { traps_set: 'Attic' },
+      },
+      profile: {
+        completionMode: 'project_required',
+        portalVisibility: 'token_only',
+        portalAttachPolicy: 'recurring_customer',
+      },
+      serviceRecordCols: {
+        status: true,
+        structured_notes: true,
+        completion_source: true,
+        protocol_defaults_used: true,
+        service_data: true,
+        report_view_token: true,
+        report_template_version: true,
+        pdf_storage_key: true,
+        updated_at: true,
+      },
+      lifecycleUpdates: {
+        actual_end_time: new Date('2026-05-21T16:00:00Z'),
+      },
+      portalAttached: false,
+      reportPath: '/report/project/customer-0123456789ab',
+      nowValue: 'NOW',
+    });
+
+    expect(update).toMatchObject({
+      status: 'completed',
+      completion_source: 'project_completion',
+      protocol_defaults_used: false,
+      report_view_token: null,
+      report_template_version: null,
+      pdf_storage_key: null,
+      updated_at: 'NOW',
+    });
+    expect(update.actual_end_time).toBeUndefined();
+    const notes = JSON.parse(update.structured_notes);
+    expect(notes).toMatchObject({
+      existingNote: true,
+      projectCompletion: true,
+      projectId: 'project-1',
+      projectType: 'rodent_trapping',
+      portalAttached: false,
+      projectReport: {
+        tokenOnly: true,
+      },
+    });
+    const serviceData = JSON.parse(update.service_data);
+    expect(serviceData).toMatchObject({
+      existingData: true,
+      project: {
+        id: 'project-1',
+        type: 'rodent_trapping',
+        findings: { traps_set: 'Attic' },
       },
     });
   });
