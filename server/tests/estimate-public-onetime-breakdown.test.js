@@ -2735,4 +2735,11 @@ describe('public estimate one-time breakdown', () => {
 
     expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10')).toBe(true);
   });
+
+  test('unsent estimates suppress view tracking side effects', () => {
+    const req = { headers: {} };
+
+    expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10', { sent_at: null })).toBe(false);
+    expect(shouldApplyFirstViewSideEffects(req, '203.0.113.10', { sent_at: '2026-05-20T12:00:00.000Z' })).toBe(true);
+  });
 });
