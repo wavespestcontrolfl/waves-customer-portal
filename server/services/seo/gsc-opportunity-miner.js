@@ -29,6 +29,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES } =
   require('../content/scoring-config');
 
@@ -289,6 +290,13 @@ class GscOpportunityMiner {
   // ── own-page resolution helper ─────────────────────────────────────
 
   async _loadOwnPagesByServiceCity(since) {
+    // Build the map under the same normalization that opportunity rows
+    // use later, so lookups by (normalized service, normalized city)
+    // match the keys here. Earlier iteration keyed on raw classifier
+    // fields (r.service_category / r.city_target) — but opportunities
+    // normalize 'local_intent' → null + infer city from query, so raw
+    // keys mismatch normalized lookups and the map silently misses or
+    // returns a wrong-segment page.
     const rows = await db('gsc_pages')
       .where('date', '>=', since)
       .select('page_url', 'service_category', 'city_target')
@@ -297,7 +305,10 @@ class GscOpportunityMiner {
       .orderBy('impressions', 'desc');
     const map = new Map();
     for (const r of rows) {
-      const key = ownPageKey(r.service_category, r.city_target);
+      const service = r.service_category || inferServiceFromUrl(r.page_url);
+      const city = normalizeCity(r.city_target) || inferCityFromUrl(r.page_url);
+      if (!service && !city) continue; // can't classify — skip rather than pollute generic bucket
+      const key = ownPageKey(service, city);
       if (!map.has(key)) map.set(key, r.page_url); // first wins (orderBy impressions desc)
     }
     return map;
@@ -323,7 +334,10 @@ class GscOpportunityMiner {
     return rows.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
-      const pageUrl = ownPagesByServiceCity.get(ownPageKey(r.service_category, r.city_target)) || null;
+      // Look up with the SAME normalized service+city the map was built
+      // with, so cityless/unclassified-but-inferred queries find their
+      // real ranking page when one exists.
+      const pageUrl = ownPagesByServiceCity.get(ownPageKey(service, city)) || null;
       const opp = {
         bucket: 'striking_distance',
         query: r.query,
@@ -372,8 +386,9 @@ class GscOpportunityMiner {
       // ctr_rewrite REQUIRES a target page (we're rewriting its title/meta).
       // If no matching own page exists, actionForOpportunity falls through
       // to do_not_publish for that opportunity — which is the right outcome
-      // when there's nothing to rewrite.
-      const pageUrl = ownPagesByServiceCity.get(ownPageKey(r.service_category, r.city_target)) || null;
+      // when there's nothing to rewrite. Use normalized values to match
+      // the map keys built in _loadOwnPagesByServiceCity.
+      const pageUrl = ownPagesByServiceCity.get(ownPageKey(service, city)) || null;
       const opp = {
         bucket: 'ctr_rewrite',
         query: r.query,
@@ -823,7 +838,11 @@ class GscOpportunityMiner {
 }
 
 function sinceDate(days) {
-  return new Date(Date.now() - days * 86400_000).toISOString().slice(0, 10);
+  // Railway runs UTC, but every other date filter in this portal lives
+  // in America/New_York (AGENTS.md). Using toISOString().slice(0,10)
+  // here would advance the GSC window one day early between 8pm ET and
+  // midnight ET. Pin to ET-day boundaries.
+  return etDateString(addETDays(new Date(), -days));
 }
 
 module.exports = new GscOpportunityMiner();

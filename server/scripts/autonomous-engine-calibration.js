@@ -33,6 +33,7 @@
 const fs = require('fs');
 const path = require('path');
 const db = require('../models/db');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, SERP_SAMPLE_CITIES } =
   require('../services/content/scoring-config');
 
@@ -55,8 +56,11 @@ const OUTPUT_PATH =
   ARGS.output ||
   path.join(__dirname, '..', '..', 'reports', `calibration-${new Date().toISOString().slice(0, 10)}.md`);
 
-const SINCE = new Date(Date.now() - PERIOD_DAYS * 86400_000).toISOString().slice(0, 10);
-const PRIOR_SINCE = new Date(Date.now() - PERIOD_DAYS * 2 * 86400_000).toISOString().slice(0, 10);
+// ET-pinned date boundaries — Railway runs UTC but the portal's other
+// date filters all use ET (AGENTS.md). Plain toISOString().slice(0,10)
+// would advance the window one day early between 8pm ET and midnight ET.
+const SINCE = etDateString(addETDays(new Date(), -PERIOD_DAYS));
+const PRIOR_SINCE = etDateString(addETDays(new Date(), -PERIOD_DAYS * 2));
 
 // ── helpers ───────────────────────────────────────────────────────
 
