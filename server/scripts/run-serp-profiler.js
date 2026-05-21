@@ -32,6 +32,7 @@
  */
 
 const db = require('../models/db');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const profiler = require('../services/seo/serp-profiler');
 
 const ARGS = Object.fromEntries(
@@ -64,7 +65,10 @@ async function loadFromQueue() {
 }
 
 async function loadFromGsc() {
-  const since = new Date(Date.now() - 28 * 86400_000).toISOString().slice(0, 10);
+  // ET-pinned per AGENTS.md; toISOString().slice(0,10) advances one day
+  // early between 8pm and midnight ET because Railway runs UTC. Same fix
+  // applied to gsc-opportunity-miner and the calibration script.
+  const since = etDateString(addETDays(new Date(), -28));
   const rows = await db('gsc_queries')
     .where('date', '>=', since)
     .where('is_branded', false)
