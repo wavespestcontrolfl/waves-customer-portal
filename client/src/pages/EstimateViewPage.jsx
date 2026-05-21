@@ -46,6 +46,8 @@ const ESTIMATE_BG = '#FAF8F3';
 const ESTIMATE_BORDER = '#E7E2D7';
 const ESTIMATE_MUTED = '#6B7280';
 const ESTIMATE_TEXT = '#1B2C5B';
+const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_CHROME = '#F7F5EE';
 const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
 
 function fmtMoney(n) {
@@ -145,11 +147,11 @@ function SkeletonBlock() {
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 24,
-      border: `1px solid ${COLORS.grayLight}`, marginBottom: 16,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 16,
     }}>
-      <div style={{ height: 12, width: 120, background: COLORS.offWhite, borderRadius: 4 }} />
-      <div style={{ height: 32, width: '60%', background: COLORS.offWhite, borderRadius: 4, marginTop: 14 }} />
-      <div style={{ height: 14, width: '40%', background: COLORS.offWhite, borderRadius: 4, marginTop: 10 }} />
+      <div style={{ height: 12, width: 120, background: ESTIMATE_CHROME, borderRadius: 4 }} />
+      <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 14 }} />
+      <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 10 }} />
     </div>
   );
 }
@@ -158,11 +160,11 @@ function NotFoundCard() {
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 32, textAlign: 'center',
-      border: `1px solid ${COLORS.grayLight}`, marginTop: 40,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginTop: 40,
     }}>
       <div style={{ fontSize: 32 }}></div>
       <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
         This link may have expired or isn't valid. Call us at{' '}
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
         and we'll get you sorted.
@@ -570,8 +572,8 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
   };
   return (
     <div style={{
-      background: '#F1F5F9', borderRadius: 999, padding: 4,
-      border: '1px solid #E2E8F0', marginBottom: 18,
+      background: ESTIMATE_CHROME, borderRadius: 999, padding: 4,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 18,
       display: 'flex', gap: 4,
       boxShadow: '0 1px 4px rgba(15,23,42,.04)',
     }}>
@@ -581,7 +583,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         style={{
           ...pillBase,
           background: mode === 'recurring' ? ESTIMATE_BUTTON_BG : 'transparent',
-          color: mode === 'recurring' ? COLORS.white : COLORS.textBody,
+          color: mode === 'recurring' ? COLORS.white : ESTIMATE_BODY,
         }}
       >Recurring Pest Control</button>
       <button
@@ -590,7 +592,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         style={{
           ...pillBase,
           background: mode === 'one_time' ? ESTIMATE_BUTTON_BG : 'transparent',
-          color: mode === 'one_time' ? COLORS.white : COLORS.textBody,
+          color: mode === 'one_time' ? COLORS.white : ESTIMATE_BODY,
         }}
       >One-Time Pest Control</button>
     </div>
@@ -631,7 +633,7 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 18,
-      border: `1px solid ${COLORS.grayLight}`, marginBottom: 16,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 16,
       boxShadow: '0 1px 6px rgba(15,23,42,0.04)',
     }}>
       <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 10 }}>
@@ -647,14 +649,14 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
               alignItems: 'start', paddingBottom: i === items.length - 1 ? 0 : 10,
-              borderBottom: i === items.length - 1 ? 'none' : `1px solid ${COLORS.grayLight}`,
+              borderBottom: i === items.length - 1 ? 'none' : `1px solid ${ESTIMATE_BORDER}`,
             }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
                   {item.label || 'One-time service'}
                 </div>
                 {item.detail ? (
-                  <div style={{ fontSize: 12, color: COLORS.textCaption, marginTop: 2, lineHeight: 1.35 }}>
+                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
                     {item.detail}
                   </div>
                 ) : null}
@@ -672,7 +674,7 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
       </div>
       <div style={{
         display: 'flex', justifyContent: 'space-between', gap: 12,
-        borderTop: `1px solid ${COLORS.grayLight}`, marginTop: 12, paddingTop: 12,
+        borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
         fontSize: 15, fontWeight: 700, color: COLORS.navy,
       }}>
         <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
@@ -688,7 +690,7 @@ function CountdownLine({ secondsRemaining }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
   return (
-    <div style={{ fontSize: 14, color: COLORS.textCaption, textAlign: 'center' }}>
+    <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center' }}>
       Slot held for {m}:{String(s).padStart(2, '0')}
     </div>
   );
@@ -712,7 +714,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
           : 'At the visit'
         }</strong>
       </div>
-      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 4 }}>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
         Slot: {slotId}
       </div>
       <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div>
@@ -729,8 +731,8 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
           type="button"
           onClick={onCancel}
           style={{
-            padding: '12px 20px', background: 'transparent', color: COLORS.textBody,
-            border: `1px solid ${COLORS.grayLight}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+            padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
+            border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
           }}
         >Go back</button>
       </div>
@@ -758,7 +760,7 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {invoiceLinkDelivered ? 'Thanks — your invoice is on the way.' : 'Thanks — your estimate is approved.'}
         </div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
         {invoiceLinkDelivered
           ? 'Use the invoice pay link we sent to complete payment. Your service request has been received and our team will confirm the schedule.'
           : 'Our team will follow up with the invoice details. Your service request has been received and our team will confirm the schedule.'}
@@ -777,7 +779,7 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           Your annual prepay is approved.
         </div>
-        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
           Our team will review and send the annual prepay invoice{prepayAmountText}. Your service request has been received and our team will confirm the schedule.
         </div>
       </div>
@@ -794,7 +796,7 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved for a one-time service.
         </div>
-        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
           {bookingUrl
             ? 'Check your phone for the booking link, or pick your appointment now.'
             : 'Our team will follow up to help schedule your appointment.'}
@@ -823,7 +825,7 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're booked.
         </div>
-        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
           Check your phone for the confirmation text. Finish setup to keep your appointment moving.
         </div>
         {onboardingToken ? (
@@ -850,7 +852,7 @@ function SuccessCard({ acceptResult }) {
       <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
         You're booked.
       </div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
         Check your phone for the confirmation text. Our team will confirm the schedule.
       </div>
     </div>
@@ -901,7 +903,7 @@ function AcceptanceModeCard({ acceptance }) {
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>{title}</div>
-      <div style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55 }}>{body}</div>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>{body}</div>
       <a href={`tel:${WAVES_PHONE_TEL}`} style={{
         display: 'inline-block',
         marginTop: 14,
