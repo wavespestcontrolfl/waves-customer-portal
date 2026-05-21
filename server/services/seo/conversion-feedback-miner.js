@@ -229,26 +229,42 @@ class ConversionFeedbackMiner {
 
     // ── inbound calls ──────────────────────────────────────────────
     // Calls don't carry a city/service classification themselves; we
-    // attribute via the linked lead when present, otherwise roll into
-    // the global bucket. Service inference from lead_synopsis is left
-    // to a future iteration (would need to load synopsis text per row).
+    // attribute via the lead matching the caller's phone.
+    //
+    // We can NOT join `leads.twilio_call_sid = call_log.twilio_call_sid`:
+    // lead-attribution.js overwrites leads.twilio_call_sid on every
+    // follow-up call for the same lead, so older call_log rows for
+    // repeat callers stop matching and would get rolled into _global,
+    // skewing per-(city, service) call counts. Instead build a
+    // phone → most-recent-lead map (matching lead-attribution's
+    // "orderBy created_at desc → first()" rule) and attribute via the
+    // map in application code.
     try {
+      const phoneToLead = new Map();
+      try {
+        const leadRows = await db('leads')
+          .whereNotNull('phone')
+          .orderBy('created_at', 'desc')
+          .select('phone', 'city', 'service_interest');
+        for (const l of leadRows) {
+          if (!phoneToLead.has(l.phone)) {
+            phoneToLead.set(l.phone, { city: l.city, service_interest: l.service_interest });
+          }
+        }
+      } catch (err) {
+        logger.warn(`[conversion-miner] phoneToLead build failed: ${err.message}`);
+      }
+
       const calls = await db('call_log')
-        .where('call_log.direction', 'inbound')
-        .where('call_log.created_at', '>=', sinceCutoff)
-        .leftJoin('leads', function () {
-          this.on('leads.twilio_call_sid', '=', 'call_log.twilio_call_sid');
-        })
-        .select(
-          'call_log.call_outcome as call_outcome',
-          'leads.city as lead_city',
-          'leads.service_interest as lead_service'
-        );
+        .where('direction', 'inbound')
+        .where('created_at', '>=', sinceCutoff)
+        .select('from_phone', 'call_outcome');
 
       for (const r of calls) {
         if (['spam', 'wrong_number'].includes(r.call_outcome)) continue;
-        const city = normalizeCity(r.lead_city);
-        const service = normalizeService(r.lead_service);
+        const lead = r.from_phone ? phoneToLead.get(r.from_phone) || null : null;
+        const city = normalizeCity(lead?.city);
+        const service = normalizeService(lead?.service_interest);
         bump(city, service, {
           calls_handled: 1,
           calls_booked: r.call_outcome === 'booked' ? 1 : 0,
