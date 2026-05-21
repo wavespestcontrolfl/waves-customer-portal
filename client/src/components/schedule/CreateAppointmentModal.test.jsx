@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ESTIMATE_SOURCE_LABEL,
   findScheduleEstimateById,
   formatScheduleEstimateAmount,
+  MANUAL_SERVICE_ENTRY_LABEL,
   pickAutoScheduleEstimate,
 } from './CreateAppointmentModal.jsx';
 
 describe('CreateAppointmentModal won estimate helpers', () => {
+  it('uses clear copy for manual appointment entry', () => {
+    expect(ESTIMATE_SOURCE_LABEL).toBe('Estimate source');
+    expect(MANUAL_SERVICE_ENTRY_LABEL).toBe('No estimate - choose services manually');
+  });
+
   it('finds numeric estimate ids from select string values', () => {
     const estimates = [{ id: 42 }, { id: 108 }];
 
