@@ -471,7 +471,11 @@ function writeSerpSection(result) {
   for (const p of result.profiles || []) {
     log(`### \`${p.keyword}\` — ${p.city || 'no city'}`);
     if (p.error) { log(`> error: ${p.error}`); log(''); continue; }
-    const top10 = p.profile?.top10 || [];
+    // serp-analyzer returns `top_10_results` (snake_case), not `top10`.
+    // Earlier iteration read profile.top10 — silently rendered empty
+    // page-type/domain lists despite spending DataForSEO credits +
+    // writing seo_serp_analyses.
+    const top10 = p.profile?.top_10_results || p.profile?.top10 || [];
     log(`- Top 10 page types: ${top10.map((r) => r.type).join(', ')}`);
     log(`- Domains: ${top10.slice(0, 5).map((r) => r.domain).join(', ')}`);
     log('');
