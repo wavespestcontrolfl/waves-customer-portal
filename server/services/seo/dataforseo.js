@@ -78,14 +78,16 @@ class DataForSEO {
     return null;
   }
 
-  // SERP — organic results
-  async serpOrganic(keyword, location = 'Bradenton,Florida,United States') {
+  // SERP — organic results. Caller-overridable device so the serp-profiler
+  // can cache distinct mobile vs desktop snapshots; defaults to mobile to
+  // preserve the prior call shape (serp-analyzer.js etc. pass 2 args).
+  async serpOrganic(keyword, location = 'Bradenton,Florida,United States', device = 'mobile') {
     return this.request('/serp/google/organic/live/advanced', [{
       keyword,
       location_name: location,
       language_name: 'English',
-      device: 'mobile',
-      os: 'iOS',
+      device,
+      os: device === 'desktop' ? 'macos' : 'iOS',
     }]);
   }
 
