@@ -24,6 +24,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
+const gpsArrivalDetector = require('../services/gps-arrival-detector');
 const { pingTechLocation } = require('../services/tech-status');
 const { FUTURE_TIMESTAMP_TOLERANCE_MS } = require('../services/customer-tracking-eta');
 const {
@@ -184,8 +185,9 @@ async function processTrackingEvent({ logId, eventType, payload }) {
       // log-mark-processed update below; the GPS history in
       // vehicle_locations is already committed at this point and is
       // the system of record for the customer-facing track map.
+      let techStatus = null;
       try {
-        await pingTechLocation({
+        techStatus = await pingTechLocation({
           tech_id: tech.id,
           lat: point.lat,
           lng: point.lng,
@@ -195,6 +197,15 @@ async function processTrackingEvent({ logId, eventType, payload }) {
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] pingTechLocation failed: ${err.message}`);
+      }
+
+      try {
+        await gpsArrivalDetector.maybeMarkArrivedFromGps({
+          techStatus,
+          point,
+        });
+      } catch (err) {
+        logger.error(`[webhooks-bouncie] gps arrival detector failed: ${err.message}`);
       }
     }
 
