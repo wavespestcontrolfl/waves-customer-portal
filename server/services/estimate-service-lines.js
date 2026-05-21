@@ -16,10 +16,10 @@ const SERVICE_LINE_PATTERNS = [
   ['termite', /termite|trench(?:ing)?|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
   ['mosquito', /mosquito/],
   ['rodent', /rodent|rat|mouse|mice/],
-  ['palm_injection', /palm\s*injection|palm\s*treatment|lethal\s*bronzing|palms?/],
+  ['palm_injection', /\bpalm\s*injection\b|\bpalm\s*treatment\b|\blethal\s*bronzing\b|\bpalms?\b/],
   ['lawn', /lawn|turf|fertili[sz]|weed|topdress|top\s*dress|dethatch|plugging|overseed/],
   ['tree_shrub', /tree|shrub|ornamental/],
-  ['pest', /pest|roach|cockroach|flea|wasp|bed\s*bug|bedbug|ant|spider|silverfish|earwig|general/],
+  ['pest', /pest|exterminator|roach|cockroach|palmetto\s+knockdown|flea|wasp|bed\s*bug|bedbug|ant|spider|silverfish|earwig|general/],
 ];
 
 function parseEstimateData(estimateData) {
