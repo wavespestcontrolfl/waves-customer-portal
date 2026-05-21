@@ -33,6 +33,7 @@ const {
   buildEstimateAssistantContext,
 } = require('../services/estimate-assistant');
 const { loadPublicEstimateSupportSources } = require('../services/estimate-ai-context');
+const { triggerAdminFollowupCall } = require('../services/admin-followup-call');
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_E164,
@@ -3994,6 +3995,36 @@ router.put('/:token/accept', async (req, res, next) => {
         await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, { icon: '\u2705', link: notificationPayload.customerLink, metadata: { estimateId: estimate.id, invoiceId } });
       }
     } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
+
+    // Customer-facing accepts should get the same admin phone workflow as a
+    // quote request: call Adam from a Waves number during business hours, then
+    // auto-bridge to the customer when the leadAutoBridge gate is enabled.
+    // Admin "mark won" uses server/routes/admin-estimates.js and does not
+    // pass through this public route.
+    try {
+      await triggerAdminFollowupCall({
+        customerId,
+        customerName: estimate.customer_name,
+        customerPhone: estimate.customer_phone,
+        address: estimate.address,
+        source: 'estimate-accept',
+        eventLabel: 'Estimate accepted',
+        sourceLabel: buildAcceptOfficeFallback({
+          customerName: estimate.customer_name,
+          address: estimate.address,
+          waveguardTier: estimate.waveguard_tier || 'Bronze',
+          monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
+          serviceLabel: oneTimeList[0]?.name || 'One-time service',
+          treatAsOneTime,
+          billByInvoice,
+          reservationCommitted,
+          billingTerm,
+          annualPrepayAmount: annualPrepayInvoiceAmount,
+        }),
+      });
+    } catch (e) {
+      logger.error(`[estimate-accept] Admin follow-up call failed: ${e.message}`);
+    }
 
     res.json(buildAcceptSuccessPayload({
       onboardingToken,
