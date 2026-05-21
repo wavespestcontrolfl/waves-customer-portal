@@ -23,6 +23,15 @@ const { CITIES, SERP_SAMPLE_CITIES } = require('../content/scoring-config');
 const DEFAULT_REFETCH_DAYS = 14;
 const DEFAULT_DEVICE = 'mobile';
 
+// serp_snapshots.city is NOT NULL with this sentinel for cityless rows —
+// Postgres treats NULL as distinct in unique constraints, which would
+// silently break the (query, city, device, fetched_at_day) dedupe. The
+// sentinel is a storage detail; the public profile API still surfaces
+// `city: null` for cityless queries.
+const CITY_SENTINEL = '_global';
+const toStoredCity = (city) => city || CITY_SENTINEL;
+const fromStoredCity = (city) => (city === CITY_SENTINEL ? null : city);
+
 // ── classification helpers (pure, test-friendly) ─────────────────────
 
 const DIRECTORY_DOMAINS = new Set([
@@ -297,7 +306,7 @@ class SerpProfiler {
     }
 
     const locationUsed = resolveLocation(city);
-    const raw = await dataforseo.serpOrganic(query, locationUsed);
+    const raw = await dataforseo.serpOrganic(query, locationUsed, device);
     const result = raw?.tasks?.[0]?.result?.[0];
     if (!result) {
       logger.warn(`[serp-profiler] no SERP data for "${query}" in ${locationUsed}`);
@@ -381,9 +390,7 @@ class SerpProfiler {
     const cutoff = new Date(Date.now() - refetchDays * 86400_000);
     const row = await db('serp_snapshots')
       .where('query', query)
-      .modify((qb) => {
-        if (city) qb.where('city', city); else qb.whereNull('city');
-      })
+      .where('city', toStoredCity(city))
       .where('device', device)
       .where('fetched_at', '>=', cutoff)
       .orderBy('fetched_at', 'desc')
@@ -393,7 +400,7 @@ class SerpProfiler {
 
     return {
       query: row.query,
-      city: row.city,
+      city: fromStoredCity(row.city),
       device: row.device,
       location_used: row.location_used,
       fetched_at: row.fetched_at,
@@ -434,7 +441,7 @@ class SerpProfiler {
                updated_at = now()
         `,
         [
-          profile.query, profile.city, profile.device, profile.location_used,
+          profile.query, toStoredCity(profile.city), profile.device, profile.location_used,
           profile.dominant_intent, profile.dominant_page_type,
           profile.recommended_asset_type, profile.confidence,
           profile.local_pack_present, profile.ai_overview_present,

@@ -8,7 +8,15 @@
  * Unique on (query, city, device, fetched_at_day). The day bucket lets
  * us tolerate multiple captures on the same day (debugging / re-runs)
  * while still pinning the dedupe to date granularity.
+ *
+ * `city` is NOT NULL with a sentinel default of '_global' for cityless
+ * (no-local-intent) queries. PostgreSQL treats NULL values as distinct
+ * inside unique constraints, so a nullable city column would let
+ * cityless reruns silently bypass ON CONFLICT and create duplicate
+ * cache rows per day — undermining the cache and inflating spend.
  */
+
+const CITY_SENTINEL = '_global';
 
 exports.up = async function (knex) {
   const exists = await knex.schema.hasTable('serp_snapshots');
@@ -17,7 +25,7 @@ exports.up = async function (knex) {
   await knex.schema.createTable('serp_snapshots', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.string('query', 500).notNullable();
-    t.string('city', 40);                 // canonical city; null when query has no local intent
+    t.string('city', 40).notNullable().defaultTo(CITY_SENTINEL); // '_global' sentinel for cityless queries (NULL would break unique)
     t.string('device', 20).notNullable().defaultTo('mobile');
     t.string('location_used', 200);       // exact DataForSEO location string
 
