@@ -1,10 +1,10 @@
 const FLEA_EXTERIOR_TIERS = [
-  { min: 1, max: 2500, initial: 55, followUp: 35 },
-  { min: 2501, max: 5000, initial: 75, followUp: 45 },
-  { min: 5001, max: 7500, initial: 95, followUp: 60 },
-  { min: 7501, max: 10000, initial: 115, followUp: 75 },
-  { min: 10001, max: 15000, initial: 155, followUp: 100 },
-  { min: 15001, max: 20000, initial: 195, followUp: 125 },
+  { min: 1, max: 2500, initial: 75, followUp: 50 },
+  { min: 2501, max: 5000, initial: 95, followUp: 60 },
+  { min: 5001, max: 7500, initial: 120, followUp: 75 },
+  { min: 7501, max: 10000, initial: 145, followUp: 95 },
+  { min: 10001, max: 15000, initial: 195, followUp: 130 },
+  { min: 15001, max: 20000, initial: 240, followUp: 155 },
 ];
 
 function parseData(data) {

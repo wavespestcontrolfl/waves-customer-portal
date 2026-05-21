@@ -339,7 +339,7 @@ describe('pest-control pricing hardening', () => {
       fleaExteriorAreaSqFt: 5000,
       fleaExteriorAreaSource: 'AI_ESTIMATE',
     });
-    expect(ai.total).toBe(470);
+    expect(ai.total).toBe(505);
     expect(ai.warnings).toContain('flea_exterior_area_ai_estimate_needs_confirmation');
     expect(ai.requiresManualReview).toBe(true);
 

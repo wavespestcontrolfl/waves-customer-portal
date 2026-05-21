@@ -142,14 +142,14 @@ describe('estimate v2 service toggle adapter', () => {
 
     const estimate = generateEstimate(input);
     const item = estimate.lineItems.find((line) => line.service === 'flea_package');
-    expect(item.total).toBe(470);
+    expect(item.total).toBe(505);
 
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.hasOneTime).toBe(true);
     expect(mapped.oneTime.specItems).toContainEqual(expect.objectContaining({
       service: 'flea_package',
       name: 'Flea Treatment Package — 2 visits',
-      price: 470,
+      price: 505,
       exteriorDetail: 'Exterior flea spray — 5,000 sf',
       fleaExteriorZones: ['PET_RESTING_AREA'],
     }));
