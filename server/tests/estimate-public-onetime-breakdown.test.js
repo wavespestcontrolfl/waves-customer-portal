@@ -1223,7 +1223,94 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Treatable lawn', value: '5,200 sq ft' },
       { label: 'Complexity', value: 'Moderate' },
     ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
     expect(payload.signals).toEqual([]);
+  });
+
+  test('Waves AI payload includes grass type for lawn-only estimates when present', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 1900,
+        lotSqFt: 7200,
+        lawnSqFt: 4200,
+        services: { lawn: { track: 'st_augustine' } },
+      },
+      result: {
+        recurring: { services: [{ name: 'Lawn Care' }] },
+      },
+    });
+
+    expect(payload.title).toContain('Waves AI reviewed your lawn');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Treatable lawn', value: '4,200 sq ft' },
+      { label: 'Grass type', value: 'St. Augustine' },
+    ]));
+  });
+
+  test('Waves AI payload uses later object turf fields when the first field is a placeholder', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        lawnSqFt: 4200,
+      },
+      result: {
+        property: {
+          turfProfile: { grassType: { track: 'N/A', grassType: 'bermuda' } },
+        },
+        recurring: { services: [{ name: 'Lawn Care' }] },
+      },
+    });
+
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Grass type', value: 'Bermuda' },
+    ]));
+  });
+
+  test('Waves AI payload does not invent a lawn grass type metric', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        lawnSqFt: 4200,
+        services: { lawn: { track: 'N/A' } },
+      },
+      result: {
+        recurring: { services: [{ name: 'Lawn Care' }] },
+      },
+    });
+
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Treatable lawn', value: '4,200 sq ft' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload preserves complexity for termite and lawn bundles', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2400,
+        lotSqFt: 9000,
+        lawnSqFt: 5200,
+        services: { lawn: { track: 'st_augustine' } },
+        landscapeComplexity: 'MODERATE',
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+        termitePerimeterFt: 180,
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Lawn Care' },
+            { name: 'Termite Bait Stations' },
+          ],
+        },
+      },
+    });
+
+    expect(payload.metrics).toHaveLength(6);
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Termite perimeter', value: '180 linear ft' },
+      { label: 'Complexity', value: 'Moderate' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
   });
 
   test('Waves AI payload shows Pool/Lanai when explicitly absent', () => {
@@ -1995,6 +2082,7 @@ describe('public estimate one-time breakdown', () => {
         homeSqFt: 2070,
         lotSqFt: 7326,
         lawnSqFt: 3200,
+        services: { lawn: { track: 'st_augustine' } },
         landscapeComplexity: 'SIMPLE',
       },
       result: {
@@ -2013,6 +2101,8 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('your lawn care estimate');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
+    expect(html).toContain('Grass type');
+    expect(html).toContain('St. Augustine');
     expect(html).toContain('Choose how you want to pay');
     expect(html).not.toContain('Choose how to start your lawn care plan');
     expect(html).toContain('Pick your first lawn care visit');

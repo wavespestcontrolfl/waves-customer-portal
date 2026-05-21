@@ -1252,6 +1252,72 @@ function prettySignalValue(value) {
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
+function formatLawnTurfType(value) {
+  if (value && typeof value === 'object') {
+    const fields = ['track', 'grassType', 'turfType', 'type', 'name'];
+    for (const field of fields) {
+      const formatted = formatLawnTurfType(value[field]);
+      if (formatted) return formatted;
+    }
+    return null;
+  }
+  if (typeof value === 'boolean' || value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (['unknown', 'n_a', 'na', 'none', 'null'].includes(key)) return null;
+  const labels = {
+    st_augustine: 'St. Augustine',
+    st_augustine_grass: 'St. Augustine',
+    saint_augustine: 'St. Augustine',
+    floratam: 'Floratam',
+    bermuda: 'Bermuda',
+    bahia: 'Bahia',
+    bahiagrass: 'Bahia',
+    zoysia: 'Zoysia',
+    empire_zoysia: 'Empire Zoysia',
+    centipede: 'Centipede',
+    mixed: 'Mixed',
+  };
+  return labels[key] || prettySignalValue(raw);
+}
+
+function lawnTurfTypeMetricValue({ inputs = {}, engineInputs = {}, property = {}, parsedData = {}, estResult = {} } = {}) {
+  const inputServices = inputs.services || {};
+  const engineServices = engineInputs.services || {};
+  const candidates = [
+    inputServices.lawn?.track,
+    inputServices.lawn?.grassType,
+    inputServices.lawn?.turfType,
+    engineServices.lawn?.track,
+    engineServices.lawn?.grassType,
+    engineServices.lawn?.turfType,
+    inputs.lawnTrack,
+    inputs.grassType,
+    inputs.turfType,
+    inputs.turf_type,
+    inputs.lawnGrassType,
+    engineInputs.lawnTrack,
+    engineInputs.grassType,
+    engineInputs.turfType,
+    engineInputs.turf_type,
+    engineInputs.lawnGrassType,
+    property.grassType,
+    property.turfType,
+    property.turfProfile?.grassType,
+    property.turfProfile?.turfType,
+    parsedData.turfProfile?.grassType,
+    parsedData.turfProfile?.turfType,
+    estResult.turfProfile?.grassType,
+    estResult.turfProfile?.turfType,
+  ];
+  for (const candidate of candidates) {
+    const formatted = formatLawnTurfType(candidate);
+    if (formatted) return formatted;
+  }
+  return null;
+}
+
 function normalizeFeaturePresence(value) {
   if (value === true) return 'yes';
   if (value === false) return 'no';
@@ -1305,6 +1371,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
 
   const estResult = parsedData.result || parsedData.engineResult || parsedData || {};
   const inputs = parsedData.inputs || parsedData.engineInputs || {};
+  const engineInputs = parsedData.engineInputs || {};
   const property = estResult.property || parsedData.property || {};
   const resultStats = estResult.results || parsedData.results || {};
   const recurringServices = Array.isArray(opts.recurringServices)
@@ -1359,6 +1426,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const termitePerimeterFt = hasTermiteBait
     ? firstPositiveNumber(resultStats.tmBait?.perim, property.termitePerimeterFt, inputs.termitePerimeterFt)
     : null;
+  const turfType = isLawnOnly ? lawnTurfTypeMetricValue({ inputs, engineInputs, property, parsedData, estResult }) : null;
   const aiAnalysis = parsedData.aiAnalysis || estResult.aiAnalysis || {};
   const inputFeatures = inputs.features || parsedData.features || {};
   const propertyFeatures = property.features || {};
@@ -1416,6 +1484,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     lotSqFt ? { label: 'Lot', value: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
     poolLanaiValue ? { label: 'Pool/Lanai', value: poolLanaiValue } : null,
     lawnSqFt ? { label: 'Treatable lawn', value: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
+    turfType ? { label: 'Grass type', value: turfType } : null,
     termitePerimeterFt ? { label: 'Termite perimeter', value: `${Math.round(termitePerimeterFt).toLocaleString()} linear ft` } : null,
     complexity ? { label: 'Complexity', value: complexity } : null,
   ]);
