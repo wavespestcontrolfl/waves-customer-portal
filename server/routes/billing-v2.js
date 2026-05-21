@@ -124,13 +124,6 @@ router.post('/cards', async (req, res, next) => {
 
     const { paymentMethodId } = await schema.validateAsync(req.body);
 
-    const currentDefault = await db('payment_methods')
-      .where({ customer_id: req.customerId, is_default: true })
-      .first('id');
-    const currentCustomer = await db('customers')
-      .where({ id: req.customerId })
-      .first('autopay_enabled');
-
     const card = await StripeService.savePaymentMethod(req.customerId, paymentMethodId);
 
     // Record consent — the portal add-card modal shows SaveCardConsent
@@ -149,25 +142,6 @@ router.post('/cards', async (req, res, next) => {
       });
     } catch (consentErr) {
       logger.error(`[billing-v2] Consent record failed: ${consentErr.message}`);
-    }
-
-    if (currentCustomer?.autopay_enabled && !currentDefault?.id) {
-      PaymentLifecycleEmail.sendAutopayEnabled({
-        customerId: req.customerId,
-        paymentMethodId: card.id,
-        enabledDate: card.created_at || new Date(),
-      }).catch((emailErr) => {
-        logger.warn(`[billing-v2] autopay enabled email failed for customer ${req.customerId}: ${emailErr.message}`);
-      });
-    } else {
-      PaymentLifecycleEmail.sendPaymentMethodUpdated({
-        customerId: req.customerId,
-        oldPaymentMethodId: currentDefault?.id || null,
-        newPaymentMethodId: card.id,
-        updatedAt: card.created_at || new Date(),
-      }).catch((emailErr) => {
-        logger.warn(`[billing-v2] payment method update email failed for customer ${req.customerId}: ${emailErr.message}`);
-      });
     }
 
     res.json({
