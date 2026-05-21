@@ -924,6 +924,13 @@ const LAWN_CARE_PERKS = [
   'Owner-operator accountability on every visit',
 ];
 
+const MOSQUITO_PERKS = [
+  'Directed barrier applications to mosquito resting zones',
+  'Standing-water and breeding-source notes after visits',
+  'Program options matched to seasonal or monthly pressure',
+  'Owner-operator accountability on every visit',
+];
+
 const TERMITE_BAIT_PERKS = [
   'Termite station service matched to your home perimeter',
   'Visit notes after completed termite protection visits',
@@ -1136,6 +1143,40 @@ function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
     && recurringRows.every((svc) => recurringServiceKey(svc) === 'lawn_care')
     && !detectPestOneTime(oneTimeRows)
     && oneTimeRows.every(isLawnCareOneTimeItem);
+}
+
+function isMosquitoOneTimeItem(item = {}) {
+  if (isActualMosquitoOneTimeItem(item)) return true;
+  const raw = [item.service, item.name, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return !raw || raw.includes('waveguard setup') || raw.includes('membership');
+}
+
+function isActualMosquitoOneTimeItem(item = {}) {
+  const category = serviceCategoryForOneTimeItem(item);
+  if (category === 'mosquito') return true;
+  const raw = [item.service, item.name, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('mosquito') || raw.includes('bti') || raw.includes('dunk');
+}
+
+function hasOnlyMosquitoServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  const recurringMosquitoOnly = recurringRows.length > 0
+    && recurringRows.every((svc) => recurringServiceKey(svc) === 'mosquito')
+    && oneTimeRows.every(isMosquitoOneTimeItem);
+  const oneTimeMosquitoOnly = recurringRows.length === 0
+    && oneTimeRows.length > 0
+    && oneTimeRows.some(isActualMosquitoOneTimeItem)
+    && oneTimeRows.every(isMosquitoOneTimeItem);
+  return !detectPestOneTime(oneTimeRows) && (recurringMosquitoOnly || oneTimeMosquitoOnly);
 }
 
 function isTreeShrubOneTimeItem(item = {}) {
@@ -1419,6 +1460,43 @@ function firstKnownTreeShrubSignal(...values) {
   return null;
 }
 
+function selectedMosquitoProgram(resultStats = {}) {
+  const rows = Array.isArray(resultStats.mq) ? resultStats.mq : [];
+  const selectedIndex = Number(resultStats.mqMeta?.ri);
+  return rows.find((row) => row?.recommended)
+    || (Number.isInteger(selectedIndex) ? rows[selectedIndex] : null)
+    || rows[0]
+    || null;
+}
+
+function mosquitoProgramMetricValue({ resultStats = {}, mosquitoInputs = {}, engineMosquitoInputs = {}, inputs = {} } = {}) {
+  const selected = selectedMosquitoProgram(resultStats);
+  const visits = firstPositiveNumber(selected?.v, selected?.visits, selected?.visitsPerYear);
+  const raw = String(
+    selected?.n
+    || selected?.name
+    || mosquitoInputs.tier
+    || mosquitoInputs.program
+    || engineMosquitoInputs.tier
+    || engineMosquitoInputs.program
+    || inputs.mosquitoProgram
+    || ''
+  ).trim();
+  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  const program = key.includes('monthly') || key.includes('monthly12') || visits === 12
+    ? 'Monthly'
+    : (key.includes('seasonal') || key.includes('seasonal9') || visits === 9 ? 'Seasonal' : prettySignalValue(raw));
+  if (!program) return null;
+  return visits ? `${program} (${Math.round(visits).toLocaleString()} visits/year)` : program;
+}
+
+function mosquitoPressureMetricValue(resultStats = {}) {
+  const pressure = Number(resultStats.mqMeta?.pr);
+  if (!Number.isFinite(pressure) || pressure <= 0) return null;
+  const rounded = Math.round(pressure * 100) / 100;
+  return `${rounded.toLocaleString('en-US', { maximumFractionDigits: 2 })}x`;
+}
+
 function treeShrubBedAreaMetricValue({ treeShrubInputs = {}, inputs = {}, property = {}, resultStats = {} } = {}) {
   const source = String(firstPresentValue(
     treeShrubInputs.bedAreaSource,
@@ -1548,6 +1626,14 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const inputServices = inputs.services || {};
   const engineServices = engineInputs.services || {};
   const serviceKeys = recurringServices.map(recurringServiceKey).filter(Boolean);
+  const intelligenceOneTimeItems = Array.isArray(opts.pricingBundle?.oneTimeBreakdown?.items)
+    ? opts.pricingBundle.oneTimeBreakdown.items
+    : normalizeOneTimeBreakdown(parsedData).items;
+  const oneTimeCategories = new Set(
+    intelligenceOneTimeItems
+      .map(serviceCategoryForOneTimeItem)
+      .filter(Boolean)
+  );
   const serviceNames = recurringServices
     .map((svc) => svc?.name || svc?.label || svc?.displayName || svc?.service)
     .filter(Boolean)
@@ -1569,6 +1655,19 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     || inputs.svcLawn === true;
   const isLawnOnly = serviceNames.length > 0
     && serviceNames.every((name) => /lawn/i.test(String(name)));
+  const hasMosquito = serviceKeys.includes('mosquito')
+    || !!inputServices.mosquito
+    || !!inputServices.oneTimeMosquito
+    || !!engineServices.mosquito
+    || !!engineServices.oneTimeMosquito
+    || inputs.svcMosquito === true
+    || inputs.svcOnetimeMosquito === true
+    || oneTimeCategories.has('mosquito');
+  const isMosquitoOnly = hasMosquito
+    && (
+      (serviceKeys.length > 0 && serviceKeys.every((key) => key === 'mosquito'))
+      || (serviceKeys.length === 0 && oneTimeCategories.size === 1 && oneTimeCategories.has('mosquito'))
+    );
   const hasTermiteBait = serviceNames.some((name) => isTermiteBaitServiceName(name))
     || !!inputServices.termiteBait
     || !!inputServices.termite;
@@ -1608,6 +1707,30 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const termitePerimeterFt = hasTermiteBait
     ? firstPositiveNumber(resultStats.tmBait?.perim, property.termitePerimeterFt, inputs.termitePerimeterFt)
     : null;
+  const mosquitoInputs = inputServices.mosquito || inputServices.oneTimeMosquito || {};
+  const engineMosquitoInputs = engineServices.mosquito || engineServices.oneTimeMosquito || {};
+  const mosquitoOneTimeItem = intelligenceOneTimeItems.find((item) => serviceCategoryForOneTimeItem(item) === 'mosquito') || {};
+  const mosquitoTreatmentAreaSqFt = isMosquitoOnly
+    ? firstPositiveNumber(
+      resultStats.mqMeta?.treatableSqFt,
+      mosquitoInputs.treatableSqFt,
+      mosquitoInputs.treatableAreaSqFt,
+      engineMosquitoInputs.treatableSqFt,
+      engineMosquitoInputs.treatableAreaSqFt,
+      mosquitoOneTimeItem.treatableSqFt,
+      mosquitoOneTimeItem.treatableAreaSqFt,
+      mosquitoOneTimeItem.mosquitoTreatableSqFt,
+      mosquitoOneTimeItem.mosquitoTreatmentAreaSqFt,
+      inputs.mosquitoTreatableSqFt,
+      inputs.mosquitoTreatmentAreaSqFt,
+      property.mosquitoTreatableSqFt,
+      property.mosquitoTreatmentAreaSqFt,
+    )
+    : null;
+  const mosquitoProgram = isMosquitoOnly
+    ? mosquitoProgramMetricValue({ resultStats, mosquitoInputs, engineMosquitoInputs, inputs })
+    : null;
+  const mosquitoPressure = isMosquitoOnly ? mosquitoPressureMetricValue(resultStats) : null;
   const turfType = isLawnOnly ? lawnTurfTypeMetricValue({ inputs, engineInputs, property, parsedData, estResult }) : null;
   const aiAnalysis = parsedData.aiAnalysis || estResult.aiAnalysis || {};
   const inputFeatures = inputs.features || parsedData.features || {};
@@ -1675,6 +1798,9 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const metrics = dedupeMetrics([
     homeSqFt ? { label: 'Home', value: `${Math.round(homeSqFt).toLocaleString()} sq ft` } : null,
     lotSqFt ? { label: 'Lot', value: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
+    mosquitoTreatmentAreaSqFt ? { label: 'Mosquito treatment area', value: `${Math.round(mosquitoTreatmentAreaSqFt).toLocaleString()} sq ft` } : null,
+    mosquitoProgram ? { label: 'Mosquito program', value: mosquitoProgram } : null,
+    mosquitoPressure ? { label: 'Mosquito pressure', value: mosquitoPressure } : null,
     poolLanaiValue ? { label: 'Pool/Lanai', value: poolLanaiValue } : null,
     treeShrubBedArea ? { label: 'Ornamental beds', value: `${Math.round(treeShrubBedArea).toLocaleString()} sq ft` } : null,
     treeShrubProfile ? { label: 'Trees/Shrubs', value: treeShrubProfile } : null,
@@ -1689,9 +1815,11 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     ? 'Waves AI reviewed your lawn before pricing this estimate'
     : (isTreeShrubOnly
       ? 'Waves AI reviewed your beds and trees before pricing this estimate'
-      : (isTermiteBaitOnly
-        ? 'Waves AI reviewed your termite perimeter before pricing this estimate'
-        : 'Waves AI reviewed your property before pricing this estimate'));
+      : (isMosquitoOnly
+        ? 'Waves AI reviewed your mosquito treatment zones before pricing this estimate'
+        : (isTermiteBaitOnly
+          ? 'Waves AI reviewed your termite perimeter before pricing this estimate'
+          : 'Waves AI reviewed your property before pricing this estimate')));
   const intelligenceBody = isLawnOnly
     ? (satelliteUrl || metrics.length
       ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
@@ -1700,13 +1828,17 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
       ? (satelliteUrl || metrics.length
         ? 'Waves AI reviews satellite imagery, property records, and visible bed and tree conditions to shape your tree & shrub plan.'
         : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your tree & shrub plan.')
-      : (isTermiteBaitOnly
+      : (isMosquitoOnly
         ? (satelliteUrl || metrics.length
-          ? 'Waves AI reviews satellite imagery, property records, and termite perimeter details to shape your termite protection plan.'
-          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your termite protection plan.')
-        : (satelliteUrl || metrics.length
-          ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
-          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')));
+          ? 'Waves AI reviews satellite imagery, property records, and mosquito pressure factors to shape your mosquito control plan.'
+          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your mosquito control plan.')
+        : (isTermiteBaitOnly
+          ? (satelliteUrl || metrics.length
+            ? 'Waves AI reviews satellite imagery, property records, and termite perimeter details to shape your termite protection plan.'
+            : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your termite protection plan.')
+          : (satelliteUrl || metrics.length
+            ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
+            : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.'))));
   return {
     eyebrow: 'Waves AI',
     title: intelligenceTitle,
@@ -1805,6 +1937,7 @@ function renderPage(token, estimate, estData) {
   const manualDiscount = normalizeManualDiscountSummary(estData);
   const manualDiscountMonthly = manualDiscount ? Math.round((manualDiscount.amount / 12) * 100) / 100 : 0;
   const hasOnlyLawnCareServices = hasOnlyLawnCareServiceMix(recurring, oneTimeItems);
+  const hasOnlyMosquitoServices = hasOnlyMosquitoServiceMix(recurring, oneTimeItems);
   const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteBaitServices = hasOnlyTermiteBaitServiceMix(recurring, oneTimeItems);
   const hasOnlyTermiteTrenchingServices = hasOnlyTermiteTrenchingServiceMix(recurring, oneTimeItems);
@@ -1834,8 +1967,34 @@ function renderPage(token, estimate, estData) {
         finalSubhead: "Let's get your lawn on the schedule.",
         finalBody: 'No payment today. No surprise increases.',
       }
-    : (hasOnlyTreeShrubServices
+    : (hasOnlyMosquitoServices
       ? {
+          heroSuffix: "here's your mosquito control estimate.",
+          recurringAssurance: 'Your plan targets shaded resting zones, lanai edges, and breeding-source pressure around your property.',
+          aggregateDayLabel: 'mosquito control',
+          billingHeading: 'Choose how you want to pay',
+          billingLede: null,
+          payAfterTitle: 'Pay after each visit',
+          payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+          noPaymentCopy: 'No payment is charged on this page. Your first mosquito control visit will be billed after completion.',
+          bookingTitle: 'Pick your first mosquito control visit',
+          bookingSubhead: 'Choose a window to get your mosquito control plan started.',
+          payPrefHeading: 'Choose how you want to pay',
+          payPrefCardTitle: 'Pay after each visit',
+          payPrefCardSub: 'Billed after each completed service through autopay.',
+          prepayTitle: 'Pay the 12-month plan in full',
+          prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval.',
+          prepayButtonSub: 'Approve annual prepay for the mosquito control plan.',
+          cardConfirmTitle: 'Confirm and save card',
+          cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+          perksHeading: 'What your mosquito control plan includes',
+          perksBody: 'Your plan includes directed barrier treatments, resting-zone targeting, and source-reduction notes for Southwest Florida mosquito pressure.',
+          finalHeading: 'Ready to start mosquito control?',
+          finalSubhead: "Let's get your mosquito plan on the schedule.",
+          finalBody: 'No payment today. No surprise increases.',
+        }
+      : (hasOnlyTreeShrubServices
+        ? {
           heroSuffix: "here's your tree & shrub estimate.",
           recurringAssurance: 'Your plan includes scheduled ornamental treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
           aggregateDayLabel: 'tree & shrub care',
@@ -1936,7 +2095,7 @@ function renderPage(token, estimate, estData) {
               finalHeading: 'Go Waves! Wave Goodbye to Pests!',
               finalSubhead: '',
               finalBody: '',
-            })));
+            }))));
 
   // One-time toggle — admin opted this estimate into letting the customer
   // pick "single visit" instead of a recurring plan. Only renders when the
@@ -2323,7 +2482,9 @@ function renderPage(token, estimate, estData) {
 
   const perksHtml = (hasOnlyLawnCareServices
     ? LAWN_CARE_PERKS
-    : (hasOnlyTermiteBaitServices ? TERMITE_BAIT_PERKS : PERKS))
+    : (hasOnlyMosquitoServices
+      ? MOSQUITO_PERKS
+      : (hasOnlyTermiteBaitServices ? TERMITE_BAIT_PERKS : PERKS)))
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
   const reviewFallbacks = LOCATIONS.slice(0, 3).map((l) => ({
@@ -2361,7 +2522,8 @@ function renderPage(token, estimate, estData) {
   const askPrompts = (() => {
     const servicePrompts = [];
     const hasLawn = recurring.some((s) => /lawn|turf/i.test(s?.name || s?.label || s?.service || ''));
-    const hasMosquito = recurring.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''));
+    const hasMosquito = recurring.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''))
+      || oneTimeItems.some((item) => serviceCategoryForOneTimeItem(item) === 'mosquito');
     const hasTermite = recurring.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''));
     const hasTreeShrub = recurring.some((s) => /\btree\b|shrub/i.test(s?.name || s?.label || s?.service || ''));
     const hasRodent = recurring.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
@@ -5863,7 +6025,7 @@ function deriveServiceCategory(estData = {}, recurringServices = [], oneTimeItem
     services.pest || inputs.svcPest ? 'pest_control' : null,
     services.lawn || services.lawnCare || inputs.svcLawn ? 'lawn_care' : null,
     services.treeShrub || services.tree_shrub || inputs.svcTreeShrub ? 'tree_shrub' : null,
-    services.mosquito || inputs.svcMosquito ? 'mosquito' : null,
+    services.mosquito || services.oneTimeMosquito || inputs.svcMosquito || inputs.svcOnetimeMosquito ? 'mosquito' : null,
     services.termiteBait || services.termite || inputs.svcTermiteBait ? 'termite_bait' : null,
     services.trenching || inputs.svcTrenching ? 'termite_trenching' : null,
     services.rodent || inputs.svcRodent ? 'rodent' : null,
