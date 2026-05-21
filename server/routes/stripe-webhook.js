@@ -18,6 +18,7 @@ const {
 const { computeChargeAmount } = require('../services/stripe-pricing');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
+const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(s => s !== 'processing');
 
 // Build a "First Last" string from a customer row, falling back to phone
@@ -733,6 +734,16 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       const existing = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
       const saved = existing || await StripeService.savePaymentMethod(wavesCustomerId, stripePmId);
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      if (!existing) {
+        PaymentLifecycleEmail.sendPaymentMethodUpdated({
+          customerId: wavesCustomerId,
+          newPaymentMethodId: saved.id,
+          updatedAt: saved.created_at || new Date(),
+          idempotencyKey: `payment.method_updated:${wavesCustomerId}:${saved.id}:save_card_opt_in`,
+        }).catch((emailErr) => {
+          logger.warn(`[stripe-webhook] Save-card email failed for PI ${piId}: ${emailErr.message}`);
+        });
+      }
       logger.info(`[stripe-webhook] Save-card opt-in persisted: pm ${stripePmId} → payment_methods ${saved.id}`);
     } catch (err) {
       // Non-fatal — the charge already succeeded. Log loudly so we can
@@ -967,25 +978,44 @@ async function handleChargeRefunded(charge) {
   const chargeId = charge.id;
   logger.info(`[stripe-webhook] Charge refunded: ${chargeId}`);
 
-  const refundAmountCents = charge.amount_refunded || 0;
+  const latestRefund = Array.isArray(charge.refunds?.data) ? charge.refunds.data[0] : null;
+  const refundId = latestRefund?.id || charge.latest_refund || null;
+  const refundDate = latestRefund?.created ? new Date(latestRefund.created * 1000) : new Date();
+  const refundReason = latestRefund?.reason || 'Account adjustment';
+  const refundAmountCents = latestRefund?.amount || charge.amount_refunded || 0;
   const refundAmountDollars = refundAmountCents / 100;
+  const cumulativeRefundAmountDollars = (charge.amount_refunded || refundAmountCents) / 100;
   const isFullRefund = charge.refunded === true;
 
   await db('payments')
     .where({ stripe_charge_id: chargeId })
     .update({
       status: isFullRefund ? 'refunded' : 'paid',
-      refund_amount: refundAmountDollars,
+      refund_amount: cumulativeRefundAmountDollars,
       refund_status: isFullRefund ? 'full' : 'partial',
+      stripe_refund_id: refundId,
     });
+
+  const refundedPayment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+  if (refundedPayment?.customer_id) {
+    PaymentLifecycleEmail.sendRefundIssued({
+      customerId: refundedPayment.customer_id,
+      paymentId: refundedPayment.id,
+      refundId: refundId || chargeId,
+      refundAmount: refundAmountDollars,
+      refundDate,
+      refundReason,
+    }).catch((emailErr) => {
+      logger.warn(`[stripe-webhook] Refund issued email failed for charge ${chargeId}: ${emailErr.message}`);
+    });
+  }
 
   // Notify admin bell + push of refund
   try {
-    const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
     await triggerNotification('payment_refunded', {
       amount: refundAmountDollars,
       isFullRefund,
-      invoiceId: payment?.invoice_id || null,
+      invoiceId: refundedPayment?.invoice_id || null,
     });
   } catch (e) {
     logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);

@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
+const PaymentLifecycleEmail = require('../payment-lifecycle-email');
 
 class PaymentExpiry {
   /**
@@ -31,7 +32,17 @@ class PaymentExpiry {
     for (const card of expiringCards) {
       try {
         const customer = await db('customers').where({ id: card.customer_id }).first();
-        if (!customer || !customer.phone) continue;
+        if (!customer) continue;
+
+        const emailPromise = PaymentLifecycleEmail.sendPaymentMethodExpiring({
+          customerId: card.customer_id,
+          paymentMethodId: card.id,
+          now,
+        }).catch((emailErr) => {
+          logger.warn(`Payment expiry email failed for card ${card.id}: ${emailErr.message}`);
+        });
+
+        if (!customer.phone) { await emailPromise; continue; }
 
         // 30-day cooldown per customer
         const recentNotice = await db('sms_log')
@@ -39,7 +50,7 @@ class PaymentExpiry {
           .where('created_at', '>', db.raw("NOW() - INTERVAL '30 days'"))
           .first();
 
-        if (recentNotice) continue;
+        if (recentNotice) { await emailPromise; continue; }
 
         const expLabel = `${String(card.exp_month).padStart(2, '0')}/${card.exp_year}`;
         const brandLabel = card.card_brand ? `${card.card_brand} ` : '';
@@ -92,6 +103,7 @@ class PaymentExpiry {
           notes: `Card ****${card.last_four} expires ${expLabel}`,
         });
 
+        await emailPromise;
         notified++;
       } catch (err) {
         logger.error(`Payment expiry check failed for card ${card.id}: ${err.message}`);

@@ -503,6 +503,31 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('sendTemplate refuses paused templates before queueing', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ status: 'paused', active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+    });
+
+    try {
+      await EmailTemplates.sendTemplate({
+        templateKey: 'estimate.expiring_notice',
+        to: 'sam@example.com',
+        payload: {
+          first_name: 'Sam',
+          estimate_url: 'https://example.com/estimate/est-1',
+          expires_at: 'June 12',
+        },
+      });
+      throw new Error('expected paused template to be rejected');
+    } catch (err) {
+      expect(err.message).toBe('email template estimate.expiring_notice is paused');
+      expect(err.status).toBe(409);
+      expect(err.code).toBe('EMAIL_TEMPLATE_DISABLED');
+    }
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
   test('sendTemplate snapshots and applies suppression group overrides', async () => {
     const suppression = {
       id: 'suppression-1',

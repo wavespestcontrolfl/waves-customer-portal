@@ -7,6 +7,7 @@ const logger = require('../services/logger');
 const { logAutopay, getRecent } = require('../services/autopay-log');
 const { isChargeableAutopayMethod } = require('../services/autopay-eligibility');
 const { computeChargeAmount } = require('../services/stripe-pricing');
+const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
 router.use(authenticate);
 
@@ -221,6 +222,31 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       await logAutopay(req.customerId, evt.type, {
         paymentMethodId: evt.paymentMethodId || null,
         details: evt.details || {},
+      });
+    }
+
+    const enabledEvent = events.find((evt) => evt.type === 'autopay_enabled');
+    const methodChangedEvent = events.find((evt) => evt.type === 'payment_method_changed');
+    const activePaymentMethodId = updates.autopay_payment_method_id !== undefined
+      ? updates.autopay_payment_method_id
+      : (selectedPaymentMethod?.id || current.autopay_payment_method_id || null);
+
+    if (enabledEvent && activePaymentMethodId) {
+      PaymentLifecycleEmail.sendAutopayEnabled({
+        customerId: req.customerId,
+        paymentMethodId: activePaymentMethodId,
+        enabledDate: new Date(),
+      }).catch((emailErr) => {
+        logger.warn(`[customer-autopay] autopay enabled email failed for customer ${req.customerId}: ${emailErr.message}`);
+      });
+    } else if (methodChangedEvent?.paymentMethodId && willBeEnabled) {
+      PaymentLifecycleEmail.sendPaymentMethodUpdated({
+        customerId: req.customerId,
+        oldPaymentMethodId: methodChangedEvent.details?.previous_payment_method_id || null,
+        newPaymentMethodId: methodChangedEvent.paymentMethodId,
+        updatedAt: new Date(),
+      }).catch((emailErr) => {
+        logger.warn(`[customer-autopay] payment method update email failed for customer ${req.customerId}: ${emailErr.message}`);
       });
     }
 

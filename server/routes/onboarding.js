@@ -12,6 +12,7 @@ const {
   resolveBillingCadence,
 } = require('../services/billing-cadence');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 
@@ -252,6 +253,16 @@ router.post('/:token/save-card', loadSession, async (req, res, next) => {
       enableAutopay: false,
       makeDefault: !hadActiveAutopay,
     });
+    if (!hadActiveAutopay) {
+      PaymentLifecycleEmail.sendPaymentMethodUpdated({
+        customerId: req.customer.id,
+        newPaymentMethodId: card.id,
+        updatedAt: card.created_at || new Date(),
+        idempotencyKey: `payment.method_updated:${req.customer.id}:${card.id}:onboarding:${req.session.id}`,
+      }).catch((emailErr) => {
+        logger.warn(`[onboarding] payment method update email failed for session ${req.session.id}: ${emailErr.message}`);
+      });
+    }
 
     // Record consent — the onboarding flow shows SaveCardConsent as
     // locked + checked because saving is a precondition of finishing

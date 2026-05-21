@@ -3,6 +3,7 @@ const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
+const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -839,6 +840,16 @@ const StripeService = {
       }
 
       const updated = await db('payments').where({ id: paymentId }).first();
+      PaymentLifecycleEmail.sendRefundIssued({
+        customerId: updated?.customer_id || payment.customer_id,
+        paymentId,
+        refundId: refund.id,
+        refundAmount: refundAmountDollars,
+        refundDate: refund.created ? new Date(refund.created * 1000) : new Date(),
+        refundReason: reason || 'Account adjustment',
+      }).catch((emailErr) => {
+        logger.warn(`[stripe] Refund issued email failed for payment ${paymentId}: ${emailErr.message}`);
+      });
       logger.info(`[stripe] Refund processed: $${refundAmountDollars} for payment ${paymentId}, refund ${refund.id}`);
       return updated;
     } catch (err) {

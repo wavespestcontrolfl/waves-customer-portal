@@ -6,6 +6,8 @@ const PaymentRouter = require('../services/payment-router');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
+const logger = require('../services/logger');
+const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 
 router.use(authenticate);
 
@@ -139,7 +141,7 @@ router.post('/cards', async (req, res, next) => {
         userAgent: req.get('user-agent') || null,
       });
     } catch (consentErr) {
-      require('../services/logger').error(`[billing-v2] Consent record failed: ${consentErr.message}`);
+      logger.error(`[billing-v2] Consent record failed: ${consentErr.message}`);
     }
 
     res.json({
@@ -241,6 +243,10 @@ router.get('/balance', async (req, res, next) => {
 // =========================================================================
 router.put('/cards/:id/default', async (req, res, next) => {
   try {
+    const currentDefault = await db('payment_methods')
+      .where({ customer_id: req.customerId, is_default: true })
+      .first('id');
+
     const card = await db('payment_methods')
       .where({ id: req.params.id, customer_id: req.customerId })
       .first();
@@ -254,6 +260,17 @@ router.put('/cards/:id/default', async (req, res, next) => {
     await db('payment_methods')
       .where({ id: req.params.id })
       .update({ is_default: true });
+
+    if (currentDefault?.id !== card.id) {
+      PaymentLifecycleEmail.sendPaymentMethodUpdated({
+        customerId: req.customerId,
+        oldPaymentMethodId: currentDefault?.id || null,
+        newPaymentMethodId: card.id,
+        updatedAt: new Date(),
+      }).catch((emailErr) => {
+        logger.warn(`[billing-v2] default payment method email failed for customer ${req.customerId}: ${emailErr.message}`);
+      });
+    }
 
     res.json({ success: true });
   } catch (err) {
