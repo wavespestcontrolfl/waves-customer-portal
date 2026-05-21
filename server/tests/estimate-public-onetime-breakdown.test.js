@@ -525,6 +525,40 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('phase 0 generic rodent recurring estimates do not use pest copy or gates', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-rodent-recurring-test',
+      estimate_data: {
+        result: {
+          recurring: {
+            monthlyTotal: 49,
+            annualAfterDiscount: 588,
+            services: [{ name: 'Rodent Remediation', mo: 49 }],
+          },
+        },
+      },
+      monthly_total: 49,
+      annual_total: 588,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'rodent',
+      label: 'Rodent Remediation',
+      isRecurring: true,
+      isPest: false,
+    }));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardTierUi: false,
+      showWaveGuardPerks: false,
+      showWaveGuardSetupFee: false,
+      showPestRecurringAddOns: false,
+    }));
+    expect(payload.askChips).toContain('Trapping vs exclusion?');
+    expect(payload.askChips).not.toContain('What products do you use?');
+  });
+
   test('phase 0 render flags do not expose WaveGuard setup or pest add-ons for one-time-only quotes', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-onetime-guard-test',
@@ -561,6 +595,7 @@ describe('public estimate one-time breakdown', () => {
 
   test('deriveServiceCategory returns pest, trenching, and bundle categories from normalized services', () => {
     expect(deriveServiceCategory({}, [{ name: 'Pest Control' }], [])).toBe('pest_control');
+    expect(deriveServiceCategory({}, [{ name: 'Rodent Remediation' }], [])).toBe('rodent');
     expect(deriveServiceCategory({}, [], [{ service: 'trenching', name: 'Trenching', price: 500 }]))
       .toBe('termite_trenching');
     expect(deriveServiceCategory({}, [{ service: 'lawn_care', name: 'Lawn Care' }], [{ service: 'one_time_pest', name: 'One-Time Pest', price: 200 }]))

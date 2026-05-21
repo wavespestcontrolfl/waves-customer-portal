@@ -1067,6 +1067,7 @@ function recurringServiceKey(svc = {}) {
     || raw.includes('rodent_monitoring')
     || (raw.includes('rodent') && /bait|station|monitor/.test(raw))
   ) return 'rodent_bait';
+  if (/\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(words)) return 'rodent';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
@@ -1079,7 +1080,7 @@ function recurringServiceKey(svc = {}) {
 function recurringServiceReceivesTierDiscount(svc = {}) {
   const key = recurringServiceKey(svc);
   if (svc.waveGuardDiscountEligible === false || svc.discountEligible === false || svc.excludeFromPctDiscount === true) return false;
-  if (key === 'palm_injection' || key === 'rodent_bait') return false;
+  if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
   return true;
 }
 
@@ -1106,6 +1107,7 @@ function recurringServiceDisplayName(key) {
     case 'termite_bait': return 'Termite Bait';
     case 'palm_injection': return 'Palm Injection';
     case 'rodent_bait': return 'Rodent Bait Stations';
+    case 'rodent': return 'Rodent Remediation';
     default: return null;
   }
 }
@@ -3438,19 +3440,20 @@ async function handleEstimateView(req, res, next) {
     }
 
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
-    const quoteRequirement = resolveEstimateQuoteRequirement(null, estData);
+    let pricingBundleForView = null;
+    try {
+      pricingBundleForView = await buildPricingBundle(estimate);
+    } catch (e) {
+      logger.warn(`[estimate-view] pricing bundle quote guard skipped: ${e.message}`);
+    }
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundleForView, estData);
 
     // One-time alternative price for the inline toggle. Mirrors the
     // resolveAcceptOneTimeTotal logic on accept so the customer sees the
     // same number that gets committed if they pick "single visit".
     let oneTimeChoicePrice = 0;
     if (estimate.show_one_time_option) {
-      try {
-        const bundle = await buildPricingBundle(estimate);
-        oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, bundle);
-      } catch (e) {
-        oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, null);
-      }
+      oneTimeChoicePrice = resolveAcceptOneTimeTotal(estimate, pricingBundleForView);
     }
 
     sendEstimatePage(res, req.params.token, {
@@ -5366,7 +5369,7 @@ function isTermiteBaitServiceName(name) {
 
 function isRodentServiceName(name) {
   const key = recurringServiceKey({ name });
-  if (key === 'rodent_bait') return true;
+  if (key === 'rodent_bait' || key === 'rodent') return true;
   const n = String(name || '').toLowerCase();
   return /\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(n);
 }
@@ -5434,6 +5437,7 @@ function categoryForRecurringServiceKey(key) {
     case 'tree_shrub': return 'tree_shrub';
     case 'mosquito': return 'mosquito';
     case 'termite_bait': return 'termite_bait';
+    case 'rodent': return 'rodent';
     case 'rodent_bait': return 'rodent';
     case 'termite_trenching': return 'termite_trenching';
     case 'palm_injection': return 'tree_shrub';
