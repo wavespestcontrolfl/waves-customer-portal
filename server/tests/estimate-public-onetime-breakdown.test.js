@@ -2618,6 +2618,13 @@ describe('public estimate one-time breakdown', () => {
       billingTerm: 'prepay_annual',
       annualPrepayAmount: 660,
     })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660. Invoice follow-up needed.');
+
+    expect(buildAcceptOfficeFallback({
+      customerName: null,
+      address: null,
+      waveguardTier: 'Bronze',
+      monthlyTotal: 89,
+    })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89/mo. Onboarding link sent.');
   });
 
   test('accept notification payload avoids WaveGuard onboarding copy for one-time accepts', () => {

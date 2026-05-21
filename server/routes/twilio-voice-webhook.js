@@ -613,15 +613,17 @@ router.post('/lead-alert-announce', async (req, res) => {
   try {
     const leadName = req.query.leadName || req.body.leadName || 'a new caller';
     const leadPhoneRaw = req.query.leadPhone || req.body.leadPhone || '';
+    const eventLabel = String(req.query.eventLabel || req.body.eventLabel || 'New Waves lead')
+      .replace(/[^\w\s.,:-]/g, '')
+      .trim()
+      .slice(0, 80) || 'New Waves lead';
     const spokenPhone = leadPhoneRaw.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1. $2. $3.');
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Pause length="1"/>
-  <Say voice="alice">New Waves lead. ${leadName}. Phone ${spokenPhone}</Say>
-  <Pause length="1"/>
-  <Say voice="alice">Again. ${leadName}. Phone ${spokenPhone}</Say>
-</Response>`;
-    res.type('text/xml').send(twiml);
+    const twiml = new VoiceResponse();
+    twiml.pause({ length: 1 });
+    twiml.say({ voice: 'alice' }, `${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
+    twiml.pause({ length: 1 });
+    twiml.say({ voice: 'alice' }, `Again. ${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
+    res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Lead alert announce error: ${err.message}`);
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>New lead received. Check admin portal.</Say></Response>');
@@ -634,6 +636,10 @@ router.post('/lead-alert-announce', async (req, res) => {
 router.post('/outbound-admin-prompt', async (req, res) => {
   try {
     const { callLogId, customerNumber, callerIdNumber, leadName: rawName = '' } = req.query;
+    const eventLabel = String(req.query.eventLabel || req.body.eventLabel || '')
+      .replace(/[^\w\s.,:-]/g, '')
+      .trim()
+      .slice(0, 80);
     const firstName = rawName.trim().split(/\s+/)[0] || 'a customer';
 
     const params = new URLSearchParams();
@@ -651,7 +657,7 @@ router.post('/outbound-admin-prompt', async (req, res) => {
 
     gather.say(
       { voice: 'Polly.Joanna' },
-      `Calling ${firstName}. Press 1 to connect.`
+      `${eventLabel ? `${eventLabel}. ` : ''}Calling ${firstName}. Press 1 to connect.`
     );
 
     twiml.say('No response received. Goodbye.');
