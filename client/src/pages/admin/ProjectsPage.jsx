@@ -240,13 +240,46 @@ async function readJsonResponse(response, fallbackMessage) {
     payload = {};
   }
   if (!response.ok) {
-    throw new Error(
+    const err = new Error(
       payload?.error ||
         fallbackMessage ||
         `Request failed (${response.status})`,
     );
+    err.status = response.status;
+    err.payload = payload;
+    throw err;
   }
   return payload;
+}
+
+function money(value) {
+  const amount = Number(value || 0);
+  return amount.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: amount % 1 === 0 ? 0 : 2,
+  });
+}
+
+function closeoutBillingLabel(billing = {}) {
+  if (!billing.required) return "No billing hold";
+  if (billing.resolved) {
+    if (billing.reason === "prepaid_covered") return `Prepaid covers ${money(billing.amount)}`;
+    if (billing.invoiceId) return `Invoice ready ${money(billing.amount)}`;
+    return `Billing resolved ${money(billing.amount)}`;
+  }
+  return `Billing required ${money(billing.amount)}`;
+}
+
+function closeoutFollowupLabel(followup = {}) {
+  if (!followup.required) return "No follow-up automation";
+  if (followup.unsupported || followup.reason === "auto_schedule_not_implemented") {
+    return "Auto-schedule not available";
+  }
+  if (followup.suggestedDate && followup.days != null) {
+    return `Alert for ${fmtDate(followup.suggestedDate)} (${followup.days} days)`;
+  }
+  return "Follow-up alert will be created";
 }
 
 function deliverySummary(channels = {}) {
@@ -1387,6 +1420,12 @@ function ProjectDetail({
   const project = data?.project;
   const typeCfg =
     project && typesRegistry ? typesRegistry[project.project_type] : null;
+  const closeoutPreview = data?.closeoutPreview || null;
+  const billingBlocksClose =
+    closeoutPreview?.billing?.required && !closeoutPreview?.billing?.resolved;
+  const followupBlocksClose = !!closeoutPreview?.followup?.unsupported;
+  const previewBlocksClose = closeoutPreview?.canClose === false;
+  const closeoutBlocksClose = billingBlocksClose || followupBlocksClose || previewBlocksClose;
   const hasPrepGuide = project
     ? PROJECT_TYPES_WITH_PREP_GUIDES.has(project.project_type)
     : false;
@@ -1651,11 +1690,42 @@ function ProjectDetail({
       setError("Admin access required to close projects.");
       return;
     }
-    if (
-      !confirm(
-        "Close this project? It stays accessible but is filtered out of Sent view.",
-      )
-    )
+    if (billingBlocksClose) {
+      setError(
+        `${closeoutBillingLabel(closeoutPreview.billing)}. Create or collect the invoice before closing this project.`,
+      );
+      return;
+    }
+    if (followupBlocksClose) {
+      setError(
+        "Auto-schedule follow-up is not available yet. Change the follow-up policy to alert or schedule the follow-up manually before closing.",
+      );
+      return;
+    }
+    if (previewBlocksClose) {
+      const status = closeoutPreview?.serviceCompletion?.status;
+      setError(
+        status
+          ? `This project cannot close while the linked service is ${status}.`
+          : "This project cannot close from its current service state.",
+      );
+      return;
+    }
+    const closeoutLines = [
+      closeoutPreview?.serviceCompletion?.willCompleteService
+        ? `Service: complete ${closeoutPreview.serviceCompletion.serviceType || "linked service"}`
+        : null,
+      closeoutPreview?.billing ? `Billing: ${closeoutBillingLabel(closeoutPreview.billing)}` : null,
+      closeoutPreview?.followup ? `Follow-up: ${closeoutFollowupLabel(closeoutPreview.followup)}` : null,
+      closeoutPreview?.portal
+        ? `Portal: ${closeoutPreview.portal.attached ? "attached" : "token-only"}`
+        : null,
+    ].filter(Boolean);
+    const confirmText = [
+      "Close this project? It stays accessible but is filtered out of Sent view.",
+      closeoutLines.length ? `\n${closeoutLines.join("\n")}` : "",
+    ].join("");
+    if (!confirm(confirmText))
       return;
     setSaving(true);
     setError("");
@@ -1673,9 +1743,24 @@ function ProjectDetail({
         : d.serviceCompleted
         ? " Report remains token-only for this customer."
         : "";
-      setNotice(`Project closed.${serviceText}${portalText}`);
+      const followupText = d.followup?.alert?.created
+        ? " Follow-up alert created."
+        : d.followup?.alert?.existingAlertId
+          ? " Existing follow-up alert kept."
+          : "";
+      setNotice(`Project closed.${serviceText}${portalText}${followupText}`);
     } catch (e) {
-      setError(e.message || "Could not close project");
+      if (e.payload?.code === "project_completion_billing_required") {
+        setError(
+          `${e.message}. Amount: ${money(e.payload?.details?.amount || 0)}. Create or collect the invoice before closing.`,
+        );
+      } else if (e.payload?.code === "project_followup_auto_schedule_unsupported") {
+        setError(
+          "Auto-schedule follow-up is not available yet. Change the follow-up policy to alert or schedule the follow-up manually before closing.",
+        );
+      } else {
+        setError(e.message || "Could not close project");
+      }
     } finally {
       setSaving(false);
     }
@@ -2316,6 +2401,96 @@ function ProjectDetail({
             </div>
           )}
         </div>{" "}
+        {canAdminActions && closeoutPreview && project.status !== "closed" && (
+          <div
+            style={{
+              border: `1px solid ${closeoutBlocksClose ? "#FCA5A5" : D.border}`,
+              background: closeoutBlocksClose ? "#FEF2F2" : "#F8FAFC",
+              borderRadius: 8,
+              padding: 12,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                color: D.heading,
+                fontSize: 13,
+                fontWeight: 850,
+                marginBottom: 8,
+              }}
+            >
+              <ClipboardList size={15} />
+              Closeout
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+                gap: 8,
+                fontSize: 12,
+              }}
+            >
+              <div>
+                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                  Service
+                </div>
+                <div style={{ color: D.heading, fontWeight: 800 }}>
+                  {closeoutPreview.serviceCompletion?.willCompleteService
+                    ? `Complete ${closeoutPreview.serviceCompletion.serviceType || "linked service"}`
+                    : closeoutPreview.serviceCompletion?.linked
+                      ? "No service completion"
+                      : "Project only"}
+                </div>
+              </div>
+              <div>
+                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                  Billing
+                </div>
+                <div
+                  style={{
+                    color: billingBlocksClose ? D.red : D.heading,
+                    fontWeight: 800,
+                  }}
+                >
+                  {closeoutBillingLabel(closeoutPreview.billing)}
+                </div>
+              </div>
+              <div>
+                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                  Follow-up
+                </div>
+                <div style={{ color: followupBlocksClose ? D.red : D.heading, fontWeight: 800 }}>
+                  {closeoutFollowupLabel(closeoutPreview.followup)}
+                </div>
+              </div>
+              <div>
+                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                  Report
+                </div>
+                <div style={{ color: D.heading, fontWeight: 800 }}>
+                  {closeoutPreview.portal?.attached ? "Portal attached" : "Token-only"}
+                </div>
+              </div>
+            </div>
+            {billingBlocksClose && (
+              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
+                Resolve billing before closing. The project can stay in review until the invoice or prepaid coverage exists.
+              </div>
+            )}
+            {followupBlocksClose && (
+              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
+                Auto-schedule follow-up is not wired yet. Use alert follow-up or schedule the return manually before closing.
+              </div>
+            )}
+            {previewBlocksClose && !billingBlocksClose && !followupBlocksClose && (
+              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
+                This project cannot close from the linked service’s current state.
+              </div>
+            )}
+          </div>
+        )}
         <ProjectHistoryPanel activity={data.activity || []} />{" "}
       </div>
       {/* Footer actions */}
@@ -2369,10 +2544,25 @@ function ProjectDetail({
           <button
             type="button"
             onClick={handleClose}
-            disabled={saving}
-            style={{ ...btnSecondary, opacity: saving ? 0.5 : 1 }}
+            disabled={saving || closeoutBlocksClose}
+            title={
+              billingBlocksClose
+                ? "Resolve billing before closing"
+                : followupBlocksClose
+                  ? "Resolve follow-up automation before closing"
+                  : previewBlocksClose
+                    ? "Project cannot close from the current service state"
+                  : "Close project"
+            }
+            style={{ ...btnSecondary, opacity: saving || closeoutBlocksClose ? 0.5 : 1 }}
           >
-            Close project
+            {billingBlocksClose
+              ? "Resolve billing first"
+              : followupBlocksClose
+                ? "Resolve follow-up first"
+                : previewBlocksClose
+                  ? "Cannot close"
+                : "Close project"}
           </button>
         )}
         <button

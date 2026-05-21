@@ -7,6 +7,7 @@ const { resolveCompletionProfileForScheduledService } = require('./service-compl
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
+const { createAlertOnce } = require('./dispatch-alerts');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped']);
@@ -16,6 +17,14 @@ function normalizeDateOnly(value) {
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+}
+
+function addDaysToDateOnly(value, days = 0) {
+  const dateOnly = normalizeDateOnly(value) || etDateString();
+  const date = new Date(`${dateOnly}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return date.toISOString().slice(0, 10);
 }
 
 function serializeJsonb(value) {
@@ -117,6 +126,16 @@ function prepaidCoversAmount(scheduledService = {}, amount = 0) {
   return amount > 0 && prepaid >= amount;
 }
 
+function operationalError(message, { status = 400, code = null, details = null } = {}) {
+  const err = new Error(message);
+  err.status = status;
+  err.statusCode = status;
+  err.code = code;
+  err.details = details;
+  err.isOperational = true;
+  return err;
+}
+
 async function findExistingCompletionInvoice({
   scheduledServiceId,
   serviceRecordId = null,
@@ -191,6 +210,55 @@ function projectCompletionNotes({ project, profile, portalAttached, reportPath }
   };
 }
 
+function projectFollowupSuggestion({
+  scheduledService = {},
+  project = {},
+  profile = {},
+} = {}) {
+  const policy = profile.followupPolicy || 'none';
+  const days = profile.defaultFollowupDays == null ? null : Number(profile.defaultFollowupDays);
+  const baseDate = project.project_date || scheduledService.scheduled_date || etDateString();
+  const normalizedDays = Number.isFinite(days) ? days : null;
+  const suggestedDate = Number.isFinite(days) ? addDaysToDateOnly(baseDate, days) : null;
+  if (policy === 'none') {
+    return {
+      required: false,
+      policy,
+      days: null,
+      suggestedDate: null,
+      alertType: null,
+    };
+  }
+  if (policy === 'auto_schedule') {
+    return {
+      required: true,
+      policy,
+      days: normalizedDays,
+      suggestedDate,
+      alertType: null,
+      unsupported: true,
+      reason: 'auto_schedule_not_implemented',
+    };
+  }
+  if (policy !== 'alert') {
+    return {
+      required: false,
+      policy,
+      days: normalizedDays,
+      suggestedDate,
+      alertType: null,
+      reason: 'unsupported_followup_policy',
+    };
+  }
+  return {
+    required: true,
+    policy,
+    days: normalizedDays,
+    suggestedDate,
+    alertType: 'follow_up_needed',
+  };
+}
+
 function buildServiceRecordInsert({
   scheduledService,
   project,
@@ -254,6 +322,87 @@ function serviceRecordMatchesScheduledService(serviceRecord = {}, scheduledServi
   if (!serviceRecord?.id || !scheduledService?.id) return false;
   if (!serviceRecord.scheduled_service_id) return false;
   return String(serviceRecord.scheduled_service_id) === String(scheduledService.id);
+}
+
+async function createProjectFollowupAlert({
+  scheduledService,
+  project,
+  serviceRecord,
+  profile,
+  customer,
+  followup,
+  trx,
+} = {}) {
+  if (!followup?.required || followup.policy !== 'alert' || !scheduledService?.id) {
+    return {
+      required: !!followup?.required,
+      created: false,
+      skipped: true,
+      reason: followup?.reason || (followup?.policy ? 'not_alert_policy' : 'not_required'),
+    };
+  }
+
+  const customerName = [
+    customer?.first_name,
+    customer?.last_name,
+  ].filter(Boolean).join(' ').trim() || null;
+  const alertType = followup.alertType || 'follow_up_needed';
+  const existing = await trx('dispatch_alerts')
+    .where({
+      type: alertType,
+      job_id: scheduledService.id,
+    })
+    .whereNull('resolved_at')
+    .first('id');
+  if (existing) {
+    return {
+      required: true,
+      created: false,
+      existingAlertId: existing.id,
+      suggestedDate: followup.suggestedDate,
+      days: followup.days,
+      policy: followup.policy,
+    };
+  }
+  const payload = {
+    source: 'project_completion',
+    projectId: project.id,
+    projectType: project.project_type,
+    serviceRecordId: serviceRecord?.id || null,
+    serviceType: scheduledService.service_type || profile.serviceName || null,
+    customerId: scheduledService.customer_id || null,
+    customerName,
+    followupPolicy: followup.policy,
+    followupDays: followup.days,
+    suggestedFollowupDate: followup.suggestedDate,
+  };
+  const alertResult = await createAlertOnce({
+    type: alertType,
+    severity: 'info',
+    techId: scheduledService.technician_id || null,
+    jobId: scheduledService.id,
+    trx,
+    payload,
+    existingPayloadSource: 'project_completion',
+  });
+  if (!alertResult?.created) {
+    return {
+      required: true,
+      created: false,
+      existingAlertId: alertResult?.row?.id || null,
+      suggestedDate: followup.suggestedDate,
+      days: followup.days,
+      policy: followup.policy,
+    };
+  }
+  return {
+    required: true,
+    created: true,
+    alertId: alertResult.row?.id || null,
+    suggestedDate: followup.suggestedDate,
+    days: followup.days,
+    policy: followup.policy,
+  };
 }
 
 function buildServiceRecordProjectCompletionUpdate({
@@ -449,15 +598,33 @@ async function completeProjectBackedService({
       knex: trx,
     });
     if (billing.required && !billing.resolved) {
-      const err = new Error('Project-backed service requires billing resolution before closeout');
-      err.status = 409;
-      err.code = 'project_completion_billing_required';
-      err.details = {
-        amount: billing.amount,
-        scheduledServiceId: scheduledService.id,
-        reason: billing.reason,
-      };
-      throw err;
+      throw operationalError('Project-backed service requires billing resolution before closeout', {
+        status: 409,
+        code: 'project_completion_billing_required',
+        details: {
+          amount: billing.amount,
+          scheduledServiceId: scheduledService.id,
+          reason: billing.reason,
+        },
+      });
+    }
+
+    const followupSuggestion = projectFollowupSuggestion({
+      scheduledService,
+      project,
+      profile,
+    });
+    if (followupSuggestion.unsupported) {
+      throw operationalError('Project follow-up auto-scheduling is not available yet', {
+        status: 409,
+        code: 'project_followup_auto_schedule_unsupported',
+        details: {
+          scheduledServiceId: scheduledService.id,
+          policy: followupSuggestion.policy,
+          suggestedDate: followupSuggestion.suggestedDate,
+          days: followupSuggestion.days,
+        },
+      });
     }
 
     const lifecycleUpdates = buildCompletionLifecycleUpdates(scheduledService, now);
@@ -493,6 +660,16 @@ async function completeProjectBackedService({
           .returning('*');
       }
     }
+
+    const followupAlert = await createProjectFollowupAlert({
+      scheduledService,
+      project: { ...project, report_token: token },
+      serviceRecord,
+      profile,
+      customer,
+      followup: followupSuggestion,
+      trx,
+    });
     if (billing.invoice?.id && serviceRecord?.id && !billing.invoice.service_record_id) {
       await trx('invoices').where({ id: billing.invoice.id }).update({
         service_record_id: serviceRecord.id,
@@ -540,6 +717,10 @@ async function completeProjectBackedService({
       portalAttachReason,
       recurringCustomer,
       billing,
+      followup: {
+        ...followupSuggestion,
+        alert: followupAlert,
+      },
       reportPath,
       completionProfile: profile,
     };
@@ -558,6 +739,160 @@ async function completeProjectBackedService({
   }
 
   return result;
+}
+
+async function buildProjectCloseoutPreview(projectId, knex = db) {
+  if (!projectId) return null;
+  const project = await knex('projects').where({ id: projectId }).first();
+  if (!project) return null;
+  if (!project.scheduled_service_id) {
+    return {
+      projectId: project.id,
+      serviceCompletion: {
+        linked: false,
+        willCompleteService: false,
+        reason: 'no_linked_scheduled_service',
+      },
+      billing: { required: false, resolved: true, amount: 0, reason: 'not_billable' },
+      followup: { required: false, policy: 'none', days: null, suggestedDate: null },
+      portal: { attached: true, reason: 'ad_hoc_project_default' },
+      canClose: project.status !== 'closed',
+    };
+  }
+
+  const scheduledService = await knex('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .where({ 's.id': project.scheduled_service_id })
+    .first(
+      's.*',
+      'c.id as customer_row_id',
+      'c.first_name',
+      'c.last_name',
+      'c.email',
+      'c.phone',
+      'c.active as customer_active',
+      'c.deleted_at as customer_deleted_at',
+      'c.waveguard_tier',
+      'c.monthly_rate',
+    );
+  if (!scheduledService) {
+    return {
+      projectId: project.id,
+      serviceCompletion: {
+        linked: true,
+        willCompleteService: false,
+        reason: 'linked_scheduled_service_missing',
+      },
+      billing: { required: false, resolved: true, amount: 0, reason: 'not_billable' },
+      followup: { required: false, policy: 'none', days: null, suggestedDate: null },
+      portal: { attached: false, reason: 'linked_scheduled_service_missing' },
+      canClose: false,
+    };
+  }
+
+  const customer = {
+    id: scheduledService.customer_id,
+    first_name: scheduledService.first_name,
+    last_name: scheduledService.last_name,
+    email: scheduledService.email,
+    phone: scheduledService.phone,
+    active: scheduledService.customer_active,
+    deleted_at: scheduledService.customer_deleted_at,
+    waveguard_tier: scheduledService.waveguard_tier,
+    monthly_rate: scheduledService.monthly_rate,
+  };
+  const profile = await resolveCompletionProfileForScheduledService(scheduledService, knex);
+  const terminalStatus = TERMINAL_NON_COMPLETABLE_STATUSES.has(String(scheduledService.status || '').toLowerCase());
+  const willCompleteService = profile.projectBacked && !terminalStatus;
+  const recurringCustomer = willCompleteService ? await isRecurringCustomer(customer, knex) : null;
+  const portalAllowedByPolicy = willCompleteService
+    ? shouldAttachProjectToPortal({ profile, customer, recurringCustomer })
+    : false;
+  const portalReviewed = projectReviewedForPortalAttachment(project);
+  const portalAttached = portalAllowedByPolicy && portalReviewed;
+  const portalReason = portalAttached
+    ? 'policy_allowed'
+    : portalAllowedByPolicy && !portalReviewed
+      ? 'report_not_sent'
+      : terminalStatus
+        ? 'terminal_scheduled_service'
+        : profile.projectBacked
+          ? 'policy_not_met'
+          : 'not_project_backed_service';
+
+  let serviceRecord = null;
+  if (willCompleteService && project.service_record_id) {
+    const candidate = await knex('service_records').where({ id: project.service_record_id }).first();
+    if (serviceRecordMatchesScheduledService(candidate, scheduledService)) serviceRecord = candidate;
+  }
+  if (willCompleteService && !serviceRecord) {
+    serviceRecord = await knex('service_records')
+      .where({ scheduled_service_id: scheduledService.id })
+      .orderBy('created_at', 'desc')
+      .first()
+      .catch(() => null);
+  }
+
+  const billing = willCompleteService
+    ? await resolveProjectCompletionBilling({
+      scheduledService,
+      serviceRecord,
+      customer,
+      knex,
+    })
+    : {
+      required: false,
+      resolved: true,
+      amount: 0,
+      reason: 'project_not_completing_service',
+    };
+  const followup = willCompleteService
+    ? projectFollowupSuggestion({ scheduledService, project, profile })
+    : {
+      required: false,
+      policy: profile.followupPolicy || 'none',
+      days: null,
+      suggestedDate: null,
+      alertType: null,
+    };
+
+  return {
+    projectId: project.id,
+    serviceCompletion: {
+      linked: true,
+      willCompleteService,
+      scheduledServiceId: scheduledService.id,
+      status: scheduledService.status || null,
+      serviceType: scheduledService.service_type || profile.serviceName || null,
+      projectBacked: !!profile.projectBacked,
+      completionMode: profile.completionMode || null,
+      reason: willCompleteService
+        ? 'project_backed_service'
+        : terminalStatus
+          ? 'terminal_scheduled_service'
+          : 'not_project_backed_service',
+    },
+    billing: {
+      required: !!billing.required,
+      resolved: !!billing.resolved,
+      amount: billing.amount || 0,
+      reason: billing.reason || null,
+      invoiceId: billing.invoice?.id || null,
+      invoiceStatus: billing.invoice?.status || null,
+    },
+    followup,
+    portal: {
+      attached: portalAttached,
+      reason: portalReason,
+      recurringCustomer,
+      portalVisibility: profile.portalVisibility || null,
+      portalAttachPolicy: profile.portalAttachPolicy || null,
+    },
+    canClose: project.status !== 'closed'
+      && !terminalStatus
+      && !followup.unsupported
+      && (!billing.required || billing.resolved),
+  };
 }
 
 async function resolveProjectPortalAttachment(project = {}, knex = db) {
@@ -612,15 +947,19 @@ async function resolveProjectPortalAttachment(project = {}, knex = db) {
 }
 
 module.exports = {
+  buildProjectCloseoutPreview,
   buildServiceRecordInsert,
   buildServiceRecordProjectCompletionUpdate,
   completeProjectBackedService,
+  createProjectFollowupAlert,
   findExistingCompletionInvoice,
   hasMembership,
   isRecurringCustomer,
+  operationalError,
   pickExistingColumns,
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
+  projectFollowupSuggestion,
   projectReviewedForPortalAttachment,
   resolveProjectCompletionBilling,
   resolveProjectPortalAttachment,
@@ -630,11 +969,13 @@ module.exports = {
     hasActiveRecurringSchedule,
     membershipTierKey,
     normalizeDateOnly,
+    addDaysToDateOnly,
     parseJsonObject,
     pickExistingColumns,
     prepaidCoversAmount,
     projectCompletionNotes,
     projectCompletionInvoiceAmount,
+    projectFollowupSuggestion,
     projectReviewedForPortalAttachment,
     serviceRecordMatchesScheduledService,
   },
