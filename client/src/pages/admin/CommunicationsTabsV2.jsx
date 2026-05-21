@@ -34,7 +34,8 @@
 //   tied to the week boundary (not just a per-render call).
 // - Lead-quality breakdown: at scale, /lead-quality?days=30 may
 //   return many records. Confirm reasonable bounded response size.
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { Trash2 } from "lucide-react";
 import {
   Badge,
   Button,
@@ -66,6 +67,11 @@ function adminFetch(path, options = {}) {
   });
 }
 
+function canDeleteSmsTemplate(template) {
+  if (template?.can_delete !== undefined) return template.can_delete === true;
+  return template?.category === "custom";
+}
+
 // ── SMS Templates Tab ───────────────────────────────────────────────
 
 export function SmsTemplatesTabV2() {
@@ -74,7 +80,10 @@ export function SmsTemplatesTabV2() {
   const [editing, setEditing] = useState(null);
   const [editBody, setEditBody] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(null);
   const [filter, setFilter] = useState("all");
+  const [highlightKey, setHighlightKey] = useState(null);
+  const hashApplied = useRef(false);
 
   useEffect(() => {
     adminFetch("/admin/sms-templates")
@@ -84,6 +93,25 @@ export function SmsTemplatesTabV2() {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (hashApplied.current || !templates.length) return;
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    if (params.get("tab") !== "templates") return;
+    const key = params.get("key");
+    if (!key) return;
+    const match = templates.find((t) => t.template_key === key);
+    if (!match) return;
+    hashApplied.current = true;
+    setFilter("all");
+    setHighlightKey(key);
+    window.setTimeout(() => {
+      document.getElementById(`sms-template-row-${key}`)?.scrollIntoView({
+        block: "center",
+        behavior: "smooth",
+      });
+    }, 80);
+  }, [templates]);
 
   const handleSave = async (id) => {
     setSaving(true);
@@ -100,6 +128,19 @@ export function SmsTemplatesTabV2() {
       alert("Save failed");
     }
     setSaving(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("Delete this SMS template? This can't be undone.")) return;
+    setDeleting(id);
+    try {
+      await adminFetch(`/admin/sms-templates/${id}`, { method: "DELETE" });
+      setTemplates((prev) => prev.filter((t) => t.id !== id));
+      if (editing === id) setEditing(null);
+    } catch {
+      alert("Delete failed");
+    }
+    setDeleting(null);
   };
 
   const toggleActive = async (t) => {
@@ -170,7 +211,14 @@ export function SmsTemplatesTabV2() {
       </div>{" "}
       <div className="flex flex-col gap-2">
         {filtered.map((t) => (
-          <Card key={t.id}>
+          <Card
+            key={t.id}
+            id={`sms-template-row-${t.template_key}`}
+            className={cn(
+              "transition-shadow",
+              highlightKey === t.template_key && "ring-2 ring-zinc-900 ring-offset-2",
+            )}
+          >
             {" "}
             <CardBody>
               {" "}
@@ -223,6 +271,18 @@ export function SmsTemplatesTabV2() {
                       Edit
                     </Button>
                   )}
+                  {canDeleteSmsTemplate(t) ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="px-2"
+                      aria-label={`Delete ${t.name}`}
+                      onClick={() => handleDelete(t.id)}
+                      disabled={deleting === t.id}
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                  ) : null}
                 </div>{" "}
               </div>
               {editing === t.id ? (

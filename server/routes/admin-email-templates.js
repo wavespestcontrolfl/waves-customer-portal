@@ -18,6 +18,9 @@ const SENSITIVITIES = new Set(['normal', 'financial', 'account', 'health_safety'
 const SUPPRESSION_TYPES = new Set(['unsubscribe', 'bounce', 'spam_complaint', 'manual', 'do_not_email']);
 const AUTOMATION_STATUSES = new Set(['draft', 'active', 'paused', 'archived']);
 const TEMPLATE_STATUSES = new Set(['draft', 'active', 'paused', 'archived']);
+const HARD_DELETE_AUTOMATION_STATUSES = new Set(['draft', 'archived']);
+const HARD_DELETE_TEMPLATE_STATUSES = new Set(['draft', 'archived']);
+const OPEN_AUTOMATION_RUN_STATUSES = ['queued', 'scheduled', 'retry_scheduled'];
 const STREAMS = new Set([
   'transactional_required',
   'service_operational',
@@ -25,6 +28,72 @@ const STREAMS = new Set([
   'marketing_referral',
   'marketing_nurture',
   'internal',
+]);
+const PROTECTED_EMAIL_TEMPLATE_KEYS = new Set([
+  'account.request_received',
+  'account.request_updated',
+  'account.updated',
+  'billing_late_payment_14_day',
+  'billing_late_payment_30_day',
+  'billing_late_payment_60_day',
+  'billing_late_payment_7_day',
+  'billing_late_payment_90_day',
+  'estimate.delivery',
+  'estimate.expiring_notice',
+  'estimate.extension_notice',
+  'estimate.followup_final',
+  'estimate.unviewed_followup',
+  'estimate.viewed_followup',
+  'invoice.receipt',
+  'invoice.sent',
+  'marketing.newsletter_issue',
+  'membership.canceled',
+  'membership.paused',
+  'membership.reactivated',
+  'membership.renewal_reminder',
+  'membership.started',
+  'membership.updated',
+  'new_lead',
+  'onboarding.24h_reminder',
+  'onboarding.72h_reminder',
+  'onboarding.expiring_notice',
+  'payment.autopay_enabled',
+  'payment.failed',
+  'payment.method_expiring',
+  'payment.method_updated',
+  'payment.plan_confirmed',
+  'payment.refund_issued',
+  'payment.retry_notice',
+  'portal.invite',
+  'prep.bed_bug',
+  'prep.cockroach',
+  'prep.flea',
+  'prep.interior_pest',
+  'prep.lawn',
+  'prep.mosquito',
+  'prep.rodent',
+  'prep.termite',
+  'project.report_ready',
+  'service.report_ready',
+  'welcome.new_recurring',
+]);
+const PROTECTED_EMAIL_AUTOMATION_KEYS = new Set([
+  'estimate.delivery',
+  'estimate.expiring_notice',
+  'estimate.extension_notice',
+  'estimate.unviewed_followup',
+  'estimate.viewed_followup',
+  'invoice.receipt',
+  'invoice.sent',
+  'onboarding.24h_reminder',
+  'onboarding.72h_reminder',
+  'onboarding.expiring_notice',
+  'payment.failed',
+  'prep.bed_bug',
+  'prep.cockroach',
+  'project.report_ready',
+  'service.report_ready',
+  'welcome.new_recurring',
 ]);
 
 function badRequest(message) {
@@ -114,6 +183,38 @@ function normalizeTemplateInput(body, existing = {}) {
 
 async function loadTemplateByParam(key) {
   return db('email_templates').where({ template_key: key }).first();
+}
+
+function templateHardDeleteBlocker(template) {
+  if (!template) return null;
+  if (PROTECTED_EMAIL_TEMPLATE_KEYS.has(template.template_key)) {
+    return 'template is protected from hard delete';
+  }
+  const status = cleanString(template.status, 'draft').toLowerCase();
+  if (!HARD_DELETE_TEMPLATE_STATUSES.has(status)) {
+    return 'template must be draft or archived before hard delete';
+  }
+  return null;
+}
+
+function canHardDeleteTemplate(template) {
+  return !templateHardDeleteBlocker(template);
+}
+
+function automationHardDeleteBlocker(automation) {
+  if (!automation) return null;
+  if (PROTECTED_EMAIL_AUTOMATION_KEYS.has(automation.automation_key)) {
+    return 'automation is protected from hard delete';
+  }
+  const status = cleanString(automation.status, 'draft').toLowerCase();
+  if (!HARD_DELETE_AUTOMATION_STATUSES.has(status)) {
+    return 'automation must be draft or archived before hard delete';
+  }
+  return null;
+}
+
+function canHardDeleteAutomation(automation) {
+  return !automationHardDeleteBlocker(automation);
 }
 
 async function loadFixtureById(id) {
@@ -365,13 +466,20 @@ router.get('/', async (req, res, next) => {
       .where({ status: 'draft' })
       .count('* as count')
       .groupBy('template_id');
+    const automationCounts = await db('email_template_automations')
+      .select('template_key')
+      .count('* as count')
+      .groupBy('template_key');
     const countMap = Object.fromEntries(versionCounts.map((r) => [r.template_id, Number(r.count)]));
     const draftMap = Object.fromEntries(draftCounts.map((r) => [r.template_id, Number(r.count)]));
+    const automationMap = Object.fromEntries(automationCounts.map((r) => [r.template_key, Number(r.count)]));
     res.json({
       templates: templates.map((t) => ({
         ...t,
         version_count: countMap[t.id] || 0,
         draft_count: draftMap[t.id] || 0,
+        automation_count: automationMap[t.template_key] || 0,
+        can_delete: canHardDeleteTemplate(t) && !automationMap[t.template_key],
       })),
     });
   } catch (err) { next(err); }
@@ -608,6 +716,7 @@ router.get('/automations', async (req, res, next) => {
         retry_policy: asJson(row.retry_policy),
         quiet_hours: asJson(row.quiet_hours),
         send_count_30d: sendMap[row.template_key] || 0,
+        can_delete: canHardDeleteAutomation(row),
       })),
     });
   } catch (err) { next(err); }
@@ -700,6 +809,36 @@ router.put('/automations/:key', async (req, res, next) => {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
   }
+});
+
+// DELETE /api/admin/email-templates/automations/:key
+router.delete('/automations/:key', async (req, res, next) => {
+  try {
+    const result = await db.transaction(async (trx) => {
+      const existing = await trx('email_template_automations')
+        .where({ automation_key: req.params.key })
+        .first();
+      if (!existing) return null;
+      const hardDeleteBlocker = automationHardDeleteBlocker(existing);
+      if (hardDeleteBlocker) return { error: hardDeleteBlocker };
+
+      const now = new Date();
+      const skippedRuns = await trx('email_template_automation_runs')
+        .where({ automation_id: existing.id })
+        .whereIn('status', OPEN_AUTOMATION_RUN_STATUSES)
+        .update({
+          status: 'skipped',
+          exit_reason: 'automation deleted by admin',
+          completed_at: now,
+          updated_at: now,
+        });
+      await trx('email_template_automations').where({ id: existing.id }).del();
+      return { skipped_runs: Number(skippedRuns || 0) };
+    });
+    if (!result) return res.status(404).json({ error: 'automation not found' });
+    if (result.error) return res.status(409).json({ error: result.error });
+    res.json({ deleted: true, skipped_runs: result.skipped_runs });
+  } catch (err) { next(err); }
 });
 
 // POST /api/admin/email-templates/automations/:key/dry-run
@@ -860,6 +999,32 @@ router.put('/:key', async (req, res, next) => {
     });
     const updated = await db('email_templates').where({ id: template.id }).first();
     res.json({ template: updated });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+// DELETE /api/admin/email-templates/:key
+router.delete('/:key', async (req, res, next) => {
+  try {
+    const template = await loadTemplateByParam(req.params.key);
+    if (!template) return res.status(404).json({ error: 'template not found' });
+    const hardDeleteBlocker = templateHardDeleteBlocker(template);
+    if (hardDeleteBlocker) return res.status(409).json({ error: hardDeleteBlocker });
+    const dependents = await db('email_template_automations')
+      .where({ template_key: template.template_key })
+      .select('automation_key');
+    if (dependents.length) {
+      return res.status(409).json({
+        error: 'template is referenced by automations',
+        automations: dependents.map((d) => d.automation_key),
+      });
+    }
+    await db.transaction(async (trx) => {
+      await trx('email_templates').where({ id: template.id }).del();
+    });
+    res.json({ deleted: true });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);

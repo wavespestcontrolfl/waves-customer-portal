@@ -417,6 +417,182 @@ describe('admin email template routes', () => {
     });
   });
 
+  test('deletes an email automation by key', async () => {
+    const existing = {
+      id: 'automation-1',
+      automation_key: 'custom.cleanup',
+      status: 'draft',
+    };
+    const skipRunsQuery = chain({ result: 2 });
+    const deleteQuery = chain();
+    setTransactionQueues({
+      email_template_automations: [chain({ first: existing }), deleteQuery],
+      email_template_automation_runs: [skipRunsQuery],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/automations/custom.cleanup`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body).toEqual({ deleted: true, skipped_runs: 2 });
+      expect(skipRunsQuery.where).toHaveBeenCalledWith({ automation_id: 'automation-1' });
+      expect(skipRunsQuery.whereIn).toHaveBeenCalledWith('status', ['queued', 'scheduled', 'retry_scheduled']);
+      expect(skipRunsQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'skipped',
+        exit_reason: 'automation deleted by admin',
+      }));
+      expect(deleteQuery.where).toHaveBeenCalledWith({ id: 'automation-1' });
+      expect(deleteQuery.del).toHaveBeenCalled();
+    });
+  });
+
+  test('protects operational email automations from hard delete', async () => {
+    const existing = {
+      id: 'automation-1',
+      automation_key: 'invoice.sent',
+      status: 'active',
+    };
+    setTransactionQueues({
+      email_template_automations: [chain({ first: existing })],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/automations/invoice.sent`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body).toEqual({ error: 'automation is protected from hard delete' });
+    });
+  });
+
+  test('requires email automations to be draft or archived before hard delete', async () => {
+    const existing = {
+      id: 'automation-1',
+      automation_key: 'custom.active',
+      status: 'active',
+    };
+    setTransactionQueues({
+      email_template_automations: [chain({ first: existing })],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/automations/custom.active`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body).toEqual({ error: 'automation must be draft or archived before hard delete' });
+    });
+  });
+
+  test('protects operational email templates from hard delete', async () => {
+    setDbQueues({
+      email_templates: [chain({
+        first: {
+          id: 'template-1',
+          template_key: 'estimate.delivery',
+          status: 'active',
+        },
+      })],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/estimate.delivery`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body).toEqual({ error: 'template is protected from hard delete' });
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  test('requires email templates to be draft or archived before hard delete', async () => {
+    setDbQueues({
+      email_templates: [chain({
+        first: {
+          id: 'template-1',
+          template_key: 'custom.active',
+          status: 'active',
+        },
+      })],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/custom.active`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body).toEqual({ error: 'template must be draft or archived before hard delete' });
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  test('guards email template delete when automations still reference it', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: { id: 'template-1', template_key: 'custom.orphan', status: 'draft' } })],
+      email_template_automations: [chain({
+        result: [
+          { automation_key: 'custom.orphan' },
+          { automation_key: 'custom.orphan.followup' },
+        ],
+      })],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/custom.orphan`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body).toEqual({
+        error: 'template is referenced by automations',
+        automations: ['custom.orphan', 'custom.orphan.followup'],
+      });
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  test('deletes an unreferenced email template inside a transaction', async () => {
+    const deleteQuery = chain();
+    setDbQueues({
+      email_templates: [chain({ first: { id: 'template-1', template_key: 'orphan.template', status: 'draft' } })],
+      email_template_automations: [chain({ result: [] })],
+    });
+    setTransactionQueues({
+      email_templates: [deleteQuery],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/orphan.template`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body).toEqual({ deleted: true });
+      expect(deleteQuery.where).toHaveBeenCalledWith({ id: 'template-1' });
+      expect(deleteQuery.del).toHaveBeenCalled();
+    });
+  });
+
   test('updates automations with validated template and suppression group references', async () => {
     const existing = {
       id: 'automation-1',
