@@ -537,6 +537,9 @@ describe('admin projects routes', () => {
         sent_at: 'NOW',
       })),
     });
+    const projectColumnInfo = chain({
+      columnInfo: jest.fn().mockResolvedValue({}),
+    });
     const sequenceRead = chain();
     const persistDelivery = chain();
     const activityInsert = chain();
@@ -549,7 +552,7 @@ describe('admin projects routes', () => {
         email: null,
       }),
     });
-    const projectQueries = [projectRead, markSent, updatedProjectRead, sequenceRead, persistDelivery];
+    const projectQueries = [projectRead, projectColumnInfo, markSent, updatedProjectRead, sequenceRead, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
@@ -612,6 +615,9 @@ describe('admin projects routes', () => {
         sent_at: null,
       }),
     });
+    const projectColumnInfo = chain({
+      columnInfo: jest.fn().mockResolvedValue({}),
+    });
     const sequenceRead = chain();
     const persistDelivery = chain();
     const activityInsert = chain();
@@ -624,7 +630,7 @@ describe('admin projects routes', () => {
         email: 'van@example.com',
       }),
     });
-    const projectQueries = [projectRead, markToken, updatedProjectRead, sequenceRead, persistDelivery];
+    const projectQueries = [projectRead, projectColumnInfo, markToken, updatedProjectRead, sequenceRead, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
