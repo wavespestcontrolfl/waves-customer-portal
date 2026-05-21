@@ -108,13 +108,28 @@ class ConversionFeedbackMiner {
     // it's unambiguous to the database — the cutoff = midnight ET N
     // days ago, not midnight UTC.
     // windowDays is internal (not user input) so we safely interpolate
-    // it into the INTERVAL literal. Knex won't parameterize an
-    // `INTERVAL ?` form reliably (the ? binds before the INTERVAL
-    // parser sees it), and CURRENT_DATE - INTERVAL N DAY is the
-    // documented Postgres way to walk an ET-anchored cutoff.
+    // it into the INTERVAL literal.
+    //
+    // ET anchor: NOW() AT TIME ZONE 'America/New_York' returns the
+    // wall-clock instant in ET. Casting ::date strips to the ET
+    // calendar day regardless of the session timezone (Railway runs
+    // UTC). Using CURRENT_DATE here would resolve to the UTC calendar
+    // day, which between 00:00–03:59 UTC = 8pm–11:59pm ET prior day
+    // would advance the cutoff by one full ET day and drop valid
+    // late-evening ET records.
     const days = Math.max(0, parseInt(windowDays, 10) || 0);
+    // Two AT TIME ZONE hops on purpose:
+    //   1. NOW() AT TIME ZONE 'America/New_York' → current wall-clock
+    //      in ET, then ::date strips to the ET calendar day. This
+    //      avoids the UTC-vs-ET date drift CURRENT_DATE would cause
+    //      between 00:00–03:59 UTC.
+    //   2. (... ::timestamp) AT TIME ZONE 'America/New_York' anchors
+    //      the resulting "naive" midnight to ET, producing the
+    //      timestamptz for ACTUAL midnight ET (e.g. 05:00 UTC in EST,
+    //      04:00 UTC in EDT). Without the second hop the cutoff would
+    //      be midnight UTC, shifted 4–5 hours earlier than intended.
     const sinceCutoff = db.raw(
-      `(CURRENT_DATE AT TIME ZONE 'America/New_York' - INTERVAL '${days} days')::timestamptz`
+      `(((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '${days} days')::timestamp AT TIME ZONE 'America/New_York')`
     );
 
     const rolls = new Map(); // key: city||_global :: service||_global → row
