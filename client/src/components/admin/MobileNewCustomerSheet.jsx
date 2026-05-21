@@ -118,7 +118,11 @@ export default function MobileNewCustomerSheet({
       {/* Sticky header: X left, Save pill right. 56px tall. */}
       <div
         className="sticky top-0 bg-white flex items-center px-3"
-        style={{ height: 56, paddingTop: "env(safe-area-inset-top, 0)" }}
+        style={{
+          height: "calc(56px + env(safe-area-inset-top, 0px))",
+          paddingTop: "env(safe-area-inset-top, 0px)",
+          zIndex: 2,
+        }}
       >
         {" "}
         <button
@@ -148,7 +152,13 @@ export default function MobileNewCustomerSheet({
           {submitting ? "Saving…" : "Save"}
         </button>{" "}
       </div>{" "}
-      <div className="px-5 pb-16 mx-auto" style={{ maxWidth: 560 }}>
+      <div
+        className="px-5 mx-auto"
+        style={{
+          maxWidth: 560,
+          paddingBottom: "calc(112px + env(safe-area-inset-bottom, 0px))",
+        }}
+      >
         {/* Heading */}
         <h1
           className="text-zinc-900"
@@ -353,6 +363,30 @@ export default function MobileNewCustomerSheet({
           </div>
         )}
       </div>{" "}
+      <div
+        className="fixed inset-x-0 bottom-0 bg-white border-t border-zinc-200 px-5 md:hidden"
+        style={{
+          paddingTop: 12,
+          paddingBottom: "calc(12px + env(safe-area-inset-bottom, 0px))",
+          zIndex: 3,
+        }}
+      >
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!canSave || submitting}
+          className="w-full rounded-full font-semibold u-focus-ring"
+          style={{
+            minHeight: 50,
+            fontSize: 16,
+            background: canSave ? "#18181B" : "#F4F4F5",
+            color: canSave ? "#FFFFFF" : "#A1A1AA",
+            opacity: submitting ? 0.6 : 1,
+          }}
+        >
+          {submitting ? "Saving..." : "Save"}
+        </button>
+      </div>
     </div>
   );
 }
