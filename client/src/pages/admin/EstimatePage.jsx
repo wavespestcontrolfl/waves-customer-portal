@@ -512,6 +512,21 @@ function TierRow({
   );
 }
 
+function mosquitoTierSelectionFlags(R, tier, index) {
+  const tiers = Array.isArray(R?.mq) ? R.mq : [];
+  const hasSelectionFields = tiers.some((t) => t.selected !== undefined || t.isSelected !== undefined);
+  const ri = Number(R?.mqMeta?.ri);
+  const selected = hasSelectionFields
+    ? !!(tier.selected || tier.isSelected)
+    : Number.isInteger(ri)
+      ? index === ri
+      : !!tier.recommended;
+  const recommended = hasSelectionFields
+    ? !!(tier.recommended || tier.isRecommended || tier.pressureRecommended)
+    : false;
+  return { selected, recommended, dimmed: !selected };
+}
+
 /* ── Form context + helpers (outside component = stable React identity) ── */
 const FormCtx = createContext({});
 
@@ -4361,16 +4376,20 @@ function EstimateToolView() {
                               </span>
                             </div>{" "}
                             <TierGrid>
-                              {R.mq.map((t, i) => (
-                                <TierRow
-                                  key={i}
-                                  name={t.n}
-                                  detail={`$${t.pv}/visit x ${t.v}`}
-                                  price={`${fmt(t.mo)}/mo`}
-                                  recommended={t.recommended}
-                                  dimmed={t.dimmed}
-                                />
-                              ))}
+                              {R.mq.map((t, i) => {
+                                const flags = mosquitoTierSelectionFlags(R, t, i);
+                                return (
+                                  <TierRow
+                                    key={i}
+                                    name={t.n}
+                                    detail={`$${t.pv}/visit x ${t.v}`}
+                                    price={`${fmt(t.mo)}/mo`}
+                                    recommended={flags.recommended}
+                                    dimmed={flags.dimmed}
+                                    selected={flags.selected}
+                                  />
+                                );
+                              })}
                             </TierGrid>{" "}
                           </div>
                         )}

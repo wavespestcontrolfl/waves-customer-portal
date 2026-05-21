@@ -77,7 +77,7 @@ function validateSortedBrackets(errors, name, rows, key, valueKey, options = {})
 
 function validatePestPricingConfig(snapshot = constants) {
   const errors = [];
-  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE } = snapshot;
+  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE, MOSQUITO } = snapshot;
 
   if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
   if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
@@ -119,6 +119,59 @@ function validatePestPricingConfig(snapshot = constants) {
 
   if (!isPositiveNumber(ONE_TIME.pest?.multiplier)) errors.push('ONE_TIME.pest.multiplier must be positive');
   if (!isPositiveNumber(ONE_TIME.pest?.floor)) errors.push('ONE_TIME.pest.floor must be positive');
+
+  const mosquitoCategories = Array.isArray(MOSQUITO.lotCategories) ? MOSQUITO.lotCategories : [];
+  const mosquitoPrograms = Array.isArray(MOSQUITO.programs) ? MOSQUITO.programs : ['seasonal9', 'monthly12'];
+  if (!mosquitoCategories.length) errors.push('MOSQUITO.lotCategories is required');
+  let previousMosquitoMax = -Infinity;
+  for (const [index, category] of mosquitoCategories.entries()) {
+    if (!category?.key) errors.push(`MOSQUITO.lotCategories[${index}].key is required`);
+    const maxSqFt = category?.maxSqFt;
+    const normalizedMax = maxSqFt === Infinity || maxSqFt === 'Infinity' || maxSqFt === null
+      ? Infinity
+      : Number(maxSqFt);
+    if (!(Number.isFinite(normalizedMax) || normalizedMax === Infinity)) {
+      errors.push(`MOSQUITO.lotCategories[${index}].maxSqFt must be finite or Infinity`);
+    }
+    if (normalizedMax < previousMosquitoMax) errors.push('MOSQUITO.lotCategories must be sorted ascending');
+    previousMosquitoMax = normalizedMax;
+    const prices = MOSQUITO.basePrices?.[category?.key];
+    if (!Array.isArray(prices) || prices.length < mosquitoPrograms.length) {
+      errors.push(`MOSQUITO.basePrices.${category?.key} must include all programs`);
+    } else {
+      mosquitoPrograms.forEach((program, programIndex) => {
+        if (!isPositiveNumber(prices[programIndex])) {
+          errors.push(`MOSQUITO.basePrices.${category.key}.${program} must be positive`);
+        }
+      });
+    }
+  }
+  for (const program of ['seasonal9', 'monthly12']) {
+    if (!isPositiveNumber(MOSQUITO.tierVisits?.[program])) {
+      errors.push(`MOSQUITO.tierVisits.${program} must be positive`);
+    }
+  }
+  for (const [key, addOn] of Object.entries(MOSQUITO.addOns || {})) {
+    if (!isNonNegativeNumber(addOn?.price)) errors.push(`MOSQUITO.addOns.${key}.price must be non-negative`);
+    if (!isNonNegativeNumber(addOn?.cost)) errors.push(`MOSQUITO.addOns.${key}.cost must be non-negative`);
+  }
+  for (const [key, value] of Object.entries(MOSQUITO.pressureFactors || {})) {
+    if (!isFiniteNumber(value)) errors.push(`MOSQUITO.pressureFactors.${key} must be finite`);
+  }
+  if (!isPositiveNumber(MOSQUITO.pressureCap)) errors.push('MOSQUITO.pressureCap must be positive');
+
+  const onetimeMosquito = ONE_TIME.mosquito || {};
+  for (const bucket of ['SMALL', 'STANDARD', 'LARGE', 'XL', 'ESTATE', 'ACRE_CLASS', 'OVER_ACRE']) {
+    if (!isPositiveNumber(onetimeMosquito[bucket])) errors.push(`ONE_TIME.mosquito.${bucket} must be positive`);
+  }
+  if (!isPositiveNumber(onetimeMosquito.overAcreIncrementSqFt)) {
+    errors.push('ONE_TIME.mosquito.overAcreIncrementSqFt must be positive');
+  }
+  if (!isPositiveNumber(onetimeMosquito.overAcreIncrementPrice)) {
+    errors.push('ONE_TIME.mosquito.overAcreIncrementPrice must be positive');
+  }
+  if (!isNonNegativeNumber(onetimeMosquito.stationAddOn)) errors.push('ONE_TIME.mosquito.stationAddOn must be non-negative');
+  if (!isNonNegativeNumber(onetimeMosquito.dunkAddOn)) errors.push('ONE_TIME.mosquito.dunkAddOn must be non-negative');
 
   const germanRoach = SPECIALTY.germanRoach || {};
   if (!isPositiveNumber(germanRoach.base)) errors.push('SPECIALTY.germanRoach.base must be positive');

@@ -285,7 +285,9 @@ function visitsForRecurringServiceName(name, resultStats = {}) {
     return sel?.v;
   }
   if (n.includes('mosquito') && Array.isArray(resultStats.mq)) {
-    const sel = resultStats.mq.find((t) => t.recommended) || resultStats.mq[0];
+    const sel = resultStats.mq.find((t) => t.selected || t.isSelected) ||
+      resultStats.mq.find((t) => t.recommended || t.isRecommended) ||
+      resultStats.mq[0];
     return sel?.v;
   }
   if (n.includes('tree') && Array.isArray(resultStats.ts)) return resultStats.ts[0]?.v;
@@ -2024,7 +2026,9 @@ function renderPage(token, estimate, estData) {
       return sel?.v;
     }
     if (n.includes('mosquito') && Array.isArray(R.mq)) {
-      const sel = R.mq.find((t) => t.recommended) || R.mq[0];
+      const sel = R.mq.find((t) => t.selected || t.isSelected) ||
+        R.mq.find((t) => t.recommended || t.isRecommended) ||
+        R.mq[0];
       return sel?.v;
     }
     if (n.includes('tree') && Array.isArray(R.ts)) return R.ts[0]?.v;

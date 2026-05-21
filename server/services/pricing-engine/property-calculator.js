@@ -198,6 +198,177 @@ function getMosquitoTreatableCategory(mosquitoTreatableSqFt, grossLotCategory) {
   return categories[Math.min(guardedIndex, categories.length - 1)].key;
 }
 
+const MOSQUITO_CATEGORY_PROXY_SQFT = {
+  SMALL: 6000,
+  QUARTER: 10000,
+  THIRD: 15000,
+  HALF: 25000,
+  ACRE: 43560,
+};
+
+function mosquitoCategoryKeys() {
+  return (MOSQUITO.lotCategories || []).map(c => c.key);
+}
+
+function isValidMosquitoLotCategory(value) {
+  return mosquitoCategoryKeys().includes(value);
+}
+
+function deriveMosquitoLotCategoryFromArea(mosquitoTreatableSqFt) {
+  const sqft = Math.max(0, Math.round(Number(mosquitoTreatableSqFt) || 0));
+  const category = (MOSQUITO.lotCategories || []).find(c => sqft <= c.maxSqFt);
+  return category?.key || (MOSQUITO.lotCategories || [])[MOSQUITO.lotCategories.length - 1]?.key || null;
+}
+
+function uniqueList(values = []) {
+  return [...new Set((values || []).filter(Boolean))];
+}
+
+function resolveMosquitoTreatableArea(property = {}) {
+  const manualReviewReasons = [];
+  const warnings = [];
+  const explicit = Number(property.mosquitoTreatableSqFt);
+  const explicitIsPositive = Number.isFinite(explicit) && explicit > 0;
+  const lotSqFt = Number(property.lotSqFt);
+  const footprint = Number(property.footprintSqFt ?? property.footprint);
+  const hardscape = Number(property.hardscape);
+  const hasPositiveLot = Number.isFinite(lotSqFt) && lotSqFt > 0;
+  const hasMosquitoTreatableValue = property.mosquitoTreatableSqFt !== undefined &&
+    property.mosquitoTreatableSqFt !== null &&
+    property.mosquitoTreatableSqFt !== '';
+  const derivedZeroWithoutLotData = hasMosquitoTreatableValue && !explicitIsPositive && !hasPositiveLot;
+  const computedFootprint = Number.isFinite(footprint) && footprint >= 0 ? footprint : 0;
+  const computedHardscape = Number.isFinite(hardscape) && hardscape >= 0 ? hardscape : 0;
+  const fallbackTreatableSqFt = hasPositiveLot
+    ? Math.max(0, Math.round(lotSqFt - computedFootprint - computedHardscape))
+    : 0;
+  const mosquitoLotCategory = !derivedZeroWithoutLotData && isValidMosquitoLotCategory(property.mosquitoLotCategory)
+    ? property.mosquitoLotCategory
+    : null;
+  const grossLotCategory = isValidMosquitoLotCategory(property.lotCategory)
+    ? property.lotCategory
+    : null;
+
+  let mosquitoTreatableSqFt;
+  let source;
+  let confidence;
+
+  if (explicitIsPositive) {
+    mosquitoTreatableSqFt = Math.round(explicit);
+    source = 'explicit_mosquito_treatable_sqft';
+    confidence = 'high';
+  } else if (fallbackTreatableSqFt > 0) {
+    mosquitoTreatableSqFt = fallbackTreatableSqFt;
+    source = 'computed_lot_minus_footprint_hardscape';
+    confidence = 'medium';
+  } else if (mosquitoLotCategory) {
+    mosquitoTreatableSqFt = MOSQUITO_CATEGORY_PROXY_SQFT[mosquitoLotCategory];
+    source = 'lot_category_proxy';
+    confidence = 'low';
+    manualReviewReasons.push('missing_mosquito_treatable_area');
+  } else if (grossLotCategory) {
+    mosquitoTreatableSqFt = MOSQUITO_CATEGORY_PROXY_SQFT[grossLotCategory];
+    source = 'gross_lot_proxy';
+    confidence = 'low';
+    manualReviewReasons.push('missing_mosquito_treatable_area');
+  } else {
+    mosquitoTreatableSqFt = 0;
+    source = 'missing_or_zero_fallback';
+    confidence = 'low';
+    manualReviewReasons.push('missing_mosquito_treatable_area');
+  }
+
+  const missingAreaData = source !== 'explicit_mosquito_treatable_sqft' &&
+    source !== 'computed_lot_minus_footprint_hardscape';
+
+  return {
+    mosquitoTreatableSqFt,
+    source,
+    confidence,
+    requiresManualReview: manualReviewReasons.length > 0,
+    manualReviewReasons: uniqueList(manualReviewReasons),
+    warnings,
+    lotCategoryFromArea: deriveMosquitoLotCategoryFromArea(mosquitoTreatableSqFt),
+    fallbackTreatableSqFt,
+    missingAreaData,
+  };
+}
+
+function resolveMosquitoLotCategory(property = {}, areaResolution = resolveMosquitoTreatableArea(property)) {
+  const manualReviewReasons = [];
+  const warnings = [];
+  const requestedMosquitoCategory = property.mosquitoLotCategory;
+  const explicitMosquitoCategory = isValidMosquitoLotCategory(requestedMosquitoCategory)
+    ? requestedMosquitoCategory
+    : null;
+  const grossLotCategory = isValidMosquitoLotCategory(property.lotCategory)
+    ? property.lotCategory
+    : null;
+
+  if (requestedMosquitoCategory && !explicitMosquitoCategory) {
+    manualReviewReasons.push('invalid_mosquito_lot_category');
+    warnings.push('invalid_mosquito_lot_category');
+  }
+
+  if (explicitMosquitoCategory) {
+    return {
+      lotCategory: explicitMosquitoCategory,
+      grossLotCategory,
+      lotCategorySource: 'explicit_mosquito_lot_category',
+      lotCategoryGuardrailApplied: false,
+      manualReviewReasons,
+      warnings,
+    };
+  }
+
+  let lotCategory = null;
+  let lotCategorySource = 'unknown';
+  if (areaResolution.mosquitoTreatableSqFt > 0) {
+    lotCategory = areaResolution.lotCategoryFromArea ||
+      deriveMosquitoLotCategoryFromArea(areaResolution.mosquitoTreatableSqFt);
+    lotCategorySource = areaResolution.source === 'gross_lot_proxy'
+      ? 'gross_lot_category_fallback'
+      : 'derived_from_treatable_area';
+  } else if (grossLotCategory) {
+    lotCategory = grossLotCategory;
+    lotCategorySource = 'gross_lot_category_fallback';
+  }
+
+  let lotCategoryGuardrailApplied = false;
+  let originalLotCategory = lotCategory;
+  let adjustedLotCategory = lotCategory;
+  if (
+    lotCategory &&
+    grossLotCategory &&
+    areaResolution.source !== 'explicit_mosquito_treatable_sqft'
+  ) {
+    const categories = MOSQUITO.lotCategories || [];
+    const lotIndex = categories.findIndex(c => c.key === lotCategory);
+    const grossIndex = categories.findIndex(c => c.key === grossLotCategory);
+    const maxDrop = Number.isFinite(Number(MOSQUITO.grossLotGuardrailMaxDrop))
+      ? Number(MOSQUITO.grossLotGuardrailMaxDrop)
+      : 1;
+    const minimumIndex = Math.max(0, grossIndex - maxDrop);
+    if (lotIndex >= 0 && grossIndex >= 0 && lotIndex < minimumIndex) {
+      adjustedLotCategory = categories[minimumIndex].key;
+      lotCategory = adjustedLotCategory;
+      lotCategoryGuardrailApplied = true;
+      manualReviewReasons.push('mosquito_lot_category_guardrail_applied');
+    }
+  }
+
+  return {
+    lotCategory,
+    grossLotCategory,
+    lotCategorySource,
+    lotCategoryGuardrailApplied,
+    originalLotCategory,
+    adjustedLotCategory,
+    manualReviewReasons: uniqueList(manualReviewReasons),
+    warnings: uniqueList(warnings),
+  };
+}
+
 function calculatePropertyProfile(input) {
   const explicitFootprint = toPositiveNumber(input.footprintSqFt ?? input.footprint);
   const footprint = explicitFootprint || calculateFootprint(input.homeSqFt, input.stories || 1);
@@ -336,5 +507,6 @@ module.exports = {
   calculateFootprint, estimateHardscape, calculateComplexityScore,
   estimateLawnSqFt, computeTurfArea, toNonNegativeNumber,
   estimateBedArea, calculatePerimeter,
-  getLotCategory, getMosquitoTreatableCategory, calculatePropertyProfile,
+  getLotCategory, getMosquitoTreatableCategory, deriveMosquitoLotCategoryFromArea,
+  resolveMosquitoTreatableArea, resolveMosquitoLotCategory, calculatePropertyProfile,
 };

@@ -155,6 +155,55 @@ describe('pricing engine DB bridge', () => {
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
   });
 
+  test('validates active mosquito recurring and one-time config defaults', () => {
+    expect(validatePestPricingConfig(constants)).toEqual(expect.objectContaining({ valid: true }));
+    expect(constants.MOSQUITO.basePrices).toEqual(expect.objectContaining({
+      SMALL: [105, 90],
+      QUARTER: [115, 100],
+      THIRD: [130, 115],
+      HALF: [155, 135],
+      ACRE: [195, 175],
+    }));
+    expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
+    expect(constants.ONE_TIME.mosquito).toEqual(expect.objectContaining({
+      SMALL: 225,
+      STANDARD: 275,
+      LARGE: 325,
+      XL: 385,
+      ESTATE: 425,
+      ACRE_CLASS: 475,
+      OVER_ACRE: 475,
+      overAcreIncrementSqFt: 10000,
+      overAcreIncrementPrice: 75,
+      stationAddOn: 75,
+      dunkAddOn: 15,
+    }));
+  });
+
+  test('rejects drifted mosquito config values during validation', () => {
+    const snapshot = JSON.parse(JSON.stringify(constants));
+    snapshot.MOSQUITO.basePrices.SMALL = [0, 90];
+    snapshot.MOSQUITO.tierVisits.monthly12 = 0;
+    snapshot.MOSQUITO.pressureFactors.nearWater = 'bad';
+    snapshot.MOSQUITO.pressureCap = 0;
+    snapshot.ONE_TIME.mosquito.OVER_ACRE = 0;
+    snapshot.ONE_TIME.mosquito.overAcreIncrementSqFt = 0;
+    snapshot.ONE_TIME.mosquito.overAcreIncrementPrice = 0;
+
+    const result = validatePestPricingConfig(snapshot);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      'MOSQUITO.basePrices.SMALL.seasonal9 must be positive',
+      'MOSQUITO.tierVisits.monthly12 must be positive',
+      'MOSQUITO.pressureFactors.nearWater must be finite',
+      'MOSQUITO.pressureCap must be positive',
+      'ONE_TIME.mosquito.OVER_ACRE must be positive',
+      'ONE_TIME.mosquito.overAcreIncrementSqFt must be positive',
+      'ONE_TIME.mosquito.overAcreIncrementPrice must be positive',
+    ]));
+  });
+
   test('restores all constants when pest config validation fails', async () => {
     const originalLaborRate = constants.GLOBAL.LABOR_RATE;
     const originalMosquitoSmall = [...constants.MOSQUITO.basePrices.SMALL];
