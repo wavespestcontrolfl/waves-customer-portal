@@ -123,6 +123,22 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(source).not.toMatch(/basePrice\s*\*\s*0\.15|pp\s*\*\s*0\.15|117\s*\*\s*0\.15/);
   });
 
+  test('client fallback rejects palm injection without a positive treated-palm count', () => {
+    const estimate = calculateEstimate({
+      homeSqFt: 2200,
+      stories: 1,
+      lotSqFt: 9000,
+      propertyType: 'single_family',
+      svcInjection: true,
+      urgency: 'NONE',
+      isAfterHours: false,
+    });
+
+    expect(estimate).toEqual({
+      error: 'Palm count is required for palm injection pricing.',
+    });
+  });
+
   test('client fallback quotes German Roach Cleanout as a no-discount total', () => {
     const baseInput = {
       homeSqFt: 2800,

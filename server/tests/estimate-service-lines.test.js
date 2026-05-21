@@ -11,6 +11,11 @@ describe('estimate service line inference', () => {
     expect(serviceKeysFromText('Commercial Pest Control')).toEqual(['commercial_pest']);
     expect(serviceKeysFromText('Commercial Lawn Treatment')).toEqual(['commercial_lawn']);
     expect(serviceKeysFromText('Commercial Pest Control + Commercial Lawn')).toEqual(['commercial_pest', 'commercial_lawn']);
+    expect(serviceKeysFromText('Palm Injection')).toEqual(['palm_injection']);
+    expect(serviceKeysFromText('Palms to treat')).toEqual(['palm_injection']);
+    expect(serviceKeysFromText('Native / Palmetto / American roaches')).toEqual(['pest']);
+    expect(serviceKeysFromText('Initial Palmetto Knockdown')).toEqual(['pest']);
+    expect(serviceKeysFromText('palmettoexterminator.com lead')).toEqual(['pest']);
     expect(serviceKeysFromText('')).toEqual([]);
   });
 

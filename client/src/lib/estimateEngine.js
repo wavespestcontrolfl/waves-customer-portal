@@ -1191,6 +1191,7 @@ export function calculateEstimate(inputs) {
     const ip = integerPalmCount(_palmTreatmentCount) || integerPalmCount(_injectablePalms) || integerPalmCount(_palmCount);
     if (!ip) {
       fieldVerify.push('injectable palm count');
+      return { error: 'Palm count is required for palm injection pricing.' };
     } else {
       const palmEstimated = !integerPalmCount(_palmTreatmentCount) && !integerPalmCount(_injectablePalms);
       if (palmEstimated) fieldVerify.push('injectable palm count');
