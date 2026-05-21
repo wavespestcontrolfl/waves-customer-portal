@@ -447,9 +447,15 @@ function fmtPct(v) {
 }
 function fmtTime(min) {
   if (min == null) return "--";
-  if (min < 60) return min + "m";
-  if (min < 1440) return Math.round(min / 60) + "h";
-  return Math.round(min / 1440) + "d";
+  const numericMinutes = Number(min);
+  if (!Number.isFinite(numericMinutes)) return "--";
+  const totalSeconds = Math.max(0, Math.round(numericMinutes * 60));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
 }
 function roiColor(roi) {
   return roi >= 0 ? C.heading : C.red;
@@ -482,8 +488,11 @@ function SpeedToLeadTimer({ firstContactAt }) {
   }, [firstContactAt]);
 
   const mins = Math.floor(elapsed / 60);
+  const hours = Math.floor(elapsed / 3600);
+  const displayMinutes = Math.floor((elapsed % 3600) / 60);
   const secs = elapsed % 60;
-  const mm = String(mins).padStart(2, "0");
+  const hh = String(hours).padStart(2, "0");
+  const mm = String(displayMinutes).padStart(2, "0");
   const ss = String(secs).padStart(2, "0");
   const color = mins < 5 ? C.green : mins < 15 ? C.amber : C.red;
   const shouldPulse = mins >= 5;
@@ -498,7 +507,7 @@ function SpeedToLeadTimer({ firstContactAt }) {
         animation: shouldPulse ? "stlPulse 1.5s ease-in-out infinite" : "none",
       }}
     >
-      {mm}:{ss}
+      {hh}:{mm}:{ss}
     </span>
   );
 }
@@ -1036,7 +1045,6 @@ export function LeadsSection() {
                       "Urgency",
                       "Status",
                       "Response",
-                      "Assigned",
                     ].map((h) => (
                       <th
                         key={h}
@@ -1192,19 +1200,10 @@ export function LeadsSection() {
                               fmtTime(lead.response_time_minutes)
                             )}
                           </td>{" "}
-                          <td
-                            style={{
-                              padding: "12px 16px",
-                              color: C.text,
-                              fontSize: 13,
-                            }}
-                          >
-                            {lead.assigned_name || "--"}
-                          </td>{" "}
                         </tr>
                         {isExpanded && (
                           <tr>
-                            <td colSpan={7} style={{ padding: 0 }}>
+                            <td colSpan={6} style={{ padding: 0 }}>
                               {" "}
                               <div
                                 style={{
@@ -2076,20 +2075,6 @@ export function LeadsSection() {
                                 lead.urgency === "urgent" ? C.red : C.amber
                               }
                             />
-                          )}
-                          {lead.assigned_name && (
-                            <span
-                              style={{
-                                color: C.muted,
-                                fontSize: 11,
-                                marginLeft: "auto",
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {lead.assigned_name}
-                            </span>
                           )}
                         </div>{" "}
                       </div>
