@@ -9,17 +9,24 @@
  * messages, google_reviews — runs them through inline simplified versions
  * of the future scorers — writes a markdown report.
  *
- * Read-only. Never writes to the database. Safe to run against prod.
+ * Default is read-only — only the DB queries that aggregate gsc_*,
+ * blog_posts, call_log, messages, google_reviews run. Safe for prod.
+ *
+ * Opt-in `--with-serp` enables SERP profiling for 5 sample keywords
+ * via the existing SERPAnalyzer.analyzeKeyword path, which DOES write
+ * to seo_serp_analyses AND spends DataForSEO credits. Initial design
+ * had this enabled by default with a --no-serp opt-out; codex review
+ * pointed out the contradiction with the "read-only" header.
  *
  * Usage:
  *   node server/scripts/autonomous-engine-calibration.js
- *   node server/scripts/autonomous-engine-calibration.js --no-serp
+ *   node server/scripts/autonomous-engine-calibration.js --with-serp
  *   node server/scripts/autonomous-engine-calibration.js --days=28 --output=/tmp/report.md
  *
  * For prod data (recommended for real calibration):
  *   railway run -s Postgres -- bash -c '
  *     DATABASE_URL=$DATABASE_PUBLIC_URL \
- *       node server/scripts/autonomous-engine-calibration.js --no-serp
+ *       node server/scripts/autonomous-engine-calibration.js
  *   '
  */
 
@@ -40,7 +47,10 @@ const ARGS = Object.fromEntries(
 );
 
 const PERIOD_DAYS = parseInt(ARGS.days || 28, 10);
-const SKIP_SERP = !!ARGS['no-serp'];
+// SERP profiling is opt-in: it writes to seo_serp_analyses and spends
+// DataForSEO credits, which violates this script's "read-only / safe for
+// prod" contract by default. --no-serp accepted for backward compat.
+const SKIP_SERP = !ARGS['with-serp'] || !!ARGS['no-serp'];
 const OUTPUT_PATH =
   ARGS.output ||
   path.join(__dirname, '..', '..', 'reports', `calibration-${new Date().toISOString().slice(0, 10)}.md`);
@@ -381,7 +391,7 @@ function writeHeader() {
   log('');
   log(`- **Generated:** ${new Date().toISOString()}`);
   log(`- **Lookback:** ${PERIOD_DAYS} days (since ${SINCE})`);
-  log(`- **SERP profiling:** ${SKIP_SERP ? 'skipped (--no-serp)' : 'enabled'}`);
+  log(`- **SERP profiling:** ${SKIP_SERP ? 'skipped (default — pass --with-serp to enable)' : 'enabled (--with-serp)'}`);
   log(`- **DB env:** ${process.env.NODE_ENV || 'development'}`);
   log('');
   log(`## Active thresholds (server/services/content/scoring-config.js)`);
@@ -450,7 +460,7 @@ function writeSerpSection(result) {
   log(`## 5. SERP profiles`);
   log('');
   if (result.skipped) {
-    log(`_Skipped (${result.error || '--no-serp flag'}). Re-run without --no-serp to spend DataForSEO credits on 5 sample profiles._`);
+    log(`_Skipped (${result.error || 'default — SERP profiling is opt-in'}). Pass --with-serp to spend DataForSEO credits on 5 sample profiles (also writes to seo_serp_analyses)._`);
     log('');
     return;
   }

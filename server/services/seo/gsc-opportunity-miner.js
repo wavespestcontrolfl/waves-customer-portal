@@ -184,6 +184,13 @@ function actionForOpportunity({ bucket, query, page_url, city, service }) {
   return 'do_not_publish';
 }
 
+// Used to look up the best-impression own page sharing a query's
+// service+city classification — same keying as the gsc_queries → gsc_pages
+// join. Treat null/empty as a distinct group rather than collapsing them.
+function ownPageKey(service, city) {
+  return `${service || ''}::${city || ''}`;
+}
+
 function dedupeKey({ bucket, service, city, query, page_url }) {
   const parts = [
     bucket,
@@ -227,12 +234,29 @@ class GscOpportunityMiner {
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
+    // Build a service+city → best-impression own page map once, reused
+    // by the query-level buckets to attach a `page_url` when an own
+    // page is plausibly already ranking. Without this, striking_distance
+    // and ctr_rewrite emit page_url=null and the decision-router can
+    // produce duplicate-content actions (new city page when an existing
+    // one already ranks, or fall through to do_not_publish for a CTR
+    // rewrite that genuinely has a target URL).
+    //
+    // GSC's standard export doesn't expose query→page mapping, so this
+    // is a heuristic: pick the highest-impression own page sharing the
+    // same service_category + city_target classification.
+    const ownPagesByServiceCity = await this._loadOwnPagesByServiceCity(since)
+      .catch((err) => {
+        logger.warn(`[gsc-opp-miner] own-pages map failed: ${err.message}`);
+        return new Map();
+      });
+
     const buckets = {};
     const errors = {};
 
     const runs = [
-      ['striking_distance', () => this.mineStrikingDistance(since)],
-      ['ctr_rewrite', () => this.mineCtrRewrite(since)],
+      ['striking_distance', () => this.mineStrikingDistance(since, ownPagesByServiceCity)],
+      ['ctr_rewrite', () => this.mineCtrRewrite(since, ownPagesByServiceCity)],
       ['decay_refresh', () => this.mineDecayRefresh(since, priorSince)],
       ['cannibalization', () => this.mineCannibalization(since)],
       ['page_type_mismatch', () => this.minePageTypeMismatch(since)],
@@ -262,9 +286,26 @@ class GscOpportunityMiner {
     return { counts, errors, persisted, opportunities: allOpportunities };
   }
 
+  // ── own-page resolution helper ─────────────────────────────────────
+
+  async _loadOwnPagesByServiceCity(since) {
+    const rows = await db('gsc_pages')
+      .where('date', '>=', since)
+      .select('page_url', 'service_category', 'city_target')
+      .sum('impressions as impressions')
+      .groupBy('page_url', 'service_category', 'city_target')
+      .orderBy('impressions', 'desc');
+    const map = new Map();
+    for (const r of rows) {
+      const key = ownPageKey(r.service_category, r.city_target);
+      if (!map.has(key)) map.set(key, r.page_url); // first wins (orderBy impressions desc)
+    }
+    return map;
+  }
+
   // ── bucket miners ──────────────────────────────────────────────────
 
-  async mineStrikingDistance(since) {
+  async mineStrikingDistance(since, ownPagesByServiceCity = new Map()) {
     const rows = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
@@ -282,10 +323,11 @@ class GscOpportunityMiner {
     return rows.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
+      const pageUrl = ownPagesByServiceCity.get(ownPageKey(r.service_category, r.city_target)) || null;
       const opp = {
         bucket: 'striking_distance',
         query: r.query,
-        page_url: null,
+        page_url: pageUrl,
         service,
         city,
         signal_metadata: {
@@ -308,7 +350,7 @@ class GscOpportunityMiner {
     });
   }
 
-  async mineCtrRewrite(since) {
+  async mineCtrRewrite(since, ownPagesByServiceCity = new Map()) {
     const rows = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
@@ -327,10 +369,15 @@ class GscOpportunityMiner {
     return filtered.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
+      // ctr_rewrite REQUIRES a target page (we're rewriting its title/meta).
+      // If no matching own page exists, actionForOpportunity falls through
+      // to do_not_publish for that opportunity — which is the right outcome
+      // when there's nothing to rewrite.
+      const pageUrl = ownPagesByServiceCity.get(ownPageKey(r.service_category, r.city_target)) || null;
       const opp = {
         bucket: 'ctr_rewrite',
         query: r.query,
-        page_url: null, // resolved at action time by finding the URL ranking for this query
+        page_url: pageUrl,
         service,
         city,
         signal_metadata: {
@@ -795,6 +842,7 @@ module.exports._internals = {
   conversionIntentScore,
   impressionsBoost,
   actionForOpportunity,
+  ownPageKey,
   dedupeKey,
   scoreOpportunity,
 };
