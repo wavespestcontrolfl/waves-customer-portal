@@ -164,6 +164,13 @@ function checkSchemaValid(draft) {
 }
 
 function checkSerpBriefAttached(_draft, brief) {
+  // brief-builder intentionally skips SERP profiling for page-only
+  // opportunities (e.g. decay_refresh on a known page URL with no
+  // associated query). For those, there's no SERP signal to require —
+  // the gate would otherwise structurally block every page-only
+  // opportunity from passing autonomous publish.
+  const isPageOnly = !brief.target_keyword && brief.target_url;
+  if (isPageOnly) return { ok: true, reason: 'skipped_page_only_opportunity' };
   const s = brief.serp_signal;
   if (!s || !s.dominant_intent) return { ok: false, reason: 'no_serp_signal' };
   return { ok: true };
