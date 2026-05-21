@@ -88,46 +88,25 @@ Description: ${safeDesc}`,
   return response.content[0]?.text?.trim() || '';
 }
 
-// ── AI Image Generation (Gemini) ──
+// ── AI Image Generation ──
+// Delegates to the provider-chained image-generator (gpt-image-2 →
+// gpt-image-1.5 → gpt-image-1 → gemini by default). Preserves the
+// legacy "return null on any failure" contract so existing callers
+// that fall through to non-image posts keep working unchanged.
 async function generateImage(title) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
-
   try {
-    const prompt = `Create a high-quality, bright, modern image for a professional pest control business named "Waves Pest Control."
-Style: Clean, trustworthy, professional. Use teal/ocean blue (#0ea5e9) accent colors.
-Topic: ${title}
-Do NOT include any text or words in the image. Photorealistic style, well-lit, 1080x1080.`;
-
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-        }),
-      }
-    );
-
-    if (!res.ok) {
-      logger.warn(`[social] Gemini image generation failed: ${res.status}`);
+    const imageGenerator = require('./content/image-generator');
+    const result = await imageGenerator.generate({ title, mode: 'social-square' });
+    // Existing callers expect { base64, mimeType }. Parse our data: URL
+    // back into those parts to maintain the contract.
+    const match = /^data:([^;]+);base64,(.+)$/.exec(result.dataUrl || '');
+    if (!match) {
+      logger.warn(`[social] image-generator returned malformed dataUrl from ${result.model}`);
       return null;
     }
-
-    const data = await res.json();
-    // Extract image from response
-    const imagePart = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-    if (imagePart?.inlineData) {
-      return {
-        base64: imagePart.inlineData.data,
-        mimeType: imagePart.inlineData.mimeType || 'image/png',
-      };
-    }
-    return null;
+    return { base64: match[2], mimeType: match[1] };
   } catch (err) {
-    logger.error(`[social] Image generation failed: ${err.message}`);
+    logger.warn(`[social] image generation failed: ${err.message}`);
     return null;
   }
 }
