@@ -1464,6 +1464,15 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     }
     return undefined;
   };
+  const positiveIntegerValue = (...values) => {
+    const raw = measurementValue(...values);
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : raw;
+  };
+  const palmRequest = o.palmInjection && typeof o.palmInjection === 'object'
+    ? o.palmInjection
+    : {};
 
   const services = {};
   const pricingMetadata = {
@@ -1537,18 +1546,37 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   }
   if (sel.has('TREE_SHRUB')) services.treeShrub = { tier: 'standard' };
   if (sel.has('PALM_INJECTION')) {
-    const totalPalmCount = Math.max(1, Number(p.estimatedPalmCount || p.palmCount) || 3);
-    const injectablePalmCount = Number(p.injectablePalms) > 0
-      ? Number(p.injectablePalms)
-      : Math.max(1, Math.round(totalPalmCount * 0.30));
-    const requestedPalmSize = String(o.palmSize || p.palmSize || 'medium').toLowerCase();
+    const requestedPalmSize = String(palmRequest.palmSize || o.palmSize || p.palmSize || 'medium').toLowerCase();
     const palmSize = ['small', 'medium', 'large'].includes(requestedPalmSize)
       ? requestedPalmSize
       : 'medium';
+    const servicePalmCount = positiveIntegerValue(
+      palmRequest.palmCount,
+      palmRequest.measurements?.palmCount,
+      o.palmTreatmentCount,
+      o.palmsToTreat,
+      o.palmInjectionPalmCount,
+      // Backward-compatibility only: older admin forms wrote the manually
+      // entered treatment count as injectablePalms. Do not invent a count when
+      // this is missing; the engine returns a palm-count validation error.
+      p.injectablePalms,
+    );
     services.palm = {
-      palmCount: injectablePalmCount,
-      treatmentType: 'combo',
+      ...(servicePalmCount !== undefined ? { palmCount: servicePalmCount, measurements: { palmCount: servicePalmCount } } : {}),
+      treatmentType: palmRequest.treatmentType || o.palmTreatmentType || 'combo',
       palmSize,
+      appsPerYear: positiveIntegerValue(palmRequest.appsPerYear, o.palmAppsPerYear),
+      intervalMonths: positiveIntegerValue(palmRequest.intervalMonths, o.palmIntervalMonths),
+      customPricePerPalm: measurementValue(palmRequest.customPricePerPalm, o.palmCustomPricePerPalm),
+      highDose: !!(palmRequest.highDose ?? o.palmHighDose),
+      largeDiameter: !!(palmRequest.largeDiameter ?? o.palmLargeDiameter),
+      nonstandardProduct: !!(palmRequest.nonstandardProduct ?? o.palmNonstandardProduct),
+      diagnosisConfirmed: !!(palmRequest.diagnosisConfirmed ?? o.palmDiagnosisConfirmed),
+      selectedProduct: palmRequest.selectedProduct || o.palmSelectedProduct,
+      palmStatus: palmRequest.palmStatus || o.palmStatus,
+      dbhInches: measurementValue(palmRequest.dbhInches, o.palmDbhInches),
+      product: palmRequest.product || o.palmProduct,
+      licensedApplicator: !!(palmRequest.licensedApplicator ?? o.palmLicensedApplicator),
     };
   }
   if (sel.has('MOSQUITO')) {
@@ -1785,6 +1813,13 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     bedAreaSource: p.estimatedBedAreaSf !== undefined && p.estimatedBedAreaSf !== null && p.estimatedBedAreaSf !== ''
       ? 'estimated'
       : undefined,
+    palmCount: positiveIntegerValue(p.palmCount),
+    palmInventory: {
+      ...(p.palmInventory || {}),
+      ...(positiveIntegerValue(p.palmInventory?.palmCount, p.estimatedPalmCount) !== undefined
+        ? { palmCount: positiveIntegerValue(p.palmInventory?.palmCount, p.estimatedPalmCount) }
+        : {}),
+    },
     features,
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,
@@ -1851,7 +1886,11 @@ router.post('/calculate-estimate', async (req, res) => {
     res.json(mapped);
   } catch (err) {
     console.error('[estimate-v1-adapter] Calculation error:', err.message, err.stack);
-    res.status(500).json({ error: err.message });
+    res.status(err.statusCode || err.status || 500).json({
+      error: err.message,
+      code: err.code,
+      metadata: err.metadata,
+    });
   }
 });
 

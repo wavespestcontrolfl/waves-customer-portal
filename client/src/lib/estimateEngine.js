@@ -22,7 +22,7 @@
  *
  * v1.5 changes:
  * - Tree & Shrub: bed area cap raised 8k→12k, access difficulty modifier (+8/+15 min)
- * - Palm Injection: prefers manual injectable count, flags when estimated
+ * - Palm Injection: requires explicit treated palm count, flags missing measurement data
  * - Mosquito: irrigation modifier (+0.08 pressure), cap raised 1.50→1.60
  * - Rodent Bait: matrix scoring (footprint + lot + water + trees) replaces OR logic
  * - One-Time Lawn: higher standalone fungicide base ($95 floor vs $73)
@@ -627,6 +627,7 @@ export function calculateEstimate(inputs) {
     isRecurringCustomer: isRC,
     bedArea: _bedArea,
     palmCount: _palmCount,
+    palmTreatmentCount: _palmTreatmentCount,
     treeCount: _treeCount,
     roachModifier: roachMod,
     pestFreq: _pestFreq,
@@ -703,7 +704,7 @@ export function calculateEstimate(inputs) {
     // v1.5 inputs
     accessDifficulty,   // 'EASY' | 'MODERATE' | 'DIFFICULT' — gate access, narrow side yards
     hasIrrigation,      // boolean — extensive irrigation creates standing water
-    injectablePalms: _injectablePalms, // manual override for injectable palm count
+    injectablePalms: _injectablePalms, // legacy manual override for injectable palm count
     bedbugEquipment,    // 'SUBCONTRACT' | 'INHOUSE' — heat treatment equipment source
   } = inputs;
 
@@ -1180,34 +1181,36 @@ export function calculateEstimate(inputs) {
   /* ── PALM INJECTION ──────────────────────────────────────── */
   if (svcInjection && !isCommercial) {
     hasRec = true;
-    // v1.5: prefer manual injectable count — the 30% estimate is unreliable
-    // (10 Washingtonia + 2 Canary Islands = 12 palms but only 2 injectable)
-    let ip;
-    let palmEstimated = false;
-    if (Number(_injectablePalms) > 0) {
-      ip = Number(_injectablePalms);
-    } else {
-      let ep = palmCount || (treeDensity === 'HEAVY' ? 6 : treeDensity === 'MODERATE' ? 5 : 3);
-      ip = Math.max(1, Math.round(ep * 0.30));
-      palmEstimated = true;
-      fieldVerify.push('injectable palm count');
-    }
-    // Client fallback mirrors the server adapter's explicit combo/medium protocol.
-    const palmPerApp = 75;
-    const appsPerYear = 2;
-    const perVisit = Math.max(ip * palmPerApp, 75);
-    const inja = perVisit * appsPerYear, injMo = Math.round(inja / 12 * 100) / 100;
-    R.injection = {
-      palms: ip,
-      ann: inja,
-      mo: injMo,
-      estimated: palmEstimated,
-      pricePerPalm: palmPerApp,
-      appsPerYear,
-      palmSize: 'medium',
-      perVisit,
-      detail: `Nutrition + Insecticide · medium palms · $${palmPerApp}/palm · ${appsPerYear}/yr${perVisit > ip * palmPerApp ? ` · $${perVisit} visit minimum applied` : ''}`,
+    const integerPalmCount = (value) => {
+      const n = Number(value);
+      return Number.isInteger(n) && n > 0 ? n : 0;
     };
+    // Service-level count is the number of palms treated for this line. Property
+    // palm count is only a prefill/default; never fall back to one palm or a
+    // 30% satellite estimate because that hides missing measurement data.
+    const ip = integerPalmCount(_palmTreatmentCount) || integerPalmCount(_injectablePalms) || integerPalmCount(_palmCount);
+    if (!ip) {
+      fieldVerify.push('injectable palm count');
+    } else {
+      const palmEstimated = !integerPalmCount(_palmTreatmentCount) && !integerPalmCount(_injectablePalms);
+      if (palmEstimated) fieldVerify.push('injectable palm count');
+      // Client fallback mirrors the server adapter's explicit combo/medium protocol.
+      const palmPerApp = 75;
+      const appsPerYear = 2;
+      const perVisit = Math.max(ip * palmPerApp, 75);
+      const inja = perVisit * appsPerYear, injMo = Math.round(inja / 12 * 100) / 100;
+      R.injection = {
+        palms: ip,
+        ann: inja,
+        mo: injMo,
+        estimated: palmEstimated,
+        pricePerPalm: palmPerApp,
+        appsPerYear,
+        palmSize: 'medium',
+        perVisit,
+        detail: `Nutrition + Insecticide · medium palms · $${palmPerApp}/palm · ${appsPerYear}/yr${perVisit > ip * palmPerApp ? ` · $${perVisit} visit minimum applied` : ''}`,
+      };
+    }
     // Palm injection is excluded from WaveGuard percent discounts and does not
     // count toward tier qualification — billed separately like rodent bait.
   }

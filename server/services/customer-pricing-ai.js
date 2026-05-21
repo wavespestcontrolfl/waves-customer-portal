@@ -65,6 +65,11 @@ function positiveNumber(...values) {
   return 0;
 }
 
+function positiveInteger(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
 function toKeyLabel(key) {
   return SERVICE_LABELS[key] || String(key || '').replace(/_/g, ' ');
 }
@@ -160,7 +165,7 @@ function optionServices(option, context) {
   if (option.serviceKey === 'rodent_bait') return { rodentBait: {} };
   if (option.serviceKey === 'palm') return {
     palm: {
-      palmCount: Math.max(1, Number(context.palmCount) || 1),
+      palmCount: positiveInteger(context.palmCount),
       treatmentType: option.treatmentType || 'combo',
       palmSize: option.palmSize || 'medium',
     },
@@ -383,6 +388,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     constructionMaterial,
     foundationType,
     roofType,
+    palmCount: positiveInteger(palmCount) || undefined,
   };
 
   return {
@@ -403,6 +409,7 @@ function missingPropertyFor(serviceKeys, context) {
   if (!context.hasHomeSqFt) return 'home_sqft';
   const needsOutdoor = serviceKeys.some(key => ['lawn_care', 'mosquito', 'tree_shrub', 'one_time_lawn', 'one_time_mosquito'].includes(key));
   if (needsOutdoor && !context.hasLotSqFt && !context.hasLawnSqFt) return 'outdoor_sqft';
+  if (serviceKeys.includes('palm') && !positiveInteger(context.palmCount)) return 'palm_count';
   return null;
 }
 
@@ -643,7 +650,9 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
       code: 'PROPERTY_DETAILS_NEEDED',
       message: missing === 'home_sqft'
         ? 'I need a home square footage on this property before I can price that accurately.'
-        : 'I need an outdoor/turf or lot measurement on this property before I can price that accurately.',
+        : missing === 'palm_count'
+          ? 'Palm count is required for palm injection pricing.'
+          : 'I need an outdoor/turf or lot measurement on this property before I can price that accurately.',
       currentServices: currentServiceKeys.map(toKeyLabel),
       requestedServices: requestedServices.map(toKeyLabel),
       alreadyIncluded: alreadyIncluded.map(toKeyLabel),
