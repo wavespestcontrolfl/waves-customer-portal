@@ -30,7 +30,14 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 
-const MIN_TOTAL_SCORE = 75;
+// Pass threshold relative to a 100-point scale. The current weight map
+// makes 75 unreachable for any page type — common hard checks sum to
+// 37 and the largest page-specific bundle is city-service at 36, so
+// max total = 73 ≈ 73% of the conceptual 100. Lowered to 55 (75% of
+// the actually-achievable 73-point max) so passing is mathematically
+// possible. The v3.1 plan called for "min total 75" as a percentage
+// goal; honoring that intent against the real ceiling means 55/73.
+const MIN_TOTAL_SCORE = 55;
 
 // Each check carries (name, weight, isHard, evaluate(draft, brief)).
 // Hard checks are pass/fail and short-circuit publishing on failure.
@@ -293,17 +300,32 @@ function checkSourceInternalLink(draft) {
   return { ok: true };
 }
 
+// Explicit allowlist of known Waves phone numbers (last 7 digits — all
+// in the 941 area code today). Per memory: 318-7612 LWR/Bradenton,
+// 297-2817 Parrish, 297-2606 Sarasota, 297-3337 Venice, 240-2066 NP,
+// 297-5749 main (PC + Palmetto). Anything not on the list is treated
+// as customer PII regardless of area code.
+const WAVES_PHONE_LAST_SEVEN = new Set([
+  '3187612', '2972817', '2972606', '2973337', '2402066', '2975749',
+]);
+
 function checkRedactionPassed(draft) {
   const body = String(draft.body || '');
-  // Look for unredacted patterns the pii-redactor would catch but
-  // didn't make it through. Phone, email, full address, [name] absence
-  // alongside name-shaped strings.
-  if (/\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/.test(body)) {
-    // Allow Waves' own published phone numbers.
-    const wavesPhones = /\b(941|863|863)[-.\s](.*?)\b/;
-    const allMatches = body.match(/\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/g) || [];
-    const allWaves = allMatches.every((p) => wavesPhones.test(p));
-    if (!allWaves) return { ok: false, reason: 'non_business_phone_number_in_body' };
+  // Broad phone regex covers both `941-555-1234` and `(941) 555-1234`
+  // (and a few common variants). Previous regex missed parenthesized
+  // formats, which let parenthesized customer numbers bypass the
+  // redaction hard check entirely.
+  const phoneRe = /\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
+  const phoneMatches = body.match(phoneRe) || [];
+  for (const raw of phoneMatches) {
+    const digits = raw.replace(/\D/g, '');
+    // Normalize to last 10 digits (drops a leading 1).
+    const last10 = digits.length >= 10 ? digits.slice(-10) : null;
+    if (!last10) return { ok: false, reason: 'malformed_phone_number_in_body' };
+    const last7 = last10.slice(-7);
+    if (!WAVES_PHONE_LAST_SEVEN.has(last7)) {
+      return { ok: false, reason: `non_business_phone_number_in_body:${last10}` };
+    }
   }
   if (/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/.test(body)) {
     return { ok: false, reason: 'email_in_body' };
