@@ -241,6 +241,25 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(estimate.totals.year2).toBe(0);
   });
 
+  test('client fallback allows Pre-Slab-only estimates without home or lot size', () => {
+    const estimate = calculateEstimate({
+      svcPreslab: true,
+      preslabSqft: 1800,
+      preslabWarranty: 'NONE',
+      preslabLabelConfirmed: true,
+      urgency: 'NONE',
+      isAfterHours: false,
+    });
+
+    expect(estimate.error).toBeUndefined();
+    const preSlab = estimate.oneTime.items.find((item) => item.name === 'Pre-Slab');
+    expect(preSlab).toEqual(expect.objectContaining({
+      warrantyTier: 'NONE',
+      warrAdd: 0,
+    }));
+    expect(preSlab.price).toBe(preSlab.basePrice);
+  });
+
   test('keeps one-time pest floor as a final customer-facing floor', () => {
     expect(source).toContain('const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));');
   });

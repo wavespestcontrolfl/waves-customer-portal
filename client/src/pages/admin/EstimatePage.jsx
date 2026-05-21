@@ -3223,6 +3223,7 @@ function EstimateToolView() {
                           <Select
                             k="preslabWarranty"
                             options={[
+                              { value: "NONE", label: "No warranty" },
                               { value: "BASIC", label: "Basic 1-yr (included)" },
                               { value: "EXTENDED", label: "Extended 5-yr (+$200)" },
                             ]}
@@ -4743,11 +4744,14 @@ function EstimateToolView() {
                                     />
                                   )}
                                 </TierGrid>
-                                {!item.warrAdd && (
+                                {!item.warrAdd && String(item.warrantyTier || "BASIC").toUpperCase() !== "NONE" && (
                                   <div style={sModNote}>
                                     Includes 1-yr builder warranty | $225/yr
                                     renewal after
                                   </div>
+                                )}
+                                {!item.warrAdd && String(item.warrantyTier || "").toUpperCase() === "NONE" && (
+                                  <div style={sModNote}>No warranty selected</div>
                                 )}
                                 {item.warningText && (
                                   <div style={sModNote}>{item.warningText}</div>

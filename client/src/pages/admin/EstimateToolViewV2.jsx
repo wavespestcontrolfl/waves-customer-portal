@@ -2900,7 +2900,9 @@ export default function EstimateToolViewV2({
       if (!profile.lotSqFt) profile.lotSqFt = 0;
       const bedBugOnly =
         selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
-      if (!bedBugOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      const preSlabOnly =
+        selectedServices.length === 1 && selectedServices[0] === "PRESLAB";
+      if (!bedBugOnly && !preSlabOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }
@@ -4687,6 +4689,7 @@ export default function EstimateToolViewV2({
                           <SelectV2
                             k="preslabWarranty"
                             options={[
+                              { value: "NONE", label: "No warranty" },
                               { value: "BASIC", label: "Basic 1-yr (included)" },
                               { value: "EXTENDED", label: "Extended 5-yr (+$200)" },
                             ]}
@@ -6205,10 +6208,15 @@ export default function EstimateToolViewV2({
                                     />
                                   )}
                                 </TierGridV2>
-                                {!item.warrAdd && (
+                                {!item.warrAdd && String(item.warrantyTier || "BASIC").toUpperCase() !== "NONE" && (
                                   <div className="text-11 text-ink-secondary mt-1">
                                     Includes 1-yr builder warranty | $225/yr
                                     renewal after
+                                  </div>
+                                )}
+                                {!item.warrAdd && String(item.warrantyTier || "").toUpperCase() === "NONE" && (
+                                  <div className="text-11 text-ink-secondary mt-1">
+                                    No warranty selected
                                   </div>
                                 )}
                                 {item.warningText && (

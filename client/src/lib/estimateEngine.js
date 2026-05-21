@@ -574,6 +574,31 @@ function normalizePreSlabVolume(value) {
   return { key: 'none', label: 'NONE', multiplier: 1.00 };
 }
 
+function normalizePreSlabWarranty(value) {
+  const raw = String(value || 'BASIC').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  const aliases = {
+    NONE: 'NONE',
+    NO: 'NONE',
+    NO_WARRANTY: 'NONE',
+    BASIC: 'BASIC',
+    BASIC_1YR: 'BASIC',
+    BASIC_1_YEAR: 'BASIC',
+    ONE_YEAR: 'BASIC',
+    ONE_YEAR_INCLUDED: 'BASIC',
+    EXTENDED: 'EXTENDED',
+    FIVE_YEAR: 'EXTENDED',
+    FIVE_YEAR_EXTENDED: 'EXTENDED',
+    '5_YEAR': 'EXTENDED',
+  };
+  const tier = aliases[raw] || 'BASIC';
+  const labels = {
+    NONE: 'No warranty',
+    BASIC: 'Basic 1-yr warranty',
+    EXTENDED: 'Extended 5-yr warranty',
+  };
+  return { tier, label: labels[tier] };
+}
+
 function resolveLawnFreq(freq) {
   const parsed = Number(freq);
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
@@ -761,7 +786,33 @@ export function calculateEstimate(inputs) {
     return hardscape;
   };
 
-  if (homeSqFt <= 0 && lotSqFt <= 0) {
+  const selectedServiceFlags = [
+    svcLawn,
+    svcPest,
+    svcTs,
+    svcInjection,
+    svcMosquito,
+    svcTermiteBait,
+    svcRodentBait,
+    svcOnetimePest,
+    svcOnetimeLawn,
+    svcOnetimeMosquito,
+    svcPlugging,
+    svcTopdress,
+    svcDethatch,
+    svcTrenching,
+    svcBoracare,
+    svcPreslab,
+    svcFoam,
+    svcRodentTrap,
+    svcFlea,
+    svcWasp,
+    svcRoach,
+    svcBedbug,
+    svcExclusion,
+  ];
+  const preSlabOnly = !!svcPreslab && selectedServiceFlags.filter(Boolean).length === 1;
+  if (!preSlabOnly && homeSqFt <= 0 && lotSqFt <= 0) {
     return { error: 'Enter home sq ft or lot size.' };
   }
 
@@ -1558,7 +1609,8 @@ export function calculateEstimate(inputs) {
       Math.round(priceBeforeVolumeDiscount * vol.multiplier),
       product.floorAfterVolumeDiscount,
     );
-    const warrAdd = preslabWarranty === 'EXTENDED' ? 200 : 0;
+    const warranty = normalizePreSlabWarranty(preslabWarranty);
+    const warrAdd = warranty.tier === 'EXTENDED' ? 200 : 0;
     const basePreSlabPrice = priceAfterVolumeDiscount;
     const fp = basePreSlabPrice + warrAdd;
     const labelConfirmed = preslabLabelConfirmed === true || preslabLabelConfirmed === 'true';
@@ -1597,6 +1649,8 @@ export function calculateEstimate(inputs) {
       volumeDiscountMultiplier: vol.multiplier,
       basePrice: basePreSlabPrice,
       warrAdd,
+      warrantyTier: warranty.tier,
+      warrantyLabel: warranty.label,
       labelConfirmed,
       requiresManualReview: !labelConfirmed,
       manualReviewReasons: labelConfirmed ? [] : ['pre_slab_label_confirmation_required'],
