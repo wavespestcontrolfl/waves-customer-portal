@@ -102,19 +102,20 @@ function revenueRealizationScore({ estimated_revenue, leads_total }) {
 class ConversionFeedbackMiner {
   async mineWindow({ windowDays = 90, persist = true } = {}) {
     const windowEndDate = etDateString(new Date());
-    // ET-pinned cutoff for timestamptz columns (leads.first_contact_at
-    // and call_log.created_at). `since` is built as an absolute Date
-    // representing 00:00 ET on the cutoff day — knex serializes Date
-    // objects via toISOString() (UTC with offset), so Postgres compares
-    // timestamptz >= the right UTC instant and the 90-day window
-    // boundary stays aligned to ET-midnight (not UTC-midnight, which
-    // would shift records by 4–5 hours). The etDateString → parseETDateTime
-    // round-trip is intentional: etDateString gives us today's ET
-    // calendar day, addETDays walks back N ET-days correctly across DST,
-    // and parseETDateTime turns "YYYY-MM-DDT00:00" into the absolute
-    // Date at ET-midnight on that day.
-    const sinceETString = etDateString(addETDays(new Date(), -windowDays));
-    const since = parseETDateTime(`${sinceETString}T00:00`);
+    // ET-pinned cutoff for timestamptz WHERE clauses against
+    // leads.first_contact_at + call_log.created_at. We build the cutoff
+    // server-side via Postgres's `AT TIME ZONE 'America/New_York'` so
+    // it's unambiguous to the database — the cutoff = midnight ET N
+    // days ago, not midnight UTC.
+    // windowDays is internal (not user input) so we safely interpolate
+    // it into the INTERVAL literal. Knex won't parameterize an
+    // `INTERVAL ?` form reliably (the ? binds before the INTERVAL
+    // parser sees it), and CURRENT_DATE - INTERVAL N DAY is the
+    // documented Postgres way to walk an ET-anchored cutoff.
+    const days = Math.max(0, parseInt(windowDays, 10) || 0);
+    const sinceCutoff = db.raw(
+      `(CURRENT_DATE AT TIME ZONE 'America/New_York' - INTERVAL '${days} days')::timestamptz`
+    );
 
     const rolls = new Map(); // key: city||_global :: service||_global → row
 
@@ -154,7 +155,7 @@ class ConversionFeedbackMiner {
     // sent/accepted counts and revenue.
     try {
       const leads = await db('leads')
-        .where('leads.first_contact_at', '>=', since)
+        .where('leads.first_contact_at', '>=', sinceCutoff)
         .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
         .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
         .select(
@@ -219,7 +220,7 @@ class ConversionFeedbackMiner {
     try {
       const calls = await db('call_log')
         .where('call_log.direction', 'inbound')
-        .where('call_log.created_at', '>=', since)
+        .where('call_log.created_at', '>=', sinceCutoff)
         .leftJoin('leads', function () {
           this.on('leads.twilio_call_sid', '=', 'call_log.twilio_call_sid');
         })
