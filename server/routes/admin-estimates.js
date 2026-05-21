@@ -45,6 +45,11 @@ const {
 
 const ESTIMATE_LIST_LIMIT = 500;
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
+const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
+
+function estimateMatchesSentOnlyScope(estimate = {}) {
+  return !!estimate.sent_at || SENT_ONLY_DELIVERY_ATTEMPT_STATUSES.includes(String(estimate.status || ''));
+}
 
 async function renderTemplate(templateKey, vars) {
   try {
@@ -501,7 +506,12 @@ router.get('/', async (req, res, next) => {
       .orderBy('estimates.created_at', 'desc');
 
     if (status) query = query.where('estimates.status', status);
-    if (sentOnly) query = query.whereNotNull('estimates.sent_at');
+    if (sentOnly) {
+      query = query.where(function () {
+        this.whereNotNull('estimates.sent_at')
+          .orWhereIn('estimates.status', SENT_ONLY_DELIVERY_ATTEMPT_STATUSES);
+      });
+    }
     if (source) {
       const sources = source.split(',');
       query = query.whereIn('estimates.source', sources);
@@ -1104,6 +1114,7 @@ router.post('/cleanup-demo', async (req, res, next) => {
 
 router._internals = {
   assertEstimateSendable,
+  estimateMatchesSentOnlyScope,
   sendEstimateEmail,
   estimateEmailIdempotencyKey,
 };
