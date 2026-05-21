@@ -860,6 +860,10 @@ function CustomerProjectReportPreview({
 }
 
 export default function ProjectsPage() {
+  const initialProjectId =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("projectId")
+      : null;
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState("");
@@ -904,6 +908,13 @@ export default function ProjectsPage() {
   useEffect(() => {
     loadProjects();
   }, [loadProjects]);
+
+  useEffect(() => {
+    if (!initialProjectId || selectedId) return;
+    if (projects.some((p) => p.id === initialProjectId)) {
+      setSelectedId(initialProjectId);
+    }
+  }, [initialProjectId, projects, selectedId]);
 
   useEffect(() => {
     adminFetch("/admin/projects/types")
@@ -1641,10 +1652,16 @@ function ProjectDetail({
       const r = await adminFetch(`/admin/projects/${projectId}/close`, {
         method: "POST",
       });
-      await readJsonResponse(r, "Could not close project");
+      const d = await readJsonResponse(r, "Could not close project");
       await load();
       onChanged?.();
-      setNotice("Project closed.");
+      const serviceText = d.serviceCompleted ? " Service marked completed." : "";
+      const portalText = d.portalAttached
+        ? " Report attached to the customer portal."
+        : d.serviceCompleted
+        ? " Report remains token-only for this customer."
+        : "";
+      setNotice(`Project closed.${serviceText}${portalText}`);
     } catch (e) {
       setError(e.message || "Could not close project");
     } finally {

@@ -25,14 +25,14 @@ const SPECIAL_PROJECT_TYPES = {
   },
   termite_trenching: {
     completionMode: 'special_project',
-    projectType: 'termite_inspection',
+    projectType: 'termite_treatment',
     portalVisibility: 'token_only',
     portalAttachPolicy: 'recurring_customer',
     notes: 'Termite trenching needs treatment/compliance documentation.',
   },
   termite_liquid: {
     completionMode: 'special_project',
-    projectType: 'termite_inspection',
+    projectType: 'termite_treatment',
     portalVisibility: 'token_only',
     portalAttachPolicy: 'recurring_customer',
     notes: 'Liquid termite treatment needs treatment/compliance documentation.',
@@ -40,23 +40,22 @@ const SPECIAL_PROJECT_TYPES = {
 };
 
 const PROJECT_TYPE_BY_SERVICE_KEY = [
-  [/^rodent_trapping(?:_|$)|^rodent_exclusion|^rodent_sanitation|^rodent_general_one_time$|^rodent_bait_setup$/, 'rodent_exclusion'],
-  [/^wildlife_trapping$/, 'rodent_exclusion'],
-  [/^flea_tick$/, 'flea'],
-  [/^pest_initial_|^pest_re_service$|^fire_ant$|^bee_wasp_removal$|^mud_dauber_removal$|^tick_control$/, 'pest_inspection'],
-  [/^lawn_/, 'pest_inspection'],
-  [/^mosquito_event$/, 'pest_inspection'],
-  [/^palm_injection$/, 'pest_inspection'],
+  [/^rodent_trapping(?:_|$)|^rodent_exclusion|^rodent_sanitation|^rodent_general_one_time$|^rodent_bait_setup$/, 'rodent_trapping'],
+  [/^wildlife_trapping$/, 'wildlife_trapping'],
+  [/^pest_initial_|^pest_re_service$|^fire_ant$|^flea_tick$|^bee_wasp_removal$|^mud_dauber_removal$|^tick_control$/, 'one_time_pest_treatment'],
+  [/^lawn_/, 'one_time_lawn_treatment'],
+  [/^mosquito_event$/, 'mosquito_event'],
+  [/^palm_injection$/, 'palm_injection'],
   [/^termite_inspection$/, 'termite_inspection'],
-  [/^termite_(spot_treatment|pretreatment|cartridge_replacement|installation_setup)$/, 'termite_inspection'],
+  [/^termite_(spot_treatment|pretreatment|cartridge_replacement|installation_setup)$/, 'termite_treatment'],
   [/^pest_inspection$/, 'pest_inspection'],
   [/^new_customer_inspection$/, 'pest_inspection'],
-  [/^rodent_inspection$/, 'rodent_exclusion'],
+  [/^rodent_inspection$/, 'rodent_trapping'],
 ];
 
 function projectTypeForService(serviceKey) {
   const match = PROJECT_TYPE_BY_SERVICE_KEY.find(([pattern]) => pattern.test(serviceKey));
-  return match ? match[1] : 'pest_inspection';
+  return match ? match[1] : 'one_time_pest_treatment';
 }
 
 function profileForService(service) {

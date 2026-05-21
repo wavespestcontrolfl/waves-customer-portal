@@ -67,6 +67,7 @@ import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBa
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
+import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import HorizontalScroll from "../../components/HorizontalScroll";
 import useIsMobile from "../../hooks/useIsMobile";
 import { Button, Badge, Card, CardBody, cn } from "../../components/ui";
@@ -100,6 +101,24 @@ function canOpenMobileCompletion(service) {
 
 function shouldOpenMobileCompletion(service) {
   return canOpenMobileCompletion(service);
+}
+
+function isProjectBackedCompletion(service) {
+  const profile = service?.completionProfile;
+  return !!(profile?.projectBacked || profile?.requiresProject);
+}
+
+function projectCompletionActionLabel(service) {
+  if (!isProjectBackedCompletion(service)) return "Complete";
+  const linked = service?.linkedProject;
+  if (linked?.status === "closed" || service?.status === "completed") return "Completed";
+  if (linked?.id) return "Continue project";
+  return "Create project";
+}
+
+function projectCompletionIsClosed(service) {
+  return isProjectBackedCompletion(service)
+    && (service?.linkedProject?.status === "closed" || service?.status === "completed");
 }
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -717,8 +736,12 @@ function ServiceCardV2({
             >
               {sendingReview ? "Sending…" : "Review"}
             </Button>{" "}
-            <Button size="sm" onClick={() => onComplete(service)}>
-              Complete
+            <Button
+              size="sm"
+              onClick={() => onComplete(service)}
+              disabled={projectCompletionIsClosed(service)}
+            >
+              {projectCompletionActionLabel(service)}
             </Button>{" "}
             <div className="relative inline-block">
               {" "}
@@ -1129,6 +1152,7 @@ export default function DispatchPageV2({
   const [error, setError] = useState(null);
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
+  const [projectService, setProjectService] = useState(null);
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
   const [detailService, setDetailService] = useState(null);
@@ -1320,6 +1344,15 @@ export default function DispatchPageV2({
   }, []);
 
   const handleComplete = useCallback((service) => {
+    if (isProjectBackedCompletion(service)) {
+      if (projectCompletionIsClosed(service)) return;
+      if (service?.linkedProject?.id) {
+        window.location.assign(`/admin/projects?projectId=${service.linkedProject.id}`);
+        return;
+      }
+      setProjectService(service);
+      return;
+    }
     setCompletingService(service);
   }, []);
 
@@ -2168,7 +2201,7 @@ export default function DispatchPageV2({
               services={services}
               onEdit={(svc) => {
                 if (shouldOpenMobileCompletion(svc)) {
-                  setCompletingService(svc);
+                  handleComplete(svc);
                 } else {
                   setDetailService(svc);
                 }
@@ -2210,6 +2243,28 @@ export default function DispatchPageV2({
           }
         />
       )}
+      {projectService && (
+        <CreateProjectModal
+          theme="light"
+          defaultCustomerId={projectService.customerId}
+          defaultCustomerLabel={projectService.customerName}
+          defaultScheduledServiceId={projectService.id}
+          defaultProjectDate={
+            String(projectService.scheduledDate || date || "").split("T")[0]
+          }
+          defaultProjectType={projectService.completionProfile?.projectType || ""}
+          allowedProjectTypes={
+            projectService.completionProfile?.projectType
+              ? [projectService.completionProfile.projectType]
+              : null
+          }
+          onClose={() => setProjectService(null)}
+          onCreated={() => {
+            setProjectService(null);
+            fetchSchedule(date);
+          }}
+        />
+      )}
       {rescheduleService && (
         <RescheduleModal
           service={rescheduleService}
@@ -2249,7 +2304,7 @@ export default function DispatchPageV2({
           onReviewCheckout={(svc) => setCheckoutService(svc)}
           onCompleteService={(svc) => {
             setDetailService(null);
-            setCompletingService(svc);
+            handleComplete(svc);
           }}
           onBookNext={(svc) => {
             setDetailService(null);

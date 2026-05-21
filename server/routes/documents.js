@@ -563,21 +563,35 @@ router.get('/', authenticate, async (req, res, next) => {
       .limit(limit)
       .offset(offset);
 
-    // Get completed service records for auto-generated docs
-    const services = await db('service_records')
+    const [serviceRecordCols, projectCols] = await Promise.all([
+      db('service_records').columnInfo().catch(() => ({})),
+      db('projects').columnInfo().catch(() => ({})),
+    ]);
+
+    // Get completed service records for auto-generated docs. Project-backed
+    // completions use the Project report itself as the customer artifact, so
+    // do not create a second generic service-report document for the same work.
+    let servicesQuery = db('service_records')
       .where({ customer_id: req.customerId, status: 'completed' })
-      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select(
-        'service_records.id',
-        'service_records.service_date',
-        'service_records.service_type',
-        'service_records.report_view_token',
-        'service_records.report_template_version',
-        'technicians.name as technician_name',
-      )
-      .orderBy('service_records.service_date', 'desc')
-      .limit(limit)
-      .offset(offset);
+      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id');
+    if (serviceRecordCols.completion_source) {
+      servicesQuery = servicesQuery.where(function visibleServiceReports() {
+        this.whereNull('service_records.completion_source')
+          .orWhereNot('service_records.completion_source', 'project_completion');
+      });
+    }
+    const services = await servicesQuery
+        .select(
+          'service_records.id',
+          'service_records.service_date',
+          'service_records.service_type',
+          'service_records.report_view_token',
+          'service_records.report_template_version',
+          'technicians.name as technician_name',
+        )
+        .orderBy('service_records.service_date', 'desc')
+        .limit(limit)
+        .offset(offset);
 
     // Auto-generate service_report entries for completed services
     const linkedServiceIds = new Set(docs.filter(d => d.linked_service_record_id).map(d => d.linked_service_record_id));
@@ -651,12 +665,30 @@ router.get('/', authenticate, async (req, res, next) => {
     // Auto-generate entries for 'sent' projects (WDO, termite, rodent, etc.).
     // Project reports live at /report/project/:token and map to the Visit
     // Reports or Real Estate category depending on project_type.
-    const projects = await db('projects as p')
+    let projectsQuery = db('projects as p')
       .leftJoin('customers as c', 'p.customer_id', 'c.id')
-      .where({ 'p.customer_id': req.customerId, 'p.status': 'sent' })
-      .whereNotNull('report_token')
-      .select('p.*', 'c.first_name', 'c.last_name')
-      .orderBy('p.sent_at', 'desc');
+      .where({ 'p.customer_id': req.customerId })
+      .whereIn('p.status', ['sent', 'closed'])
+      .whereNotNull('report_token');
+    if (projectCols.portal_visible) {
+      projectsQuery = projectsQuery.where(function portalVisibleProjects() {
+        this.where('p.portal_visible', true)
+          // Legacy sent reports predate the explicit portal visibility
+          // column. Keep them visible unless a closeout explicitly sets false.
+          .orWhere(function legacySentProject() {
+            this.whereNull('p.portal_visible').where('p.status', 'sent');
+          });
+      });
+    } else {
+      projectsQuery = projectsQuery.where('p.status', 'sent');
+    }
+    projectsQuery = projectsQuery.select('p.*', 'c.first_name', 'c.last_name');
+    if (projectCols.closed_at) {
+      projectsQuery = projectsQuery.orderByRaw('COALESCE(p.sent_at, p.closed_at, p.created_at) DESC');
+    } else {
+      projectsQuery = projectsQuery.orderBy('p.sent_at', 'desc').orderBy('p.created_at', 'desc');
+    }
+    const projects = await projectsQuery;
 
     const projectDocs = await Promise.all(projects.map(async (p) => {
       const isWdo = p.project_type === 'wdo_inspection';

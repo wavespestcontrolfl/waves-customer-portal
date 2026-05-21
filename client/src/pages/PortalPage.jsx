@@ -1900,22 +1900,28 @@ function ServicesTab() {
                           </div>
                         </div>
 
-                        {/* Footer with Download PDF */}
+                        {/* Footer with report access */}
                         <div style={{ padding: '12px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                          <div style={{ fontSize: 12, color: muted }}>Report generated automatically from service data</div>
+                          <div style={{ fontSize: 12, color: muted }}>
+                            {s.isProjectCompletion
+                              ? (s.reportUrl ? 'Project report attached to your portal' : 'Project report available through the secure link sent by Waves')
+                              : 'Report generated automatically from service data'}
+                          </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                            <a
-                              href={s.reportUrl || api.getServiceReportUrl(s.id)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{
-                                ...primaryButton, padding: '7px 12px', fontSize: 12,
-                                textDecoration: 'none',
-                                borderRadius: 8,
-                              }}
-                            >
-                              <Icon name="document" size={16} strokeWidth={1.75} /> {s.reportUrl ? 'View report' : 'Download PDF'}
-                            </a>
+                            {(!s.isProjectCompletion || s.reportUrl) && (
+                              <a
+                                href={s.reportUrl || api.getServiceReportUrl(s.id)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  ...primaryButton, padding: '7px 12px', fontSize: 12,
+                                  textDecoration: 'none',
+                                  borderRadius: 8,
+                                }}
+                              >
+                                <Icon name="document" size={16} strokeWidth={1.75} /> {s.isProjectCompletion ? 'View project report' : s.reportUrl ? 'View report' : 'Download PDF'}
+                              </a>
+                            )}
                             <div style={{ fontSize: 12, color: muted }}>Waves Pest Control · (941) 297-5749</div>
                           </div>
                         </div>

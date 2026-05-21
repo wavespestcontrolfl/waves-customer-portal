@@ -1,0 +1,109 @@
+const db = require('../models/db');
+
+const DEFAULT_SERVICE_REPORT_PROFILE = {
+  serviceKey: null,
+  serviceName: null,
+  category: null,
+  billingType: null,
+  completionMode: 'service_report',
+  projectType: null,
+  createsServiceRecord: true,
+  portalVisibility: 'customer_portal',
+  portalAttachPolicy: 'active_portal_customer',
+  followupPolicy: 'none',
+  defaultFollowupDays: null,
+  active: true,
+  notes: 'Fallback profile: standard service-report completion.',
+  projectBacked: false,
+  specialProject: false,
+  requiresProject: false,
+};
+
+function serializeProfile(row = null) {
+  if (!row) return { ...DEFAULT_SERVICE_REPORT_PROFILE };
+  const completionMode = row.completion_mode || 'service_report';
+  const projectBacked = completionMode === 'project_required' || completionMode === 'special_project';
+  return {
+    serviceKey: row.service_key || null,
+    serviceName: row.service_name_snapshot || null,
+    category: row.category || null,
+    billingType: row.billing_type || null,
+    completionMode,
+    projectType: row.project_type || null,
+    createsServiceRecord: row.creates_service_record !== false,
+    portalVisibility: row.portal_visibility || 'customer_portal',
+    portalAttachPolicy: row.portal_attach_policy || 'active_portal_customer',
+    followupPolicy: row.followup_policy || 'none',
+    defaultFollowupDays: row.default_followup_days == null ? null : Number(row.default_followup_days),
+    active: row.active !== false,
+    notes: row.notes || null,
+    projectBacked,
+    specialProject: completionMode === 'special_project',
+    requiresProject: projectBacked,
+  };
+}
+
+async function tableAvailable(knex) {
+  return knex.schema.hasTable('service_completion_profiles').catch(() => false);
+}
+
+async function lookupServiceForScheduledService(scheduledService = {}, knex = db) {
+  if (!scheduledService) return null;
+  if (scheduledService.service_id) {
+    const byId = await knex('services')
+      .where({ id: scheduledService.service_id })
+      .first('service_key', 'name', 'category', 'billing_type');
+    if (byId) return byId;
+  }
+
+  const serviceType = String(scheduledService.service_type || scheduledService.serviceType || '').trim();
+  if (!serviceType) return null;
+
+  const exact = await knex('services')
+    .whereRaw('lower(name) = lower(?)', [serviceType])
+    .first('service_key', 'name', 'category', 'billing_type');
+  if (exact) return exact;
+
+  return knex('services')
+    .whereRaw('lower(short_name) = lower(?)', [serviceType])
+    .first('service_key', 'name', 'category', 'billing_type')
+    .catch(() => null);
+}
+
+async function profileByServiceKey(serviceKey, knex = db) {
+  if (!serviceKey || !(await tableAvailable(knex))) return null;
+  return knex('service_completion_profiles')
+    .where({ service_key: serviceKey, active: true })
+    .first();
+}
+
+async function resolveCompletionProfileForScheduledService(scheduledService = {}, knex = db) {
+  const service = await lookupServiceForScheduledService(scheduledService, knex);
+  const profile = service?.service_key
+    ? await profileByServiceKey(service.service_key, knex)
+    : null;
+  if (profile) return serializeProfile(profile);
+
+  return {
+    ...DEFAULT_SERVICE_REPORT_PROFILE,
+    serviceKey: service?.service_key || null,
+    serviceName: service?.name || scheduledService.service_type || scheduledService.serviceType || null,
+    category: service?.category || null,
+    billingType: service?.billing_type || null,
+  };
+}
+
+async function resolveCompletionProfileForServiceId(serviceId, knex = db) {
+  const scheduledService = await knex('scheduled_services')
+    .where({ id: serviceId })
+    .first('id', 'service_id', 'service_type');
+  if (!scheduledService) return null;
+  return resolveCompletionProfileForScheduledService(scheduledService, knex);
+}
+
+module.exports = {
+  resolveCompletionProfileForScheduledService,
+  resolveCompletionProfileForServiceId,
+  serializeProfile,
+  DEFAULT_SERVICE_REPORT_PROFILE,
+};

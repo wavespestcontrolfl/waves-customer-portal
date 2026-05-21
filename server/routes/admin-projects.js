@@ -29,6 +29,10 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const ProjectEmail = require('../services/project-email');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
+const {
+  completeProjectBackedService,
+  resolveProjectPortalAttachment,
+} = require('../services/project-completion');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1244,10 +1248,26 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     }
 
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
-    await db('projects').where({ id: req.params.id }).update({
+    const projectCols = await db('projects').columnInfo().catch(() => ({}));
+    const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
+      logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
+      return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
+    });
+    const tokenUpdate = {
       report_token: token,
       updated_at: db.fn.now(),
-    });
+    };
+    if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
+    if (projectCols.portal_visibility) {
+      tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
+    }
+    if (projectCols.portal_attach_policy) {
+      tokenUpdate.portal_attach_policy = portalAttachment.completionProfile?.portalAttachPolicy || project.portal_attach_policy || 'active_portal_customer';
+    }
+    if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
+      tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
+    }
+    await db('projects').where({ id: req.params.id }).update(tokenUpdate);
 
     const updatedProject = await db('projects').where({ id: req.params.id }).first();
     const reportPath = await projectReportPathForProject(db, updatedProject, customer || {});
@@ -1505,14 +1525,32 @@ router.post('/:id/close', requireAdmin, async (req, res, next) => {
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
-    await db('projects').where({ id: req.params.id }).update({ status: 'closed', updated_at: db.fn.now() });
+    const result = await completeProjectBackedService({
+      projectId: req.params.id,
+      actorId: req.technicianId,
+    });
     await logProjectActivity(
       req,
-      project,
+      result.project || project,
       'project_closed',
       `Project closed: ${getProjectType(project.project_type)?.label || project.project_type}`,
+      {
+        scheduled_service_id: project.scheduled_service_id || null,
+        service_record_id: result.serviceRecord?.id || result.project?.service_record_id || null,
+        service_completed: !!result.serviceCompleted,
+        portal_attached: !!result.portalAttached,
+        portal_attach_reason: result.portalAttachReason || null,
+      },
     );
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      project: result.project,
+      serviceRecordId: result.serviceRecord?.id || result.project?.service_record_id || null,
+      serviceCompleted: !!result.serviceCompleted,
+      portalAttached: !!result.portalAttached,
+      portalAttachReason: result.portalAttachReason || null,
+      reportUrl: result.reportPath || null,
+    });
   } catch (err) { next(err); }
 });
 
@@ -1717,6 +1755,7 @@ router._private = {
   isMissingS3ObjectError,
   logProjectActivity,
   evaluateProjectSendReadiness,
+  completeProjectBackedService,
 };
 
 module.exports = router;
