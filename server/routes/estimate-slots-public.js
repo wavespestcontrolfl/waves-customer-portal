@@ -36,13 +36,33 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { getAvailableSlots } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
-const { handleEstimateAsk } = require('./estimate-public');
+const {
+  handleEstimateAsk,
+  isStructuralOneTimeOnlyEstimate,
+} = require('./estimate-public');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
 // 64-char hex format. Post-estimate-versions PR every new token will be
 // 64-char hex; existing slug tokens remain valid for historical estimates
 // and their customer links shouldn't break.
+
+function parseEstimateData(estimate = {}) {
+  if (!estimate.estimate_data) return {};
+  if (typeof estimate.estimate_data !== 'string') return estimate.estimate_data || {};
+  try {
+    return JSON.parse(estimate.estimate_data);
+  } catch {
+    return {};
+  }
+}
+
+function resolveSlotServiceMode(estimate = {}, requestedMode = '') {
+  if (isStructuralOneTimeOnlyEstimate(parseEstimateData(estimate), estimate)) {
+    return 'one_time';
+  }
+  return requestedMode === 'one_time' ? 'one_time' : 'recurring';
+}
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -59,7 +79,9 @@ router.get('/:token/available-slots', async (req, res) => {
   }
 
   try {
-    const estimate = await db('estimates').where({ token }).first('id', 'status', 'expires_at');
+    const estimate = await db('estimates')
+      .where({ token })
+      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -69,11 +91,7 @@ router.get('/:token/available-slots', async (req, res) => {
     if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 14) {
       opts.windowDays = windowDays;
     }
-    if (req.query.serviceMode === 'one_time') {
-      opts.serviceMode = 'one_time';
-    } else if (req.query.serviceMode === 'recurring') {
-      opts.serviceMode = 'recurring';
-    }
+    opts.serviceMode = resolveSlotServiceMode(estimate, req.query.serviceMode);
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();
     }
@@ -133,18 +151,22 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   if (!slotId) {
     return res.status(400).json({ error: 'slotId required' });
   }
-  const serviceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
+  const requestedServiceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
   const selectedFrequency = typeof req.body?.selectedFrequency === 'string'
     ? req.body.selectedFrequency.trim()
     : '';
-  const slotOpts = { serviceMode };
+  const slotOpts = {};
   if (selectedFrequency) slotOpts.selectedFrequency = selectedFrequency;
 
   try {
-    const estimate = await db('estimates').where({ token }).first('id', 'status', 'expires_at');
+    const estimate = await db('estimates')
+      .where({ token })
+      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
+
+    slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
 
     try {
       const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({

@@ -92,6 +92,9 @@ function serviceKeyForLabel(value = '') {
   if (/mosquito/.test(raw)) return 'mosquito';
   if (/tree|shrub|ornamental/.test(raw)) return 'tree_shrub';
   if (/palm/.test(raw)) return 'palm_injection';
+  if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
+  if (/rodent.*exclusion|exclusion.*rodent/.test(raw)) return 'rodent_exclusion';
+  if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
   if (/rodent|rat|mouse|mice/.test(raw)) return 'rodent_bait';
   if (/termite/.test(raw)) return 'termite_bait';
   return '';
@@ -115,6 +118,9 @@ function canonicalServiceTypeForProfile(serviceProfile = {}, fallback = 'Estimat
   if (key === 'tree_shrub') return 'Tree & Shrub';
   if (key === 'termite_bait') return 'Termite Bait';
   if (key === 'palm_injection') return 'Palm Injection';
+  if (key === 'rodent_trapping') return 'Rodent Trapping Service';
+  if (key === 'rodent_exclusion') return 'Rodent Exclusion Service';
+  if (key === 'rodent_sanitation') return 'Rodent Sanitation Service';
   if (key === 'rodent_bait') return 'Rodent Bait';
   return cappedServiceType(fallback);
 }

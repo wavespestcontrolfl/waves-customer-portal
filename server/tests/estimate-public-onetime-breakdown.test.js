@@ -10,6 +10,7 @@ const {
   buildEstimateAskQueryLog,
   buildPricingBundle,
   buildWaveGuardIntelligencePayload,
+  defaultServiceModeForEstimate,
   isEstimateAcceptActive,
   isEstimateAskAnswerable,
   isAnnualPrepayEligibleServiceMix,
@@ -623,6 +624,51 @@ describe('public estimate one-time breakdown', () => {
     };
 
     expect(isStructuralOneTimeOnlyEstimate(specialtyOnly, { monthly_total: 0, annual_total: 0 })).toBe(true);
+    expect(defaultServiceModeForEstimate(specialtyOnly, { monthly_total: 0, annual_total: 0 })).toBe('one_time');
+  });
+
+  test('engine-invocation pricing anchors stored rodent trapping totals when rerun has no recurring service', async () => {
+    const bundle = await buildPricingBundle({
+      id: 'estimate-public-rodent-trapping-anchor-test',
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 555,
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        engineInputs: {
+          propertyType: 'single_family',
+          homeSqFt: 3267,
+          lotSqFt: 27442,
+          stories: 1,
+          services: {},
+        },
+        result: {
+          recurring: {
+            services: [],
+            monthlyTotal: 0,
+            annualAfterDiscount: 0,
+          },
+          oneTime: {
+            total: 555,
+            specItems: [{
+              service: 'rodent_trapping',
+              name: 'Rodent Trapping',
+              price: 555,
+              detail: 'Unlimited trap checks/callbacks for 14 days | moderate pressure',
+            }],
+          },
+        },
+      },
+    });
+
+    expect(bundle.source).toBe('engine_invocation');
+    expect(bundle.anchorOneTimePrice).toBe(555);
+    expect(bundle.defaultServiceMode).toBe('one_time');
+    expect(bundle.oneTimeBreakdown.items).toContainEqual(expect.objectContaining({
+      service: 'rodent_trapping',
+      label: 'Rodent Trapping',
+      amount: 555,
+    }));
   });
 
   test('acceptance one-time total prefers live pricing over stale stored totals', () => {
