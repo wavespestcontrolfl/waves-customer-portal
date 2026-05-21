@@ -13,9 +13,14 @@ const TRANSACTIONAL_GROUP = 'transactional_required';
 
 const PREP_TEMPLATE_BY_PROJECT_TYPE = Object.freeze({
   rodent_exclusion: 'prep.rodent',
+  rodent_trapping: 'prep.rodent',
   flea: 'prep.flea',
   pest_inspection: 'prep.interior_pest',
+  one_time_pest_treatment: 'prep.interior_pest',
+  one_time_lawn_treatment: 'prep.lawn',
+  mosquito_event: 'prep.mosquito',
   termite_inspection: 'prep.termite',
+  termite_treatment: 'prep.termite',
   pre_treatment_termite_certificate: 'prep.termite',
 });
 
