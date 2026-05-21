@@ -203,6 +203,53 @@ describe('buildPestPressureCustomerView: service-line + frequency scope', () => 
   });
 });
 
+describe('buildPestPressureCustomerView: client rating capture', () => {
+  test('canCaptureClientRating false when no serviceRecord supplied', () => {
+    const view = buildPestPressureCustomerView({ config: DEFAULT_CONFIG, scoreRow: makeScoreRow() });
+    expect(view).toBeNull();
+  });
+
+  test('canCaptureClientRating true when serviceRecord has no rating', () => {
+    const view = buildPestPressureCustomerView({
+      config: DEFAULT_CONFIG,
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: 'Quarterly Pest Control', client_pest_rating: null },
+    });
+    expect(view.canCaptureClientRating).toBe(true);
+    expect(view.clientRatingQuestion).toMatch(/past 3 months/);
+    expect(view.submittedClientRating).toBeNull();
+  });
+
+  test('clientRatingQuestion adapts to monthly frequency', () => {
+    const view = buildPestPressureCustomerView({
+      config: DEFAULT_CONFIG,
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: 'Monthly Pest Control', client_pest_rating: null },
+    });
+    expect(view.clientRatingQuestion).toMatch(/Since your last service/);
+  });
+
+  test('clientRatingQuestion adapts to bi-monthly frequency', () => {
+    const view = buildPestPressureCustomerView({
+      config: DEFAULT_CONFIG,
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: 'Bi-monthly Pest Control', client_pest_rating: null },
+    });
+    expect(view.clientRatingQuestion).toMatch(/past 2 months/);
+  });
+
+  test('canCaptureClientRating false + submittedClientRating populated once captured', () => {
+    const view = buildPestPressureCustomerView({
+      config: DEFAULT_CONFIG,
+      scoreRow: makeScoreRow(),
+      serviceRecord: { id: 'svc-1', service_line: 'pest', service_type: 'Monthly Pest Control', client_pest_rating: 3 },
+    });
+    expect(view.canCaptureClientRating).toBe(false);
+    expect(view.clientRatingQuestion).toBeNull();
+    expect(view.submittedClientRating).toBe(3);
+  });
+});
+
 describe('buildPestPressureAdminView', () => {
   test('returns null when no scoreRow', () => {
     expect(buildPestPressureAdminView({ scoreRow: null })).toBeNull();

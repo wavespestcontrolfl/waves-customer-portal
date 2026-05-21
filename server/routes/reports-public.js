@@ -10,13 +10,22 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
+const {
+  runAndSwallowErrors: runPestPressureForServiceRecord,
+  calculateAndPersistForServiceRecord,
+} = require('../services/pest-pressure/orchestrate');
+const {
+  loadActiveConfig,
+  loadScoreForServiceRecord,
+  pestPressureVisibilitySignature,
+} = require('../services/pest-pressure/store');
+const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
-const { loadActiveConfig, pestPressureVisibilitySignature } = require('../services/pest-pressure/store');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -297,6 +306,129 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     await recordServiceReportEvent(service, eventName, channel, req, metadata);
 
     return res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// POST /api/reports/:token/pest-pressure/client-rating — customer-facing,
+// token-scoped capture of the "how much pest activity have you noticed?"
+// rating. Updates service_records.client_pest_rating (source='customer'),
+// re-runs the pest-pressure orchestrator to incorporate the new signal,
+// and returns the updated pestPressure object so the page can re-render
+// without a full reload.
+//
+// One rating per report (409 on re-submit). Feature flag is config.enabled;
+// 404 covers disabled / non-v1 / unknown-token uniformly so the existence
+// of any specific report token isn't leaked.
+router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    // Strict validation — one-shot write, no rounding. `Number.isInteger`
+    // covers all the typeof + finite checks AND rejects fractional inputs
+    // like 0.4 or 2.7 (those previously rounded silently, burning the
+    // customer's one rating on an unintended value). AGENTS.md requires
+    // strict pre-`Number()` validation for `/api/reports/:token/*` writes.
+    const rawRating = req.body && req.body.rating;
+    if (!Number.isInteger(rawRating) || rawRating < 0 || rawRating > 5) {
+      return res.status(400).json({ error: 'rating_out_of_range' });
+    }
+    const rounded = rawRating;
+
+    const service = await db('service_records')
+      .where({ report_view_token: req.params.token })
+      .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'report_template_version', 'client_pest_rating');
+    if (!service || service.report_template_version !== 'service_report_v1') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const config = await loadActiveConfig(db);
+    if (!config.enabled) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    // Eligibility must mirror the customer view exactly — feature flag
+    // isn't enough. showOnCustomerReport, enabledServiceLines, and
+    // requireRecurringFrequency all gate visibility; a rating must not
+    // be storable for a report where the card doesn't render. Reusing
+    // buildPestPressureCustomerView keeps the gate logic in one place.
+    const eligibilityView = buildPestPressureCustomerView({
+      config,
+      scoreRow: null,
+      serviceRecord: service,
+    });
+    if (!eligibilityView || !eligibilityView.canCaptureClientRating) {
+      // canCaptureClientRating === false also covers the "already rated"
+      // case, but we surface the more specific 409 first so the customer
+      // UI can show "already submitted".
+      if (service.client_pest_rating !== null && service.client_pest_rating !== undefined) {
+        return res.status(409).json({ error: 'rating_already_submitted' });
+      }
+      return res.status(403).json({ error: 'rating_not_allowed' });
+    }
+
+    // Wrap the atomic UPDATE + score recalc in a transaction. If recalc
+    // throws (config load, component query, persist), the rating UPDATE
+    // rolls back too — the customer's one allowed rating isn't burned on
+    // a transient failure, future POSTs are still permitted, and the
+    // score row stays in a consistent state. Trade-off: an orchestrator
+    // hiccup returns 500 to the customer (who can retry) instead of
+    // silently leaving the rating set but the score stale.
+    //
+    // The atomic `whereNull('client_pest_rating').update(...)` also
+    // serves as the one-shot guard: if two concurrent POSTs both passed
+    // the eligibility check above, only one's UPDATE matches the predicate
+    // and the other transaction's rowsAffected===0 throws ALREADY_SUBMITTED.
+    try {
+      await db.transaction(async (trx) => {
+        const rowsAffected = await trx('service_records')
+          .where({ id: service.id })
+          .whereNull('client_pest_rating')
+          .update({
+            client_pest_rating: rounded,
+            client_pest_rating_source: 'customer',
+            client_pest_rating_at: trx.fn.now(),
+          });
+        if (rowsAffected === 0) {
+          const dupErr = new Error('rating_already_submitted');
+          dupErr.code = 'ALREADY_SUBMITTED';
+          throw dupErr;
+        }
+        // Non-swallowing recalc inside the transaction. If this throws
+        // the rating UPDATE rolls back via the surrounding transaction.
+        await calculateAndPersistForServiceRecord(service.id, trx);
+      });
+    } catch (txErr) {
+      if (txErr && txErr.code === 'ALREADY_SUBMITTED') {
+        return res.status(409).json({ error: 'rating_already_submitted' });
+      }
+      throw txErr;
+    }
+
+    // Build the response view from the original service row plus the new
+    // rating — re-querying with .first('id', 'customer_id', 'service_type',
+    // 'client_pest_rating') would drop service_line, and
+    // buildPestPressureCustomerView's isServiceLineEnabled relies on
+    // service_line before falling back to detectServiceLine(service_type).
+    // For generic service labels that fallback can fail and the view
+    // returns null — the client would re-show the picker even though the
+    // rating was consumed.
+    const updatedScore = await loadScoreForServiceRecord(db, service.id);
+    const updatedService = {
+      id: service.id,
+      customer_id: service.customer_id,
+      service_type: service.service_type,
+      service_line: service.service_line,
+      client_pest_rating: rounded,
+    };
+
+    const pestPressure = buildPestPressureCustomerView({
+      config,
+      scoreRow: updatedScore,
+      serviceRecord: updatedService,
+    });
+
+    return res.json({ pestPressure, submittedRating: rounded });
   } catch (err) { next(err); }
 });
 
