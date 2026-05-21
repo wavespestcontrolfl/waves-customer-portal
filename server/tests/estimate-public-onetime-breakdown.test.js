@@ -532,10 +532,48 @@ describe('public estimate one-time breakdown', () => {
 
   test('deriveServiceCategory returns pest, trenching, and bundle categories from normalized services', () => {
     expect(deriveServiceCategory({}, [{ name: 'Pest Control' }], [])).toBe('pest_control');
-    expect(deriveServiceCategory({}, [], [{ service: 'termite_trenching', name: 'Termite Trenching', price: 500 }]))
+    expect(deriveServiceCategory({}, [], [{ service: 'trenching', name: 'Trenching', price: 500 }]))
       .toBe('termite_trenching');
     expect(deriveServiceCategory({}, [{ service: 'lawn_care', name: 'Lawn Care' }], [{ service: 'one_time_pest', name: 'One-Time Pest', price: 200 }]))
       .toBe('bundle');
+  });
+
+  test('quote-required frequencies preserve null pricing and roll up to pricing quote state', async () => {
+    const pricing = await buildPricingBundle({
+      id: 'estimate-public-phase-0-quote-frequency-contract-test',
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'snapshot_fixture',
+            waveGuardTier: 'Bronze',
+            frequencies: [{
+              key: 'manual',
+              label: 'Manual quote',
+              kind: 'quote_required',
+              monthly: null,
+              annual: null,
+            }],
+          },
+        },
+        result: {
+          recurring: {
+            services: [{ name: 'Pest Control' }],
+          },
+        },
+      },
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(pricing.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'manual',
+      monthly: null,
+      annual: null,
+      quoteRequired: true,
+    }));
+    expect(pricing.quoteRequired).toBe(true);
+    expect(resolveEstimateQuoteRequirement(pricing)).toEqual(expect.objectContaining({
+      quoteRequired: true,
+    }));
   });
 
   test('quote-required pricing rolls into the acceptance contract', async () => {

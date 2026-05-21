@@ -5462,7 +5462,7 @@ function serviceCategoryForOneTimeItem(item = {}) {
   if (service === 'waveguard_setup' || service === 'one_time_adjustment' || service === 'rodent_bundle_discount') return null;
   if (service === 'pest_initial_roach' || service === 'one_time_pest' || isPestServiceName(name)) return 'pest_control';
   if (isTermiteInstallItem(item)) return 'termite_bait';
-  if (isTermiteTrenchingServiceName(name) || service.includes('termite_trench')) return 'termite_trenching';
+  if (isTermiteTrenchingServiceName(name) || service === 'trenching' || service.includes('termite_trench')) return 'termite_trenching';
   if (isRodentServiceName(name) || service.includes('rodent')) return 'rodent';
   if (isTreeShrubServiceName(name) || service.includes('tree') || service.includes('shrub') || service.includes('palm')) return 'tree_shrub';
   if (isMosquitoServiceName(name) || service.includes('mosquito')) return 'mosquito';
@@ -5527,27 +5527,31 @@ function quoteRequiredFromFrequency(frequency = {}) {
     || (frequency?.monthly == null && frequency?.annual == null && frequency?.perTreatment == null && frequency?.quoteRequired !== false);
 }
 
+function finiteNumberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function shapeServiceFrequency(frequency = {}, { allowAddOns = false } = {}) {
-  const monthly = Number.isFinite(Number(frequency.monthly)) ? Number(frequency.monthly) : null;
-  const annual = Number.isFinite(Number(frequency.annual))
-    ? Number(frequency.annual)
-    : (monthly != null ? roundMonthly(monthly * 12) : null);
-  const monthlyBase = Number.isFinite(Number(frequency.monthlyBase))
-    ? Number(frequency.monthlyBase)
-    : (pestMonthlyBaseForFrequency(frequency) ?? monthly);
-  const visitsPerYear = Number.isFinite(Number(frequency.visitsPerYear))
-    ? Number(frequency.visitsPerYear)
-    : (pestVisitsForFrequency(frequency) || null);
+  const monthly = finiteNumberOrNull(frequency.monthly);
+  const explicitAnnual = finiteNumberOrNull(frequency.annual);
+  const annual = explicitAnnual != null ? explicitAnnual : (monthly != null ? roundMonthly(monthly * 12) : null);
+  const perTreatment = finiteNumberOrNull(frequency.perTreatment ?? frequency.perVisit);
+  const explicitMonthlyBase = finiteNumberOrNull(frequency.monthlyBase);
+  const monthlyBase = explicitMonthlyBase != null ? explicitMonthlyBase : (pestMonthlyBaseForFrequency(frequency) ?? monthly);
+  const explicitVisitsPerYear = finiteNumberOrNull(frequency.visitsPerYear);
+  const visitsPerYear = explicitVisitsPerYear != null ? explicitVisitsPerYear : (pestVisitsForFrequency(frequency) || null);
   return {
     ...frequency,
     monthlyBase,
     monthly,
     annual,
-    perTreatment: frequency.perTreatment ?? frequency.perVisit ?? null,
+    perTreatment,
     visitsPerYear,
     included: Array.isArray(frequency.included) ? frequency.included : [],
     addOns: allowAddOns && Array.isArray(frequency.addOns) ? frequency.addOns : [],
-    quoteRequired: quoteRequiredFromFrequency({ ...frequency, monthly, annual }) && frequency.quoteRequired === true,
+    quoteRequired: quoteRequiredFromFrequency({ ...frequency, monthly, annual, perTreatment }),
   };
 }
 
