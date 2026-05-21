@@ -173,6 +173,21 @@ function parseStructuredNotes(value) {
   }
 }
 
+function labelFromKey(value) {
+  return String(value || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function projectReportUrlFromNotes(notes = {}) {
+  const report = notes.projectReport || {};
+  if (report.url) return report.url;
+  if (report.token) return `/report/project/${report.token}`;
+  return null;
+}
+
 function approvalCodeLabel(code) {
   return String(code || "")
     .replace(/^repeat_/, "repeat ")
@@ -1319,6 +1334,8 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
   const structuredNotes = parseStructuredNotes(s.structured_notes);
   const managerApproval = structuredNotes.waveguardManagerApproval;
   const tankCleanout = structuredNotes.waveguardTankCleanout;
+  const isProjectCompletion = structuredNotes.projectCompletion === true;
+  const projectReportUrl = isProjectCompletion ? projectReportUrlFromNotes(structuredNotes) : null;
   const inventoryDeductions = Array.isArray(structuredNotes.inventoryDeductions)
     ? structuredNotes.inventoryDeductions
     : [];
@@ -1337,6 +1354,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
           {s.service_type}
         </span>{" "}
         <span className="flex items-center gap-3">
+          {isProjectCompletion && <Badge tone="neutral">Project</Badge>}
           {s.total_cost > 0 && (
             <span className="u-nums text-zinc-900">
               {fmtCurrency(s.total_cost)}
@@ -1353,6 +1371,44 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
       </button>
       {expanded && (
         <div className="px-3.5 py-2.5 border-t border-hairline border-zinc-200 text-12 space-y-1">
+          {isProjectCompletion && (
+            <div className="mb-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5">
+              {" "}
+              <div className="flex items-center gap-2 text-zinc-900 font-medium mb-1">
+                {" "}
+                <FileText size={14} strokeWidth={1.75} />{" "}
+                <span>Project Completion</span>{" "}
+              </div>{" "}
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-ink-secondary">
+                {" "}
+                <div>
+                  Type:{" "}
+                  <span className="text-zinc-900">
+                    {labelFromKey(structuredNotes.projectType) || "Project"}
+                  </span>
+                </div>{" "}
+                <div>
+                  Portal:{" "}
+                  <span className="text-zinc-900">
+                    {structuredNotes.portalAttached
+                      ? "Attached"
+                      : "Token-only"}
+                  </span>
+                </div>{" "}
+              </div>
+              {projectReportUrl && (
+                <a
+                  href={projectReportUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 mt-2 text-zinc-900 underline underline-offset-2"
+                >
+                  <Link2 size={13} strokeWidth={1.75} />
+                  Open project report
+                </a>
+              )}
+            </div>
+          )}
           {s.notes && <div className="text-zinc-900">{s.notes}</div>}
           {s.products_used && (
             <div className="text-ink-secondary">
@@ -1489,6 +1545,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
           {!s.notes &&
             !s.products_used &&
             !s.areas_treated &&
+            !isProjectCompletion &&
             !hasWaveGuardAudit && (
               <div className="text-ink-secondary">No additional details</div>
             )}
@@ -2635,20 +2692,26 @@ export default function Customer360ProfileV2({
                   <SectionTitle>
                     Recent Services ({services.length})
                   </SectionTitle>
-                  {services.slice(0, 5).map((s, i) => (
-                    <div
-                      key={i}
-                      className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between"
-                    >
-                      {" "}
-                      <span className="text-zinc-900">
-                        {s.service_type}
-                      </span>{" "}
-                      <span className="text-ink-secondary">
-                        {fmtDate(s.service_date)}
-                      </span>{" "}
-                    </div>
-                  ))}
+                  {services.slice(0, 5).map((s, i) => {
+                    const recentNotes = parseStructuredNotes(s.structured_notes);
+                    return (
+                      <div
+                        key={i}
+                        className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
+                      >
+                        {" "}
+                        <span className="text-zinc-900 flex items-center gap-1.5">
+                          {s.service_type}
+                          {recentNotes.projectCompletion === true && (
+                            <Badge tone="neutral">Project</Badge>
+                          )}
+                        </span>{" "}
+                        <span className="text-ink-secondary">
+                          {fmtDate(s.service_date)}
+                        </span>{" "}
+                      </div>
+                    );
+                  })}
                   {services.length === 0 && (
                     <div className="text-12 text-ink-secondary">
                       No services recorded

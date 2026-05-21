@@ -7,6 +7,20 @@ const { authenticate } = require('../middleware/auth');
 
 router.use(authenticate);
 
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 const listQuerySchema = Joi.object({
   limit: Joi.number().integer().min(1).max(100).default(20),
   offset: Joi.number().integer().min(0).default(0),
@@ -55,6 +69,13 @@ router.get('/', async (req, res, next) => {
         .first();
 
       const photoCountNum = parseInt(photoCount?.count) || 0;
+      const structuredNotes = parseJsonObject(svc.structured_notes);
+      const isProjectCompletion = svc.completion_source === 'project_completion'
+        || structuredNotes.projectCompletion === true;
+      const projectReport = structuredNotes.projectReport || {};
+      const projectReportUrl = structuredNotes.portalAttached && projectReport.url
+        ? projectReport.url
+        : null;
       return {
         id: svc.id,
         date: svc.service_date,
@@ -72,8 +93,16 @@ router.get('/', async (req, res, next) => {
         products: products || [],
         hasPhotos: photoCountNum > 0,
         photoCount: photoCountNum,
-        reportUrl: svc.report_view_token ? `/report/${svc.report_view_token}` : null,
-        reportPdfUrl: svc.report_view_token ? `/api/reports/${svc.report_view_token}` : null,
+        isProjectCompletion,
+        projectId: structuredNotes.projectId || null,
+        projectType: structuredNotes.projectType || null,
+        projectReportPortalAttached: Boolean(structuredNotes.portalAttached && projectReportUrl),
+        reportUrl: isProjectCompletion
+          ? projectReportUrl
+          : (svc.report_view_token ? `/report/${svc.report_view_token}` : null),
+        reportPdfUrl: isProjectCompletion
+          ? projectReportUrl
+          : (svc.report_view_token ? `/api/reports/${svc.report_view_token}` : null),
         reportToken: svc.report_view_token || null,
         reportGeneratedAt: svc.report_generated_at || null,
         reportViewedAt: svc.report_viewed_at || null,

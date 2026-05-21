@@ -155,6 +155,16 @@ export default function MobileAppointmentDetailSheet({
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
   const prepaidCovered = isPrepaid && prepaidAmt >= total;
   const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered;
+  const completionProfile = service.completionProfile || {};
+  const projectBackedCompletion = !!(completionProfile.projectBacked || completionProfile.requiresProject);
+  const linkedProject = service.linkedProject || null;
+  const projectCompletionClosed = projectBackedCompletion
+    && (linkedProject?.status === 'closed' || service.status === 'completed');
+  const projectCompletionLabel = projectCompletionClosed
+    ? 'Project completed'
+    : linkedProject?.id
+    ? 'Continue project'
+    : 'Complete project';
 
   const noteDirty = (service?.notes || '') !== note;
   const isLawn = String(service?.serviceType || '').toLowerCase().includes('lawn');
@@ -260,11 +270,11 @@ export default function MobileAppointmentDetailSheet({
           <button
             type="button"
             onClick={completeService}
-            disabled={savingNote}
+            disabled={savingNote || projectCompletionClosed}
             className="w-full rounded-sm bg-zinc-900 text-white u-focus-ring"
-            style={{ padding: '14px 20px', fontSize: 16, opacity: savingNote ? 0.6 : 1 }}
-          >
-            {savingNote ? 'Saving note...' : 'Complete service'}
+          style={{ padding: '14px 20px', fontSize: 16, opacity: savingNote || projectCompletionClosed ? 0.6 : 1 }}
+        >
+            {savingNote ? 'Saving note...' : projectBackedCompletion ? projectCompletionLabel : 'Complete service'}
           </button>
         )}
 
@@ -276,7 +286,7 @@ export default function MobileAppointmentDetailSheet({
           className={`w-full rounded-sm u-focus-ring ${canCompleteService ? 'bg-white text-zinc-900 border border-hairline border-zinc-300 mt-3' : 'bg-zinc-900 text-white'}`}
           style={{ padding: '14px 20px', fontSize: 16, opacity: (!hasChargeableAmount && !canCompleteService) ? 0.55 : 1 }}
         >
-          {hasChargeableAmount ? 'Review & checkout' : canCompleteService ? 'Review visit details' : 'Visit complete'}
+          {hasChargeableAmount ? 'Review & checkout' : canCompleteService ? (projectBackedCompletion ? (linkedProject?.id ? 'Open project details' : 'Review project details') : 'Review visit details') : 'Visit complete'}
         </button>
         {coveredByMembership && !isPrepaid && (
           <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>

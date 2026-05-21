@@ -1,0 +1,536 @@
+const crypto = require('crypto');
+
+const db = require('../models/db');
+const logger = require('./logger');
+const { transitionJobStatus } = require('./job-status');
+const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
+const { etDateString } = require('../utils/datetime-et');
+const { projectReportPathForProject } = require('./project-report-links');
+
+const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset']);
+const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped']);
+
+function normalizeDateOnly(value) {
+  if (!value) return null;
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+}
+
+function serializeJsonb(value) {
+  return JSON.stringify(value ?? null);
+}
+
+function pickExistingColumns(values = {}, columnInfo = {}) {
+  return Object.fromEntries(
+    Object.entries(values).filter(([key]) => Boolean(columnInfo[key]))
+  );
+}
+
+function membershipTierKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function hasMembership(customer = {}) {
+  const rawTier = customer.waveguard_tier ?? customer.tier;
+  const tierKey = membershipTierKey(rawTier);
+  if (tierKey && NON_MEMBERSHIP_TIER_KEYS.has(tierKey)) return false;
+  if (tierKey) return true;
+  const monthlyRate = Number(customer.monthly_rate ?? customer.monthlyRate ?? 0);
+  return Number.isFinite(monthlyRate) && monthlyRate > 0;
+}
+
+async function hasActiveRecurringSchedule(customerId, knex = db) {
+  if (!customerId) return false;
+  const cols = await knex('scheduled_services').columnInfo().catch(() => ({}));
+  const hasRecurringCols = cols.is_recurring || cols.recurring_parent_id || cols.recurring_pattern;
+  if (!hasRecurringCols) return false;
+
+  const row = await knex('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNotIn('status', ['cancelled', 'completed', 'skipped'])
+    .where(function recurringOnly() {
+      if (cols.is_recurring) this.orWhere({ is_recurring: true });
+      if (cols.recurring_parent_id) this.orWhereNotNull('recurring_parent_id');
+      if (cols.recurring_pattern) this.orWhereNotNull('recurring_pattern');
+    })
+    .first('id')
+    .catch((err) => {
+      logger.warn(`[project-completion] recurring schedule lookup failed for ${customerId}: ${err.message}`);
+      return null;
+    });
+  return Boolean(row);
+}
+
+async function isRecurringCustomer(customer = {}, knex = db) {
+  if (!customer?.id) return false;
+  if (customer.active === false || customer.deleted_at) return false;
+  if (hasMembership(customer)) return true;
+  return hasActiveRecurringSchedule(customer.id, knex);
+}
+
+function shouldAttachProjectToPortal({ profile = {}, customer = {}, recurringCustomer = false } = {}) {
+  if (profile.portalVisibility === 'internal_only') return false;
+  const policy = profile.portalAttachPolicy || 'never';
+  if (policy === 'never') return false;
+  if (policy === 'always') return true;
+  if (policy === 'active_portal_customer') return customer.active !== false && !customer.deleted_at;
+  if (policy === 'recurring_customer') return Boolean(recurringCustomer);
+  return false;
+}
+
+function projectReviewedForPortalAttachment(project = {}) {
+  return String(project.status || '').toLowerCase() === 'sent' || Boolean(project.sent_at);
+}
+
+function positiveMoney(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount > 0 ? amount : 0;
+}
+
+function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {} } = {}) {
+  const estimated = positiveMoney(scheduledService.estimated_price);
+  if (estimated > 0) return estimated;
+  if (scheduledService.create_invoice_on_complete) {
+    return positiveMoney(customer.monthly_rate ?? scheduledService.monthly_rate);
+  }
+  return 0;
+}
+
+function prepaidCoversAmount(scheduledService = {}, amount = 0) {
+  const prepaid = positiveMoney(scheduledService.prepaid_amount);
+  return amount > 0 && prepaid >= amount;
+}
+
+async function findExistingCompletionInvoice({
+  scheduledServiceId,
+  serviceRecordId = null,
+  knex = db,
+} = {}) {
+  if (!scheduledServiceId && !serviceRecordId) return null;
+  try {
+    const query = knex('invoices')
+      .whereNot('status', 'void')
+      .where(function invoiceForCompletion() {
+        if (scheduledServiceId) this.orWhere({ scheduled_service_id: scheduledServiceId });
+        if (serviceRecordId) this.orWhere({ service_record_id: serviceRecordId });
+      })
+      .orderBy('created_at', 'desc');
+    return query.first();
+  } catch (err) {
+    logger.warn(`[project-completion] invoice lookup failed for scheduled service ${scheduledServiceId}: ${err.message}`);
+    return null;
+  }
+}
+
+async function resolveProjectCompletionBilling({
+  scheduledService,
+  serviceRecord = null,
+  customer = {},
+  knex = db,
+} = {}) {
+  const invoiceAmount = projectCompletionInvoiceAmount({ scheduledService, customer });
+  if (!(invoiceAmount > 0)) {
+    return { required: false, resolved: true, amount: 0, reason: 'not_billable' };
+  }
+  if (prepaidCoversAmount(scheduledService, invoiceAmount)) {
+    return { required: true, resolved: true, amount: invoiceAmount, reason: 'prepaid_covered' };
+  }
+  const invoice = await findExistingCompletionInvoice({
+    scheduledServiceId: scheduledService.id,
+    serviceRecordId: serviceRecord?.id || null,
+    knex,
+  });
+  if (invoice) {
+    return {
+      required: true,
+      resolved: true,
+      amount: invoiceAmount,
+      reason: 'invoice_exists',
+      invoice,
+    };
+  }
+  return {
+    required: true,
+    resolved: false,
+    amount: invoiceAmount,
+    reason: 'invoice_required',
+  };
+}
+
+function projectCompletionNotes({ project, profile, portalAttached, reportPath }) {
+  return {
+    projectCompletion: true,
+    projectId: project.id,
+    projectType: project.project_type,
+    projectTitle: project.title || null,
+    completionMode: profile.completionMode || null,
+    portalVisibility: profile.portalVisibility || null,
+    portalAttachPolicy: profile.portalAttachPolicy || null,
+    portalAttached: Boolean(portalAttached),
+    projectReport: {
+      token: project.report_token || null,
+      url: portalAttached ? reportPath : null,
+      tokenOnly: !portalAttached && Boolean(project.report_token),
+    },
+  };
+}
+
+function buildServiceRecordInsert({
+  scheduledService,
+  project,
+  profile,
+  serviceRecordCols = {},
+  lifecycleUpdates = {},
+  portalAttached = false,
+  reportPath = null,
+}) {
+  const serviceDate = normalizeDateOnly(project.project_date)
+    || normalizeDateOnly(scheduledService.scheduled_date)
+    || etDateString();
+  const notes = [
+    project.title ? `Project completed: ${project.title}` : 'Project completed.',
+    project.recommendations ? String(project.recommendations).trim() : '',
+  ].filter(Boolean).join('\n\n');
+  const structuredNotes = projectCompletionNotes({
+    project,
+    profile,
+    portalAttached,
+    reportPath,
+  });
+
+  const recordInsert = {
+    customer_id: scheduledService.customer_id,
+    technician_id: scheduledService.technician_id || project.created_by_tech_id || null,
+    service_date: serviceDate,
+    service_type: scheduledService.service_type || profile.serviceName || project.title || 'Project service',
+    status: 'completed',
+    technician_notes: notes,
+  };
+
+  if (serviceRecordCols.scheduled_service_id) recordInsert.scheduled_service_id = scheduledService.id;
+  if (serviceRecordCols.structured_notes) recordInsert.structured_notes = serializeJsonb(structuredNotes);
+  if (serviceRecordCols.completion_source) recordInsert.completion_source = 'project_completion';
+  if (serviceRecordCols.protocol_defaults_used) recordInsert.protocol_defaults_used = false;
+  if (serviceRecordCols.service_data) {
+    recordInsert.service_data = serializeJsonb({
+      project: {
+        id: project.id,
+        type: project.project_type,
+        findings: project.findings || {},
+      },
+    });
+  }
+  Object.assign(recordInsert, pickExistingColumns(lifecycleUpdates, serviceRecordCols));
+  return recordInsert;
+}
+
+async function completeProjectBackedService({
+  projectId,
+  actorId = null,
+  now = new Date(),
+  knex = db,
+  transitionJobStatusFn = transitionJobStatus,
+} = {}) {
+  if (!projectId) {
+    const err = new Error('projectId required');
+    err.status = 400;
+    throw err;
+  }
+
+  let postCommitTrackServiceId = null;
+  const result = await knex.transaction(async (trx) => {
+    const project = await trx('projects').where({ id: projectId }).first();
+    if (!project) {
+      const err = new Error('Project not found');
+      err.status = 404;
+      throw err;
+    }
+
+    const projectCols = await trx('projects').columnInfo().catch(() => ({}));
+
+    if (!project.scheduled_service_id) {
+      const closeUpdate = { status: 'closed', updated_at: trx.fn.now() };
+      if (projectCols.closed_at) closeUpdate.closed_at = project.closed_at || now;
+      await trx('projects').where({ id: project.id }).update(closeUpdate);
+      const closedProject = await trx('projects').where({ id: project.id }).first();
+      return {
+        project: closedProject,
+        serviceRecord: null,
+        serviceCompleted: false,
+        portalAttached: false,
+        portalAttachReason: 'no_linked_scheduled_service',
+      };
+    }
+
+    const scheduledService = await trx('scheduled_services as s')
+      .leftJoin('customers as c', 's.customer_id', 'c.id')
+      .where({ 's.id': project.scheduled_service_id })
+      .first(
+        's.*',
+        'c.id as customer_row_id',
+        'c.first_name',
+        'c.last_name',
+        'c.email',
+        'c.phone',
+        'c.active as customer_active',
+        'c.deleted_at as customer_deleted_at',
+        'c.waveguard_tier',
+        'c.monthly_rate',
+      );
+    if (!scheduledService) {
+      const err = new Error('Linked scheduled service not found');
+      err.status = 400;
+      throw err;
+    }
+    if (String(scheduledService.customer_id) !== String(project.customer_id)) {
+      const err = new Error('Project customer does not match linked scheduled service');
+      err.status = 400;
+      throw err;
+    }
+    if (TERMINAL_NON_COMPLETABLE_STATUSES.has(String(scheduledService.status || '').toLowerCase())) {
+      const err = new Error(`Cannot complete a ${scheduledService.status} scheduled service from a project`);
+      err.status = 409;
+      throw err;
+    }
+
+    const customer = {
+      id: scheduledService.customer_id,
+      first_name: scheduledService.first_name,
+      last_name: scheduledService.last_name,
+      email: scheduledService.email,
+      phone: scheduledService.phone,
+      active: scheduledService.customer_active,
+      deleted_at: scheduledService.customer_deleted_at,
+      waveguard_tier: scheduledService.waveguard_tier,
+      monthly_rate: scheduledService.monthly_rate,
+    };
+    const profile = await resolveCompletionProfileForScheduledService(scheduledService, trx);
+    if (!profile.projectBacked) {
+      const closeUpdate = { status: 'closed', updated_at: trx.fn.now() };
+      if (projectCols.closed_at) closeUpdate.closed_at = project.closed_at || now;
+      if (projectCols.portal_visible) closeUpdate.portal_visible = false;
+      if (projectCols.portal_visibility) {
+        closeUpdate.portal_visibility = profile.portalVisibility || project.portal_visibility || 'token_only';
+      }
+      if (projectCols.portal_attach_policy) {
+        closeUpdate.portal_attach_policy = profile.portalAttachPolicy || project.portal_attach_policy || 'never';
+      }
+      if (projectCols.completion_profile_snapshot) {
+        closeUpdate.completion_profile_snapshot = serializeJsonb(profile);
+      }
+      await trx('projects').where({ id: project.id }).update(closeUpdate);
+      const closedProject = await trx('projects').where({ id: project.id }).first();
+      return {
+        project: closedProject,
+        serviceRecord: null,
+        serviceCompleted: false,
+        portalAttached: false,
+        portalAttachReason: 'not_project_backed_service',
+        recurringCustomer: null,
+        reportPath: null,
+        completionProfile: profile,
+      };
+    }
+    const recurringCustomer = await isRecurringCustomer(customer, trx);
+    const portalAllowedByPolicy = shouldAttachProjectToPortal({ profile, customer, recurringCustomer });
+    const portalReviewed = projectReviewedForPortalAttachment(project);
+    const portalAttached = portalAllowedByPolicy && portalReviewed;
+    const portalAttachReason = portalAttached
+      ? 'policy_allowed'
+      : portalAllowedByPolicy && !portalReviewed
+        ? 'report_not_sent'
+        : 'policy_not_met';
+    const token = project.report_token || crypto.randomBytes(16).toString('hex');
+    const reportProjectForPath = { ...project, report_token: token };
+    const reportPath = await projectReportPathForProject(trx, reportProjectForPath, customer);
+
+    let serviceRecord = null;
+    if (project.service_record_id) {
+      serviceRecord = await trx('service_records').where({ id: project.service_record_id }).first();
+    }
+    if (!serviceRecord) {
+      serviceRecord = await trx('service_records')
+        .where({ scheduled_service_id: scheduledService.id })
+        .orderBy('created_at', 'desc')
+        .first()
+        .catch(() => null);
+    }
+
+    const billing = await resolveProjectCompletionBilling({
+      scheduledService,
+      serviceRecord,
+      customer,
+      knex: trx,
+    });
+    if (billing.required && !billing.resolved) {
+      const err = new Error('Project-backed service requires billing resolution before closeout');
+      err.status = 409;
+      err.code = 'project_completion_billing_required';
+      err.details = {
+        amount: billing.amount,
+        scheduledServiceId: scheduledService.id,
+        reason: billing.reason,
+      };
+      throw err;
+    }
+
+    const lifecycleUpdates = buildCompletionLifecycleUpdates(scheduledService, now);
+    const scheduledServiceCols = await trx('scheduled_services').columnInfo().catch(() => ({}));
+    const scheduledLifecycleUpdates = pickExistingColumns(lifecycleUpdates, scheduledServiceCols);
+    const serviceRecordCols = await trx('service_records').columnInfo().catch(() => ({}));
+    if (!serviceRecord) {
+      const insert = buildServiceRecordInsert({
+        scheduledService,
+        project: { ...project, report_token: token },
+        profile,
+        serviceRecordCols,
+        lifecycleUpdates,
+        portalAttached,
+        reportPath,
+      });
+      [serviceRecord] = await trx('service_records').insert(insert).returning('*');
+    }
+    if (billing.invoice?.id && serviceRecord?.id && !billing.invoice.service_record_id) {
+      await trx('invoices').where({ id: billing.invoice.id }).update({
+        service_record_id: serviceRecord.id,
+        technician_id: scheduledService.technician_id || billing.invoice.technician_id || null,
+        updated_at: trx.fn.now(),
+      }).catch((err) => {
+        logger.warn(`[project-completion] invoice link failed for ${billing.invoice.id}: ${err.message}`);
+      });
+    }
+
+    if (scheduledService.status !== 'completed') {
+      if (Object.keys(scheduledLifecycleUpdates).length) {
+        await trx('scheduled_services').where({ id: scheduledService.id }).update(scheduledLifecycleUpdates);
+      }
+      await transitionJobStatusFn({
+        jobId: scheduledService.id,
+        fromStatus: scheduledService.status,
+        toStatus: 'completed',
+        transitionedBy: actorId,
+        notes: `Completed via project ${project.id}`,
+        trx,
+      });
+      postCommitTrackServiceId = scheduledService.id;
+    }
+
+    const projectUpdate = {
+      status: 'closed',
+      report_token: token,
+      service_record_id: project.service_record_id || serviceRecord.id,
+      updated_at: trx.fn.now(),
+    };
+    if (projectCols.closed_at) projectUpdate.closed_at = project.closed_at || now;
+    if (projectCols.portal_visible) projectUpdate.portal_visible = portalAttached;
+    if (projectCols.portal_visibility) projectUpdate.portal_visibility = profile.portalVisibility || 'token_only';
+    if (projectCols.portal_attach_policy) projectUpdate.portal_attach_policy = profile.portalAttachPolicy || 'never';
+    if (projectCols.completion_profile_snapshot) projectUpdate.completion_profile_snapshot = serializeJsonb(profile);
+    await trx('projects').where({ id: project.id }).update(projectUpdate);
+
+    const updatedProject = await trx('projects').where({ id: project.id }).first();
+    return {
+      project: updatedProject,
+      serviceRecord,
+      serviceCompleted: true,
+      portalAttached,
+      portalAttachReason,
+      recurringCustomer,
+      billing,
+      reportPath,
+      completionProfile: profile,
+    };
+  });
+
+  if (postCommitTrackServiceId) {
+    try {
+      const trackTransitions = require('./track-transitions');
+      await trackTransitions.markComplete(postCommitTrackServiceId, {
+        actorType: 'admin',
+        actorId,
+      });
+    } catch (err) {
+      logger.warn(`[project-completion] track completion refresh failed for ${postCommitTrackServiceId}: ${err.message}`);
+    }
+  }
+
+  return result;
+}
+
+async function resolveProjectPortalAttachment(project = {}, knex = db) {
+  if (!project?.scheduled_service_id) {
+    return {
+      portalAttached: true,
+      portalAttachReason: 'ad_hoc_project_default',
+      completionProfile: null,
+      recurringCustomer: null,
+    };
+  }
+
+  const scheduledService = await knex('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .where({ 's.id': project.scheduled_service_id })
+    .first(
+      's.*',
+      'c.id as customer_row_id',
+      'c.first_name',
+      'c.last_name',
+      'c.email',
+      'c.phone',
+      'c.active as customer_active',
+      'c.deleted_at as customer_deleted_at',
+      'c.waveguard_tier',
+      'c.monthly_rate',
+    );
+  if (!scheduledService) {
+    return {
+      portalAttached: false,
+      portalAttachReason: 'linked_scheduled_service_missing',
+      completionProfile: null,
+      recurringCustomer: false,
+    };
+  }
+  const customer = {
+    id: scheduledService.customer_id,
+    active: scheduledService.customer_active,
+    deleted_at: scheduledService.customer_deleted_at,
+    waveguard_tier: scheduledService.waveguard_tier,
+    monthly_rate: scheduledService.monthly_rate,
+  };
+  const profile = await resolveCompletionProfileForScheduledService(scheduledService, knex);
+  const recurringCustomer = await isRecurringCustomer(customer, knex);
+  const portalAttached = shouldAttachProjectToPortal({ profile, customer, recurringCustomer });
+  return {
+    portalAttached,
+    portalAttachReason: portalAttached ? 'policy_allowed' : 'policy_not_met',
+    completionProfile: profile,
+    recurringCustomer,
+  };
+}
+
+module.exports = {
+  buildServiceRecordInsert,
+  completeProjectBackedService,
+  findExistingCompletionInvoice,
+  hasMembership,
+  isRecurringCustomer,
+  pickExistingColumns,
+  prepaidCoversAmount,
+  projectCompletionInvoiceAmount,
+  projectReviewedForPortalAttachment,
+  resolveProjectCompletionBilling,
+  resolveProjectPortalAttachment,
+  shouldAttachProjectToPortal,
+  _test: {
+    hasActiveRecurringSchedule,
+    membershipTierKey,
+    normalizeDateOnly,
+    pickExistingColumns,
+    prepaidCoversAmount,
+    projectCompletionNotes,
+    projectCompletionInvoiceAmount,
+    projectReviewedForPortalAttachment,
+  },
+};

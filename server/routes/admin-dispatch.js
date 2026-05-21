@@ -37,6 +37,10 @@ const { buildAndStoreSmsPreviewImage } = require('../services/service-report/pre
 const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const { uploadServicePhotoDataUrls } = require('../services/service-photos');
+const {
+  resolveCompletionProfileForScheduledService,
+  resolveCompletionProfileForServiceId,
+} = require('../services/service-completion-profiles');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
   recordTrackTransitionFailure,
@@ -778,6 +782,15 @@ router.get('/:serviceId/tech-rating-allowed', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/completion-profile
+router.get('/:serviceId/completion-profile', async (req, res, next) => {
+  try {
+    const profile = await resolveCompletionProfileForServiceId(req.params.serviceId);
+    if (!profile) return res.status(404).json({ error: 'Service not found' });
+    res.json({ profile });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/recap-preview
 router.post('/recap-preview', async (req, res, next) => {
   try {
@@ -843,6 +856,20 @@ router.get('/:date?', async (req, res, next) => {
         autopay_payment_method_id: s.autopay_payment_method_id,
         ach_status: s.ach_status,
       });
+      const completionProfile = await resolveCompletionProfileForScheduledService(s).catch(() => null);
+      const linkedProject = await db('projects')
+        .where({ scheduled_service_id: s.id })
+        .orderByRaw(`
+          CASE status
+            WHEN 'draft' THEN 1
+            WHEN 'sent' THEN 2
+            WHEN 'closed' THEN 3
+            ELSE 4
+          END
+        `)
+        .orderBy('created_at', 'desc')
+        .first('id', 'status', 'project_type', 'title', 'report_token', 'service_record_id', 'portal_visible')
+        .catch(() => null);
 
       // Build property notes
       const alerts = [];
@@ -863,6 +890,7 @@ router.get('/:date?', async (req, res, next) => {
         address: `${s.address_line1}, ${s.city}, ${s.state} ${s.zip}`,
         city: s.city,
         serviceType: s.service_type,
+        scheduledDate: s.scheduled_date,
         windowStart: s.window_start,
         windowEnd: s.window_end,
         status: s.status,
@@ -881,6 +909,16 @@ router.get('/:date?', async (req, res, next) => {
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+        completionProfile,
+        linkedProject: linkedProject ? {
+          id: linkedProject.id,
+          status: linkedProject.status,
+          projectType: linkedProject.project_type,
+          title: linkedProject.title,
+          hasReportToken: !!linkedProject.report_token,
+          serviceRecordId: linkedProject.service_record_id || null,
+          portalVisible: linkedProject.portal_visible === true,
+        } : null,
         isRecurring: !!s.is_recurring,
         lawnType: s.lawn_type,
         propertyAlerts: alerts,
@@ -1415,6 +1453,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const completionProfile = await resolveCompletionProfileForScheduledService(svc).catch((err) => {
+      logger.warn(`[dispatch] completion profile lookup failed for ${svc.id}: ${err.message}`);
+      return null;
+    });
+    if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
+      return res.status(409).json({
+        error: 'This service must be completed through a project.',
+        code: 'project_required_completion',
+        completionProfile,
+      });
+    }
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);

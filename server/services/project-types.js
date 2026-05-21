@@ -115,6 +115,122 @@ const PROJECT_TYPES = {
     ],
   },
 
+  rodent_trapping: {
+    label: 'Rodent Trapping',
+    short: 'Rodent Trap',
+    description: 'Active trapping setup, trap checks, activity findings, and follow-up plan.',
+    requiresFollowup: true,
+    photoCategories: ['trap_placement', 'entry_point', 'droppings', 'damage', 'attic', 'garage', 'crawlspace', 'other'],
+    findingsFields: [
+      { key: 'species', label: 'Species', type: 'select', options: ['Roof rat', 'Norway rat', 'House mouse', 'Mixed', 'Unknown'] },
+      { key: 'activity_found', label: 'Activity found', type: 'textarea', placeholder: 'Droppings, rub marks, noises, entry trails, nesting evidence…' },
+      { key: 'traps_set', label: 'Traps set (count + locations)', type: 'textarea', placeholder: '6 snap traps in attic, 2 glue boards in garage…' },
+      { key: 'bait_or_products_used', label: 'Bait / products used', type: 'textarea' },
+      { key: 'entry_points_observed', label: 'Entry points observed', type: 'textarea' },
+      { key: 'sanitation_or_damage_notes', label: 'Sanitation / damage notes', type: 'textarea' },
+      { key: 'followup_plan', label: 'Trap-check / follow-up plan', type: 'textarea', placeholder: 'Return in 3 days to check/reset traps; extend if activity continues.' },
+    ],
+  },
+
+  wildlife_trapping: {
+    label: 'Wildlife Trapping',
+    short: 'Wildlife',
+    description: 'Wildlife trap setup, monitoring notes, access points, and required daily check plan.',
+    requiresFollowup: true,
+    photoCategories: ['trap_placement', 'entry_point', 'damage', 'yard', 'attic', 'crawlspace', 'other'],
+    findingsFields: [
+      { key: 'target_animal', label: 'Target animal', type: 'text', placeholder: 'Armadillo, opossum, raccoon, unknown…' },
+      { key: 'activity_found', label: 'Activity found', type: 'textarea' },
+      { key: 'traps_set', label: 'Traps set (count + locations)', type: 'textarea' },
+      { key: 'property_damage', label: 'Damage / disturbance', type: 'textarea' },
+      { key: 'daily_check_plan', label: 'Daily check plan', type: 'textarea' },
+      { key: 'customer_instructions', label: 'Customer instructions', type: 'textarea' },
+    ],
+  },
+
+  one_time_pest_treatment: {
+    label: 'One-Time Pest Treatment',
+    short: 'One-Time Pest',
+    description: 'Documentation for one-time pest cleanouts, removals, and specialty pest treatments.',
+    requiresFollowup: false,
+    photoCategories: ['exterior', 'interior', 'kitchen', 'bathroom', 'garage', 'evidence', 'treatment_area', 'other'],
+    findingsFields: [
+      { key: 'target_pest', label: 'Target pest', type: 'text', placeholder: 'German roaches, wasps, fire ants, fleas/ticks…' },
+      { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea' },
+      { key: 'activity_level', label: 'Activity level', type: 'select', options: ['Low', 'Moderate', 'Heavy', 'Severe'] },
+      { key: 'treatment_performed', label: 'Treatment performed', type: 'textarea' },
+      { key: 'products_used', label: 'Products used', type: 'textarea' },
+      { key: 'customer_instructions', label: 'Customer instructions', type: 'textarea' },
+      { key: 'followup_plan', label: 'Follow-up plan', type: 'textarea' },
+    ],
+  },
+
+  one_time_lawn_treatment: {
+    label: 'One-Time Lawn Treatment',
+    short: 'One-Time Lawn',
+    description: 'Standalone lawn assessment or treatment documentation outside the recurring WaveGuard flow.',
+    requiresFollowup: false,
+    photoCategories: ['front_yard', 'back_yard', 'side_yard', 'problem_area', 'weeds', 'disease', 'insects', 'other'],
+    findingsFields: [
+      { key: 'turf_type', label: 'Turf type', type: 'select', options: ['St. Augustine', 'Bahia', 'Zoysia', 'Bermuda', 'Centipede', 'Mixed', 'Unknown'] },
+      { key: 'areas_treated', label: 'Areas treated / assessed', type: 'textarea' },
+      { key: 'condition_found', label: 'Condition found', type: 'textarea' },
+      { key: 'treatment_performed', label: 'Treatment performed', type: 'textarea' },
+      { key: 'products_used', label: 'Products used', type: 'textarea' },
+      { key: 'irrigation_or_cultural_notes', label: 'Irrigation / cultural notes', type: 'textarea' },
+      { key: 'followup_plan', label: 'Follow-up plan', type: 'textarea' },
+    ],
+  },
+
+  mosquito_event: {
+    label: 'Mosquito Event Spray',
+    short: 'Mosquito Event',
+    description: 'One-time mosquito event treatment documentation and weather/site notes.',
+    requiresFollowup: false,
+    photoCategories: ['yard', 'foliage', 'pool_area', 'lanai', 'standing_water', 'equipment', 'other'],
+    findingsFields: [
+      { key: 'event_context', label: 'Event / service context', type: 'textarea' },
+      { key: 'areas_treated', label: 'Areas treated', type: 'textarea' },
+      { key: 'standing_water_sources', label: 'Standing water / breeding sources', type: 'textarea' },
+      { key: 'products_used', label: 'Products used', type: 'textarea' },
+      { key: 'weather_notes', label: 'Weather notes', type: 'textarea' },
+      { key: 'customer_instructions', label: 'Customer instructions', type: 'textarea' },
+    ],
+  },
+
+  palm_injection: {
+    label: 'Palm Injection',
+    short: 'Palm Injection',
+    description: 'Standalone palm injection treatment documentation.',
+    requiresFollowup: false,
+    photoCategories: ['palm', 'trunk', 'canopy', 'injection_site', 'disease', 'other'],
+    findingsFields: [
+      { key: 'palm_species', label: 'Palm species', type: 'text' },
+      { key: 'palm_count', label: 'Palm count', type: 'text' },
+      { key: 'condition_found', label: 'Condition found', type: 'textarea' },
+      { key: 'treatment_performed', label: 'Treatment performed', type: 'textarea' },
+      { key: 'products_used', label: 'Products used', type: 'textarea' },
+      { key: 'followup_plan', label: 'Follow-up / retreatment plan', type: 'textarea' },
+    ],
+  },
+
+  termite_treatment: {
+    label: 'Termite Treatment',
+    short: 'Termite Treatment',
+    description: 'Termite treatment documentation for spot treatment, liquid treatment, trenching, cartridge work, and setup visits.',
+    requiresFollowup: false,
+    photoCategories: ['foundation', 'trench', 'drill_point', 'station', 'damage', 'treatment_area', 'before', 'after', 'other'],
+    findingsFields: [
+      { key: 'target_termite', label: 'Target termite / WDO', type: 'select', options: ['Subterranean termites', 'Formosan subterranean termites', 'Drywood termites', 'Unknown / preventive'] },
+      { key: 'areas_treated', label: 'Areas treated', type: 'textarea' },
+      { key: 'treatment_method', label: 'Treatment method', type: 'select', options: ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Bait station setup', 'Cartridge replacement', 'Wood treatment', 'Other'] },
+      { key: 'products_used', label: 'Products used', type: 'textarea' },
+      { key: 'linear_feet_or_stations', label: 'Linear feet / stations', type: 'textarea' },
+      { key: 'gallons_or_amount', label: 'Gallons / amount applied', type: 'textarea' },
+      { key: 'followup_plan', label: 'Follow-up / warranty plan', type: 'textarea' },
+    ],
+  },
+
   bed_bug: {
     label: 'Bed Bug Treatment',
     short: 'Bed Bug',
