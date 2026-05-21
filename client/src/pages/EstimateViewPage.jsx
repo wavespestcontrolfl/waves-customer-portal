@@ -1372,7 +1372,7 @@ export default function EstimateViewPage() {
           {serviceMode === 'recurring' ? (
             <>
               {services.map((section) => {
-                const setupFees = renderFlags.showWaveGuardSetupFee && section.key === 'pest_control'
+                const setupFees = renderFlags.showWaveGuardSetupFee && section.isPest
                   ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
                     ? pricing.firstVisitFees
                     : (pricing.setupFee ? [pricing.setupFee] : []))

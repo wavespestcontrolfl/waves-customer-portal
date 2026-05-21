@@ -447,6 +447,55 @@ describe('public estimate one-time breakdown', () => {
     ]);
   });
 
+  test('phase 0 pest bundles preserve pest setup and add-on render signals', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-pest-bundle-contract-test',
+      estimate_data: {
+        result: {
+          results: {
+            pestTiers: [
+              { label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 90,
+            annualAfterDiscount: 1080,
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 40 },
+            ],
+          },
+          oneTime: {
+            total: 99,
+            membershipFee: 99,
+            items: [],
+          },
+        },
+      },
+      monthly_total: 90,
+      annual_total: 1080,
+      onetime_total: 99,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'bundle',
+      isPest: true,
+      isRecurring: true,
+      setupFee: expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
+    }));
+    expect(payload.services[0].frequencies[0].addOns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'interior_spray' }),
+      expect.objectContaining({ key: 'exterior_sweep' }),
+    ]));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardSetupFee: true,
+      showPestRecurringAddOns: true,
+      showOneTimePestAddOns: false,
+    }));
+  });
+
   test('phase 0 render flags do not expose WaveGuard setup or pest add-ons for one-time-only quotes', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-onetime-guard-test',

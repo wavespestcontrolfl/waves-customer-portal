@@ -5644,9 +5644,9 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       category: 'bundle',
       label: 'Recurring services',
       isRecurring: true,
-      isPest: false,
+      isPest: hasRecurringPest,
       frequencies,
-      setupFee: null,
+      setupFee: hasRecurringPest ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
     })];
@@ -5717,8 +5717,8 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
 }
 
 function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
-  const hasRecurringPest = services.some((section) => section?.key === 'pest_control' && section?.isRecurring);
-  const hasPestOneTime = services.some((section) => section?.key === 'pest_control' && !section?.isRecurring);
+  const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
+  const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
   const qualifyingCount = Number(combinedRecurring?.qualifyingCount || 0);
   const hasDiscountContext = Number(combinedRecurring?.waveGuardDiscountPct || 0) > 0
     || Number(combinedRecurring?.savingsPerMonth || 0) > 0;

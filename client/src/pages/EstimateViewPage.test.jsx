@@ -79,4 +79,27 @@ describe('ServiceSection', () => {
 
     expect(screen.queryByText('Skip parts you don\'t need')).not.toBeInTheDocument();
   });
+
+  it('renders pest add-ons for a pest-containing bundle section', () => {
+    render(
+      <ServiceSection
+        section={{
+          key: 'bundle',
+          label: 'Recurring services',
+          isRecurring: true,
+          isPest: true,
+          frequencies: [baseFrequency],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="standard"
+        selectedAddOns={new Set(['interior_spray'])}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: true, showWaveGuardTierUi: true }}
+        waveGuardTier="Bronze"
+      />,
+    );
+
+    expect(screen.getByText('Skip parts you don\'t need')).toBeInTheDocument();
+  });
 });
