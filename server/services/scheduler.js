@@ -232,6 +232,20 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Content decay/cannibalization failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // MON–FRI 9AM ET — Autonomous Content Engine daily run.
+  // Per v3.1 plan: 5 SEO actions/week, ET-pinned, shadow mode by default
+  // until SHADOW_MODE_<ACTION_TYPE>=false is set per action type.
+  // Gated behind GATE_AUTONOMOUS_CONTENT so it stays inert in prod
+  // until Adam explicitly enables it.
+  cron.schedule('0 9 * * 1-5', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    logger.info('Running: Autonomous Content Engine daily');
+    try {
+      const AutonomousRunner = require('./content/autonomous-runner');
+      await AutonomousRunner.runDaily();
+    } catch (err) { logger.error(`Autonomous content engine failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 4AM — Newsletter event ingestion (P3a). Pulls every enabled
   // RSS source from event_sources, upserts into events_raw. Daily cadence

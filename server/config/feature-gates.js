@@ -72,6 +72,12 @@ const gates = {
   //   field_content.publish_fanout  (phase 5)
   // All three cascade-require this master gate.
   fieldContentModule: isProd ? process.env.GATE_FIELD_CONTENT === 'true' : true,
+
+  // Autonomous Content Engine — runs the daily content pipeline.
+  // Even when this gate is ON, individual action types stay in shadow
+  // mode until SHADOW_MODE_<ACTION_TYPE>=false is set (per v3.1 plan
+  // rollout — per-action-type trust-build before live publish).
+  autonomousContentEngine: isProd ? process.env.GATE_AUTONOMOUS_CONTENT === 'true' : true,
 };
 
 function isEnabled(gate) {
