@@ -332,16 +332,23 @@ async function profileSampleSerps() {
   catch (e) { return { skipped: true, error: `serp-analyzer unavailable: ${e.message}` }; }
 
   // Pick top 5 striking-distance keywords across the sample cities.
+  // Position is an aggregate after groupBy, so the predicate has to be
+  // in HAVING; Postgres rejects aggregates in WHERE. The earlier
+  // version used whereRaw and silently produced an empty result via
+  // the catch — fail-open on a SERP sampling pass would skip every
+  // keyword and the calibration report's section 5 would read
+  // 'no profiles' even with --no-serp omitted.
   const sampleKeywords = await db('gsc_queries')
     .where('date', '>=', SINCE)
     .where('is_branded', false)
-    .whereRaw('avg(position) BETWEEN ? AND ?', [
+    .select('query', 'city_target')
+    .sum('impressions as impressions')
+    .avg('position as avg_position')
+    .groupBy('query', 'city_target')
+    .havingRaw('avg(position) BETWEEN ? AND ?', [
       THRESHOLDS.strikingDistancePositionMin,
       THRESHOLDS.strikingDistancePositionMax,
     ])
-    .select('query', 'city_target')
-    .sum('impressions as impressions')
-    .groupBy('query', 'city_target')
     .orderBy('impressions', 'desc')
     .limit(5)
     .catch(() => []);
