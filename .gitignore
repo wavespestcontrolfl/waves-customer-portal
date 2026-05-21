@@ -10,6 +10,7 @@ coverage/
 .tmp/
 .claude/*.lock
 .claude/db-schema.txt
+.claude/worktrees/
 
 # Reconcile-script outputs — contain row-level subscriber PII. Never commit.
 tmp-beehiiv-reconcile-*.json
