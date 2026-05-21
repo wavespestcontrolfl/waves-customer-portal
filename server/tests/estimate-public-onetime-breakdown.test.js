@@ -559,6 +559,52 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.askChips).not.toContain('What products do you use?');
   });
 
+  test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-mosquito-recurring-test',
+      estimate_data: {
+        result: {
+          results: {
+            mq: [{ n: 'Seasonal Mosquito Program (9 visits)', v: 9, pv: 110, recommended: true }],
+            mqMeta: { pr: 1.2, ri: 0, treatableSqFt: 8250 },
+          },
+          recurring: {
+            monthlyTotal: 82.5,
+            annualAfterDiscount: 990,
+            services: [
+              { service: 'mosquito', name: 'Mosquito (Seasonal Mosquito Program)', mo: 82.5, perTreatment: 110, visitsPerYear: 9 },
+            ],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 82.5,
+      annual_total: 990,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'mosquito',
+      label: 'Mosquito',
+      isPest: false,
+      isRecurring: true,
+      copy: expect.objectContaining({
+        headline: 'Hey {first}, choose your mosquito control option.',
+      }),
+    }));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardSetupFee: false,
+      showPestRecurringAddOns: false,
+      showOneTimePestAddOns: false,
+    }));
+    expect(payload.askChips).toContain('How long does each visit last?');
+    expect(payload.askChips).toContain('What about my pool area?');
+    expect(payload.askChips).not.toContain('What products do you use?');
+  });
+
   test('phase 0 render flags do not expose WaveGuard setup or pest add-ons for one-time-only quotes', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-onetime-guard-test',
@@ -598,6 +644,8 @@ describe('public estimate one-time breakdown', () => {
     expect(deriveServiceCategory({}, [{ name: 'Rodent Remediation' }], [])).toBe('rodent');
     expect(deriveServiceCategory({}, [], [{ service: 'trenching', name: 'Trenching', price: 500 }]))
       .toBe('termite_trenching');
+    expect(deriveServiceCategory({ inputs: { svcOnetimeMosquito: true } }, [], []))
+      .toBe('mosquito');
     expect(deriveServiceCategory({}, [{ service: 'lawn_care', name: 'Lawn Care' }], [{ service: 'one_time_pest', name: 'One-Time Pest', price: 200 }]))
       .toBe('bundle');
   });
@@ -1446,6 +1494,98 @@ describe('public estimate one-time breakdown', () => {
     ]));
     expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload uses mosquito-specific copy and metrics for mosquito-only estimates', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2100,
+        lotSqFt: 9400,
+        services: { mosquito: { tier: 'monthly12' } },
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'LARGE',
+        landscapeComplexity: 'MODERATE',
+      },
+      result: {
+        recurring: {
+          services: [{ name: 'Mosquito (Monthly Mosquito Program)' }],
+        },
+        results: {
+          mq: [
+            { n: 'Seasonal Mosquito Program (9 visits)', v: 9, recommended: false },
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, recommended: true },
+          ],
+          mqMeta: {
+            pr: 1.35,
+            ri: 1,
+            treatableSqFt: 7800,
+          },
+        },
+      },
+    });
+
+    expect(payload.title).toBe('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(payload.body).toContain('mosquito control plan');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Home', value: '2,100 sq ft' },
+      { label: 'Lot', value: '9,400 sq ft' },
+      { label: 'Mosquito treatment area', value: '7,800 sq ft' },
+      { label: 'Mosquito program', value: 'Monthly (12 visits/year)' },
+      { label: 'Mosquito pressure', value: '1.35x' },
+      { label: 'Pool/Lanai', value: 'Yes (Large cage)' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Termite perimeter')).toBe(false);
+  });
+
+  test('Waves AI payload keeps bundle copy when recurring mosquito includes non-mosquito one-time rows', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2100,
+        lotSqFt: 9400,
+        services: { mosquito: { tier: 'monthly12' } },
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'LARGE',
+      },
+      result: {
+        recurring: {
+          services: [{ name: 'Mosquito (Monthly Mosquito Program)' }],
+        },
+        oneTime: {
+          total: 225,
+          items: [{
+            service: 'one_time_pest',
+            name: 'One-Time Pest Treatment',
+            price: 225,
+          }],
+          specItems: [],
+        },
+        results: {
+          mq: [
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, recommended: true },
+          ],
+          mqMeta: {
+            pr: 1.35,
+            ri: 0,
+            treatableSqFt: 7800,
+          },
+        },
+      },
+    });
+
+    expect(payload.title).toBe('Waves AI reviewed your property before pricing this estimate');
+    expect(payload.body).toContain('WaveGuard plan');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Home', value: '2,100 sq ft' },
+      { label: 'Lot', value: '9,400 sq ft' },
+      { label: 'Pool/Lanai', value: 'Yes (Large cage)' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito treatment area')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito program')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito pressure')).toBe(false);
   });
 
   test('Waves AI payload shows Pool/Lanai when explicitly absent', () => {
@@ -2328,6 +2468,209 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Ready to start tree &amp; shrub?');
     expect(html).not.toContain('Ready to start pest control?');
     expect(html).not.toContain('Skip parts you don&#39;t need');
+  });
+
+  test('server-rendered mosquito-only estimate uses mosquito-specific desktop copy', () => {
+    const html = renderPage('mosquito-only-token', {
+      status: 'sent',
+      customerName: 'Maya Customer',
+      address: '801 Lanai Loop',
+      monthlyTotal: 82.5,
+      annualTotal: 990,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/mosquito.png',
+    }, {
+      inputs: {
+        homeSqFt: 2050,
+        lotSqFt: 9800,
+        services: { mosquito: { tier: 'seasonal9' } },
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+        landscapeComplexity: 'MODERATE',
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Mosquito (Seasonal Mosquito Program)', mo: 82.5, perTreatment: 110, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          mq: [
+            { n: 'Seasonal Mosquito Program (9 visits)', v: 9, pv: 110, recommended: true },
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, pv: 95 },
+          ],
+          mqMeta: {
+            pr: 1.2,
+            ri: 0,
+            treatableSqFt: 8250,
+          },
+        },
+      },
+    });
+
+    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(html).toContain('Mosquito treatment area');
+    expect(html).toContain('8,250 sq ft');
+    expect(html).toContain('Mosquito program');
+    expect(html).toContain('Seasonal (9 visits/year)');
+    expect(html).toContain('Mosquito pressure');
+    expect(html).toContain('1.2x');
+    expect(html).toContain('Pick your first mosquito control visit');
+    expect(html).toContain('What your mosquito control plan includes');
+    expect(html).toContain('Ready to start mosquito control?');
+    expect(html).toContain('How long does it last?');
+    expect(html).not.toContain('Ready to start pest control?');
+    expect(html).not.toContain('Go Waves! Wave Goodbye to Pests!');
+    expect(html).not.toContain('Free annual termite inspection');
+    expect(html).not.toContain('What WaveGuard members get');
+  });
+
+  test('server-rendered one-time mosquito estimate uses mosquito-specific copy', () => {
+    const html = renderPage('mosquito-onetime-token', {
+      status: 'sent',
+      customerName: 'Maya Customer',
+      address: '801 Lanai Loop',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 275,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/mosquito-onetime.png',
+    }, {
+      inputs: {
+        homeSqFt: 2050,
+        lotSqFt: 9800,
+        mosquitoTreatmentAreaSqFt: 8250,
+        svcOnetimeMosquito: true,
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+      },
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 275,
+          items: [{
+            service: 'one_time_mosquito',
+            name: 'One-Time Mosquito Treatment',
+            price: 275,
+            detail: 'Rain re-spray guarantee',
+          }],
+          specItems: [],
+        },
+        specItems: [],
+        results: {
+          mqMeta: {
+            pr: 1.2,
+            treatableSqFt: 8250,
+          },
+        },
+      },
+    });
+
+    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(html).toContain('Mosquito treatment area');
+    expect(html).toContain('8,250 sq ft');
+    expect(html).toContain('Mosquito pressure');
+    expect(html).toContain('1.2x');
+    expect(html).toContain('Pick your first mosquito control visit');
+    expect(html).toContain('One-Time Mosquito Treatment');
+    expect(html).toContain('data-estimate-ask-prompt="How long does it last?"');
+    expect(html).toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).not.toContain('custom quote');
+    expect(html).not.toContain('Find a date &amp; time that works for you');
+    expect(html).not.toContain('What WaveGuard members get');
+    expect(html).not.toContain('data-estimate-ask-prompt="What products do you use?"');
+  });
+
+  test('server-rendered one-time mosquito estimate keeps mosquito copy with reconciliation adjustment row', () => {
+    const estimateData = {
+      inputs: {
+        homeSqFt: 2050,
+        lotSqFt: 9800,
+        mosquitoTreatmentAreaSqFt: 8250,
+        svcOnetimeMosquito: true,
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+      },
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 325,
+          items: [{
+            service: 'one_time_mosquito',
+            name: 'One-Time Mosquito Treatment',
+            price: 275,
+            detail: 'Rain re-spray guarantee',
+          }],
+          specItems: [],
+        },
+        specItems: [],
+        results: {
+          mqMeta: {
+            pr: 1.2,
+            treatableSqFt: 8250,
+          },
+        },
+      },
+    };
+    expect(normalizeOneTimeBreakdown(estimateData).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service: 'one_time_adjustment',
+        amount: 50,
+      }),
+    ]));
+
+    const html = renderPage('mosquito-onetime-adjustment-token', {
+      status: 'sent',
+      customerName: 'Maya Customer',
+      address: '801 Lanai Loop',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 325,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/mosquito-onetime.png',
+    }, estimateData);
+
+    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(html).toContain('Mosquito treatment area');
+    expect(html).toContain('8,250 sq ft');
+    expect(html).toContain('Pick your first mosquito control visit');
+    expect(html).not.toContain('Find a date &amp; time that works for you');
+    expect(html).not.toContain('Go Waves! Wave Goodbye to Pests!');
+  });
+
+  test('server-rendered setup-only one-time row does not trigger mosquito copy', () => {
+    const html = renderPage('setup-only-token', {
+      status: 'sent',
+      customerName: 'Sam Customer',
+      address: '10 Setup Row',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 99,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 99,
+          items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).not.toContain('mosquito control estimate');
+    expect(html).not.toContain('Pick your first mosquito control visit');
+    expect(html).not.toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
   });
 
   test('server-rendered termite-bait-only estimate uses termite-specific desktop copy', () => {
