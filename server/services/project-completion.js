@@ -22,6 +22,20 @@ function serializeJsonb(value) {
   return JSON.stringify(value ?? null);
 }
 
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 function pickExistingColumns(values = {}, columnInfo = {}) {
   return Object.fromEntries(
     Object.entries(values).filter(([key]) => Boolean(columnInfo[key]))
@@ -226,6 +240,71 @@ function buildServiceRecordInsert({
   return recordInsert;
 }
 
+function projectServiceData(project) {
+  return {
+    project: {
+      id: project.id,
+      type: project.project_type,
+      findings: project.findings || {},
+    },
+  };
+}
+
+function serviceRecordMatchesScheduledService(serviceRecord = {}, scheduledService = {}) {
+  if (!serviceRecord?.id || !scheduledService?.id) return false;
+  if (!serviceRecord.scheduled_service_id) return false;
+  return String(serviceRecord.scheduled_service_id) === String(scheduledService.id);
+}
+
+function buildServiceRecordProjectCompletionUpdate({
+  serviceRecord = {},
+  project,
+  profile,
+  serviceRecordCols = {},
+  lifecycleUpdates = {},
+  portalAttached = false,
+  reportPath = null,
+  nowValue = null,
+}) {
+  const structuredNotes = projectCompletionNotes({
+    project,
+    profile,
+    portalAttached,
+    reportPath,
+  });
+  const existingStructuredNotes = parseJsonObject(serviceRecord.structured_notes);
+  const existingServiceData = parseJsonObject(serviceRecord.service_data);
+  const update = {
+    status: 'completed',
+  };
+
+  if (serviceRecordCols.structured_notes) {
+    update.structured_notes = serializeJsonb({
+      ...existingStructuredNotes,
+      ...structuredNotes,
+    });
+  }
+  if (serviceRecordCols.completion_source) update.completion_source = 'project_completion';
+  if (serviceRecordCols.protocol_defaults_used) update.protocol_defaults_used = false;
+  if (serviceRecordCols.service_data) {
+    update.service_data = serializeJsonb({
+      ...existingServiceData,
+      ...projectServiceData(project),
+    });
+  }
+  if (serviceRecordCols.report_view_token) update.report_view_token = null;
+  if (serviceRecordCols.report_template_version) update.report_template_version = null;
+  if (serviceRecordCols.pdf_storage_key) update.pdf_storage_key = null;
+  if (serviceRecordCols.report_html_storage_key) update.report_html_storage_key = null;
+  if (serviceRecordCols.map_svg_storage_key) update.map_svg_storage_key = null;
+  if (serviceRecordCols.updated_at && nowValue) update.updated_at = nowValue;
+
+  return {
+    ...pickExistingColumns(lifecycleUpdates, serviceRecordCols),
+    ...pickExistingColumns(update, serviceRecordCols),
+  };
+}
+
 async function completeProjectBackedService({
   projectId,
   actorId = null,
@@ -348,7 +427,12 @@ async function completeProjectBackedService({
 
     let serviceRecord = null;
     if (project.service_record_id) {
-      serviceRecord = await trx('service_records').where({ id: project.service_record_id }).first();
+      const candidate = await trx('service_records').where({ id: project.service_record_id }).first();
+      if (serviceRecordMatchesScheduledService(candidate, scheduledService)) {
+        serviceRecord = candidate;
+      } else if (candidate) {
+        logger.warn(`[project-completion] project ${project.id} linked service_record_id ${candidate.id} does not match scheduled_service_id ${scheduledService.id}; creating or reusing a scheduled-service record instead`);
+      }
     }
     if (!serviceRecord) {
       serviceRecord = await trx('service_records')
@@ -391,6 +475,23 @@ async function completeProjectBackedService({
         reportPath,
       });
       [serviceRecord] = await trx('service_records').insert(insert).returning('*');
+    } else {
+      const update = buildServiceRecordProjectCompletionUpdate({
+        serviceRecord,
+        project: { ...project, report_token: token },
+        profile,
+        serviceRecordCols,
+        lifecycleUpdates,
+        portalAttached,
+        reportPath,
+        nowValue: trx.fn.now(),
+      });
+      if (Object.keys(update).length) {
+        [serviceRecord] = await trx('service_records')
+          .where({ id: serviceRecord.id })
+          .update(update)
+          .returning('*');
+      }
     }
     if (billing.invoice?.id && serviceRecord?.id && !billing.invoice.service_record_id) {
       await trx('invoices').where({ id: billing.invoice.id }).update({
@@ -420,7 +521,7 @@ async function completeProjectBackedService({
     const projectUpdate = {
       status: 'closed',
       report_token: token,
-      service_record_id: project.service_record_id || serviceRecord.id,
+      service_record_id: serviceRecord.id,
       updated_at: trx.fn.now(),
     };
     if (projectCols.closed_at) projectUpdate.closed_at = project.closed_at || now;
@@ -512,6 +613,7 @@ async function resolveProjectPortalAttachment(project = {}, knex = db) {
 
 module.exports = {
   buildServiceRecordInsert,
+  buildServiceRecordProjectCompletionUpdate,
   completeProjectBackedService,
   findExistingCompletionInvoice,
   hasMembership,
@@ -522,15 +624,18 @@ module.exports = {
   projectReviewedForPortalAttachment,
   resolveProjectCompletionBilling,
   resolveProjectPortalAttachment,
+  serviceRecordMatchesScheduledService,
   shouldAttachProjectToPortal,
   _test: {
     hasActiveRecurringSchedule,
     membershipTierKey,
     normalizeDateOnly,
+    parseJsonObject,
     pickExistingColumns,
     prepaidCoversAmount,
     projectCompletionNotes,
     projectCompletionInvoiceAmount,
     projectReviewedForPortalAttachment,
+    serviceRecordMatchesScheduledService,
   },
 };
