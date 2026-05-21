@@ -362,10 +362,16 @@ function mapV1ToLegacyShape(v1Result) {
     const selectedIndex = (mqLI.tiers || []).findIndex(t => t.tier === mqLI.tier);
     let ri = selectedIndex >= 0 ? selectedIndex : 0;
     R.mq = (mqLI.tiers || []).map((t, i) => {
+      const selected = !!(t.isSelected ?? t.selected);
+      const recommended = !!(t.isRecommended ?? t.recommended);
       return {
         pv: t.perVisit, v: t.visits, ann: t.annual, mo: t.monthly,
         n: t.name,
-        recommended: !!t.recommended, dimmed: !t.recommended,
+        selected,
+        recommended,
+        isSelected: selected,
+        isRecommended: recommended,
+        dimmed: !selected,
         pressureRecommended: !!t.pressureRecommended,
       };
     });
@@ -373,7 +379,12 @@ function mapV1ToLegacyShape(v1Result) {
       pr: mqLI.pressureMultiplier || 1,
       sz: mqLI.lotCategory || 'SMALL',
       program: mqLI.tier || 'monthly',
+      selectedProgram: mqLI.selectedProgram || mqLI.tier || null,
+      selectedTier: mqLI.selectedTier || mqLI.tier || null,
       recommendedProgram: mqLI.recommendedProgram || null,
+      recommendedTier: mqLI.recommendedTier || mqLI.recommendedProgram || null,
+      tierWasForced: !!mqLI.tierWasForced,
+      recommendationReasons: Array.isArray(mqLI.recommendationReasons) ? mqLI.recommendationReasons : [],
       addOns: mqLI.addOns || null,
       ri,
     };
@@ -431,6 +442,7 @@ function mapV1ToLegacyShape(v1Result) {
   svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)
+      || (mqLI.tiers || []).find(t => t.selected || t.isSelected)
       || (mqLI.tiers || []).find(t => t.recommended)
       || null;
     const visits = selectedTier?.visits || mqLI.visits || 0;

@@ -269,8 +269,8 @@ function commercialSubtypeFromInput(input = {}, services = {}) {
 }
 
 function normalizeMosquitoProgram(value) {
-  if (value == null || value === '') return null;
-  const raw = String(value).toLowerCase();
+  if (value == null || String(value).trim() === '') return null;
+  const raw = String(value).trim().toLowerCase();
   if (raw === 'seasonal9' || raw === 'monthly12') return raw;
   if (raw === 'seasonal') return 'seasonal9';
   if (raw === 'monthly') return 'monthly12';

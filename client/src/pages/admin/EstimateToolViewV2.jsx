@@ -882,7 +882,7 @@ function previewRecurringFrequencyLabel(name, R) {
     return previewVisitsLabel(selected?.v);
   }
   if (label.includes("mosquito") && Array.isArray(R?.mq)) {
-    const selected = R.mq.find((tier) => tier.recommended) || R.mq[R?.mqMeta?.ri] || R.mq[0];
+    const selected = selectedMosquitoTier(R);
     return previewVisitsLabel(selected?.v);
   }
   if (label.includes("tree") && Array.isArray(R?.ts)) {
@@ -891,6 +891,31 @@ function previewRecurringFrequencyLabel(name, R) {
   }
   if (label.includes("termite") && label.includes("bait")) return "Quarterly";
   return "";
+}
+
+function mosquitoTierSelectionFlags(R, tier, index) {
+  const tiers = Array.isArray(R?.mq) ? R.mq : [];
+  const hasSelectionFields = tiers.some((t) => t.selected !== undefined || t.isSelected !== undefined);
+  const ri = Number(R?.mqMeta?.ri);
+  const selected = hasSelectionFields
+    ? !!(tier.selected || tier.isSelected)
+    : Number.isInteger(ri)
+      ? index === ri
+      : !!tier.recommended;
+  const recommended = hasSelectionFields
+    ? !!(tier.recommended || tier.isRecommended || tier.pressureRecommended)
+    : false;
+  return { selected, recommended, dimmed: !selected };
+}
+
+function selectedMosquitoTier(R) {
+  const tiers = Array.isArray(R?.mq) ? R.mq : [];
+  const ri = Number(R?.mqMeta?.ri);
+  return tiers.find((tier) => tier.selected || tier.isSelected) ||
+    (Number.isInteger(ri) ? tiers[ri] : null) ||
+    tiers.find((tier) => tier.recommended || tier.isRecommended) ||
+    tiers[0] ||
+    null;
 }
 
 function previewRecurringDisplayName(service) {
@@ -5697,16 +5722,20 @@ export default function EstimateToolViewV2({
                               Mosquito <Tag>Pressure {R.mqMeta?.pr}x</Tag>{" "}
                             </SectionTitle>{" "}
                             <TierGridV2>
-                              {R.mq.map((t, i) => (
-                                <TierRowV2
-                                  key={i}
-                                  name={t.n}
-                                  detail={`$${t.pv}/visit x ${t.v}`}
-                                  price={`${fmt(t.mo)}/mo`}
-                                  recommended={t.recommended}
-                                  dimmed={t.dimmed}
-                                />
-                              ))}
+                              {R.mq.map((t, i) => {
+                                const flags = mosquitoTierSelectionFlags(R, t, i);
+                                return (
+                                  <TierRowV2
+                                    key={i}
+                                    name={t.n}
+                                    detail={`$${t.pv}/visit x ${t.v}`}
+                                    price={`${fmt(t.mo)}/mo`}
+                                    recommended={flags.recommended}
+                                    dimmed={flags.dimmed}
+                                    selected={flags.selected}
+                                  />
+                                );
+                              })}
                             </TierGridV2>{" "}
                           </div>
                         )}

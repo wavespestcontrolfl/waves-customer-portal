@@ -7,6 +7,10 @@ const {
   TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
+const {
+  resolveMosquitoTreatableArea,
+  resolveMosquitoLotCategory,
+} = require('./property-calculator');
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -1106,17 +1110,102 @@ function applyOneTimeFloor(price, floor) {
   return Math.max(floor, price);
 }
 
+function normalizeMosquitoProgramSelection(value) {
+  const requestedTier = value;
+  if (value == null || String(value).trim() === '') {
+    return { requestedTier, normalizedRequestedTier: null, warnings: [] };
+  }
+  const raw = String(value).trim().toLowerCase();
+  const aliases = {
+    seasonal9: 'seasonal9',
+    monthly12: 'monthly12',
+    seasonal: 'seasonal9',
+    monthly: 'monthly12',
+    residual_seasonal: 'seasonal9',
+    scion_seasonal: 'seasonal9',
+    upgraded_seasonal: 'seasonal9',
+    upgrade_seasonal: 'seasonal9',
+    residual_monthly: 'monthly12',
+    scion_monthly: 'monthly12',
+    scion: 'monthly12',
+    upgraded: 'monthly12',
+    upgrade: 'monthly12',
+    bronze: 'seasonal9',
+    silver: 'monthly12',
+    gold: 'monthly12',
+    platinum: 'monthly12',
+  };
+  return {
+    requestedTier,
+    normalizedRequestedTier: aliases[raw] || raw,
+    warnings: [],
+  };
+}
+
 function normalizeMosquitoProgramKey(value) {
-  if (value == null || value === '') return null;
-  const raw = String(value).toLowerCase();
-  if (raw === 'seasonal9' || raw === 'monthly12') return raw;
-  if (raw === 'seasonal') return 'seasonal9';
-  if (raw === 'monthly') return 'monthly12';
-  if (raw === 'residual_seasonal' || raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'seasonal9';
-  if (raw === 'residual_monthly' || raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'monthly12';
-  if (raw === 'bronze') return 'seasonal9';
-  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly12';
-  return raw;
+  return normalizeMosquitoProgramSelection(value).normalizedRequestedTier;
+}
+
+function normalizeMosquitoWaterMultiplier(value) {
+  if (value == null || value === '') {
+    return {
+      waterMultiplier: 1.0,
+      waterMultiplierSource: 'default',
+      warnings: [],
+    };
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return {
+      waterMultiplier: 1.0,
+      waterMultiplierSource: 'defaulted_invalid',
+      warnings: ['invalid_mosquito_water_multiplier_defaulted'],
+    };
+  }
+  if (parsed < 1.0) {
+    return {
+      waterMultiplier: 1.0,
+      waterMultiplierSource: 'defaulted_below_one',
+      warnings: ['mosquito_water_multiplier_below_one_defaulted'],
+    };
+  }
+  const upperBound = Number.isFinite(Number(MOSQUITO.pressureCap)) && Number(MOSQUITO.pressureCap) > 1
+    ? Number(MOSQUITO.pressureCap)
+    : 2.0;
+  if (parsed > upperBound) {
+    return {
+      waterMultiplier: upperBound,
+      waterMultiplierSource: 'clamped',
+      warnings: ['mosquito_water_multiplier_clamped'],
+    };
+  }
+  return {
+    waterMultiplier: parsed,
+    waterMultiplierSource: 'provided',
+    warnings: [],
+  };
+}
+
+function normalizeMosquitoAddOnCount(value, key) {
+  if (value == null || value === '') return { count: 0, warnings: [] };
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return {
+      count: 0,
+      warnings: [`invalid_${key}_count_defaulted`],
+    };
+  }
+  if (parsed < 0) {
+    return {
+      count: 0,
+      warnings: [`negative_${key}_count_clamped`],
+    };
+  }
+  const rounded = Math.round(parsed);
+  return {
+    count: rounded,
+    warnings: Number.isInteger(parsed) ? [] : [`fractional_${key}_count_rounded`],
+  };
 }
 
 // ============================================================
@@ -2314,9 +2403,15 @@ function priceMosquito(property, options = {}) {
     dunkCount = 0,
   } = options;
 
-  const lotCategory = property.mosquitoLotCategory || property.lotCategory;
+  property = property || {};
+  const areaResolution = resolveMosquitoTreatableArea(property);
+  const categoryResolution = resolveMosquitoLotCategory(property, areaResolution);
+  const lotCategory = categoryResolution.lotCategory;
   const basePrices = MOSQUITO.basePrices[lotCategory];
   if (!basePrices) throw new Error(`Unknown lot category: ${lotCategory}`);
+  const waterMeta = normalizeMosquitoWaterMultiplier((modifiers || {}).mosquitoWaterMult);
+  const waterMultiplier = waterMeta.waterMultiplier;
+  const hasGraduatedWaterMultiplier = waterMultiplier > 1.0;
 
   // Pressure multiplier
   let pressure = 1.00;
@@ -2326,31 +2421,39 @@ function priceMosquito(property, options = {}) {
   if (f.complexity === 'complex') pressure += MOSQUITO.pressureFactors.complexity_complex;
   else if (f.complexity === 'moderate') pressure += MOSQUITO.pressureFactors.complexity_moderate;
   if (f.pool || f.poolCage) pressure += MOSQUITO.pressureFactors.pool;
-  if (f.nearWater) pressure += MOSQUITO.pressureFactors.nearWater;
+  if (f.nearWater && !hasGraduatedWaterMultiplier) pressure += MOSQUITO.pressureFactors.nearWater;
   if (f.irrigation) pressure += MOSQUITO.pressureFactors.irrigation;
   if (lotCategory === 'ACRE') pressure += MOSQUITO.pressureFactors.lot_acre;
   else if (lotCategory === 'HALF') pressure += MOSQUITO.pressureFactors.lot_half;
-  // v2 graduated water proximity replaces binary nearWater when provided
-  const waterMultiplier = Number(modifiers.mosquitoWaterMult || 1);
   if (waterMultiplier && waterMultiplier !== 1.0) {
     pressure *= waterMultiplier;
   }
+  const pressureBeforeCap = pressure;
   pressure = Math.min(pressure, MOSQUITO.pressureCap);
 
-  const recommendedProgram = (
-    pressure >= 1.30 ||
-    waterMultiplier >= 1.20 ||
-    f.trees === 'heavy'
-  ) ? 'monthly12' : 'seasonal9';
-  const selectedProgram = normalizeMosquitoProgramKey(tier) || recommendedProgram;
+  const recommendationReasons = [];
+  if (pressure >= 1.30) recommendationReasons.push('pressure_at_or_above_1_30');
+  if (waterMultiplier >= 1.20) recommendationReasons.push('water_multiplier_at_or_above_1_20');
+  if (f.trees === 'heavy') recommendationReasons.push('heavy_trees');
+  const recommendedProgram = recommendationReasons.length > 0 ? 'monthly12' : 'seasonal9';
+  if (recommendedProgram === 'seasonal9') recommendationReasons.push('seasonal_default_low_pressure');
+
+  const programMeta = normalizeMosquitoProgramSelection(tier);
+  const normalizedRequestedTier = programMeta.normalizedRequestedTier;
+  const selectedProgram = normalizedRequestedTier || recommendedProgram;
   const tierIndex = MOSQUITO.programs.indexOf(selectedProgram);
   if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
+  const tierWasForced = !!normalizedRequestedTier && selectedProgram !== recommendedProgram;
+  if (tierWasForced) recommendationReasons.push('forced_by_request');
   const basePrice = basePrices[tierIndex];
 
   const perVisit = Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
-  const stationQty = Math.max(0, Math.round(Number(stationCount) || 0));
-  const dunkQty = Math.max(0, Math.round(Number(dunkCount) || 0));
+  const stationMeta = normalizeMosquitoAddOnCount(stationCount, 'station');
+  const dunkMeta = normalizeMosquitoAddOnCount(dunkCount, 'dunk');
+  const stationQty = stationMeta.count;
+  const dunkQty = dunkMeta.count;
+  // Recurring mosquito add-ons are annual add-ons, not per-visit add-ons.
   const stationAddOn = stationQty * MOSQUITO.addOns.in2CareStation.price;
   const dunkAddOn = dunkQty * MOSQUITO.addOns.dunkTablet.price;
   const annualAddOns = stationAddOn + dunkAddOn;
@@ -2358,7 +2461,7 @@ function priceMosquito(property, options = {}) {
   const monthly = Math.round(annual / 12 * 100) / 100;
 
   // Cost estimate
-  const treatableThousands = Math.max(1, (property.mosquitoTreatableSqFt || 0) / 1000);
+  const treatableThousands = Math.max(1, areaResolution.mosquitoTreatableSqFt / 1000);
   const usage = MOSQUITO.productUsage;
   const costs = MOSQUITO.productCosts;
   const usesPrecisionAdulticide = false;
@@ -2371,6 +2474,7 @@ function priceMosquito(property, options = {}) {
   const laborPerVisitCost = laborCost(30);
   const annualCost = (materialPerVisit + laborPerVisitCost) * visits + addOnCost + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
+  const marginFloorOk = margin >= GLOBAL.MARGIN_FLOOR;
 
   const tiers = MOSQUITO.programs.map((name, idx) => {
     const bp = basePrices[idx];
@@ -2384,19 +2488,56 @@ function priceMosquito(property, options = {}) {
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
       name: MOSQUITO.programLabels[name] || name.charAt(0).toUpperCase() + name.slice(1),
-      recommended: name === selectedProgram,
       selected: name === selectedProgram,
+      recommended: name === recommendedProgram,
       pressureRecommended: name === recommendedProgram,
+      isSelected: name === selectedProgram,
+      isRecommended: name === recommendedProgram,
     };
   });
+
+  const manualReviewReasons = uniqueList([
+    ...areaResolution.manualReviewReasons,
+    ...categoryResolution.manualReviewReasons,
+    pressureBeforeCap > MOSQUITO.pressureCap ? 'pressure_cap_reached' : null,
+    marginFloorOk ? null : 'margin_below_floor',
+    stationQty >= 6 ? 'high_station_count' : null,
+    dunkQty >= 10 ? 'high_dunk_count' : null,
+    lotCategory === 'ACRE' ? 'acre_or_larger_property' : null,
+  ]);
+  const warnings = uniqueList([
+    ...areaResolution.warnings,
+    ...categoryResolution.warnings,
+    ...waterMeta.warnings,
+    ...programMeta.warnings,
+    ...stationMeta.warnings,
+    ...dunkMeta.warnings,
+  ]);
 
   return {
     service: 'mosquito',
     tier: selectedProgram,
+    selectedProgram,
+    selectedTier: selectedProgram,
+    recommendedProgram,
+    recommendedTier: recommendedProgram,
+    recommendationReasons: uniqueList(recommendationReasons),
+    requestedTier: tier,
+    normalizedRequestedTier,
+    tierWasForced,
     lotCategory,
-    grossLotCategory: property.lotCategory,
-    mosquitoTreatableSqFt: property.mosquitoTreatableSqFt || 0,
+    grossLotCategory: categoryResolution.grossLotCategory || property.lotCategory,
+    lotCategorySource: categoryResolution.lotCategorySource,
+    lotCategoryGuardrailApplied: categoryResolution.lotCategoryGuardrailApplied,
+    originalLotCategory: categoryResolution.originalLotCategory,
+    adjustedLotCategory: categoryResolution.adjustedLotCategory,
+    mosquitoTreatableSqFt: areaResolution.mosquitoTreatableSqFt,
+    mosquitoTreatableSqFtSource: areaResolution.source,
+    mosquitoTreatableSqFtConfidence: areaResolution.confidence,
+    fallbackTreatableSqFt: areaResolution.fallbackTreatableSqFt,
+    missingAreaData: areaResolution.missingAreaData,
     basePrice, pressureMultiplier: pressure,
+    pressureBeforeCap,
     perVisit, visits, annual, monthly,
     tiers,
     addOns: {
@@ -2415,10 +2556,12 @@ function priceMosquito(property, options = {}) {
       annualCost: Math.round(annualCost),
     },
     margin: Math.round(margin * 1000) / 1000,
-    marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
-    recommendedTier: selectedProgram,
-    recommendedProgram,
+    marginFloorOk,
+    requiresManualReview: manualReviewReasons.length > 0,
+    manualReviewReasons,
+    warnings,
     waterMultiplier,
+    waterMultiplierSource: waterMeta.waterMultiplierSource,
   };
 }
 
@@ -3046,17 +3189,14 @@ function getOneTimeMosquitoBase(mosquitoTreatableSqFt) {
 }
 
 function priceOneTimeMosquito(property, options = {}) {
-  const fallbackTreatableSqFt = Math.max(
-    0,
-    (Number(property.lotSqFt) || 0) - (Number(property.footprint) || 0) - (Number(property.hardscape) || 0)
-  );
-  const mosquitoTreatableSqFt = Math.max(
-    0,
-    Math.round(Number(property.mosquitoTreatableSqFt ?? fallbackTreatableSqFt) || 0)
-  );
+  property = property || {};
+  const areaResolution = resolveMosquitoTreatableArea(property);
+  const mosquitoTreatableSqFt = Math.max(0, Math.round(areaResolution.mosquitoTreatableSqFt || 0));
   const base = getOneTimeMosquitoBase(mosquitoTreatableSqFt);
-  const stationCount = Math.max(0, Math.round(Number(options.stationCount) || 0));
-  const dunkCount = Math.max(0, Math.round(Number(options.dunkCount) || 0));
+  const stationMeta = normalizeMosquitoAddOnCount(options.stationCount, 'station');
+  const dunkMeta = normalizeMosquitoAddOnCount(options.dunkCount, 'dunk');
+  const stationCount = stationMeta.count;
+  const dunkCount = dunkMeta.count;
   const stationAddOnTotal = stationCount * ONE_TIME.mosquito.stationAddOn;
   const dunkAddOnTotal = dunkCount * ONE_TIME.mosquito.dunkAddOn;
   const subtotalBeforeRecurringCustomerDiscount = base.basePrice + stationAddOnTotal + dunkAddOnTotal;
@@ -3067,6 +3207,17 @@ function priceOneTimeMosquito(property, options = {}) {
   const detailParts = [];
   if (stationCount > 0) detailParts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOnTotal)})`);
   if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOnTotal)})`);
+  const manualReviewReasons = uniqueList([
+    ...areaResolution.manualReviewReasons,
+    base.requiresManualReview ? 'over_acre_mosquito_treatment' : null,
+    stationCount >= 6 ? 'high_station_count' : null,
+    dunkCount >= 10 ? 'high_dunk_count' : null,
+  ]);
+  const warnings = uniqueList([
+    ...areaResolution.warnings,
+    ...stationMeta.warnings,
+    ...dunkMeta.warnings,
+  ]);
   return {
     service: 'one_time_mosquito',
     key: 'oneTimeMosquito',
@@ -3074,6 +3225,10 @@ function priceOneTimeMosquito(property, options = {}) {
     recurring: false,
     price,
     mosquitoTreatableSqFt,
+    mosquitoTreatableSqFtSource: areaResolution.source,
+    mosquitoTreatableSqFtConfidence: areaResolution.confidence,
+    fallbackTreatableSqFt: areaResolution.fallbackTreatableSqFt,
+    missingAreaData: areaResolution.missingAreaData,
     areaBucket: base.areaBucket,
     lotCategory: base.areaBucket,
     basePrice: base.basePrice,
@@ -3084,7 +3239,9 @@ function priceOneTimeMosquito(property, options = {}) {
     subtotalBeforeRecurringCustomerDiscount,
     recurringCustomerDiscountRate: discounted.rate,
     recurringCustomerDiscountAmount: discounted.amount,
-    requiresManualReview: base.requiresManualReview,
+    requiresManualReview: manualReviewReasons.length > 0,
+    manualReviewReasons,
+    warnings,
     overageSqFt: base.overageSqFt || 0,
     incrementCount: base.incrementCount || 0,
     detail: detailParts.join(' + '),
@@ -5296,6 +5453,7 @@ module.exports = {
   interpolate, laborCost,
   getOneTimeUrgencyMultiplier, applyOneTimeRecurringCustomerDiscount,
   applyOneTimeFloor, getOneTimeMosquitoAreaBucket, getOneTimeMosquitoBase,
+  normalizeMosquitoProgramKey, normalizeMosquitoWaterMultiplier,
   normalizeGrassType, calcLawnAnnualCostFloor,
   recommendTreeShrubTier,
   evaluateTreeShrubTierRecommendation,
