@@ -1131,6 +1131,25 @@ function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
     && oneTimeRows.every(isLawnCareOneTimeItem);
 }
 
+function isTreeShrubOneTimeItem(item = {}) {
+  const raw = [item.service, item.name, item.label]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  if (!raw || raw.includes('waveguard setup') || raw.includes('membership')) return true;
+  return /\btree|shrub|ornamental/.test(raw);
+}
+
+function hasOnlyTreeShrubServiceMix(recurring = [], oneTimeItems = []) {
+  const recurringRows = Array.isArray(recurring) ? recurring : [];
+  const oneTimeRows = Array.isArray(oneTimeItems) ? oneTimeItems : [];
+  return recurringRows.length > 0
+    && recurringRows.every((svc) => recurringServiceKey(svc) === 'tree_shrub')
+    && !detectPestOneTime(oneTimeRows)
+    && oneTimeRows.every(isTreeShrubOneTimeItem);
+}
+
 function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
   const recurringRows = Array.isArray(recurring) ? recurring : [];
   if (!recurringRows.length) return false;
@@ -1318,6 +1337,98 @@ function lawnTurfTypeMetricValue({ inputs = {}, engineInputs = {}, property = {}
   return null;
 }
 
+function firstPresentValue(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== '') return value;
+  }
+  return null;
+}
+
+function prettyKnownSignalValue(value) {
+  if (typeof value === 'boolean' || value == null) return null;
+  if (typeof value === 'number' && value === 0) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (['unknown', 'n_a', 'na', 'none', 'null', 'false', 'no', '0', 'zero'].includes(key)) return null;
+  return prettySignalValue(raw);
+}
+
+function firstKnownTreeShrubSignal(...values) {
+  for (const value of values) {
+    const formatted = prettyKnownSignalValue(value);
+    if (formatted) return formatted;
+  }
+  return null;
+}
+
+function treeShrubBedAreaMetricValue({ treeShrubInputs = {}, inputs = {}, property = {}, resultStats = {} } = {}) {
+  const source = String(firstPresentValue(
+    treeShrubInputs.bedAreaSource,
+    inputs.bedAreaSource,
+    property.bedAreaSource,
+    resultStats.tsMeta?.bedAreaSource,
+  ) || '').trim().toLowerCase();
+  if (source === 'fallback') return null;
+
+  return firstPositiveNumber(
+    treeShrubInputs.bedArea,
+    treeShrubInputs.estimatedBedArea,
+    treeShrubInputs.estimatedBedAreaSf,
+    inputs.bedArea,
+    inputs.estimatedBedArea,
+    inputs.estimatedBedAreaSf,
+    property.bedArea,
+    property.estimatedBedArea,
+    property.estimatedBedAreaSf,
+    resultStats.tsMeta?.eb,
+    resultStats.tsMeta?.bedArea,
+  );
+}
+
+function treeShrubProfileMetricValue({
+  treeShrubInputs = {},
+  inputs = {},
+  inputFeatures = {},
+  property = {},
+  propertyFeatures = {},
+  resultStats = {},
+} = {}) {
+  const treeCount = firstPositiveNumber(
+    treeShrubInputs.treeCount,
+    inputs.treeCount,
+    inputFeatures.treeCount,
+    property.treeCount,
+    propertyFeatures.treeCount,
+    resultStats.tsMeta?.et,
+    resultStats.tsMeta?.treeCount,
+  );
+  const treeSignal = treeCount
+    ? `${Math.round(treeCount).toLocaleString()} trees`
+    : (() => {
+      const density = firstKnownTreeShrubSignal(
+        treeShrubInputs.treeDensity,
+        treeShrubInputs.trees,
+        inputFeatures.trees,
+        property.treeDensity,
+        propertyFeatures.trees,
+        resultStats.tsMeta?.treeDensity,
+      );
+      return density ? `${density} trees` : null;
+    })();
+  const shrubDensity = firstKnownTreeShrubSignal(
+    treeShrubInputs.shrubDensity,
+    treeShrubInputs.shrubs,
+    inputFeatures.shrubs,
+    property.shrubDensity,
+    propertyFeatures.shrubs,
+    resultStats.tsMeta?.shrubDensity,
+  );
+  const shrubSignal = shrubDensity ? `${shrubDensity} shrubs` : null;
+  const parts = [treeSignal, shrubSignal].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
+}
+
 function normalizeFeaturePresence(value) {
   if (value === true) return 'yes';
   if (value === false) return 'no';
@@ -1378,6 +1489,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     ? opts.recurringServices
     : recurringServicesWithSupplements(estResult);
   const inputServices = inputs.services || {};
+  const engineServices = engineInputs.services || {};
+  const serviceKeys = recurringServices.map(recurringServiceKey).filter(Boolean);
   const serviceNames = recurringServices
     .map((svc) => svc?.name || svc?.label || svc?.displayName || svc?.service)
     .filter(Boolean)
@@ -1402,6 +1515,15 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const hasTermiteBait = serviceNames.some((name) => isTermiteBaitServiceName(name))
     || !!inputServices.termiteBait
     || !!inputServices.termite;
+  const hasTreeShrub = serviceKeys.includes('tree_shrub')
+    || !!inputServices.treeShrub
+    || !!inputServices.tree_shrub
+    || !!engineServices.treeShrub
+    || !!engineServices.tree_shrub
+    || inputs.svcTreeShrub === true;
+  const isTreeShrubOnly = hasTreeShrub
+    && serviceKeys.length > 0
+    && serviceKeys.every((key) => key === 'tree_shrub');
 
   const stories = firstPositiveNumber(inputs.stories, property.stories) || 1;
   const homeSqFt = firstPositiveNumber(
@@ -1430,6 +1552,17 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
   const aiAnalysis = parsedData.aiAnalysis || estResult.aiAnalysis || {};
   const inputFeatures = inputs.features || parsedData.features || {};
   const propertyFeatures = property.features || {};
+  const treeShrubInputs = inputServices.treeShrub
+    || inputServices.tree_shrub
+    || engineServices.treeShrub
+    || engineServices.tree_shrub
+    || {};
+  const treeShrubBedArea = isTreeShrubOnly
+    ? treeShrubBedAreaMetricValue({ treeShrubInputs, inputs, property, resultStats })
+    : null;
+  const treeShrubProfile = isTreeShrubOnly
+    ? treeShrubProfileMetricValue({ treeShrubInputs, inputs, inputFeatures, property, propertyFeatures, resultStats })
+    : null;
   const complexity = prettySignalValue(
     aiAnalysis.landscape_complexity
     || aiAnalysis.landscapeComplexity
@@ -1483,6 +1616,8 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     homeSqFt ? { label: 'Home', value: `${Math.round(homeSqFt).toLocaleString()} sq ft` } : null,
     lotSqFt ? { label: 'Lot', value: `${Math.round(lotSqFt).toLocaleString()} sq ft` } : null,
     poolLanaiValue ? { label: 'Pool/Lanai', value: poolLanaiValue } : null,
+    treeShrubBedArea ? { label: 'Ornamental beds', value: `${Math.round(treeShrubBedArea).toLocaleString()} sq ft` } : null,
+    treeShrubProfile ? { label: 'Trees/Shrubs', value: treeShrubProfile } : null,
     lawnSqFt ? { label: 'Treatable lawn', value: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
     turfType ? { label: 'Grass type', value: turfType } : null,
     termitePerimeterFt ? { label: 'Termite perimeter', value: `${Math.round(termitePerimeterFt).toLocaleString()} linear ft` } : null,
@@ -1494,14 +1629,20 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     eyebrow: 'Waves AI',
     title: isLawnOnly
       ? 'Waves AI reviewed your lawn before pricing this estimate'
-      : 'Waves AI reviewed your property before pricing this estimate',
+      : (isTreeShrubOnly
+        ? 'Waves AI reviewed your beds and trees before pricing this estimate'
+        : 'Waves AI reviewed your property before pricing this estimate'),
     body: isLawnOnly
       ? (satelliteUrl || metrics.length
         ? 'Waves AI reviews satellite imagery, property records, and treatable lawn area to shape your lawn care plan.'
         : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your lawn care plan.')
-      : (satelliteUrl || metrics.length
-        ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
-        : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.'),
+      : (isTreeShrubOnly
+        ? (satelliteUrl || metrics.length
+          ? 'Waves AI reviews satellite imagery, property records, and visible bed and tree conditions to shape your tree & shrub plan.'
+          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your tree & shrub plan.')
+        : (satelliteUrl || metrics.length
+          ? 'Waves AI reviews satellite imagery, property records, and visible service areas to show the details behind your WaveGuard plan.'
+          : 'Waves AI reviews the available property details, selected services, and pricing rules to shape your WaveGuard plan.')),
     satelliteUrl,
     metrics,
     signals: [],
@@ -1596,6 +1737,7 @@ function renderPage(token, estimate, estData) {
   const manualDiscount = normalizeManualDiscountSummary(estData);
   const manualDiscountMonthly = manualDiscount ? Math.round((manualDiscount.amount / 12) * 100) / 100 : 0;
   const hasOnlyLawnCareServices = hasOnlyLawnCareServiceMix(recurring, oneTimeItems);
+  const hasOnlyTreeShrubServices = hasOnlyTreeShrubServiceMix(recurring, oneTimeItems);
   const pageCopy = hasOnlyLawnCareServices
     ? {
         heroSuffix: "here's your lawn care estimate.",
@@ -1621,30 +1763,55 @@ function renderPage(token, estimate, estData) {
         finalSubhead: "Let's get your lawn on the schedule.",
         finalBody: 'No payment today. No surprise increases.',
       }
-    : {
-        heroSuffix: "here's your custom quote.",
-        recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
-        aggregateDayLabel: 'complete home protection',
-        billingHeading: 'Choose how you want to pay',
-        billingLede: null,
-        payAfterTitle: 'Pay after each visit',
-        payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
-        noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
-        bookingTitle: 'Find a date & time that works for you',
-        bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
-        payPrefHeading: 'Choose how you want to pay',
-        payPrefCardTitle: 'Pay after each visit',
-        payPrefCardSub: 'Billed after each completed service through autopay.',
-        prepayTitle: 'Pay the 12-month plan in full',
-        prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
-        prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
-        cardConfirmTitle: 'Confirm and save card',
-        cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
-        perksHeading: 'What WaveGuard members get',
-        finalHeading: 'Go Waves! Wave Goodbye to Pests!',
-        finalSubhead: '',
-        finalBody: '',
-      };
+    : (hasOnlyTreeShrubServices
+      ? {
+          heroSuffix: "here's your tree & shrub estimate.",
+          recurringAssurance: 'Your plan includes scheduled ornamental treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
+          aggregateDayLabel: 'tree & shrub care',
+          billingHeading: 'Choose how you want to pay',
+          billingLede: null,
+          payAfterTitle: 'Pay after each visit',
+          payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+          noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
+          bookingTitle: 'Pick your first tree & shrub visit',
+          bookingSubhead: 'Choose a window to get your tree & shrub plan started.',
+          payPrefHeading: 'Choose how you want to pay',
+          payPrefCardTitle: 'Pay after each visit',
+          payPrefCardSub: 'Billed after each completed service through autopay.',
+          prepayTitle: 'Pay the 12-month plan in full',
+          prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
+          prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
+          cardConfirmTitle: 'Confirm and save card',
+          cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+          perksHeading: 'What your tree & shrub plan includes',
+          finalHeading: 'Ready to start tree & shrub?',
+          finalSubhead: "Let's get your tree & shrub plan on the schedule.",
+          finalBody: 'No payment today. No surprise increases.',
+        }
+      : {
+          heroSuffix: "here's your custom quote.",
+          recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
+          aggregateDayLabel: 'complete home protection',
+          billingHeading: 'Choose how you want to pay',
+          billingLede: null,
+          payAfterTitle: 'Pay after each visit',
+          payAfterBody: 'Approve now, then save a card for autopay after each completed service visit.',
+          noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
+          bookingTitle: 'Find a date & time that works for you',
+          bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
+          payPrefHeading: 'Choose how you want to pay',
+          payPrefCardTitle: 'Pay after each visit',
+          payPrefCardSub: 'Billed after each completed service through autopay.',
+          prepayTitle: 'Pay the 12-month plan in full',
+          prepayBody: 'Choose the 12-month plan up front; we send one prepay invoice after approval and waive the setup.',
+          prepayButtonSub: 'Approve annual prepay and the setup is included at no charge.',
+          cardConfirmTitle: 'Confirm and save card',
+          cardConfirmSub: 'next step saves your card for autopay. Service visits are billed after completion.',
+          perksHeading: 'What WaveGuard members get',
+          finalHeading: 'Go Waves! Wave Goodbye to Pests!',
+          finalSubhead: '',
+          finalBody: '',
+        });
 
   // One-time toggle — admin opted this estimate into letting the customer
   // pick "single visit" instead of a recurring plan. Only renders when the

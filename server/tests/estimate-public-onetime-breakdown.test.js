@@ -1282,6 +1282,71 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
   });
 
+  test('Waves AI payload includes tree and shrub metrics for tree/shrub-only estimates', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2100,
+        lotSqFt: 8400,
+        bedArea: 1800,
+        bedAreaSource: 'explicit',
+        services: {
+          treeShrub: {
+            treeCount: 6,
+            shrubDensity: 'heavy',
+          },
+        },
+        features: {
+          shrubs: 'heavy',
+          trees: 'moderate',
+        },
+        landscapeComplexity: 'COMPLEX',
+        pool: 'NO',
+        poolCage: 'NO',
+      },
+      result: {
+        recurring: { services: [{ name: 'Tree & Shrub' }] },
+      },
+    });
+
+    expect(payload.title).toContain('Waves AI reviewed your beds and trees');
+    expect(payload.body).toContain('tree & shrub plan');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Home', value: '2,100 sq ft' },
+      { label: 'Lot', value: '8,400 sq ft' },
+      { label: 'Pool/Lanai', value: 'No' },
+      { label: 'Ornamental beds', value: '1,800 sq ft' },
+      { label: 'Trees/Shrubs', value: '6 trees, Heavy shrubs' },
+      { label: 'Complexity', value: 'Complex' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload skips placeholder tree and shrub metrics', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        bedArea: 2000,
+        bedAreaSource: 'fallback',
+        services: {
+          treeShrub: {
+            treeDensity: 0,
+            shrubDensity: '0',
+          },
+        },
+        features: {
+          trees: 'N/A',
+          shrubs: 'unknown',
+        },
+      },
+      result: {
+        recurring: { services: [{ name: 'Tree & Shrub' }] },
+      },
+    });
+
+    expect(payload.metrics.some((metric) => metric.label === 'Ornamental beds')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Trees/Shrubs')).toBe(false);
+  });
+
   test('Waves AI payload preserves complexity for termite and lawn bundles', () => {
     const payload = buildWaveGuardIntelligencePayload({}, {
       inputs: {
@@ -2141,6 +2206,58 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('90-day money-back guarantee');
     expect(html).not.toContain('Free annual termite inspection');
     expect(html).not.toContain('What WaveGuard members get');
+  });
+
+  test('server-rendered tree/shrub-only estimate uses tree/shrub-specific desktop copy', () => {
+    const html = renderPage('tree-shrub-only-token', {
+      status: 'sent',
+      customerName: 'Jane Customer',
+      address: '6539 Field Sparrow Gln',
+      monthlyTotal: 72,
+      annualTotal: 864,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/tree-shrub.png',
+    }, {
+      inputs: {
+        homeSqFt: 2070,
+        lotSqFt: 7326,
+        bedArea: 1700,
+        bedAreaSource: 'explicit',
+        services: {
+          treeShrub: {
+            treeCount: 5,
+            shrubDensity: 'moderate',
+          },
+        },
+        landscapeComplexity: 'MODERATE',
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Tree & Shrub', mo: 72, perTreatment: 96, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          ts: [{ recommended: true, v: 9 }],
+          tsMeta: { eb: 1700, et: 5 },
+        },
+      },
+    });
+
+    expect(html).toContain('tree &amp; shrub');
+    expect(html).toContain('Waves AI reviewed your beds and trees before pricing this estimate');
+    expect(html).toContain('Ornamental beds');
+    expect(html).toContain('1,700 sq ft');
+    expect(html).toContain('Trees/Shrubs');
+    expect(html).toContain('5 trees, Moderate shrubs');
+    expect(html).toContain('Pick your first tree &amp; shrub visit');
+    expect(html).toContain('What your tree &amp; shrub plan includes');
+    expect(html).toContain('Ready to start tree &amp; shrub?');
+    expect(html).not.toContain('Ready to start pest control?');
+    expect(html).not.toContain('Skip parts you don&#39;t need');
   });
 
   test('server-rendered estimate promotes separate palm and rodent bait recurring services', () => {
