@@ -48,9 +48,16 @@ const STATUS_STYLES = {
 const TYPE_LABELS = {
   wdo_inspection: "WDO",
   termite_inspection: "Termite",
+  termite_treatment: "Termite Treatment",
   pest_inspection: "Pest",
+  one_time_pest_treatment: "One-Time Pest",
+  one_time_lawn_treatment: "One-Time Lawn",
   flea: "Flea",
   rodent_exclusion: "Rodent",
+  rodent_trapping: "Rodent Trap",
+  wildlife_trapping: "Wildlife",
+  mosquito_event: "Mosquito Event",
+  palm_injection: "Palm Injection",
   bed_bug: "Bed Bug",
   pre_treatment_termite_certificate: "Pre-Treat Cert",
 };
@@ -62,9 +69,14 @@ const GENERAL_TYPE_LABELS = Object.fromEntries(
 const GENERAL_PROJECT_TYPES = Object.keys(GENERAL_TYPE_LABELS);
 const PROJECT_TYPES_WITH_PREP_GUIDES = new Set([
   "termite_inspection",
+  "termite_treatment",
   "pest_inspection",
+  "one_time_pest_treatment",
+  "one_time_lawn_treatment",
   "flea",
   "rodent_exclusion",
+  "rodent_trapping",
+  "mosquito_event",
   "pre_treatment_termite_certificate",
 ]);
 const BOOK_URL = "https://www.wavespestcontrol.com/book/";

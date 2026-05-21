@@ -29,6 +29,7 @@ const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
+const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -794,6 +795,63 @@ async function loadAddonsByServiceId(serviceIds) {
   }
 }
 
+function mapLinkedProject(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    status: row.status,
+    projectType: row.project_type,
+    title: row.title,
+    hasReportToken: !!row.report_token,
+    serviceRecordId: row.service_record_id || null,
+    portalVisible: row.portal_visible === true,
+  };
+}
+
+async function loadLinkedProjectsByServiceId(serviceIds) {
+  const ids = (serviceIds || []).filter(Boolean);
+  if (!ids.length) return new Map();
+  try {
+    const rows = await db('projects')
+      .whereIn('scheduled_service_id', ids)
+      .orderByRaw(`
+        CASE status
+          WHEN 'draft' THEN 1
+          WHEN 'sent' THEN 2
+          WHEN 'closed' THEN 3
+          ELSE 4
+        END
+      `)
+      .orderBy('created_at', 'desc')
+      .select('scheduled_service_id', 'id', 'status', 'project_type', 'title', 'report_token', 'service_record_id', 'portal_visible');
+    const map = new Map();
+    for (const row of rows) {
+      if (!map.has(row.scheduled_service_id)) map.set(row.scheduled_service_id, mapLinkedProject(row));
+    }
+    return map;
+  } catch (e) {
+    logger.warn(`[schedule] Linked project lookup failed: ${e.message}`);
+    return new Map();
+  }
+}
+
+async function loadProjectCompletionContextByServiceId(services) {
+  const rows = Array.isArray(services) ? services : [];
+  const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
+  const entries = await Promise.all(rows.map(async (service) => {
+    const completionProfile = await resolveCompletionProfileForScheduledService(service)
+      .catch((e) => {
+        logger.warn(`[schedule] completion profile lookup failed for ${service.id}: ${e.message}`);
+        return null;
+      });
+    return [service.id, {
+      completionProfile,
+      linkedProject: linkedProjectsByServiceId.get(service.id) || null,
+    }];
+  }));
+  return new Map(entries);
+}
+
 function getZone(city, zip) {
   const c = (city || '').toLowerCase();
   const z = zip || '';
@@ -849,6 +907,7 @@ router.get('/', async (req, res, next) => {
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
@@ -863,6 +922,7 @@ router.get('/', async (req, res, next) => {
       const category = detectServiceCategory(normalizedType);
       const serviceAddons = addonsByServiceId.get(s.id) || [];
       const serviceTypeDisplay = formatServiceDisplay(normalizedType, serviceAddons);
+      const projectCompletionContext = projectCompletionContextByServiceId.get(s.id) || {};
 
       const cleanedNotes = (s.notes || '').trim();
       let checkoutInvoice = null;
@@ -919,6 +979,8 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+        completionProfile: projectCompletionContext.completionProfile || null,
+        linkedProject: projectCompletionContext.linkedProject || null,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
@@ -1044,6 +1106,7 @@ router.get('/week', async (req, res, next) => {
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
         .select('scheduled_services.id', 'scheduled_services.customer_id',
+          'scheduled_services.service_id',
           'scheduled_services.service_type', 'scheduled_services.status',
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes',
@@ -1071,11 +1134,13 @@ router.get('/week', async (req, res, next) => {
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
       const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+      const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
         const serviceAddons = addonsByServiceId.get(s.id) || [];
         const serviceTypeDisplay = formatServiceDisplay(svcType, serviceAddons);
+        const projectCompletionContext = projectCompletionContextByServiceId.get(s.id) || {};
         let checkoutInvoice = null;
         try {
           checkoutInvoice = await db('invoices')
@@ -1118,6 +1183,8 @@ router.get('/week', async (req, res, next) => {
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+          completionProfile: projectCompletionContext.completionProfile || null,
+          linkedProject: projectCompletionContext.linkedProject || null,
           technicianId: s.technician_id,
           technicianName: s.tech_name,
           isRecurring: s.is_recurring,
