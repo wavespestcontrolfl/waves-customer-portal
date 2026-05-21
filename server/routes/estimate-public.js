@@ -1147,6 +1147,7 @@ function hasOnlyLawnCareServiceMix(recurring = [], oneTimeItems = []) {
 
 function isMosquitoOneTimeItem(item = {}) {
   if (isActualMosquitoOneTimeItem(item)) return true;
+  if (String(item.service || '').toLowerCase() === 'one_time_adjustment') return true;
   const raw = [item.service, item.name, item.label]
     .filter(Boolean)
     .join(' ')

@@ -2588,6 +2588,65 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('data-estimate-ask-prompt="What products do you use?"');
   });
 
+  test('server-rendered one-time mosquito estimate keeps mosquito copy with reconciliation adjustment row', () => {
+    const estimateData = {
+      inputs: {
+        homeSqFt: 2050,
+        lotSqFt: 9800,
+        mosquitoTreatmentAreaSqFt: 8250,
+        svcOnetimeMosquito: true,
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+      },
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 325,
+          items: [{
+            service: 'one_time_mosquito',
+            name: 'One-Time Mosquito Treatment',
+            price: 275,
+            detail: 'Rain re-spray guarantee',
+          }],
+          specItems: [],
+        },
+        specItems: [],
+        results: {
+          mqMeta: {
+            pr: 1.2,
+            treatableSqFt: 8250,
+          },
+        },
+      },
+    };
+    expect(normalizeOneTimeBreakdown(estimateData).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service: 'one_time_adjustment',
+        amount: 50,
+      }),
+    ]));
+
+    const html = renderPage('mosquito-onetime-adjustment-token', {
+      status: 'sent',
+      customerName: 'Maya Customer',
+      address: '801 Lanai Loop',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 325,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/mosquito-onetime.png',
+    }, estimateData);
+
+    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(html).toContain('Mosquito treatment area');
+    expect(html).toContain('8,250 sq ft');
+    expect(html).toContain('Pick your first mosquito control visit');
+    expect(html).not.toContain('Find a date &amp; time that works for you');
+    expect(html).not.toContain('Go Waves! Wave Goodbye to Pests!');
+  });
+
   test('server-rendered setup-only one-time row does not trigger mosquito copy', () => {
     const html = renderPage('setup-only-token', {
       status: 'sent',
