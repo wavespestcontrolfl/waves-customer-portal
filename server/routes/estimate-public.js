@@ -5656,6 +5656,21 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
     })];
   }
 
+  if (!isOneTimeOnly && recurringKeys.length === 0 && frequencies.length > 0) {
+    const fallbackCategory = deriveServiceCategory(estData, [], []);
+    return [buildServiceSection({
+      key: fallbackCategory,
+      category: fallbackCategory,
+      label: serviceLabelForCategory(fallbackCategory),
+      isRecurring: true,
+      isPest: fallbackCategory === 'pest_control',
+      frequencies,
+      setupFee: fallbackCategory === 'pest_control' ? waveGuardSetupFee : null,
+      oneTimeBreakdown,
+      quoteRequired: payload.quoteRequired === true,
+    })];
+  }
+
   const category = serviceCategory === 'bundle'
     ? (serviceCategoryForOneTimeItem(oneTimeItems[0]) || 'bundle')
     : serviceCategory;

@@ -496,6 +496,35 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('phase 0 no-engine recurring fallback keeps stored frequency pricing in services', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-stored-recurring-fallback-test',
+      estimate_data: {},
+      monthly_total: 80,
+      annual_total: 960,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.frequencies).toHaveLength(1);
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'pest_control',
+      isRecurring: true,
+      isPest: true,
+    }));
+    expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 80,
+      annual: 960,
+      quoteRequired: false,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 80,
+      annualSubtotal: 960,
+    }));
+  });
+
   test('phase 0 render flags do not expose WaveGuard setup or pest add-ons for one-time-only quotes', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-onetime-guard-test',
