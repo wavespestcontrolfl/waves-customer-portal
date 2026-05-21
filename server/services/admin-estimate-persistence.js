@@ -98,6 +98,8 @@ async function createOrReuseAdminEstimate({
   const writeFields = buildEstimatePersistenceFields(body);
 
   return database.transaction(async (trx) => {
+    let canReplaceLinkedEstimate = false;
+
     if (linkedLeadId) {
       const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }));
       if (!lead) throw errorWithStatus('Lead not found', 404);
@@ -128,6 +130,15 @@ async function createOrReuseAdminEstimate({
             reused: true,
           };
         }
+
+        if (existingEstimate && !existingEstimate.archived_at) {
+          throw errorWithStatus(
+            'Lead is already linked to an active estimate. Archive or delete the existing estimate before creating a new one.',
+            409,
+          );
+        }
+
+        canReplaceLinkedEstimate = true;
       }
     }
 
@@ -146,6 +157,7 @@ async function createOrReuseAdminEstimate({
         estimateId: created.id,
         estimate: created,
         technician,
+        allowReplacingEstimateId: canReplaceLinkedEstimate,
       });
     }
 

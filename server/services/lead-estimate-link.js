@@ -29,7 +29,7 @@ function leadMatchesEstimateContact(lead, estimate) {
   return !!(leadEmail && estimateEmail && leadEmail === estimateEmail);
 }
 
-function assertLeadCanAttachEstimate({ lead, estimate, estimateId }) {
+function assertLeadCanAttachEstimate({ lead, estimate, estimateId, allowReplacingEstimateId = false }) {
   if (!lead) {
     const err = new Error('Lead not found');
     err.statusCode = 404;
@@ -40,7 +40,11 @@ function assertLeadCanAttachEstimate({ lead, estimate, estimateId }) {
     err.statusCode = 409;
     throw err;
   }
-  if (lead.estimate_id && String(lead.estimate_id) !== String(estimateId)) {
+  if (
+    lead.estimate_id
+    && String(lead.estimate_id) !== String(estimateId)
+    && !allowReplacingEstimateId
+  ) {
     const err = new Error('Lead is already linked to another estimate');
     err.statusCode = 409;
     throw err;
@@ -75,13 +79,25 @@ async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system
   });
 }
 
-async function attachLeadToEstimate({ database = db, leadId, estimateId, estimate = null, technician }) {
+async function attachLeadToEstimate({
+  database = db,
+  leadId,
+  estimateId,
+  estimate = null,
+  technician,
+  allowReplacingEstimateId = false,
+}) {
   if (!leadId) return null;
 
   const lead = await database('leads').where({ id: leadId }).first();
 
   const estimateForValidation = estimate || await database('estimates').where({ id: estimateId }).first();
-  assertLeadCanAttachEstimate({ lead, estimate: estimateForValidation, estimateId });
+  assertLeadCanAttachEstimate({
+    lead,
+    estimate: estimateForValidation,
+    estimateId,
+    allowReplacingEstimateId,
+  });
 
   const performedBy = performedByFromTechnician(technician);
   const updates = {
