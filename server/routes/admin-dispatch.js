@@ -931,6 +931,8 @@ router.get('/:date?', async (req, res, next) => {
           portalVisible: linkedProject.portal_visible === true,
         } : null,
         isRecurring: !!s.is_recurring,
+        recurringParentId: s.recurring_parent_id || null,
+        recurringPattern: s.recurring_pattern || null,
         lawnType: s.lawn_type,
         propertyAlerts: alerts,
         lastServiceDate: lastService?.service_date || null,

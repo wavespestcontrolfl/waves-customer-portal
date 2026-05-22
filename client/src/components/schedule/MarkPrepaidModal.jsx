@@ -54,12 +54,24 @@ function patternLabel(pattern) {
   return `${p} plan`;
 }
 
+// Default visit count used to seed the plan-total field when the operator
+// opens the modal on a recurring child. The server fans the input across the
+// ACTUAL sibling count when it saves — this is just a best-guess pre-fill.
+const DEFAULT_SERIES_VISIT_GUESS = 4;
+
 export default function MarkPrepaidModal({ service, onClose, onSaved }) {
   const isSeries = serviceIsPartOfSeries(service);
   const [applyToSeries, setApplyToSeries] = useState(isSeries);
+  // Seed `amount` from `applyToSeries` so the default state matches the
+  // checkbox: single-visit pre-fills estimatedPrice, series pre-fills
+  // estimatedPrice × DEFAULT_SERIES_VISIT_GUESS. Without this, opening the
+  // modal on a recurring visit and hitting Save sent the single-visit price
+  // as if it were the plan total — fanning $90 across 4 siblings as $22.50
+  // each and under-funding every later completion.
   const [amount, setAmount] = useState(() => {
-    const p = service?.estimatedPrice;
-    return p != null ? String(p) : '';
+    const p = Number(service?.estimatedPrice);
+    if (!Number.isFinite(p) || p <= 0) return '';
+    return String(isSeries ? p * DEFAULT_SERIES_VISIT_GUESS : p);
   });
   const [method, setMethod] = useState('cash');
   const [note, setNote] = useState('');
@@ -68,17 +80,17 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
 
   // When the operator flips between "this visit" and "the whole plan" we
   // re-seed the amount field so they don't have to clear it manually — single
-  // visit pre-fills the per-visit price, series pre-fills 4× that as a
-  // best-guess for a typical quarterly plan. They can always override.
+  // visit pre-fills the per-visit price, series pre-fills the same default
+  // best-guess as the initial render. They can always override.
   function toggleApplyToSeries(next) {
     setApplyToSeries(next);
     const perVisit = Number(service?.estimatedPrice || 0);
     if (!Number.isFinite(perVisit) || perVisit <= 0) return;
-    setAmount(next ? String(perVisit * 4) : String(perVisit));
+    setAmount(next ? String(perVisit * DEFAULT_SERIES_VISIT_GUESS) : String(perVisit));
   }
 
   const amt = parseFloat(amount);
-  const previewVisits = applyToSeries ? 4 : 1; // best-guess; server fans to actual count
+  const previewVisits = applyToSeries ? DEFAULT_SERIES_VISIT_GUESS : 1; // best-guess; server fans to actual count
   const previewPerVisit = Number.isFinite(amt) && previewVisits > 0
     ? Math.round((amt / previewVisits) * 100) / 100
     : 0;

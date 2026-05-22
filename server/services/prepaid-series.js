@@ -5,9 +5,11 @@
 // Y · N more covered" context for the appointment detail UI.
 
 // Statuses that should NOT receive a prepayment stamp. A completed visit
-// already has its books closed; cancelled / no-show are dead rows we don't
-// want to charge against.
-const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'no_show']);
+// already has its books closed; cancelled / no-show / skipped are dead rows
+// we don't want to charge against. `skipped` is treated as terminal because
+// other dispatch flows already use it as the operator-driven "we did not
+// service this row" outcome.
+const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'no_show', 'skipped']);
 
 // Series rows of the same family share `recurring_parent_id`. The parent row
 // itself has `recurring_parent_id IS NULL` and is identified by its own id
@@ -115,7 +117,13 @@ async function buildPrepaidSeriesContext(db, service) {
     (row) => !TERMINAL_STATUSES.has(String(row.status || '').toLowerCase()) && row.id !== service.id,
   ).length;
   const visitNumber = family.findIndex((row) => row.id === service.id) + 1;
-  const perVisitAmount = Number(prepaidSiblings[0].prepaid_amount) || 0;
+  // Per-visit amount must reflect THIS row's stamped slice, not the first
+  // sibling's — splitTotalAcrossVisits dumps any sub-cent remainder onto the
+  // final visit, so e.g. $100/3 yields a final row of $33.34 vs $33.33. Using
+  // the anchor row keeps the detail card consistent with the row's books.
+  const currentRowStamp = service.prepaid_amount != null
+    ? Number(service.prepaid_amount)
+    : Number(prepaidSiblings[0].prepaid_amount) || 0;
   const seriesTotal = prepaidSiblings.reduce(
     (sum, row) => sum + (Number(row.prepaid_amount) || 0),
     0,
@@ -126,7 +134,7 @@ async function buildPrepaidSeriesContext(db, service) {
     totalCoveredVisits,
     futureCoveredVisits,
     visitNumber: visitNumber > 0 ? visitNumber : null,
-    perVisitAmount: Math.round(perVisitAmount * 100) / 100,
+    perVisitAmount: Math.round(currentRowStamp * 100) / 100,
     seriesTotal: Math.round(seriesTotal * 100) / 100,
     method: service.prepaid_method || prepaidSiblings[0].prepaid_method || null,
   };
@@ -136,9 +144,13 @@ async function buildPrepaidSeriesContext(db, service) {
 // "Prepaid plans" card on Customer 360. One entry per recurring family that
 // has at least one prepaid sibling.
 async function listCustomerPrepaidPlans(db, customerId) {
+  // Only rows with a positive stamp count — a `prepaid_amount = 0` row carries
+  // no coverage and should not surface as an active plan, mirroring the
+  // dispatch/detail UI which only shows the PAID pill on `> 0` rows.
   const rows = await db('scheduled_services')
     .where({ customer_id: customerId })
     .whereNotNull('prepaid_amount')
+    .where('prepaid_amount', '>', 0)
     .orderBy('scheduled_date');
   if (!rows.length) return [];
   const families = new Map();
@@ -150,6 +162,10 @@ async function listCustomerPrepaidPlans(db, customerId) {
   const plans = [];
   for (const [parentId, paidRows] of families.entries()) {
     const family = await fetchSeriesRows(db, parentId);
+    // "Prepaid plans" is documented as a recurring-family rollup. Standalone
+    // prepaid visits are already covered by the per-visit "Prepaid $X" badge
+    // and the dispatch row pill — don't double-count them here as fake plans.
+    if (family.length <= 1) continue;
     const usedVisits = family.filter(
       (row) => String(row.status || '').toLowerCase() === 'completed' && row.prepaid_amount != null,
     ).length;

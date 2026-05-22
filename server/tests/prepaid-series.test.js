@@ -44,10 +44,11 @@ describe('prepaid-series helpers', () => {
   });
 
   describe('TERMINAL_STATUSES', () => {
-    it('locks out completed/cancelled/no_show so a finished visit is not re-stamped', () => {
+    it('locks out completed/cancelled/no_show/skipped so a finished visit is not re-stamped', () => {
       expect(TERMINAL_STATUSES.has('completed')).toBe(true);
       expect(TERMINAL_STATUSES.has('cancelled')).toBe(true);
       expect(TERMINAL_STATUSES.has('no_show')).toBe(true);
+      expect(TERMINAL_STATUSES.has('skipped')).toBe(true);
       expect(TERMINAL_STATUSES.has('pending')).toBe(false);
       expect(TERMINAL_STATUSES.has('on_site')).toBe(false);
     });
