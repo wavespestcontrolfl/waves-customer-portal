@@ -943,6 +943,28 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   notifyPaymentFailed(paymentIntent, friendlyFailure, eventId).catch((err) => {
     logger.warn(`[stripe-webhook] payment_failed notify failed: ${err.message}`);
   });
+
+  // ── Customer email for interactive (non-autopay, non-ACH) failures ──
+  //
+  // Autopay failures are already covered by billing-cron, which sends the
+  // `payment.retry_notice` template once a retry has been scheduled —
+  // emailing here would duplicate. ACH failures have their own dedicated
+  // SMS + retry path in handleAchFailure. The remaining case — a card
+  // payment that fails interactively (Pay page, customer-initiated) —
+  // had no customer follow-up. We now send the `payment.failed` Waves
+  // template so the customer gets a branded "we couldn't process that"
+  // notice with a link back to retry or update their card. Idempotency
+  // is per (PI, attempt) so a re-emitted webhook doesn't double-send.
+  const isAutopay = paymentIntent.metadata?.type === 'monthly_autopay';
+  if (pmType !== 'us_bank_account' && !isAutopay) {
+    const attemptId = paymentIntent.latest_charge || eventId || 'no_charge';
+    PaymentLifecycleEmail.sendPaymentFailed({
+      paymentIntentId: piId,
+      attemptId,
+    }).catch((err) => {
+      logger.warn(`[stripe-webhook] payment_failed customer email failed: ${err.message}`);
+    });
+  }
 }
 
 async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
