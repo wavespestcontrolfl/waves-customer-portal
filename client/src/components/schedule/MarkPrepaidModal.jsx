@@ -61,20 +61,39 @@ const DEFAULT_SERIES_VISIT_GUESS = 4;
 
 export default function MarkPrepaidModal({ service, onClose, onSaved }) {
   const isSeries = serviceIsPartOfSeries(service);
-  const [applyToSeries, setApplyToSeries] = useState(isSeries);
-  // Seed `amount` from `applyToSeries` so the default state matches the
-  // checkbox: single-visit pre-fills estimatedPrice, series pre-fills
-  // estimatedPrice × DEFAULT_SERIES_VISIT_GUESS. Without this, opening the
-  // modal on a recurring visit and hitting Save sent the single-visit price
-  // as if it were the plan total — fanning $90 across 4 siblings as $22.50
-  // each and under-funding every later completion.
+  // True when we're editing an existing prepayment (operator tapped "Edit" on
+  // the green banner) rather than recording a fresh one. The modal becomes a
+  // round-trip view of the saved state instead of overwriting it with
+  // estimatedPrice/cash defaults on first save.
+  const existingPerVisit = service?.prepaidAmount != null && Number(service.prepaidAmount) > 0
+    ? Number(service.prepaidAmount)
+    : null;
+  const existingSeriesTotal = service?.prepaidSeriesContext?.seriesTotal != null
+    && service?.prepaidSeriesContext?.totalCoveredVisits > 1
+    ? Number(service.prepaidSeriesContext.seriesTotal)
+    : null;
+  const isExistingSeries = existingSeriesTotal != null;
+  const isExistingPrepayment = existingPerVisit != null;
+
+  // applyToSeries default: keep an existing series prepayment in series mode;
+  // an existing single-visit prepayment stays single-visit; otherwise fall
+  // back to the recurring-family heuristic from #1059.
+  const [applyToSeries, setApplyToSeries] = useState(
+    isExistingSeries ? true : isExistingPrepayment ? false : isSeries,
+  );
+
+  // Amount default: editing a recorded prepayment prefills the saved figure
+  // (series total when applicable so the operator sees the dollars they
+  // actually collected, not a recomputed per-visit slice).
   const [amount, setAmount] = useState(() => {
+    if (isExistingSeries) return String(existingSeriesTotal);
+    if (isExistingPrepayment) return String(existingPerVisit);
     const p = Number(service?.estimatedPrice);
     if (!Number.isFinite(p) || p <= 0) return '';
     return String(isSeries ? p * DEFAULT_SERIES_VISIT_GUESS : p);
   });
-  const [method, setMethod] = useState('cash');
-  const [note, setNote] = useState('');
+  const [method, setMethod] = useState(() => service?.prepaidMethod || 'cash');
+  const [note, setNote] = useState(() => service?.prepaidNote || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -139,7 +158,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
               className="font-medium text-zinc-900"
               style={{ fontSize: 18 }}
             >
-              Mark prepaid
+              {isExistingPrepayment ? 'Edit prepayment' : 'Mark prepaid'}
             </div>
             <div
               className="text-ink-secondary"
@@ -276,7 +295,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           className="w-full rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
           style={{ padding: '14px 20px', fontSize: 15, opacity: saving ? 0.6 : 1 }}
         >
-          {saving ? 'Saving…' : 'Save prepayment'}
+          {saving ? 'Saving…' : isExistingPrepayment ? 'Save changes' : 'Save prepayment'}
         </button>
       </div>
     </div>
