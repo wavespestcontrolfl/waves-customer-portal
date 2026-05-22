@@ -1416,6 +1416,79 @@ async function handlePaymentIntentProcessing(paymentIntent) {
         total: amount,
       });
   });
+
+  // ── Customer-facing ACH "we got it, processing" acknowledgment ──
+  //
+  // The customer initiated a bank transfer; ACH takes 3–5 business days
+  // to clear. Without an acknowledgment the invoice silently flips from
+  // Sent → Processing in the portal and the customer hears nothing
+  // until the receipt fires days later (or worse, a failure SMS).
+  //
+  // Idempotency: invoices.ach_processing_notified_at is stamped after
+  // the SMS+email pair dispatches. Stripe retries (5xx, slow ack) and
+  // any duplicate processing event after a transient downgrade won't
+  // double-send. Channels run independently — missing phone skips SMS
+  // but email still fires, and vice versa.
+  //
+  // Fire-and-forget via setImmediate so a Twilio/SendGrid hiccup
+  // doesn't make Stripe retry the entire webhook (which would re-run
+  // the amount-mismatch + status guards above).
+  setImmediate(async () => {
+    try {
+      const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
+      if (!freshInvoice) return;
+      if (freshInvoice.ach_processing_notified_at) return;
+      if (freshInvoice.status !== 'processing') return;
+
+      const customer = freshInvoice.customer_id
+        ? await db('customers').where({ id: freshInvoice.customer_id }).first()
+        : null;
+      if (!customer) return;
+
+      await db('invoices')
+        .where({ id: freshInvoice.id })
+        .whereNull('ach_processing_notified_at')
+        .update({ ach_processing_notified_at: new Date() });
+
+      if (customer.phone) {
+        try {
+          const smsBody = await renderRequiredSmsTemplate('ach_payment_processing', {
+            first_name: customer.first_name || 'there',
+            invoice_number: freshInvoice.invoice_number || '',
+          });
+          const smsResult = await sendBillingSms(customer, smsBody, {
+            original_message_type: 'ach_payment_processing',
+            stripe_payment_intent_id: piId,
+            invoice_id: freshInvoice.id,
+          });
+          if (!smsResult.sent) {
+            logger.warn(`[stripe-webhook] ACH processing SMS blocked/failed for invoice ${freshInvoice.invoice_number}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          }
+        } catch (smsErr) {
+          logger.error(`[stripe-webhook] ACH processing SMS failed for invoice ${freshInvoice.invoice_number}: ${smsErr.message}`);
+        }
+      }
+
+      const expectedClearDate = new Date();
+      expectedClearDate.setDate(expectedClearDate.getDate() + 5);
+      const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
+        customerId: freshInvoice.customer_id,
+        invoiceId: freshInvoice.id,
+        amountPaid: amount,
+        initiatedAt: new Date(),
+        expectedClearDate,
+        idempotencyKey: `payment.ach_processing:${freshInvoice.id}`,
+      }).catch((err) => ({ ok: false, error: err.message }));
+      if (!emailResult?.ok) {
+        const reason = emailResult?.reason || emailResult?.error || 'unknown';
+        if (reason !== 'missing_email' && reason !== 'customer_not_found') {
+          logger.warn(`[stripe-webhook] ACH processing email not sent for invoice ${freshInvoice.invoice_number}: ${reason}`);
+        }
+      }
+    } catch (err) {
+      logger.error(`[stripe-webhook] ACH processing acknowledgment failed for PI ${piId}: ${err.message}`, { stack: err.stack });
+    }
+  });
 }
 
 /**

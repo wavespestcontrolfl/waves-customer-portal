@@ -449,6 +449,40 @@ async function sendPaymentFailed({
   });
 }
 
+async function sendAchProcessing({
+  customerId,
+  invoiceId,
+  paymentId = null,
+  amountPaid = null,
+  initiatedAt = new Date(),
+  expectedClearDate = null,
+  idempotencyKey,
+} = {}) {
+  const invoice = invoiceId ? await db('invoices').where({ id: invoiceId }).first().catch(() => null) : null;
+  if (!invoice) return { ok: false, skipped: true, reason: 'invoice_not_found' };
+  const payUrl = invoice.token
+    ? `${publicPortalUrl()}/pay/${invoice.token}`
+    : portalBillingUrl();
+  const payload = {
+    invoice_title: invoice.title || invoice.service_type || `Invoice ${invoice.invoice_number || ''}`.trim() || 'your Waves invoice',
+    invoice_number: invoice.invoice_number || '',
+    amount_paid: money(amountPaid != null ? amountPaid : invoice.total),
+    payment_initiated_date: displayDate(initiatedAt),
+    expected_clear_date: expectedClearDate ? displayDate(expectedClearDate) : '',
+    pay_url: payUrl,
+  };
+  const effectiveCustomerId = customerId || invoice.customer_id;
+  return sendLifecycleTemplate({
+    customerId: effectiveCustomerId,
+    templateKey: 'payment.ach_processing',
+    eventType: 'payment.ach_processing',
+    payload,
+    invoiceId: invoice.id,
+    paymentId,
+    idempotencyKey: idempotencyKey || `payment.ach_processing:${invoice.id}`,
+  });
+}
+
 async function sendPaymentPlanConfirmed({
   customerId,
   paymentPlanId,
@@ -520,6 +554,7 @@ module.exports = {
   sendPaymentMethodExpiring,
   sendPaymentRetryNotice,
   sendPaymentFailed,
+  sendAchProcessing,
   sendPaymentPlanConfirmed,
   sendRefundIssued,
   _private: {

@@ -90,6 +90,15 @@ module.exports = [
     channels_expected: ['email', 'sms'],
   },
   {
+    event_key: 'payment.ach_processing',
+    name: 'Bank payment received - processing',
+    audience: 'customer',
+    description: 'A customer ACH bank payment is in flight (3-5 business days to clear).',
+    fires_when: 'When Stripe reports payment_intent.processing for an ACH payment',
+    source: 'server/routes/stripe-webhook.js',
+    channels_expected: ['email', 'sms'],
+  },
+  {
     event_key: 'service_report.ready',
     name: 'Service report ready',
     audience: 'customer',
