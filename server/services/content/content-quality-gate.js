@@ -30,14 +30,26 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 
-// Pass threshold relative to a 100-point scale. The current weight map
-// makes 75 unreachable for any page type — common hard checks sum to
-// 37 and the largest page-specific bundle is city-service at 36, so
-// max total = 73 ≈ 73% of the conceptual 100. Lowered to 55 (75% of
-// the actually-achievable 73-point max) so passing is mathematically
-// possible. The v3.1 plan called for "min total 75" as a percentage
-// goal; honoring that intent against the real ceiling means 55/73.
-const MIN_TOTAL_SCORE = 55;
+// Compute the achievable maximum score from the weight map so the
+// pass threshold is always a reachable fraction of it. The v3.1 plan
+// wanted "min total ~75%" — apply that as a percentage of the real
+// ceiling rather than a hardcoded literal (a hardcoded 75 was
+// unreachable: common hard checks = 37, largest page-specific
+// bundle = city-service at 36, so absolute max = 73).
+const PASS_THRESHOLD_PCT = 0.75;
+
+function computeMaxAchievableScore(hardChecks, pageTypeChecks) {
+  const commonSum = hardChecks.reduce((s, c) => s + c.weight, 0);
+  let maxPageTypeSum = 0;
+  for (const checks of Object.values(pageTypeChecks)) {
+    const sum = checks.reduce((s, c) => s + c.weight, 0);
+    if (sum > maxPageTypeSum) maxPageTypeSum = sum;
+  }
+  return commonSum + maxPageTypeSum; // ceiling for any single page type
+}
+
+// Computed below after the check arrays are defined.
+let MIN_TOTAL_SCORE;
 
 // Each check carries (name, weight, isHard, evaluate(draft, brief)).
 // Hard checks are pass/fail and short-circuit publishing on failure.
@@ -87,6 +99,12 @@ const PAGE_TYPE_CHECKS = {
   gbp: [],
   none: [],
 };
+
+// Resolve MIN_TOTAL_SCORE now that check arrays are defined.
+// MAX_ACHIEVABLE = 37 common + 36 city-service = 73.
+// MIN_TOTAL_SCORE = floor(73 * 0.75) = 54.
+const MAX_ACHIEVABLE_SCORE = computeMaxAchievableScore(HARD_CHECKS, PAGE_TYPE_CHECKS);
+MIN_TOTAL_SCORE = Math.floor(MAX_ACHIEVABLE_SCORE * PASS_THRESHOLD_PCT);
 
 // ── main API ────────────────────────────────────────────────────────
 
@@ -163,14 +181,18 @@ function checkSchemaValid(draft) {
   catch { return { ok: false, reason: 'schema_not_valid_json' }; }
 }
 
+function isPageOnlyOpportunity(brief) {
+  // brief-builder intentionally skips SERP profiling when the
+  // opportunity has no keyword (e.g. decay_refresh on a known page
+  // URL). Page-only briefs cannot satisfy a serp_signal check by
+  // construction, so the SERP hard check must skip for them.
+  return !brief.target_keyword && Boolean(brief.target_url);
+}
+
 function checkSerpBriefAttached(_draft, brief) {
-  // brief-builder intentionally skips SERP profiling for page-only
-  // opportunities (e.g. decay_refresh on a known page URL with no
-  // associated query). For those, there's no SERP signal to require —
-  // the gate would otherwise structurally block every page-only
-  // opportunity from passing autonomous publish.
-  const isPageOnly = !brief.target_keyword && brief.target_url;
-  if (isPageOnly) return { ok: true, reason: 'skipped_page_only_opportunity' };
+  if (isPageOnlyOpportunity(brief)) {
+    return { ok: true, reason: 'serp_skip_page_only' };
+  }
   const s = brief.serp_signal;
   if (!s || !s.dominant_intent) return { ok: false, reason: 'no_serp_signal' };
   return { ok: true };

@@ -253,7 +253,9 @@ describe('evaluate (full gate)', () => {
   test('MIN_TOTAL_SCORE exposed and reachable', () => {
     // 55/73 = ~75% of the achievable ceiling (city-service: 36 page-
     // specific + 37 common = 73). 75 absolute would be unreachable.
-    expect(MIN_TOTAL_SCORE).toBe(55);
+    // MIN = floor(MAX_ACHIEVABLE * 0.75). With city-service as the
+    // ceiling (common 37 + city-service 36 = 73), this resolves to 54.
+    expect(MIN_TOTAL_SCORE).toBe(54);
   });
   test('throws on missing inputs', () => {
     expect(() => evaluate(null, brief())).toThrow();
