@@ -11,7 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
+import { BookOpen, Leaf, MapPin, ShieldCheck } from 'lucide-react';
 import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
@@ -133,17 +133,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         aria-hidden
         style={{ width: 4, background: accent, borderRadius: 2, flexShrink: 0 }}
       />
-      <div
-        role="button"
-        tabIndex={0}
+      <button
+        type="button"
         onClick={() => onEdit?.(service)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onEdit?.(service);
-          }
-        }}
-        className="flex-1 min-w-0 flex items-center gap-3 bg-white active:bg-zinc-50 u-focus-ring text-left cursor-pointer"
+        className="flex-1 min-w-0 flex items-center gap-3 bg-white active:bg-zinc-50 u-focus-ring text-left"
       >
         <span className="flex-1 min-w-0">
           <span className="flex items-baseline gap-2 flex-wrap">
@@ -173,18 +166,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             )}
           </span>
           {service.address && (
-            <a
-              href={googleMapsDirectionsUrl(service.address)}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              onKeyDown={(e) => e.stopPropagation()}
-              aria-label={`Open ${service.address} in Google Maps`}
-              className="block truncate text-ink-secondary underline underline-offset-2"
+            <span
+              className="block truncate text-ink-secondary"
               style={{ fontSize: 13, marginTop: 2 }}
             >
               {service.address}
-            </a>
+            </span>
           )}
           {serviceDisplayName(service) && (
             <span
@@ -201,7 +188,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             {formatWindow(service)}
           </span>
         </span>
-      </div>
+      </button>
       {techInitial && (
         <button
           type="button"
@@ -257,6 +244,19 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         >
           <WavesMark size={18} fill="#009CDE" title="Waves logo" />
         </button>
+      )}
+      {service.address && (
+        <a
+          href={googleMapsDirectionsUrl(service.address)}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
+          title="Open in Google Maps"
+          aria-label={`Open ${service.address} in Google Maps`}
+        >
+          <MapPin size={18} strokeWidth={1.75} />
+        </a>
       )}
     </div>
   );
