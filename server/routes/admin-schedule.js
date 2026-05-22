@@ -30,6 +30,11 @@ const {
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const {
+  stampSeriesPrepaid,
+  resolveSeriesParentId,
+  buildPrepaidSeriesContext,
+} = require('../services/prepaid-series');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -2221,12 +2226,30 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // POST /api/admin/schedule/:id/prepaid — record payment taken in advance
 // (cash at door, phone CC, Zelle, etc.). Completion handler skips auto-invoice
 // when prepaid_amount >= the would-be invoice total.
+//
+// When `applyToSeries=true`, the amount represents the TOTAL the customer
+// paid to cover the whole recurring family (e.g. $360 for a quarterly plan)
+// and we split it evenly across every non-completed sibling so each visit
+// completes against its own slice — the per-visit invoice-skip logic keeps
+// working unchanged.
 router.post('/:id/prepaid', async (req, res, next) => {
   try {
-    const { amount, method, note } = req.body;
+    const { amount, method, note, applyToSeries } = req.body;
     const amt = Number(amount);
     if (!Number.isFinite(amt) || amt < 0) {
       return res.status(400).json({ error: 'amount must be a non-negative number' });
+    }
+    if (applyToSeries) {
+      const result = await stampSeriesPrepaid(db, {
+        anchorServiceId: req.params.id,
+        totalAmount: amt,
+        method,
+        note,
+      });
+      logger.info(
+        `[schedule] Marked series ${result.seriesParentId} prepaid: $${amt} across ${result.visitsCovered} visit(s) via ${method || 'unspecified'}`,
+      );
+      return res.json({ success: true, ...result });
     }
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
@@ -2240,12 +2263,36 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (!updated.length) return res.status(404).json({ error: 'Scheduled service not found' });
     logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);
     res.json({ success: true, ...updated[0] });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
-// DELETE /api/admin/schedule/:id/prepaid — clear a prepayment record
+// DELETE /api/admin/schedule/:id/prepaid — clear a prepayment record. When
+// `?series=1` is passed, every eligible sibling in the recurring family is
+// cleared too — symmetry with the POST flow so the operator doesn't have to
+// hunt down each prepaid visit individually if the customer asks for a refund.
 router.delete('/:id/prepaid', async (req, res, next) => {
   try {
+    if (req.query.series === '1' || req.query.series === 'true') {
+      const anchor = await db('scheduled_services').where({ id: req.params.id }).first();
+      if (!anchor) return res.status(404).json({ error: 'Scheduled service not found' });
+      const parentId = resolveSeriesParentId(anchor);
+      const cleared = await db('scheduled_services')
+        .where(function () {
+          this.where('recurring_parent_id', parentId).orWhere('id', parentId);
+        })
+        .whereNotNull('prepaid_amount')
+        .update({
+          prepaid_amount: null,
+          prepaid_method: null,
+          prepaid_note: null,
+          prepaid_at: null,
+        })
+        .returning(['id']);
+      return res.json({ success: true, clearedCount: cleared.length, seriesParentId: parentId });
+    }
     await db('scheduled_services').where({ id: req.params.id }).update({
       prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
     });

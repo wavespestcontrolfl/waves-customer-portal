@@ -2767,6 +2767,47 @@ export default function Customer360ProfileV2({
                       )}
                     </div>
                   )}
+                  {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
+                    <div className="mb-3">
+                      <SectionTitle>Prepaid Plans</SectionTitle>
+                      {data.prepaidPlans.map((plan) => (
+                        <div
+                          key={plan.seriesParentId}
+                          className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-12 font-medium text-zinc-900 truncate">
+                              {plan.serviceType}
+                              {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
+                            </div>
+                            <span
+                              className="inline-flex items-center rounded-full text-10 font-medium uppercase tracking-label"
+                              style={{
+                                height: 18,
+                                padding: "0 8px",
+                                background: plan.remainingVisits > 0 ? "#DCFCE7" : "#F4F4F5",
+                                color: plan.remainingVisits > 0 ? "#166534" : "#52525B",
+                              }}
+                            >
+                              {plan.remainingVisits > 0 ? "Active" : "Used"}
+                            </span>
+                          </div>
+                          <div className="text-11 text-ink-secondary mt-1">
+                            {plan.usedVisits} of {plan.paidVisits} used
+                            {plan.remainingVisits > 0
+                              ? ` · ${plan.remainingVisits} remaining`
+                              : ""}
+                            {" · "}${plan.perVisitAmount.toFixed(2)}/visit
+                          </div>
+                          <div className="text-11 text-ink-secondary mt-0.5">
+                            Total ${plan.seriesTotal.toFixed(2)}
+                            {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
+                            {plan.nextVisitDate ? ` · next ${fmtDate(plan.nextVisitDate)}` : ""}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <SectionTitle>Recent Invoices</SectionTitle>
                   {invoices.slice(0, 3).map((inv, i) => (
                     <div

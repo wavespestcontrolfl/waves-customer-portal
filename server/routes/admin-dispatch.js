@@ -41,6 +41,7 @@ const {
   resolveCompletionProfileForScheduledService,
   resolveCompletionProfileForServiceId,
 } = require('../services/service-completion-profiles');
+const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
   recordTrackTransitionFailure,
@@ -857,6 +858,12 @@ router.get('/:date?', async (req, res, next) => {
         ach_status: s.ach_status,
       });
       const completionProfile = await resolveCompletionProfileForScheduledService(s).catch(() => null);
+      // Only fan out the series-context lookup for visits that are actually
+      // prepaid — most rows aren't, and we don't want N extra family-fetches
+      // per day on the dispatch list.
+      const prepaidSeriesContext = s.prepaid_amount != null && Number(s.prepaid_amount) > 0
+        ? await buildPrepaidSeriesContext(db, s).catch(() => null)
+        : null;
       const linkedProject = await db('projects')
         .where({ scheduled_service_id: s.id })
         .orderByRaw(`
@@ -905,6 +912,10 @@ router.get('/:date?', async (req, res, next) => {
         autopayEnabled: s.autopay_enabled !== false,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
+        prepaidMethod: s.prepaid_method || null,
+        prepaidNote: s.prepaid_note || null,
+        prepaidAt: s.prepaid_at || null,
+        prepaidSeriesContext,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,

@@ -135,7 +135,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         className="flex-1 min-w-0 flex items-center gap-3 bg-white active:bg-zinc-50 u-focus-ring text-left"
       >
         <span className="flex-1 min-w-0">
-          <span className="flex items-baseline gap-2">
+          <span className="flex items-baseline gap-2 flex-wrap">
             <span
               className="font-medium text-zinc-900 truncate"
               style={{ fontSize: 15 }}
@@ -143,6 +143,23 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               {displayName}
             </span>
             {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
+            {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
+              <span
+                className="inline-flex items-center rounded-full uppercase tracking-label font-medium"
+                style={{
+                  height: 18,
+                  padding: '0 8px',
+                  background: '#DCFCE7',
+                  color: '#166534',
+                  fontSize: 10,
+                }}
+                title={service.prepaidSeriesContext?.totalCoveredVisits > 1
+                  ? `Visit ${service.prepaidSeriesContext.visitNumber || '?'} of ${service.prepaidSeriesContext.totalVisitsInSeries} on a prepaid plan`
+                  : 'Prepaid'}
+              >
+                Paid
+              </span>
+            )}
           </span>
           {serviceDisplayName(service) && (
             <span
