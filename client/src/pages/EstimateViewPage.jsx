@@ -37,6 +37,7 @@ import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
+import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -694,7 +695,7 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
-function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service));
@@ -720,6 +721,7 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
           const amount = Number(item.amount) || 0;
           const isDiscount = !isQuoteRequired && (amount < 0 || item.kind === 'discount');
           const isIncluded = !isQuoteRequired && item.kind === 'included';
+          const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -733,6 +735,11 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
                 {item.detail ? (
                   <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
                     {item.detail}
+                  </div>
+                ) : null}
+                {quoteNote ? (
+                  <div style={{ fontSize: 12, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
+                    {quoteNote}
                   </div>
                 ) : null}
               </div>
@@ -757,6 +764,11 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
           {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
         </span>
       </div>
+      {totalIsQuoteRequired ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.45 }}>
+          Waves will confirm final pricing before this can be accepted online.
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -772,6 +784,7 @@ function manualDiscountMonthlyAmount(manualDiscount) {
 function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier }) {
   if (!combined) return null;
   const quoteRequired = selectedFrequency?.quoteRequired === true;
+  const quoteReason = quoteRequired ? quoteRequiredReasonText(selectedFrequency || combined) : '';
   const monthly = quoteRequired ? null : (selectedFrequency?.monthly ?? combined.monthlySubtotal);
   const annual = quoteRequired ? null : (selectedFrequency?.annual ?? combined.annualSubtotal);
   const manualDiscount = combined.manualDiscount && Number(combined.manualDiscount.amount) > 0
@@ -823,6 +836,11 @@ function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier
           {!quoteRequired && annual ? (
             <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8 }}>
               {fmtMoney(annual)} / year
+            </div>
+          ) : null}
+          {quoteRequired && quoteReason ? (
+            <div style={{ fontSize: 14, color: '#92400E', marginTop: 10, lineHeight: 1.4, fontWeight: 700, maxWidth: 320 }}>
+              {quoteReason}
             </div>
           ) : null}
           {waveGuardTier ? (
@@ -1464,6 +1482,7 @@ export default function EstimateViewPage() {
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
   const waveGuardTier = renderFlags.showWaveGuardTierUi === false ? null : (pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier);
   const combinedFrequency = selectedCombinedFrequency(pricing, selectedFrequency);
+  const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
 
   if (!canAccept) {
     return (
@@ -1483,6 +1502,7 @@ export default function EstimateViewPage() {
           state={cta.terminalState}
           customerFirstName={estimate.customerFirstName}
           address={estimate.address}
+          quoteReason={quoteRequiredReason}
         />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>

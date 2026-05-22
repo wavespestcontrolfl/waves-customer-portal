@@ -30,6 +30,7 @@ import {
   isServiceSpecificCredit,
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
+import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 
 const COMMERCIAL_WARNING_TEXT =
   "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
@@ -170,6 +171,10 @@ function estimateRequiresQuote(value, depth = 0) {
     return true;
   }
   return Object.values(value).some((item) => estimateRequiresQuote(item, depth + 1));
+}
+
+function quoteRequiredDetailText(item = {}, existingText = "") {
+  return quoteRequiredReasonNote(item, existingText, "Requires review before final pricing.");
 }
 
 class EstimateErrorBoundary extends Component {
@@ -5074,16 +5079,20 @@ function EstimateToolView() {
                             marginBottom: 24,
                           }}
                         >
-                          {E.specItems.map((s, i) => (
-                            <div key={i} style={sSpecCard}>
-                              {" "}
-                              <div style={sSpecName}>{s.name}</div>{" "}
-                              <div style={sSpecPrice}>
-                                {s.quoteRequired ? "Quote Required" : s.onProg ? "$0 — Included" : fmtInt(s.price)}
-                              </div>{" "}
-                              <div style={sSpecDet}>{s.det}</div>{" "}
-                            </div>
-                          ))}
+                          {E.specItems.map((s, i) => {
+                            const quoteDetail = s.quoteRequired ? quoteRequiredDetailText(s, s.det || "") : "";
+                            const detailText = [s.det, quoteDetail].filter(Boolean).join(" · ");
+                            return (
+                              <div key={i} style={sSpecCard}>
+                                {" "}
+                                <div style={sSpecName}>{s.name}</div>{" "}
+                                <div style={sSpecPrice}>
+                                  {s.quoteRequired ? "Quote Required" : s.onProg ? "$0 — Included" : fmtInt(s.price)}
+                                </div>{" "}
+                                <div style={sSpecDet}>{detailText}</div>{" "}
+                              </div>
+                            );
+                          })}
                         </div>{" "}
                       </>
                     )}
@@ -5113,6 +5122,11 @@ function EstimateToolView() {
                           {(E.pricingMetadata.warnings || []).map((warning, i) => (
                             <div key={`warning-${i}`} style={{ color: C.muted }}>
                               {warning}
+                            </div>
+                          ))}
+                          {(E.pricingMetadata.manualReviewReasons || []).map((reason, i) => (
+                            <div key={`manual-review-${i}`} style={{ color: C.muted }}>
+                              {humanizeQuoteReason(reason)}
                             </div>
                           ))}
                         </div>
@@ -5490,31 +5504,42 @@ function EstimateToolView() {
                                   </span>{" "}
                                 </div>
                               ))}
-                              {E.oneTime.specItems.map((s, i) => (
-                                <div
-                                  key={`sp-${i}`}
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "center",
-                                    padding: "3px 0 3px 16px",
-                                    fontSize: 14,
-                                    color: C.gray,
-                                  }}
-                                >
-                                  {" "}
-                                  <span>{s.name}</span>{" "}
-                                  <span
+                              {E.oneTime.specItems.map((s, i) => {
+                                const quoteDetail = s.quoteRequired ? quoteRequiredDetailText(s, s.det || s.detail || "") : "";
+                                return (
+                                  <div
+                                    key={`sp-${i}`}
                                     style={{
-                                      fontFamily: "'JetBrains Mono', monospace",
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      alignItems: "flex-start",
+                                      gap: 12,
+                                      padding: "3px 0 3px 16px",
                                       fontSize: 14,
-                                      color: C.green,
+                                      color: C.gray,
                                     }}
                                   >
-                                    {s.quoteRequired ? "Quote Required" : fmtInt(s.price)}
-                                  </span>{" "}
-                                </div>
-                              ))}
+                                    {" "}
+                                    <span>
+                                      {s.name}
+                                      {quoteDetail ? (
+                                        <span style={{ display: "block", fontSize: 11, color: C.gray, lineHeight: 1.25 }}>
+                                          {quoteDetail}
+                                        </span>
+                                      ) : null}
+                                    </span>{" "}
+                                    <span
+                                      style={{
+                                        fontFamily: "'JetBrains Mono', monospace",
+                                        fontSize: 14,
+                                        color: C.green,
+                                      }}
+                                    >
+                                      {s.quoteRequired ? "Quote Required" : fmtInt(s.price)}
+                                    </span>{" "}
+                                  </div>
+                                );
+                              })}
                             </>
                           )}
                           {/* Big totals */}

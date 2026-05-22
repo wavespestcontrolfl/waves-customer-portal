@@ -1,3 +1,5 @@
+import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
+
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
  * service-tier programs can keep a monthly bill while showing visit cadence.
@@ -94,6 +96,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const monthly = frequency.monthly;
   const annual = frequency.annual;
   const quoteRequired = frequency.quoteRequired === true;
+  const quoteReason = quoteRequired ? quoteRequiredReasonText(frequency) : '';
   const billingKey = billingKeyForFrequency(frequency);
   const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
   const periodLabel = wording?.periodLabelByKey?.[billingKey]
@@ -169,6 +172,12 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       {!quoteRequired && annual ? (
         <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
           {fmtMoney(annual)} / year
+        </div>
+      ) : null}
+
+      {quoteRequired && quoteReason ? (
+        <div style={{ fontSize: 15, color: '#92400E', marginTop: 10, lineHeight: 1.45, fontWeight: 700 }}>
+          {quoteReason}
         </div>
       ) : null}
 

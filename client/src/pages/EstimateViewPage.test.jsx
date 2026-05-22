@@ -3,7 +3,8 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { EstimateAskBar, ServiceSection, getServiceLabel } from './EstimateViewPage';
+import TerminalStateCard from '../components/estimate/TerminalStateCard';
+import { EstimateAskBar, OneTimeBreakdownCard, ServiceSection, getServiceLabel } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -136,6 +137,77 @@ describe('ServiceSection', () => {
     expect(screen.getByText('/mo')).toBeInTheDocument();
     expect(screen.getByText('Service visits: Bi-monthly')).toBeInTheDocument();
     expect(screen.queryByText('/bi-monthly')).not.toBeInTheDocument();
+  });
+
+  it('shows the selected quote-required frequency reason', () => {
+    render(
+      <ServiceSection
+        section={{
+          key: 'commercial_pest',
+          label: 'Commercial Pest Control',
+          isRecurring: true,
+          isPest: false,
+          frequencies: [{
+            key: 'manual',
+            label: 'Manual quote',
+            monthly: null,
+            annual: null,
+            quoteRequired: true,
+            customQuoteReason: 'Commercial pest requires manual quote or commercial pilot pricing.',
+            included: [],
+          }],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="manual"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      />,
+    );
+
+    expect(screen.getByText('Quote required')).toBeInTheDocument();
+    expect(screen.getByText('Commercial pest requires manual quote or commercial pilot pricing.')).toBeInTheDocument();
+  });
+});
+
+describe('OneTimeBreakdownCard', () => {
+  it('shows quote-required specialty reasons instead of only the blocked price', () => {
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{
+          total: 0,
+          items: [{
+            service: 'flea_package',
+            label: 'Flea Treatment Package',
+            amount: null,
+            kind: 'quote_required',
+            quoteRequired: true,
+            customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+          }],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Flea Treatment Package')).toBeInTheDocument();
+    expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
+    expect(screen.getByText('Exterior yard area exceeds automatic quote threshold.')).toBeInTheDocument();
+  });
+});
+
+describe('TerminalStateCard', () => {
+  it('shows the quote-required reason in the blocked React estimate state', () => {
+    render(
+      <TerminalStateCard
+        state="quote_required"
+        customerFirstName="Pat"
+        address="123 Main St"
+        quoteReason="SEVERE_INFESTATION"
+      />,
+    );
+
+    expect(screen.getByText('This treatment needs an inspection.')).toBeInTheDocument();
+    expect(screen.getByText('Severe infestation')).toBeInTheDocument();
   });
 });
 
