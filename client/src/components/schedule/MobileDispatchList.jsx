@@ -11,7 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
+import { BookOpen, Leaf, MapPin, ShieldCheck } from 'lucide-react';
 import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
@@ -30,6 +30,10 @@ function adminFetch(path) {
 
 function serviceDisplayName(service) {
   return service?.serviceTypeDisplay || service?.serviceType || '';
+}
+
+function googleMapsDirectionsUrl(address) {
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address || '')}&travelmode=driving`;
 }
 
 // Monday of the ET week that contains `dateStr` ('YYYY-MM-DD'). Returned
@@ -161,6 +165,14 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               </span>
             )}
           </span>
+          {service.address && (
+            <span
+              className="block truncate text-ink-secondary"
+              style={{ fontSize: 13, marginTop: 2 }}
+            >
+              {service.address}
+            </span>
+          )}
           {serviceDisplayName(service) && (
             <span
               className="block truncate text-ink-secondary"
@@ -232,6 +244,19 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         >
           <WavesMark size={18} fill="#009CDE" title="Waves logo" />
         </button>
+      )}
+      {service.address && (
+        <a
+          href={googleMapsDirectionsUrl(service.address)}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
+          title="Open in Google Maps"
+          aria-label={`Open ${service.address} in Google Maps`}
+        >
+          <MapPin size={18} strokeWidth={1.75} />
+        </a>
       )}
     </div>
   );
