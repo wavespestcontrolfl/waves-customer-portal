@@ -32,6 +32,10 @@ function serviceDisplayName(service) {
   return service?.serviceTypeDisplay || service?.serviceType || '';
 }
 
+function googleMapsDirectionsUrl(address) {
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address || '')}&travelmode=driving`;
+}
+
 // Monday of the ET week that contains `dateStr` ('YYYY-MM-DD'). Returned
 // as the same 'YYYY-MM-DD' shape so it can go straight into the API call.
 function mondayOfETWeek(dateStr) {
@@ -129,10 +133,17 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         aria-hidden
         style={{ width: 4, background: accent, borderRadius: 2, flexShrink: 0 }}
       />
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => onEdit?.(service)}
-        className="flex-1 min-w-0 flex items-center gap-3 bg-white active:bg-zinc-50 u-focus-ring text-left"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onEdit?.(service);
+          }
+        }}
+        className="flex-1 min-w-0 flex items-center gap-3 bg-white active:bg-zinc-50 u-focus-ring text-left cursor-pointer"
       >
         <span className="flex-1 min-w-0">
           <span className="flex items-baseline gap-2 flex-wrap">
@@ -161,6 +172,20 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               </span>
             )}
           </span>
+          {service.address && (
+            <a
+              href={googleMapsDirectionsUrl(service.address)}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+              aria-label={`Open ${service.address} in Google Maps`}
+              className="block truncate text-ink-secondary underline underline-offset-2"
+              style={{ fontSize: 13, marginTop: 2 }}
+            >
+              {service.address}
+            </a>
+          )}
           {serviceDisplayName(service) && (
             <span
               className="block truncate text-ink-secondary"
@@ -176,7 +201,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             {formatWindow(service)}
           </span>
         </span>
-      </button>
+      </div>
       {techInitial && (
         <button
           type="button"
