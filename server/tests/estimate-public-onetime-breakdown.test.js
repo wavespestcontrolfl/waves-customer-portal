@@ -1716,6 +1716,40 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('requiresCustomQuote one-time rows preserve customer-facing quote reasons', () => {
+    const breakdown = normalizeOneTimeBreakdown({
+      result: {
+        oneTime: {
+          total: 0,
+          specItems: [{
+            service: 'flea_package',
+            name: 'Flea Treatment Package',
+            price: null,
+            requiresCustomQuote: true,
+            customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+            manualReviewReasons: ['large_lot'],
+          }],
+        },
+      },
+    });
+
+    expect(breakdown.quoteRequired).toBe(true);
+    expect(breakdown.items).toContainEqual(expect.objectContaining({
+      service: 'flea_package',
+      kind: 'quote_required',
+      amount: null,
+      quoteRequired: true,
+      requiresCustomQuote: true,
+      reason: 'Exterior yard area exceeds automatic quote threshold.',
+      customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+      manualReviewReasons: ['large_lot'],
+    }));
+    expect(resolveEstimateQuoteRequirement({ oneTimeBreakdown: breakdown })).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      reason: 'Exterior yard area exceeds automatic quote threshold.',
+    }));
+  });
+
   test('quote-required result spec rows lock public commercial manual drafts', async () => {
     const estimateData = {
       result: {
@@ -1767,6 +1801,35 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Ready to lock in');
     expect(html).not.toContain('class="cta pick-time-cta"');
     expect(html).not.toContain('id="booking-card"');
+  });
+
+  test('server-rendered quote-required page explains why pricing is blocked', () => {
+    const html = renderPage('quote-reason-token', {
+      status: 'quote_required',
+      quoteRequired: true,
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        oneTime: {
+          total: 0,
+          specItems: [{
+            service: 'flea_package',
+            name: 'Flea Treatment Package',
+            price: null,
+            requiresCustomQuote: true,
+            customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+          }],
+        },
+      },
+    });
+
+    expect(html).toContain('Quote Required');
+    expect(html).toContain('Exterior yard area exceeds automatic quote threshold.');
   });
 
   test('server-rendered termite trenching quote-required page avoids zero-price acceptance copy', () => {

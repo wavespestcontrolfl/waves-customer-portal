@@ -55,6 +55,7 @@ import {
   isServiceSpecificCredit,
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
+import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -612,13 +613,16 @@ function formatSqFt(value) {
 }
 
 function serviceDetailText(item = {}) {
-  const parts = [
+  const baseParts = [
     item.detail || item.det || item.note || "",
     item.exteriorDetail || "",
     item.warning || "",
     ...(Array.isArray(item.warnings) ? item.warnings : []),
-    item.customQuoteReason || "",
   ].filter(Boolean);
+  const quoteDetail = item.quoteRequired || item.requiresCustomQuote
+    ? quoteRequiredReasonNote(item, baseParts.join(" · "))
+    : "";
+  const parts = [...baseParts, quoteDetail].filter(Boolean);
   const unique = [];
   for (const part of parts) {
     if (unique.includes(part)) continue;
@@ -6566,6 +6570,11 @@ export default function EstimateToolViewV2({
                               {warning}
                             </div>
                           ))}
+                          {(E.pricingMetadata.manualReviewReasons || []).map((reason, i) => (
+                            <div key={`manual-review-${i}`} className="text-ink-secondary">
+                              {humanizeQuoteReason(reason)}
+                            </div>
+                          ))}
                         </div>
                       )
                     )}
@@ -6770,7 +6779,7 @@ export default function EstimateToolViewV2({
                               {E.oneTime.specItems.map((s, i) => (
                                 <div
                                   key={`sp-${i}`}
-                                  className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary"
+                                  className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary"
                                 >
                                   {" "}
                                   <span>
