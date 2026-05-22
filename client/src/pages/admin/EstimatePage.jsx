@@ -123,6 +123,10 @@ function formatAiSources(sources) {
     .join(" + ");
 }
 
+function isExpectedAiTimeout(message) {
+  return /timed out after \d+ms/i.test(String(message || ""));
+}
+
 function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } = {}) {
   const normalizedSources = normalizeAiSources(sources);
   const warnings = [];
@@ -130,7 +134,9 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
     const openaiError = errors.find((error) => error?.source === "openai");
     const openaiStatus = providerStatus.openai;
     if (openaiError?.message) {
-      warnings.push(`ChatGPT skipped: ${openaiError.message}`);
+      if (!isExpectedAiTimeout(openaiError.message)) {
+        warnings.push(`ChatGPT skipped: ${openaiError.message}`);
+      }
     } else if (openaiStatus === false || openaiStatus?.configured === false) {
       warnings.push("ChatGPT skipped: OPENAI_API_KEY is not configured");
     } else if (openaiStatus?.available === false) {

@@ -1368,6 +1368,14 @@ function buildFieldVerifyFlags(rc, ai) {
     }
   }
 
+  if (rc && !rc.lotSize && !/condo|apartment|multifamily|hoa common/i.test(String(rc.propertyType || ''))) {
+    flags.push({
+      field: 'lotSize',
+      reason: 'Lot size missing from property sources — verify parcel/lot square footage before lawn, mosquito, or rodent pricing',
+      priority: 'HIGH',
+    });
+  }
+
   // Satellite AI pool signal disagrees with property records.
   if (rc?.hasPool === false && ai?.pool === 'YES') {
     flags.push({

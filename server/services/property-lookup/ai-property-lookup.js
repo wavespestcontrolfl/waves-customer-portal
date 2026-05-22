@@ -489,7 +489,9 @@ Search aggressively, in this order:
 Output rules:
 - Garage square footage is NOT counted as living area, AND not counted as a story.
 - "stories" = number of floors above grade (1, 2, 3, 4).
-- "lotSize" MUST be in square feet. If the listing shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
+- "lotSize" is a CRITICAL pricing field. If the first listing says N/A or omits the lot, search the exact address again with "lot size square feet", "Lot Size Square Feet", "acre lot", and the county property appraiser before leaving it null.
+- "lotSize" MUST be in square feet. If the exact-property source shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
+- Do NOT borrow lot size from a nearby home, comparable, neighborhood median, or builder community page unless it is explicitly for the exact address.
 - If the converted lot size is above 200000 square feet, output 200000 so the public quote flow prices at its maximum lot-size cap instead of defaulting to a small lot.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", "Commercial", "Office", "Retail", "Warehouse", "Restaurant", "Medical Office", "School", "Industrial", "Multifamily", "Apartment", "HOA Common Area", or null.
@@ -500,7 +502,7 @@ Output rules:
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
   "squareFootage": <int 500-15000 or null>,
-  "lotSize": <int 1000-200000, in SQUARE FEET (convert from acres if needed; cap verified oversized lots at 200000), or null>,
+  "lotSize": <int 1000-200000, in SQUARE FEET for the exact property (convert from acres if needed; cap verified oversized lots at 200000), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
   "bathrooms": <number 0.5-15 or null>,
@@ -523,8 +525,18 @@ function parsePropertyJSON(text) {
   try {
     const raw = JSON.parse(match[0]);
     const out = {
-      squareFootage: coerceInt(raw.squareFootage, 500, 15000),
-      lotSize: coerceLotSize(raw.lotSize),
+      squareFootage: coerceFirstInt([
+        raw.squareFootage,
+        raw.square_footage,
+        raw.homeSqFt,
+        raw.home_sqft,
+        raw.livingArea,
+        raw.living_area,
+        raw.livingAreaSqFt,
+        raw.living_area_sqft,
+        raw.sqft,
+      ], 500, 15000),
+      lotSize: coerceParsedLotSize(raw),
       yearBuilt: coerceInt(raw.yearBuilt, 1900, new Date().getFullYear() + 1),
       bedrooms: coerceInt(raw.bedrooms, 1, 15),
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
@@ -549,9 +561,114 @@ function coerceInt(raw, min, max) {
   return rounded;
 }
 
+function coerceFirstInt(values, min, max) {
+  for (const value of values) {
+    const parsed = coerceInt(value, min, max);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+
 const SQFT_PER_ACRE = 43560;
 const LOT_SQFT_MIN = 1000;
 const LOT_SQFT_MAX = 200_000;
+
+function coerceParsedLotSize(raw) {
+  if (!raw || typeof raw !== 'object') return coerceLotSize(raw);
+
+  const lotCandidates = [
+    raw.lotSize,
+    raw.lot_size,
+    raw.lotArea,
+    raw.lot_area,
+    raw.lot,
+  ];
+  for (const candidate of lotCandidates) {
+    const structuredLotSize = coerceStructuredLotSize(candidate);
+    if (structuredLotSize != null) return structuredLotSize;
+  }
+
+  const lotSqftCandidates = [
+    raw.lotSize,
+    raw.lot_size,
+    raw.lotSqFt,
+    raw.lot_sqft,
+    raw.lotSizeSqFt,
+    raw.lot_size_sqft,
+    raw.lotSquareFeet,
+    raw.lot_square_feet,
+    raw.lotAreaSqFt,
+    raw.lot_area_sqft,
+    raw.lotAreaSquareFeet,
+    raw.lot_area_square_feet,
+    raw.lotArea,
+    raw.lot_area,
+    raw.lot,
+  ];
+  for (const candidate of lotSqftCandidates) {
+    const lotSqft = coerceLotSize(candidate);
+    if (lotSqft != null) return lotSqft;
+  }
+
+  const lotAcreCandidates = [
+    raw.lotSizeAcres,
+    raw.lot_size_acres,
+    raw.lotAcres,
+    raw.lot_acres,
+    raw.lotAreaAcres,
+    raw.lot_area_acres,
+    raw.acres,
+  ];
+  for (const candidate of lotAcreCandidates) {
+    if (candidate == null || candidate === '') continue;
+    const lotAcres = coerceLotSize(`${candidate} acres`);
+    if (lotAcres != null) return lotAcres;
+  }
+
+  return null;
+}
+
+function coerceStructuredLotSize(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  const sqftCandidates = [
+    raw.squareFeet,
+    raw.square_feet,
+    raw.sqft,
+    raw.sqFt,
+    raw.sq_ft,
+    raw.valueSqft,
+    raw.value_sqft,
+    raw.areaSqft,
+    raw.area_sqft,
+  ];
+  for (const candidate of sqftCandidates) {
+    const sqftValue = coerceLotSize(candidate);
+    if (sqftValue != null) return sqftValue;
+  }
+
+  const acreCandidates = [raw.acres, raw.valueAcres, raw.value_acres, raw.areaAcres, raw.area_acres];
+  for (const candidate of acreCandidates) {
+    if (candidate == null || candidate === '') continue;
+    const acresValue = coerceLotSize(`${candidate} acres`);
+    if (acresValue != null) return acresValue;
+  }
+
+  const unit = String(raw.unit || raw.units || raw.uom || '').toLowerCase();
+  const valueCandidates = [raw.value, raw.amount, raw.size, raw.area];
+  for (const candidate of valueCandidates) {
+    if (candidate == null || candidate === '') continue;
+    if (/\bacre/.test(unit)) {
+      const acresValue = coerceLotSize(`${candidate} acres`);
+      if (acresValue != null) return acresValue;
+    }
+    if (/\bsq\.?\s*ft\b|\bsqft\b|\bsf\b|square\s*feet/.test(unit)) {
+      const sqftValue = coerceLotSize(`${candidate} sqft`);
+      if (sqftValue != null) return sqftValue;
+    }
+  }
+  return null;
+}
 
 // Lot sizes show up two ways in source data: square feet ("8,712 sqft Lot")
 // or acres ("5.99 Acres Lot", "1/2 acre"). The pricing engine always wants
@@ -976,25 +1093,32 @@ function scoreToConfidence(score) {
 function buildPropertyDataQuality(fieldEvidence, providers) {
   const values = Object.values(fieldEvidence || {});
   const criticalFields = ['squareFootage', 'lotSize', 'stories', 'propertyType'];
-  const criticalCovered = criticalFields.filter((field) => fieldEvidence?.[field] && !fieldEvidence[field].fieldVerify).length;
-  const avgScore = values.length
+  const verifiedCriticalFields = criticalFields.filter((field) => fieldEvidence?.[field] && !fieldEvidence[field].fieldVerify);
+  const criticalCovered = verifiedCriticalFields.length;
+  const avgEvidenceScore = values.length
     ? Math.round(values.reduce((sum, item) => sum + (item.score || 0), 0) / values.length)
     : 0;
+  const criticalCoverageScore = Math.round((criticalCovered / criticalFields.length) * 100);
+  const avgScore = values.length ? Math.min(avgEvidenceScore, criticalCoverageScore) : 0;
   const verifyCount = values.filter((item) => item.fieldVerify).length;
   const sourceTypes = [...new Set(values.map((item) => item.sourceType).filter(Boolean))];
-  const level = avgScore >= 85 && criticalCovered >= 3 && verifyCount === 0
+  const level = avgScore >= 85 && criticalCovered === criticalFields.length && verifyCount === 0
     ? 'high'
-    : avgScore >= 60 && criticalCovered >= 2
+    : avgEvidenceScore >= 60 && criticalCovered >= 2
       ? 'medium'
       : 'low';
   return {
     level,
     score: avgScore,
+    evidenceScore: avgEvidenceScore,
+    criticalCoverageScore,
     providerCount: providers?.length || 0,
     providers: providers || [],
     sourceTypes,
     verifiedCriticalFields: criticalCovered,
     totalCriticalFields: criticalFields.length,
+    missingCriticalFields: criticalFields.filter((field) => !fieldEvidence?.[field]),
+    verifyCriticalFields: criticalFields.filter((field) => fieldEvidence?.[field]?.fieldVerify),
     fieldVerifyCount: verifyCount,
   };
 }
@@ -1057,6 +1181,7 @@ module.exports = {
   lookupPropertyFromGemini,
   lookupPropertyFromAITrio,
   _private: {
+    buildPropertyDataQuality,
     hasAnyPropertyFact,
     normalizeLookupPropertyType,
     parsePropertyJSON,
