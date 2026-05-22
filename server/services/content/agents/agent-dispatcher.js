@@ -168,11 +168,14 @@ class AgentDispatcher {
     }
     const sessionId = session.id;
 
-    // Post the initial input to the session.
+    // Post the initial input to the session. Schema mirrors the
+    // production content-agent.js pattern: type='user' (not the legacy
+    // 'user_message') and content as an array of text blocks (not a
+    // JSON-stringified payload).
     try {
       await apiCall('POST', `/sessions/${sessionId}/events`, {
-        type: 'user_message',
-        content: JSON.stringify(payload),
+        type: 'user',
+        content: [{ type: 'text', text: JSON.stringify(payload) }],
       });
     } catch (err) {
       return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId };
@@ -216,39 +219,100 @@ class AgentDispatcher {
   }
 
   /**
-   * Internal: poll session events, execute custom tool calls,
-   * stop when the agent emits draft / metadata OR the session
-   * completes.
+   * Internal: stream session events via SSE (same pattern as the
+   * legacy content-agent.js), execute custom tool calls, stop when
+   * the agent emits draft / metadata OR the session completes.
+   *
+   * Earlier iteration polled GET /sessions/{id}/events with an
+   * `?after=` cursor and read `evt.type === 'tool_use'`. The Managed
+   * Agents API exposes those events over SSE (text/event-stream)
+   * where each frame is `event: <name>` + `data: {...}`. The legacy
+   * agent (already running in prod) consumes them that way; polling
+   * would never see a tool_use event and sessions would deadlock.
    */
   async _streamAndExecute(sessionId, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
-    let cursor = null;
-    while (Date.now() < deadline) {
-      const events = await apiCall(
-        'GET',
-        `/sessions/${sessionId}/events${cursor ? `?after=${cursor}` : ''}`
-      );
-      for (const evt of events.events || []) {
-        cursor = evt.id;
-        if (evt.type === 'tool_use') {
-          const result = await executeBriefTool(evt.tool_name, evt.input, { sessionId });
-          await apiCall('POST', `/sessions/${sessionId}/events`, {
-            type: 'tool_result',
-            tool_use_id: evt.id,
-            content: JSON.stringify(result),
-          });
-          if (getDraft(sessionId)) return; // sink fired; agent finished
-        }
-        if (evt.type === 'session_end' || evt.type === 'turn_end') {
-          if (getDraft(sessionId)) return;
-        }
+    for await (const { event, data } of streamSessionEvents(sessionId, deadline)) {
+      // Tool use can surface as either `event: tool_use` or as a
+      // payload field; both are accepted (mirrors the legacy agent).
+      if (event === 'tool_use' || data?.type === 'tool_use') {
+        const toolName = data?.name;
+        const toolInput = data?.input || {};
+        const toolUseId = data?.id;
+        const result = await executeBriefTool(toolName, toolInput, { sessionId });
+        // Reply with tool_result. content is an array of text blocks
+        // (matches the Managed Agents reply contract used by the
+        // production content-agent).
+        await apiCall('POST', `/sessions/${sessionId}/events`, {
+          type: 'tool_result',
+          tool_use_id: toolUseId,
+          content: [{ type: 'text', text: JSON.stringify(result) }],
+        });
+        if (getDraft(sessionId)) return; // sink fired; agent finished
+        continue;
       }
-      // Brief poll cadence — Managed Agents typically push faster than
-      // we poll, but this is a backstop. Real production wiring will
-      // use SSE streaming (managed-assistant.js pattern).
-      await new Promise((r) => setTimeout(r, 750));
+      // Session/turn termination events — exit if a draft was captured.
+      if (event === 'done' || event === 'session_complete' || event === 'turn_end' || event === 'session_end') {
+        if (getDraft(sessionId)) return;
+      }
+      if (data?.stop_reason === 'end_turn' && getDraft(sessionId)) return;
     }
     throw new Error(`session ${sessionId} timed out after ${timeoutMs}ms`);
+  }
+}
+
+// ── SSE streaming helper (mirrors content-agent.js production pattern) ─
+
+async function* streamSessionEvents(sessionId, deadline) {
+  if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
+  const controller = new AbortController();
+  const timeoutMs = Math.max(0, deadline - Date.now());
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}/events?stream=true`, {
+      method: 'GET',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': BETA_HEADER,
+        accept: 'text/event-stream',
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) {
+      const errText = res.body ? await res.text() : '';
+      throw new Error(`SSE open failed ${res.status}: ${errText.slice(0, 200)}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let currentEvent = 'message';
+    while (true) {
+      if (Date.now() >= deadline) throw new Error('SSE deadline exceeded');
+      const { done, value } = await reader.read();
+      if (done) return;
+      buf += decoder.decode(value, { stream: true });
+      // SSE frames are separated by blank lines (\n\n).
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let evName = currentEvent;
+        let dataLines = [];
+        for (const rawLine of frame.split('\n')) {
+          const line = rawLine.replace(/\r$/, '');
+          if (line.startsWith('event:')) evName = line.slice(6).trim();
+          else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+        }
+        if (dataLines.length === 0) continue;
+        const dataStr = dataLines.join('\n');
+        let data = null;
+        try { data = JSON.parse(dataStr); } catch { data = dataStr; }
+        yield { event: evName, data };
+      }
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
