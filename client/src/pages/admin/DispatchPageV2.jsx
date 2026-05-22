@@ -135,6 +135,10 @@ function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address || "")}`;
 }
 
+function googleMapsDirectionsUrl(address) {
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address || "")}&travelmode=driving`;
+}
+
 function detectServiceCategory(serviceType) {
   const t = (serviceType || "").toLowerCase();
   if (t.includes("lawn")) return "lawn";
@@ -713,7 +717,16 @@ function ServiceCardV2({
             {status !== "en_route" && status !== "on_site" && (
               <Button
                 size="sm"
-                onClick={() => changeStatus("en_route")}
+                onClick={() => {
+                  if (service.address) {
+                    window.open(
+                      googleMapsDirectionsUrl(service.address),
+                      "_blank",
+                      "noopener,noreferrer",
+                    );
+                  }
+                  changeStatus("en_route");
+                }}
                 disabled={updating}
               >
                 En Route
