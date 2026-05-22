@@ -1868,7 +1868,23 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('TOPDRESS')) services.topDressing = { depth: 'eighth' };
-  if (sel.has('DETHATCH')) services.dethatching = {};
+  if (sel.has('DETHATCH')) {
+    services.dethatching = {
+      cleanupLevel: o.dethatchingCleanupLevel || o.cleanupLevel || 'none',
+      access: o.dethatchingAccess || o.dethatchingAccessDifficulty || o.access || 'easy',
+      grassType: track,
+      track,
+      debrisRemovalIncluded: o.dethatchingDebrisRemovalIncluded ?? o.debrisRemovalIncluded,
+      managerApproved: o.dethatchingManagerApproved ?? o.managerApproved,
+      managerApprovalReason: o.dethatchingManagerApprovalReason || o.managerApprovalReason || null,
+      thatchProbe1Inches: measurementValue(o.thatchProbe1Inches, o.dethatchingThatchProbe1Inches),
+      thatchProbe2Inches: measurementValue(o.thatchProbe2Inches, o.dethatchingThatchProbe2Inches),
+      thatchProbe3Inches: measurementValue(o.thatchProbe3Inches, o.dethatchingThatchProbe3Inches),
+      thatchDepthInches: measurementValue(o.thatchDepthInches, o.dethatchingThatchDepthInches),
+      thatchMeasurementSource: o.thatchMeasurementSource || o.dethatchingThatchMeasurementSource || 'manual',
+      manuallyEnteredLawnSqFt: measurementValue(p.measuredTurfSf, p.lawnSqFt),
+    };
+  }
   if (sel.has('PLUGGING')) {
     services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12, urgency, afterHours };
   }

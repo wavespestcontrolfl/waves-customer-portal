@@ -396,6 +396,19 @@ const CONTACT_FIELDS = new Set([
 ]);
 const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
 const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
+const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
+  "dethatchingCleanupLevel",
+  "dethatchingDebrisRemovalIncluded",
+  "dethatchingAccess",
+  "dethatchingManagerApproved",
+  "dethatchingManagerApprovalReason",
+  "grassType",
+  "thatchProbe1Inches",
+  "thatchProbe2Inches",
+  "thatchProbe3Inches",
+  "thatchDepthInches",
+  "thatchMeasurementSource",
+]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
   "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
@@ -1725,6 +1738,16 @@ export default function EstimateToolViewV2({
     pestFreq: "4",
     plugArea: "",
     plugSpacing: "12",
+    dethatchingCleanupLevel: "none",
+    dethatchingDebrisRemovalIncluded: false,
+    dethatchingAccess: "easy",
+    dethatchingManagerApproved: false,
+    dethatchingManagerApprovalReason: "",
+    thatchProbe1Inches: "",
+    thatchProbe2Inches: "",
+    thatchProbe3Inches: "",
+    thatchDepthInches: "",
+    thatchMeasurementSource: "manual",
     manualDiscountPreset: "",
     manualDiscountType: "NONE",
     manualDiscountValue: "",
@@ -2052,7 +2075,7 @@ export default function EstimateToolViewV2({
       }
       return next;
     });
-    if (key.startsWith("svc")) {
+    if (key.startsWith("svc") || DETHATCHING_ESTIMATE_RESET_FIELDS.has(key)) {
       setEstimate(null);
       setSavedId(null);
       setSavedViewUrl(null);
@@ -2756,6 +2779,16 @@ export default function EstimateToolViewV2({
         recurringCustomer: form.isRecurringCustomer === "YES",
         plugArea: parseInt(form.plugArea, 10) || 0,
         plugSpacing: parseInt(form.plugSpacing, 10) || 12,
+        dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
+        dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
+        dethatchingAccess: form.dethatchingAccess || "easy",
+        dethatchingManagerApproved: !!form.dethatchingManagerApproved,
+        dethatchingManagerApprovalReason: form.dethatchingManagerApprovalReason || "",
+        thatchProbe1Inches: form.thatchProbe1Inches,
+        thatchProbe2Inches: form.thatchProbe2Inches,
+        thatchProbe3Inches: form.thatchProbe3Inches,
+        thatchDepthInches: form.thatchDepthInches,
+        thatchMeasurementSource: form.thatchMeasurementSource || "manual",
         termiteBaitSystem: form.termiteBaitSystem || "advance",
         termiteMonitoringTier: form.termiteMonitoringTier || "basic",
         termiteBaitComplexity: form.termiteBaitComplexity || "",
@@ -3360,6 +3393,10 @@ export default function EstimateToolViewV2({
     null;
   const confirmedTurfSqFt = parseNonNegativeInteger(form.measuredTurfSf);
   const effectiveTurfSqFt = confirmedTurfSqFt ?? aiTurfSqFt ?? 0;
+  const isDethatchingStAugustine = String(form.grassType || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .includes("staugustine");
   const lotSqFtForTurf =
     parseNonNegativeInteger(form.lotSqFt) ??
     parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
@@ -4525,7 +4562,107 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <CheckboxV2 k="svcTopdress" label="Top Dressing" />{" "}
-              <CheckboxV2 k="svcDethatch" label="Dethatching" />{" "}
+              <CheckboxV2
+                k="svcDethatch"
+                label={
+                  isDethatchingStAugustine
+                    ? "Dethatching - manager approval required for St. Augustine / Floratam"
+                    : "Dethatching"
+                }
+              />{" "}
+              {form.svcDethatch && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Lawn Sq Ft Used">
+                      <input
+                        type="text"
+                        readOnly
+                        value={`${Math.round(effectiveTurfSqFt || 0).toLocaleString()} sf`}
+                        className={cn(INPUT_CLS, "bg-white text-ink-secondary")}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Grass Type / Track">
+                      <SelectV2
+                        k="grassType"
+                        options={[
+                          { value: "st_augustine", label: "St. Augustine / Floratam" },
+                          { value: "bermuda", label: "Bermuda" },
+                          { value: "zoysia", label: "Zoysia" },
+                          { value: "bahia", label: "Bahia" },
+                          { value: "unknown", label: "Unknown - review" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Cleanup Level">
+                      <SelectV2
+                        k="dethatchingCleanupLevel"
+                        options={[
+                          { value: "none", label: "No debris removal" },
+                          { value: "light", label: "Light cleanup" },
+                          { value: "moderate", label: "Moderate cleanup" },
+                          { value: "heavy", label: "Heavy cleanup / bagging" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Access">
+                      <SelectV2
+                        k="dethatchingAccess"
+                        options={[
+                          { value: "easy", label: "Easy" },
+                          { value: "moderate", label: "Moderate" },
+                          { value: "difficult", label: "Difficult - review" },
+                        ]}
+                      />
+                    </FieldV2>
+                  </div>
+                  <CheckboxV2 k="dethatchingDebrisRemovalIncluded" label="Debris removal included" />
+                  <div className="grid grid-cols-3 gap-3">
+                    <FieldV2 label="Thatch Probe #1">
+                      <InputV2 k="thatchProbe1Inches" type="number" min="0" placeholder="inches" />
+                    </FieldV2>
+                    <FieldV2 label="Thatch Probe #2">
+                      <InputV2 k="thatchProbe2Inches" type="number" min="0" placeholder="inches" />
+                    </FieldV2>
+                    <FieldV2 label="Thatch Probe #3">
+                      <InputV2 k="thatchProbe3Inches" type="number" min="0" placeholder="inches" />
+                    </FieldV2>
+                  </div>
+                  {form.dethatchingCleanupLevel === "none" && !form.dethatchingDebrisRemovalIncluded && (
+                    <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                      Base price does not include bagging or debris hauling.
+                    </div>
+                  )}
+                  {(form.dethatchingCleanupLevel === "moderate" || form.dethatchingCleanupLevel === "heavy" || form.dethatchingDebrisRemovalIncluded) && (
+                    <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                      Cleanup/debris removal included.
+                    </div>
+                  )}
+                  {isDethatchingStAugustine && (
+                    <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                      Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.
+                    </div>
+                  )}
+                  {isDethatchingStAugustine && (
+                    <div className="grid grid-cols-2 gap-3 mt-3">
+                      <FieldV2 label="Manager Approval Reason">
+                        <SelectV2
+                          k="dethatchingManagerApprovalReason"
+                          options={[
+                            { value: "", label: "Select reason" },
+                            { value: "verified_thatch_probe", label: "Verified thatch probe" },
+                            { value: "customer_requested_after_warning", label: "Customer requested after warning" },
+                            { value: "bermuda_or_zoysia_confirmed", label: "Bermuda/Zoysia confirmed" },
+                            { value: "manager_override", label: "Manager override" },
+                          ]}
+                        />
+                      </FieldV2>
+                      <div className="pt-7">
+                        <CheckboxV2 k="dethatchingManagerApproved" label="Manager approval confirmed" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               <SubGroupLabel className="mt-3">Termite</SubGroupLabel>{" "}
               <CheckboxV2 k="svcWdo" label="WDO / Termite Inspection" />{" "}
               <CheckboxV2 k="svcTrenching" label="Termite Trenching" />{" "}
