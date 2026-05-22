@@ -715,7 +715,8 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   // on the PI (customer ticked "Save this card on file"), Stripe attaches
   // the pm to the Stripe customer automatically on success. We still need
   // to mirror it into our payment_methods table so the rest of the
-  // system (autopay, admin Card on File, portal card list) can see it.
+  // system (admin Card on File, portal card list, and later explicit
+  // autopay selection) can see it.
   //
   // Also back-fills the payment_method_id FK on any consent rows that
   // were recorded before this webhook landed.
@@ -732,7 +733,19 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       const ConsentService = require('../services/payment-method-consents');
       // Check if we already saved this pm (e.g. from a duplicate webhook)
       const existing = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
-      const saved = existing || await StripeService.savePaymentMethod(wavesCustomerId, stripePmId);
+      const currentAutopayMethod = await db('payment_methods')
+        .where({
+          customer_id: wavesCustomerId,
+          processor: 'stripe',
+          is_default: true,
+          autopay_enabled: true,
+        })
+        .whereNotNull('stripe_payment_method_id')
+        .first('id');
+      const saved = existing || await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
+        enableAutopay: false,
+        makeDefault: !currentAutopayMethod,
+      });
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       if (!existing) {
         PaymentLifecycleEmail.sendPaymentMethodUpdated({
