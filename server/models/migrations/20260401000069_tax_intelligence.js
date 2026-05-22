@@ -77,6 +77,7 @@ exports.up = async function (knex) {
     { service_key: 'tree_shrub', service_label: 'Tree & Shrub Care', is_taxable: true, tax_category: 'lawn_maintenance', fl_statute_ref: 'FL §212.05(1)(i)1' },
     { service_key: 'palm_injection', service_label: 'Palm Injection', is_taxable: true, tax_category: 'lawn_maintenance', fl_statute_ref: 'FL §212.05(1)(i)1' },
     { service_key: 'plugging', service_label: 'Lawn Plugging', is_taxable: true, tax_category: 'lawn_maintenance', fl_statute_ref: 'FL §212.05(1)(i)1' },
+    // TODO: Verify Florida tax treatment for dethatching/lawn-maintenance service. Florida DOR guidance says many lawn-care services are nontaxable, but current Waves tax-intelligence config marks dethatching taxable as lawn_maintenance.
     { service_key: 'dethatching', service_label: 'Dethatching', is_taxable: true, tax_category: 'lawn_maintenance', fl_statute_ref: 'FL §212.05(1)(i)1' },
     { service_key: 'topdressing', service_label: 'Topdressing', is_taxable: true, tax_category: 'lawn_maintenance', fl_statute_ref: 'FL §212.05(1)(i)1' },
     { service_key: 'wdo_inspection', service_label: 'WDO Inspection (Real Estate)', is_taxable: false, tax_category: 'inspection', fl_statute_ref: 'FL §212.08(6)', notes: 'Standalone inspection reports are generally not taxable — but treatment that follows IS taxable' },

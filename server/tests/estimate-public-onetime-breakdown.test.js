@@ -1716,6 +1716,45 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('unresolved St. Augustine dethatching approval blocks public acceptance', async () => {
+    const estimateData = {
+      result: {
+        oneTime: {
+          total: 150,
+          items: [{
+            service: 'dethatching',
+            name: 'Dethatching',
+            price: 150,
+            requiresManagerApproval: true,
+            managerApprovalReason: 'st_augustine_dethatching',
+            managerApprovalSatisfied: false,
+          }],
+        },
+      },
+    };
+
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-st-aug-dethatching-approval-test',
+      estimate_data: estimateData,
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 150,
+      waveguard_tier: 'Bronze',
+    });
+    const quoteRequirement = resolveEstimateQuoteRequirement(payload, estimateData);
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(quoteRequirement).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      reason: 'st_augustine_dethatching',
+    }));
+    expect(buildEstimateAcceptanceContract({ quoteRequirement })).toEqual({
+      mode: 'quote_required',
+      ctaLabel: 'Call Waves',
+      reason: 'st_augustine_dethatching',
+    });
+  });
+
   test('quote-required result spec rows lock public commercial manual drafts', async () => {
     const estimateData = {
       result: {

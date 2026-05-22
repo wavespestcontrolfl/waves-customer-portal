@@ -1931,6 +1931,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,
     category: p.category || o.category || null,
+    grassType: track,
     isCommercial: commercialProfile,
     commercialSubtype,
     measuredTurfSf: p.measuredTurfSf,

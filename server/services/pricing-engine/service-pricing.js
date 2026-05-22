@@ -5201,7 +5201,13 @@ function priceDethatching(lawnSqFt, options = {}) {
   const materialCost = (lawnEst / 1000) * cfg.materialPer1K;
   const cleanupPriceAdder = (lawnEst / 1000) * cleanup.pricePer1K;
   const rawCost = laborCostVal + materialCost;
-  const basePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
+  const formulaBasePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
+  const compatibilityBasePrice = cleanupLevel === 'none' && accessChoice.key === 'easy'
+    ? cfg.baseCompatibilityPrices?.[String(Math.round(lawnEst))]
+    : undefined;
+  const basePrice = Number.isFinite(Number(compatibilityBasePrice))
+    ? Number(compatibilityBasePrice)
+    : formulaBasePrice;
   const calculatedPrice = Math.round(basePrice + cleanupPriceAdder);
   const debrisRemovalIncluded = debrisRemovalRequested || cleanupLevel !== 'none';
   const managerApproved = optionBooleanTrue(options.managerApproved);
@@ -5231,6 +5237,9 @@ function priceDethatching(lawnSqFt, options = {}) {
   }
   if (requiresManagerApproval && managerApproved && !managerApprovalOverrideReason) {
     manualReviewReasons.push('st_augustine_dethatching_manager_approval_reason_missing');
+  }
+  if (optionBooleanTrue(options.isCommercial) || normalizeToken(options.propertyType) === 'commercial') {
+    manualReviewReasons.push('commercial_dethatching_manual_quote_required');
   }
 
   let dethatchingRecommended = false;
