@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { EstimateAskBar, ServiceSection } from './EstimateViewPage';
+import { EstimateAskBar, ServiceSection, getServiceLabel } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -21,6 +21,8 @@ describe('EstimateAskBar', () => {
     expect(screen.getByRole('button', { name: 'What products do you use?' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Are pets and kids safe?' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'What is included?' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Ask Waves' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Ask Waves about this estimate')).toBeInTheDocument();
   });
 });
 
@@ -101,5 +103,56 @@ describe('ServiceSection', () => {
     );
 
     expect(screen.getByText('Skip parts you don\'t need')).toBeInTheDocument();
+  });
+
+  it('shows tree and shrub service cadence without changing monthly billing copy', () => {
+    render(
+      <ServiceSection
+        section={{
+          key: 'tree_shrub',
+          label: 'Tree & Shrub',
+          isRecurring: true,
+          isPest: false,
+          frequencies: [{
+            key: 'standard',
+            label: 'Bi-monthly',
+            serviceCategory: 'tree_shrub',
+            monthly: 72,
+            annual: 864,
+            billingFrequencyKey: 'monthly',
+            included: [{ key: 'tree_shrub_standard', label: 'Bi-monthly tree & shrub program' }],
+          }],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="standard"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: true, showWaveGuardTierUi: false }}
+      />,
+    );
+
+    expect(screen.getByText('$72')).toBeInTheDocument();
+    expect(screen.getByText('/mo')).toBeInTheDocument();
+    expect(screen.getByText('Service visits: Bi-monthly')).toBeInTheDocument();
+    expect(screen.queryByText('/bi-monthly')).not.toBeInTheDocument();
+  });
+});
+
+describe('getServiceLabel', () => {
+  it('uses tree and shrub cadence labels instead of pest control copy', () => {
+    expect(getServiceLabel(
+      { key: 'standard', label: 'Bi-monthly', serviceCategory: 'tree_shrub' },
+      {},
+      { services: [{ key: 'tree_shrub', label: 'Tree & Shrub', isRecurring: true }] },
+    )).toBe('Bi-monthly Tree & Shrub');
+  });
+
+  it('keeps pest control cadence copy for pest estimates', () => {
+    expect(getServiceLabel(
+      { key: 'quarterly', label: 'Quarterly' },
+      {},
+      { services: [{ key: 'pest_control', label: 'Pest Control', isRecurring: true }] },
+    )).toBe('Quarterly Pest Control');
   });
 });

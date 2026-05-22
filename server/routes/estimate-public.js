@@ -2607,12 +2607,12 @@ function renderPage(token, estimate, estData) {
   <section class="card estimate-ask-card" aria-labelledby="estimate-ask-title">
     <div class="estimate-ask-heading">
       <div>
-        <h2 id="estimate-ask-title">Ask Waves AI</h2>
+        <h2 id="estimate-ask-title">Ask Waves</h2>
         <p class="ai-blurb">Get quick answers about your plan, pricing, scheduling, or service before you continue.</p>
       </div>
     </div>
     <form class="estimate-ask-form" id="estimate-ask-form">
-      <input id="estimate-ask-input" name="estimate_question" type="text" maxlength="500" autocomplete="off" placeholder="Ask about services, pricing, scheduling, or Waves" aria-label="Ask Waves AI about this estimate">
+      <input id="estimate-ask-input" name="estimate_question" type="text" maxlength="500" autocomplete="off" placeholder="Ask about services, pricing, scheduling, or Waves" aria-label="Ask Waves about this estimate">
       <button type="submit" id="estimate-ask-submit">Ask</button>
     </form>
     <div class="estimate-ask-prompts" aria-label="Example questions">
