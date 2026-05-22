@@ -144,7 +144,7 @@ const TEMPLATES = [
     template_key: 'invoice_followup_3day',
     name: 'Invoice — 3-Day Friendly Nudge (hardcoded)',
     category: 'billing',
-    body: "Hello {first_name}! Your {invoice_title} invoice still has an open balance of ${amount}. Pay securely here: {pay_url}\n\nIf something looks off, reply and we'll sort it.",
+    body: "Hello {first_name}! Your invoice for {invoice_title} still has an open balance of ${amount}. Pay securely here: {pay_url}\n\nIf something looks off, reply and we'll sort it.",
     variables: ['first_name', 'invoice_title', 'amount', 'pay_url'],
     sort_order: 19,
   },
