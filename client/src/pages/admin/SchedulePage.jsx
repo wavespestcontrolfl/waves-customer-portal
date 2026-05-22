@@ -993,21 +993,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
       >
         {" "}
         <div
+          className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-4"
           style={{
             position: "sticky",
             top: 0,
             zIndex: 3,
             background: "#fff",
             borderBottom: `1px solid ${D.border}`,
-            padding: "14px 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 16,
+            padding: "14px 20px",
           }}
         >
           {" "}
-          <div>
+          <div className="min-w-0 flex-1">
             {" "}
             <div style={{ fontSize: 22, fontWeight: 800, color: "#111827" }}>
               Edit appointment
@@ -1016,6 +1013,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
               style={{
                 display: "flex",
                 alignItems: "center",
+                flexWrap: "wrap",
                 gap: 8,
                 marginTop: 5,
               }}
@@ -1036,16 +1034,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
               >
                 {service.status || "Accepted"}
               </span>{" "}
-              <span style={{ color: D.muted, fontSize: 13 }}>
+              <span
+                style={{
+                  color: D.muted,
+                  fontSize: 13,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  minWidth: 0,
+                }}
+              >
                 {customerName}
               </span>{" "}
             </div>{" "}
           </div>{" "}
           <div
+            className="w-full md:w-auto"
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 10,
+              gap: 8,
               flexWrap: "wrap",
               justifyContent: "flex-end",
             }}
@@ -1054,9 +1062,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
             <button
               onClick={() => handleSave({ takePayment: true })}
               disabled={saving}
-              className="font-bold"
+              className="font-bold flex-1 md:flex-initial"
               style={{
-                padding: "11px 16px",
+                padding: "11px 14px",
                 borderRadius: 4,
                 background: "#111827",
                 color: "#fff",
@@ -1064,16 +1072,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 fontSize: 13,
                 cursor: saving ? "wait" : "pointer",
                 opacity: saving ? 0.6 : 1,
+                whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save and take payment"}
+              {saving ? "Saving..." : "Save & take payment"}
             </button>{" "}
             <button
               onClick={() => handleSave()}
               disabled={saving}
-              className="font-bold"
+              className="font-bold flex-1 md:flex-initial"
               style={{
-                padding: "11px 16px",
+                padding: "11px 14px",
                 borderRadius: 4,
                 background: "#fff",
                 color: "#111827",
@@ -1081,6 +1090,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 fontSize: 13,
                 cursor: saving ? "wait" : "pointer",
                 opacity: saving ? 0.6 : 1,
+                whiteSpace: "nowrap",
               }}
             >
               {saving ? "Saving..." : "Save"}
@@ -1107,24 +1117,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
           </div>{" "}
         </div>{" "}
         <div
+          className="grid grid-cols-1 md:[grid-template-columns:340px_1fr]"
           style={{
             width: "100%",
             maxWidth: 1180,
             margin: "0 auto",
-            padding: "22px 20px 36px",
-            display: "grid",
-            gridTemplateColumns:
-              "repeat(auto-fit, minmax(min(100%, 340px), 1fr))",
+            padding: "18px 16px 36px",
             gap: 20,
           }}
         >
           {" "}
           <aside
+            className="order-2 md:order-1 md:sticky md:top-[88px]"
             style={{
               ...sectionStyle,
               alignSelf: "start",
-              position: "sticky",
-              top: 88,
             }}
           >
             {" "}
@@ -1339,9 +1346,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
               </div>{" "}
             </div>{" "}
           </aside>{" "}
-          <main>
+          <main className="order-1 md:order-2 min-w-0 flex flex-col">
             {" "}
-            <section style={sectionStyle}>
+            <section style={{ ...sectionStyle, order: 2 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Location</h2>{" "}
               <label style={labelStyle}>Appointment location</label>{" "}
@@ -1405,7 +1412,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 </div>{" "}
               </div>{" "}
             </section>{" "}
-            <section style={sectionStyle}>
+            <section style={{ ...sectionStyle, order: 1 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Services and items</h2>{" "}
               <div
@@ -1819,7 +1826,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 </div>{" "}
               </div>{" "}
             </section>{" "}
-            <section style={sectionStyle}>
+            <section style={{ ...sectionStyle, order: 3 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Date and time</h2>{" "}
               <div
@@ -2111,7 +2118,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 </div>
               )}
             </section>{" "}
-            <section style={sectionStyle}>
+            <section style={{ ...sectionStyle, order: 4 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Notes</h2>{" "}
               <label style={labelStyle}>Appointment notes</label>{" "}
