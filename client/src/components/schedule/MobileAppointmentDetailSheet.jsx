@@ -15,6 +15,7 @@
 // Note save          → PATCH /admin/dispatch/:id/note (new endpoint).
 
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { TIMEZONE } from '../../lib/timezone';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 
@@ -232,7 +233,7 @@ export default function MobileAppointmentDetailSheet({
     }
   };
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-[100] bg-white overflow-y-auto"
       style={{ fontFamily: 'Roboto, system-ui, sans-serif', fontWeight: 700 }}
@@ -509,6 +510,7 @@ export default function MobileAppointmentDetailSheet({
           onClose={() => setShowCustomer(false)}
         />
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
