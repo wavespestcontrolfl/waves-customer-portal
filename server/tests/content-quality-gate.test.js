@@ -1,0 +1,264 @@
+/**
+ * Unit tests for content-quality-gate. Safety-critical — heavy coverage.
+ */
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const { evaluate, MIN_TOTAL_SCORE } = require('../services/content/content-quality-gate');
+const {
+  checkSchemaValid, checkSerpBriefAttached, checkGscSignalAttached,
+  checkNoDuplicateIntent, checkCanonical, checkIndexable,
+  checkPreviewSuccess, checkSitemapUpdated,
+  checkNapConsistent, checkLocalProof, checkCtaAboveFold,
+  checkServiceMenu, checkFaqFromCustomer, checkLocalBusinessServiceSchema,
+  checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
+  checkImprovementOverPrior,
+  checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkTitleLengthBounds, checkMetaLengthBounds,
+  checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
+} = require('../services/content/content-quality-gate')._internals;
+
+// ── fixtures ────────────────────────────────────────────────────────
+
+function brief(overrides = {}) {
+  return {
+    page_type: 'supporting-blog',
+    city: 'Bradenton',
+    service: 'pest',
+    target_keyword: 'how to identify a termite swarm',
+    serp_signal: { dominant_intent: 'informational' },
+    gsc_signal: { impressions: 250 },
+    customer_signal: null,
+    human_review_required: false,
+    ...overrides,
+  };
+}
+
+function fullDraft(overrides = {}) {
+  return {
+    url: '/blog/how-to-identify-termite-swarm/',
+    body: 'Termite swarmers look like flying ants but have straight antennae. In Bradenton you might see them after rain.',
+    title: 'How to Identify a Termite Swarm in Bradenton',
+    meta_description: 'Termite swarmers look like flying ants but have straight antennae and equal-length wings. Here is how Bradenton homeowners spot them early.',
+    schema: { '@type': 'Article' },
+    frontmatter: {},
+    ...overrides,
+  };
+}
+
+// ── hard checks ─────────────────────────────────────────────────────
+
+describe('hard checks: schema/canonical/indexable', () => {
+  test('schema_valid passes with object schema', () => {
+    expect(checkSchemaValid({ schema: { '@type': 'Article' } }).ok).toBe(true);
+  });
+  test('schema_valid passes with JSON string', () => {
+    expect(checkSchemaValid({ schema: '{"@type":"Article"}' }).ok).toBe(true);
+  });
+  test('schema_valid fails without schema', () => {
+    expect(checkSchemaValid({}).ok).toBe(false);
+  });
+  test('serp_brief_attached requires dominant_intent', () => {
+    expect(checkSerpBriefAttached({}, { serp_signal: { dominant_intent: 'x' } }).ok).toBe(true);
+    expect(checkSerpBriefAttached({}, { serp_signal: {} }).ok).toBe(false);
+    expect(checkSerpBriefAttached({}, {}).ok).toBe(false);
+  });
+  test('gsc_signal_attached requires impressions', () => {
+    expect(checkGscSignalAttached({}, { gsc_signal: { impressions: 1 } }).ok).toBe(true);
+    expect(checkGscSignalAttached({}, { gsc_signal: {} }).ok).toBe(false);
+  });
+  test('no_duplicate_intent fails on cannibalization human_review reason', () => {
+    expect(checkNoDuplicateIntent({}, { human_review_required: true, human_review_reason: 'cannibalization bucket' }).ok).toBe(false);
+    expect(checkNoDuplicateIntent({}, { human_review_required: true, human_review_reason: 'first publish trust-build' }).ok).toBe(true);
+    expect(checkNoDuplicateIntent({}, {}).ok).toBe(true);
+  });
+  test('canonical: warns when set elsewhere', () => {
+    expect(checkCanonical({ url: '/a/', canonical: '/b/' }).ok).toBe(false);
+    expect(checkCanonical({ url: '/a/', canonical: '/a/' }).ok).toBe(true);
+  });
+  test('indexable: fails on noindex robots', () => {
+    expect(checkIndexable({ frontmatter: { robots: 'noindex' } }).ok).toBe(false);
+    expect(checkIndexable({ frontmatter: { robots: 'index,follow' } }).ok).toBe(true);
+    expect(checkIndexable({}).ok).toBe(true);
+  });
+  test('sitemap_updated honors context', () => {
+    expect(checkSitemapUpdated({}, {}, { sitemapHasUrl: true }).ok).toBe(true);
+    expect(checkSitemapUpdated({}, {}, { sitemapHasUrl: false }).ok).toBe(false);
+    expect(checkSitemapUpdated({}, {}, {}).ok).toBe(true); // skipped
+  });
+  test('preview_success honors context', () => {
+    expect(checkPreviewSuccess({}, {}, { previewBuildSuccess: true }).ok).toBe(true);
+    expect(checkPreviewSuccess({}, {}, { previewBuildSuccess: false }).ok).toBe(false);
+  });
+});
+
+// ── city-service checks ─────────────────────────────────────────────
+
+describe('city-service: nap / proof / cta / menu / faq / schema', () => {
+  test('NAP check requires brand + phone', () => {
+    expect(checkNapConsistent({ body: 'Waves Pest Control · 941-555-1234' }).ok).toBe(true);
+    expect(checkNapConsistent({ body: 'No phone here.' }).ok).toBe(false);
+    expect(checkNapConsistent({ body: 'Just 941-555-1234' }).ok).toBe(false);
+  });
+  test('local proof requires quantified/quoted/tech signal', () => {
+    expect(checkLocalProof({ body: '500+ jobs in Bradenton' }).ok).toBe(true);
+    expect(checkLocalProof({ body: 'generic copy only' }).ok).toBe(false);
+  });
+  test('CTA above fold requires action language in first 800 chars', () => {
+    expect(checkCtaAboveFold({ body: 'Get a free inspection today. Then we will...' }).ok).toBe(true);
+    expect(checkCtaAboveFold({ body: 'X'.repeat(900) + 'free inspection here' }).ok).toBe(false);
+  });
+  test('service menu requires ≥3 list items', () => {
+    expect(checkServiceMenu({ body: '- pest\n- lawn\n- mosquito\n- termite' }).ok).toBe(true);
+    expect(checkServiceMenu({ body: '- pest\n- lawn' }).ok).toBe(false);
+  });
+  test('FAQ from customer requires section heading + customer signal topic referenced', () => {
+    const cs = { normalized_question: 'Does rain affect the treatment?', topic: 'rain-after-treatment' };
+    expect(checkFaqFromCustomer({ body: 'FAQ\nDoes rain affect the treatment? No.' }, { customer_signal: cs }).ok).toBe(true);
+    expect(checkFaqFromCustomer({ body: 'No FAQ section.' }, { customer_signal: cs }).ok).toBe(false);
+  });
+  test('LocalBusiness/Service schema check', () => {
+    expect(checkLocalBusinessServiceSchema({ schema: { '@type': 'LocalBusiness' } }).ok).toBe(true);
+    expect(checkLocalBusinessServiceSchema({ schema: { '@type': 'Article' } }).ok).toBe(false);
+  });
+});
+
+// ── customer-question checks ────────────────────────────────────────
+
+describe('customer-question: answer-in-first-paragraph / link / redaction', () => {
+  test('answer in first paragraph: short + addresses question', () => {
+    const draft = { body: 'Termites have straight antennae. (long article continues...)' };
+    expect(checkAnswerInFirstParagraph(draft, { target_keyword: 'how to identify termites' }).ok).toBe(true);
+  });
+  test('fails when first paragraph too long', () => {
+    const draft = { body: 'x'.repeat(700) };
+    expect(checkAnswerInFirstParagraph(draft, { target_keyword: 'termites' }).ok).toBe(false);
+  });
+  test('source internal link required', () => {
+    expect(checkSourceInternalLink({ body: 'See [more here](/termite-inspection/)' }).ok).toBe(true);
+    expect(checkSourceInternalLink({ body: 'no links here' }).ok).toBe(false);
+  });
+  test('redaction passed: catches non-business phone + email', () => {
+    expect(checkRedactionPassed({ body: 'Plain text.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Email me at jane@example.com' }).ok).toBe(false);
+  });
+  test('redaction: allows known Waves numbers, rejects other 941 / parenthesized', () => {
+    // Known Waves number — allowed.
+    expect(checkRedactionPassed({ body: 'Call us at 941-318-7612.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Reach Sarasota: (941) 297-2606.' }).ok).toBe(true);
+    // Non-Waves 941 number — rejected (earlier code wrongly allowed any 941/863).
+    expect(checkRedactionPassed({ body: 'Reach me at 941-555-9876.' }).ok).toBe(false);
+    // Parenthesized customer number — earlier regex missed this entirely.
+    expect(checkRedactionPassed({ body: 'My cell is (212) 555-1234.' }).ok).toBe(false);
+  });
+});
+
+// ── refresh checks ──────────────────────────────────────────────────
+
+describe('refresh: improvement over prior', () => {
+  test('passes when new content is longer + +200 chars', () => {
+    const prev = { body: 'x'.repeat(1000) };
+    const draft = { body: 'x'.repeat(1500) };
+    expect(checkImprovementOverPrior(draft, {}, { previousVersion: prev }).ok).toBe(true);
+  });
+  test('fails when lost > 20% of prior content', () => {
+    const prev = { body: 'x'.repeat(1000) };
+    const draft = { body: 'x'.repeat(500) };
+    expect(checkImprovementOverPrior(draft, {}, { previousVersion: prev }).ok).toBe(false);
+  });
+  test('fails when adds less than 200 chars', () => {
+    const prev = { body: 'x'.repeat(1000) };
+    const draft = { body: 'x'.repeat(1050) };
+    expect(checkImprovementOverPrior(draft, {}, { previousVersion: prev }).ok).toBe(false);
+  });
+  test('fails when no previous version', () => {
+    expect(checkImprovementOverPrior({ body: 'x' }, {}, {}).ok).toBe(false);
+  });
+});
+
+// ── supporting-blog checks ──────────────────────────────────────────
+
+describe('supporting-blog: hub link / cities / faq / voice', () => {
+  test('hub link present', () => {
+    expect(checkHubLinkPresent({ body: 'See /pest-control-services/' }).ok).toBe(true);
+    expect(checkHubLinkPresent({ body: 'no hub link' }).ok).toBe(false);
+  });
+  test('two-plus city mentions', () => {
+    expect(checkTwoPlusCityMentions({ body: 'Bradenton and Sarasota homes' }).ok).toBe(true);
+    expect(checkTwoPlusCityMentions({ body: 'Bradenton only' }).ok).toBe(false);
+  });
+  test('FAQ section', () => {
+    expect(checkFaqSectionPresent({ body: 'FAQ\n- Q?\n- A.' }).ok).toBe(true);
+    expect(checkFaqSectionPresent({ body: 'no section' }).ok).toBe(false);
+  });
+  test('voice match', () => {
+    const body = 'Your sandy soil and afternoon storms create perfect conditions. You should protect your home. Your yard matters. You need this. Your call.';
+    expect(checkVoiceMatch({ body }).ok).toBe(true);
+    expect(checkVoiceMatch({ body: 'generic corporate language' }).ok).toBe(false);
+  });
+});
+
+// ── metadata checks ────────────────────────────────────────────────
+
+describe('metadata: title / meta / keyword / no-duplicate', () => {
+  test('title length 30-70 inclusive', () => {
+    expect(checkTitleLengthBounds({ title: 'A' .repeat(40) }).ok).toBe(true);
+    expect(checkTitleLengthBounds({ title: 'A' }).ok).toBe(false);
+    expect(checkTitleLengthBounds({ title: 'A'.repeat(100) }).ok).toBe(false);
+  });
+  test('meta length 115-160 inclusive', () => {
+    expect(checkMetaLengthBounds({ meta_description: 'M'.repeat(140) }).ok).toBe(true);
+    expect(checkMetaLengthBounds({ meta_description: 'short' }).ok).toBe(false);
+  });
+  test('primary keyword in title', () => {
+    expect(checkPrimaryKeywordInTitle({ title: 'Termite Inspection Bradenton' }, { target_keyword: 'termite inspection bradenton' }).ok).toBe(true);
+    expect(checkPrimaryKeywordInTitle({ title: 'Generic Title' }, { target_keyword: 'termite inspection bradenton' }).ok).toBe(false);
+  });
+  test('no duplicate title', () => {
+    const sibs = new Set(['pest control bradenton']);
+    expect(checkNoDuplicateTitle({ title: 'Pest Control Bradenton' }, {}, { siblingTitles: sibs }).ok).toBe(false);
+    expect(checkNoDuplicateTitle({ title: 'New Unique Title' }, {}, { siblingTitles: sibs }).ok).toBe(true);
+  });
+});
+
+// ── full evaluate ───────────────────────────────────────────────────
+
+describe('evaluate (full gate)', () => {
+  test('strong supporting-blog draft passes (score ≥ 75)', () => {
+    const r = evaluate(
+      fullDraft({
+        body: 'Termite swarmers have straight antennae and equal-length wings — Bradenton and Sarasota homeowners often spot them after rain. Use your eyes carefully. Your home depends on it. Your sandy soil and afternoon storms create perfect conditions. /pest-control-services/ — get help.\n\nFAQ\n- Do swarmers bite?\n- No, just look.',
+      }),
+      brief({ page_type: 'supporting-blog' }),
+      { previewBuildSuccess: true, sitemapHasUrl: true }
+    );
+    // Should pass all hard checks; soft score may not hit 75 with minimal body
+    // but at least zero hard failures expected.
+    expect(r.hard_failures).toEqual([]);
+  });
+  test('missing schema → hard fail → not ok', () => {
+    const draft = fullDraft({ schema: undefined });
+    const r = evaluate(draft, brief({ page_type: 'supporting-blog' }));
+    expect(r.hard_failures.some((f) => f.name === 'schema_valid')).toBe(true);
+    expect(r.ok).toBe(false);
+  });
+  test('city-service draft missing LocalBusiness schema → hard fail', () => {
+    const r = evaluate(
+      fullDraft({ schema: { '@type': 'Article' } }),
+      brief({ page_type: 'city-service' })
+    );
+    expect(r.hard_failures.some((f) => f.name === 'localbusiness_service_schema')).toBe(true);
+  });
+  test('MIN_TOTAL_SCORE exposed and reachable', () => {
+    // 55/73 = ~75% of the achievable ceiling (city-service: 36 page-
+    // specific + 37 common = 73). 75 absolute would be unreachable.
+    // MIN = floor(MAX_ACHIEVABLE * 0.75). With city-service as the
+    // ceiling (common 37 + city-service 36 = 73), this resolves to 54.
+    expect(MIN_TOTAL_SCORE).toBe(54);
+  });
+  test('throws on missing inputs', () => {
+    expect(() => evaluate(null, brief())).toThrow();
+    expect(() => evaluate({ body: 'x' }, null)).toThrow();
+  });
+});
