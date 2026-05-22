@@ -55,22 +55,36 @@ function parseHHMM(s) {
   return hh * 60 + mm;
 }
 
-function formatTimeLabel(hhmm) {
+function formatTimeLabel(hhmm, { compact = false } = {}) {
   const mins = parseHHMM(hhmm);
   if (mins == null) return '';
   const h24 = Math.floor(mins / 60);
   const m = mins % 60;
   const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
   const ap = h24 < 12 ? 'AM' : 'PM';
+  if (compact && m === 0) return `${h12} ${ap}`;
   return `${h12}:${String(m).padStart(2, '0')} ${ap}`;
 }
 
+// Compact window: "8–9 AM" when both ends are on the hour in the same meridiem;
+// otherwise fall back to the full "8:00 AM – 9:30 AM" form.
 function formatWindow(svc) {
-  const start = formatTimeLabel(svc.windowStart);
-  const end = formatTimeLabel(svc.windowEnd);
-  if (!start) return '—';
-  if (!end) return start;
-  return `${start} – ${end}`;
+  const startMins = parseHHMM(svc.windowStart);
+  const endMins = parseHHMM(svc.windowEnd);
+  if (startMins == null) return '—';
+  if (endMins == null) return formatTimeLabel(svc.windowStart);
+  const startOnHour = startMins % 60 === 0;
+  const endOnHour = endMins % 60 === 0;
+  const sameMeridiem = Math.floor(startMins / 60) < 12 === Math.floor(endMins / 60) < 12;
+  if (startOnHour && endOnHour && sameMeridiem) {
+    const h24s = Math.floor(startMins / 60);
+    const h24e = Math.floor(endMins / 60);
+    const h12s = h24s % 12 === 0 ? 12 : h24s % 12;
+    const h12e = h24e % 12 === 0 ? 12 : h24e % 12;
+    const ap = h24s < 12 ? 'AM' : 'PM';
+    return `${h12s}–${h12e} ${ap}`;
+  }
+  return `${formatTimeLabel(svc.windowStart)} – ${formatTimeLabel(svc.windowEnd)}`;
 }
 
 function sortByWindow(services) {
@@ -124,26 +138,36 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
     ? service.technicianName.trim().charAt(0).toUpperCase()
     : '';
 
+  const showTreatmentPlan = isLawnService(service) && Boolean(onTreatmentPlan);
+  const showProtocol = Boolean(onProtocol);
+  const showAudit =
+    service.status === 'completed' &&
+    Boolean(onViewAudit) &&
+    Boolean(service.customerId || service.customer_id);
+  const showEnRoute = Boolean(onEnRoute) && canMarkEnRoute(service);
+  const showNavigate = Boolean(service.address);
+  const hasActions =
+    Boolean(techInitial) || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
+
+  const iconBtnClass =
+    'inline-flex items-center justify-center h-9 w-9 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 shrink-0';
+
   return (
     <div
-      className="flex items-stretch gap-2 bg-white border-b border-hairline border-zinc-200"
-      style={{ padding: '12px 14px 12px 0' }}
+      className="flex items-stretch bg-white border-b border-hairline border-zinc-200"
     >
       <span
         aria-hidden
         style={{ width: 4, background: accent, borderRadius: 2, flexShrink: 0 }}
       />
-      <button
-        type="button"
-        onClick={() => onEdit?.(service)}
-        className="flex-1 min-w-0 flex items-center gap-3 bg-white active:bg-zinc-50 u-focus-ring text-left"
-      >
-        <span className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0" style={{ padding: '12px 14px' }}>
+        <button
+          type="button"
+          onClick={() => onEdit?.(service)}
+          className="block w-full text-left bg-white active:bg-zinc-50 u-focus-ring"
+        >
           <span className="flex items-baseline gap-2 flex-wrap">
-            <span
-              className="font-medium text-zinc-900 truncate"
-              style={{ fontSize: 15 }}
-            >
+            <span className="font-medium text-zinc-900" style={{ fontSize: 15 }}>
               {displayName}
             </span>
             {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
@@ -167,15 +191,15 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           </span>
           {service.address && (
             <span
-              className="block truncate text-ink-secondary"
-              style={{ fontSize: 13, marginTop: 2 }}
+              className="block text-ink-secondary"
+              style={{ fontSize: 13, marginTop: 2, wordBreak: 'break-word' }}
             >
               {service.address}
             </span>
           )}
           {serviceDisplayName(service) && (
             <span
-              className="block truncate text-ink-secondary"
+              className="block text-ink-secondary"
               style={{ fontSize: 13, marginTop: 1 }}
             >
               {serviceDisplayName(service)}
@@ -187,77 +211,83 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           >
             {formatWindow(service)}
           </span>
-        </span>
-      </button>
-      {techInitial && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onEdit?.(service); }}
-          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center font-medium"
-          style={{ fontSize: 13 }}
-          title={service.technicianName}
-          aria-label={`Technician: ${service.technicianName}`}
-        >
-          {techInitial}
         </button>
-      )}
-      {isLawnService(service) && onTreatmentPlan && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onTreatmentPlan(service); }}
-          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
-          title="Treatment plan"
-          aria-label="Treatment plan"
-        >
-          <Leaf size={18} strokeWidth={1.75} />
-        </button>
-      )}
-      {onProtocol && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onProtocol(service); }}
-          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
-          title="Protocol"
-          aria-label="Protocol"
-        >
-          <BookOpen size={18} strokeWidth={1.75} />
-        </button>
-      )}
-      {service.status === 'completed' && onViewAudit && (service.customerId || service.customer_id) && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onViewAudit(service); }}
-          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
-          title="View completion audit"
-          aria-label="View completion audit"
-        >
-          <ShieldCheck size={18} strokeWidth={1.75} />
-        </button>
-      )}
-      {onEnRoute && canMarkEnRoute(service) && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onEnRoute(service); }}
-          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
-          title="Tech En Route"
-          aria-label="Tech En Route"
-        >
-          <WavesMark size={18} fill="#009CDE" title="Waves logo" />
-        </button>
-      )}
-      {service.address && (
-        <a
-          href={googleMapsDirectionsUrl(service.address)}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="inline-flex items-center justify-center h-11 w-11 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 self-center"
-          title="Open in Google Maps"
-          aria-label={`Open ${service.address} in Google Maps`}
-        >
-          <MapPin size={18} strokeWidth={1.75} />
-        </a>
-      )}
+        {hasActions && (
+          <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 10 }}>
+            {techInitial && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onEdit?.(service); }}
+                className="inline-flex items-center justify-center h-9 w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 font-medium"
+                style={{ fontSize: 13 }}
+                title={service.technicianName}
+                aria-label={`Technician: ${service.technicianName}`}
+              >
+                {techInitial}
+              </button>
+            )}
+            {showTreatmentPlan && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onTreatmentPlan(service); }}
+                className={iconBtnClass}
+                title="Treatment plan"
+                aria-label="Treatment plan"
+              >
+                <Leaf size={16} strokeWidth={1.75} />
+              </button>
+            )}
+            {showProtocol && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onProtocol(service); }}
+                className={iconBtnClass}
+                title="Protocol"
+                aria-label="Protocol"
+              >
+                <BookOpen size={16} strokeWidth={1.75} />
+              </button>
+            )}
+            {showAudit && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onViewAudit(service); }}
+                className={iconBtnClass}
+                title="View completion audit"
+                aria-label="View completion audit"
+              >
+                <ShieldCheck size={16} strokeWidth={1.75} />
+              </button>
+            )}
+            {showEnRoute && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onEnRoute(service); }}
+                className={iconBtnClass}
+                title="Tech En Route"
+                aria-label="Tech En Route"
+              >
+                <WavesMark size={16} fill="#009CDE" title="Waves logo" />
+              </button>
+            )}
+            {showNavigate && (
+              <a
+                href={googleMapsDirectionsUrl(service.address)}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="ml-auto inline-flex items-center justify-center gap-1.5 h-9 px-3 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 shrink-0 font-medium"
+                style={{ fontSize: 13 }}
+                title="Open in Google Maps"
+                aria-label={`Open ${service.address} in Google Maps`}
+              >
+                <MapPin size={16} strokeWidth={1.75} />
+                Navigate
+              </a>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
