@@ -155,6 +155,11 @@ export default function MobileAppointmentDetailSheet({
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
   const prepaidCovered = isPrepaid && prepaidAmt >= total;
+  // prepaidSeriesContext is computed server-side when this visit is part of a
+  // family-level prepayment (e.g. $360 covering 4 quarterly visits). Falsy on
+  // a one-off prepaid visit, in which case we fall back to the original
+  // single-visit "Prepaid $X via Y" copy below.
+  const seriesCtx = service.prepaidSeriesContext || null;
   const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered;
   const completionProfile = service.completionProfile || {};
   const projectBackedCompletion = !!(completionProfile.projectBacked || completionProfile.requiresProject);
@@ -294,7 +299,29 @@ export default function MobileAppointmentDetailSheet({
             Covered by WaveGuard {tierLabel(tier)} — no charge needed
           </div>
         )}
-        {isPrepaid && (
+        {isPrepaid && seriesCtx && seriesCtx.totalCoveredVisits > 1 && (
+          <div className="mt-3 rounded-sm border border-hairline border-zinc-200 bg-zinc-50" style={{ padding: '10px 14px' }}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-zinc-900 font-medium" style={{ fontSize: 14 }}>
+                Paid in full — visit {seriesCtx.visitNumber || '?'} of {seriesCtx.totalVisitsInSeries}
+              </div>
+              <span
+                className="inline-flex items-center rounded-full"
+                style={{ height: 22, padding: '0 10px', background: '#DCFCE7', color: '#166534', fontSize: 11, fontWeight: 600, letterSpacing: '0.04em' }}
+              >
+                PAID
+              </span>
+            </div>
+            <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 4 }}>
+              {seriesCtx.futureCoveredVisits > 0
+                ? `${seriesCtx.futureCoveredVisits} more visit${seriesCtx.futureCoveredVisits === 1 ? '' : 's'} covered`
+                : 'Final visit on this plan'}
+              {' · '}${seriesCtx.perVisitAmount.toFixed(2)}/visit
+              {seriesCtx.method ? ` · ${seriesCtx.method.replace(/_/g, ' ')}` : ''}
+            </div>
+          </div>
+        )}
+        {isPrepaid && (!seriesCtx || seriesCtx.totalCoveredVisits <= 1) && (
           <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
             Prepaid ${prepaidAmt.toFixed(2)}
             {service.prepaidMethod ? ` via ${service.prepaidMethod.replace(/_/g, ' ')}` : ''} — no charge needed
