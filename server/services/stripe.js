@@ -156,7 +156,7 @@ const StripeService = {
    * @param {string} customerId — Waves customer UUID
    * @param {string} paymentMethodId — Stripe pm_xxx ID
    * @param {object} [options]
-   * @param {boolean} [options.enableAutopay=true] — mark this method chargeable by the monthly autopay cron
+   * @param {boolean} [options.enableAutopay=false] — mark this method chargeable by the monthly autopay cron
    * @param {boolean} [options.makeDefault=true] — make this the customer's default saved method
    * @returns {object} payment_methods row
    */
@@ -165,7 +165,7 @@ const StripeService = {
     if (!stripe) throw new Error('Stripe not configured');
 
     const stripeCustomerId = await this.ensureStripeCustomer(customerId);
-    const enableAutopay = options.enableAutopay !== false;
+    const enableAutopay = options.enableAutopay === true;
     const makeDefault = options.makeDefault !== false;
 
     try {
