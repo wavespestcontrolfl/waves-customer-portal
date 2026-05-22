@@ -11,7 +11,7 @@
 // when EstimatePage migrates off the legacy shape.
 // ============================================================
 
-const { priceTopDressing } = require('./service-pricing');
+const { priceTopDressing, priceTreeShrub } = require('./service-pricing');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -52,6 +52,70 @@ const effectiveOneTimePrice = (li = {}) => {
     ?? 0
   );
 };
+
+const TREE_SHRUB_LEGACY_TIERS = ['standard', 'enhanced'];
+
+function treeShrubTierLabel(tier) {
+  return tier === 'enhanced' ? 'Enhanced' : 'Standard';
+}
+
+function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {
+  const property = v1Result.property || {};
+  return {
+    ...property,
+    bedArea: tsLI.bedArea ?? property.bedArea ?? property.estimatedBedAreaSf,
+    estimatedBedAreaSf: tsLI.bedArea ?? property.estimatedBedAreaSf ?? property.bedArea,
+    features: {
+      ...(property.features || {}),
+      access: tsLI.access || property.features?.access || property.access || 'easy',
+      treeCount: tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount ?? 0,
+    },
+  };
+}
+
+function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') {
+  const quote = priceTreeShrub(treeShrubQuoteInput(v1Result, tsLI), {
+    tier,
+    access: tsLI.access || 'easy',
+    treeCount: tsLI.treeCount ?? 0,
+  });
+  const annual = Math.round(quote.annual);
+  const monthly = roundMoney(annual / 12);
+  const visits = Number(quote.frequency || 0) || null;
+  return {
+    pa: visits ? roundMoney(annual / visits) : quote.perApp,
+    v: visits,
+    ann: annual,
+    mo: monthly,
+  };
+}
+
+function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
+  const selectedTier = TREE_SHRUB_LEGACY_TIERS.includes(tsLI.tier) ? tsLI.tier : 'standard';
+  const recommendedTier = TREE_SHRUB_LEGACY_TIERS.includes(tsLI.recommendedTier)
+    ? tsLI.recommendedTier
+    : (tsLI.recommended ? selectedTier : selectedTier);
+
+  return TREE_SHRUB_LEGACY_TIERS.map((tier) => {
+    const values = tier === selectedTier
+      ? {
+          pa: tsLI.perApp,
+          v: tsLI.frequency,
+          ann: tsLI.annual,
+          mo: tsLI.monthly,
+        }
+      : roundedTreeShrubTierQuote(v1Result, tsLI, tier);
+    return {
+      ...values,
+      name: treeShrubTierLabel(tier),
+      tier,
+      selected: tier === selectedTier,
+      isSelected: tier === selectedTier,
+      recommended: tier === recommendedTier,
+      dimmed: tier !== recommendedTier,
+    };
+  });
+}
 
 const SERVICE_LABEL = {
   commercial_pest: 'Commercial Pest Control',
@@ -331,11 +395,7 @@ function mapV1ToLegacyShape(v1Result) {
 
   // Tree & Shrub → R.ts, R.tsMeta
   if (tsLI) {
-    R.ts = [{
-      pa: tsLI.perApp, v: tsLI.frequency, ann: tsLI.annual, mo: tsLI.monthly,
-      name: tsLI.tier === 'enhanced' ? 'Enhanced' : 'Standard',
-      recommended: true, dimmed: false,
-    }];
+    R.ts = treeShrubLegacyTierRows(v1Result, tsLI);
     R.tsMeta = {
       eb: tsLI.bedArea || 0,
       et: tsLI.treeCount || 0,

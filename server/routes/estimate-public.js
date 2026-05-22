@@ -277,6 +277,14 @@ function recurringResultStats(estData = {}) {
   return estResult?.results || estData?.results || {};
 }
 
+function selectedResultStatsRow(rows = []) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  return rows.find((t) => t?.selected || t?.isSelected)
+    || rows.find((t) => t?.recommended || t?.isRecommended)
+    || rows[0]
+    || null;
+}
+
 function visitsForRecurringServiceName(name, resultStats = {}) {
   const n = String(name || '').toLowerCase();
   if (n.includes('pest')) return resultStats.pest?.apps;
@@ -290,7 +298,7 @@ function visitsForRecurringServiceName(name, resultStats = {}) {
       resultStats.mq[0];
     return sel?.v;
   }
-  if (n.includes('tree') && Array.isArray(resultStats.ts)) return resultStats.ts[0]?.v;
+  if (n.includes('tree') && Array.isArray(resultStats.ts)) return selectedResultStatsRow(resultStats.ts)?.v;
   if (n.includes('termite') && n.includes('bait')) return 4;
   return null;
 }
@@ -2231,7 +2239,7 @@ function renderPage(token, estimate, estData) {
         R.mq[0];
       return sel?.v;
     }
-    if (n.includes('tree') && Array.isArray(R.ts)) return R.ts[0]?.v;
+    if (n.includes('tree') && Array.isArray(R.ts)) return selectedResultStatsRow(R.ts)?.v;
     if (n.includes('termite') && n.includes('bait')) return 4;
     return null;
   };
@@ -4184,11 +4192,13 @@ router.put('/:token/accept', async (req, res, next) => {
     if (annualPrepaySelected && !isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList)) {
       return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
     }
-    const selectedFrequency = !treatAsOneTime && pricingBundle?.frequencies?.length
-      ? pricingBundle.frequencies.find((f) => f.key === selectedFrequencyKey)
+    const pricingFrequencies = Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : [];
+    const selectedFrequency = !treatAsOneTime && pricingFrequencies.length
+      ? (selectedFrequencyKey
+        ? pricingFrequencies.find((f) => f.key === selectedFrequencyKey)
+        : defaultFrequencyFromList(pricingFrequencies))
       : null;
     const pricingVisitFrequency = selectedFrequency
-      || (!selectedFrequencyKey && pricingBundle?.frequencies?.[0])
       || null;
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
@@ -4203,15 +4213,30 @@ router.put('/:token/accept', async (req, res, next) => {
       ? resolveAnnualPrepayInvoiceAmount(effectiveAnnualTotal, effectiveMonthlyTotal)
       : null;
     const effectiveOneTimeTotal = treatAsOneTime ? oneTimeChoicePrice : Number(estimate.onetime_total || 0);
+    const acceptedFrequencyKey = selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey;
+    const acceptedServiceTierKey = selectedFrequency?.billingFrequencyKey ? selectedFrequency.key : null;
+    const acceptedSchedulingFrequencyKey = acceptedServiceTierKey || acceptedFrequencyKey;
+    const selectedServiceTierBillsMonthly = !!acceptedServiceTierKey && acceptedFrequencyKey === 'monthly';
+    const acceptedEstDataForPricing = selectedFrequency
+      ? applySelectedTreeShrubTierToEstimateData(estData, selectedFrequency)
+      : estData;
+    if (acceptedEstDataForPricing !== estData) {
+      const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
+      recurringSvcList = acceptedLists.recurringSvcList;
+      oneTimeList = acceptedLists.oneTimeList;
+      if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
+        recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
+      }
+    }
     const effectiveBillingCadence = !treatAsOneTime
       ? BillingCadence.resolveBillingCadence({
           monthlyRate: effectiveMonthlyTotal,
-          frequencyKey: selectedFrequency?.key || selectedFrequencyKey,
-          estimateData: estData,
+          frequencyKey: selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || selectedFrequencyKey,
+          estimateData: acceptedEstDataForPricing,
           fallbackFrequencyKey: 'quarterly',
         })
       : null;
-    const acceptPrefs = normalizePrefs(estData?.preferences);
+    const acceptPrefs = normalizePrefs(acceptedEstDataForPricing?.preferences);
     const selectedFrequencyPestVisits = pestVisitsForFrequency(selectedFrequency);
     const selectedFrequencyPestMonthlyBase = pestMonthlyBaseForFrequency(selectedFrequency);
     const acceptPestRecurring = detectPestRecurring(recurringSvcList);
@@ -4220,26 +4245,28 @@ router.put('/:token/accept', async (req, res, next) => {
       ? preferenceMonthlyOffForPestVisits(acceptPrefs, selectedFrequencyPestVisits, selectedFrequencyPestMonthlyBase)
       : storedCadencePrefMonthlyOff;
     const acceptTier = estimate.waveguard_tier || pricingBundle?.waveGuardTier || 'Bronze';
-    const acceptEstResult = estData?.result || estData || {};
+    const acceptEstResult = acceptedEstDataForPricing?.result || acceptedEstDataForPricing || {};
     const savedAcceptTierDiscount = Number(acceptEstResult?.recurring?.discount);
     const acceptTierDiscount = tierDiscountForEstimate(
-      estData,
+      acceptedEstDataForPricing,
       acceptTier,
       Number.isFinite(savedAcceptTierDiscount) ? savedAcceptTierDiscount : null,
     );
-    const selectedFrequencyFirstVisitAmount = resolveRecurringFirstVisitAmountFromFrequency(
-      selectedFrequency,
-      { prefMonthlyOff: acceptPrefMonthlyOff, services: recurringSvcList },
-    );
-    const recurringFirstVisitAmount = !treatAsOneTime
+    const selectedFrequencyFirstVisitAmount = selectedServiceTierBillsMonthly
+      ? null
+      : resolveRecurringFirstVisitAmountFromFrequency(
+          selectedFrequency,
+          { prefMonthlyOff: acceptPrefMonthlyOff, services: recurringSvcList },
+        );
+    const recurringFirstVisitAmount = !treatAsOneTime && !selectedServiceTierBillsMonthly
       ? selectedFrequencyFirstVisitAmount || resolveRecurringFirstVisitAmount(recurringSvcList, {
-          estData,
+          estData: acceptedEstDataForPricing,
           tierDiscount: acceptTierDiscount,
           prefMonthlyOff: acceptPrefMonthlyOff,
           pestRecurring: acceptPestRecurring,
         })
       : null;
-    const sameDayVisitTotal = !treatAsOneTime
+    const sameDayVisitTotal = !treatAsOneTime && !selectedServiceTierBillsMonthly
       ? sameDayVisitTotalForPricingFrequency(pricingVisitFrequency, { preferences: acceptPrefs })
       : null;
     const visitEstimatedPrice = treatAsOneTime
@@ -4254,7 +4281,9 @@ router.put('/:token/accept', async (req, res, next) => {
         status: 'accepted',
         accepted_at: trx.fn.now(),
       };
-      let nextEstimateData = estData && typeof estData === 'object' ? { ...estData } : null;
+      let nextEstimateData = acceptedEstDataForPricing && typeof acceptedEstDataForPricing === 'object'
+        ? { ...acceptedEstDataForPricing }
+        : null;
       if (nextEstimateData) {
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
@@ -4264,8 +4293,14 @@ router.put('/:token/accept', async (req, res, next) => {
         nextEstimateData = nextEstimateData || {};
         nextEstimateData.customerSelection = {
           ...(nextEstimateData.customerSelection || {}),
-          frequency: selectedFrequency.key,
-          frequencyLabel: selectedFrequency.label,
+          frequency: acceptedFrequencyKey,
+          frequencyKey: acceptedFrequencyKey,
+          frequencyLabel: effectiveBillingCadence.frequencyLabel || selectedFrequency.label,
+          ...(acceptedServiceTierKey ? {
+            serviceTier: acceptedServiceTierKey,
+            serviceTierKey: acceptedServiceTierKey,
+            serviceTierLabel: selectedFrequency.label,
+          } : {}),
           monthlyTotal: effectiveMonthlyTotal,
           annualTotal: effectiveAnnualTotal,
           billingAmount: effectiveBillingCadence.amount,
@@ -4290,6 +4325,14 @@ router.put('/:token/accept', async (req, res, next) => {
         }
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
+      const acceptedEstimateForScheduling = nextEstimateData
+        ? {
+            ...estimateForPricing,
+            monthly_total: acceptedUpdates.monthly_total ?? estimateForPricing.monthly_total,
+            annual_total: acceptedUpdates.annual_total ?? estimateForPricing.annual_total,
+            estimate_data: nextEstimateData,
+          }
+        : estimateForPricing;
       if (treatAsOneTime && effectiveOneTimeTotal > 0 && Number(estimate.onetime_total || 0) !== effectiveOneTimeTotal) {
         acceptedUpdates.onetime_total = effectiveOneTimeTotal;
       }
@@ -4357,9 +4400,9 @@ router.put('/:token/accept', async (req, res, next) => {
             customerId,
             paymentMethodPreference,
             estimatedPrice: visitEstimatedPrice,
-            estimate: estimateForPricing,
+            estimate: acceptedEstimateForScheduling,
             serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
-            selectedFrequency: selectedFrequency?.key || selectedFrequencyKey,
+            selectedFrequency: acceptedSchedulingFrequencyKey,
             trx,
           });
           reservationCommitted = true;
@@ -6105,6 +6148,81 @@ function mergeAskChips(categories = []) {
   return merged.slice(0, 6);
 }
 
+function treeShrubTierKey(row = {}) {
+  const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
+  if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
+  if (raw.includes('standard') || raw === '6' || raw === '6x') return 'standard';
+  return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
+}
+
+function treeShrubFrequenciesFromResultStats(estData = {}) {
+  const resultStats = recurringResultStats(estData);
+  const rows = Array.isArray(resultStats.ts) ? resultStats.ts : [];
+  const seen = new Set();
+  const rawManualDiscount = normalizeManualDiscountSummary(estData);
+  return rows
+    .map((row) => {
+      const tierKey = treeShrubTierKey(row);
+      if (!['standard', 'enhanced'].includes(tierKey) || seen.has(tierKey)) return null;
+      seen.add(tierKey);
+      const visits = finiteNumberOrNull(row.v ?? row.visitsPerYear ?? row.frequency);
+      const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
+      const annualBase = finiteNumberOrNull(row.ann ?? row.annual);
+      const perTreatmentBase = finiteNumberOrNull(row.pa ?? row.perTreatment ?? row.perApp ?? row.perVisit);
+      const discountBaseAnnual = annualBase != null
+        ? annualBase
+        : (monthlyBase != null ? roundMonthly(monthlyBase * 12) : 0);
+      const manualDiscount = manualDiscountForRecurringBase(rawManualDiscount, discountBaseAnnual);
+      const manualDiscountAmount = Number(manualDiscount?.amount || 0);
+      const manualDiscountMonthly = Number(manualDiscount?.monthlyAmount || 0);
+      const monthly = monthlyBase != null
+        ? Math.max(0, roundMonthly(monthlyBase - manualDiscountMonthly))
+        : null;
+      const annual = annualBase != null
+        ? Math.max(0, roundMonthly(annualBase - manualDiscountAmount))
+        : (monthly != null ? roundMonthly(monthly * 12) : null);
+      const perTreatment = perTreatmentBase != null
+        ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
+        : null;
+      const labelBase = tierKey === 'enhanced' ? 'Every 6 weeks' : 'Bi-monthly';
+      return {
+        key: tierKey,
+        label: labelBase,
+        serviceCategory: 'tree_shrub',
+        serviceTierKey: tierKey,
+        monthlyBase,
+        monthly,
+        annual,
+        perTreatment,
+        visitsPerYear: visits,
+        billingFrequencyKey: 'monthly',
+        manualDiscount: manualDiscount || null,
+        recommended: row.recommended === true || row.isRecommended === true,
+        selected: row.selected === true || row.isSelected === true,
+        included: [
+          {
+            key: `tree_shrub_${tierKey}`,
+            label: `${labelBase} tree & shrub program`,
+            detail: visits ? `${Math.round(visits)} visits per year` : null,
+            includedAtThisFrequency: true,
+          },
+          {
+            key: 'tree_shrub_beds_trees',
+            label: 'Ornamental bed and tree treatments',
+            detail: 'Plant-health treatments matched to the property plan',
+            includedAtThisFrequency: true,
+          },
+        ],
+        addOns: [],
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const order = { standard: 0, enhanced: 1 };
+      return (order[a.key] ?? 99) - (order[b.key] ?? 99);
+    });
+}
+
 function quoteRequiredFromFrequency(frequency = {}) {
   return frequency?.quoteRequired === true
     || frequency?.kind === 'quote_required'
@@ -6115,6 +6233,164 @@ function finiteNumberOrNull(value) {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function treeShrubTierRuntimeMeta(tierKey) {
+  switch (String(tierKey || '').trim().toLowerCase()) {
+    case 'standard':
+      return {
+        tierKey: 'standard',
+        serviceKey: 'tree_shrub_program',
+        name: 'Bi-Monthly Tree & Shrub Care Service',
+        frequencyKey: 'bi_monthly',
+        label: 'Bi-monthly',
+        visitsPerYear: 6,
+      };
+    case 'enhanced':
+      return {
+        tierKey: 'enhanced',
+        serviceKey: 'tree_shrub_6week',
+        name: 'Every 6 Weeks Tree & Shrub Care Service',
+        frequencyKey: 'every_6_weeks',
+        label: 'Every 6 weeks',
+        visitsPerYear: 9,
+      };
+    default:
+      return null;
+  }
+}
+
+function isTreeShrubTierFrequency(frequency = {}) {
+  const meta = treeShrubTierRuntimeMeta(frequency?.key);
+  if (!meta) return false;
+  if (frequency.serviceCategory === 'tree_shrub') return true;
+  const included = Array.isArray(frequency.included) ? frequency.included : [];
+  return included.some((item) => {
+    const raw = String(item?.key || item?.service || item?.label || '').toLowerCase();
+    return raw.includes('tree_shrub') || raw.includes('tree') || raw.includes('shrub');
+  });
+}
+
+function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
+  const meta = treeShrubTierRuntimeMeta(frequency?.key);
+  if (!meta) return existing;
+  const monthly = finiteNumberOrNull(frequency.monthly ?? frequency.monthlyBase ?? existing.mo ?? existing.monthly ?? existing.monthlyTotal);
+  const annual = finiteNumberOrNull(frequency.annual ?? existing.annual ?? existing.ann ?? existing.annualAfterDiscount);
+  const perTreatment = finiteNumberOrNull(frequency.perTreatment ?? frequency.perVisit ?? existing.perTreatment ?? existing.perVisit ?? existing.pa);
+  const visits = finiteNumberOrNull(frequency.visitsPerYear ?? existing.visitsPerYear ?? existing.visits ?? existing.v)
+    || meta.visitsPerYear;
+  const label = frequency.label || meta.label;
+  const row = {
+    ...existing,
+    service: 'tree_shrub',
+    serviceKey: meta.serviceKey,
+    service_key: meta.serviceKey,
+    name: meta.name,
+    label: meta.name,
+    displayName: meta.name,
+    frequency: meta.frequencyKey,
+    cadence: meta.frequencyKey,
+    cadenceLabel: label,
+    tier: meta.tierKey,
+    tierKey: meta.tierKey,
+    serviceTier: meta.tierKey,
+    tierLabel: label,
+    billingFrequencyKey: frequency.billingFrequencyKey || 'monthly',
+    selected: true,
+    isSelected: true,
+  };
+  if (monthly != null) {
+    row.mo = monthly;
+    row.monthly = monthly;
+    row.monthlyTotal = monthly;
+  }
+  if (annual != null) {
+    row.ann = annual;
+    row.annual = annual;
+    row.annualAfterDiscount = annual;
+  }
+  if (perTreatment != null) {
+    row.pa = perTreatment;
+    row.perTreatment = perTreatment;
+    row.perVisit = perTreatment;
+  }
+  if (visits != null) {
+    row.v = visits;
+    row.visits = visits;
+    row.visitsPerYear = visits;
+    row.appsPerYear = visits;
+  }
+  return row;
+}
+
+function rewriteTreeShrubRecurringServices(services = [], frequency = {}) {
+  if (!Array.isArray(services)) return { services, changed: false };
+  let changed = false;
+  const nextServices = services.map((svc) => {
+    const name = svc?.name || svc?.label || svc?.displayName || svc?.service || svc?.serviceKey || svc?.service_key;
+    if (!isTreeShrubServiceName(name)) return svc;
+    changed = true;
+    return selectedTreeShrubServiceRow(svc, frequency);
+  });
+  return { services: nextServices, changed };
+}
+
+function applyTreeShrubTierToRecurring(recurring = {}, frequency = {}) {
+  if (!recurring || typeof recurring !== 'object') return recurring;
+  const { services, changed } = rewriteTreeShrubRecurringServices(recurring.services, frequency);
+  if (!changed) return recurring;
+  const monthly = finiteNumberOrNull(frequency.monthly ?? frequency.monthlyBase);
+  const annual = finiteNumberOrNull(frequency.annual);
+  return {
+    ...recurring,
+    services,
+    ...(monthly != null ? { monthlyTotal: monthly, grandTotal: monthly, mo: monthly } : {}),
+    ...(annual != null ? { annualAfterDiscount: annual, annual, ann: annual } : {}),
+  };
+}
+
+function markSelectedTreeShrubTierRows(rows = [], selectedTierKey = '') {
+  if (!Array.isArray(rows)) return rows;
+  const normalizedSelected = String(selectedTierKey || '').trim().toLowerCase();
+  return rows.map((row) => {
+    const tierKey = treeShrubTierKey(row);
+    if (!['standard', 'enhanced'].includes(tierKey)) return row;
+    return {
+      ...row,
+      selected: tierKey === normalizedSelected,
+      isSelected: tierKey === normalizedSelected,
+    };
+  });
+}
+
+function applySelectedTreeShrubTierToEstimateData(estData = {}, frequency = {}) {
+  if (!isTreeShrubTierFrequency(frequency)) return estData;
+  const hasResult = estData.result && typeof estData.result === 'object';
+  const sourceResult = hasResult ? estData.result : estData;
+  const result = { ...sourceResult };
+
+  if (result.recurring && typeof result.recurring === 'object') {
+    result.recurring = applyTreeShrubTierToRecurring(result.recurring, frequency);
+  }
+
+  if (result.results && typeof result.results === 'object') {
+    const results = { ...result.results };
+    if (Array.isArray(results.ts)) {
+      results.ts = markSelectedTreeShrubTierRows(results.ts, frequency.key);
+    }
+    if (results.recurring && typeof results.recurring === 'object') {
+      results.recurring = applyTreeShrubTierToRecurring(results.recurring, frequency);
+    }
+    result.results = results;
+  }
+
+  if (!hasResult) return result;
+
+  const nextData = { ...estData, result };
+  if (estData.recurring && typeof estData.recurring === 'object') {
+    nextData.recurring = applyTreeShrubTierToRecurring(estData.recurring, frequency);
+  }
+  return nextData;
 }
 
 function shapeServiceFrequency(frequency = {}, { allowAddOns = false } = {}) {
@@ -6152,7 +6428,23 @@ function normalizePricingFrequencyTotals(frequency = {}) {
 
 function defaultFrequencyKeyFor(frequencies = []) {
   if (!Array.isArray(frequencies) || frequencies.length === 0) return null;
+  const selected = frequencies.find((frequency) => (
+    frequency?.selected === true
+    || frequency?.isSelected === true
+  ));
+  if (selected?.key) return selected.key;
+  const recommended = frequencies.find((frequency) => (
+    frequency?.recommended === true
+    || frequency?.isRecommended === true
+  ));
+  if (recommended?.key) return recommended.key;
   return frequencies[0]?.key || null;
+}
+
+function defaultFrequencyFromList(frequencies = []) {
+  if (!Array.isArray(frequencies) || frequencies.length === 0) return null;
+  const defaultKey = defaultFrequencyKeyFor(frequencies);
+  return frequencies.find((frequency) => frequency.key === defaultKey) || frequencies[0] || null;
 }
 
 function oneTimeContributionForCategory(oneTimeBreakdown = {}, category) {
@@ -6507,7 +6799,9 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
 
 function defaultFrequencyForSection(section = {}) {
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
-  return frequencies.find((frequency) => frequency.key === section.defaultFrequencyKey) || frequencies[0] || null;
+  return frequencies.find((frequency) => frequency.key === section.defaultFrequencyKey)
+    || defaultFrequencyFromList(frequencies)
+    || null;
 }
 
 function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, services = []) {
@@ -6523,9 +6817,7 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
   );
   const tierLabel = normalizeWaveGuardTierLabel(payload.waveGuardTier || estimate.waveguard_tier || estimate.waveGuardTier || estimate.tier || 'Bronze');
   const frequency = defaultFrequencyForSection(recurringSections[0]);
-  const legacyDefaultFrequency = Array.isArray(payload.frequencies) && payload.frequencies.length
-    ? payload.frequencies[0]
-    : null;
+  const legacyDefaultFrequency = defaultFrequencyFromList(payload.frequencies);
   const monthlySubtotal = roundMonthly(firstPositiveNumber(
     legacyDefaultFrequency?.monthly,
     frequency?.monthly,
@@ -6817,10 +7109,14 @@ async function buildPricingBundle(estimate) {
       frequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: pestOnlyChoice }));
     }
 
-    // If no pest at all, drop the extra two entries — slider is meaningless
-    // without a pest cadence to vary. Keep Quarterly as the single surface.
+    // If no pest at all, drop the pest-cadence entries. Service-specific
+    // phases can replace them with their own tier ladder.
     const hasPest = v1.pestTiers.length > 0;
-    const finalFreqs = hasPest ? frequencies : frequencies.slice(0, 1);
+    const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
+    const treeShrubFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'tree_shrub'
+      ? treeShrubFrequenciesFromResultStats(estData)
+      : [];
+    const finalFreqs = hasPest ? frequencies : (treeShrubFreqs.length ? treeShrubFreqs : frequencies.slice(0, 1));
     const annualPrepayEligible = annualPrepayEligibleForEstimateData(estData);
 
     // First-visit fees stack — non-recurring charges shown to the customer
@@ -7222,6 +7518,7 @@ module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;
+module.exports.applySelectedTreeShrubTierToEstimateData = applySelectedTreeShrubTierToEstimateData;
 module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;

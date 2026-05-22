@@ -7,6 +7,7 @@ const {
   buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
   acceptanceServiceLists,
+  applySelectedTreeShrubTierToEstimateData,
   buildEstimateAskQueryLog,
   buildEstimateAcceptanceContract,
   buildPricingBundle,
@@ -41,6 +42,7 @@ const {
   buildEstimateAssistantContext,
   cleanAssistantAnswer,
 } = require('../services/estimate-assistant');
+const estimateSlotAvailability = require('../services/estimate-slot-availability');
 
 function savedAdminEstimateData() {
   return {
@@ -926,6 +928,262 @@ describe('public estimate one-time breakdown', () => {
     }));
     expect(payload.askChips).toContain('Trapping vs exclusion?');
     expect(payload.askChips).not.toContain('What products do you use?');
+  });
+
+  test('tree and shrub recurring estimates expose bi-monthly and every-six-weeks tiers', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-tree-shrub-tier-contract-test',
+      estimate_data: {
+        result: {
+          results: {
+            ts: [
+              { name: 'Standard', v: 6, mo: 72, ann: 864, pa: 144, recommended: false },
+              { name: 'Enhanced', v: 9, mo: 96, ann: 1152, pa: 128, recommended: true },
+              { name: 'Premium', v: 12, mo: 120, ann: 1440, pa: 120, recommended: false },
+            ],
+            tsMeta: { eb: 2400, et: 7 },
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 96,
+            annualAfterDiscount: 1152,
+            waveGuardTier: 'Bronze',
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 96,
+      annual_total: 1152,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['standard', 'enhanced']);
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'tree_shrub',
+      label: 'Tree & Shrub',
+      isPest: false,
+      defaultFrequencyKey: 'enhanced',
+      setupFee: null,
+    }));
+    expect(payload.services[0].frequencies).toEqual([
+      expect.objectContaining({
+        key: 'standard',
+        label: 'Bi-monthly',
+        monthly: 72,
+        annual: 864,
+        perTreatment: 144,
+        visitsPerYear: 6,
+        billingFrequencyKey: 'monthly',
+        addOns: [],
+      }),
+      expect.objectContaining({
+        key: 'enhanced',
+        label: 'Every 6 weeks',
+        monthly: 96,
+        annual: 1152,
+        perTreatment: 128,
+        visitsPerYear: 9,
+        billingFrequencyKey: 'monthly',
+        addOns: [],
+        recommended: true,
+      }),
+    ]);
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 96,
+      annualSubtotal: 1152,
+      qualifyingCount: 1,
+    }));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardSetupFee: false,
+      showPestRecurringAddOns: false,
+    }));
+    expect(payload.askChips).toEqual([
+      'Which trees get treated?',
+      'What gets applied?',
+      'When do visits start?',
+      'Can I prepay annually?',
+    ]);
+  });
+
+  test('tree and shrub default tier follows source selection before recommendation', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-tree-shrub-selected-standard-test',
+      estimate_data: {
+        result: {
+          results: {
+            ts: [
+              { name: 'Standard', v: 6, mo: 72, ann: 864, pa: 144, selected: true },
+              { name: 'Enhanced', v: 9, mo: 96, ann: 1152, pa: 128, recommended: true },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 72,
+            annualAfterDiscount: 864,
+            waveGuardTier: 'Bronze',
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 72 }],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 72,
+      annual_total: 864,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'tree_shrub',
+      defaultFrequencyKey: 'standard',
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 72,
+      annualSubtotal: 864,
+    }));
+  });
+
+  test('tree and shrub tier rows preserve manual recurring discounts', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-tree-shrub-manual-discount-test',
+      estimate_data: {
+        result: {
+          manualDiscount: {
+            source: 'catalog_preset',
+            catalogName: 'Military Discount',
+            type: 'FIXED',
+            value: 120,
+            amount: 120,
+            label: 'Military Discount',
+          },
+          totals: {
+            manualDiscount: {
+              source: 'catalog_preset',
+              catalogName: 'Military Discount',
+              type: 'FIXED',
+              value: 120,
+              amount: 120,
+              label: 'Military Discount',
+            },
+          },
+          results: {
+            ts: [
+              { name: 'Standard', v: 6, mo: 72, ann: 864, pa: 144, recommended: false },
+              { name: 'Enhanced', v: 9, mo: 96, ann: 1152, pa: 128, recommended: true },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 86,
+            annualAfterDiscount: 1032,
+            waveGuardTier: 'Bronze',
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 86,
+      annual_total: 1032,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.frequencies).toEqual([
+      expect.objectContaining({
+        key: 'standard',
+        monthlyBase: 72,
+        monthly: 62,
+        annual: 744,
+        perTreatment: 124,
+      }),
+      expect.objectContaining({
+        key: 'enhanced',
+        monthlyBase: 96,
+        monthly: 86,
+        annual: 1032,
+        perTreatment: 114.67,
+        manualDiscount: expect.objectContaining({
+          label: 'Military Discount',
+          amount: 120,
+          monthlyAmount: 10,
+        }),
+      }),
+    ]);
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 86,
+      annualSubtotal: 1032,
+    }));
+  });
+
+  test('accepted tree and shrub tier rewrites downstream service profile while billing stays monthly', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          ts: [
+            { name: 'Standard', v: 6, mo: 72, ann: 864, pa: 144 },
+            { name: 'Enhanced', v: 9, mo: 96, ann: 1152, pa: 128, selected: true },
+          ],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 96,
+          annualAfterDiscount: 1152,
+          waveGuardTier: 'Bronze',
+          services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+        },
+        oneTime: { total: 0, items: [], specItems: [] },
+        specItems: [],
+      },
+    };
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-tree-shrub-accepted-standard-test',
+      estimate_data: estimateData,
+      monthly_total: 96,
+      annual_total: 1152,
+      waveguard_tier: 'Bronze',
+    });
+    const standard = payload.frequencies.find((frequency) => frequency.key === 'standard');
+
+    const nextData = applySelectedTreeShrubTierToEstimateData(estimateData, standard);
+    const service = nextData.result.recurring.services[0];
+    const profile = estimateSlotAvailability.resolveEstimateSlotProfile({
+      service_interest: 'Tree & Shrub',
+      estimate_data: nextData,
+    }, { selectedFrequency: 'standard' });
+
+    expect(standard).toEqual(expect.objectContaining({
+      key: 'standard',
+      label: 'Bi-monthly',
+      billingFrequencyKey: 'monthly',
+    }));
+    expect(service).toEqual(expect.objectContaining({
+      service: 'tree_shrub',
+      serviceKey: 'tree_shrub_program',
+      service_key: 'tree_shrub_program',
+      name: 'Bi-Monthly Tree & Shrub Care Service',
+      mo: 72,
+      monthly: 72,
+      annual: 864,
+      annualAfterDiscount: 864,
+      perTreatment: 144,
+      visitsPerYear: 6,
+      frequency: 'bi_monthly',
+      tierKey: 'standard',
+      tierLabel: 'Bi-monthly',
+      billingFrequencyKey: 'monthly',
+    }));
+    expect(nextData.result.recurring).toEqual(expect.objectContaining({
+      monthlyTotal: 72,
+      annualAfterDiscount: 864,
+    }));
+    expect(nextData.result.results.ts).toEqual([
+      expect.objectContaining({ name: 'Standard', selected: true, isSelected: true }),
+      expect.objectContaining({ name: 'Enhanced', selected: false, isSelected: false }),
+    ]);
+    expect(profile.serviceLabel).toContain('6x Bi-Monthly Tree & Shrub Care Service');
+    expect(estimateData.result.recurring.services[0].mo).toBe(96);
   });
 
   test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
@@ -2872,7 +3130,10 @@ describe('public estimate one-time breakdown', () => {
         oneTime: { items: [], specItems: [] },
         specItems: [],
         results: {
-          ts: [{ recommended: true, v: 9 }],
+          ts: [
+            { name: 'Standard', selected: false, recommended: false, v: 6 },
+            { name: 'Enhanced', selected: true, recommended: true, v: 9 },
+          ],
           tsMeta: { eb: 1700, et: 5 },
         },
       },
@@ -2885,6 +3146,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Trees/Shrubs');
     expect(html).toContain('5 trees, Moderate shrubs');
     expect(html).toContain('Pick your first tree &amp; shrub visit');
+    expect(html).toContain('Tree &amp; Shrub (9x)');
     expect(html).toContain('What your tree &amp; shrub plan includes');
     expect(html).toContain('Ready to start tree &amp; shrub?');
     expect(html).not.toContain('Ready to start pest control?');
