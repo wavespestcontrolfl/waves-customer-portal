@@ -11,7 +11,7 @@
 // against America/New_York — the business is in SW Florida. No UTC.
 
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Leaf, MapPin, ShieldCheck, User } from 'lucide-react';
+import { BookOpen, Leaf, MapPin, ShieldCheck } from 'lucide-react';
 import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
@@ -150,9 +150,9 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
     Boolean(techInitial) || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
 
   const actionBtnClass =
-    'inline-flex items-center justify-center gap-1.5 h-9 px-2 flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
+    'inline-flex items-center justify-center h-9 flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
   const primaryBtnClass =
-    'inline-flex items-center justify-center gap-1.5 h-9 px-2 flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
+    'inline-flex items-center justify-center h-9 flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
 
   return (
     <div
@@ -220,13 +220,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onEdit?.(service); }}
-                className={actionBtnClass}
+                className={primaryBtnClass}
                 style={{ fontSize: 13 }}
                 title={service.technicianName}
                 aria-label={`Technician: ${service.technicianName}`}
               >
-                <User size={16} strokeWidth={1.75} />
-                <span className="truncate">{techInitial}</span>
+                {techInitial}
               </button>
             )}
             {showTreatmentPlan && (
@@ -234,12 +233,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onTreatmentPlan(service); }}
                 className={actionBtnClass}
-                style={{ fontSize: 13 }}
                 title="Treatment plan"
                 aria-label="Treatment plan"
               >
                 <Leaf size={16} strokeWidth={1.75} />
-                <span className="truncate">Treatment</span>
               </button>
             )}
             {showProtocol && (
@@ -247,12 +244,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onProtocol(service); }}
                 className={actionBtnClass}
-                style={{ fontSize: 13 }}
                 title="Protocol"
                 aria-label="Protocol"
               >
                 <BookOpen size={16} strokeWidth={1.75} />
-                <span className="truncate">Protocol</span>
               </button>
             )}
             {showAudit && (
@@ -260,12 +255,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onViewAudit(service); }}
                 className={actionBtnClass}
-                style={{ fontSize: 13 }}
                 title="View completion audit"
                 aria-label="View completion audit"
               >
                 <ShieldCheck size={16} strokeWidth={1.75} />
-                <span className="truncate">Audit</span>
               </button>
             )}
             {showEnRoute && (
@@ -273,12 +266,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onEnRoute(service); }}
                 className={actionBtnClass}
-                style={{ fontSize: 13 }}
                 title="Tech En Route"
                 aria-label="Tech En Route"
               >
                 <WavesMark size={16} fill="#009CDE" title="Waves logo" />
-                <span className="truncate">En Route</span>
               </button>
             )}
             {showNavigate && (
@@ -288,12 +279,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 rel="noopener noreferrer"
                 onClick={(e) => e.stopPropagation()}
                 className={primaryBtnClass}
-                style={{ fontSize: 13 }}
                 title="Open in Google Maps"
                 aria-label={`Open ${service.address} in Google Maps`}
               >
                 <MapPin size={16} strokeWidth={1.75} />
-                <span className="truncate">Navigate</span>
               </a>
             )}
           </div>
