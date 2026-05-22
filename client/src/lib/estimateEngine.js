@@ -369,6 +369,296 @@ function normalizeGrassType(grassType) {
   return 'st_augustine';
 }
 
+const DETHATCHING_CONFIG = {
+  floor: 150,
+  marginDivisor: 0.40,
+  materialPer1K: 2.10,
+  timeModel: {
+    primaryPassSqFtPerMin: 100,
+    crossPassSqFtPerMin: 200,
+    setupMin: 30,
+  },
+  cleanup: {
+    none: { minutesPer1K: 0, pricePer1K: 0, label: 'No debris removal' },
+    light: { minutesPer1K: 3, pricePer1K: 10, label: 'Light cleanup' },
+    moderate: { minutesPer1K: 7, pricePer1K: 20, label: 'Moderate cleanup' },
+    heavy: { minutesPer1K: 12, pricePer1K: 35, label: 'Heavy cleanup / bagging' },
+  },
+  accessMinutes: {
+    easy: 0,
+    moderate: 10,
+    difficult: 20,
+  },
+  manualReview: {
+    largeLawnSqFt: 10000,
+    heavyCleanupSqFt: 6000,
+    stAugustineRequiresApproval: true,
+  },
+};
+
+function hasClientValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function normalizeDethatchingToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+function parseClientNonNegativeMeasurement(value) {
+  if (!hasClientValue(value)) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function roundClientMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function clientBooleanTrue(value) {
+  return value === true || value === 'true' || value === 'TRUE' || value === 'YES' || value === 'yes';
+}
+
+function uniqueClientStrings(values = []) {
+  return [...new Set((values || []).filter(Boolean))];
+}
+
+function normalizeDethatchingChoice(value, choices, fallback, warningCode) {
+  const raw = normalizeDethatchingToken(value || fallback);
+  if (Object.prototype.hasOwnProperty.call(choices || {}, raw)) {
+    return { key: raw, warning: null };
+  }
+  return { key: fallback, warning: warningCode };
+}
+
+function normalizeDethatchingGrassType(options = {}) {
+  const requestedGrassType = options.grassType ?? options.track ?? options.turfTrack ?? options.grassTrack;
+  if (!hasClientValue(requestedGrassType)) {
+    return {
+      requestedGrassType,
+      grassType: 'unknown',
+      isStAugustine: false,
+      isKnown: false,
+      warnings: ['grass_type_not_recorded'],
+    };
+  }
+  const raw = normalizeDethatchingToken(requestedGrassType);
+  const compact = String(requestedGrassType).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (
+    ['a', 'b', 'st_augustine', 'staugustine', 'staug', 'floratam'].includes(raw) ||
+    ['staugustine', 'staug'].includes(compact) ||
+    compact.includes('floratam')
+  ) {
+    return { requestedGrassType, grassType: 'st_augustine', isStAugustine: true, isKnown: true, warnings: [] };
+  }
+  if (['c1', 'bermuda'].includes(raw)) {
+    return { requestedGrassType, grassType: 'bermuda', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  if (['c2', 'zoysia'].includes(raw)) {
+    return { requestedGrassType, grassType: 'zoysia', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  if (['d', 'bahia'].includes(raw)) {
+    return { requestedGrassType, grassType: 'bahia', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  return {
+    requestedGrassType,
+    grassType: 'unknown',
+    isStAugustine: false,
+    isKnown: false,
+    warnings: ['unknown_grass_type_requires_dethatching_review'],
+  };
+}
+
+function resolveDethatchingProbe(options = {}) {
+  const probeValues = [
+    parseClientNonNegativeMeasurement(options.thatchProbe1Inches),
+    parseClientNonNegativeMeasurement(options.thatchProbe2Inches),
+    parseClientNonNegativeMeasurement(options.thatchProbe3Inches),
+  ];
+  const validProbeValues = probeValues.filter(value => value !== null);
+  const explicitDepth = parseClientNonNegativeMeasurement(options.thatchDepthInches);
+  const averageDepth = explicitDepth !== null
+    ? explicitDepth
+    : (validProbeValues.length > 0
+      ? validProbeValues.reduce((sum, value) => sum + value, 0) / validProbeValues.length
+      : null);
+  const warnings = [];
+  if (validProbeValues.length > 0 && validProbeValues.length < 3) warnings.push('partial_thatch_probe_readings');
+  if ((clientBooleanTrue(options.requireThatchDepth) || clientBooleanTrue(options.requireThatchProbe)) && averageDepth === null) {
+    warnings.push('thatch_depth_not_recorded');
+  }
+  return {
+    thatchDepthInches: averageDepth === null ? null : roundClientMoney(averageDepth),
+    thatchMeasurementSource: options.thatchMeasurementSource || (validProbeValues.length > 0 || explicitDepth !== null ? 'manual' : 'unknown'),
+    probeMeasurements: {
+      thatchProbe1Inches: probeValues[0],
+      thatchProbe2Inches: probeValues[1],
+      thatchProbe3Inches: probeValues[2],
+    },
+    warnings,
+  };
+}
+
+const DETHATCHING_MANAGER_APPROVAL_REASONS = new Set([
+  'verified_thatch_probe',
+  'customer_requested_after_warning',
+  'bermuda_or_zoysia_confirmed',
+  'manager_override',
+]);
+
+function normalizeDethatchingManagerApprovalReason(value) {
+  const raw = typeof value === 'string' ? normalizeDethatchingToken(value) : '';
+  return DETHATCHING_MANAGER_APPROVAL_REASONS.has(raw) ? raw : null;
+}
+
+function priceDethatchingClient(lawnSqFt, options = {}) {
+  const cfg = DETHATCHING_CONFIG;
+  const lawnEst = Math.max(0, Number(lawnSqFt) || 0);
+  const cleanupChoice = normalizeDethatchingChoice(
+    options.cleanupLevel,
+    cfg.cleanup,
+    'none',
+    'invalid_dethatching_cleanup_level_defaulted'
+  );
+  const accessChoice = normalizeDethatchingChoice(
+    options.access ?? options.accessDifficulty,
+    cfg.accessMinutes,
+    'easy',
+    'invalid_dethatching_access_defaulted'
+  );
+  const debrisRemovalRequested = clientBooleanTrue(options.debrisRemovalIncluded);
+  const cleanupLevel = cleanupChoice.key === 'none' && debrisRemovalRequested ? 'light' : cleanupChoice.key;
+  const cleanup = cfg.cleanup[cleanupLevel] || cfg.cleanup.none;
+  const grass = normalizeDethatchingGrassType(options);
+  const probe = resolveDethatchingProbe(options);
+  const basePrimaryMin = lawnEst / cfg.timeModel.primaryPassSqFtPerMin;
+  const baseCrossMin = lawnEst / cfg.timeModel.crossPassSqFtPerMin;
+  const setupMin = cfg.timeModel.setupMin;
+  const cleanupMin = (lawnEst / 1000) * cleanup.minutesPer1K;
+  const accessMin = cfg.accessMinutes[accessChoice.key] || 0;
+  const timeMin = basePrimaryMin + baseCrossMin + setupMin + cleanupMin + accessMin;
+  const laborCost = 35 * timeMin / 60;
+  const materialCost = (lawnEst / 1000) * cfg.materialPer1K;
+  const cleanupPriceAdder = (lawnEst / 1000) * cleanup.pricePer1K;
+  const rawCost = laborCost + materialCost;
+  const basePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
+  const calculatedPrice = Math.round(basePrice + cleanupPriceAdder);
+  const debrisRemovalIncluded = debrisRemovalRequested || cleanupLevel !== 'none';
+  const managerApproved = clientBooleanTrue(options.managerApproved);
+  const managerApprovalOverrideReason = normalizeDethatchingManagerApprovalReason(options.managerApprovalReason);
+  const requiresManagerApproval = !!(cfg.manualReview.stAugustineRequiresApproval && grass.isStAugustine);
+  const warnings = uniqueClientStrings([
+    cleanupChoice.warning,
+    accessChoice.warning,
+    ...grass.warnings,
+    ...probe.warnings,
+    cleanupLevel === 'none' && !debrisRemovalIncluded ? 'base_price_excludes_bagging_or_debris_hauling' : null,
+    requiresManagerApproval ? 'Dethatching St. Augustine / Floratam can damage stolons. Manager approval required.' : null,
+  ]);
+  const manualReviewReasons = [];
+  if (lawnEst >= cfg.manualReview.largeLawnSqFt) manualReviewReasons.push('large_lawn_dethatching_manual_review');
+  if (cleanupLevel === 'heavy' && lawnEst >= cfg.manualReview.heavyCleanupSqFt) manualReviewReasons.push('heavy_cleanup_required');
+  if (accessChoice.key === 'difficult') manualReviewReasons.push('difficult_access_dethatching');
+  if (grass.grassType === 'unknown') manualReviewReasons.push('unknown_grass_dethatching_review');
+  if ((clientBooleanTrue(options.requireThatchDepth) || clientBooleanTrue(options.requireThatchProbe)) && probe.thatchDepthInches === null) {
+    manualReviewReasons.push('thatch_depth_not_recorded');
+  }
+  if (requiresManagerApproval && !managerApproved) {
+    manualReviewReasons.push('st_augustine_dethatching_manager_approval_required');
+  }
+  if (requiresManagerApproval && managerApproved && !managerApprovalOverrideReason) {
+    manualReviewReasons.push('st_augustine_dethatching_manager_approval_reason_missing');
+  }
+
+  let dethatchingRecommended = false;
+  let recommendationReason = 'thatch_depth_not_recorded';
+  if (probe.thatchDepthInches !== null) {
+    if (grass.grassType === 'bermuda' || grass.grassType === 'zoysia') {
+      dethatchingRecommended = probe.thatchDepthInches > 0.5;
+      recommendationReason = dethatchingRecommended
+        ? 'bermuda_zoysia_thatch_above_half_inch'
+        : 'thatch_probe_threshold_not_met';
+      if (!dethatchingRecommended) manualReviewReasons.push('thatch_probe_threshold_not_met');
+    } else if (grass.isStAugustine) {
+      recommendationReason = probe.thatchDepthInches > 0.75
+        ? 'st_augustine_threshold_requires_manager_approval'
+        : 'st_augustine_no_auto_recommendation';
+    } else if (grass.grassType === 'unknown') {
+      recommendationReason = 'unknown_grass_manual_review';
+    } else {
+      recommendationReason = 'grass_track_not_configured_for_auto_recommendation';
+    }
+  }
+
+  const managerApprovalSatisfied = !requiresManagerApproval || (managerApproved && !!managerApprovalOverrideReason);
+  const manualReviewReasonList = uniqueClientStrings(manualReviewReasons);
+  const approvalBlocked = requiresManagerApproval && !managerApprovalSatisfied;
+  const approvalBlockReason = approvalBlocked
+    ? 'Manager approval is required before St. Augustine / Floratam dethatching can be quoted.'
+    : null;
+  const manualReviewBlockReason = !approvalBlockReason && manualReviewReasonList.length > 0
+    ? `Dethatching requires admin review: ${manualReviewReasonList.join(', ')}.`
+    : null;
+  const quoteRequired = approvalBlocked || manualReviewReasonList.length > 0;
+  const detailParts = [
+    'Double-pass machine time',
+    cleanup.label,
+    accessChoice.key === 'easy' ? null : `${accessChoice.key} access`,
+    debrisRemovalIncluded ? 'cleanup/debris removal included' : null,
+    approvalBlocked ? 'manager approval required' : null,
+  ].filter(Boolean);
+
+  return {
+    service: 'dethatching',
+    lawnSqFt: lawnEst,
+    manuallyEnteredLawnSqFt: options.manuallyEnteredLawnSqFt ?? null,
+    price: quoteRequired ? null : calculatedPrice,
+    estimatedPrice: calculatedPrice,
+    basePrice,
+    rawCost: roundClientMoney(rawCost),
+    timeMin: roundClientMoney(timeMin),
+    laborCost: roundClientMoney(laborCost),
+    materialCost: roundClientMoney(materialCost),
+    cleanupLevel,
+    requestedCleanupLevel: cleanupChoice.key,
+    cleanupLabel: cleanup.label,
+    cleanupMin: roundClientMoney(cleanupMin),
+    cleanupPriceAdder: roundClientMoney(cleanupPriceAdder),
+    debrisRemovalIncluded,
+    access: accessChoice.key,
+    accessMin,
+    grassType: grass.grassType,
+    requestedGrassType: grass.requestedGrassType,
+    thatchDepthInches: probe.thatchDepthInches,
+    thatchMeasurementSource: probe.thatchMeasurementSource,
+    probeMeasurements: probe.probeMeasurements,
+    dethatchingRecommended,
+    recommendationReason,
+    requiresManualReview: quoteRequired,
+    manualReviewReasons: manualReviewReasonList,
+    quoteRequired,
+    requiresCustomQuote: quoteRequired,
+    autoQuoteRequiresAdminApproval: quoteRequired,
+    customQuoteReason: approvalBlockReason || manualReviewBlockReason,
+    reason: approvalBlockReason || manualReviewBlockReason,
+    requiresManagerApproval,
+    managerApproved,
+    managerApprovalSatisfied,
+    managerApprovalReason: requiresManagerApproval ? 'st_augustine_dethatching' : null,
+    managerApprovalOverrideReason,
+    warnings,
+    warning: requiresManagerApproval
+      ? 'Dethatching St. Augustine / Floratam can damage stolons. Manager approval required.'
+      : null,
+    equipmentMetadata: {
+      equipmentAssetTag: 'LAWN-001',
+      equipmentName: 'Classen TR-20H Dethatcher',
+      seasonalUse: 'spring/fall',
+      internalOnly: true,
+    },
+    detail: detailParts.join(' | '),
+  };
+}
+
 function resolveFoamDrillTier(points) {
   const pointCount = Number(points === undefined ? 5 : points);
   if (!Number.isInteger(pointCount) || pointCount < 1) {
@@ -781,6 +1071,17 @@ export function calculateEstimate(inputs) {
     svcPlugging,
     svcTopdress,
     svcDethatch,
+    dethatchingCleanupLevel,
+    dethatchingDebrisRemovalIncluded,
+    dethatchingAccess,
+    dethatchingAccessDifficulty,
+    dethatchingManagerApproved,
+    dethatchingManagerApprovalReason,
+    thatchProbe1Inches,
+    thatchProbe2Inches,
+    thatchProbe3Inches,
+    thatchDepthInches,
+    thatchMeasurementSource,
     svcTrenching,
     svcBoracare,
     svcPreslab,
@@ -1538,11 +1839,33 @@ export function calculateEstimate(inputs) {
   /* ── Dethatching ─────────────────────────────────────────── */
   if (svcDethatch && !isCommercial && lawnEst > 0) {
     hasOT = true;
-    const dt = lawnEst / 100 + lawnEst / 200 + 30;
-    const dc = LABOR * (dt / 60) + lawnEst / 1000 * 2.10;
-    const sp = otP(Math.max(150, Math.round(dc / 0.40)));
+    const dth = priceDethatchingClient(lawnEst, {
+      cleanupLevel: dethatchingCleanupLevel || 'none',
+      debrisRemovalIncluded: dethatchingDebrisRemovalIncluded,
+      access: dethatchingAccess || dethatchingAccessDifficulty || 'easy',
+      grassType: _grassType || grassType,
+      track: grassType,
+      managerApproved: dethatchingManagerApproved,
+      managerApprovalReason: dethatchingManagerApprovalReason,
+      thatchProbe1Inches,
+      thatchProbe2Inches,
+      thatchProbe3Inches,
+      thatchDepthInches,
+      thatchMeasurementSource,
+      manuallyEnteredLawnSqFt: _measuredTurfSf || null,
+    });
+    const sp = dth.quoteRequired ? null : otP(dth.price);
     R.dth = sp;
-    otItems.push({ name: 'Dethatching', price: sp, detail: 'One-time service' });
+    R.dthMeta = { ...dth, price: sp, baseEstimatePrice: dth.estimatedPrice ?? dth.price };
+    (dth.manualReviewReasons || []).forEach(addManualReviewReason);
+    (dth.warnings || []).forEach(addRoutingWarning);
+    otItems.push({
+      ...dth,
+      name: 'Dethatching',
+      price: sp,
+      baseEstimatePrice: dth.estimatedPrice ?? dth.price,
+      detail: dth.detail || 'One-time service',
+    });
   }
 
   /* ── Trenching ───────────────────────────────────────────── */

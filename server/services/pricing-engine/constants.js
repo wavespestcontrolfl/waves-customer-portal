@@ -775,7 +775,37 @@ const SPECIALTY = {
     eighth: { formula: 'standard', floor: r(250), marginDivisor: 0.40, sandRate: 4.09, deliveryRate: 2.62 },  // 60% target margin
     quarter: { formula: 'double', floor: r(450), marginDivisor: 0.35, sandRate: 4.09, deliveryRate: 5.24 },  // 65% target margin
   },
-  dethatching: { floor: r(150), marginDivisor: 0.40, materialPer1K: 2.10 },  // 60% target margin
+  dethatching: {
+    floor: r(150),
+    marginDivisor: 0.40,
+    materialPer1K: 2.10,
+    timeModel: {
+      primaryPassSqFtPerMin: 100,
+      crossPassSqFtPerMin: 200,
+      setupMin: 30,
+    },
+    cleanup: {
+      none: { minutesPer1K: 0, pricePer1K: 0, label: 'No debris removal' },
+      light: { minutesPer1K: 3, pricePer1K: 10, label: 'Light cleanup' },
+      moderate: { minutesPer1K: 7, pricePer1K: 20, label: 'Moderate cleanup' },
+      heavy: { minutesPer1K: 12, pricePer1K: 35, label: 'Heavy cleanup / bagging' },
+    },
+    accessMinutes: {
+      easy: 0,
+      moderate: 10,
+      difficult: 20,
+    },
+    manualReview: {
+      largeLawnSqFt: 10000,
+      heavyCleanupSqFt: 6000,
+      stAugustineRequiresApproval: true,
+    },
+    equipment: {
+      equipmentAssetTag: 'LAWN-001',
+      equipmentName: 'Classen TR-20H Dethatcher',
+      seasonalUse: 'spring/fall',
+    },
+  },  // 60% target margin
   trenching: {
     dirtPerLF: r(10),
     concretePerLF: r(14),

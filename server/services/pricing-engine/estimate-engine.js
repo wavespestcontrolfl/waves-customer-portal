@@ -823,7 +823,26 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.dethatching && !useCommercialManualQuote(services.dethatching, 'lawn_care')) {
-    const result = priceDethatching(property.lawnSqFt);
+    const dethatchingOptions = serviceOptions(services.dethatching);
+    const result = priceDethatching(
+      dethatchingOptions.lawnSqFt || property.lawnSqFt,
+      {
+        ...dethatchingOptions,
+        grassType: dethatchingOptions.grassType
+          ?? dethatchingOptions.track
+          ?? services.lawn?.track
+          ?? input.grassType
+          ?? input.track
+          ?? property.grassType,
+        track: dethatchingOptions.track ?? services.lawn?.track ?? input.track,
+        manuallyEnteredLawnSqFt: dethatchingOptions.manuallyEnteredLawnSqFt
+          ?? input.measuredTurfSf
+          ?? input.lawnSqFt
+          ?? null,
+      }
+    );
+    (result.manualReviewReasons || []).forEach(addManualReviewReason);
+    (result.warnings || []).forEach(addRoutingWarning);
     lineItems.push(result);
   }
   if (services.plugging && !useCommercialManualQuote(services.plugging, 'lawn_care')) {
