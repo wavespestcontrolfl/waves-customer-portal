@@ -661,7 +661,7 @@ const EDIT_FALLBACK_SERVICES = [
   },
 ];
 
-export function EditServiceModal({ service, technicians, onClose, onSaved }) {
+export function EditServiceModal({ service, technicians, onClose, onSaved, onMarkPrepaid }) {
   const serviceHasSeries = !!(
     service.isRecurring ||
     service.recurringParentId ||
@@ -969,7 +969,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
     setWeekendShift(value === "back" ? "back" : "forward");
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -1647,6 +1647,53 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                   </div>{" "}
                 </div>{" "}
               </div>{" "}
+              {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    padding: "10px 12px",
+                    marginBottom: 12,
+                    background: "#DCFCE7",
+                    border: "1px solid #86EFAC",
+                    borderRadius: 6,
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: "#166534" }}>
+                      Prepaid ${Number(service.prepaidAmount).toFixed(2)}
+                      {service.prepaidMethod ? ` · ${String(service.prepaidMethod).replace(/_/g, " ")}` : ""}
+                    </div>
+                    {service.prepaidSeriesContext?.totalCoveredVisits > 1 && (
+                      <div style={{ fontSize: 12, color: "#15803D", marginTop: 2 }}>
+                        Visit {service.prepaidSeriesContext.visitNumber || "?"} of {service.prepaidSeriesContext.totalVisitsInSeries}
+                        {service.prepaidSeriesContext.futureCoveredVisits > 0
+                          ? ` · ${service.prepaidSeriesContext.futureCoveredVisits} more covered`
+                          : ""}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onMarkPrepaid?.(service)}
+                    className="font-bold"
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 4,
+                      background: "#fff",
+                      color: "#166534",
+                      border: "1px solid #86EFAC",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Edit
+                  </button>
+                </div>
+              )}
               <div
                 style={{
                   display: "flex",
@@ -1656,37 +1703,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 }}
               >
                 {" "}
-                <button
-                  type="button"
-                  style={{
-                    padding: "9px 12px",
-                    borderRadius: 4,
-                    border: `1px solid ${D.inputBorder}`,
-                    background: "#fff",
-                    fontSize: 13,
-                    fontWeight: 800,
-                  }}
-                >
-                  Add services
-                </button>{" "}
-                <button
-                  type="button"
-                  style={{
-                    padding: "9px 12px",
-                    borderRadius: 4,
-                    border: `1px solid ${D.inputBorder}`,
-                    background: "#fff",
-                    fontSize: 13,
-                    fontWeight: 800,
-                  }}
-                >
-                  Add item
-                </button>{" "}
+                {onMarkPrepaid && !(service.prepaidAmount != null && Number(service.prepaidAmount) > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => onMarkPrepaid(service)}
+                    className="font-bold"
+                    style={{
+                      padding: "9px 12px",
+                      borderRadius: 4,
+                      border: `1px solid ${D.inputBorder}`,
+                      background: "#fff",
+                      fontSize: 13,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Mark prepaid
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() =>
                     setDiscountPresetId(discountPresetId || "custom")
                   }
+                  className="font-bold"
                   style={{
                     padding: "9px 12px",
                     borderRadius: 4,
@@ -1694,6 +1734,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                     background: "#fff",
                     fontSize: 13,
                     fontWeight: 800,
+                    cursor: "pointer",
                   }}
                 >
                   Add discount
@@ -2164,7 +2205,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
           </main>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

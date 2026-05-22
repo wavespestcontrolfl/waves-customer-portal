@@ -122,7 +122,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
   return (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-[110] flex items-end md:items-center justify-center"
+      className="fixed inset-0 z-[1200] flex items-end md:items-center justify-center"
       style={{ background: 'rgba(15,23,42,0.55)', padding: 16 }}
     >
       <div
