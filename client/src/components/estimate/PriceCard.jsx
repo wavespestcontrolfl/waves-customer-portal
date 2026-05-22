@@ -1,7 +1,6 @@
 /**
- * Primary price display — frequency-aware. The API stores recurring rates
- * as monthly equivalents, but customers see the actual service cadence:
- * quarterly per quarter, bi-monthly per bi-monthly visit, monthly per month.
+ * Primary price display. Pest frequencies bill by the selected cadence;
+ * service-tier programs can keep a monthly bill while showing visit cadence.
  */
 const W = {
   blue: '#065A8C', blueBright: '#009CDE', blueDeeper: '#1B2C5B',
@@ -74,6 +73,16 @@ function serviceInclusions(row = {}) {
   return SERVICE_INCLUSIONS[serviceKey(row)] || SERVICE_INCLUSIONS.pest_control;
 }
 
+function billingKeyForFrequency(frequency = {}) {
+  return frequency.billingFrequencyKey || frequency.key;
+}
+
+function isSeparateServiceCadence(frequency = {}) {
+  return !!frequency.billingFrequencyKey
+    && frequency.billingFrequencyKey !== frequency.key
+    && !!frequency.label;
+}
+
 const DEFAULT_WORDING = {
   dayLine: "That's just {amount}/day for complete home protection.",
   guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
@@ -85,9 +94,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const monthly = frequency.monthly;
   const annual = frequency.annual;
   const quoteRequired = frequency.quoteRequired === true;
-  const intervalMonths = frequency.key === 'quarterly' ? 3 : frequency.key === 'bi_monthly' ? 2 : 1;
-  const periodLabel = wording?.periodLabelByKey?.[frequency.key]
-    || (frequency.key === 'quarterly' ? '/quarter' : frequency.key === 'bi_monthly' ? '/bi-monthly' : '/mo');
+  const billingKey = billingKeyForFrequency(frequency);
+  const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
+  const periodLabel = wording?.periodLabelByKey?.[billingKey]
+    || (billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo');
+  const serviceCadenceLabel = isSeparateServiceCadence(frequency) ? frequency.label : null;
   const cadencePrice = quoteRequired || monthly == null ? null : Math.round(Number(monthly) * intervalMonths * 100) / 100;
   const anchorPrice = Number(frequency.perVisit || 0);
   const savings = cadencePrice != null && anchorPrice > cadencePrice ? Math.round((anchorPrice - cadencePrice) * 100) / 100 : 0;
@@ -158,6 +169,12 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       {!quoteRequired && annual ? (
         <div style={{ fontSize: 14, color: '#6B7280', marginTop: 8 }}>
           {fmtMoney(annual)} / year
+        </div>
+      ) : null}
+
+      {serviceCadenceLabel ? (
+        <div style={{ fontSize: 14, color: '#475569', marginTop: 8, fontWeight: 700 }}>
+          Service visits: {serviceCadenceLabel}
         </div>
       ) : null}
 

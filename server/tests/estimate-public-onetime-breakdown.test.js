@@ -2328,7 +2328,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Waves AI');
     expect(html).toContain('Waves AI reviewed your property before pricing this estimate');
     expect(html).toContain('id="estimate-ask-form"');
-    expect(html).toContain('Ask Waves AI');
+    expect(html).toContain('Ask Waves');
+    expect(html).toContain('aria-label="Ask Waves about this estimate"');
     expect(html).toContain('/api/public/estimates/');
     expect(html).toContain('/ask');
     expect(html).toContain('ESTIMATE_ASK_TOKEN');
@@ -2360,7 +2361,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
     expect(acceptedHtml).not.toContain('id="estimate-ask-form"');
-    expect(acceptedHtml).not.toContain('Ask Waves AI');
+    expect(acceptedHtml).not.toContain('Ask Waves');
   });
 
   test('estimate assistant fallback answers included service questions from estimate context', () => {
@@ -2514,6 +2515,105 @@ describe('public estimate one-time breakdown', () => {
     expect(answer).toContain('$244 / bi-monthly visit');
     expect(answer).toContain('WaveGuard setup is $99');
     expect(answer).toContain('Initial Roach Knockdown is $119');
+  });
+
+  test('estimate assistant treats tree and shrub tiers as monthly billing with service cadence', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Bronze',
+      },
+      estData: {
+        customerSelection: {
+          serviceTierKey: 'enhanced',
+          serviceTierLabel: 'Every 6 weeks',
+        },
+        result: {
+          recurring: {
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+          },
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Bronze',
+        frequencies: [
+          {
+            key: 'standard',
+            label: 'Bi-monthly',
+            serviceCategory: 'tree_shrub',
+            monthly: 72,
+            annual: 864,
+            billingFrequencyKey: 'monthly',
+            included: [{ label: 'Bi-monthly tree & shrub program', detail: '6 visits per year' }],
+          },
+          {
+            key: 'enhanced',
+            label: 'Every 6 weeks',
+            serviceCategory: 'tree_shrub',
+            monthly: 96,
+            annual: 1152,
+            billingFrequencyKey: 'monthly',
+            included: [{ label: 'Every 6 weeks tree & shrub program', detail: '9 visits per year' }],
+          },
+        ],
+      },
+    });
+    const answer = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.billing.amountText).toBe('$96 / month');
+    expect(context.billing.serviceCadence).toBe('Every 6 weeks');
+    expect(context.services[0].summary).toContain('Every 6 weeks');
+    expect(context.services[0].summary).toContain('9 visits per year');
+    expect(answer).toContain('$96 / month');
+    expect(answer).toContain('Service visits are Every 6 weeks.');
+    expect(answer).not.toContain('/ bi-monthly visit');
+  });
+
+  test('estimate assistant invoice mode uses selected tier billing cadence', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Bronze',
+        bill_by_invoice: true,
+      },
+      estData: {
+        customerSelection: {
+          serviceTierKey: 'enhanced',
+        },
+        result: {
+          recurring: {
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+          },
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Bronze',
+        frequencies: [
+          {
+            key: 'standard',
+            label: 'Bi-monthly',
+            serviceCategory: 'tree_shrub',
+            monthly: 72,
+            annual: 864,
+            billingFrequencyKey: 'monthly',
+          },
+          {
+            key: 'enhanced',
+            label: 'Every 6 weeks',
+            serviceCategory: 'tree_shrub',
+            monthly: 96,
+            annual: 1152,
+            billingFrequencyKey: 'monthly',
+          },
+        ],
+      },
+    });
+    const answer = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.billing.amountText).toBe('$96 / month');
+    expect(context.billing.invoiceDueText).toBe('$96');
+    expect(answer).toContain('invoice due immediately for $96');
+    expect(answer).not.toContain('$288');
   });
 
   test('estimate assistant honors the currently selected pricing state', () => {

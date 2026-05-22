@@ -120,6 +120,36 @@ function selectedCombinedFrequency(pricing = {}, selectedFrequencyKey) {
   return frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
 }
 
+function serviceLabelForKey(key) {
+  switch (key) {
+    case 'tree_shrub': return 'Tree & Shrub';
+    case 'lawn_care': return 'Lawn Care';
+    case 'mosquito': return 'Mosquito';
+    case 'termite_bait': return 'Termite Bait';
+    case 'palm_injection': return 'Palm Injection';
+    case 'rodent_bait': return 'Rodent Bait Stations';
+    case 'pest_control': return 'Pest Control';
+    default: return 'Service';
+  }
+}
+
+function recurringServiceForEstimate(pricing = {}) {
+  const services = Array.isArray(pricing?.services) ? pricing.services : [];
+  return services.find((service) => service?.isRecurring) || services[0] || null;
+}
+
+function frequencyServiceCategory(frequency = {}, pricing = {}) {
+  if (frequency?.serviceCategory) return frequency.serviceCategory;
+  const service = recurringServiceForEstimate(pricing);
+  return service?.key || pricing?.serviceCategory || 'pest_control';
+}
+
+function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
+  const left = String(frequencyLabel || '').toLowerCase();
+  const right = String(serviceLabel || '').toLowerCase();
+  return !!left && !!right && (left.includes(right) || right.includes(left));
+}
+
 function Page({ children }) {
   return (
     <div style={{
@@ -428,7 +458,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           fontWeight: 700,
           marginBottom: 6,
         }}>
-          Waves AI
+          Ask Waves
         </div>
         <h2 style={{
           fontFamily: FONTS.serif,
@@ -439,7 +469,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           margin: 0,
           letterSpacing: 0,
         }}>
-          Ask Waves AI
+          Ask Waves
         </h2>
       </div>
 
@@ -454,7 +484,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
           placeholder="Ask about services, pricing, scheduling, or Waves"
-          aria-label="Ask Waves AI about this estimate"
+          aria-label="Ask Waves about this estimate"
           maxLength={500}
           style={{
             width: '100%',
@@ -537,15 +567,22 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   );
 }
 
-function getServiceLabel(frequency, estimate, pricing) {
+export function getServiceLabel(frequency, estimate, pricing) {
   if (estimate?.isOneTimeOnly) {
     const primary = pricing?.oneTimeBreakdown?.items?.find((item) => item?.kind !== 'discount');
     return primary?.label || 'One-time service';
   }
-  if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
+  const category = frequencyServiceCategory(frequency, pricing);
+  const service = recurringServiceForEstimate(pricing);
+  const serviceLabel = service?.label || serviceLabelForKey(category);
+  if (category === 'pest_control' && estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
     return `${frequency?.label || 'Quarterly'} Pest Control or One-Time Pest Control`;
   }
-  if (frequency?.label) return `${frequency.label} Pest Control`;
+  if (frequency?.label) {
+    return labelAlreadyIncludesService(frequency.label, serviceLabel)
+      ? frequency.label
+      : `${frequency.label} ${serviceLabel}`;
+  }
   return 'Custom quote';
 }
 
