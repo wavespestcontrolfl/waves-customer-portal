@@ -409,6 +409,46 @@ async function sendPaymentRetryNotice({
   });
 }
 
+async function sendPaymentFailed({
+  customerId,
+  paymentIntentId,
+  attemptId,
+  invoiceId = null,
+  paymentId = null,
+  idempotencyKey,
+} = {}) {
+  let invoice = invoiceId ? await db('invoices').where({ id: invoiceId }).first().catch(() => null) : null;
+  let payment = paymentId ? await db('payments').where({ id: paymentId }).first().catch(() => null) : null;
+  if (!payment && paymentIntentId) {
+    payment = await db('payments').where({ stripe_payment_intent_id: paymentIntentId }).first().catch(() => null);
+  }
+  if (!invoice && payment) invoice = await invoiceForPayment(payment, invoiceId);
+  if (!invoice && paymentIntentId) {
+    invoice = await db('invoices').where({ stripe_payment_intent_id: paymentIntentId }).first().catch(() => null);
+  }
+  const payUrl = invoice?.token
+    ? `${publicPortalUrl()}/pay/${invoice.token}`
+    : portalBillingUrl();
+  const payload = {
+    payment_url: payUrl,
+    invoice_number: invoice?.invoice_number || '',
+  };
+  const effectiveCustomerId = customerId || invoice?.customer_id || payment?.customer_id;
+  if (!effectiveCustomerId) return { ok: false, skipped: true, reason: 'customer_not_resolved' };
+  const dedupeKey = idempotencyKey
+    || `payment.failed:${paymentIntentId || invoice?.id || effectiveCustomerId}:${attemptId || 'no_attempt'}`;
+  return sendLifecycleTemplate({
+    customerId: effectiveCustomerId,
+    templateKey: 'payment.failed',
+    eventType: 'payment.failed',
+    payload,
+    invoiceId: invoice?.id || invoiceId || null,
+    paymentId: payment?.id || paymentId || null,
+    paymentMethodId: payment?.payment_method_id || null,
+    idempotencyKey: dedupeKey,
+  });
+}
+
 async function sendPaymentPlanConfirmed({
   customerId,
   paymentPlanId,
@@ -479,6 +519,7 @@ module.exports = {
   sendPaymentMethodUpdated,
   sendPaymentMethodExpiring,
   sendPaymentRetryNotice,
+  sendPaymentFailed,
   sendPaymentPlanConfirmed,
   sendRefundIssued,
   _private: {
