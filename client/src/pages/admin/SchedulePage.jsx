@@ -2174,6 +2174,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
 // PROTOCOL PANEL — shows all 5 protocol layers for a service
 // =========================================================================
 export function ProtocolPanel({ service, onClose }) {
+  // Monochrome admin V2 palette — shadows the module-level D inside this panel
+  // so the Service Protocol flyout matches the zinc admin shell instead of the
+  // warmer legacy slate/teal/amber accents.
+  const D = {
+    bg: "#F4F4F5",
+    card: "#FFFFFF",
+    border: "#E4E4E7",
+    input: "#FFFFFF",
+    teal: "#18181B",
+    green: "#52525B",
+    amber: "#52525B",
+    red: "#C8312F",
+    blue: "#18181B",
+    purple: "#52525B",
+    gray: "#A1A1AA",
+    text: "#3F3F46",
+    muted: "#71717A",
+    white: "#FFFFFF",
+    heading: "#18181B",
+    inputBorder: "#D4D4D8",
+  };
   const [photos, setPhotos] = useState([]);
   const [seasonal, setSeasonal] = useState([]);
   const [scripts, setScripts] = useState([]);
@@ -2317,12 +2338,14 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "equipment", label: " Equipment", count: equipment.length },
   ];
 
+  // Pest pressure stays ordinal but monochrome — peak gets alert-fg because
+  // it's a genuine "act now" signal; the rest step down a zinc ramp.
   const pressureColors = {
-    peak: D.red,
-    high: D.amber,
-    moderate: D.teal,
-    low: D.green,
-    dormant: D.gray,
+    peak: "#C8312F",
+    high: "#18181B",
+    moderate: "#52525B",
+    low: "#71717A",
+    dormant: "#A1A1AA",
   };
 
   return (
@@ -2380,36 +2403,42 @@ export function ProtocolPanel({ service, onClose }) {
       <div
         style={{
           display: "flex",
-          gap: 4,
-          padding: "8px 12px",
+          gap: 16,
+          padding: "0 16px",
           borderBottom: `1px solid ${D.border}`,
           overflowX: "auto",
           WebkitOverflowScrolling: "touch",
           flexWrap: "nowrap",
         }}
       >
-        {SECTIONS.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => setActiveSection(s.id)}
-            style={{
-              padding: "6px 12px",
-              borderRadius: 8,
-              border: "none",
-              cursor: "pointer",
-              whiteSpace: "nowrap",
-              fontSize: 11,
-              fontWeight: 600,
-              flexShrink: 0,
-              minHeight: 44,
-              background: activeSection === s.id ? D.teal : "transparent",
-              color: activeSection === s.id ? D.bg : D.muted,
-            }}
-          >
-            {s.label}
-            {s.count !== null ? ` (${s.count})` : ""}
-          </button>
-        ))}
+        {SECTIONS.map((s) => {
+          const active = activeSection === s.id;
+          return (
+            <button
+              key={s.id}
+              onClick={() => setActiveSection(s.id)}
+              style={{
+                padding: "12px 2px",
+                marginBottom: -1,
+                background: "transparent",
+                border: "none",
+                borderBottom: `2px solid ${active ? D.heading : "transparent"}`,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                fontSize: 11,
+                fontWeight: 500,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+                flexShrink: 0,
+                minHeight: 44,
+                color: active ? D.heading : D.muted,
+              }}
+            >
+              {s.label.trim()}
+              {s.count !== null ? ` (${s.count})` : ""}
+            </button>
+          );
+        })}
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
@@ -2500,11 +2529,11 @@ export function ProtocolPanel({ service, onClose }) {
                     {!lawnContext.lawnSqft && (
                       <div
                         style={{
-                          background: "#FEF3C7",
+                          background: D.bg,
                           borderRadius: 10,
                           padding: 12,
-                          border: "1px solid #F59E0B55",
-                          color: D.amber,
+                          border: `1px solid ${D.border}`,
+                          color: D.text,
                           fontSize: 12,
                           lineHeight: 1.45,
                           marginBottom: 12,
@@ -3146,7 +3175,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.amber }}
+                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
                     >
                       {seasonal.length}
                     </div>{" "}
@@ -3173,7 +3202,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.teal }}
+                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
                     >
                       {photos.length}
                     </div>{" "}
@@ -3200,7 +3229,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.green }}
+                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
                     >
                       {scripts.length}
                     </div>{" "}
@@ -3224,7 +3253,7 @@ export function ProtocolPanel({ service, onClose }) {
                       style={{
                         fontSize: 12,
                         fontWeight: 700,
-                        color: D.amber,
+                        color: D.heading,
                         marginBottom: 6,
                       }}
                     >
@@ -3235,10 +3264,10 @@ export function ProtocolPanel({ service, onClose }) {
                         key={i}
                         style={{
                           fontSize: 12,
-                          color: a.type === "chemical" ? D.red : D.amber,
+                          color: a.type === "chemical" ? D.red : D.text,
                           marginBottom: 3,
                           paddingLeft: 8,
-                          borderLeft: `2px solid ${a.type === "chemical" ? D.red : D.amber}`,
+                          borderLeft: `2px solid ${a.type === "chemical" ? D.red : D.heading}`,
                         }}
                       >
                         {a.text}
