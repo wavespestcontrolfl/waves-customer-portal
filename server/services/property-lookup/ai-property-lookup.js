@@ -51,7 +51,12 @@ const SOURCE_TYPE_LABELS = {
   unknown: 'unknown source',
 };
 
-async function lookupStoriesFromAI(address, hints = {}) {
+function positiveInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+async function lookupStoriesFromAI(address, hints = {}, options = {}) {
   if (!process.env.ANTHROPIC_API_KEY) {
     logger.info('[ai-stories] skipped — ANTHROPIC_API_KEY not set');
     return null;
@@ -61,8 +66,9 @@ async function lookupStoriesFromAI(address, hints = {}) {
     return null;
   }
 
-  const timeoutMs = Number(process.env.AI_STORIES_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
-  const maxSearches = Number(process.env.AI_STORIES_MAX_SEARCHES) || DEFAULT_MAX_SEARCHES;
+  const configuredTimeoutMs = positiveInt(process.env.AI_STORIES_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+  const timeoutMs = positiveInt(options.timeoutMs, configuredTimeoutMs);
+  const maxSearches = positiveInt(options.maxSearches || process.env.AI_STORIES_MAX_SEARCHES, DEFAULT_MAX_SEARCHES);
 
   const t0 = Date.now();
   logger.info('[ai-stories] calling Claude with web_search', {
@@ -220,8 +226,8 @@ async function lookupPropertyFromAI(address) {
     return null;
   }
 
-  const timeoutMs = Number(process.env.AI_PROPERTY_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
-  const maxSearches = Number(process.env.AI_PROPERTY_MAX_SEARCHES) || DEFAULT_MAX_SEARCHES;
+  const timeoutMs = positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+  const maxSearches = positiveInt(process.env.AI_PROPERTY_MAX_SEARCHES, DEFAULT_MAX_SEARCHES);
 
   const t0 = Date.now();
   logger.info('[ai-property] calling Claude with web_search', {
@@ -306,7 +312,7 @@ async function lookupPropertyFromOpenAI(address) {
     return null;
   }
 
-  const timeoutMs = Number(process.env.AI_PROPERTY_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+  const timeoutMs = positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();
@@ -393,7 +399,7 @@ async function lookupPropertyFromGemini(address) {
     return null;
   }
 
-  const timeoutMs = Number(process.env.AI_PROPERTY_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+  const timeoutMs = positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const t0 = Date.now();

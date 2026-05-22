@@ -31,6 +31,14 @@ const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
+const DEFAULT_LOOKUP_TOTAL_BUDGET_MS = 60000;
+const DEFAULT_LOOKUP_RESPONSE_MARGIN_MS = 2500;
+const DEFAULT_STORIES_MIN_REMAINING_MS = 12000;
+const DEFAULT_AI_STORIES_TIMEOUT_MS = 30000;
+const DEFAULT_MAPS_TIMEOUT_MS = 8000;
+const DEFAULT_IMAGE_TIMEOUT_MS = 8000;
+const DEFAULT_VISION_PROVIDER_TIMEOUT_MS = 25000;
+const DEFAULT_VISION_MIN_REMAINING_MS = 10000;
 
 // SWFL bounding box — reject addresses outside service area
 const SWFL_BOUNDS = { latMin: 26.3, latMax: 27.8, lngMin: -82.9, lngMax: -81.5 };
@@ -38,6 +46,52 @@ const TURF_REVIEW_THRESHOLD_SQFT = 15000;
 const TURF_MANUAL_CONFIRMATION_SQFT = 20000;
 const TURF_HIGH_LOT_RATIO = 0.55;
 const TURF_PRICED_SERVICES = new Set(['LAWN', 'OT_LAWN', 'TOPDRESS', 'DETHATCH', 'PLUGGING']);
+
+function positiveIntEnv(name, fallback) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function getLookupTimingConfig() {
+  return {
+    totalBudgetMs: positiveIntEnv('PROPERTY_LOOKUP_TOTAL_BUDGET_MS', DEFAULT_LOOKUP_TOTAL_BUDGET_MS),
+    responseMarginMs: positiveIntEnv('PROPERTY_LOOKUP_RESPONSE_MARGIN_MS', DEFAULT_LOOKUP_RESPONSE_MARGIN_MS),
+    storiesMinRemainingMs: positiveIntEnv('PROPERTY_LOOKUP_STORIES_MIN_REMAINING_MS', DEFAULT_STORIES_MIN_REMAINING_MS),
+    mapsTimeoutMs: positiveIntEnv('PROPERTY_LOOKUP_MAPS_TIMEOUT_MS', DEFAULT_MAPS_TIMEOUT_MS),
+    imageTimeoutMs: positiveIntEnv('PROPERTY_LOOKUP_IMAGE_TIMEOUT_MS', DEFAULT_IMAGE_TIMEOUT_MS),
+    visionProviderTimeoutMs: positiveIntEnv('PROPERTY_LOOKUP_VISION_TIMEOUT_MS', DEFAULT_VISION_PROVIDER_TIMEOUT_MS),
+    visionMinRemainingMs: positiveIntEnv('PROPERTY_LOOKUP_VISION_MIN_REMAINING_MS', DEFAULT_VISION_MIN_REMAINING_MS),
+    storiesTimeoutMs: positiveIntEnv('AI_STORIES_TIMEOUT_MS', DEFAULT_AI_STORIES_TIMEOUT_MS),
+  };
+}
+
+function remainingLookupMs(startMs, timing) {
+  return Math.max(0, timing.totalBudgetMs - (Date.now() - startMs));
+}
+
+function createFetchTimeout(timeoutMs) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timer),
+    didTimeout: () => timedOut || controller.signal.aborted,
+  };
+}
+
+function timeoutError(label, timeoutMs) {
+  const err = new Error(`${label} timed out after ${timeoutMs}ms`);
+  err.code = 'ETIMEDOUT';
+  return err;
+}
+
+function isTimeoutFailure(err, timeout) {
+  return timeout.didTimeout() || err?.name === 'TimeoutError' || err?.code === 'ETIMEDOUT';
+}
 
 // ─────────────────────────────────────────────
 // CORE LOOKUP — reusable by admin + public routes
@@ -64,6 +118,8 @@ async function performPropertyLookup(address) {
   };
 
   const t0 = Date.now();
+  const timing = getLookupTimingConfig();
+  result.meta.budgetMs = timing.totalBudgetMs;
 
   // ── STEP 1: AI property search ──
   // Pull pricing-relevant public facts (sqft, lot, year built, beds, baths,
@@ -83,7 +139,7 @@ async function performPropertyLookup(address) {
   // ── STEP 2: Geocode + Satellite Images ──
   let lat, lng;
   try {
-    const geo = await geocodeAddress(address);
+    const geo = await geocodeAddress(address, timing.mapsTimeoutMs);
     lat = geo.lat;
     lng = geo.lng;
 
@@ -109,11 +165,11 @@ async function performPropertyLookup(address) {
       const wideUrlWithKey = `${GOOGLE_STATIC_MAP}?center=${lat},${lng}&zoom=18&size=640x640&maptype=satellite&format=png&key=${mapsKey}`;
 
       const [microCloseB64, ultraCloseB64, superCloseB64, closeB64, wideB64] = await Promise.all([
-        fetchImageAsBase64(microCloseUrl).catch(() => null),
-        fetchImageAsBase64(ultraCloseUrl).catch(() => null),
-        fetchImageAsBase64(superCloseUrl).catch(() => null),
-        fetchImageAsBase64(closeUrlWithKey).catch(() => null),
-        fetchImageAsBase64(wideUrlWithKey).catch(() => null),
+        fetchImageAsBase64(microCloseUrl, timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(ultraCloseUrl, timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(superCloseUrl, timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(closeUrlWithKey, timing.imageTimeoutMs).catch(() => null),
+        fetchImageAsBase64(wideUrlWithKey, timing.imageTimeoutMs).catch(() => null),
       ]);
       console.log(`[property-lookup] Satellite images: micro=${!!microCloseB64}, ultra=${!!ultraCloseB64}, super=${!!superCloseB64}, close=${!!closeB64}, wide=${!!wideB64}`);
 
@@ -138,7 +194,9 @@ async function performPropertyLookup(address) {
   }
 
   // ── STEP 3: Trio AI Vision Analysis (Claude + OpenAI + Gemini) ──
-  if (result.satellite?._closeB64 && result.satellite?._wideB64) {
+  const visionBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
+  const visionTimeoutMs = Math.min(timing.visionProviderTimeoutMs, visionBudgetMs);
+  if (result.satellite?._closeB64 && result.satellite?._wideB64 && visionBudgetMs >= timing.visionMinRemainingMs) {
     const [claudeResult, openaiResult, geminiResult] = await Promise.allSettled([
       // Claude Vision
       (async () => {
@@ -159,7 +217,8 @@ async function performPropertyLookup(address) {
             address,
             result.satellite._superCloseB64,
             result.satellite._ultraCloseB64,
-            result.satellite._microCloseB64
+            result.satellite._microCloseB64,
+            visionTimeoutMs
           );
           console.log(`[CLAUDE DEBUG] Success! Confidence: ${claudeAnalysis?.confidenceScore || 'N/A'}%`);
           return claudeAnalysis;
@@ -185,7 +244,8 @@ async function performPropertyLookup(address) {
               result.satellite?._wideB64,
             ].filter(Boolean),
             result.propertyRecord,
-            address
+            address,
+            visionTimeoutMs
           );
           console.log(`[OPENAI DEBUG] Success! Confidence: ${openaiAnalysis?.confidenceScore || 'N/A'}%`);
           return openaiAnalysis;
@@ -214,7 +274,8 @@ async function performPropertyLookup(address) {
             ].filter(Boolean),
             result.propertyRecord,
             address,
-            geminiKey
+            geminiKey,
+            visionTimeoutMs
           );
           console.log(`[GEMINI DEBUG] Success! Confidence: ${geminiAnalysis?.confidenceScore || 'N/A'}%`);
           return geminiAnalysis;
@@ -254,6 +315,16 @@ async function performPropertyLookup(address) {
     } else {
       result.errors.push({ source: 'ai', message: 'All AI vision models failed — check API keys' });
     }
+  } else if (result.satellite?._closeB64 && result.satellite?._wideB64) {
+    logger.info('[property-lookup] skipped satellite vision to keep lookup responsive', {
+      elapsedMs: Date.now() - t0,
+      remainingMs: remainingLookupMs(t0, timing),
+      minRemainingMs: timing.visionMinRemainingMs,
+    });
+    result.errors.push({
+      source: 'ai',
+      message: 'Skipped satellite vision to keep property lookup responsive',
+    });
   } else if (!result.satellite?._closeB64) {
     result.errors.push({ source: 'ai', message: 'Satellite images not available — cannot run AI analysis' });
   }
@@ -277,10 +348,26 @@ async function performPropertyLookup(address) {
         yearBuilt: result.propertyRecord.yearBuilt || null,
         propertyType: result.propertyRecord.propertyType || null,
       };
-      const aiStories = await lookupStoriesFromAI(address, hints).catch((err) => {
-        result.errors.push({ source: 'ai-stories', message: err?.message || String(err) });
-        return null;
-      });
+      const storyBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
+      let aiStories = null;
+      if (storyBudgetMs >= timing.storiesMinRemainingMs) {
+        aiStories = await lookupStoriesFromAI(address, hints, {
+          timeoutMs: Math.min(storyBudgetMs, timing.storiesTimeoutMs),
+        }).catch((err) => {
+          result.errors.push({ source: 'ai-stories', message: err?.message || String(err) });
+          return null;
+        });
+      } else {
+        logger.info('[property-lookup] skipped stories fallback to keep lookup responsive', {
+          elapsedMs: Date.now() - t0,
+          remainingMs: remainingLookupMs(t0, timing),
+          minRemainingMs: timing.storiesMinRemainingMs,
+        });
+        result.errors.push({
+          source: 'ai-stories',
+          message: 'Skipped stories fallback to keep property lookup responsive',
+        });
+      }
       if (aiStories) {
         result.propertyRecord.stories = aiStories;
         result.propertyRecord._storiesSource = 'ai';
@@ -366,35 +453,51 @@ function normalizeRoof(raw) {
 // ─────────────────────────────────────────────
 // GEOCODE
 // ─────────────────────────────────────────────
-async function geocodeAddress(address) {
+async function geocodeAddress(address, timeoutMs = DEFAULT_MAPS_TIMEOUT_MS) {
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
   if (!mapsKey) throw new Error('No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured');
   const url = `${GOOGLE_GEOCODE}?address=${encodeURIComponent(address)}&key=${mapsKey}`;
-  const resp = await fetch(url);
-  const data = await resp.json();
-  if (data.status !== 'OK' || !data.results?.length) {
-    throw new Error(`Geocode failed: ${data.status}`);
+  const timeout = createFetchTimeout(timeoutMs);
+  try {
+    const resp = await fetch(url, { signal: timeout.signal });
+    const data = await resp.json();
+    if (data.status !== 'OK' || !data.results?.length) {
+      throw new Error(`Geocode failed: ${data.status}`);
+    }
+    const loc = data.results[0].geometry.location;
+    return { lat: loc.lat, lng: loc.lng };
+  } catch (err) {
+    if (isTimeoutFailure(err, timeout)) throw timeoutError('Google geocode', timeoutMs);
+    throw err;
+  } finally {
+    timeout.clear();
   }
-  const loc = data.results[0].geometry.location;
-  return { lat: loc.lat, lng: loc.lng };
 }
 
 
 // ─────────────────────────────────────────────
 // IMAGE FETCH (base64 for Claude)
 // ─────────────────────────────────────────────
-async function fetchImageAsBase64(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`);
-  const buffer = await resp.arrayBuffer();
-  return Buffer.from(buffer).toString('base64');
+async function fetchImageAsBase64(url, timeoutMs = DEFAULT_IMAGE_TIMEOUT_MS) {
+  const timeout = createFetchTimeout(timeoutMs);
+  try {
+    const resp = await fetch(url, { signal: timeout.signal });
+    if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`);
+    const buffer = await resp.arrayBuffer();
+    return Buffer.from(buffer).toString('base64');
+  } catch (err) {
+    if (isTimeoutFailure(err, timeout)) throw timeoutError('Satellite image fetch', timeoutMs);
+    throw err;
+  } finally {
+    timeout.clear();
+  }
 }
 
 
 // ─────────────────────────────────────────────
 // CLAUDE VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithClaude(closeB64, wideB64, propertyRecord, address, superCloseB64, ultraCloseB64, microCloseB64) {
+async function analyzeWithClaude(closeB64, wideB64, propertyRecord, address, superCloseB64, ultraCloseB64, microCloseB64, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS) {
   const rcContext = propertyRecord ? `
 Property record for this address:
 - Address: ${propertyRecord.formattedAddress}
@@ -501,52 +604,62 @@ Return a JSON object with exactly these fields:
   "analysisNotes": "string — any caveats, things you couldn't determine, or recommendations for field verification"
 }`;
 
-  const resp = await fetch(ANTHROPIC_API, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 4096,
-      messages: [{
-        role: 'user',
-        content: [
-          ...(microCloseB64 ? [{
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/png', data: microCloseB64 }
-          }] : []),
-          ...(ultraCloseB64 ? [{
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/png', data: ultraCloseB64 }
-          }] : []),
-          ...(superCloseB64 ? [{
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/png', data: superCloseB64 }
-          }] : []),
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/png', data: closeB64 }
-          },
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/png', data: wideB64 }
-          },
-          { type: 'text', text: userPrompt }
-        ]
-      }],
-      system: systemPrompt
-    })
-  });
+  const timeout = createFetchTimeout(timeoutMs);
+  let data;
+  try {
+    const resp = await fetch(ANTHROPIC_API, {
+      method: 'POST',
+      signal: timeout.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: MODELS.FLAGSHIP,
+        max_tokens: 4096,
+        messages: [{
+          role: 'user',
+          content: [
+            ...(microCloseB64 ? [{
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: microCloseB64 }
+            }] : []),
+            ...(ultraCloseB64 ? [{
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: ultraCloseB64 }
+            }] : []),
+            ...(superCloseB64 ? [{
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: superCloseB64 }
+            }] : []),
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: closeB64 }
+            },
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: wideB64 }
+            },
+            { type: 'text', text: userPrompt }
+          ]
+        }],
+        system: systemPrompt
+      })
+    });
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`Claude API ${resp.status}: ${errText.substring(0, 200)}`);
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Claude API ${resp.status}: ${errText.substring(0, 200)}`);
+    }
+
+    data = await resp.json();
+  } catch (err) {
+    if (isTimeoutFailure(err, timeout)) throw timeoutError('Claude vision analysis', timeoutMs);
+    throw err;
+  } finally {
+    timeout.clear();
   }
-
-  const data = await resp.json();
   console.log(`[CLAUDE VISION DEBUG] stop_reason: ${data.stop_reason}, usage: ${JSON.stringify(data.usage || {})}`);
   const text = data.content
     .filter(b => b.type === 'text')
@@ -1898,7 +2011,7 @@ router.post('/calculate-estimate', async (req, res) => {
 // ─────────────────────────────────────────────
 // OPENAI VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithOpenAI(imageB64s, propertyRecord, address) {
+async function analyzeWithOpenAI(imageB64s, propertyRecord, address, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS) {
   const content = [
     { type: 'input_text', text: buildSatelliteVisionPrompt(address, propertyRecord) },
     ...imageB64s.map((imageB64) => ({
@@ -1908,24 +2021,34 @@ async function analyzeWithOpenAI(imageB64s, propertyRecord, address) {
     })),
   ];
 
-  const resp = await fetch(OPENAI_RESPONSES_API, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: OPENAI_VISION_MODEL,
-      input: [{ role: 'user', content }],
-    }),
-  });
+  const timeout = createFetchTimeout(timeoutMs);
+  let data;
+  try {
+    const resp = await fetch(OPENAI_RESPONSES_API, {
+      method: 'POST',
+      signal: timeout.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_VISION_MODEL,
+        input: [{ role: 'user', content }],
+      }),
+    });
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`OpenAI API ${resp.status}: ${errText.substring(0, 200)}`);
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`OpenAI API ${resp.status}: ${errText.substring(0, 200)}`);
+    }
+
+    data = await resp.json();
+  } catch (err) {
+    if (isTimeoutFailure(err, timeout)) throw timeoutError('OpenAI vision analysis', timeoutMs);
+    throw err;
+  } finally {
+    timeout.clear();
   }
-
-  const data = await resp.json();
   const text = extractOpenAIText(data);
   if (!text) throw new Error('OpenAI returned empty response');
   const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -1937,34 +2060,44 @@ async function analyzeWithOpenAI(imageB64s, propertyRecord, address) {
 // ─────────────────────────────────────────────
 // GEMINI VISION ANALYSIS
 // ─────────────────────────────────────────────
-async function analyzeWithGemini(imageB64s, propertyRecord, address, apiKey) {
+async function analyzeWithGemini(imageB64s, propertyRecord, address, apiKey, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS) {
   const prompt = buildSatelliteVisionPrompt(address, propertyRecord);
 
-  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{
-        parts: [
-          ...imageB64s.map((imageB64) => ({ inlineData: { mimeType: 'image/png', data: imageB64 } })),
-          { text: prompt },
-        ],
-      }],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 4096,
-        responseMimeType: 'application/json',
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    }),
-  });
+  const timeout = createFetchTimeout(timeoutMs);
+  let data;
+  try {
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      signal: timeout.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            ...imageB64s.map((imageB64) => ({ inlineData: { mimeType: 'image/png', data: imageB64 } })),
+            { text: prompt },
+          ],
+        }],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 4096,
+          responseMimeType: 'application/json',
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }),
+    });
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`Gemini API ${resp.status}: ${errText.substring(0, 200)}`);
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Gemini API ${resp.status}: ${errText.substring(0, 200)}`);
+    }
+
+    data = await resp.json();
+  } catch (err) {
+    if (isTimeoutFailure(err, timeout)) throw timeoutError('Gemini vision analysis', timeoutMs);
+    throw err;
+  } finally {
+    timeout.clear();
   }
-
-  const data = await resp.json();
   console.log(`[GEMINI DEBUG] finishReason: ${data.candidates?.[0]?.finishReason}, usage: ${JSON.stringify(data.usageMetadata || {})}`);
   // Gemini 2.5+ may return multiple parts (thinking + response)
   const parts = data.candidates?.[0]?.content?.parts || [];
