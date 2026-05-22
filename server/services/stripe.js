@@ -1430,6 +1430,9 @@ const StripeService = {
 
 // Map Stripe error codes/decline_codes to friendly customer-facing messages.
 // Raw Stripe error messages are logged server-side, never returned to the customer.
+// Accepts either a thrown Stripe error (`err.code` / `err.raw.code`) or a
+// PaymentIntent `last_payment_error` object (`code` / `decline_code` at top
+// level) — same shape for our purposes.
 function friendlyStripeError(err) {
   const declineCode = err?.decline_code || err?.raw?.decline_code;
   const code = err?.code || err?.raw?.code;
@@ -1441,8 +1444,10 @@ function friendlyStripeError(err) {
     processing_error: 'A processing error occurred. Please try again.',
     incorrect_number: 'The card number is incorrect.',
     authentication_required: 'Your bank requires additional authentication. Please retry.',
+    payment_intent_authentication_failure: 'Card authentication failed. Please retry or use a different card.',
   };
   return map[declineCode] || map[code] || 'We could not process your payment. Please try again or use a different payment method.';
 }
 
 module.exports = StripeService;
+module.exports.friendlyStripeError = friendlyStripeError;

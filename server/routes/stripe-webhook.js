@@ -881,6 +881,17 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   const piId = paymentIntent.id;
   const failureMessage = paymentIntent.last_payment_error?.message || 'Unknown failure';
   const failureCode = paymentIntent.last_payment_error?.code || null;
+  // Friendly version for human-facing surfaces (bell + push). Raw Stripe
+  // strings like "The provided PaymentMethod has failed authentication.
+  // You can provide payment_method_data or a new PaymentMethod to attempt
+  // to fulfill this PaymentIntent again." are developer messages and
+  // unreadable in a notification banner. We keep the raw text in
+  // payments.failure_reason / ach_failure_log.failure_reason for
+  // diagnostics; only the bell body uses the friendly version.
+  const { friendlyStripeError } = require('../services/stripe');
+  const friendlyFailure = paymentIntent.last_payment_error
+    ? friendlyStripeError(paymentIntent.last_payment_error)
+    : 'Payment could not be completed.';
 
   logger.warn(`[stripe-webhook] PaymentIntent failed: ${piId} — ${failureMessage}`);
 
@@ -929,12 +940,12 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // above. Emit even when no invoice is bound — payment_failed is
   // urgent enough that an orphan PI failure still warrants a bell
   // entry; link defaults to /admin/revenue in that case.
-  notifyPaymentFailed(paymentIntent, failureMessage, eventId).catch((err) => {
+  notifyPaymentFailed(paymentIntent, friendlyFailure, eventId).catch((err) => {
     logger.warn(`[stripe-webhook] payment_failed notify failed: ${err.message}`);
   });
 }
 
-async function notifyPaymentFailed(paymentIntent, failureMessage, eventId) {
+async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
   const piId = paymentIntent.id;
   // Failures are NOT one-shot per PI: /api/pay/:token/update-amount
   // mutates an existing PI's amount and the customer can fail again
@@ -979,7 +990,7 @@ async function notifyPaymentFailed(paymentIntent, failureMessage, eventId) {
   await triggerNotification('payment_failed', {
     amount: (paymentIntent.amount || 0) / 100,
     customerName: customerLabel(customer),
-    reason: failureMessage,
+    reason: friendlyFailure,
     invoiceId: failedInvoice?.id || null,
   });
 }
