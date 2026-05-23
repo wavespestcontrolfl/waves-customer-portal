@@ -33,14 +33,20 @@ const ARGS = Object.fromEntries(
 const LIVE = !!ARGS.live;
 const MIN_SCORE = ARGS['min-score'] ? parseInt(ARGS['min-score'], 10) : undefined;
 
+function redactCli(value) {
+  return String(value || '')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[redacted-email]')
+    .replace(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b/g, '[redacted-phone]');
+}
+
 (async function main() {
   try {
     console.log(`\n── Autonomous Runner: runNext (${LIVE ? 'LIVE' : 'DRY-RUN'}) ──\n`);
     const result = await runner.runNext({ dryRun: !LIVE, minScore: MIN_SCORE });
 
     console.log(`Outcome:           ${result.outcome}`);
-    if (result.skip_reason) console.log(`Skip reason:       ${result.skip_reason}`);
-    if (result.failure_message) console.log(`Failure:           ${result.failure_message}`);
+    if (result.skip_reason) console.log(`Skip reason:       ${redactCli(result.skip_reason)}`);
+    if (result.failure_message) console.log(`Failure:           ${redactCli(result.failure_message)}`);
     console.log(`Action type:       ${result.action_type || '—'}`);
     console.log(`Page type:         ${result.page_type || '—'}`);
     console.log(`Shadow mode:       ${result.shadow_mode ? 'YES' : 'no'}`);
@@ -60,17 +66,17 @@ const MIN_SCORE = ARGS['min-score'] ? parseInt(ARGS['min-score'], 10) : undefine
 
     if (result.reviewer_notes) {
       console.log('');
-      console.log(`Reviewer notes: ${result.reviewer_notes}`);
+      console.log(`Reviewer notes: ${redactCli(result.reviewer_notes)}`);
     }
     if (result.uniqueness_gate_result?.failed_count > 0) {
       console.log('');
       console.log(`Uniqueness failures (${result.uniqueness_gate_result.failed_count}):`);
-      for (const r of (result.uniqueness_gate_result.failed_reasons || []).slice(0, 8)) console.log(`  ${r}`);
+      for (const r of (result.uniqueness_gate_result.failed_reasons || []).slice(0, 8)) console.log(`  ${redactCli(r)}`);
     }
     if (result.quality_gate_result?.hard_failures?.length) {
       console.log('');
       console.log(`Quality hard failures:`);
-      for (const f of result.quality_gate_result.hard_failures) console.log(`  ${f.name}: ${f.reason || ''}`);
+      for (const f of result.quality_gate_result.hard_failures) console.log(`  ${redactCli(f.name)}: ${redactCli(f.reason || '')}`);
     }
     console.log('');
 

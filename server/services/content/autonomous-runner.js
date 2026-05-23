@@ -207,8 +207,11 @@ class AutonomousRunner {
 
     // 4. Uniqueness gate (only applies to certain page types).
     const uniquenessGate = getUniquenessGate();
-    let uniquenessResult = { ok: true, skipped: 'module_unavailable' };
-    if (uniquenessGate) {
+    const needsUniquenessGate = brief.page_type === 'city-service' || brief.page_type === 'customer-question';
+    let uniquenessResult = { ok: true, skipped: 'not_applicable' };
+    if (!uniquenessGate && needsUniquenessGate) {
+      uniquenessResult = { ok: false, error: 'uniqueness_gate_unavailable' };
+    } else if (uniquenessGate && needsUniquenessGate) {
       const t4 = Date.now();
       try {
         const siblingPages = await this._loadSiblingPages(brief).catch(() => []);
@@ -222,7 +225,7 @@ class AutonomousRunner {
 
     // 5. Quality gate.
     const qualityGate = getQualityGate();
-    let qualityResult = { ok: true, skipped: 'module_unavailable' };
+    let qualityResult = { ok: false, error: 'quality_gate_unavailable' };
     if (qualityGate) {
       const t5 = Date.now();
       const sitemap = getSitemap();
@@ -243,7 +246,7 @@ class AutonomousRunner {
     const gatesPass = uniquenessResult.ok && qualityResult.ok;
 
     // 6. Trust-build check.
-    const trustBuildCount = await this._getTrustBuildCount(opp.action_type).catch(() => 0);
+    const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
     const trustBuildSatisfied = trustBuildCount >= TRUST_BUILD_THRESHOLD;
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
@@ -267,6 +270,15 @@ class AutonomousRunner {
         outcome: 'completed_pending_review',
         skip_reason: reason,
         reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, brief),
+      });
+    }
+
+    if (!this._hasDraftBriefPublisher()) {
+      await queue.complete(opp.id, { notes: 'pending_review:publisher_adapter_unavailable', claimToken }).catch(() => {});
+      return finalize(run, t0, {
+        outcome: 'completed_pending_review',
+        skip_reason: 'publisher_adapter_unavailable',
+        reviewer_notes: 'Astro draft/brief publisher adapter is not wired yet; route this approved draft manually.',
       });
     }
 
@@ -367,6 +379,11 @@ class AutonomousRunner {
         reviewer_notes: `Queued ${tasks.length} internal-link task(s) for manual/apply review.`,
       },
     };
+  }
+
+  _hasDraftBriefPublisher() {
+    const publisher = getAstroPublisher();
+    return !!publisher?.publishOrUpdatePage;
   }
 
   async _publishAndDistribute(draft, brief, run) {
