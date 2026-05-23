@@ -19,6 +19,22 @@ function normalizeUrl(url) {
     .replace(/^https?:\/\/(www\.)?/, '');
 }
 
+function urlLookupVariants(rawUrl) {
+  const normalized = normalizeUrl(rawUrl);
+  if (!normalized) return [];
+  const withoutWww = normalized.replace(/^www\./, '');
+  const withWww = withoutWww ? `www.${withoutWww}` : normalized;
+  const bases = [...new Set([normalized, withoutWww, withWww].filter(Boolean))];
+  return [...new Set(bases.flatMap((u) => [
+    u,
+    `${u}/`,
+    `https://${u}`,
+    `https://${u}/`,
+    `http://${u}`,
+    `http://${u}/`,
+  ]))];
+}
+
 function extractDomain(url) {
   const normalized = normalizeUrl(url);
   return normalized.split('/')[0] || '';
@@ -93,6 +109,7 @@ module.exports = {
   NETWORK_DOMAINS,
   HUB_DOMAINS,
   normalizeUrl,
+  urlLookupVariants,
   extractDomain,
   classifyDomainRole,
   inferCityFromUrl,

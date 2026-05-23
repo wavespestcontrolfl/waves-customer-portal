@@ -4,6 +4,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const {
   normalizeUrl,
   extractDomain,
+  urlLookupVariants,
   classifyDomainRole,
   inferCityFromUrl,
   inferServiceFromUrl,
@@ -154,22 +155,6 @@ async function promisePool(items, concurrency, fn) {
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
   await Promise.all(workers);
   return results;
-}
-
-function urlLookupVariants(rawUrl) {
-  const normalized = normalizeUrl(rawUrl);
-  if (!normalized) return [];
-  const withoutWww = normalized.replace(/^www\./, '');
-  const withWww = withoutWww ? `www.${withoutWww}` : normalized;
-  const bases = [...new Set([normalized, withoutWww, withWww].filter(Boolean))];
-  return [...new Set(bases.flatMap((u) => [
-    u,
-    `${u}/`,
-    `https://${u}`,
-    `https://${u}/`,
-    `http://${u}`,
-    `http://${u}/`,
-  ]))];
 }
 
 function applyDiagnosisFields(record, service) {
@@ -333,11 +318,11 @@ class UrlIntelligence {
       .whereIn('url', urlVariants)
       .first();
 
-    // Fetch 28d GSC performance — try exact match, then with https:// prefix
+    // Fetch 28d GSC performance using exact normalized/full URL variants.
     const now = etDateString();
     const d28ago = etDateString(addETDays(new Date(), -28));
-    let gsc = await db('gsc_pages')
-      .where('page_url', url)
+    const gsc = await db('gsc_pages')
+      .whereIn('page_url', urlVariants)
       .where('date', '>=', d28ago)
       .select(
         db.raw('SUM(clicks) as clicks'),
@@ -346,20 +331,6 @@ class UrlIntelligence {
         db.raw('AVG(position) as position'),
       )
       .first();
-
-    // If no match on normalized URL, try with https://
-    if (!gsc || !gsc.impressions) {
-      gsc = await db('gsc_pages')
-        .where('page_url', 'like', `%${url}%`)
-        .where('date', '>=', d28ago)
-        .select(
-          db.raw('SUM(clicks) as clicks'),
-          db.raw('SUM(impressions) as impressions'),
-          db.raw('AVG(ctr) as ctr'),
-          db.raw('AVG(position) as position'),
-        )
-        .first();
-    }
 
     // Fetch content QA
     const contentQa = await db('seo_content_qa_scores')

@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { normalizeUrl, extractDomain } = require('../../utils/normalize-url');
+const { normalizeUrl, extractDomain, urlLookupVariants } = require('../../utils/normalize-url');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 let Anthropic;
@@ -214,7 +214,7 @@ class SeoActionGenerator {
 
         // Fetch top queries for this URL
         const topQueries = await db('gsc_query_page_map')
-          .where('page_url', 'like', `%${action.url}%`)
+          .whereIn('page_url', urlLookupVariants(action.url))
           .select('query')
           .sum('impressions as impressions')
           .sum('clicks as clicks')
@@ -273,7 +273,7 @@ Return JSON: { "title": "...", "meta_description": "...", "reasoning": "..." }`,
     const d28ago = etDateString(addETDays(new Date(), -28));
 
     const gsc = await db('gsc_pages')
-      .where('page_url', 'like', `%${action.url}%`)
+      .whereIn('page_url', urlLookupVariants(action.url))
       .where('date', '>=', d28ago)
       .select(
         db.raw('SUM(clicks) as clicks'),
@@ -316,7 +316,7 @@ Return JSON: { "title": "...", "meta_description": "...", "reasoning": "..." }`,
         const d28ago = etDateString(addETDays(new Date(), -28));
 
         const gsc = await db('gsc_pages')
-          .where('page_url', 'like', `%${exp.url}%`)
+          .whereIn('page_url', urlLookupVariants(exp.url))
           .where('date', '>=', d28ago)
           .select(
             db.raw('SUM(clicks) as clicks'),
