@@ -238,7 +238,8 @@ class InternalLinkPlanner {
 
     for (const page of corpus) {
       if (tasks.length >= cap) break;
-      if (sameUrl(page.url, targetPath)) continue; // never link page to itself
+      const pageUrl = page.url || deriveUrlFromSourceFile(page.file, page.body);
+      if (sameUrl(pageUrl, targetPath)) continue; // never link page to itself
       if (pageAlreadyLinksTo(page.body, targetPath)) continue;
 
       for (const { phrase } of candidates) {
@@ -349,6 +350,13 @@ function deriveUrlFromFile(collection, file, body = '') {
   return `/${base}/`;
 }
 
+function deriveUrlFromSourceFile(file, body = '') {
+  const normalized = String(file || '').split(path.sep).join('/');
+  const m = normalized.match(/(?:^|\/)src\/content\/(blog|services|locations)\/(.+\.mdx?)$/);
+  if (!m) return '';
+  return deriveUrlFromFile(m[1], m[2], body);
+}
+
 function walkMarkdownFiles(dir) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -401,6 +409,7 @@ module.exports._internals = {
   stripHost,
   sameUrl,
   deriveUrlFromFile,
+  deriveUrlFromSourceFile,
   walkMarkdownFiles,
   extractFrontmatterSlug,
 };

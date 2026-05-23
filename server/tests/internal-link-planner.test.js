@@ -25,6 +25,7 @@ const {
   sameUrl,
   canonicalInternalPath,
   deriveUrlFromFile,
+  deriveUrlFromSourceFile,
   extractFrontmatterSlug,
 } = planner._internals;
 
@@ -341,6 +342,11 @@ Body`;
     expect(extractFrontmatterSlug(body)).toBe('/tree-shrub/get-rid-of-treehoppers/');
     expect(deriveUrlFromFile('blog', 'get-rid-of-treehoppers.md', body)).toBe('/tree-shrub/get-rid-of-treehoppers/');
   });
+  test('deriveUrlFromSourceFile infers collection URLs from Astro paths', () => {
+    expect(deriveUrlFromSourceFile('src/content/blog/foo.md')).toBe('/blog/foo/');
+    expect(deriveUrlFromSourceFile('src/content/services/pest-control-bradenton-fl.md')).toBe('/pest-control-bradenton-fl/');
+    expect(deriveUrlFromSourceFile('src/content/locations/siesta-key.mdx')).toBe('/siesta-key/');
+  });
   test('loadAstroCorpus recurses through collection subdirectories', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'internal-link-corpus-'));
     try {
@@ -417,6 +423,10 @@ describe('planForTarget', () => {
     const c = [{ file: 'src/content/services/pest-control-bradenton-fl.md', body: 'pest control bradenton here', url: '/pest-control-bradenton-fl/' }];
     expect(planner.planForTarget(target, { corpus: c })).toEqual([]);
   });
+  test('never links page to itself when corpus omits url', () => {
+    const c = [{ file: 'src/content/services/pest-control-bradenton-fl.md', body: 'pest control bradenton here' }];
+    expect(planner.planForTarget(target, { corpus: c })).toEqual([]);
+  });
   test('never links page to itself when target has query/hash variant', () => {
     const variantTarget = { ...target, url: '/pest-control-bradenton-fl/?utm_source=gbp#faq' };
     const c = [{ file: 'src/content/services/pest-control-bradenton-fl.md', body: 'pest control bradenton here', url: '/pest-control-bradenton-fl/' }];
@@ -433,6 +443,19 @@ describe('planForTarget', () => {
       url: '/tree-shrub/get-rid-of-treehoppers/',
     }];
     expect(planner.planForTarget(blogTarget, { corpus: c })).toEqual([]);
+  });
+  test('never links blog target to itself when url is derived from file or frontmatter', () => {
+    expect(planner.planForTarget({ url: '/blog/post-a/', keyword: 'pest control bradenton' }, {
+      corpus: [{ file: 'src/content/blog/post-a.md', body: 'pest control bradenton here' }],
+    })).toEqual([]);
+
+    const body = `---
+slug: "/tree-shrub/get-rid-of-treehoppers/"
+---
+treehoppers can damage ornamental plants.`;
+    expect(planner.planForTarget({ url: '/tree-shrub/get-rid-of-treehoppers/', keyword: 'treehoppers' }, {
+      corpus: [{ file: 'src/content/blog/get-rid-of-treehoppers.md', body }],
+    })).toEqual([]);
   });
   test('returns [] for target with no anchor candidates', () => {
     expect(planner.planForTarget({ url: '/x/' }, { corpus })).toEqual([]);
