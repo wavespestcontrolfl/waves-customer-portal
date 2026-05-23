@@ -2676,9 +2676,9 @@ function CoverageMapGeometry({ location, projection, active = false, onActivate 
     return (
       <g className={`coverage-marker ${toneClass} status-${location.status}${active ? ' is-active' : ''}`} transform={`translate(${point.x} ${point.y})`} {...activateProps}>
         <title>{label}</title>
-        <circle r="13" className="coverage-marker-outer" />
-        <circle r="9" className="coverage-marker-inner" />
-        <text y="3.5" textAnchor="middle" className="coverage-marker-text">{location.markerLabel || coverageMarkerText(location.status)}</text>
+        <circle r="16" className="coverage-marker-outer" />
+        <circle r="12" className="coverage-marker-inner" />
+        <text y="4.5" textAnchor="middle" className="coverage-marker-text">{location.markerLabel || coverageMarkerText(location.status)}</text>
         <text x="16" y="4" className="coverage-map-label coverage-point-label">{labelText}</text>
       </g>
     );
@@ -2773,17 +2773,6 @@ function ServiceCoverageMap({
         {activeMapBackgroundUrl && mapAttribution && <div className="map-attribution coverage-map-attribution">{mapAttribution}</div>}
       </div>
 
-      {legend.length > 0 && (
-        <div className="coverage-legend" aria-label="Service coverage legend">
-          {legend.map(({ key, label, tone, Icon }) => (
-            <div className={`coverage-legend-item status-${tone}`} key={key}>
-              <span className="coverage-legend-swatch" aria-hidden="true"><Icon size={14} strokeWidth={2} /></span>
-              <span>{label}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
       {evidenceNote && <p className="coverage-evidence-note">{evidenceNote}</p>}
     </div>
   );
@@ -2817,6 +2806,40 @@ function productNamesForCoverageItem(item = {}, applications = []) {
     .slice(0, 4);
 }
 
+// Dedupe coverage items by markerLabel — same physical zone listed with
+// multiple statuses (e.g., "Completed" + "Inspected") collapses into one
+// card with multiple status rows underneath. Items without a markerLabel
+// stay as their own card (keyed by id) so nothing gets dropped.
+function mergeCoverageItemsByMarker(items, applications) {
+  const order = [];
+  const byKey = new Map();
+  for (const item of items) {
+    const key = item.markerLabel ? `marker-${item.markerLabel}` : `id-${item.id}`;
+    const config = coverageStatusConfig(item.status);
+    const entry = {
+      id: item.id,
+      status: item.status,
+      tone: config.tone,
+      statusLabel: item.customerStatusLabel || item.statusLabel || config.label,
+      description: item.customerDescription,
+      products: productNamesForCoverageItem(item, applications),
+    };
+    if (byKey.has(key)) {
+      byKey.get(key).entries.push(entry);
+    } else {
+      order.push(key);
+      byKey.set(key, {
+        key,
+        markerLabel: item.markerLabel,
+        areaName: item.areaName,
+        firstItemId: item.id,
+        entries: [entry],
+      });
+    }
+  }
+  return order.map((key) => byKey.get(key));
+}
+
 function ServiceCoverageList({ coverage, activeItemId, onActivate, applications = [] }) {
   const groups = Array.isArray(coverage?.groups) && coverage.groups.length
     ? coverage.groups
@@ -2825,49 +2848,64 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
 
   return (
     <div className="service-coverage-list" aria-label="Service coverage areas">
-      {groups.map((group) => (
-        <div className="service-coverage-list-group" key={group.serviceLine || group.title || 'coverage'}>
-          {showGroupTitles && <h3>{group.title || formatEnumLabel(group.serviceLine)}</h3>}
-          {(group.items || []).map((item) => {
-            const config = coverageStatusConfig(item.status);
-            const statusLabel = item.customerStatusLabel || item.statusLabel || config.label;
-            const productNames = productNamesForCoverageItem(item, applications);
-            return (
-              <article
-                className={`coverage-summary-row zone-service-row service-coverage-item${activeItemId === item.id ? ' is-active' : ''}`}
-                key={item.id}
-                tabIndex={0}
-                role="button"
-                aria-pressed={activeItemId === item.id ? 'true' : 'false'}
-                onClick={() => onActivate(item.id)}
-                onFocus={() => onActivate(item.id)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onActivate(item.id);
-                  }
-                }}
-              >
-                <div className="zone-service-identity">
-                  <span className="zone-letter-badge" aria-label={item.markerLabel ? `Coverage marker ${item.markerLabel}` : 'Service coverage marker'}>
-                    {item.markerLabel}
-                  </span>
-                  <div className="zone-service-copy">
-                    <h3>{item.areaName}</h3>
-                    <p>{item.customerDescription}</p>
-                    {productNames.length > 0 && (
-                      <div className="coverage-product-line">
-                        Products used: {productNames.join(' · ')}
-                      </div>
-                    )}
+      {groups.map((group) => {
+        const merged = mergeCoverageItemsByMarker(group.items || [], applications);
+        return (
+          <div className="service-coverage-list-group" key={group.serviceLine || group.title || 'coverage'}>
+            {showGroupTitles && <h3>{group.title || formatEnumLabel(group.serviceLine)}</h3>}
+            {merged.map((zone) => {
+              const isActive = zone.entries.some((entry) => entry.id === activeItemId);
+              const allProducts = Array.from(new Set(zone.entries.flatMap((entry) => entry.products)));
+              return (
+                <article
+                  className={`coverage-summary-row zone-service-row service-coverage-item${isActive ? ' is-active' : ''}`}
+                  key={zone.key}
+                  tabIndex={0}
+                  role="button"
+                  aria-pressed={isActive ? 'true' : 'false'}
+                  onClick={() => onActivate(zone.firstItemId)}
+                  onFocus={() => onActivate(zone.firstItemId)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      onActivate(zone.firstItemId);
+                    }
+                  }}
+                >
+                  <div className="zone-service-identity">
+                    <span className="zone-letter-badge" aria-label={zone.markerLabel ? `Coverage marker ${zone.markerLabel}` : 'Service coverage marker'}>
+                      {zone.markerLabel}
+                    </span>
+                    <div className="zone-service-copy">
+                      <h3>{zone.areaName}</h3>
+                      {zone.entries.map((entry) => (
+                        <p key={`desc-${entry.id}`} className="zone-status-description">
+                          {entry.description}
+                        </p>
+                      ))}
+                      {allProducts.length > 0 && (
+                        <div className="coverage-product-line">
+                          Products used: {allProducts.join(' · ')}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <span className={`coverage-status-chip zone-status-chip status-${config.tone}`}>{statusLabel}</span>
-              </article>
-            );
-          })}
-        </div>
-      ))}
+                  <div className="zone-status-chips">
+                    {zone.entries.map((entry) => (
+                      <span
+                        key={entry.id}
+                        className={`coverage-status-chip zone-status-chip status-${entry.tone}`}
+                      >
+                        {entry.statusLabel}
+                      </span>
+                    ))}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -4477,7 +4515,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: var(--line);
         }
         .service-status-grid {
-          grid-template-columns: minmax(0, 1.45fr) minmax(0, .8fr) minmax(0, .8fr);
+          grid-template-columns: 1fr;
         }
         .service-status-timeline {
           margin-top: 16px;
@@ -4953,7 +4991,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-marker-text {
           fill: #fff;
           font-family: Inter, Arial, sans-serif;
-          font-size: 10px;
+          font-size: 14px;
           font-weight: 850;
           letter-spacing: 0;
         }
@@ -5108,6 +5146,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-status-chip.zone-status-chip {
           font-weight: 850;
+        }
+        .zone-status-chips {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          flex-shrink: 0;
+          align-items: flex-end;
+        }
+        .zone-status-description {
+          margin: 4px 0 0;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
+        .zone-status-description + .zone-status-description {
+          margin-top: 2px;
         }
         .coverage-empty-state {
           border: 1px dashed var(--line);
@@ -6638,9 +6692,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       </header>
 
       <main className="sr-shell">
-        <ServiceStatusCard data={data} mode={mode} />
-
         {mode === 'live' && <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />}
+
+        <ServiceStatusCard data={data} mode={mode} />
 
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 
