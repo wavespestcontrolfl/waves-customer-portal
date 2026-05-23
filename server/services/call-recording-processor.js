@@ -29,6 +29,7 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+const { normalizeCallExtraction } = require('../utils/intake-normalize');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1037,6 +1038,12 @@ IMPORTANT — customer name rules:
 - If only one name is clearly stated, put it in first_name and leave last_name null.
 - Do not invent a last name from caller ID, address, email, or context.
 
+IMPORTANT — customer contact rules:
+- Do not invent email addresses. Only return email when the caller clearly says or spells the complete address.
+- If the transcript contains an uncertain, partial, or malformed email, return null.
+- Return the caller phone unless the caller clearly gives a different callback number.
+- Do not overwrite or infer customer identity from transcript context alone; uncertain names, phones, emails, or addresses must be null.
+
 Return ONLY valid JSON.`;
 
   const res = await fetch(
@@ -1065,10 +1072,16 @@ Return ONLY valid JSON.`;
   // defensively in case the model falls back to markdown.
   const cleaned = text.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
   try {
-    return JSON.parse(cleaned);
+    return normalizeCallExtraction(JSON.parse(cleaned), { callerPhone });
   } catch (e) {
     logger.error(`[call-proc] Invalid JSON from Gemini: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
-    return { first_name: null, is_spam: false, is_voicemail: false, call_summary: 'AI extraction returned invalid JSON', lead_quality: 'cold' };
+    return normalizeCallExtraction({
+      first_name: null,
+      is_spam: false,
+      is_voicemail: false,
+      call_summary: 'AI extraction returned invalid JSON',
+      lead_quality: 'cold',
+    }, { callerPhone });
   }
 }
 
@@ -2208,6 +2221,7 @@ CallRecordingProcessor._test = {
   resolveSchedulableCallService,
   validatePhoneCallAppointmentCustomer,
   extractedNameMatchesCustomer,
+  normalizeCallExtraction,
 };
 
 module.exports = CallRecordingProcessor;

@@ -13,6 +13,7 @@ const { resolveLeadSource } = require('../services/lead-source-resolver');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { normalizeWebsiteQuoteContact } = require('../utils/intake-normalize');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -125,13 +126,6 @@ const quoteLimiter = rateLimit({
   message: { error: 'Too many quote requests. Please try again later.' },
 });
 
-function normalizePhone(raw) {
-  const digits = String(raw || '').replace(/\D/g, '');
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  if (digits.length === 10) return `+1${digits}`;
-  return null;
-}
-
 router.post('/calculate', quoteLimiter, async (req, res) => {
   try {
     const {
@@ -154,7 +148,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const quoteZip = normalizedAddress.zip || zip || '';
     const quoteFullAddress = normalizedAddress.fullAddress || [quoteAddress, quoteCity, [quoteState, quoteZip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
 
-    if (!firstName || !lastName || !email || !phone || !quoteAddress) {
+    const contact = normalizeWebsiteQuoteContact({ firstName, lastName, email, phone });
+    const contactFirstName = contact.firstName;
+    const contactLastName = contact.lastName;
+    const contactEmail = contact.email;
+    const contactPhone = contact.phoneForStorage;
+    const normalizedPhone = contact.phoneE164;
+
+    if (!contactFirstName || !contactLastName || !contactEmail || !contactPhone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
     if (!services || (
@@ -269,8 +270,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       services.termite ? 'Termite Control' : null,
       services.rodentBait ? 'Rodent Control' : null,
     ].filter(Boolean).join(' + ');
-    const normalizedPhone = normalizePhone(phone);
-
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
     const sourceMeta = await resolveLeadSource(attr);
@@ -300,10 +299,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // Don't overwrite a lead_source_id set at property-lookup time — only fill
       // it in if the row is still missing one (manual leadId reuse, legacy rows).
       const updateFields = {
-        first_name: firstName,
-        last_name: lastName,
-        email: email.toLowerCase().trim(),
-        phone: normalizedPhone || phone,
+        first_name: contactFirstName,
+        last_name: contactLastName,
+        email: contactEmail,
+        phone: contactPhone,
         address: quoteFullAddress,
         city: quoteCity || null,
         zip: quoteZip || null,
@@ -323,10 +322,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (!lead) {
       const rows = await db('leads').insert({
-        first_name: firstName,
-        last_name: lastName,
-        email: email.toLowerCase().trim(),
-        phone: normalizedPhone || phone,
+        first_name: contactFirstName,
+        last_name: contactLastName,
+        email: contactEmail,
+        phone: contactPhone,
         address: quoteFullAddress,
         city: quoteCity || null,
         zip: quoteZip || null,
@@ -352,8 +351,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // have it.
     let customerId = null;
     try {
-      const phoneDigits = String(normalizedPhone || phone).replace(/\D/g, '').slice(-10);
-      const emailLc = email.toLowerCase().trim();
+      const phoneDigits = String(contactPhone).replace(/\D/g, '').slice(-10);
+      const emailLc = contactEmail;
       let existingCust = null;
       if (phoneDigits.length === 10) {
         existingCust = await db('customers')
@@ -400,10 +399,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       } else {
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
         const [newCust] = await db('customers').insert({
-          first_name: firstName,
-          last_name: lastName,
+          first_name: contactFirstName,
+          last_name: contactLastName,
           email: emailLc,
-          phone: normalizedPhone || phone,
+          phone: contactPhone,
           address_line1: quoteAddress,
           city: quoteCity || '',
           state: quoteState || 'FL',
@@ -464,9 +463,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         .first();
       const estFields = {
         customer_id: customerId,
-        customer_name: `${firstName} ${lastName}`,
-        customer_phone: normalizedPhone || phone,
-        customer_email: email.toLowerCase().trim(),
+        customer_name: `${contactFirstName} ${contactLastName}`,
+        customer_phone: contactPhone,
+        customer_email: contactEmail,
         address: quoteFullAddress,
         monthly_total: monthly,
         annual_total: annual,
@@ -478,8 +477,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (existingEst) {
         await db('estimates').where({ id: existingEst.id }).update({ ...estFields, updated_at: new Date() });
       } else {
-        await withAutomatedEstimatePhoneLock(normalizedPhone || phone, async (trx) => {
-          const duplicateBlock = await blockIfAutomatedEstimateDuplicate(normalizedPhone || phone, { database: trx });
+        await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
+          const duplicateBlock = await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx });
           if (duplicateBlock) {
             logger.info(`[public-quote] Estimate mirror blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for lead ${lead.id}`);
           } else {
@@ -495,7 +494,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const NotificationService = require('../services/notification-service');
       await NotificationService.notifyAdmin(
         'new_lead',
-        quoteRequired ? `Manual quote needed: ${firstName} ${lastName}` : `Calculator quote: ${firstName} ${lastName}`,
+        quoteRequired ? `Manual quote needed: ${contactFirstName} ${contactLastName}` : `Calculator quote: ${contactFirstName} ${contactLastName}`,
         quoteRequired
           ? `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`
           : `${serviceInterest} · $${Math.round(monthly)}/mo · ${quoteFullAddress}`,
@@ -521,7 +520,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         });
         const customerBody = await renderTemplate(
           'estimate_accepted_onetime',
-          { first_name: firstName, service_label: serviceLabel, booking_url: bookingUrl },
+          { first_name: contactFirstName, service_label: serviceLabel, booking_url: bookingUrl },
         );
         if (!customerBody) {
           logger.warn(`[public-quote] estimate_accepted_onetime template missing/disabled; booking SMS skipped for lead ${lead.id}`);
@@ -555,7 +554,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // public newsletter form. The promotional new_lead automation is queued
     // only after the subscriber confirms.
     const newsletterOptIn = req.body.newsletter_opt_in === true;
-    const emailLc = email ? email.toLowerCase().trim() : '';
+    const emailLc = contactEmail;
 
     if (newsletterOptIn && emailLc) {
       // SendGrid side: dual-write into newsletter_subscribers via the
@@ -564,8 +563,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       try {
         const result = await subscribeOrResubscribe({
           email: emailLc,
-          firstName: firstName || null,
-          lastName: lastName || null,
+          firstName: contactFirstName || null,
+          lastName: contactLastName || null,
           source: 'quote_wizard',
           strict: true,
           requireConfirmation: true,
@@ -588,8 +587,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               customer: {
                 id: result.subscriber?.customer_id || customerId || null,
                 email: emailLc,
-                first_name: firstName || null,
-                last_name: lastName || null,
+                first_name: contactFirstName || null,
+                last_name: contactLastName || null,
               },
             });
             logger.info(`[public-quote] existing subscriber id=${result.subscriber?.id} new_lead ${r.enrolled ? 'queued' : 'skipped'}`);
