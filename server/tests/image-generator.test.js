@@ -77,6 +77,10 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/social media tile/);
     expect(buildPrompt({ title: 'X', mode: 'blog-hero' })).toMatch(/blog hero image/);
   });
+  test('embeds mode-specific aspect/dimensions (needed for Gemini)', () => {
+    expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/1:1.*1024x1024/);
+    expect(buildPrompt({ title: 'X', mode: 'blog-hero' })).toMatch(/3:2.*1536x1024/);
+  });
 });
 
 // ── ImageGenerator chain behavior ───────────────────────────────────

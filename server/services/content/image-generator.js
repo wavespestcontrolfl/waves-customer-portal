@@ -71,8 +71,14 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
   const local = city
     ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
     : `Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon.`;
+  // Aspect/dimension lives in the prompt because Gemini's generateContent
+  // doesn't accept a size parameter — without this, Gemini-only deploys
+  // return arbitrary aspect ratios for both blog heroes and social tiles.
+  const composition = mode === 'social-square'
+    ? `Composition: square 1:1 aspect ratio, 1024x1024.`
+    : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
   const style = `Style: bright, clean, professional. Teal/ocean-blue accent (#0ea5e9). No text, words, watermarks, or logos in the image.`;
-  return [base, focus, local, style].join(' ');
+  return [base, focus, local, composition, style].join(' ');
 }
 
 // ── providers ────────────────────────────────────────────────────────
