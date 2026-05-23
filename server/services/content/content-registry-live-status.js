@@ -24,7 +24,8 @@ const CHECK_FIELDS = [
 ];
 
 function normalizeStatuses(value) {
-  if (value == null) return DEFAULT_STATUSES;
+  if (typeof value === 'undefined') return DEFAULT_STATUSES;
+  if (value === null) return null;
   if (value === false) return [];
   const list = Array.isArray(value)
     ? value
@@ -289,6 +290,7 @@ function extractSitemapLocs(xml) {
 }
 
 async function loadRegistryRows(database, { statuses, limit }) {
+  if (Array.isArray(statuses) && statuses.length === 0) return [];
   let query = database('content_registry').select(CHECK_FIELDS);
   if (statuses && statuses.length) query = query.whereIn('reconciliation_status', statuses);
   return query

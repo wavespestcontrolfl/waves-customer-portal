@@ -209,6 +209,24 @@ describe('content registry live status helpers', () => {
     expect(paths.has('/blog-sitemap.xml/')).toBe(false);
   });
 
+  test('status normalization preserves default, all, and empty semantics', async () => {
+    expect(liveStatus.normalizeStatuses(undefined)).toEqual(liveStatus.DEFAULT_STATUSES);
+    expect(liveStatus.normalizeStatuses(null)).toBe(null);
+    expect(liveStatus.normalizeStatuses('all')).toBe(null);
+    expect(liveStatus.normalizeStatuses('')).toEqual([]);
+
+    const result = await liveStatus.runContentRegistryLiveStatusCheck({
+      database: fakeDatabase([{ id: 'row-skipped', canonical_url_normalized: '/should-not-fetch/' }]),
+      statuses: '',
+      useSitemap: false,
+      fetchImpl: async () => {
+        throw new Error('fetch should not be called for empty status filter');
+      },
+    });
+
+    expect(result.summary.checked_count).toBe(0);
+  });
+
   test('CLI args preserve values and parse boolean flags', () => {
     expect(liveCli.parseArgs([
       '--status=db_published_missing_astro,conflict',
