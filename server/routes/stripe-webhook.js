@@ -347,7 +347,7 @@ router.post(
           break;
 
         case 'payment_intent.processing':
-          await handlePaymentIntentProcessing(event.data.object, event.created);
+          await handlePaymentIntentProcessing(event.data.object, event.created, event.id);
           break;
 
         case 'payment_intent.requires_action':
@@ -1320,8 +1320,15 @@ async function handleAchFailure(paymentIntent, failureReason) {
  * proxy we have for "customer authorized the ACH transfer". Don't use
  * paymentIntent.created: the PI is minted at /pay/:token/setup and reused
  * via /update-amount, so it can predate authorization by hours or days.
+ *
+ * `eventId` is the Stripe event id and is unique per processing-transition
+ * delivery. It's used in the email idempotency key so that a re-attempted
+ * ACH against the same PI (services/stripe.js updates the existing PI in
+ * requires_payment_method instead of minting a new one) still gets a
+ * fresh acknowledgment email, while genuine duplicate webhook deliveries
+ * of the same event remain deduped at the email_messages level.
  */
-async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null) {
+async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null, eventId = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent processing (ACH in flight): ${piId}`);
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
@@ -1539,13 +1546,19 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null)
         amountPaid: amount,
         initiatedAt,
         expectedClearDate,
-        // Scope by PI so the per-attempt reset of ach_processing_notified_at
-        // (cleared in handlePaymentIntentFailed / handlePaymentIntentCanceled)
-        // actually allows a fresh email on the next attempt — without this,
-        // email_messages.idempotency_key would dedupe permanently per invoice
-        // and silently suppress the second ack even though the SMS path went
-        // through.
-        idempotencyKey: `payment.ach_processing:${freshInvoice.id}:${piId}`,
+        // Scope by event id, not just (invoice, PI). services/stripe.js
+        // updates an existing PI in requires_payment_method on retry
+        // instead of minting a new one, so piId is stable across attempts
+        // and a key of `{invoiceId}:{piId}` would dedupe forever after the
+        // first send. Every payment_intent.processing delivery has a
+        // unique event id; duplicate webhook deliveries of the *same*
+        // event share an id (so email_messages.idempotency_key still
+        // dedupes those), but a genuine new attempt fires a new event id
+        // and gets a fresh email. Falls back to (invoice, PI) if the
+        // event id wasn't threaded — preserves the prior behavior.
+        idempotencyKey: eventId
+          ? `payment.ach_processing:${freshInvoice.id}:${eventId}`
+          : `payment.ach_processing:${freshInvoice.id}:${piId}`,
       }).catch((err) => ({ ok: false, error: err.message }));
       if (!emailResult?.ok) {
         const reason = emailResult?.reason || emailResult?.error || 'unknown';
