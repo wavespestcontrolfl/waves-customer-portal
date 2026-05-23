@@ -856,9 +856,11 @@ function parseManateeRooms(value) {
 
 function normalizeManateePropertyType(type, classification) {
   const text = `${type || ''} ${classification || ''}`.toUpperCase();
+  if (/TOWN\s*HOME|TOWN\s*HOUSE|TOWNHOUSE/.test(text)) return 'Townhome';
+  if (/DUPLEX/.test(text)) return 'Duplex';
   if (/APT|APARTMENT/.test(text)) return 'Apartment';
   if (/CONDO/.test(text)) return 'Condo';
-  if (/MULTI|DUPLEX/.test(text)) return 'Multifamily';
+  if (/MULTI|TRIPLEX|QUADPLEX|FOURPLEX/.test(text)) return 'Multifamily';
   if (/COM|COMMERCIAL|OFFICE|RETAIL|WAREHOUSE|INDUSTRIAL/.test(text)) return 'Commercial';
   if (/RES|RESIDENTIAL/.test(text)) return 'Single Family';
   return null;

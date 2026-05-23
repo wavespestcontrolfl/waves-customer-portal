@@ -287,6 +287,29 @@ describe('Manatee PAO property lookup facts', () => {
     expect(parsed.source).toBe('https://www.manateepao.gov/parcel/?parid=647302459');
   });
 
+  test('keeps Manatee residential subtypes in estimator categories', () => {
+    const withClassification = (classification) => ({
+      ...manateeBuildings,
+      rows: [
+        ['RES', '1', classification, '2017', '2017', 1, '2943', '2310', '4/2/0', 'MASONRY/STUCCO', 'SHINGLES COMP', 'HIP AND/OR GABLE'],
+      ],
+    });
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Duplex St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: withClassification('RESIDENTIAL DUPLEX'),
+    }).propertyType).toBe('Duplex');
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Townhome St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: withClassification('TOWNHOUSE'),
+    }).propertyType).toBe('Townhome');
+  });
+
   test('merged county records remain authoritative and high quality', () => {
     const parsed = _private.parseManateePaoRecord({
       address: '8920 49th Ave E, Bradenton, FL 34211',
