@@ -239,6 +239,10 @@ describe('Manatee PAO property lookup facts', () => {
       parcelId: '222',
       city: 'SARASOTA',
     });
+    expect(_private.pickManateeSearchResult({
+      ...searchResults,
+      rows: [searchResults.rows[0]],
+    }, '123 Main St, FL 34243')).toBeNull();
   });
 
   test('allows PAO postal-city aliases when a non-shared Manatee ZIP is present', () => {
@@ -365,6 +369,32 @@ describe('Manatee PAO property lookup facts', () => {
       ...searchResults,
       rows: [searchResults.rows[0]],
     }, '123 Main St, Lakewood Ranch, FL 34240')).toBeNull();
+    expect(_private.pickManateeSearchResult(searchResults, '123 Main St, FL 34240')).toBeNull();
+  });
+
+  test('requires city match for shared Manatee ZIP aliases', () => {
+    const searchResults = {
+      cols: [
+        { title: 'Parcel ID' },
+        { title: 'Property Type' },
+        { title: 'Owner(s)' },
+        { title: 'Situs Address' },
+        { title: 'Postal City' },
+      ],
+      rows: [
+        ['111', 'REAL PROPERTY', '', ';123 MAIN ST;', 'PALMETTO'],
+        ['222', 'REAL PROPERTY', '', ';123 MAIN ST;', 'SARASOTA'],
+      ],
+    };
+
+    expect(_private.pickManateeSearchResult(searchResults, '123 Main St, Sarasota, FL 34202')).toMatchObject({
+      parcelId: '222',
+      city: 'SARASOTA',
+    });
+    expect(_private.pickManateeSearchResult({
+      ...searchResults,
+      rows: [searchResults.rows[0]],
+    }, '123 Main St, Sarasota, FL 34202')).toBeNull();
   });
 
   test('deduplicates identical PAO search rows before deciding uniqueness', () => {

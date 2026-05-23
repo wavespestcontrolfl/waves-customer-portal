@@ -67,7 +67,7 @@ const MANATEE_ZIPS = new Set([
   '34221', '34222', '34228', '34243', '34250', '34251', '34264', '34270', '34280',
   '34281', '34282',
 ]);
-const MANATEE_SHARED_ZIPS = new Set(['34228', '34243']);
+const MANATEE_SHARED_ZIPS = new Set(['34202', '34228', '34240', '34243']);
 const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao']);
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
@@ -774,7 +774,9 @@ function pickManateeSearchResult(data, address) {
   const target = normalizeCountyStreetLine(address);
   const targetNoSuffix = removeStreetSuffix(target);
   const targetNumber = target.match(/^\d+/)?.[0] || null;
-  const targetCity = shouldRequireManateeResultCityMatch(address) ? extractCommaCity(address) : null;
+  const requiresCityMatch = shouldRequireManateeResultCityMatch(address);
+  const targetCity = requiresCityMatch ? extractCommaCity(address) : null;
+  if (requiresCityMatch && !targetCity) return null;
   const candidates = rows
     .map((row) => ({
       parcelId: cleanPaoCell(row[parcelIdx >= 0 ? parcelIdx : 0]),
@@ -806,11 +808,11 @@ function pickManateeSearchResult(data, address) {
 }
 
 function shouldRequireManateeResultCityMatch(address) {
-  if (!extractCommaCity(address)) return false;
   const zip = extractAddressZip(address);
   // PAO postal city can differ from the entered municipality; require it when
   // the ZIP cannot disambiguate the Manatee parcel search by itself.
-  return !(zip && MANATEE_ZIPS.has(zip) && !MANATEE_SHARED_ZIPS.has(zip));
+  if (zip && MANATEE_SHARED_ZIPS.has(zip)) return true;
+  return !(zip && MANATEE_ZIPS.has(zip));
 }
 
 function isRelaxedManateeStreetMatch(normalizedAddress, target, targetNoSuffix) {
