@@ -197,6 +197,8 @@ function nameProperCase(field, value) {
 
   const proposed = properCaseName(compact);
   if (!proposed || proposed === current) return null;
+  const guard = properCaseProposalGuard(compact, proposed);
+  if (!guard.ok) return null;
 
   return proposal(field, current, proposed, {
     rule_id: field === 'first_name' ? 'name.proper_case_first' : 'name.proper_case_last',
@@ -206,6 +208,46 @@ function nameProperCase(field, value) {
       auto_apply_eligible: false,
       reason: 'proper_case_is_proposal_only',
     },
+  });
+}
+
+function properCaseProposalGuard(current, proposed) {
+  if (isAllCapsInitials(current)) {
+    return { ok: false, reason: 'all_caps_initials' };
+  }
+  if (!isAllCapsName(current) && hasInternalCapital(current)) {
+    return { ok: false, reason: 'existing_internal_capital' };
+  }
+  if (introducesMacIntracap(current, proposed)) {
+    return { ok: false, reason: 'mac_intracap_false_positive' };
+  }
+  return { ok: true };
+}
+
+function isAllCapsInitials(value) {
+  if (!isAllCapsName(value)) return false;
+  const tokens = value.match(/[A-Za-z]+/g) || [];
+  return tokens.length > 0 && tokens.every((token) => token.length <= 2);
+}
+
+function isAllCapsName(value) {
+  const letters = value.replace(/[^A-Za-z]/g, '');
+  return !!letters && letters === letters.toUpperCase();
+}
+
+function hasInternalCapital(value) {
+  return value
+    .split(/[\s'-]+/)
+    .some((segment) => /[A-Z]/.test(segment.slice(1)));
+}
+
+function introducesMacIntracap(current, proposed) {
+  const currentWords = current.split(/\s+/);
+  const proposedWords = proposed.split(/\s+/);
+  return proposedWords.some((word, index) => {
+    if (!/^Mac[A-Z]/.test(word)) return false;
+    const currentWord = currentWords[index] || '';
+    return !/^Mac[A-Z]/.test(currentWord);
   });
 }
 
@@ -318,5 +360,6 @@ module.exports = {
   _private: {
     emailAutoApplyExclusions,
     nanpPhoneGuard,
+    properCaseProposalGuard,
   },
 };
