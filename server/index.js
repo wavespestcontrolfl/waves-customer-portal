@@ -330,6 +330,7 @@ app.use('/api/admin/ads', adminAdsRoutes);
 app.use('/api/admin/seo/actions', require('./routes/admin-seo-actions'));
 app.use('/api/admin/seo/url-intelligence', require('./routes/admin-seo-url-intelligence'));
 app.use('/api/admin/seo', adminSeoRoutes);
+app.use('/api/admin/content-registry', require('./routes/admin-content-registry'));
 app.use('/api/admin/content', adminContentRoutes);
 app.use('/api/admin/knowledge', adminKnowledgeRoutes);
 app.use('/api/admin/csr', adminCsrRoutes);
