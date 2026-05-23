@@ -367,6 +367,37 @@ describe('content-registry reconciliation', () => {
     expect(row.sitemap_present).toBeNull();
   });
 
+  test('does not preserve live-check mirror fields when URL is gained or lost', () => {
+    const gained = registry.preserveLiveMirrorFields(
+      { canonical_url_normalized: '/new-url/', astro_source_path: 'src/content/blog/post.md' },
+      {
+        byAstroPath: new Map([['src/content/blog/post.md', {
+          astro_source_path: 'src/content/blog/post.md',
+          http_status: '200',
+          live_status: 'live',
+        }]]),
+        byDbId: new Map(),
+      },
+    );
+    const lost = registry.preserveLiveMirrorFields(
+      { astro_source_path: 'src/content/blog/post.md' },
+      {
+        byAstroPath: new Map([['src/content/blog/post.md', {
+          astro_source_path: 'src/content/blog/post.md',
+          canonical_url_normalized: '/old-url/',
+          http_status: '200',
+          live_status: 'live',
+        }]]),
+        byDbId: new Map(),
+      },
+    );
+
+    expect(gained.http_status).toBeUndefined();
+    expect(gained.live_status).toBeUndefined();
+    expect(lost.http_status).toBeUndefined();
+    expect(lost.live_status).toBeUndefined();
+  });
+
   test('repeated reconciliation without previous changes is stable', () => {
     const astroItems = [{ canonical_url_normalized: '/stable/', slug: 'stable', astro_source_path: 'src/content/blog/stable.md', content_type: 'blog', astro_status: 'present', astro_file_hash: 'same' }];
     const first = registry.reconcileContent({ astroItems, dbItems: [] });

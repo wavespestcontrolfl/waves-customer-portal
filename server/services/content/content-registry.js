@@ -327,7 +327,7 @@ function preserveLiveMirrorFields(row, previous) {
 function liveTargetChanged(row, prev) {
   const current = normalizeContentUrl(row.live_url || row.canonical_url || row.canonical_url_normalized);
   const previous = normalizeContentUrl(prev.live_url || prev.canonical_url || prev.canonical_url_normalized);
-  return Boolean(current && previous && current !== previous);
+  return current !== previous;
 }
 
 function finalizeRegistryRow(row) {
