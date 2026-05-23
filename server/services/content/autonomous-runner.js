@@ -111,7 +111,7 @@ class AutonomousRunner {
     // 2. Compose brief.
     const briefBuilder = getBriefBuilder();
     if (!briefBuilder) {
-      await queue.release(opp.id, { claimToken });
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalize(run, t0, { outcome: 'failed', failure_message: 'brief-builder unavailable' });
     }
     const t2 = Date.now();
@@ -119,8 +119,7 @@ class AutonomousRunner {
     try {
       brief = await briefBuilder.compose(opp.id, { persist: !dryRun, skipSerp: false });
     } catch (err) {
-      if (dryRun) await queue.release(opp.id, { claimToken }).catch(() => {});
-      else await queue.skip(opp.id, `brief_compose_failed:${err.message}`, { claimToken }).catch(() => {});
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalize(run, t0, { outcome: 'failed', failure_message: `brief_compose:${err.message}` });
     }
     run.brief_ms = Date.now() - t2;
@@ -131,8 +130,7 @@ class AutonomousRunner {
 
     // 2a. Router blocked the action — record + skip.
     if (brief.action_type === 'do_not_publish') {
-      if (dryRun) await queue.release(opp.id, { claimToken }).catch(() => {});
-      else await queue.skip(opp.id, brief.human_review_reason || 'router_do_not_publish', { claimToken }).catch(() => {});
+      await this._skipClaimOrThrow(queue, opp.id, brief.human_review_reason || 'router_do_not_publish', { claimToken });
       return finalize(run, t0, {
         outcome: 'skipped_gate_fail',
         skip_reason: brief.human_review_reason || 'router_do_not_publish',
@@ -140,7 +138,7 @@ class AutonomousRunner {
     }
 
     if (dryRun) {
-      await queue.release(opp.id, { claimToken }).catch(() => {});
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalize(run, t0, {
         outcome: 'skipped_shadow_mode',
         skip_reason: 'dry_run_via_cli',
@@ -150,16 +148,16 @@ class AutonomousRunner {
     if (brief.action_type === 'add_internal_links') {
       try {
         const result = await this._handleInternalLinksAction(brief, run);
-        await queue.complete(opp.id, { notes: result.notes, claimToken }).catch(() => {});
+        await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes, claimToken });
         return finalize(run, t0, result.patch);
       } catch (err) {
-        await queue.release(opp.id, { claimToken }).catch(() => {});
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
         return finalize(run, t0, { outcome: 'failed', failure_message: `internal_links:${err.message}` });
       }
     }
 
     if (brief.action_type === 'gbp_post') {
-      await queue.complete(opp.id, { notes: 'pending_review:gbp_post_not_implemented', claimToken }).catch(() => {});
+      await this._completeClaimOrThrow(queue, opp.id, { notes: 'pending_review:gbp_post_not_implemented', claimToken });
       return finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: 'gbp_post_not_implemented',
@@ -170,7 +168,7 @@ class AutonomousRunner {
     // 3. Dispatch agent — unless dryRun.
     const dispatcher = getDispatcher();
     if (!dispatcher) {
-      await queue.release(opp.id, { claimToken });
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalize(run, t0, { outcome: 'failed', failure_message: 'agent-dispatcher unavailable' });
     }
     const t3 = Date.now();
@@ -181,15 +179,14 @@ class AutonomousRunner {
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
-        await queue.release(opp.id, { claimToken }).catch(() => {});
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
         // Defensive dryRun short-circuit — finalize as if shadow_mode skipped.
         return finalize(run, t0, {
           outcome: 'skipped_shadow_mode',
           skip_reason: 'dry_run_via_cli',
         });
       }
-      // No release — agent failures shouldn't loop the same opp.
-      await queue.skip(opp.id, `agent_${dispatchResult.reason}`, { claimToken }).catch(() => {});
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalize(run, t0, {
         outcome: 'failed_agent',
         failure_message: dispatchResult.reason,
@@ -201,12 +198,12 @@ class AutonomousRunner {
     run.agent_session_id = dispatchResult.session_id || null;
     run.draft_payload = draft || null;
     if (!draft) {
-      await queue.skip(opp.id, 'agent_no_draft', { claimToken }).catch(() => {});
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalize(run, t0, { outcome: 'failed_agent', failure_message: 'no draft from agent' });
     }
 
     if (brief.action_type === 'rewrite_title_meta') {
-      await queue.complete(opp.id, { notes: 'pending_review:metadata_requires_existing_page_hydration', claimToken }).catch(() => {});
+      await this._completeClaimOrThrow(queue, opp.id, { notes: 'pending_review:metadata_requires_existing_page_hydration', claimToken });
       return finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: 'metadata_requires_existing_page_hydration',
@@ -264,7 +261,7 @@ class AutonomousRunner {
     if (dryRun || run.shadow_mode) {
       // Shadow / dry: never publish. Record what would have happened.
       const wouldPublish = gatesPass && trustBuildSatisfied && !brief.human_review_required;
-      await queue.complete(opp.id, { notes: `shadow_${wouldPublish ? 'would_publish' : 'would_gate'}`, claimToken }).catch(() => {});
+      await this._completeClaimOrThrow(queue, opp.id, { notes: `shadow_${wouldPublish ? 'would_publish' : 'would_gate'}`, claimToken });
       return finalize(run, t0, {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
@@ -275,7 +272,7 @@ class AutonomousRunner {
       const reason = !gatesPass ? 'gate_fail'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
-      await queue.complete(opp.id, { notes: `pending_review:${reason}`, claimToken }).catch(() => {});
+      await this._completeClaimOrThrow(queue, opp.id, { notes: `pending_review:${reason}`, claimToken });
       return finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: reason,
@@ -299,7 +296,7 @@ class AutonomousRunner {
       await this._completeClaimOrThrow(queue, opp.id, { notes: `published:${publishOutcome.published_url || 'unknown'}`, claimToken });
       return finalize(run, t0, { outcome: 'completed_published' });
     } catch (err) {
-      await queue.release(opp.id, { claimToken }).catch(() => {}); // let next run retry
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken }); // let next run retry
       return finalize(run, t0, {
         outcome: 'failed_publish',
         failure_message: err.message,
@@ -389,6 +386,16 @@ class AutonomousRunner {
   async _completeClaimOrThrow(queue, opportunityId, payload) {
     const ok = await queue.complete(opportunityId, payload);
     if (!ok) throw new Error('queue_complete_failed_or_stale_claim');
+  }
+
+  async _skipClaimOrThrow(queue, opportunityId, reason, payload) {
+    const ok = await queue.skip(opportunityId, reason, payload);
+    if (!ok) throw new Error('queue_skip_failed_or_stale_claim');
+  }
+
+  async _releaseClaimOrThrow(queue, opportunityId, payload) {
+    const ok = await queue.release(opportunityId, payload);
+    if (!ok) throw new Error('queue_release_failed_or_stale_claim');
   }
 
   async _getTrustBuildCount(actionType) {
