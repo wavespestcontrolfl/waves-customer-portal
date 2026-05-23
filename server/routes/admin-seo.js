@@ -6,6 +6,7 @@ const SearchConsole = require('../services/seo/search-console');
 const SEOAdvisor = require('../services/seo/seo-advisor');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { extractDomain } = require('../utils/normalize-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -534,36 +535,38 @@ router.get('/keywords', async (req, res, next) => {
 const SiteAuditor = require('../services/seo/site-auditor');
 
 router.get('/audit', async (req, res, next) => {
-  try { res.json(await SiteAuditor.getDashboard()); } catch (err) { next(err); }
+  try { res.json(await SiteAuditor.getDashboard(req.query.domain)); } catch (err) { next(err); }
 });
 
 router.get('/audit/history', async (req, res, next) => {
   try {
-    const runs = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').limit(20);
+    const domain = extractDomain(req.query.domain) || 'wavespestcontrol.com';
+    const runs = await db('seo_site_audit_runs').where('status', 'completed').where('domain', domain).orderBy('run_date', 'desc').limit(20);
     res.json({ runs });
   } catch (err) { next(err); }
 });
 
 router.get('/audit/pages', async (req, res, next) => {
   try {
-    const latest = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').first();
+    const domain = extractDomain(req.query.domain) || 'wavespestcontrol.com';
+    const latest = await db('seo_site_audit_runs').where('status', 'completed').where('domain', domain).orderBy('run_date', 'desc').first();
     if (!latest) return res.json({ pages: [] });
     const date = latest.run_date.toISOString?.().split('T')[0] || etDateString();
-    const pages = await db('seo_page_audits').where('audit_date', date).orderBy('technical_health_score', 'asc');
+    const pages = await db('seo_page_audits').where('audit_date', date).where('domain', domain).orderBy('technical_health_score', 'asc');
     res.json({ pages, auditDate: date });
   } catch (err) { next(err); }
 });
 
 router.get('/audit/page-detail', async (req, res, next) => {
   try {
-    const data = await SiteAuditor.getPageDetail(req.query.url);
+    const data = await SiteAuditor.getPageDetail(req.query.url, req.query.domain);
     res.json(data);
   } catch (err) { next(err); }
 });
 
 router.post('/audit/run', async (req, res, next) => {
   try {
-    const result = await SiteAuditor.runSiteAudit();
+    const result = await SiteAuditor.runSiteAudit({ domain: req.body?.domain || req.query.domain });
     res.json(result);
   } catch (err) { next(err); }
 });

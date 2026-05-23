@@ -175,7 +175,7 @@ class SiteAuditor {
     const startTime = Date.now();
 
     const [auditRun] = await db('seo_site_audit_runs').insert({
-      run_date: new Date(), status: 'running',
+      run_date: new Date(), status: 'running', domain,
     }).returning('*');
 
     try {
@@ -256,7 +256,12 @@ class SiteAuditor {
       const avgScore = auditResults.length > 0 ? Math.round(auditResults.reduce((s, r) => s + r.technical_health_score, 0) / auditResults.length) : 0;
 
       // Get previous run for delta
-      const prevRun = await db('seo_site_audit_runs').where('id', '!=', auditRun.id).where('status', 'completed').orderBy('run_date', 'desc').first();
+      const prevRun = await db('seo_site_audit_runs')
+        .where('id', '!=', auditRun.id)
+        .where('status', 'completed')
+        .where('domain', domain)
+        .orderBy('run_date', 'desc')
+        .first();
       const scoreDelta = prevRun?.avg_health_score ? avgScore - parseFloat(prevRun.avg_health_score) : 0;
 
       await db('seo_site_audit_runs').where('id', auditRun.id).update({
@@ -506,12 +511,14 @@ class SiteAuditor {
     return Object.entries(groups).filter(([, urls]) => urls.length > 1).map(([value, urls]) => ({ value: value.substring(0, 100), urls }));
   }
 
-  async getDashboard() {
-    const latestRun = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').first();
+  async getDashboard(domainInput = null) {
+    const domain = extractDomain(domainInput) || 'wavespestcontrol.com';
+    const latestRun = await db('seo_site_audit_runs').where('status', 'completed').where('domain', domain).orderBy('run_date', 'desc').first();
     if (!latestRun) return { hasData: false };
 
     const pages = await db('seo_page_audits')
       .where('audit_date', latestRun.run_date.toISOString?.().split('T')[0] || etDateString())
+      .where('domain', domain)
       .orderBy('technical_health_score', 'asc');
 
     const issues = await db('seo_audit_issue_trends')
@@ -519,10 +526,11 @@ class SiteAuditor {
       .orderByRaw("CASE WHEN severity = 'critical' THEN 0 WHEN severity = 'warning' THEN 1 ELSE 2 END")
       .orderBy('affected_count', 'desc');
 
-    const history = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').limit(12);
+    const history = await db('seo_site_audit_runs').where('status', 'completed').where('domain', domain).orderBy('run_date', 'desc').limit(12);
 
     return {
       hasData: true,
+      domain,
       latestRun,
       pages,
       issues,
@@ -530,8 +538,11 @@ class SiteAuditor {
     };
   }
 
-  async getPageDetail(url) {
-    const audits = await db('seo_page_audits').where('url', url).orderBy('audit_date', 'desc').limit(10);
+  async getPageDetail(url, domainInput = null) {
+    const domain = extractDomain(domainInput) || extractDomain(url);
+    let query = db('seo_page_audits').where('url', url);
+    if (domain) query = query.where('domain', domain);
+    const audits = await query.orderBy('audit_date', 'desc').limit(10);
     return { audits, latest: audits[0] };
   }
 }

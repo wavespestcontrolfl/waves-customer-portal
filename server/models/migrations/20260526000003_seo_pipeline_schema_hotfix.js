@@ -17,12 +17,31 @@ exports.up = async function (knex) {
   `);
   await knex.raw('CREATE INDEX IF NOT EXISTS seo_page_audits_domain_index ON seo_page_audits (domain)');
 
+  const hasAuditRunDomain = await knex.schema.hasColumn('seo_site_audit_runs', 'domain');
+  if (!hasAuditRunDomain) {
+    await knex.schema.alterTable('seo_site_audit_runs', (t) => {
+      t.string('domain', 200);
+    });
+  }
+  await knex('seo_site_audit_runs')
+    .whereNull('domain')
+    .update({ domain: 'wavespestcontrol.com' });
+  await knex.raw('CREATE INDEX IF NOT EXISTS seo_site_audit_runs_domain_index ON seo_site_audit_runs (domain)');
+
   if (await knex.schema.hasTable('seo_pipeline_runs')) {
     await knex.raw('ALTER TABLE seo_pipeline_runs ALTER COLUMN status TYPE varchar(40)');
   }
 };
 
 exports.down = async function (knex) {
+  await knex.raw('DROP INDEX IF EXISTS seo_site_audit_runs_domain_index');
+  const hasAuditRunDomain = await knex.schema.hasColumn('seo_site_audit_runs', 'domain');
+  if (hasAuditRunDomain) {
+    await knex.schema.alterTable('seo_site_audit_runs', (t) => {
+      t.dropColumn('domain');
+    });
+  }
+
   await knex.raw('DROP INDEX IF EXISTS seo_page_audits_domain_index');
 
   const hasPageAuditDomain = await knex.schema.hasColumn('seo_page_audits', 'domain');
