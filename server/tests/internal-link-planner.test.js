@@ -125,6 +125,17 @@ describe('findFirstUnlinkedOccurrence', () => {
     expect(findFirstUnlinkedOccurrence('', 'x')).toBeNull();
     expect(findFirstUnlinkedOccurrence('x', '')).toBeNull();
   });
+  test('word-boundary: short keyword does not match inside larger word', () => {
+    // 'ant' must not match inside 'plant' or 'pleasant'.
+    expect(findFirstUnlinkedOccurrence('The plant is pleasant.', 'ant')).toBeNull();
+    // But matches a standalone occurrence.
+    const t = 'I saw an ant today.';
+    const r = findFirstUnlinkedOccurrence(t, 'ant');
+    expect(r.index).toBe(t.indexOf('ant today'));
+  });
+  test('word-boundary: pest does not match inside pesticide', () => {
+    expect(findFirstUnlinkedOccurrence('Apply pesticide carefully.', 'pest')).toBeNull();
+  });
 });
 
 // ── pageAlreadyLinksTo ──────────────────────────────────────────────
@@ -144,6 +155,26 @@ describe('pageAlreadyLinksTo', () => {
       '[x](https://www.wavespestcontrol.com/pest-control-bradenton-fl/)',
       'https://other.host/pest-control-bradenton-fl/'
     )).toBe(true);
+  });
+  test('matches across trailing slash + hash + query (normalized)', () => {
+    // Existing link with no trailing slash + hash, target with slash.
+    expect(pageAlreadyLinksTo(
+      '[faq](/pest-control-bradenton-fl#faq)',
+      '/pest-control-bradenton-fl/'
+    )).toBe(true);
+    // Existing link with query, target without.
+    expect(pageAlreadyLinksTo(
+      '[gbp](/pest-control-bradenton-fl/?utm_src=gbp)',
+      '/pest-control-bradenton-fl/'
+    )).toBe(true);
+  });
+  test('superstring URL should NOT match (avoid false dedupe)', () => {
+    // /pest-control-bradenton-fl-area should not be treated as matching
+    // /pest-control-bradenton-fl — the old includes() let that through.
+    expect(pageAlreadyLinksTo(
+      '[x](/pest-control-bradenton-fl-area/)',
+      '/pest-control-bradenton-fl/'
+    )).toBe(false);
   });
 });
 

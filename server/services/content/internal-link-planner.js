@@ -89,20 +89,20 @@ function maskExcludedRegions(text) {
 function findFirstUnlinkedOccurrence(text, phrase) {
   if (!text || !phrase) return null;
   const masked = maskExcludedRegions(text);
-  const lower = masked.toLowerCase();
-  const needle = phrase.toLowerCase();
-  let start = 0;
-  while (start < lower.length) {
-    const idx = lower.indexOf(needle, start);
-    if (idx === -1) return null;
-    if (isInsideLink(masked, idx, idx + needle.length)) {
-      start = idx + needle.length;
-      continue;
-    }
+  // Require word boundaries — raw indexOf matched short keywords like
+  // "ant" inside "plant" or "pest" inside "pesticide" and corrupted
+  // the rendered markdown when applyTaskToBody wrapped the partial.
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\b${escaped}\\b`, 'gi');
+  let m;
+  while ((m = re.exec(masked)) !== null) {
+    const idx = m.index;
+    const length = m[0].length;
+    if (isInsideLink(masked, idx, idx + length)) continue;
     return {
       index: idx,
-      length: needle.length,
-      snippet: snippetAround(text, idx, needle.length),
+      length,
+      snippet: snippetAround(text, idx, length),
     };
   }
   return null;
@@ -147,17 +147,32 @@ function snippetAround(text, start, length, padding = 50) {
  */
 function pageAlreadyLinksTo(text, targetUrl) {
   if (!text || !targetUrl) return false;
-  const t = targetUrl.toLowerCase();
+  const target = normalizePath(targetUrl);
+  if (!target) return false;
   const mdLink = /\]\(([^)\s]+)\)/g;
   let m;
   while ((m = mdLink.exec(text)) !== null) {
-    if (m[1].toLowerCase().includes(t.replace(/^https?:\/\/[^/]+/, ''))) return true;
+    if (normalizePath(m[1]) === target) return true;
   }
   const href = /href=["']([^"']+)["']/g;
   while ((m = href.exec(text)) !== null) {
-    if (m[1].toLowerCase().includes(t.replace(/^https?:\/\/[^/]+/, ''))) return true;
+    if (normalizePath(m[1]) === target) return true;
   }
   return false;
+}
+
+/**
+ * Canonical comparison form for a URL or href — strips host, query,
+ * hash, trailing slashes, and lowercases. Without query/hash
+ * stripping, a page already linking to /pest-control-bradenton-fl#faq
+ * wasn't recognized as covering target /pest-control-bradenton-fl/.
+ */
+function normalizePath(url) {
+  return String(url || '')
+    .replace(/^https?:\/\/[^/]+/, '')
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
 }
 
 // ── main planner ────────────────────────────────────────────────────
@@ -282,6 +297,7 @@ module.exports._internals = {
   isInsideLink,
   snippetAround,
   pageAlreadyLinksTo,
+  normalizePath,
   stripHost,
   sameUrl,
   deriveUrlFromFile,
