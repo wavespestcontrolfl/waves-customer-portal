@@ -1441,15 +1441,31 @@ async function seoActionQueueReport(input) {
   };
 }
 
-async function approveSeoAction(input) {
+async function approveSeoAction(input, context) {
   if (!input.action_id) return { error: 'action_id is required' };
+  if (!context?.isAdmin) return { error: 'Admin access required to approve SEO actions' };
   const action = await db('seo_actions').where('id', input.action_id).first();
   if (!action) return { error: `Action ${input.action_id} not found` };
   await db('seo_actions').where('id', input.action_id).update({
     approval_status: 'approved',
+    approved_by_admin_id: context?.technicianId || null,
     approved_at: new Date(),
     approval_notes: input.notes || 'Approved via Intelligence Bar',
   });
+  try {
+    await db('seo_decisions').insert({
+      diagnosis_id: action.diagnosis_id,
+      issue_type: action.issue_type,
+      target_url: action.url,
+      agent_recommendation: JSON.stringify({ action_type: action.action_type, summary: action.summary }),
+      agent_impact_score: action.impact_score,
+      agent_effort_score: action.effort_score,
+      decision: 'accepted',
+      decision_reason: input.notes || 'Approved via Intelligence Bar',
+      decided_by_admin_id: context?.technicianId || null,
+      decided_at: new Date(),
+    });
+  } catch {}
   return { approved: true, id: input.action_id, url: action.url, action_type: action.action_type };
 }
 

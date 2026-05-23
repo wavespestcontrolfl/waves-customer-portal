@@ -57,6 +57,7 @@ class CannibalizationDetector {
         const existing = await db('seo_cannibalization_flags')
           .where('query', q.query)
           .where('status', 'open')
+          .where(function () { this.where('domain', q.domain).orWhereNull('domain'); })
           .first();
 
         const row = {

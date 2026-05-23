@@ -929,7 +929,10 @@ class UrlIntelligence {
       if (!Array.isArray(targets)) continue;
 
       for (const target of targets) {
-        const normalizedTarget = normalizeUrl(target);
+        // Resolve relative URLs against the source domain
+        let resolved = target;
+        if (resolved.startsWith('/')) resolved = `${d}${resolved}`;
+        const normalizedTarget = normalizeUrl(resolved);
         if (!normalizedTarget) continue;
 
         await db('seo_internal_link_graph')
