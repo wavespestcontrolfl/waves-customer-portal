@@ -96,6 +96,21 @@ async function vaultReadSensitive({
 }) {
   const conn = trx || db;
   const key = vaultKey();
+
+  // Audit before decrypting, and intentionally write this audit outside the
+  // caller transaction. A caller may roll back its apply/revert transaction
+  // after reading the raw value; the read still happened and must remain
+  // forensically visible.
+  const audit_log_id = await recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: actor_id || null,
+    action: 'data_hygiene.vault.read',
+    resource_type: 'data_hygiene_sensitive_vault',
+    resource_id: vault_id,
+    metadata: { reason },
+    critical: true,
+  });
+
   const { rows } = await conn.raw(`
     SELECT
       id,
@@ -115,24 +130,9 @@ async function vaultReadSensitive({
     return null;
   }
 
-  await recordAuditEvent({
-    actor_type: 'technician',
-    actor_id: actor_id || null,
-    action: 'data_hygiene.vault.read',
-    resource_type: 'data_hygiene_sensitive_vault',
-    resource_id: vault_id,
-    metadata: {
-      proposal_id: row.proposal_id,
-      audit_log_id: row.audit_log_id || null,
-      field: row.field,
-      reason,
-    },
-    critical: true,
-    trx,
-  });
-
   return {
     id: row.id,
+    read_audit_log_id: audit_log_id,
     proposal_id: row.proposal_id,
     audit_log_id: row.audit_log_id,
     field: row.field,

@@ -51,8 +51,10 @@ async function recordAuditEvent({
 
   const auditDb = trx || db;
   if (critical) {
-    await auditDb('audit_log').insert(row);
-    return;
+    const [inserted] = await auditDb('audit_log')
+      .insert(row)
+      .returning(['id']);
+    return inserted?.id || null;
   }
 
   try {
