@@ -132,6 +132,330 @@ describe('admin estimate delivery option validation', () => {
 
   });
 
+  test('allows approval stored in result inputs when top-level inputs are partial', () => {
+    expect(estimateDataHasUnresolvedManagerApproval({
+      inputs: {
+        svcDethatch: true,
+        grassType: 'St. Augustine',
+      },
+      result: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+          dethatchingManagerApprovalTrusted: true,
+        },
+        oneTime: {
+          items: [
+            {
+              service: 'dethatching',
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+            },
+          ],
+        },
+      },
+    })).toBe(false);
+  });
+
+  test('rejects trusted approval markers with invalid reasons', () => {
+    expect(estimateDataHasUnresolvedManagerApproval({
+      result: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'bogus',
+          dethatchingManagerApprovalTrusted: true,
+        },
+        oneTime: {
+          items: [
+            {
+              service: 'dethatching',
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+            },
+          ],
+        },
+      },
+    })).toBe(true);
+  });
+
+  test('does not trust engine input approval markers', () => {
+    const item = {
+      service: 'dethatching',
+      requiresManagerApproval: true,
+      managerApprovalReason: 'st_augustine_dethatching',
+    };
+    const engineInputs = {
+      dethatchingManagerApproved: true,
+      dethatchingManagerApprovalReason: 'verified_thatch_probe',
+      dethatchingManagerApprovalTrusted: true,
+    };
+
+    expect(estimateDataHasUnresolvedManagerApproval({
+      engineInputs,
+      result: {
+        oneTime: { items: [item] },
+      },
+    })).toBe(true);
+
+    expect(estimateDataHasUnresolvedManagerApproval({
+      result: {
+        engineInputs,
+        oneTime: { items: [item] },
+      },
+    })).toBe(true);
+  });
+
+  test('top-level approval revocation overrides nested trusted approval', () => {
+    expect(estimateDataHasUnresolvedManagerApproval({
+      inputs: {
+        dethatchingManagerApproved: false,
+        dethatchingManagerApprovalReason: '',
+      },
+      result: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+          dethatchingManagerApprovalTrusted: true,
+        },
+        oneTime: {
+          items: [
+            {
+              service: 'dethatching',
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+            },
+          ],
+        },
+      },
+    })).toBe(true);
+  });
+
+  test('preserves result inputs approval during normalization', () => {
+    const normalized = normalizeEstimateDethatchingManagerApproval({
+      inputs: {
+        svcDethatch: true,
+        grassType: 'St. Augustine',
+      },
+      result: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+          dethatchingManagerApprovalTrusted: true,
+          dethatchingManagerApprovedBy: 'admin-2',
+          dethatchingManagerApprovedByRole: 'admin',
+          dethatchingManagerApprovedAt: '2026-05-22T11:00:00.000Z',
+        },
+        oneTime: {
+          items: [
+            {
+              service: 'dethatching',
+              price: null,
+              estimatedPrice: 180,
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+              manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+              quoteRequired: true,
+              requiresCustomQuote: true,
+            },
+          ],
+        },
+      },
+    }, {
+      technician: { id: 'admin-2', role: 'admin' },
+      technicianId: 'admin-2',
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    expect(normalized.inputs).toEqual(expect.objectContaining({
+      dethatchingManagerApproved: true,
+      dethatchingManagerApprovalReason: 'verified_thatch_probe',
+      dethatchingManagerApprovalTrusted: true,
+      dethatchingManagerApprovedBy: 'admin-2',
+      dethatchingManagerApprovedByRole: 'admin',
+      dethatchingManagerApprovedAt: '2026-05-22T11:00:00.000Z',
+    }));
+    expect(normalized.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: 180,
+      quoteRequired: false,
+      managerApproved: true,
+      managerApprovalSatisfied: true,
+      managerApprovalOverrideReason: 'verified_thatch_probe',
+      managerApprovalApprovedBy: 'admin-2',
+    }));
+    expect(estimateDataHasUnresolvedManagerApproval(normalized)).toBe(false);
+  });
+
+  test('normalization keeps explicit top-level revocation over nested approval', () => {
+    const normalized = normalizeEstimateDethatchingManagerApproval({
+      inputs: {
+        dethatchingManagerApproved: false,
+        dethatchingManagerApprovalReason: '',
+      },
+      result: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+          dethatchingManagerApprovalTrusted: true,
+        },
+        oneTime: {
+          items: [
+            {
+              service: 'dethatching',
+              price: 180,
+              estimatedPrice: 180,
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+              manualReviewReasons: [],
+              quoteRequired: false,
+              requiresCustomQuote: false,
+            },
+          ],
+        },
+      },
+    }, {
+      technician: { id: 'admin-1', role: 'admin' },
+      technicianId: 'admin-1',
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    expect(normalized.inputs).toEqual(expect.objectContaining({
+      dethatchingManagerApproved: false,
+      dethatchingManagerApprovalReason: '',
+      dethatchingManagerApprovalTrusted: false,
+    }));
+    expect(normalized.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: null,
+      quoteRequired: true,
+      managerApproved: false,
+      managerApprovalSatisfied: false,
+    }));
+    expect(estimateDataHasUnresolvedManagerApproval(normalized)).toBe(true);
+  });
+
+  test('preserves approver metadata across repeated normalization', () => {
+    const firstPass = normalizeEstimateDethatchingManagerApproval({
+      inputs: {
+        svcDethatch: true,
+        grassType: 'St. Augustine',
+      },
+      result: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+          dethatchingManagerApprovalTrusted: true,
+          dethatchingManagerApprovedBy: 'admin-2',
+          dethatchingManagerApprovedByRole: 'admin',
+          dethatchingManagerApprovedAt: '2026-05-22T11:00:00.000Z',
+        },
+        oneTime: {
+          items: [
+            {
+              service: 'dethatching',
+              price: null,
+              estimatedPrice: 180,
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+              manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+              quoteRequired: true,
+              requiresCustomQuote: true,
+            },
+          ],
+        },
+      },
+    }, {
+      technician: { id: 'admin-3', role: 'admin' },
+      technicianId: 'admin-3',
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    const secondPass = normalizeEstimateDethatchingManagerApproval(firstPass, {
+      technician: { id: 'admin-4', role: 'admin' },
+      technicianId: 'admin-4',
+      now: () => new Date('2026-05-22T13:00:00.000Z'),
+    });
+
+    expect(secondPass.inputs).toEqual(expect.objectContaining({
+      dethatchingManagerApprovedBy: 'admin-2',
+      dethatchingManagerApprovedByRole: 'admin',
+      dethatchingManagerApprovedAt: '2026-05-22T11:00:00.000Z',
+    }));
+    expect(secondPass.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      managerApprovalApprovedBy: 'admin-2',
+      managerApprovalApprovedByRole: 'admin',
+      managerApprovalApprovedAt: '2026-05-22T11:00:00.000Z',
+    }));
+  });
+
+  test('strips result input approval markers from non-admin normalization', () => {
+    const normalized = normalizeEstimateDethatchingManagerApproval({
+      inputs: {
+        svcDethatch: true,
+        grassType: 'St. Augustine',
+      },
+      result: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+          dethatchingManagerApprovalTrusted: true,
+        },
+        oneTime: {
+          items: [
+            {
+              service: 'dethatching',
+              price: null,
+              estimatedPrice: 180,
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+              manualReviewReasons: [],
+              quoteRequired: false,
+              requiresCustomQuote: false,
+            },
+          ],
+        },
+      },
+    }, {
+      technician: { id: 'tech-1', role: 'technician' },
+      technicianId: 'tech-1',
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    expect(normalized.result.inputs).toEqual(expect.objectContaining({
+      dethatchingManagerApproved: false,
+      dethatchingManagerApprovalReason: '',
+      dethatchingManagerApprovalTrusted: false,
+    }));
+    expect(normalized.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: null,
+      quoteRequired: true,
+      managerApproved: false,
+      managerApprovalSatisfied: false,
+    }));
+    expect(estimateDataHasUnresolvedManagerApproval(normalized)).toBe(true);
+  });
+
+  test('does not combine approval fields from different input payloads', () => {
+    expect(estimateDataHasUnresolvedManagerApproval({
+      inputs: {
+        dethatchingManagerApproved: true,
+        dethatchingManagerApprovalReason: 'verified_thatch_probe',
+      },
+      result: {
+        inputs: {
+          dethatchingManagerApprovalTrusted: true,
+        },
+        oneTime: {
+          items: [
+            {
+              service: 'dethatching',
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+            },
+          ],
+        },
+      },
+    })).toBe(true);
+  });
+
   test('does not trust item-level approval without a server-trusted approval marker', () => {
     expect(estimateDataHasUnresolvedManagerApproval({
       result: {
@@ -325,6 +649,80 @@ describe('admin estimate delivery option validation', () => {
     expect(normalized.result.quoteRequiredItems).toEqual([]);
     expect(estimateDataHasQuoteRequirement(normalized)).toBe(false);
     expect(estimateDataHasUnresolvedManagerApproval(normalized)).toBe(false);
+  });
+
+  test('normalizes malformed manual review reason payloads without throwing', () => {
+    const normalized = normalizeEstimateDethatchingManagerApproval({
+      inputs: {
+        dethatchingManagerApproved: true,
+        dethatchingManagerApprovalReason: 'verified_thatch_probe',
+      },
+      result: {
+        oneTime: {
+          items: [{
+            service: 'dethatching',
+            name: 'Dethatching',
+            price: null,
+            estimatedPrice: 180,
+            requiresManagerApproval: true,
+            managerApprovalReason: 'st_augustine_dethatching',
+            manualReviewReasons: 'st_augustine_dethatching_manager_approval_required',
+            quoteRequired: true,
+            requiresCustomQuote: true,
+          }],
+        },
+      },
+    }, {
+      technician: { id: 'admin-1', role: 'admin' },
+      technicianId: 'admin-1',
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    expect(normalized.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: 180,
+      quoteRequired: false,
+      managerApproved: true,
+      managerApprovalSatisfied: true,
+    }));
+    expect(normalized.result.oneTime.items[0].manualReviewReasons).toEqual([]);
+  });
+
+  test('preserves scalar non-dethatching manual review reasons during approval normalization', () => {
+    const normalized = normalizeEstimateDethatchingManagerApproval({
+      inputs: {
+        dethatchingManagerApproved: true,
+        dethatchingManagerApprovalReason: 'verified_thatch_probe',
+      },
+      result: {
+        oneTime: {
+          items: [{
+            service: 'dethatching',
+            name: 'Dethatching',
+            price: null,
+            estimatedPrice: 180,
+            requiresManagerApproval: true,
+            managerApprovalReason: 'st_augustine_dethatching',
+            manualReviewReasons: 'field_measurement_needed',
+            quoteRequired: true,
+            requiresCustomQuote: true,
+          }],
+        },
+      },
+    }, {
+      technician: { id: 'admin-1', role: 'admin' },
+      technicianId: 'admin-1',
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    expect(normalized.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: null,
+      quoteRequired: true,
+      managerApproved: true,
+      managerApprovalSatisfied: true,
+    }));
+    expect(normalized.result.oneTime.items[0].manualReviewReasons).toEqual([
+      'field_measurement_needed',
+    ]);
   });
 
   test('propagates trusted St. Augustine dethatching approval into engine inputs', () => {

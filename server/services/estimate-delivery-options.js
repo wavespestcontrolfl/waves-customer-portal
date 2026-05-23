@@ -54,12 +54,39 @@ function estimateDataHasQuoteRequirement(estimateData) {
 }
 
 function approvalInputsSatisfied(root = {}) {
-  const inputs = root?.inputs || root?.result?.inputs || {};
+  if (hasApprovalInputFields(root?.inputs)) {
+    return !!trustedApprovalStateFromInputs(root.inputs);
+  }
+  return !!trustedApprovalStateFromInputs(root?.result?.inputs);
+}
+
+function hasApprovalInputFields(inputs) {
+  if (!inputs || typeof inputs !== 'object') return false;
+  return [
+    'dethatchingManagerApproved',
+    'managerApproved',
+    'dethatchingManagerApprovalReason',
+    'managerApprovalReason',
+    'dethatchingManagerApprovalTrusted',
+    'managerApprovalTrusted',
+  ].some((key) => Object.prototype.hasOwnProperty.call(inputs, key));
+}
+
+function trustedApprovalStateFromInputs(inputs) {
+  if (!inputs || typeof inputs !== 'object') return null;
   const approved = inputs.dethatchingManagerApproved === true || inputs.managerApproved === true;
-  const reason = String(inputs.dethatchingManagerApprovalReason || inputs.managerApprovalReason || '').trim();
   const trusted = inputs.dethatchingManagerApprovalTrusted === true ||
     inputs.managerApprovalTrusted === true;
-  return trusted && approved && reason.length > 0;
+  const reason = normalizeDethatchingApprovalReason(
+    inputs.dethatchingManagerApprovalReason || inputs.managerApprovalReason
+  );
+  if (!approved || !trusted || reason.length === 0) return null;
+  return {
+    reason,
+    approvedBy: inputs.dethatchingManagerApprovedBy || inputs.managerApprovedBy || null,
+    approvedByRole: inputs.dethatchingManagerApprovedByRole || inputs.managerApprovedByRole || null,
+    approvedAt: inputs.dethatchingManagerApprovedAt || inputs.managerApprovedAt || null,
+  };
 }
 
 function looksLikeDethatchingApprovalItem(value = {}) {
@@ -209,7 +236,8 @@ function normalizeMoneyValue(value) {
 }
 
 function uniqueStringList(values = []) {
-  return [...new Set((values || []).filter(Boolean).map((value) => String(value)))];
+  const list = Array.isArray(values) ? values : [values];
+  return [...new Set(list.filter(Boolean).map((value) => String(value)))];
 }
 
 function normalizeDethatchingApprovalDerivedFields(value, {
@@ -321,11 +349,34 @@ function normalizeEstimateDethatchingManagerApproval(estimateData, {
     ? data.inputs
     : (data.inputs = {});
   const requestedApproved = inputs.dethatchingManagerApproved === true || inputs.managerApproved === true;
-  const reason = normalizeDethatchingApprovalReason(
+  const requestedReason = normalizeDethatchingApprovalReason(
     inputs.dethatchingManagerApprovalReason || inputs.managerApprovalReason
   );
   const isAdmin = String(technician?.role || '').toLowerCase() === 'admin';
-  const trustedApproval = requestedApproved && reason.length > 0 && isAdmin;
+  const hasTopLevelApprovalFields = hasApprovalInputFields(inputs);
+  const topLevelTrustedApproval = isAdmin ? trustedApprovalStateFromInputs(inputs) : null;
+  const reusableTopLevelApproval = topLevelTrustedApproval && (
+    topLevelTrustedApproval.approvedBy ||
+    topLevelTrustedApproval.approvedByRole ||
+    topLevelTrustedApproval.approvedAt
+  )
+    ? topLevelTrustedApproval
+    : null;
+  const requestedTrustedApproval = !reusableTopLevelApproval &&
+    requestedApproved && requestedReason.length > 0 && isAdmin
+    ? {
+      reason: requestedReason,
+      approvedBy: technicianId || technician?.id || null,
+      approvedByRole: technician?.role || 'admin',
+      approvedAt: now().toISOString(),
+    }
+    : null;
+  const existingTrustedApproval = isAdmin
+    ? (!hasTopLevelApprovalFields ? trustedApprovalStateFromInputs(data.result?.inputs) : null)
+    : null;
+  const approval = reusableTopLevelApproval || requestedTrustedApproval || existingTrustedApproval;
+  const trustedApproval = !!approval;
+  const reason = approval?.reason || requestedReason;
 
   function applyApprovalToEngineInputs(engineInputs) {
     if (!engineInputs || typeof engineInputs !== 'object') return;
@@ -353,15 +404,16 @@ function normalizeEstimateDethatchingManagerApproval(estimateData, {
   delete inputs.managerApproved;
   delete inputs.managerApprovalReason;
   if (trustedApproval) {
-    inputs.dethatchingManagerApprovedBy = technicianId || technician?.id || null;
-    inputs.dethatchingManagerApprovedByRole = technician?.role || 'admin';
-    inputs.dethatchingManagerApprovedAt = now().toISOString();
+    inputs.dethatchingManagerApprovedBy = approval.approvedBy;
+    inputs.dethatchingManagerApprovedByRole = approval.approvedByRole;
+    inputs.dethatchingManagerApprovedAt = approval.approvedAt;
   } else {
     delete inputs.dethatchingManagerApprovedBy;
     delete inputs.dethatchingManagerApprovedByRole;
     delete inputs.dethatchingManagerApprovedAt;
   }
   applyApprovalToEngineInputs(inputs);
+  applyApprovalToEngineInputs(data.result?.inputs);
   applyApprovalToEngineInputs(data.engineInputs);
   applyApprovalToEngineInputs(data.result?.engineInputs);
 

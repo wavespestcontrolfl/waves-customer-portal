@@ -124,16 +124,27 @@ function deriveTotalsFromEstimateData(estimateData) {
     ...(Array.isArray(oneTime.items) ? oneTime.items : []),
     ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
   ];
+  const oneTimeMembershipFee = positiveMoney(oneTime.membershipFee) ?? 0;
   const oneTimeRowsTotal = roundMoney(
     sumSignedAmounts(oneTimeRows, ['price', 'estimatedPrice', 'baseEstimatePrice']) +
-    (positiveMoney(oneTime.membershipFee) ?? 0)
+    oneTimeMembershipFee
   );
+  const topLevelSpecRows = Array.isArray(result.specItems)
+    ? result.specItems.filter((row) => row?.onProg !== true && row?.includedOnProgram !== true)
+    : [];
   const topLevelSpecRowsTotal = sumSignedAmounts(
-    Array.isArray(result.specItems) ? result.specItems : [],
+    topLevelSpecRows,
     ['price', 'estimatedPrice', 'baseEstimatePrice']
   );
   const explicitOneTimeTotal = nonNegativeMoney(oneTime.total);
-  const derivedOneTimeTotal = nonNegativeMoney(oneTimeRowsTotal) ?? nonNegativeMoney(topLevelSpecRowsTotal);
+  const hasOneTimeDerivedSource = oneTimeRows.length > 0 || oneTimeMembershipFee > 0;
+  const derivedOneTimeTotal = (
+    hasOneTimeDerivedSource ? nonNegativeMoney(oneTimeRowsTotal) : null
+  ) ?? (
+    topLevelSpecRows.length > 0
+      ? nonNegativeMoney(topLevelSpecRowsTotal)
+      : null
+  );
   const hasApprovedDethatchingManagerRow = oneTimeRows.some((row) => isApprovedDethatchingManagerRow(row));
   const oneTimeTotal = explicitOneTimeTotal !== null
     ? (
