@@ -224,6 +224,24 @@ describe('blog Astro frontmatter validation', () => {
       commit_sha: 'file-sha',
     });
   });
+
+  test('rejects autonomous drafts whose canonical does not match the emitted slug', async () => {
+    jest.clearAllMocks();
+    const frontmatter = validFrontmatter({
+      slug: '/ant-trails-bradenton/',
+      canonical: 'https://example.com/ant-trails-bradenton/',
+    });
+
+    await expect(AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter,
+        body: 'Waves Pest Control guidance for Bradenton homeowners.',
+      },
+      { action_type: 'new_supporting_blog' }
+    )).rejects.toThrow(/canonical must match slug/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
 });
 
 describe('Astro publisher autonomous draft adapter', () => {

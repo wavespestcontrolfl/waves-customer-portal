@@ -368,6 +368,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   assertValidBlogFrontmatter(frontmatter);
 
   const slug = slugPathFromFrontmatter(frontmatter);
+  const canonical = assertCanonicalMatchesSlug(frontmatter, slug);
   const branchSlug = slugify(slug.replace(/\//g, '-'));
   const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const body = String(draft.body || '').trim();
@@ -391,7 +392,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   });
 
   return {
-    url: frontmatter.canonical || `/${slug}/`,
+    url: canonical,
     status: 'pr_open',
     live: false,
     pr_number: pr.number,
@@ -629,6 +630,36 @@ function slugPathFromFrontmatter(frontmatter) {
   return pathname;
 }
 
+function canonicalUrlForSlug(slug) {
+  const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+  return `${hub}/${slug}/`;
+}
+
+function normalizeCanonicalPath(pathname) {
+  return `/${String(pathname || '').replace(/^\/+|\/+$/g, '')}/`;
+}
+
+function assertCanonicalMatchesSlug(frontmatter, slug) {
+  const expected = canonicalUrlForSlug(slug);
+  const supplied = String(frontmatter?.canonical || '').trim();
+  let suppliedUrl;
+  let expectedUrl;
+  try {
+    suppliedUrl = new URL(supplied);
+    expectedUrl = new URL(expected);
+  } catch {
+    throw new Error('autonomous draft canonical is not a valid URL');
+  }
+  if (
+    suppliedUrl.origin !== expectedUrl.origin
+    || normalizeCanonicalPath(suppliedUrl.pathname) !== normalizeCanonicalPath(expectedUrl.pathname)
+  ) {
+    throw new Error(`autonomous draft canonical must match slug ${frontmatter.slug}`);
+  }
+  frontmatter.canonical = expected;
+  return expected;
+}
+
 function formatList(v) {
   if (!v) return '—';
   const arr = Array.isArray(v) ? v : safeJson(v, []);
@@ -645,6 +676,8 @@ module.exports = {
   liveUrlForPost,
   _internals: {
     slugPathFromFrontmatter,
+    canonicalUrlForSlug,
+    assertCanonicalMatchesSlug,
     buildDraftPrBody,
   },
 };
