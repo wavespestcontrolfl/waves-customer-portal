@@ -2840,11 +2840,12 @@ function ServiceCoverageMap({
         {activeMapBackgroundUrl && mapAttribution && <div className="map-attribution coverage-map-attribution">{mapAttribution}</div>}
       </div>
 
-      {/* Legend kept ONLY when neither stat counts nor the per-zone list
-          provide status-to-color mapping (e.g. settings.showList=false +
-          settings.showSummaryCounts=false). When either is rendered, the
-          colored markers already have textual context above/beside the
-          map and the legend chips are redundant. */}
+      {/* Legend kept whenever the per-zone list is hidden. Summary counts
+          alone don't replace it — ServiceCoverageSummary only labels four
+          buckets (Completed / Inspected / Inaccessible / Needs Attention)
+          and doesn't cover red (blocked), gray (not-serviced/not-included),
+          or light-green (partially treated) tones the markers may use.
+          The list does label every status per zone in text. */}
       {!hasStatusText && legend.length > 0 && (
         <div className="coverage-legend" aria-label="Service coverage legend">
           {legend.map(({ key, label, tone, Icon }) => (
@@ -3068,7 +3069,7 @@ function ServiceCoverageCard({
               mapAttribution={mapAttribution}
               activeItemId={activeId}
               onActivate={setActiveItemId}
-              hasStatusText={showList || showSummary}
+              hasStatusText={showList}
             />
           ) : (
             <p className="coverage-map-unavailable">Coverage map was not recorded for this visit.</p>
