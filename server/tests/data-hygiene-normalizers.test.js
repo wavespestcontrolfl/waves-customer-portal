@@ -53,6 +53,8 @@ describe('data hygiene deterministic normalizers', () => {
       ['first_name', 'AS', 'name.proper_case_first'],
       ['first_name', 'CJ', 'name.proper_case_first'],
       ['first_name', 'Mackenzie', 'name.proper_case_first'],
+      ['last_name', 'Smith-Mackenzie', 'name.proper_case_last'],
+      ['last_name', 'SMITH-MACKENZIE', 'name.proper_case_last'],
       ['last_name', 'LaSalle', 'name.proper_case_last'],
       ['last_name', 'DeSanto', 'name.proper_case_last'],
       ['last_name', 'DeFusco', 'name.proper_case_last'],

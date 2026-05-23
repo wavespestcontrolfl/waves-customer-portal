@@ -242,13 +242,17 @@ function hasInternalCapital(value) {
 }
 
 function introducesMacIntracap(current, proposed) {
-  const currentWords = current.split(/\s+/);
-  const proposedWords = proposed.split(/\s+/);
-  return proposedWords.some((word, index) => {
-    if (!/^Mac[A-Z]/.test(word)) return false;
-    const currentWord = currentWords[index] || '';
-    return !/^Mac[A-Z]/.test(currentWord);
+  const currentSegments = nameCaseSegments(current);
+  const proposedSegments = nameCaseSegments(proposed);
+  return proposedSegments.some((segment, index) => {
+    if (!/^Mac[A-Z]/.test(segment)) return false;
+    const currentSegment = currentSegments[index] || '';
+    return !/^Mac[A-Z]/.test(currentSegment);
   });
+}
+
+function nameCaseSegments(value) {
+  return value.split(/\s+/).flatMap((word) => word.split('-'));
 }
 
 function zipZeroPad(value, stateValue) {
