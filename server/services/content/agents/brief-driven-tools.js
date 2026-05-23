@@ -183,8 +183,11 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       const { topic } = input || {};
       if (!topic) return { error: 'topic required' };
       try {
-        const answer = await wikiQa.ask(topic);
-        return { topic, answer };
+        // WikiQA exposes query/lookup/search — there is no `ask`. Match
+        // the legacy content-agent + lead-agent shape: query(topic, ctx)
+        // returns { answer, articlesUsed }.
+        const result = await wikiQa.query(topic, { source: 'brief_driven_agent' });
+        return { topic, answer: result.answer, sources: result.articlesUsed || [] };
       } catch (err) {
         return { error: `wiki-qa failed: ${err.message}` };
       }
@@ -288,6 +291,17 @@ const SERVICE_HUB_SLUGS = new Set([
   'tree-and-shrub-care',
 ]);
 
+// Segment must be a slug: alnum start/end, hyphens allowed internally.
+// Path-traversal sequences (`..`, percent-encodings) are rejected before
+// reaching the GitHub Contents API — these agents enable web search, so
+// prompt-injected page_url values otherwise let the agent read arbitrary
+// files outside src/content/* from the Astro repo.
+const SLUG_SEGMENT = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+function isSafeSlugPath(s) {
+  if (!s || s.includes('..') || s.includes('%') || s.includes('\\')) return false;
+  return s.split('/').every((seg) => SLUG_SEGMENT.test(seg));
+}
+
 /**
  * Map a public URL ('/pest-control-bradenton-fl/') to an Astro
  * content collection file path. This is a heuristic — the Astro
@@ -298,6 +312,7 @@ function urlToAstroPath(url) {
   if (!url) return null;
   const cleaned = String(url).replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '').replace(/^\/+|\/+$/g, '');
   if (!cleaned) return null;
+  if (!isSafeSlugPath(cleaned)) return null;
   if (cleaned.startsWith('blog/')) return `src/content/blog/${cleaned.slice(5)}.md`;
   // city-service slugs live in services collection
   if (/-fl$/.test(cleaned)) return `src/content/services/${cleaned}.md`;

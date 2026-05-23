@@ -216,6 +216,19 @@ describe('urlToAstroPath', () => {
     expect(urlToAstroPath(null)).toBeNull();
     expect(urlToAstroPath('')).toBeNull();
   });
+  test.each([
+    '/blog/../../../../README',
+    '/../etc/passwd',
+    '/pages/../config/db',
+    '/blog/post%2e%2e/secret',
+    '/blog/post\\..\\secret',
+    '/UPPERCASE/path',
+    '/has space/seg',
+    '/-leadinghyphen/',
+    '/trailinghyphen-/',
+  ])('rejects unsafe path %s', (url) => {
+    expect(urlToAstroPath(url)).toBeNull();
+  });
 });
 
 // ── parseJsonbColumns helper ────────────────────────────────────────
