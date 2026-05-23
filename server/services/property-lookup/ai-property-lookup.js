@@ -60,6 +60,7 @@ const MANATEE_CITY_NAMES = new Set([
   'WEST SAMOSET',
   'WHITFIELD',
 ]);
+const COUNTY_ADDRESS_CITY_HINTS = new Set([...MANATEE_CITY_NAMES, 'SARASOTA']);
 const MANATEE_ZIPS = new Set([
   '34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209',
   '34210', '34211', '34212', '34215', '34216', '34217', '34218', '34219', '34220',
@@ -672,7 +673,7 @@ function extractAddressZip(address) {
 
 function extractCommaCity(address) {
   const parts = String(address || '').split(',').map((part) => part.trim()).filter(Boolean);
-  if (parts.length < 2) return null;
+  if (parts.length < 2) return extractInlineCountyCity(address);
 
   for (let index = parts.length - 1; index > 0; index -= 1) {
     if (/\bFL(?:ORIDA)?\b/i.test(parts[index]) || /\b\d{5}(?:-\d{4})?\b/.test(parts[index])) {
@@ -699,7 +700,7 @@ function normalizeCountyCityName(value) {
 
 function normalizeCountyStreetLine(address) {
   const firstLine = String(address || '').split(',')[0] || '';
-  return firstLine
+  const normalized = firstLine
     .toUpperCase()
     .replace(/[^A-Z0-9\s]/g, ' ')
     .replace(/\bNORTH\b/g, 'N')
@@ -721,6 +722,30 @@ function normalizeCountyStreetLine(address) {
     .replace(/\bWAY\b/g, 'WAY')
     .replace(/\s+/g, ' ')
     .trim();
+  return stripCountyLocationSuffix(normalized);
+}
+
+function stripCountyLocationSuffix(normalizedStreet) {
+  let street = String(normalizedStreet || '')
+    .replace(/\s+\d{5}(?:\s+\d{4})?$/, '')
+    .replace(/\s+FL(?:ORIDA)?$/, '')
+    .trim();
+  const city = extractTrailingCountyCity(street);
+  if (city) street = street.slice(0, -city.length).trim();
+  return street;
+}
+
+function extractInlineCountyCity(address) {
+  let normalized = normalizeCountyCityName(String(address || '')
+    .replace(/\b\d{5}(?:-\d{4})?\s*$/, '')
+    .replace(/\bFL(?:ORIDA)?\s*$/i, ''));
+  return extractTrailingCountyCity(normalized);
+}
+
+function extractTrailingCountyCity(normalizedText) {
+  const text = String(normalizedText || '').trim();
+  const cities = [...COUNTY_ADDRESS_CITY_HINTS].sort((a, b) => b.length - a.length);
+  return cities.find((city) => text === city || text.endsWith(` ${city}`)) || null;
 }
 
 function removeStreetSuffix(street) {
