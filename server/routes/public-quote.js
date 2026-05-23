@@ -108,6 +108,101 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
   };
 }
 
+function normalizePublicQuotePestFrequency(value) {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  const aliases = {
+    qtr: 'quarterly',
+    quarter: 'quarterly',
+    quarterly: 'quarterly',
+    bi_monthly: 'bimonthly',
+    bimonthly: 'bimonthly',
+    every_other_month: 'bimonthly',
+    monthly: 'monthly',
+  };
+  return aliases[raw] || 'quarterly';
+}
+
+function publicQuotePestLabel(pest = {}) {
+  const frequency = normalizePublicQuotePestFrequency(pest.frequency);
+  const labels = {
+    quarterly: 'Quarterly Pest Control',
+    bimonthly: 'Bi-Monthly Pest Control',
+    monthly: 'Monthly Pest Control',
+  };
+  return labels[frequency] || 'Quarterly Pest Control';
+}
+
+function publicQuoteCompactPestLabel(pest = {}) {
+  return publicQuotePestLabel(pest).replace(' Pest Control', ' Pest');
+}
+
+function compactServiceInterestPart(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const key = text.toLowerCase().replace(/\s+/g, ' ');
+  const labels = {
+    'quarterly pest control': 'Quarterly Pest',
+    'bi-monthly pest control': 'Bi-Monthly Pest',
+    'monthly pest control': 'Monthly Pest',
+    'recurring pest control': 'Recurring Pest',
+    'one-time pest control': 'One-Time Pest',
+    'pest control consultation': 'Pest Consult',
+    'recurring lawn care': 'Lawn Care',
+    'one-time lawn care': 'One-Time Lawn',
+    'lawn care consultation': 'Lawn Consult',
+    'recurring mosquito control': 'Mosquito',
+    'mosquito control': 'Mosquito',
+    'mosquito & no-see-um control': 'Mosquito',
+    'termite monitoring': 'Termite',
+    'termite protection': 'Termite',
+    'rodent bait stations': 'Rodent Bait',
+    'rodent control': 'Rodent',
+    'tree & shrub care': 'Tree/Shrub',
+  };
+  return labels[key] || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '');
+}
+
+function buildCompactCustomerServiceInterest(parts = []) {
+  const compactParts = Array.from(new Set(
+    parts
+      .flatMap((part) => String(part || '').split(/\s+\+\s+/))
+      .map(compactServiceInterestPart)
+      .filter(Boolean)
+  ));
+
+  const kept = [];
+  for (const part of compactParts) {
+    const candidate = [...kept, part].join(' + ');
+    if (candidate.length <= 32) {
+      kept.push(part);
+    }
+  }
+  return kept.join(' + ') || compactParts[0]?.slice(0, 32) || null;
+}
+
+function buildPublicQuoteServiceInterest(services = {}) {
+  return [
+    services.pest ? publicQuotePestLabel(services.pest) : null,
+    services.lawn ? 'Recurring Lawn Care' : null,
+    services.mosquito ? 'Recurring Mosquito Control' : null,
+    services.termite ? 'Termite Monitoring' : null,
+    services.rodentBait ? 'Rodent Bait Stations' : null,
+  ].filter(Boolean).join(' + ');
+}
+
+function buildCompactPublicQuoteServiceInterest(services = {}) {
+  return buildCompactCustomerServiceInterest([
+    services.pest ? publicQuoteCompactPestLabel(services.pest) : null,
+    services.lawn ? 'Lawn Care' : null,
+    services.mosquito ? 'Mosquito' : null,
+    services.termite ? 'Termite' : null,
+    services.rodentBait ? 'Rodent Bait' : null,
+  ]);
+}
+
 async function renderTemplate(templateKey, vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -263,13 +358,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return res.status(500).json({ error: 'Unable to calculate a price right now.' });
     }
 
-    const serviceInterest = [
-      services.pest ? 'Pest Control' : null,
-      services.lawn ? 'Lawn Care' : null,
-      services.mosquito ? 'Mosquito Control' : null,
-      services.termite ? 'Termite Control' : null,
-      services.rodentBait ? 'Rodent Control' : null,
-    ].filter(Boolean).join(' + ');
+    const serviceInterest = buildPublicQuoteServiceInterest(services);
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
     const sourceMeta = await resolveLeadSource(attr);
@@ -369,7 +458,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
       // customers.lead_service_interest is varchar(32); a merged upsell string
       // ("Pest Control + Lawn Care + Mosquito...") will overflow. Truncate.
-      const serviceInterestForCustomer = serviceInterest ? serviceInterest.slice(0, 32) : null;
+      const serviceInterestForCustomer = buildCompactPublicQuoteServiceInterest(services);
       // landing_page_url is varchar(500); UTM-heavy URLs can creep past it.
       const landingForCustomer = attr?.landing_url ? String(attr.landing_url).slice(0, 500) : null;
 
@@ -708,16 +797,17 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
         .update({ service_interest: mergedInterest, updated_at: new Date() });
     } catch (e) { logger.error(`[public-quote] Estimate upsell sync failed: ${e.message}`); }
 
-    // Cascade to the customer row's lead_service_interest (varchar(32) — must
-    // truncate, since merged "Pest Control + Lawn Care + Mosquito..." overflows).
+    // Cascade to the customer row's lead_service_interest (varchar(32), so use
+    // the compact label set instead of slicing a full label mid-word).
     // Same scope guard as the estimate sync — only if pipeline_stage is still
     // 'new_lead', so we don't mutate active/won customer profiles.
     if (lead.customer_id) {
+      const compactCustomerInterest = buildCompactCustomerServiceInterest([...existing, ...addLabels]);
       try {
         await db('customers')
           .where({ id: lead.customer_id, pipeline_stage: 'new_lead' })
           .update({
-            lead_service_interest: mergedInterest.slice(0, 32),
+            lead_service_interest: compactCustomerInterest,
             last_contact_date: new Date(),
             last_contact_type: 'website_quote',
           });
@@ -746,4 +836,7 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
 module.exports = router;
 module.exports._internals = {
   isPublicCommercialQuote,
+  buildPublicQuoteServiceInterest,
+  buildCompactPublicQuoteServiceInterest,
+  buildCompactCustomerServiceInterest,
 };
