@@ -7,6 +7,7 @@ const {
   buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
   acceptanceServiceLists,
+  applySelectedTreeShrubTierToEstimateData,
   buildEstimateAskQueryLog,
   buildEstimateAcceptanceContract,
   buildPricingBundle,
@@ -41,6 +42,7 @@ const {
   buildEstimateAssistantContext,
   cleanAssistantAnswer,
 } = require('../services/estimate-assistant');
+const estimateSlotAvailability = require('../services/estimate-slot-availability');
 
 function savedAdminEstimateData() {
   return {
@@ -447,16 +449,48 @@ describe('public estimate one-time breakdown', () => {
     ]);
   });
 
-  test('phase 0 pest bundles preserve pest setup and add-on render signals', async () => {
+  test('multi-service recurring bundles emit stacked service sections while preserving combined total', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-pest-bundle-contract-test',
       estimate_data: {
-        result: {
-          results: {
-            pestTiers: [
-              { label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 },
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'complete_service_rows_snapshot',
+            waveGuardTier: 'Bronze',
+            firstVisitFees: [
+              { service: 'waveguard_setup', label: 'WaveGuard Membership Setup', amount: 99 },
+            ],
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 90,
+                annual: 1080,
+                perServiceTreatments: [
+                  {
+                    service: 'pest_control',
+                    label: 'Pest Control (Quarterly)',
+                    displayPrice: 150,
+                    perTreatment: 150,
+                    visitsPerYear: 4,
+                  },
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care',
+                    displayPrice: 120,
+                    perTreatment: 120,
+                    visitsPerYear: 4,
+                  },
+                ],
+                included: [
+                  { service: 'pest_control', label: 'Pest Control', detail: 'Quarterly service' },
+                  { service: 'lawn_care', label: 'Lawn Care', detail: 'Recurring turf applications' },
+                ],
+              },
             ],
           },
+        },
+        result: {
           recurring: {
             monthlyTotal: 90,
             annualAfterDiscount: 1080,
@@ -478,21 +512,358 @@ describe('public estimate one-time breakdown', () => {
       waveguard_tier: 'Bronze',
     });
 
-    expect(payload.services).toHaveLength(1);
+    expect(payload.frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 90,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 90,
+      annualSubtotal: 1080,
+    }));
+    expect(payload.services.map((section) => section.key)).toEqual(['pest_control', 'lawn_care']);
     expect(payload.services[0]).toEqual(expect.objectContaining({
-      key: 'bundle',
+      key: 'pest_control',
+      label: 'Pest Control',
       isPest: true,
       isRecurring: true,
       setupFee: expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
     }));
-    expect(payload.services[0].frequencies[0].addOns).toEqual(expect.arrayContaining([
-      expect.objectContaining({ key: 'interior_spray' }),
-      expect.objectContaining({ key: 'exterior_sweep' }),
-    ]));
+    expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 50,
+      perVisit: 150,
+    }));
+    expect(payload.services[1]).toEqual(expect.objectContaining({
+      key: 'lawn_care',
+      label: 'Lawn Care',
+      isPest: false,
+      isRecurring: true,
+      setupFee: null,
+    }));
+    expect(payload.services[1].frequencies).toHaveLength(1);
+    expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'recurring',
+      monthly: 40,
+      perTreatment: 120,
+      perVisit: null,
+      addOns: [],
+    }));
     expect(payload.renderFlags).toEqual(expect.objectContaining({
       showWaveGuardSetupFee: true,
       showPestRecurringAddOns: true,
       showOneTimePestAddOns: false,
+    }));
+    expect(payload.askChips).toEqual(expect.arrayContaining([
+      'What products do you use?',
+      'What gets applied each visit?',
+    ]));
+  });
+
+  test('multi-service pest bundles preserve non-pest cadence rows when split', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-mixed-pest-non-pest-cadence-test',
+      monthly_total: 90,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'complete_mixed_service_rows_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 90,
+                perServiceTreatments: [
+                  {
+                    service: 'pest_control',
+                    label: 'Pest Control (Quarterly)',
+                    displayPrice: 150,
+                    perTreatment: 150,
+                    visitsPerYear: 4,
+                  },
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care (Quarterly)',
+                    displayPrice: 120,
+                    perTreatment: 120,
+                    visitsPerYear: 4,
+                  },
+                ],
+              },
+              {
+                key: 'monthly',
+                label: 'Monthly',
+                monthly: 110,
+                perServiceTreatments: [
+                  {
+                    service: 'pest_control',
+                    label: 'Pest Control (Monthly)',
+                    displayPrice: 60,
+                    perTreatment: 60,
+                    visitsPerYear: 12,
+                  },
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care (Monthly)',
+                    displayPrice: 50,
+                    perTreatment: 50,
+                    visitsPerYear: 12,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        result: {
+          recurring: {
+            monthlyTotal: 90,
+            annualAfterDiscount: 1080,
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 40 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 90,
+      annual: 1080,
+    }));
+    expect(payload.frequencies[1]).toEqual(expect.objectContaining({
+      key: 'monthly',
+      monthly: 110,
+      annual: 1320,
+    }));
+    expect(payload.services.map((section) => section.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(payload.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services[1].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 40,
+      perTreatment: 120,
+      perVisit: null,
+    }));
+    expect(payload.services[1].frequencies[1]).toEqual(expect.objectContaining({
+      key: 'monthly',
+      monthly: 50,
+      perTreatment: 50,
+      perVisit: null,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 90,
+      annualSubtotal: 1080,
+    }));
+  });
+
+  test('multi-service non-pest bundles preserve selectable cadence rows when split', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-non-pest-multi-cadence-test',
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'complete_non_pest_service_rows_snapshot',
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 50,
+                annual: 600,
+                perServiceTreatments: [
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care',
+                    displayPrice: 90,
+                    perTreatment: 90,
+                    visitsPerYear: 4,
+                  },
+                  {
+                    service: 'mosquito',
+                    label: 'Mosquito',
+                    displayPrice: 60,
+                    perTreatment: 60,
+                    visitsPerYear: 4,
+                  },
+                ],
+              },
+              {
+                key: 'monthly',
+                label: 'Monthly',
+                monthly: 60,
+                annual: 720,
+                perServiceTreatments: [
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care',
+                    displayPrice: 35,
+                    perTreatment: 35,
+                    visitsPerYear: 12,
+                  },
+                  {
+                    service: 'mosquito',
+                    label: 'Mosquito',
+                    displayPrice: 25,
+                    perTreatment: 25,
+                    visitsPerYear: 12,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        result: {
+          recurring: {
+            monthlyTotal: 50,
+            annualAfterDiscount: 600,
+            services: [
+              { name: 'Lawn Care', mo: 30 },
+              { name: 'Mosquito', mo: 20 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services.map((section) => section.key)).toEqual(['lawn_care', 'mosquito']);
+    expect(payload.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services[1].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
+    expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      key: 'quarterly',
+      monthly: 30,
+      perTreatment: 90,
+      perVisit: null,
+    }));
+    expect(payload.services[0].frequencies[1]).toEqual(expect.objectContaining({
+      key: 'monthly',
+      monthly: 35,
+      perTreatment: 35,
+      perVisit: null,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 50,
+      annualSubtotal: 600,
+    }));
+  });
+
+  test('multi-service snapshots keep legacy bundle when service rows do not cover selectable ladder', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-multi-service-snapshot-ladder-test',
+      monthly_total: 90,
+      annual_total: 1080,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'old_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [
+              { key: 'quarterly', label: 'Quarterly', monthly: 90, annual: 1080 },
+              { key: 'bi_monthly', label: 'Bi-monthly', monthly: 110, annual: 1320 },
+              { key: 'monthly', label: 'Monthly', monthly: 130, annual: 1560 },
+            ],
+          },
+        },
+        result: {
+          results: {
+            pestTiers: [
+              { label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 40 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'bundle',
+      isRecurring: true,
+      isPest: true,
+    }));
+    expect(payload.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 90,
+      annualSubtotal: 1080,
+    }));
+  });
+
+  test('multi-service snapshots keep legacy bundle when service rows do not match adjusted total', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-multi-service-adjusted-total-test',
+      monthly_total: 83.33,
+      annual_total: 999.96,
+      estimate_data: {
+        preferences: { interior_spray: false },
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'adjusted_total_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 83.33,
+                annual: 999.96,
+                perServiceTreatments: [
+                  {
+                    service: 'pest_control',
+                    label: 'Pest Control (Quarterly)',
+                    displayPrice: 150,
+                    perTreatment: 150,
+                    visitsPerYear: 4,
+                  },
+                  {
+                    service: 'lawn_care',
+                    label: 'Lawn Care',
+                    displayPrice: 120,
+                    perTreatment: 120,
+                    visitsPerYear: 4,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        result: {
+          recurring: {
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 40 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'bundle',
+      isRecurring: true,
+      isPest: true,
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 83.33,
+      annualSubtotal: 999.96,
     }));
   });
 
@@ -559,6 +930,308 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.askChips).not.toContain('What products do you use?');
   });
 
+  test('tree and shrub recurring estimates expose bi-monthly and every-six-weeks tiers', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-tree-shrub-tier-contract-test',
+      estimate_data: {
+        result: {
+          results: {
+            ts: [
+              { name: 'Standard', v: 6, mo: 72, ann: 864, pa: 144, recommended: false },
+              { name: 'Enhanced', v: 9, mo: 96, ann: 1152, pa: 128, recommended: true },
+              { name: 'Premium', v: 12, mo: 120, ann: 1440, pa: 120, recommended: false },
+            ],
+            tsMeta: { eb: 2400, et: 7 },
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 96,
+            annualAfterDiscount: 1152,
+            waveGuardTier: 'Bronze',
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 96,
+      annual_total: 1152,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['standard', 'enhanced']);
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'tree_shrub',
+      label: 'Tree & Shrub',
+      isPest: false,
+      defaultFrequencyKey: 'enhanced',
+      setupFee: null,
+    }));
+    expect(payload.services[0].frequencies).toEqual([
+      expect.objectContaining({
+        key: 'standard',
+        label: 'Bi-monthly',
+        monthly: 72,
+        annual: 864,
+        perTreatment: 144,
+        visitsPerYear: 6,
+        billingFrequencyKey: 'monthly',
+        addOns: [],
+      }),
+      expect.objectContaining({
+        key: 'enhanced',
+        label: 'Every 6 weeks',
+        monthly: 96,
+        annual: 1152,
+        perTreatment: 128,
+        visitsPerYear: 9,
+        billingFrequencyKey: 'monthly',
+        addOns: [],
+        recommended: true,
+      }),
+    ]);
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 96,
+      annualSubtotal: 1152,
+      qualifyingCount: 1,
+    }));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardSetupFee: false,
+      showPestRecurringAddOns: false,
+    }));
+    expect(payload.askChips).toEqual([
+      'Which trees get treated?',
+      'What gets applied?',
+      'When do visits start?',
+      'Can I prepay annually?',
+    ]);
+  });
+
+  test('tree and shrub default tier follows source selection before recommendation', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-tree-shrub-selected-standard-test',
+      estimate_data: {
+        result: {
+          results: {
+            ts: [
+              { name: 'Standard', v: 6, mo: 72, ann: 864, pa: 144, selected: true },
+              { name: 'Enhanced', v: 9, mo: 96, ann: 1152, pa: 128, recommended: true },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 72,
+            annualAfterDiscount: 864,
+            waveGuardTier: 'Bronze',
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 72 }],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 72,
+      annual_total: 864,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'tree_shrub',
+      defaultFrequencyKey: 'standard',
+    }));
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 72,
+      annualSubtotal: 864,
+    }));
+  });
+
+  test('tree and shrub tier rows preserve manual recurring discounts', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-tree-shrub-manual-discount-test',
+      estimate_data: {
+        result: {
+          manualDiscount: {
+            source: 'catalog_preset',
+            catalogName: 'Military Discount',
+            type: 'FIXED',
+            value: 120,
+            amount: 120,
+            label: 'Military Discount',
+          },
+          totals: {
+            manualDiscount: {
+              source: 'catalog_preset',
+              catalogName: 'Military Discount',
+              type: 'FIXED',
+              value: 120,
+              amount: 120,
+              label: 'Military Discount',
+            },
+          },
+          results: {
+            ts: [
+              { name: 'Standard', v: 6, mo: 72, ann: 864, pa: 144, recommended: false },
+              { name: 'Enhanced', v: 9, mo: 96, ann: 1152, pa: 128, recommended: true },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 86,
+            annualAfterDiscount: 1032,
+            waveGuardTier: 'Bronze',
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 86,
+      annual_total: 1032,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.frequencies).toEqual([
+      expect.objectContaining({
+        key: 'standard',
+        monthlyBase: 72,
+        monthly: 62,
+        annual: 744,
+        perTreatment: 124,
+      }),
+      expect.objectContaining({
+        key: 'enhanced',
+        monthlyBase: 96,
+        monthly: 86,
+        annual: 1032,
+        perTreatment: 114.67,
+        manualDiscount: expect.objectContaining({
+          label: 'Military Discount',
+          amount: 120,
+          monthlyAmount: 10,
+        }),
+      }),
+    ]);
+    expect(payload.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 86,
+      annualSubtotal: 1032,
+    }));
+  });
+
+  test('accepted tree and shrub tier rewrites downstream service profile while billing stays monthly', async () => {
+    const estimateData = {
+      result: {
+        results: {
+          ts: [
+            { name: 'Standard', v: 6, mo: 72, ann: 864, pa: 144 },
+            { name: 'Enhanced', v: 9, mo: 96, ann: 1152, pa: 128, selected: true },
+          ],
+        },
+        recurring: {
+          discount: 0,
+          monthlyTotal: 96,
+          annualAfterDiscount: 1152,
+          waveGuardTier: 'Bronze',
+          services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+        },
+        oneTime: { total: 0, items: [], specItems: [] },
+        specItems: [],
+      },
+    };
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-tree-shrub-accepted-standard-test',
+      estimate_data: estimateData,
+      monthly_total: 96,
+      annual_total: 1152,
+      waveguard_tier: 'Bronze',
+    });
+    const standard = payload.frequencies.find((frequency) => frequency.key === 'standard');
+
+    const nextData = applySelectedTreeShrubTierToEstimateData(estimateData, standard);
+    const service = nextData.result.recurring.services[0];
+    const profile = estimateSlotAvailability.resolveEstimateSlotProfile({
+      service_interest: 'Tree & Shrub',
+      estimate_data: nextData,
+    }, { selectedFrequency: 'standard' });
+
+    expect(standard).toEqual(expect.objectContaining({
+      key: 'standard',
+      label: 'Bi-monthly',
+      billingFrequencyKey: 'monthly',
+    }));
+    expect(service).toEqual(expect.objectContaining({
+      service: 'tree_shrub',
+      serviceKey: 'tree_shrub_program',
+      service_key: 'tree_shrub_program',
+      name: 'Bi-Monthly Tree & Shrub Care Service',
+      mo: 72,
+      monthly: 72,
+      annual: 864,
+      annualAfterDiscount: 864,
+      perTreatment: 144,
+      visitsPerYear: 6,
+      frequency: 'bi_monthly',
+      tierKey: 'standard',
+      tierLabel: 'Bi-monthly',
+      billingFrequencyKey: 'monthly',
+    }));
+    expect(nextData.result.recurring).toEqual(expect.objectContaining({
+      monthlyTotal: 72,
+      annualAfterDiscount: 864,
+    }));
+    expect(nextData.result.results.ts).toEqual([
+      expect.objectContaining({ name: 'Standard', selected: true, isSelected: true }),
+      expect.objectContaining({ name: 'Enhanced', selected: false, isSelected: false }),
+    ]);
+    expect(profile.serviceLabel).toContain('6x Bi-Monthly Tree & Shrub Care Service');
+    expect(estimateData.result.recurring.services[0].mo).toBe(96);
+  });
+
+  test('phase 0 mosquito recurring contract uses mosquito copy without pest gates', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-mosquito-recurring-test',
+      estimate_data: {
+        result: {
+          results: {
+            mq: [{ n: 'Seasonal Mosquito Program (9 visits)', v: 9, pv: 110, recommended: true }],
+            mqMeta: { pr: 1.2, ri: 0, treatableSqFt: 8250 },
+          },
+          recurring: {
+            monthlyTotal: 82.5,
+            annualAfterDiscount: 990,
+            services: [
+              { service: 'mosquito', name: 'Mosquito (Seasonal Mosquito Program)', mo: 82.5, perTreatment: 110, visitsPerYear: 9 },
+            ],
+          },
+          oneTime: { total: 0, items: [], specItems: [] },
+          specItems: [],
+        },
+      },
+      monthly_total: 82.5,
+      annual_total: 990,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'mosquito',
+      label: 'Mosquito',
+      isPest: false,
+      isRecurring: true,
+      copy: expect.objectContaining({
+        headline: 'Hey {first}, choose your mosquito control option.',
+      }),
+    }));
+    expect(payload.renderFlags).toEqual(expect.objectContaining({
+      showWaveGuardSetupFee: false,
+      showPestRecurringAddOns: false,
+      showOneTimePestAddOns: false,
+    }));
+    expect(payload.askChips).toContain('How long does each visit last?');
+    expect(payload.askChips).toContain('What about my pool area?');
+    expect(payload.askChips).not.toContain('What products do you use?');
+  });
+
   test('phase 0 render flags do not expose WaveGuard setup or pest add-ons for one-time-only quotes', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-phase-0-onetime-guard-test',
@@ -593,11 +1266,60 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('pre-slab one-time quotes use pre-slab category and copy instead of trenching', async () => {
+    expect(deriveServiceCategory({}, [], [{
+      service: 'pre_slab_termiticide',
+      name: 'Pre-Slab Termiticide Treatment',
+      price: 225,
+    }])).toBe('pre_slab_termiticide');
+    expect(deriveServiceCategory({}, [{ name: 'Pre-Slab Termite Treatment' }], []))
+      .toBe('pre_slab_termiticide');
+    expect(deriveServiceCategory({ inputs: { services: { preSlabTermiticide: true } } }, [], []))
+      .toBe('pre_slab_termiticide');
+
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-phase-0-preslab-category-test',
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 225,
+            items: [{
+              service: 'pre_slab_termiticide',
+              name: 'Pre-Slab Termiticide Treatment',
+              price: 225,
+              warrantyStatus: 'No extended warranty selected.',
+            }],
+          },
+          recurring: { services: [] },
+        },
+      },
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 225,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.services).toHaveLength(1);
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'pre_slab_termiticide',
+      label: 'Pre-Slab Termiticide Treatment',
+      isRecurring: false,
+      isPest: false,
+      copy: expect.objectContaining({
+        headline: "Hey {first}, here's your pre-slab termite treatment quote.",
+      }),
+    }));
+    expect(payload.askChips).toContain('Do I get documentation?');
+    expect(payload.askChips).not.toContain('How long does the barrier last?');
+  });
+
   test('deriveServiceCategory returns pest, trenching, and bundle categories from normalized services', () => {
     expect(deriveServiceCategory({}, [{ name: 'Pest Control' }], [])).toBe('pest_control');
     expect(deriveServiceCategory({}, [{ name: 'Rodent Remediation' }], [])).toBe('rodent');
     expect(deriveServiceCategory({}, [], [{ service: 'trenching', name: 'Trenching', price: 500 }]))
       .toBe('termite_trenching');
+    expect(deriveServiceCategory({ inputs: { svcOnetimeMosquito: true } }, [], []))
+      .toBe('mosquito');
     expect(deriveServiceCategory({}, [{ service: 'lawn_care', name: 'Lawn Care' }], [{ service: 'one_time_pest', name: 'One-Time Pest', price: 200 }]))
       .toBe('bundle');
   });
@@ -700,6 +1422,11 @@ describe('public estimate one-time breakdown', () => {
         amount: 60,
         monthlyAmount: 5,
       }),
+    }));
+    expect(payload.combinedRecurring?.manualDiscount).toEqual(expect.objectContaining({
+      label: 'Military Discount',
+      amount: 60,
+      monthlyAmount: 5,
     }));
   });
 
@@ -989,6 +1716,40 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
+  test('requiresCustomQuote one-time rows preserve customer-facing quote reasons', () => {
+    const breakdown = normalizeOneTimeBreakdown({
+      result: {
+        oneTime: {
+          total: 0,
+          specItems: [{
+            service: 'flea_package',
+            name: 'Flea Treatment Package',
+            price: null,
+            requiresCustomQuote: true,
+            customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+            manualReviewReasons: ['large_lot'],
+          }],
+        },
+      },
+    });
+
+    expect(breakdown.quoteRequired).toBe(true);
+    expect(breakdown.items).toContainEqual(expect.objectContaining({
+      service: 'flea_package',
+      kind: 'quote_required',
+      amount: null,
+      quoteRequired: true,
+      requiresCustomQuote: true,
+      reason: 'Exterior yard area exceeds automatic quote threshold.',
+      customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+      manualReviewReasons: ['large_lot'],
+    }));
+    expect(resolveEstimateQuoteRequirement({ oneTimeBreakdown: breakdown })).toEqual(expect.objectContaining({
+      quoteRequired: true,
+      reason: 'Exterior yard area exceeds automatic quote threshold.',
+    }));
+  });
+
   test('quote-required result spec rows lock public commercial manual drafts', async () => {
     const estimateData = {
       result: {
@@ -1040,6 +1801,79 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Ready to lock in');
     expect(html).not.toContain('class="cta pick-time-cta"');
     expect(html).not.toContain('id="booking-card"');
+  });
+
+  test('server-rendered quote-required page explains why pricing is blocked', () => {
+    const html = renderPage('quote-reason-token', {
+      status: 'quote_required',
+      quoteRequired: true,
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+    }, {
+      result: {
+        oneTime: {
+          total: 0,
+          specItems: [{
+            service: 'flea_package',
+            name: 'Flea Treatment Package',
+            price: null,
+            requiresCustomQuote: true,
+            customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+          }],
+        },
+      },
+    });
+
+    expect(html).toContain('Quote Required');
+    expect(html).toContain('Exterior yard area exceeds automatic quote threshold.');
+  });
+
+  test('server-rendered termite trenching quote-required page avoids zero-price acceptance copy', () => {
+    const html = renderPage('termite-trenching-quote-token', {
+      status: 'quote_required',
+      quoteRequired: true,
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 725,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{
+            service: 'trenching',
+            name: 'Termite Trenching',
+            price: 725,
+            quoteRequired: true,
+          }, {
+            service: 'inspection_fee',
+            name: 'Inspection Fee',
+            price: 50,
+          }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('termite trenching quote');
+    expect(html).toContain('Quote Required');
+    expect(html).toContain('Inspection required before final pricing.');
+    expect(html).toContain('Inspection required to finish this quote');
+    expect(html).not.toContain('$0.00');
+    expect(html).not.toContain('$0</span>');
+    expect(html).not.toContain('$725');
+    expect(html).not.toContain('$50');
+    expect(html).not.toContain('$775');
+    expect(html).not.toContain('class="cta pick-time-cta"');
+    expect(html).not.toContain('id="booking-card"');
+    expect(html).not.toContain('Find a date & time that works for you');
   });
 
   test('server-rendered booking review buttons use explicit click listeners', () => {
@@ -1223,7 +2057,277 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Treatable lawn', value: '5,200 sq ft' },
       { label: 'Complexity', value: 'Moderate' },
     ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
     expect(payload.signals).toEqual([]);
+  });
+
+  test('Waves AI payload includes grass type for lawn-only estimates when present', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 1900,
+        lotSqFt: 7200,
+        lawnSqFt: 4200,
+        services: { lawn: { track: 'st_augustine' } },
+      },
+      result: {
+        recurring: { services: [{ name: 'Lawn Care' }] },
+      },
+    });
+
+    expect(payload.title).toContain('Waves AI reviewed your lawn');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Treatable lawn', value: '4,200 sq ft' },
+      { label: 'Grass type', value: 'St. Augustine' },
+    ]));
+  });
+
+  test('Waves AI payload uses later object turf fields when the first field is a placeholder', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        lawnSqFt: 4200,
+      },
+      result: {
+        property: {
+          turfProfile: { grassType: { track: 'N/A', grassType: 'bermuda' } },
+        },
+        recurring: { services: [{ name: 'Lawn Care' }] },
+      },
+    });
+
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Grass type', value: 'Bermuda' },
+    ]));
+  });
+
+  test('Waves AI payload does not invent a lawn grass type metric', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        lawnSqFt: 4200,
+        services: { lawn: { track: 'N/A' } },
+      },
+      result: {
+        recurring: { services: [{ name: 'Lawn Care' }] },
+      },
+    });
+
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Treatable lawn', value: '4,200 sq ft' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload includes tree and shrub metrics for tree/shrub-only estimates', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2100,
+        lotSqFt: 8400,
+        bedArea: 1800,
+        bedAreaSource: 'explicit',
+        services: {
+          treeShrub: {
+            treeCount: 6,
+            shrubDensity: 'heavy',
+          },
+        },
+        features: {
+          shrubs: 'heavy',
+          trees: 'moderate',
+        },
+        landscapeComplexity: 'COMPLEX',
+        pool: 'NO',
+        poolCage: 'NO',
+      },
+      result: {
+        recurring: { services: [{ name: 'Tree & Shrub' }] },
+      },
+    });
+
+    expect(payload.title).toContain('Waves AI reviewed your beds and trees');
+    expect(payload.body).toContain('tree & shrub plan');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Home', value: '2,100 sq ft' },
+      { label: 'Lot', value: '8,400 sq ft' },
+      { label: 'Pool/Lanai', value: 'No' },
+      { label: 'Ornamental beds', value: '1,800 sq ft' },
+      { label: 'Trees/Shrubs', value: '6 trees, Heavy shrubs' },
+      { label: 'Complexity', value: 'Complex' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload skips placeholder tree and shrub metrics', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        bedArea: 2000,
+        bedAreaSource: 'fallback',
+        services: {
+          treeShrub: {
+            treeDensity: 0,
+            shrubDensity: '0',
+          },
+        },
+        features: {
+          trees: 'N/A',
+          shrubs: 'unknown',
+        },
+      },
+      result: {
+        recurring: { services: [{ name: 'Tree & Shrub' }] },
+      },
+    });
+
+    expect(payload.metrics.some((metric) => metric.label === 'Ornamental beds')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Trees/Shrubs')).toBe(false);
+  });
+
+  test('Waves AI payload preserves complexity for termite and lawn bundles', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2400,
+        lotSqFt: 9000,
+        lawnSqFt: 5200,
+        services: { lawn: { track: 'st_augustine' } },
+        landscapeComplexity: 'MODERATE',
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+        termitePerimeterFt: 180,
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Lawn Care' },
+            { name: 'Termite Bait Stations' },
+          ],
+        },
+      },
+    });
+
+    expect(payload.metrics).toHaveLength(6);
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Termite perimeter', value: '180 linear ft' },
+      { label: 'Complexity', value: 'Moderate' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload uses termite-specific copy and perimeter for termite-bait-only estimates', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2200,
+        lotSqFt: 7800,
+        termitePerimeterFt: 185,
+        services: { termiteBait: true },
+        pool: 'NO',
+        poolCage: 'NO',
+      },
+      result: {
+        recurring: {
+          services: [{ name: 'Termite Bait Stations' }],
+        },
+      },
+    });
+
+    expect(payload.title).toBe('Waves AI reviewed your termite perimeter before pricing this estimate');
+    expect(payload.body).toContain('termite perimeter details');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Termite perimeter', value: '185 linear ft' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload uses mosquito-specific copy and metrics for mosquito-only estimates', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2100,
+        lotSqFt: 9400,
+        services: { mosquito: { tier: 'monthly12' } },
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'LARGE',
+        landscapeComplexity: 'MODERATE',
+      },
+      result: {
+        recurring: {
+          services: [{ name: 'Mosquito (Monthly Mosquito Program)' }],
+        },
+        results: {
+          mq: [
+            { n: 'Seasonal Mosquito Program (9 visits)', v: 9, recommended: false },
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, recommended: true },
+          ],
+          mqMeta: {
+            pr: 1.35,
+            ri: 1,
+            treatableSqFt: 7800,
+          },
+        },
+      },
+    });
+
+    expect(payload.title).toBe('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(payload.body).toContain('mosquito control plan');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Home', value: '2,100 sq ft' },
+      { label: 'Lot', value: '9,400 sq ft' },
+      { label: 'Mosquito treatment area', value: '7,800 sq ft' },
+      { label: 'Mosquito program', value: 'Monthly (12 visits/year)' },
+      { label: 'Mosquito pressure', value: '1.35x' },
+      { label: 'Pool/Lanai', value: 'Yes (Large cage)' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Termite perimeter')).toBe(false);
+  });
+
+  test('Waves AI payload keeps bundle copy when recurring mosquito includes non-mosquito one-time rows', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 2100,
+        lotSqFt: 9400,
+        services: { mosquito: { tier: 'monthly12' } },
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'LARGE',
+      },
+      result: {
+        recurring: {
+          services: [{ name: 'Mosquito (Monthly Mosquito Program)' }],
+        },
+        oneTime: {
+          total: 225,
+          items: [{
+            service: 'one_time_pest',
+            name: 'One-Time Pest Treatment',
+            price: 225,
+          }],
+          specItems: [],
+        },
+        results: {
+          mq: [
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, recommended: true },
+          ],
+          mqMeta: {
+            pr: 1.35,
+            ri: 0,
+            treatableSqFt: 7800,
+          },
+        },
+      },
+    });
+
+    expect(payload.title).toBe('Waves AI reviewed your property before pricing this estimate');
+    expect(payload.body).toContain('WaveGuard plan');
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Home', value: '2,100 sq ft' },
+      { label: 'Lot', value: '9,400 sq ft' },
+      { label: 'Pool/Lanai', value: 'Yes (Large cage)' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito treatment area')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito program')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Mosquito pressure')).toBe(false);
   });
 
   test('Waves AI payload shows Pool/Lanai when explicitly absent', () => {
@@ -1287,7 +2391,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Waves AI');
     expect(html).toContain('Waves AI reviewed your property before pricing this estimate');
     expect(html).toContain('id="estimate-ask-form"');
-    expect(html).toContain('Ask Waves AI');
+    expect(html).toContain('Ask Waves');
+    expect(html).toContain('aria-label="Ask Waves about this estimate"');
     expect(html).toContain('/api/public/estimates/');
     expect(html).toContain('/ask');
     expect(html).toContain('ESTIMATE_ASK_TOKEN');
@@ -1319,7 +2424,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
     expect(acceptedHtml).not.toContain('id="estimate-ask-form"');
-    expect(acceptedHtml).not.toContain('Ask Waves AI');
+    expect(acceptedHtml).not.toContain('Ask Waves');
   });
 
   test('estimate assistant fallback answers included service questions from estimate context', () => {
@@ -1473,6 +2578,105 @@ describe('public estimate one-time breakdown', () => {
     expect(answer).toContain('$244 / bi-monthly visit');
     expect(answer).toContain('WaveGuard setup is $99');
     expect(answer).toContain('Initial Roach Knockdown is $119');
+  });
+
+  test('estimate assistant treats tree and shrub tiers as monthly billing with service cadence', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Bronze',
+      },
+      estData: {
+        customerSelection: {
+          serviceTierKey: 'enhanced',
+          serviceTierLabel: 'Every 6 weeks',
+        },
+        result: {
+          recurring: {
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+          },
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Bronze',
+        frequencies: [
+          {
+            key: 'standard',
+            label: 'Bi-monthly',
+            serviceCategory: 'tree_shrub',
+            monthly: 72,
+            annual: 864,
+            billingFrequencyKey: 'monthly',
+            included: [{ label: 'Bi-monthly tree & shrub program', detail: '6 visits per year' }],
+          },
+          {
+            key: 'enhanced',
+            label: 'Every 6 weeks',
+            serviceCategory: 'tree_shrub',
+            monthly: 96,
+            annual: 1152,
+            billingFrequencyKey: 'monthly',
+            included: [{ label: 'Every 6 weeks tree & shrub program', detail: '9 visits per year' }],
+          },
+        ],
+      },
+    });
+    const answer = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.billing.amountText).toBe('$96 / month');
+    expect(context.billing.serviceCadence).toBe('Every 6 weeks');
+    expect(context.services[0].summary).toContain('Every 6 weeks');
+    expect(context.services[0].summary).toContain('9 visits per year');
+    expect(answer).toContain('$96 / month');
+    expect(answer).toContain('Service visits are Every 6 weeks.');
+    expect(answer).not.toContain('/ bi-monthly visit');
+  });
+
+  test('estimate assistant invoice mode uses selected tier billing cadence', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Bronze',
+        bill_by_invoice: true,
+      },
+      estData: {
+        customerSelection: {
+          serviceTierKey: 'enhanced',
+        },
+        result: {
+          recurring: {
+            services: [{ service: 'tree_shrub', name: 'Tree & Shrub', mo: 96 }],
+          },
+        },
+      },
+      pricingBundle: {
+        waveGuardTier: 'Bronze',
+        frequencies: [
+          {
+            key: 'standard',
+            label: 'Bi-monthly',
+            serviceCategory: 'tree_shrub',
+            monthly: 72,
+            annual: 864,
+            billingFrequencyKey: 'monthly',
+          },
+          {
+            key: 'enhanced',
+            label: 'Every 6 weeks',
+            serviceCategory: 'tree_shrub',
+            monthly: 96,
+            annual: 1152,
+            billingFrequencyKey: 'monthly',
+          },
+        ],
+      },
+    });
+    const answer = answerEstimateQuestionFallback('How does billing work?', context);
+
+    expect(context.billing.amountText).toBe('$96 / month');
+    expect(context.billing.invoiceDueText).toBe('$96');
+    expect(answer).toContain('invoice due immediately for $96');
+    expect(answer).not.toContain('$288');
   });
 
   test('estimate assistant honors the currently selected pricing state', () => {
@@ -1995,6 +3199,7 @@ describe('public estimate one-time breakdown', () => {
         homeSqFt: 2070,
         lotSqFt: 7326,
         lawnSqFt: 3200,
+        services: { lawn: { track: 'st_augustine' } },
         landscapeComplexity: 'SIMPLE',
       },
       result: {
@@ -2013,6 +3218,8 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('your lawn care estimate');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
+    expect(html).toContain('Grass type');
+    expect(html).toContain('St. Augustine');
     expect(html).toContain('Choose how you want to pay');
     expect(html).not.toContain('Choose how to start your lawn care plan');
     expect(html).toContain('Pick your first lawn care visit');
@@ -2051,6 +3258,315 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('90-day money-back guarantee');
     expect(html).not.toContain('Free annual termite inspection');
     expect(html).not.toContain('What WaveGuard members get');
+  });
+
+  test('server-rendered tree/shrub-only estimate uses tree/shrub-specific desktop copy', () => {
+    const html = renderPage('tree-shrub-only-token', {
+      status: 'sent',
+      customerName: 'Jane Customer',
+      address: '6539 Field Sparrow Gln',
+      monthlyTotal: 72,
+      annualTotal: 864,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/tree-shrub.png',
+    }, {
+      inputs: {
+        homeSqFt: 2070,
+        lotSqFt: 7326,
+        bedArea: 1700,
+        bedAreaSource: 'explicit',
+        services: {
+          treeShrub: {
+            treeCount: 5,
+            shrubDensity: 'moderate',
+          },
+        },
+        landscapeComplexity: 'MODERATE',
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Tree & Shrub', mo: 72, perTreatment: 96, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          ts: [
+            { name: 'Standard', selected: false, recommended: false, v: 6 },
+            { name: 'Enhanced', selected: true, recommended: true, v: 9 },
+          ],
+          tsMeta: { eb: 1700, et: 5 },
+        },
+      },
+    });
+
+    expect(html).toContain('tree &amp; shrub');
+    expect(html).toContain('Waves AI reviewed your beds and trees before pricing this estimate');
+    expect(html).toContain('Ornamental beds');
+    expect(html).toContain('1,700 sq ft');
+    expect(html).toContain('Trees/Shrubs');
+    expect(html).toContain('5 trees, Moderate shrubs');
+    expect(html).toContain('Pick your first tree &amp; shrub visit');
+    expect(html).toContain('Tree &amp; Shrub (9x)');
+    expect(html).toContain('What your tree &amp; shrub plan includes');
+    expect(html).toContain('Ready to start tree &amp; shrub?');
+    expect(html).not.toContain('Ready to start pest control?');
+    expect(html).not.toContain('Skip parts you don&#39;t need');
+  });
+
+  test('server-rendered mosquito-only estimate uses mosquito-specific desktop copy', () => {
+    const html = renderPage('mosquito-only-token', {
+      status: 'sent',
+      customerName: 'Maya Customer',
+      address: '801 Lanai Loop',
+      monthlyTotal: 82.5,
+      annualTotal: 990,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/mosquito.png',
+    }, {
+      inputs: {
+        homeSqFt: 2050,
+        lotSqFt: 9800,
+        services: { mosquito: { tier: 'seasonal9' } },
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+        landscapeComplexity: 'MODERATE',
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Mosquito (Seasonal Mosquito Program)', mo: 82.5, perTreatment: 110, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: {
+          mq: [
+            { n: 'Seasonal Mosquito Program (9 visits)', v: 9, pv: 110, recommended: true },
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, pv: 95 },
+          ],
+          mqMeta: {
+            pr: 1.2,
+            ri: 0,
+            treatableSqFt: 8250,
+          },
+        },
+      },
+    });
+
+    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(html).toContain('Mosquito treatment area');
+    expect(html).toContain('8,250 sq ft');
+    expect(html).toContain('Mosquito program');
+    expect(html).toContain('Seasonal (9 visits/year)');
+    expect(html).toContain('Mosquito pressure');
+    expect(html).toContain('1.2x');
+    expect(html).toContain('Pick your first mosquito control visit');
+    expect(html).toContain('What your mosquito control plan includes');
+    expect(html).toContain('Ready to start mosquito control?');
+    expect(html).toContain('How long does it last?');
+    expect(html).not.toContain('Ready to start pest control?');
+    expect(html).not.toContain('Go Waves! Wave Goodbye to Pests!');
+    expect(html).not.toContain('Free annual termite inspection');
+    expect(html).not.toContain('What WaveGuard members get');
+  });
+
+  test('server-rendered one-time mosquito estimate uses mosquito-specific copy', () => {
+    const html = renderPage('mosquito-onetime-token', {
+      status: 'sent',
+      customerName: 'Maya Customer',
+      address: '801 Lanai Loop',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 275,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/mosquito-onetime.png',
+    }, {
+      inputs: {
+        homeSqFt: 2050,
+        lotSqFt: 9800,
+        mosquitoTreatmentAreaSqFt: 8250,
+        svcOnetimeMosquito: true,
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+      },
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 275,
+          items: [{
+            service: 'one_time_mosquito',
+            name: 'One-Time Mosquito Treatment',
+            price: 275,
+            detail: 'Rain re-spray guarantee',
+          }],
+          specItems: [],
+        },
+        specItems: [],
+        results: {
+          mqMeta: {
+            pr: 1.2,
+            treatableSqFt: 8250,
+          },
+        },
+      },
+    });
+
+    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(html).toContain('Mosquito treatment area');
+    expect(html).toContain('8,250 sq ft');
+    expect(html).toContain('Mosquito pressure');
+    expect(html).toContain('1.2x');
+    expect(html).toContain('Pick your first mosquito control visit');
+    expect(html).toContain('One-Time Mosquito Treatment');
+    expect(html).toContain('data-estimate-ask-prompt="How long does it last?"');
+    expect(html).toContain('data-estimate-ask-prompt="Are pets and kids safe?"');
+    expect(html).not.toContain('custom quote');
+    expect(html).not.toContain('Find a date &amp; time that works for you');
+    expect(html).not.toContain('What WaveGuard members get');
+    expect(html).not.toContain('data-estimate-ask-prompt="What products do you use?"');
+  });
+
+  test('server-rendered one-time mosquito estimate keeps mosquito copy with reconciliation adjustment row', () => {
+    const estimateData = {
+      inputs: {
+        homeSqFt: 2050,
+        lotSqFt: 9800,
+        mosquitoTreatmentAreaSqFt: 8250,
+        svcOnetimeMosquito: true,
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'MEDIUM',
+      },
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 325,
+          items: [{
+            service: 'one_time_mosquito',
+            name: 'One-Time Mosquito Treatment',
+            price: 275,
+            detail: 'Rain re-spray guarantee',
+          }],
+          specItems: [],
+        },
+        specItems: [],
+        results: {
+          mqMeta: {
+            pr: 1.2,
+            treatableSqFt: 8250,
+          },
+        },
+      },
+    };
+    expect(normalizeOneTimeBreakdown(estimateData).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service: 'one_time_adjustment',
+        amount: 50,
+      }),
+    ]));
+
+    const html = renderPage('mosquito-onetime-adjustment-token', {
+      status: 'sent',
+      customerName: 'Maya Customer',
+      address: '801 Lanai Loop',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 325,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/mosquito-onetime.png',
+    }, estimateData);
+
+    expect(html).toContain('mosquito control estimate');
+    expect(html).toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+    expect(html).toContain('Mosquito treatment area');
+    expect(html).toContain('8,250 sq ft');
+    expect(html).toContain('Pick your first mosquito control visit');
+    expect(html).not.toContain('Find a date &amp; time that works for you');
+    expect(html).not.toContain('Go Waves! Wave Goodbye to Pests!');
+  });
+
+  test('server-rendered setup-only one-time row does not trigger mosquito copy', () => {
+    const html = renderPage('setup-only-token', {
+      status: 'sent',
+      customerName: 'Sam Customer',
+      address: '10 Setup Row',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 99,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 99,
+          items: [{ service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).not.toContain('mosquito control estimate');
+    expect(html).not.toContain('Pick your first mosquito control visit');
+    expect(html).not.toContain('Waves AI reviewed your mosquito treatment zones before pricing this estimate');
+  });
+
+  test('server-rendered termite-bait-only estimate uses termite-specific desktop copy', () => {
+    const html = renderPage('termite-bait-only-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 45,
+      annualTotal: 540,
+      onetimeTotal: 420,
+      tier: 'Bronze',
+      satelliteUrl: 'https://maps.example/termite.png',
+    }, {
+      inputs: {
+        homeSqFt: 2200,
+        lotSqFt: 7800,
+        termitePerimeterFt: 185,
+        services: { termiteBait: true },
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Termite Bait Stations', mo: 45, perTreatment: 135, visitsPerYear: 4 },
+          ],
+        },
+        oneTime: {
+          items: [{ service: 'termite_bait_installation', name: 'Termite bait installation', price: 420 }],
+          specItems: [],
+        },
+        specItems: [],
+        results: {
+          tmBait: { perim: 185, sta: 24 },
+        },
+      },
+    });
+
+    expect(html).toContain('termite protection estimate');
+    expect(html).toContain('Waves AI reviewed your termite perimeter before pricing this estimate');
+    expect(html).toContain('Termite perimeter');
+    expect(html).toContain('185 linear ft');
+    expect(html).toContain('Pick your first termite protection visit');
+    expect(html).toContain('What your termite protection plan includes');
+    expect(html).toContain('Ready to start termite protection?');
+    expect(html).toContain('How does the bait work?');
+    expect(html).not.toContain('Ready to start pest control?');
+    expect(html).not.toContain('Go Waves! Wave Goodbye to Pests!');
+    expect(html).not.toContain('Skip parts you don&#39;t need');
+    expect(html).not.toContain('Free annual termite inspection');
+    expect(html).not.toContain('What WaveGuard members get');
+    expect(html).not.toContain('Your WaveGuard membership goes beyond routine visits');
   });
 
   test('server-rendered estimate promotes separate palm and rodent bait recurring services', () => {
@@ -2148,6 +3664,18 @@ describe('public estimate one-time breakdown', () => {
     const pricing = await buildPricingBundle(estimate);
 
     expect(pricing.frequencies[0].monthly).toBe(149);
+    expect(pricing.combinedRecurring).toEqual(expect.objectContaining({
+      monthlySubtotal: 149,
+      annualSubtotal: 1788,
+      qualifyingCount: 1,
+    }));
+    expect(pricing.services).toHaveLength(1);
+    expect(pricing.services[0]).toEqual(expect.objectContaining({
+      key: 'bundle',
+      isPest: true,
+      isRecurring: true,
+    }));
+    expect(pricing.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
     expect(pricing.frequencies[0].perServiceTreatments).toEqual(expect.arrayContaining([
       expect.objectContaining({
         service: 'palm_injection',

@@ -85,6 +85,98 @@ describe('stripe banking service', () => {
     service = require('../services/stripe-banking');
   });
 
+  test('getBalance reads live Stripe buckets and ignores paid payouts for next payout', async () => {
+    stripeClient.balance.retrieve.mockResolvedValue({
+      available: [{ currency: 'usd', amount: 178315 }],
+      pending: [{ currency: 'usd', amount: 11772 }],
+      instant_available: [{ currency: 'usd', amount: 0 }],
+    });
+    stripeClient.payouts.list
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'po_next',
+            amount: 2500,
+            arrival_date: 1770086400,
+            status: 'pending',
+            method: 'standard',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'po_paid',
+            amount: 43671,
+            arrival_date: 1770000000,
+            status: 'paid',
+            method: 'standard',
+          },
+        ],
+        has_more: false,
+      });
+
+    const result = await service.getBalance();
+
+    expect(stripeClient.balance.retrieve).toHaveBeenCalledTimes(1);
+    expect(stripeClient.payouts.list).toHaveBeenNthCalledWith(1, { limit: 100, status: 'pending' });
+    expect(stripeClient.payouts.list).toHaveBeenNthCalledWith(2, { limit: 100 });
+    expect(result.total_available).toBe(1783.15);
+    expect(result.total_pending).toBe(117.72);
+    expect(result.total_instant_available).toBe(0);
+    expect(result.next_payout).toMatchObject({
+      id: 'po_next',
+      amount: 25,
+      status: 'pending',
+      method: 'standard',
+    });
+  });
+
+  test('getBalance pages payouts to find an in-transit next payout', async () => {
+    stripeClient.balance.retrieve.mockResolvedValue({
+      available: [{ currency: 'usd', amount: 178315 }],
+      pending: [],
+      instant_available: [],
+    });
+    stripeClient.payouts.list
+      .mockResolvedValueOnce({ data: [], has_more: false })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'po_paid',
+            amount: 43671,
+            arrival_date: 1770000000,
+            status: 'paid',
+            method: 'standard',
+          },
+        ],
+        has_more: true,
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'po_in_transit',
+            amount: 2500,
+            arrival_date: 1770086400,
+            status: 'in_transit',
+            method: 'standard',
+          },
+        ],
+        has_more: false,
+      });
+
+    const result = await service.getBalance();
+
+    expect(stripeClient.payouts.list).toHaveBeenNthCalledWith(1, { limit: 100, status: 'pending' });
+    expect(stripeClient.payouts.list).toHaveBeenNthCalledWith(2, { limit: 100 });
+    expect(stripeClient.payouts.list).toHaveBeenNthCalledWith(3, { limit: 100, starting_after: 'po_paid' });
+    expect(result.next_payout).toMatchObject({
+      id: 'po_in_transit',
+      amount: 25,
+      status: 'in_transit',
+    });
+  });
+
   test('syncPayoutTransactions paginates every Stripe balance transaction page', async () => {
     stripeClient.balanceTransactions.list
       .mockResolvedValueOnce({

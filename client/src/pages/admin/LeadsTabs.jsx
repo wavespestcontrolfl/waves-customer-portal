@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -186,6 +187,47 @@ function MetricCard({ label, value, sub, color }) {
   );
 }
 
+function PipelineStatusCard({ label, value }) {
+  return (
+    <div
+      style={{
+        flex: "1 1 140px",
+        minWidth: 140,
+        background: C.card,
+        border: `1px solid ${C.border}`,
+        borderRadius: 6,
+        padding: 14,
+        textAlign: "left",
+        fontFamily: ROBOTO,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          marginBottom: 4,
+        }}
+      >
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: 0,
+            color: C.muted,
+          }}
+        >
+          {label}
+        </span>
+      </div>
+      <div style={{ fontSize: 22, fontWeight: 500, color: C.heading, ...mono }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
 function LeadsWorkspaceNav({ active, onChange, counts }) {
   const tabs = [
     {
@@ -299,6 +341,7 @@ function LeadsWorkspaceNav({ active, onChange, counts }) {
 function Btn({ children, onClick, color, small, style, disabled }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
       style={{
@@ -447,9 +490,15 @@ function fmtPct(v) {
 }
 function fmtTime(min) {
   if (min == null) return "--";
-  if (min < 60) return min + "m";
-  if (min < 1440) return Math.round(min / 60) + "h";
-  return Math.round(min / 1440) + "d";
+  const numericMinutes = Number(min);
+  if (!Number.isFinite(numericMinutes)) return "--";
+  const totalSeconds = Math.max(0, Math.round(numericMinutes * 60));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
 }
 function roiColor(roi) {
   return roi >= 0 ? C.heading : C.red;
@@ -482,8 +531,11 @@ function SpeedToLeadTimer({ firstContactAt }) {
   }, [firstContactAt]);
 
   const mins = Math.floor(elapsed / 60);
+  const hours = Math.floor(elapsed / 3600);
+  const displayMinutes = Math.floor((elapsed % 3600) / 60);
   const secs = elapsed % 60;
-  const mm = String(mins).padStart(2, "0");
+  const hh = String(hours).padStart(2, "0");
+  const mm = String(displayMinutes).padStart(2, "0");
   const ss = String(secs).padStart(2, "0");
   const color = mins < 5 ? C.green : mins < 15 ? C.amber : C.red;
   const shouldPulse = mins >= 5;
@@ -498,7 +550,7 @@ function SpeedToLeadTimer({ firstContactAt }) {
         animation: shouldPulse ? "stlPulse 1.5s ease-in-out infinite" : "none",
       }}
     >
-      {mm}:{ss}
+      {hh}:{mm}:{ss}
     </span>
   );
 }
@@ -546,6 +598,7 @@ export function LeadsSection() {
   });
   const [pipelineView, setPipelineView] = useState("table");
   const [draggingLeadId, setDraggingLeadId] = useState(null);
+  const [deletingLeadId, setDeletingLeadId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
@@ -661,6 +714,38 @@ export function LeadsSection() {
     }
   };
 
+  const deleteLead = async (lead) => {
+    const label =
+      [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() ||
+      lead.phone ||
+      lead.email ||
+      "this lead";
+    if (
+      !window.confirm(
+        `Delete ${label} from the lead pipeline?\n\nThis removes the lead and its activity timeline. Existing estimates stay in Estimates.`,
+      )
+    ) {
+      return;
+    }
+
+    setDeletingLeadId(lead.id);
+    try {
+      await adminFetch(`/admin/leads/${lead.id}`, { method: "DELETE" });
+      setLeads((rows) => rows.filter((row) => row.id !== lead.id));
+      setLeadsTotal((total) => Math.max(0, total - 1));
+      if (expandedLead === lead.id) {
+        setExpandedLead(null);
+        setLeadActivities([]);
+      }
+      loadAnalytics();
+      loadSources();
+    } catch (e) {
+      alert("Delete failed: " + e.message);
+    } finally {
+      setDeletingLeadId(null);
+    }
+  };
+
   const retryCurrentTab = () => {
     setLoadError(null);
     if (tab === "pipeline") {
@@ -727,32 +812,32 @@ export function LeadsSection() {
   // ═════════════════════════════════════════════════════════════════════════
   const renderPipeline = () => {
     const ov = overview || {};
-    const pipelineOrder = [
-      "new",
-      "contacted",
-      "estimate_sent",
-      "won",
-      "lost",
-      "unresponsive",
-      "disqualified",
-    ];
-    const funnelData = pipelineOrder
-      .map(
-        (s) =>
-          funnel.find((f) => f.stage === s) || {
-            stage: s,
-            label: s.replace(/_/g, " "),
-            count: 0,
-          },
-      )
-      .filter(
-        (f) =>
-          f.count > 0 ||
-          ["new", "contacted", "estimate_sent", "won", "lost"].includes(
-            f.stage,
-          ),
+    const funnelByStage = new Map(funnel.map((f) => [f.stage, f]));
+    const countStages = (stages) =>
+      stages.reduce(
+        (sum, stage) => sum + Number(funnelByStage.get(stage)?.count || 0),
+        0,
       );
-    const maxPipelineCount = Math.max(...funnelData.map((d) => d.count), 1);
+    const pipelineOrder = [
+      { stage: "new", label: "New Leads", count: countStages(["new"]) },
+      {
+        stage: "contacted",
+        label: "Contacted",
+        count: countStages(["contacted"]),
+      },
+      {
+        stage: "estimate_sent",
+        label: "Estimate Sent",
+        count: countStages(["estimate_sent", "estimate_viewed", "negotiating"]),
+      },
+      { stage: "won", label: "Won", count: countStages(["won"]) },
+      {
+        stage: "lost",
+        label: "Lost",
+        count: countStages(["lost", "unresponsive", "disqualified", "duplicate"]),
+      },
+    ];
+    const funnelData = pipelineOrder;
     const draggingLead = draggingLeadId
       ? leads.find((lead) => lead.id === draggingLeadId)
       : null;
@@ -825,8 +910,7 @@ export function LeadsSection() {
           />{" "}
         </div>
         {/* Pipeline status */}
-        <Card style={{ marginBottom: 24 }}>
-          {" "}
+        <div style={{ marginBottom: 10 }}>
           <h2
             style={{
               margin: "0 0 6px",
@@ -838,67 +922,28 @@ export function LeadsSection() {
             }}
           >
             Pipeline Status
-          </h2>{" "}
-          <div style={{ margin: "0 0 14px", color: C.muted, fontSize: 12 }}>
+          </h2>
+          <div style={{ margin: 0, color: C.muted, fontSize: 12 }}>
             Current lead counts by status for the selected month.
-          </div>{" "}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-end",
-              gap: 6,
-              height: 130,
-            }}
-          >
-            {funnelData.map((f) => {
-              const h = Math.max(18, (f.count / maxPipelineCount) * 104);
-              return (
-                <div
-                  key={f.stage}
-                  style={{
-                    flex: "1 1 84px",
-                    minWidth: 70,
-                    textAlign: "center",
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{
-                      fontSize: 18,
-                      fontWeight: 700,
-                      color: C.heading,
-                      ...mono,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {f.count}
-                  </div>{" "}
-                  <div
-                    style={{
-                      height: h,
-                      backgroundColor: STATUS_COLORS[f.stage] || C.teal,
-                      borderRadius: "6px 6px 0 0",
-                      margin: "0 auto",
-                      width: "70%",
-                      minWidth: 30,
-                      transition: "height 0.3s",
-                    }}
-                  />{" "}
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: C.muted,
-                      marginTop: 6,
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {f.label || f.stage.replace(/_/g, " ")}
-                  </div>{" "}
-                </div>
-              );
-            })}
-          </div>{" "}
-        </Card>
+          </div>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            marginBottom: 16,
+            flexWrap: "wrap",
+          }}
+        >
+          {funnelData.map((f) => (
+            <PipelineStatusCard
+              key={f.stage}
+              label={f.label || f.stage.replace(/_/g, " ")}
+              value={f.count}
+            />
+          ))}
+        </div>
         {/* Filters + Actions */}
         <div
           style={{
@@ -1036,7 +1081,7 @@ export function LeadsSection() {
                       "Urgency",
                       "Status",
                       "Response",
-                      "Assigned",
+                      "Actions",
                     ].map((h) => (
                       <th
                         key={h}
@@ -1193,13 +1238,42 @@ export function LeadsSection() {
                             )}
                           </td>{" "}
                           <td
-                            style={{
-                              padding: "12px 16px",
-                              color: C.text,
-                              fontSize: 13,
-                            }}
+                            style={{ padding: "12px 16px" }}
+                            onClick={(e) => e.stopPropagation()}
                           >
-                            {lead.assigned_name || "--"}
+                            <button
+                              type="button"
+                              aria-label={`Delete lead for ${
+                                [lead.first_name, lead.last_name]
+                                  .filter(Boolean)
+                                  .join(" ") || "unknown"
+                              }`}
+                              title="Delete lead"
+                              disabled={deletingLeadId === lead.id}
+                              onClick={() => deleteLead(lead)}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 6,
+                                border: `1px solid ${C.red}33`,
+                                borderRadius: 6,
+                                padding: "5px 8px",
+                                background: C.white,
+                                color: C.red,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                cursor:
+                                  deletingLeadId === lead.id
+                                    ? "not-allowed"
+                                    : "pointer",
+                                opacity: deletingLeadId === lead.id ? 0.5 : 1,
+                              }}
+                            >
+                              <Trash2 size={14} strokeWidth={1.8} />
+                              {deletingLeadId === lead.id
+                                ? "Deleting"
+                                : "Delete"}
+                            </button>
                           </td>{" "}
                         </tr>
                         {isExpanded && (
@@ -1584,6 +1658,22 @@ export function LeadsSection() {
                                     }}
                                   >
                                     Assign
+                                  </Btn>{" "}
+                                  <Btn
+                                    small
+                                    color={C.red}
+                                    disabled={deletingLeadId === lead.id}
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                    }}
+                                    onClick={() => deleteLead(lead)}
+                                  >
+                                    <Trash2 size={14} strokeWidth={1.8} />
+                                    {deletingLeadId === lead.id
+                                      ? "Deleting"
+                                      : "Delete Lead"}
                                   </Btn>{" "}
                                 </div>
                                 {/* Inline SMS Compose */}
@@ -2077,21 +2167,42 @@ export function LeadsSection() {
                               }
                             />
                           )}
-                          {lead.assigned_name && (
-                            <span
-                              style={{
-                                color: C.muted,
-                                fontSize: 11,
-                                marginLeft: "auto",
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {lead.assigned_name}
-                            </span>
-                          )}
                         </div>{" "}
+                        <button
+                          type="button"
+                          aria-label={`Delete lead for ${
+                            [lead.first_name, lead.last_name]
+                              .filter(Boolean)
+                              .join(" ") || "unknown"
+                          }`}
+                          title="Delete lead"
+                          disabled={deletingLeadId === lead.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteLead(lead);
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 5,
+                            marginTop: 10,
+                            border: `1px solid ${C.red}33`,
+                            borderRadius: 6,
+                            padding: "4px 7px",
+                            background: C.white,
+                            color: C.red,
+                            fontSize: 11,
+                            fontWeight: 600,
+                            cursor:
+                              deletingLeadId === lead.id
+                                ? "not-allowed"
+                                : "pointer",
+                            opacity: deletingLeadId === lead.id ? 0.5 : 1,
+                          }}
+                        >
+                          <Trash2 size={13} strokeWidth={1.8} />
+                          {deletingLeadId === lead.id ? "Deleting" : "Delete"}
+                        </button>
                       </div>
                     ))}
                     {stageLeads.length === 0 && (

@@ -155,28 +155,39 @@ describe('estimate v2 service toggle adapter', () => {
     }));
   });
 
-  test('maps palm injection selection with explicit medium palm size for strict tiered pricing', () => {
+  test('maps palm injection selection with editable property and service palm counts', () => {
     const input = translateV2CallToV1Input(
       {
         ...baseProfile(),
-        estimatedPalmCount: 8,
+        palmCount: 8,
       },
       ['PALM_INJECTION'],
-      {}
+      {
+        palmInjection: {
+          palmCount: 5,
+          treatmentType: 'combo',
+          palmSize: 'medium',
+        },
+      }
     );
 
-    expect(input.services.palm).toEqual({
-      palmCount: 2,
+    expect(input.palmCount).toBe(8);
+    expect(input.services.palm).toEqual(expect.objectContaining({
+      palmCount: 5,
+      measurements: { palmCount: 5 },
       treatmentType: 'combo',
       palmSize: 'medium',
-    });
+    }));
 
     const estimate = generateEstimate(input);
     const palm = estimate.lineItems.find((line) => line.service === 'palm_injection');
     expect(palm).toEqual(expect.objectContaining({
+      palmCount: 5,
       treatmentType: 'combo',
       palmSize: 'medium',
       pricePerPalm: 75,
+      palmCountSource: 'service_manual_override',
+      servicePalmCountDiffersFromPropertyPalmCount: true,
     }));
 
     const mapped = mapV1ToLegacyShape(estimate);
@@ -184,18 +195,32 @@ describe('estimate v2 service toggle adapter', () => {
       pricePerPalm: 75,
       appsPerYear: 2,
       palmSize: 'medium',
+      palmCountSource: 'service_manual_override',
+      servicePalmCountDiffersFromPropertyPalmCount: true,
       detail: expect.stringContaining('$75/palm'),
     }));
+  });
+
+  test('palm injection without service or property palm count returns a clear validation error', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['PALM_INJECTION'],
+      {}
+    );
+
+    expect(input.services.palm.palmCount).toBeUndefined();
+    expect(() => generateEstimate(input)).toThrow(/Palm count is required/);
   });
 
   test('maps Gold palm credits onto the legacy palm line item and totals', () => {
     const input = translateV2CallToV1Input(
       {
         ...baseProfile(),
-        estimatedPalmCount: 10,
+        palmCount: 3,
       },
       ['PEST', 'LAWN', 'MOSQUITO', 'PALM_INJECTION'],
       {
+        palmInjection: { palmCount: 3, treatmentType: 'combo', palmSize: 'medium' },
         manualDiscount: { type: 'FIXED', value: 100, label: 'Manual promo' },
       }
     );
@@ -261,6 +286,40 @@ describe('estimate v2 service toggle adapter', () => {
     const mosquito = mapped.recurring.services.find((svc) => svc.service === 'mosquito');
     expect(mosquito.detail).toContain('2 mosquito stations (+$78/yr)');
     expect(mosquito.detail).toContain('4 Bti dunk tablets (+$16/yr)');
+  });
+
+  test('persists both tree and shrub tiers for the public estimate slider', () => {
+    const input = translateV2CallToV1Input(
+      {
+        ...baseProfile(),
+        shrubDensity: 'LIGHT',
+        treeDensity: 'LIGHT',
+        landscapeComplexity: 'SIMPLE',
+      },
+      ['TREE_SHRUB'],
+      {}
+    );
+
+    const mapped = mapV1ToLegacyShape(generateEstimate(input));
+
+    expect(mapped.results.ts.map((row) => row.name)).toEqual(['Standard', 'Enhanced']);
+    expect(mapped.results.ts).toEqual([
+      expect.objectContaining({
+        name: 'Standard',
+        tier: 'standard',
+        selected: true,
+        isSelected: true,
+        v: 6,
+      }),
+      expect.objectContaining({
+        name: 'Enhanced',
+        tier: 'enhanced',
+        selected: false,
+        isSelected: false,
+        v: 9,
+      }),
+    ]);
+    expect(mapped.results.ts[1].mo).toBeGreaterThan(mapped.results.ts[0].mo);
   });
 
   test('does not double-bill recurring German roach initial when standalone German roach is also selected', () => {

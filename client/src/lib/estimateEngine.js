@@ -22,7 +22,7 @@
  *
  * v1.5 changes:
  * - Tree & Shrub: bed area cap raised 8k→12k, access difficulty modifier (+8/+15 min)
- * - Palm Injection: prefers manual injectable count, flags when estimated
+ * - Palm Injection: requires explicit treated palm count, flags missing measurement data
  * - Mosquito: irrigation modifier (+0.08 pressure), cap raised 1.50→1.60
  * - Rodent Bait: matrix scoring (footprint + lot + water + trees) replaces OR logic
  * - One-Time Lawn: higher standalone fungicide base ($95 floor vs $73)
@@ -369,6 +369,296 @@ function normalizeGrassType(grassType) {
   return 'st_augustine';
 }
 
+const DETHATCHING_CONFIG = {
+  floor: 150,
+  marginDivisor: 0.40,
+  materialPer1K: 2.10,
+  timeModel: {
+    primaryPassSqFtPerMin: 100,
+    crossPassSqFtPerMin: 200,
+    setupMin: 30,
+  },
+  cleanup: {
+    none: { minutesPer1K: 0, pricePer1K: 0, label: 'No debris removal' },
+    light: { minutesPer1K: 3, pricePer1K: 10, label: 'Light cleanup' },
+    moderate: { minutesPer1K: 7, pricePer1K: 20, label: 'Moderate cleanup' },
+    heavy: { minutesPer1K: 12, pricePer1K: 35, label: 'Heavy cleanup / bagging' },
+  },
+  accessMinutes: {
+    easy: 0,
+    moderate: 10,
+    difficult: 20,
+  },
+  manualReview: {
+    largeLawnSqFt: 10000,
+    heavyCleanupSqFt: 6000,
+    stAugustineRequiresApproval: true,
+  },
+};
+
+function hasClientValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function normalizeDethatchingToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+function parseClientNonNegativeMeasurement(value) {
+  if (!hasClientValue(value)) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function roundClientMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function clientBooleanTrue(value) {
+  return value === true || value === 'true' || value === 'TRUE' || value === 'YES' || value === 'yes';
+}
+
+function uniqueClientStrings(values = []) {
+  return [...new Set((values || []).filter(Boolean))];
+}
+
+function normalizeDethatchingChoice(value, choices, fallback, warningCode) {
+  const raw = normalizeDethatchingToken(value || fallback);
+  if (Object.prototype.hasOwnProperty.call(choices || {}, raw)) {
+    return { key: raw, warning: null };
+  }
+  return { key: fallback, warning: warningCode };
+}
+
+function normalizeDethatchingGrassType(options = {}) {
+  const requestedGrassType = options.grassType ?? options.track ?? options.turfTrack ?? options.grassTrack;
+  if (!hasClientValue(requestedGrassType)) {
+    return {
+      requestedGrassType,
+      grassType: 'unknown',
+      isStAugustine: false,
+      isKnown: false,
+      warnings: ['grass_type_not_recorded'],
+    };
+  }
+  const raw = normalizeDethatchingToken(requestedGrassType);
+  const compact = String(requestedGrassType).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (
+    ['a', 'b', 'st_augustine', 'staugustine', 'staug', 'floratam'].includes(raw) ||
+    ['staugustine', 'staug'].includes(compact) ||
+    compact.includes('floratam')
+  ) {
+    return { requestedGrassType, grassType: 'st_augustine', isStAugustine: true, isKnown: true, warnings: [] };
+  }
+  if (['c1', 'bermuda'].includes(raw)) {
+    return { requestedGrassType, grassType: 'bermuda', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  if (['c2', 'zoysia'].includes(raw)) {
+    return { requestedGrassType, grassType: 'zoysia', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  if (['d', 'bahia'].includes(raw)) {
+    return { requestedGrassType, grassType: 'bahia', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  return {
+    requestedGrassType,
+    grassType: 'unknown',
+    isStAugustine: false,
+    isKnown: false,
+    warnings: ['unknown_grass_type_requires_dethatching_review'],
+  };
+}
+
+function resolveDethatchingProbe(options = {}) {
+  const probeValues = [
+    parseClientNonNegativeMeasurement(options.thatchProbe1Inches),
+    parseClientNonNegativeMeasurement(options.thatchProbe2Inches),
+    parseClientNonNegativeMeasurement(options.thatchProbe3Inches),
+  ];
+  const validProbeValues = probeValues.filter(value => value !== null);
+  const explicitDepth = parseClientNonNegativeMeasurement(options.thatchDepthInches);
+  const averageDepth = explicitDepth !== null
+    ? explicitDepth
+    : (validProbeValues.length > 0
+      ? validProbeValues.reduce((sum, value) => sum + value, 0) / validProbeValues.length
+      : null);
+  const warnings = [];
+  if (validProbeValues.length > 0 && validProbeValues.length < 3) warnings.push('partial_thatch_probe_readings');
+  if ((clientBooleanTrue(options.requireThatchDepth) || clientBooleanTrue(options.requireThatchProbe)) && averageDepth === null) {
+    warnings.push('thatch_depth_not_recorded');
+  }
+  return {
+    thatchDepthInches: averageDepth === null ? null : roundClientMoney(averageDepth),
+    thatchMeasurementSource: options.thatchMeasurementSource || (validProbeValues.length > 0 || explicitDepth !== null ? 'manual' : 'unknown'),
+    probeMeasurements: {
+      thatchProbe1Inches: probeValues[0],
+      thatchProbe2Inches: probeValues[1],
+      thatchProbe3Inches: probeValues[2],
+    },
+    warnings,
+  };
+}
+
+const DETHATCHING_MANAGER_APPROVAL_REASONS = new Set([
+  'verified_thatch_probe',
+  'customer_requested_after_warning',
+  'bermuda_or_zoysia_confirmed',
+  'manager_override',
+]);
+
+function normalizeDethatchingManagerApprovalReason(value) {
+  const raw = typeof value === 'string' ? normalizeDethatchingToken(value) : '';
+  return DETHATCHING_MANAGER_APPROVAL_REASONS.has(raw) ? raw : null;
+}
+
+function priceDethatchingClient(lawnSqFt, options = {}) {
+  const cfg = DETHATCHING_CONFIG;
+  const lawnEst = Math.max(0, Number(lawnSqFt) || 0);
+  const cleanupChoice = normalizeDethatchingChoice(
+    options.cleanupLevel,
+    cfg.cleanup,
+    'none',
+    'invalid_dethatching_cleanup_level_defaulted'
+  );
+  const accessChoice = normalizeDethatchingChoice(
+    options.access ?? options.accessDifficulty,
+    cfg.accessMinutes,
+    'easy',
+    'invalid_dethatching_access_defaulted'
+  );
+  const debrisRemovalRequested = clientBooleanTrue(options.debrisRemovalIncluded);
+  const cleanupLevel = cleanupChoice.key === 'none' && debrisRemovalRequested ? 'light' : cleanupChoice.key;
+  const cleanup = cfg.cleanup[cleanupLevel] || cfg.cleanup.none;
+  const grass = normalizeDethatchingGrassType(options);
+  const probe = resolveDethatchingProbe(options);
+  const basePrimaryMin = lawnEst / cfg.timeModel.primaryPassSqFtPerMin;
+  const baseCrossMin = lawnEst / cfg.timeModel.crossPassSqFtPerMin;
+  const setupMin = cfg.timeModel.setupMin;
+  const cleanupMin = (lawnEst / 1000) * cleanup.minutesPer1K;
+  const accessMin = cfg.accessMinutes[accessChoice.key] || 0;
+  const timeMin = basePrimaryMin + baseCrossMin + setupMin + cleanupMin + accessMin;
+  const laborCost = 35 * timeMin / 60;
+  const materialCost = (lawnEst / 1000) * cfg.materialPer1K;
+  const cleanupPriceAdder = (lawnEst / 1000) * cleanup.pricePer1K;
+  const rawCost = laborCost + materialCost;
+  const basePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
+  const calculatedPrice = Math.round(basePrice + cleanupPriceAdder);
+  const debrisRemovalIncluded = debrisRemovalRequested || cleanupLevel !== 'none';
+  const managerApproved = clientBooleanTrue(options.managerApproved);
+  const managerApprovalOverrideReason = normalizeDethatchingManagerApprovalReason(options.managerApprovalReason);
+  const requiresManagerApproval = !!(cfg.manualReview.stAugustineRequiresApproval && grass.isStAugustine);
+  const warnings = uniqueClientStrings([
+    cleanupChoice.warning,
+    accessChoice.warning,
+    ...grass.warnings,
+    ...probe.warnings,
+    cleanupLevel === 'none' && !debrisRemovalIncluded ? 'base_price_excludes_bagging_or_debris_hauling' : null,
+    requiresManagerApproval ? 'Dethatching St. Augustine / Floratam can damage stolons. Manager approval required.' : null,
+  ]);
+  const manualReviewReasons = [];
+  if (lawnEst >= cfg.manualReview.largeLawnSqFt) manualReviewReasons.push('large_lawn_dethatching_manual_review');
+  if (cleanupLevel === 'heavy' && lawnEst >= cfg.manualReview.heavyCleanupSqFt) manualReviewReasons.push('heavy_cleanup_required');
+  if (accessChoice.key === 'difficult') manualReviewReasons.push('difficult_access_dethatching');
+  if (grass.grassType === 'unknown') manualReviewReasons.push('unknown_grass_dethatching_review');
+  if ((clientBooleanTrue(options.requireThatchDepth) || clientBooleanTrue(options.requireThatchProbe)) && probe.thatchDepthInches === null) {
+    manualReviewReasons.push('thatch_depth_not_recorded');
+  }
+  if (requiresManagerApproval && !managerApproved) {
+    manualReviewReasons.push('st_augustine_dethatching_manager_approval_required');
+  }
+  if (requiresManagerApproval && managerApproved && !managerApprovalOverrideReason) {
+    manualReviewReasons.push('st_augustine_dethatching_manager_approval_reason_missing');
+  }
+
+  let dethatchingRecommended = false;
+  let recommendationReason = 'thatch_depth_not_recorded';
+  if (probe.thatchDepthInches !== null) {
+    if (grass.grassType === 'bermuda' || grass.grassType === 'zoysia') {
+      dethatchingRecommended = probe.thatchDepthInches > 0.5;
+      recommendationReason = dethatchingRecommended
+        ? 'bermuda_zoysia_thatch_above_half_inch'
+        : 'thatch_probe_threshold_not_met';
+      if (!dethatchingRecommended) manualReviewReasons.push('thatch_probe_threshold_not_met');
+    } else if (grass.isStAugustine) {
+      recommendationReason = probe.thatchDepthInches > 0.75
+        ? 'st_augustine_threshold_requires_manager_approval'
+        : 'st_augustine_no_auto_recommendation';
+    } else if (grass.grassType === 'unknown') {
+      recommendationReason = 'unknown_grass_manual_review';
+    } else {
+      recommendationReason = 'grass_track_not_configured_for_auto_recommendation';
+    }
+  }
+
+  const managerApprovalSatisfied = !requiresManagerApproval || (managerApproved && !!managerApprovalOverrideReason);
+  const manualReviewReasonList = uniqueClientStrings(manualReviewReasons);
+  const approvalBlocked = requiresManagerApproval && !managerApprovalSatisfied;
+  const approvalBlockReason = approvalBlocked
+    ? 'Manager approval is required before St. Augustine / Floratam dethatching can be quoted.'
+    : null;
+  const manualReviewBlockReason = !approvalBlockReason && manualReviewReasonList.length > 0
+    ? `Dethatching requires admin review: ${manualReviewReasonList.join(', ')}.`
+    : null;
+  const quoteRequired = approvalBlocked || manualReviewReasonList.length > 0;
+  const detailParts = [
+    'Double-pass machine time',
+    cleanup.label,
+    accessChoice.key === 'easy' ? null : `${accessChoice.key} access`,
+    debrisRemovalIncluded ? 'cleanup/debris removal included' : null,
+    approvalBlocked ? 'manager approval required' : null,
+  ].filter(Boolean);
+
+  return {
+    service: 'dethatching',
+    lawnSqFt: lawnEst,
+    manuallyEnteredLawnSqFt: options.manuallyEnteredLawnSqFt ?? null,
+    price: quoteRequired ? null : calculatedPrice,
+    estimatedPrice: calculatedPrice,
+    basePrice,
+    rawCost: roundClientMoney(rawCost),
+    timeMin: roundClientMoney(timeMin),
+    laborCost: roundClientMoney(laborCost),
+    materialCost: roundClientMoney(materialCost),
+    cleanupLevel,
+    requestedCleanupLevel: cleanupChoice.key,
+    cleanupLabel: cleanup.label,
+    cleanupMin: roundClientMoney(cleanupMin),
+    cleanupPriceAdder: roundClientMoney(cleanupPriceAdder),
+    debrisRemovalIncluded,
+    access: accessChoice.key,
+    accessMin,
+    grassType: grass.grassType,
+    requestedGrassType: grass.requestedGrassType,
+    thatchDepthInches: probe.thatchDepthInches,
+    thatchMeasurementSource: probe.thatchMeasurementSource,
+    probeMeasurements: probe.probeMeasurements,
+    dethatchingRecommended,
+    recommendationReason,
+    requiresManualReview: quoteRequired,
+    manualReviewReasons: manualReviewReasonList,
+    quoteRequired,
+    requiresCustomQuote: quoteRequired,
+    autoQuoteRequiresAdminApproval: quoteRequired,
+    customQuoteReason: approvalBlockReason || manualReviewBlockReason,
+    reason: approvalBlockReason || manualReviewBlockReason,
+    requiresManagerApproval,
+    managerApproved,
+    managerApprovalSatisfied,
+    managerApprovalReason: requiresManagerApproval ? 'st_augustine_dethatching' : null,
+    managerApprovalOverrideReason,
+    warnings,
+    warning: requiresManagerApproval
+      ? 'Dethatching St. Augustine / Floratam can damage stolons. Manager approval required.'
+      : null,
+    equipmentMetadata: {
+      equipmentAssetTag: 'LAWN-001',
+      equipmentName: 'Classen TR-20H Dethatcher',
+      seasonalUse: 'spring/fall',
+      internalOnly: true,
+    },
+    detail: detailParts.join(' | '),
+  };
+}
+
 function resolveFoamDrillTier(points) {
   const pointCount = Number(points === undefined ? 5 : points);
   if (!Number.isInteger(pointCount) || pointCount < 1) {
@@ -396,8 +686,6 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerOz: 78,
     productOzPer10SqFt: 0.8,
     marginDivisor: 0.45,
-    floorBeforeVolumeDiscount: 600,
-    floorAfterVolumeDiscount: 500,
     warning: 'Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.',
   },
   taurus_sc: {
@@ -410,8 +698,6 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerOz: 78,
     productOzPer10SqFt: 0.8,
     marginDivisor: 0.45,
-    floorBeforeVolumeDiscount: 600,
-    floorAfterVolumeDiscount: 500,
     warning: 'Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.',
   },
   bifen_it: {
@@ -424,8 +710,6 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerOz: 128,
     productOzPer10SqFt: 1.0,
     marginDivisor: 0.45,
-    floorBeforeVolumeDiscount: 600,
-    floorAfterVolumeDiscount: 500,
     warning: 'Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.',
   },
   talstar_p: {
@@ -438,10 +722,42 @@ const PRE_SLAB_TERMITICIDE_PRODUCTS = {
     containerOz: 128,
     productOzPer10SqFt: 1.0,
     marginDivisor: 0.45,
-    floorBeforeVolumeDiscount: 600,
-    floorAfterVolumeDiscount: 500,
     warning: 'Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.',
   },
+};
+
+const PRE_SLAB_TERMITICIDE_MINIMUMS = {
+  standalone: [
+    { maxSqFt: 250, floor: 225 },
+    { maxSqFt: 750, floor: 325 },
+    { maxSqFt: 1250, floor: 425 },
+    { maxSqFt: Infinity, floor: 600 },
+  ],
+  builderBatch: [
+    { maxSqFt: 250, floor: 150 },
+    { maxSqFt: 750, floor: 250 },
+    { maxSqFt: 1250, floor: 350 },
+    { maxSqFt: Infinity, floor: 500 },
+  ],
+  sameTripAddOn: [
+    { maxSqFt: 250, floor: 125 },
+    { maxSqFt: 750, floor: 225 },
+    { maxSqFt: 1250, floor: 325 },
+    { maxSqFt: Infinity, floor: 500 },
+  ],
+};
+
+const PRE_SLAB_JOB_CONTEXT_LABELS = {
+  standalone: 'Standalone one-off job',
+  builderBatch: 'Builder batch / same site',
+  sameTripAddOn: 'Same-trip add-on',
+};
+
+const PRE_SLAB_COMPLIANCE_ADMIN_COST = 25;
+const PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT = {
+  standalone: true,
+  builderBatch: false,
+  sameTripAddOn: false,
 };
 
 const TRENCHING_TERMITICIDE_PRODUCTS = {
@@ -574,6 +890,69 @@ function normalizePreSlabVolume(value) {
   return { key: 'none', label: 'NONE', multiplier: 1.00 };
 }
 
+function normalizePreSlabWarranty(value) {
+  const raw = String(value || 'BASIC').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  const aliases = {
+    NONE: 'NONE',
+    NO: 'NONE',
+    NO_WARRANTY: 'NONE',
+    BASIC: 'BASIC',
+    BASIC_1YR: 'BASIC',
+    BASIC_1_YEAR: 'BASIC',
+    ONE_YEAR: 'BASIC',
+    ONE_YEAR_INCLUDED: 'BASIC',
+    EXTENDED: 'EXTENDED',
+    FIVE_YEAR: 'EXTENDED',
+    FIVE_YEAR_EXTENDED: 'EXTENDED',
+    '5_YEAR': 'EXTENDED',
+  };
+  const tier = aliases[raw] || 'BASIC';
+  const labels = {
+    NONE: 'No warranty',
+    BASIC: 'Basic 1-yr warranty',
+    EXTENDED: 'Extended 5-yr warranty',
+  };
+  return { tier, label: labels[tier] };
+}
+
+function normalizePreSlabJobContext(value, volumeKey = 'none') {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/-]+/g, '_')
+    .replace(/_+/g, '_');
+  const aliases = {
+    standalone: 'standalone',
+    one_off: 'standalone',
+    oneoff: 'standalone',
+    single_job: 'standalone',
+    builder: 'builderBatch',
+    builderbatch: 'builderBatch',
+    builder_batch: 'builderBatch',
+    batch: 'builderBatch',
+    same_site: 'builderBatch',
+    same_trip: 'sameTripAddOn',
+    sametripaddon: 'sameTripAddOn',
+    same_trip_add_on: 'sameTripAddOn',
+    same_trip_addon: 'sameTripAddOn',
+    addon: 'sameTripAddOn',
+    add_on: 'sameTripAddOn',
+  };
+  if (aliases[raw]) return aliases[raw];
+  return volumeKey === '5plus' || volumeKey === '10plus' ? 'builderBatch' : 'standalone';
+}
+
+function lookupPreSlabMinimum(slabSqFt, jobContext) {
+  const tiers = PRE_SLAB_TERMITICIDE_MINIMUMS[jobContext] || PRE_SLAB_TERMITICIDE_MINIMUMS.standalone;
+  const tier = tiers.find(row => slabSqFt <= row.maxSqFt) || tiers[tiers.length - 1];
+  return {
+    floor: tier.floor,
+    maxSqFt: tier.maxSqFt,
+    basis: `${PRE_SLAB_JOB_CONTEXT_LABELS[jobContext] || PRE_SLAB_JOB_CONTEXT_LABELS.standalone}, ` +
+      `${tier.maxSqFt === Infinity ? 'over 1,250' : `up to ${tier.maxSqFt}`} sqft`,
+  };
+}
+
 function resolveLawnFreq(freq) {
   const parsed = Number(freq);
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
@@ -627,6 +1006,7 @@ export function calculateEstimate(inputs) {
     isRecurringCustomer: isRC,
     bedArea: _bedArea,
     palmCount: _palmCount,
+    palmTreatmentCount: _palmTreatmentCount,
     treeCount: _treeCount,
     roachModifier: roachMod,
     pestFreq: _pestFreq,
@@ -672,6 +1052,7 @@ export function calculateEstimate(inputs) {
     preslabSqft: psSqft,
     preslabWarranty,
     preslabVolume,
+    preslabJobContext,
     preslabProductKey,
     preslabLabelConfirmed,
     foamPoints: _foamPoints,
@@ -690,6 +1071,17 @@ export function calculateEstimate(inputs) {
     svcPlugging,
     svcTopdress,
     svcDethatch,
+    dethatchingCleanupLevel,
+    dethatchingDebrisRemovalIncluded,
+    dethatchingAccess,
+    dethatchingAccessDifficulty,
+    dethatchingManagerApproved,
+    dethatchingManagerApprovalReason,
+    thatchProbe1Inches,
+    thatchProbe2Inches,
+    thatchProbe3Inches,
+    thatchDepthInches,
+    thatchMeasurementSource,
     svcTrenching,
     svcBoracare,
     svcPreslab,
@@ -703,7 +1095,7 @@ export function calculateEstimate(inputs) {
     // v1.5 inputs
     accessDifficulty,   // 'EASY' | 'MODERATE' | 'DIFFICULT' — gate access, narrow side yards
     hasIrrigation,      // boolean — extensive irrigation creates standing water
-    injectablePalms: _injectablePalms, // manual override for injectable palm count
+    injectablePalms: _injectablePalms, // legacy manual override for injectable palm count
     bedbugEquipment,    // 'SUBCONTRACT' | 'INHOUSE' — heat treatment equipment source
   } = inputs;
 
@@ -760,7 +1152,33 @@ export function calculateEstimate(inputs) {
     return hardscape;
   };
 
-  if (homeSqFt <= 0 && lotSqFt <= 0) {
+  const selectedServiceFlags = [
+    svcLawn,
+    svcPest,
+    svcTs,
+    svcInjection,
+    svcMosquito,
+    svcTermiteBait,
+    svcRodentBait,
+    svcOnetimePest,
+    svcOnetimeLawn,
+    svcOnetimeMosquito,
+    svcPlugging,
+    svcTopdress,
+    svcDethatch,
+    svcTrenching,
+    svcBoracare,
+    svcPreslab,
+    svcFoam,
+    svcRodentTrap,
+    svcFlea,
+    svcWasp,
+    svcRoach,
+    svcBedbug,
+    svcExclusion,
+  ];
+  const preSlabOnly = !!svcPreslab && selectedServiceFlags.filter(Boolean).length === 1;
+  if (!preSlabOnly && homeSqFt <= 0 && lotSqFt <= 0) {
     return { error: 'Enter home sq ft or lot size.' };
   }
 
@@ -1180,34 +1598,37 @@ export function calculateEstimate(inputs) {
   /* ── PALM INJECTION ──────────────────────────────────────── */
   if (svcInjection && !isCommercial) {
     hasRec = true;
-    // v1.5: prefer manual injectable count — the 30% estimate is unreliable
-    // (10 Washingtonia + 2 Canary Islands = 12 palms but only 2 injectable)
-    let ip;
-    let palmEstimated = false;
-    if (Number(_injectablePalms) > 0) {
-      ip = Number(_injectablePalms);
-    } else {
-      let ep = palmCount || (treeDensity === 'HEAVY' ? 6 : treeDensity === 'MODERATE' ? 5 : 3);
-      ip = Math.max(1, Math.round(ep * 0.30));
-      palmEstimated = true;
-      fieldVerify.push('injectable palm count');
-    }
-    // Client fallback mirrors the server adapter's explicit combo/medium protocol.
-    const palmPerApp = 75;
-    const appsPerYear = 2;
-    const perVisit = Math.max(ip * palmPerApp, 75);
-    const inja = perVisit * appsPerYear, injMo = Math.round(inja / 12 * 100) / 100;
-    R.injection = {
-      palms: ip,
-      ann: inja,
-      mo: injMo,
-      estimated: palmEstimated,
-      pricePerPalm: palmPerApp,
-      appsPerYear,
-      palmSize: 'medium',
-      perVisit,
-      detail: `Nutrition + Insecticide · medium palms · $${palmPerApp}/palm · ${appsPerYear}/yr${perVisit > ip * palmPerApp ? ` · $${perVisit} visit minimum applied` : ''}`,
+    const integerPalmCount = (value) => {
+      const n = Number(value);
+      return Number.isInteger(n) && n > 0 ? n : 0;
     };
+    // Service-level count is the number of palms treated for this line. Property
+    // palm count is only a prefill/default; never fall back to one palm or a
+    // 30% satellite estimate because that hides missing measurement data.
+    const ip = integerPalmCount(_palmTreatmentCount) || integerPalmCount(_injectablePalms) || integerPalmCount(_palmCount);
+    if (!ip) {
+      fieldVerify.push('injectable palm count');
+      return { error: 'Palm count is required for palm injection pricing.' };
+    } else {
+      const palmEstimated = !integerPalmCount(_palmTreatmentCount) && !integerPalmCount(_injectablePalms);
+      if (palmEstimated) fieldVerify.push('injectable palm count');
+      // Client fallback mirrors the server adapter's explicit combo/medium protocol.
+      const palmPerApp = 75;
+      const appsPerYear = 2;
+      const perVisit = Math.max(ip * palmPerApp, 75);
+      const inja = perVisit * appsPerYear, injMo = Math.round(inja / 12 * 100) / 100;
+      R.injection = {
+        palms: ip,
+        ann: inja,
+        mo: injMo,
+        estimated: palmEstimated,
+        pricePerPalm: palmPerApp,
+        appsPerYear,
+        palmSize: 'medium',
+        perVisit,
+        detail: `Nutrition + Insecticide · medium palms · $${palmPerApp}/palm · ${appsPerYear}/yr${perVisit > ip * palmPerApp ? ` · $${perVisit} visit minimum applied` : ''}`,
+      };
+    }
     // Palm injection is excluded from WaveGuard percent discounts and does not
     // count toward tier qualification — billed separately like rodent bait.
   }
@@ -1418,11 +1839,33 @@ export function calculateEstimate(inputs) {
   /* ── Dethatching ─────────────────────────────────────────── */
   if (svcDethatch && !isCommercial && lawnEst > 0) {
     hasOT = true;
-    const dt = lawnEst / 100 + lawnEst / 200 + 30;
-    const dc = LABOR * (dt / 60) + lawnEst / 1000 * 2.10;
-    const sp = otP(Math.max(150, Math.round(dc / 0.40)));
+    const dth = priceDethatchingClient(lawnEst, {
+      cleanupLevel: dethatchingCleanupLevel || 'none',
+      debrisRemovalIncluded: dethatchingDebrisRemovalIncluded,
+      access: dethatchingAccess || dethatchingAccessDifficulty || 'easy',
+      grassType: _grassType || grassType,
+      track: grassType,
+      managerApproved: dethatchingManagerApproved,
+      managerApprovalReason: dethatchingManagerApprovalReason,
+      thatchProbe1Inches,
+      thatchProbe2Inches,
+      thatchProbe3Inches,
+      thatchDepthInches,
+      thatchMeasurementSource,
+      manuallyEnteredLawnSqFt: _measuredTurfSf || null,
+    });
+    const sp = dth.quoteRequired ? null : otP(dth.price);
     R.dth = sp;
-    otItems.push({ name: 'Dethatching', price: sp, detail: 'One-time service' });
+    R.dthMeta = { ...dth, price: sp, baseEstimatePrice: dth.estimatedPrice ?? dth.price };
+    (dth.manualReviewReasons || []).forEach(addManualReviewReason);
+    (dth.warnings || []).forEach(addRoutingWarning);
+    otItems.push({
+      ...dth,
+      name: 'Dethatching',
+      price: sp,
+      baseEstimatePrice: dth.estimatedPrice ?? dth.price,
+      detail: dth.detail || 'One-time service',
+    });
   }
 
   /* ── Trenching ───────────────────────────────────────────── */
@@ -1540,29 +1983,40 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     const productKey = normalizePreSlabProductKey(preslabProductKey);
     const product = PRE_SLAB_TERMITICIDE_PRODUCTS[productKey];
+    const vol = normalizePreSlabVolume(preslabVolume);
+    const jobContext = normalizePreSlabJobContext(preslabJobContext, vol.key);
+    const contextualMinimum = lookupPreSlabMinimum(psSqft, jobContext);
     const productOz = psSqft / 10 * product.productOzPer10SqFt;
     const units = Math.max(1, Math.ceil(productOz / product.containerOz));
-    const productCost = units * product.containerCost;
+    const chemicalCostPerOz = product.containerCost / product.containerOz;
+    const allocatedProductCost = productOz * chemicalCostPerOz;
+    const fullContainerProductCost = units * product.containerCost;
     const lhr = Math.min(5, Math.max(1, 0.5 + psSqft / 1500));
     const laborCost = lhr * LABOR;
     const equipCost = 15;
-    const cost = productCost + laborCost + equipCost;
+    const complianceAdminCost = PRE_SLAB_COMPLIANCE_ADMIN_COST;
+    const driveCost = PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT[jobContext] ? LABOR * DRIVE / 60 : 0;
+    const cost = allocatedProductCost + laborCost + equipCost + complianceAdminCost + driveCost;
     const rawPrice = Math.round(cost / product.marginDivisor);
-    const priceBeforeVolumeDiscount = Math.max(rawPrice, product.floorBeforeVolumeDiscount);
-    const vol = normalizePreSlabVolume(preslabVolume);
+    const priceBeforeVolumeDiscount = Math.max(rawPrice, contextualMinimum.floor);
     const priceAfterVolumeDiscount = Math.max(
       Math.round(priceBeforeVolumeDiscount * vol.multiplier),
-      product.floorAfterVolumeDiscount,
+      contextualMinimum.floor,
     );
-    const warrAdd = preslabWarranty === 'EXTENDED' ? 200 : 0;
+    const warranty = normalizePreSlabWarranty(preslabWarranty);
+    const warrAdd = warranty.tier === 'EXTENDED' ? 200 : 0;
     const basePreSlabPrice = priceAfterVolumeDiscount;
     const fp = basePreSlabPrice + warrAdd;
     const labelConfirmed = preslabLabelConfirmed === true || preslabLabelConfirmed === 'true';
+    const warrantyStatus = warranty.tier === 'EXTENDED'
+      ? 'Extended 5-year warranty'
+      : warranty.label;
     const detail = [
       psSqft.toLocaleString() + ' sf',
       product.shortLabel,
       Math.round(productOz * 100) / 100 + ' oz',
       units + (units === 1 ? ' unit' : ' units'),
+      warrantyStatus,
       vol.key !== 'none' ? 'vol disc' : null,
     ].filter(Boolean).join(' | ');
     otItems.push({
@@ -1579,13 +2033,28 @@ export function calculateEstimate(inputs) {
       productOz: Math.round(productOz * 100) / 100,
       units,
       btl: units,
+      containersRequired: units,
       containerOz: product.containerOz,
       containerCost: product.containerCost,
-      productCost: Math.round(productCost * 100) / 100,
+      chemicalCostPerOz: Math.round(chemicalCostPerOz * 10000) / 10000,
+      allocatedProductCost: Math.round(allocatedProductCost * 100) / 100,
+      productCost: Math.round(allocatedProductCost * 100) / 100,
+      fullContainerProductCost: Math.round(fullContainerProductCost * 100) / 100,
       laborHrs: Math.round(lhr * 100) / 100,
       laborCost: Math.round(laborCost * 100) / 100,
       equipCost,
+      complianceAdminCost,
+      driveCost: Math.round(driveCost * 100) / 100,
+      includeDriveCost: PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT[jobContext] === true,
+      cost: Math.round(cost * 100) / 100,
       rawPrice,
+      jobContext,
+      preSlabJobContext: jobContext,
+      preSlabJobContextLabel: PRE_SLAB_JOB_CONTEXT_LABELS[jobContext] || PRE_SLAB_JOB_CONTEXT_LABELS.standalone,
+      contextualFloor: contextualMinimum.floor,
+      contextualMinimumBasis: contextualMinimum.basis,
+      floorBeforeVolumeDiscount: contextualMinimum.floor,
+      floorAfterVolumeDiscount: contextualMinimum.floor,
       priceBeforeVolumeDiscount,
       priceAfterVolumeDiscount,
       volDisc: vol.key !== 'none',
@@ -1593,6 +2062,10 @@ export function calculateEstimate(inputs) {
       volumeDiscountMultiplier: vol.multiplier,
       basePrice: basePreSlabPrice,
       warrAdd,
+      warrantyTier: warranty.tier,
+      warrantyLabel: warranty.label,
+      warrantyStatus,
+      warrantyExtendedSelected: warranty.tier === 'EXTENDED',
       labelConfirmed,
       requiresManualReview: !labelConfirmed,
       manualReviewReasons: labelConfirmed ? [] : ['pre_slab_label_confirmation_required'],

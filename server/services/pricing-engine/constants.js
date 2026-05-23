@@ -775,7 +775,37 @@ const SPECIALTY = {
     eighth: { formula: 'standard', floor: r(250), marginDivisor: 0.40, sandRate: 4.09, deliveryRate: 2.62 },  // 60% target margin
     quarter: { formula: 'double', floor: r(450), marginDivisor: 0.35, sandRate: 4.09, deliveryRate: 5.24 },  // 65% target margin
   },
-  dethatching: { floor: r(150), marginDivisor: 0.40, materialPer1K: 2.10 },  // 60% target margin
+  dethatching: {
+    floor: r(150),
+    marginDivisor: 0.40,
+    materialPer1K: 2.10,
+    timeModel: {
+      primaryPassSqFtPerMin: 100,
+      crossPassSqFtPerMin: 200,
+      setupMin: 30,
+    },
+    cleanup: {
+      none: { minutesPer1K: 0, pricePer1K: 0, label: 'No debris removal' },
+      light: { minutesPer1K: 3, pricePer1K: 10, label: 'Light cleanup' },
+      moderate: { minutesPer1K: 7, pricePer1K: 20, label: 'Moderate cleanup' },
+      heavy: { minutesPer1K: 12, pricePer1K: 35, label: 'Heavy cleanup / bagging' },
+    },
+    accessMinutes: {
+      easy: 0,
+      moderate: 10,
+      difficult: 20,
+    },
+    manualReview: {
+      largeLawnSqFt: 10000,
+      heavyCleanupSqFt: 6000,
+      stAugustineRequiresApproval: true,
+    },
+    equipment: {
+      equipmentAssetTag: 'LAWN-001',
+      equipmentName: 'Classen TR-20H Dethatcher',
+      seasonalUse: 'spring/fall',
+    },
+  },  // 60% target margin
   trenching: {
     dirtPerLF: r(10),
     concretePerLF: r(14),
@@ -940,8 +970,6 @@ const SPECIALTY = {
         productOzPer10SqFt: 0.8,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.45,
-        floorBeforeVolumeDiscount: 600,
-        floorAfterVolumeDiscount: 500,
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -961,8 +989,6 @@ const SPECIALTY = {
         productOzPer10SqFt: 0.8,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.45,
-        floorBeforeVolumeDiscount: 600,
-        floorAfterVolumeDiscount: 500,
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -981,8 +1007,6 @@ const SPECIALTY = {
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.45,
-        floorBeforeVolumeDiscount: 600,
-        floorAfterVolumeDiscount: 500,
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -1001,8 +1025,6 @@ const SPECIALTY = {
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.45,
-        floorBeforeVolumeDiscount: 600,
-        floorAfterVolumeDiscount: 500,
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
@@ -1011,7 +1033,33 @@ const SPECIALTY = {
         ],
       },
     },
+    minimums: {
+      standalone: [
+        { maxSqFt: 250, floor: 225 },
+        { maxSqFt: 750, floor: 325 },
+        { maxSqFt: 1250, floor: 425 },
+        { maxSqFt: 'Infinity', floor: 600 },
+      ],
+      builderBatch: [
+        { maxSqFt: 250, floor: 150 },
+        { maxSqFt: 750, floor: 250 },
+        { maxSqFt: 1250, floor: 350 },
+        { maxSqFt: 'Infinity', floor: 500 },
+      ],
+      sameTripAddOn: [
+        { maxSqFt: 250, floor: 125 },
+        { maxSqFt: 750, floor: 225 },
+        { maxSqFt: 1250, floor: 325 },
+        { maxSqFt: 'Infinity', floor: 500 },
+      ],
+    },
     equipCost: 15,
+    complianceAdminCost: 25,
+    includeDriveCostByContext: {
+      standalone: true,
+      builderBatch: false,
+      sameTripAddOn: false,
+    },
     labor: {
       baseHours: 0.5,
       hoursPerSqFt: 1 / 1500,

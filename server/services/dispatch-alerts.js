@@ -117,6 +117,65 @@ async function createAlert({ type, severity, techId, jobId, payload, trx } = {})
   return captured;
 }
 
+async function createAlertOnce({ type, severity, techId, jobId, payload, trx, existingPayloadSource } = {}) {
+  if (!type) {
+    throw new Error('createAlertOnce: type is required');
+  }
+  const sev = severity || 'info';
+  if (!VALID_SEVERITIES.includes(sev)) {
+    throw new Error(`createAlertOnce: invalid severity '${sev}' (expected one of ${VALID_SEVERITIES.join(', ')})`);
+  }
+
+  async function doWrite(t) {
+    const rows = await t('dispatch_alerts')
+      .insert({
+        type,
+        severity: sev,
+        tech_id: techId || null,
+        job_id: jobId || null,
+        payload: payload ? JSON.stringify(payload) : null,
+      })
+      .onConflict()
+      .ignore()
+      .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+
+    if (rows[0]) return { row: rows[0], created: true };
+
+    const existingQuery = t('dispatch_alerts')
+      .where({ type, job_id: jobId || null })
+      .whereNull('resolved_at');
+    if (existingPayloadSource) {
+      existingQuery.whereRaw("payload->>'source' = ?", [existingPayloadSource]);
+    }
+    const existing = await existingQuery
+      .orderBy('created_at', 'desc')
+      .first('id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by');
+    return { row: existing || null, created: false };
+  }
+
+  if (trx) {
+    const result = await doWrite(trx);
+    if (result.created && result.row) {
+      if (trx.executionPromise) {
+        trx.executionPromise.then(() => emitAlert(result.row)).catch(() => {
+          // Outer rollback. Suppress the emit so no phantom alert reaches dispatch.
+        });
+      } else {
+        logger.warn('[dispatch-alerts] trx.executionPromise missing — emitting inline (test harness?)');
+        emitAlert(result.row);
+      }
+    }
+    return result;
+  }
+
+  let result;
+  await db.transaction(async (innerTrx) => {
+    result = await doWrite(innerTrx);
+  });
+  if (result.created && result.row) emitAlert(result.row);
+  return result;
+}
+
 function emitAlert(row) {
   const io = getIo();
   if (!io) {
@@ -344,6 +403,7 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
 
 module.exports = {
   createAlert,
+  createAlertOnce,
   resolveAlert,
   resolveAllOpenAlerts,
   autoResolveOverdueAlertsForJob,

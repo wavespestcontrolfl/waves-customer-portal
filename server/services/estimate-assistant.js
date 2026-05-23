@@ -71,11 +71,29 @@ function uniqueByLabel(rows) {
   });
 }
 
+function normalizeBillingFrequencyKey(value) {
+  const raw = cleanText(value).toLowerCase().replace(/[_\s-]+/g, '_');
+  if (!raw) return null;
+  if (raw === '6' || raw.includes('bi_month') || raw.includes('bimonth')) return 'bi_monthly';
+  if (raw === '12' || raw.includes('monthly') || raw === 'month') return 'monthly';
+  if (raw === '4' || raw.includes('quarter')) return 'quarterly';
+  return null;
+}
+
 function periodLabelForFrequency(frequency = {}) {
-  const key = cleanText(frequency.key).toLowerCase();
-  const label = cleanText(frequency.label).toLowerCase();
-  if (key === 'bi_monthly' || label.includes('bi-month') || label.includes('bimonth')) return 'bi-monthly visit';
-  if (key === 'monthly' || label.includes('monthly')) return 'month';
+  const explicitBillingKey = cleanText(
+    frequency.billingFrequencyKey
+      || frequency.billingFrequency
+      || frequency.billingCadenceKey
+      || frequency.billingCadence,
+  );
+  const key = normalizeBillingFrequencyKey(explicitBillingKey || frequency.key);
+  if (key === 'bi_monthly') return 'bi-monthly visit';
+  if (key === 'monthly') return 'month';
+  if (key === 'quarterly') return 'quarter';
+  const labelKey = explicitBillingKey ? null : normalizeBillingFrequencyKey(frequency.label);
+  if (labelKey === 'bi_monthly') return 'bi-monthly visit';
+  if (labelKey === 'monthly') return 'month';
   return 'quarter';
 }
 
@@ -131,6 +149,9 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
   const included = Array.isArray(frequency?.included) ? frequency.included : [];
   const perTreatments = Array.isArray(frequency?.perServiceTreatments) ? frequency.perServiceTreatments : [];
   const byLabel = new Map();
+  const serviceCadence = frequency?.billingFrequencyKey && frequency.billingFrequencyKey !== frequency.key
+    ? cleanText(frequency.label)
+    : '';
   const waveGuardDiscount = waveGuardDiscountForTier(pricingBundle.waveGuardTier);
   const targetAnnual = Number(frequency?.annual)
     || (Number.isFinite(Number(frequency?.monthly)) ? Number(frequency.monthly) * 12 : null);
@@ -169,9 +190,12 @@ function serviceRowsFromPricing(pricingBundle = {}, selectedFrequency = null) {
 
   included.forEach((service) => {
     const label = normalizeServiceName(service.label || service.service || service.key);
+    const current = byLabel.get(label) || { label };
     byLabel.set(label, {
+      ...current,
       label,
-      detail: cleanText(service.detail),
+      cadence: current.cadence || serviceCadence,
+      detail: current.detail || cleanText(service.detail),
     });
   });
 
@@ -315,6 +339,8 @@ function serviceLine(row = {}) {
 function normalizeFrequencyKey(value) {
   const raw = cleanText(value).toLowerCase().replace(/[_\s-]+/g, '_');
   if (!raw) return null;
+  if (raw === 'standard' || raw.includes('tree_shrub_standard')) return 'standard';
+  if (raw === 'enhanced' || raw.includes('tree_shrub_enhanced')) return 'enhanced';
   if (raw === '6' || raw.includes('bi_month') || raw.includes('bimonth')) return 'bi_monthly';
   if (raw === '12' || raw.includes('monthly') || raw === 'month') return 'monthly';
   if (raw === '4' || raw.includes('quarter')) return 'quarterly';
@@ -328,7 +354,28 @@ function selectedFrequencyKeyFromEstimateData(estData = {}) {
     ? result.recurring.services
     : (Array.isArray(inner.recurring?.services) ? inner.recurring.services : []);
   const pestService = services.find((service) => /pest/i.test(cleanText(service?.name || service?.label || service?.service)));
+  const treeShrubService = services.find((service) => /tree|shrub|ornamental/i.test(cleanText(service?.name || service?.label || service?.service)));
+  const customerSelection = estData.customerSelection
+    || result.customerSelection
+    || inner.customerSelection
+    || {};
+  const serviceTierCandidates = [
+    customerSelection.serviceTierKey,
+    customerSelection.serviceTier,
+    customerSelection.tierKey,
+    customerSelection.tier,
+    treeShrubService?.serviceTierKey,
+    treeShrubService?.serviceTier,
+    treeShrubService?.tierKey,
+    treeShrubService?.tier,
+  ];
+  for (const candidate of serviceTierCandidates) {
+    const key = normalizeFrequencyKey(candidate);
+    if (key === 'standard' || key === 'enhanced') return key;
+  }
   const directCandidates = [
+    customerSelection.frequencyKey,
+    customerSelection.frequency,
     pestService?.frequency,
     pestService?.billing,
     pestService?.cadence,
@@ -365,7 +412,14 @@ function selectPricingFrequency(pricingBundle = {}, estimate = {}, estData = {},
 
   const requested = cleanText(selectedFrequencyKey);
   if (requested) {
-    const match = frequencies.find((frequency) => frequency.key === requested);
+    const requestedKey = normalizeFrequencyKey(requested);
+    const requestedLower = requested.toLowerCase();
+    const match = frequencies.find((frequency) => (
+      frequency.key === requested
+      || (requestedKey && frequency.key === requestedKey)
+      || cleanText(frequency.label).toLowerCase() === requestedLower
+      || (requestedKey && normalizeFrequencyKey(frequency.label) === requestedKey)
+    ));
     if (match) return match;
   }
 
@@ -462,6 +516,9 @@ function buildEstimateAssistantContext({
     : (recurringServices.length ? recurringServices : (oneTimeAvailable ? oneTimeServices : []));
   const billingPeriod = periodLabelForFrequency(frequency);
   const billingAmount = billingAmountForFrequency(frequency);
+  const serviceCadence = frequency?.billingFrequencyKey && frequency.billingFrequencyKey !== frequency.key
+    ? cleanText(frequency.label)
+    : null;
   const rawWaveGuardTier = cleanText(pricingBundle.waveGuardTier || estimate.waveguard_tier || estimate.tier || 'WaveGuard');
   const waveGuardTier = /^waveguard\b/i.test(rawWaveGuardTier)
     ? rawWaveGuardTier
@@ -473,12 +530,12 @@ function buildEstimateAssistantContext({
     || cleanText(estimate.customerFirstName);
   const quoteRequired = quoteRequiredFromContext(estimate, pricingBundle);
   const invoiceMode = truthy(estimate.bill_by_invoice) || truthy(estimate.billByInvoice);
-  const invoiceAmount = selectedMode === 'one_time'
-    ? oneTimeTotal
-    : Math.round(Number(frequency.monthly || estimate.monthly_total || estimate.monthlyTotal || 0) * 3 * 100) / 100;
   const normalBillingAmountText = billingAmount ? `${fmtMoney(billingAmount)} / ${billingPeriod}` : null;
   const oneTimeBillingAmount = Number.isFinite(oneTimeTotal) && oneTimeTotal > 0 ? oneTimeTotal : null;
   const contextBillingAmount = selectedMode === 'one_time' ? oneTimeBillingAmount : billingAmount;
+  const invoiceAmount = selectedMode === 'one_time'
+    ? oneTimeTotal
+    : (billingAmount || Math.round(Number(frequency.monthly || estimate.monthly_total || estimate.monthlyTotal || 0) * 3 * 100) / 100);
   const contextBillingText = selectedMode === 'one_time'
     ? (oneTimeBillingAmount ? fmtMoney(oneTimeBillingAmount) : null)
     : normalBillingAmountText;
@@ -509,6 +566,7 @@ function buildEstimateAssistantContext({
       amount: quoteRequired ? null : contextBillingAmount,
       amountText: quoteRequired ? null : contextBillingText,
       period: quoteRequired ? null : (selectedMode === 'one_time' ? 'one-time' : billingPeriod),
+      serviceCadence: quoteRequired || selectedMode === 'one_time' ? null : serviceCadence,
       monthlyText: quoteRequired || selectedMode === 'one_time' || !frequency.monthly ? null : `${fmtMoney(frequency.monthly)} / month equivalent`,
       annualText: !quoteRequired && selectedMode !== 'one_time' && Number.isFinite(annual) && annual > 0 ? fmtMoney(annual) : null,
       billedAfterVisit: !invoiceMode && !quoteRequired && selectedMode !== 'one_time',
@@ -602,6 +660,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
     const firstVisitFees = listFirstVisitFees(context);
     return [
       billingText ? `Your ${tier} estimate is ${billingText}.` : `This estimate uses ${tier} pricing.`,
+      context.billing?.serviceCadence ? `Service visits are ${context.billing.serviceCadence}.` : '',
       context.billing?.billedAfterVisit ? 'You are billed after completed service visits unless you choose the 12-month pay-in-full option.' : '',
       context.billing?.annualText ? `The 12-month plan total shown is ${context.billing.annualText}.` : '',
       firstVisitFees,

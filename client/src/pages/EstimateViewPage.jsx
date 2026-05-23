@@ -37,6 +37,7 @@ import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { estimateCopyFor } from '../lib/estimate-copy';
+import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 
 const FONT_BODY = "'Inter', system-ui, sans-serif";
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -46,6 +47,8 @@ const ESTIMATE_BG = '#FAF8F3';
 const ESTIMATE_BORDER = '#E7E2D7';
 const ESTIMATE_MUTED = '#6B7280';
 const ESTIMATE_TEXT = '#1B2C5B';
+const ESTIMATE_BODY = '#3F4A65';
+const ESTIMATE_CHROME = '#F7F5EE';
 const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
 
 function fmtMoney(n) {
@@ -105,6 +108,49 @@ function primarySelectedFrequencyKey(services = [], selected = {}) {
   return primary ? selected[primary.key] || primary.defaultFrequencyKey || primary.frequencies?.[0]?.key || null : null;
 }
 
+function selectedPricingFrequencyKey(pricing = {}, services = [], selected = {}) {
+  const sectionKey = primarySelectedFrequencyKey(services, selected);
+  const frequencies = Array.isArray(pricing?.frequencies) ? pricing.frequencies : [];
+  if (!frequencies.length) return sectionKey;
+  if (frequencies.some((frequency) => frequency.key === sectionKey)) return sectionKey;
+  return frequencies[0]?.key || null;
+}
+
+function selectedCombinedFrequency(pricing = {}, selectedFrequencyKey) {
+  const frequencies = Array.isArray(pricing?.frequencies) ? pricing.frequencies : [];
+  return frequencies.find((frequency) => frequency.key === selectedFrequencyKey) || frequencies[0] || null;
+}
+
+function serviceLabelForKey(key) {
+  switch (key) {
+    case 'tree_shrub': return 'Tree & Shrub';
+    case 'lawn_care': return 'Lawn Care';
+    case 'mosquito': return 'Mosquito';
+    case 'termite_bait': return 'Termite Bait';
+    case 'palm_injection': return 'Palm Injection';
+    case 'rodent_bait': return 'Rodent Bait Stations';
+    case 'pest_control': return 'Pest Control';
+    default: return 'Service';
+  }
+}
+
+function recurringServiceForEstimate(pricing = {}) {
+  const services = Array.isArray(pricing?.services) ? pricing.services : [];
+  return services.find((service) => service?.isRecurring) || services[0] || null;
+}
+
+function frequencyServiceCategory(frequency = {}, pricing = {}) {
+  if (frequency?.serviceCategory) return frequency.serviceCategory;
+  const service = recurringServiceForEstimate(pricing);
+  return service?.key || pricing?.serviceCategory || 'pest_control';
+}
+
+function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
+  const left = String(frequencyLabel || '').toLowerCase();
+  const right = String(serviceLabel || '').toLowerCase();
+  return !!left && !!right && (left.includes(right) || right.includes(left));
+}
+
 function Page({ children }) {
   return (
     <div style={{
@@ -145,11 +191,11 @@ function SkeletonBlock() {
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 24,
-      border: `1px solid ${COLORS.grayLight}`, marginBottom: 16,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 16,
     }}>
-      <div style={{ height: 12, width: 120, background: COLORS.offWhite, borderRadius: 4 }} />
-      <div style={{ height: 32, width: '60%', background: COLORS.offWhite, borderRadius: 4, marginTop: 14 }} />
-      <div style={{ height: 14, width: '40%', background: COLORS.offWhite, borderRadius: 4, marginTop: 10 }} />
+      <div style={{ height: 12, width: 120, background: ESTIMATE_CHROME, borderRadius: 4 }} />
+      <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 14 }} />
+      <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 10 }} />
     </div>
   );
 }
@@ -158,11 +204,11 @@ function NotFoundCard() {
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 32, textAlign: 'center',
-      border: `1px solid ${COLORS.grayLight}`, marginTop: 40,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginTop: 40,
     }}>
       <div style={{ fontSize: 32 }}></div>
       <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
         This link may have expired or isn't valid. Call us at{' '}
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
         and we'll get you sorted.
@@ -413,7 +459,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           fontWeight: 700,
           marginBottom: 6,
         }}>
-          Waves AI
+          Ask Waves
         </div>
         <h2 style={{
           fontFamily: FONTS.serif,
@@ -424,7 +470,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           margin: 0,
           letterSpacing: 0,
         }}>
-          Ask Waves AI
+          Ask Waves
         </h2>
       </div>
 
@@ -439,7 +485,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
           placeholder="Ask about services, pricing, scheduling, or Waves"
-          aria-label="Ask Waves AI about this estimate"
+          aria-label="Ask Waves about this estimate"
           maxLength={500}
           style={{
             width: '100%',
@@ -522,16 +568,49 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   );
 }
 
-function getServiceLabel(frequency, estimate, pricing) {
+export function getServiceLabel(frequency, estimate, pricing) {
   if (estimate?.isOneTimeOnly) {
     const primary = pricing?.oneTimeBreakdown?.items?.find((item) => item?.kind !== 'discount');
     return primary?.label || 'One-time service';
   }
-  if (estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
+  const category = frequencyServiceCategory(frequency, pricing);
+  const service = recurringServiceForEstimate(pricing);
+  const serviceLabel = service?.label || serviceLabelForKey(category);
+  if (category === 'pest_control' && estimate?.showOneTimeOption && (pricing?.anchorOneTimePrice || 0) > 0) {
     return `${frequency?.label || 'Quarterly'} Pest Control or One-Time Pest Control`;
   }
-  if (frequency?.label) return `${frequency.label} Pest Control`;
+  if (frequency?.label) {
+    return labelAlreadyIncludesService(frequency.label, serviceLabel)
+      ? frequency.label
+      : `${frequency.label} ${serviceLabel}`;
+  }
   return 'Custom quote';
+}
+
+function isPreSlabBreakdownItem(item = {}) {
+  const raw = [item.service, item.label, item.name, item.detail]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('pre slab')
+    && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
+}
+
+function oneTimePriceCopy(breakdown = {}) {
+  const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
+  const preSlabItems = items.filter(isPreSlabBreakdownItem);
+  if (preSlabItems.length > 0) {
+    const hasExtendedWarranty = preSlabItems.some((item) => {
+      const raw = [item.warrantyStatus, item.detail].filter(Boolean).join(' ').toLowerCase();
+      if (item.warrantyExtendedSelected === true) return true;
+      if (raw.includes('no extended')) return false;
+      return raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr');
+    });
+    return 'Includes pre-slab soil treatment for the measured slab area. Certificate/termite-treatment documentation is provided when required. Warranty terms depend on the selected warranty option.'
+      + (hasExtendedWarranty ? '' : ' No extended warranty selected.');
+  }
+  return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
 }
 
 function SetupFeeCard({ fee }) {
@@ -570,8 +649,8 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
   };
   return (
     <div style={{
-      background: '#F1F5F9', borderRadius: 999, padding: 4,
-      border: '1px solid #E2E8F0', marginBottom: 18,
+      background: ESTIMATE_CHROME, borderRadius: 999, padding: 4,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 18,
       display: 'flex', gap: 4,
       boxShadow: '0 1px 4px rgba(15,23,42,.04)',
     }}>
@@ -581,7 +660,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         style={{
           ...pillBase,
           background: mode === 'recurring' ? ESTIMATE_BUTTON_BG : 'transparent',
-          color: mode === 'recurring' ? COLORS.white : COLORS.textBody,
+          color: mode === 'recurring' ? COLORS.white : ESTIMATE_BODY,
         }}
       >Recurring Pest Control</button>
       <button
@@ -590,14 +669,14 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
         style={{
           ...pillBase,
           background: mode === 'one_time' ? ESTIMATE_BUTTON_BG : 'transparent',
-          color: mode === 'one_time' ? COLORS.white : COLORS.textBody,
+          color: mode === 'one_time' ? COLORS.white : ESTIMATE_BODY,
         }}
       >One-Time Pest Control</button>
     </div>
   );
 }
 
-function OneTimePriceCard({ oneTimePrice }) {
+function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
     <div style={{
       padding: '14px 0 24px',
@@ -610,14 +689,13 @@ function OneTimePriceCard({ oneTimePrice }) {
         <span style={{ fontSize: 24, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
       <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 14, lineHeight: 1.55 }}>
-        One visit, pay on service day. No recurring schedule, no tier discount.
-        Includes a 30-day callback period if pests return after this visit.
+        {oneTimePriceCopy(breakdown)}
       </div>
     </div>
   );
 }
 
-function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service));
@@ -631,7 +709,7 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
   return (
     <div style={{
       background: COLORS.white, borderRadius: 16, padding: 18,
-      border: `1px solid ${COLORS.grayLight}`, marginBottom: 16,
+      border: `1px solid ${ESTIMATE_BORDER}`, marginBottom: 16,
       boxShadow: '0 1px 6px rgba(15,23,42,0.04)',
     }}>
       <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 10 }}>
@@ -643,19 +721,25 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
           const amount = Number(item.amount) || 0;
           const isDiscount = !isQuoteRequired && (amount < 0 || item.kind === 'discount');
           const isIncluded = !isQuoteRequired && item.kind === 'included';
+          const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
               alignItems: 'start', paddingBottom: i === items.length - 1 ? 0 : 10,
-              borderBottom: i === items.length - 1 ? 'none' : `1px solid ${COLORS.grayLight}`,
+              borderBottom: i === items.length - 1 ? 'none' : `1px solid ${ESTIMATE_BORDER}`,
             }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
                   {item.label || 'One-time service'}
                 </div>
                 {item.detail ? (
-                  <div style={{ fontSize: 12, color: COLORS.textCaption, marginTop: 2, lineHeight: 1.35 }}>
+                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
                     {item.detail}
+                  </div>
+                ) : null}
+                {quoteNote ? (
+                  <div style={{ fontSize: 12, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
+                    {quoteNote}
                   </div>
                 ) : null}
               </div>
@@ -672,7 +756,7 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
       </div>
       <div style={{
         display: 'flex', justifyContent: 'space-between', gap: 12,
-        borderTop: `1px solid ${COLORS.grayLight}`, marginTop: 12, paddingTop: 12,
+        borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
         fontSize: 15, fontWeight: 700, color: COLORS.navy,
       }}>
         <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
@@ -680,7 +764,122 @@ function OneTimeBreakdownCard({ breakdown, excludeServices = [] }) {
           {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
         </span>
       </div>
+      {totalIsQuoteRequired ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.45 }}>
+          Waves will confirm final pricing before this can be accepted online.
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+function manualDiscountMonthlyAmount(manualDiscount) {
+  if (!manualDiscount) return 0;
+  const monthly = Number(manualDiscount.monthlyAmount);
+  if (Number.isFinite(monthly) && monthly > 0) return Math.round(monthly * 100) / 100;
+  const amount = Number(manualDiscount.amount);
+  return Number.isFinite(amount) && amount > 0 ? Math.round((amount / 12) * 100) / 100 : 0;
+}
+
+function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGuardTier }) {
+  if (!combined) return null;
+  const quoteRequired = selectedFrequency?.quoteRequired === true;
+  const quoteReason = quoteRequired ? quoteRequiredReasonText(selectedFrequency || combined) : '';
+  const monthly = quoteRequired ? null : (selectedFrequency?.monthly ?? combined.monthlySubtotal);
+  const annual = quoteRequired ? null : (selectedFrequency?.annual ?? combined.annualSubtotal);
+  const manualDiscount = combined.manualDiscount && Number(combined.manualDiscount.amount) > 0
+    ? combined.manualDiscount
+    : null;
+  const manualDiscountMonthly = manualDiscountMonthlyAmount(manualDiscount);
+  return (
+    <section style={{
+      background: COLORS.white,
+      border: `1px solid ${ESTIMATE_BORDER}`,
+      borderRadius: 16,
+      padding: 24,
+      margin: '4px 0 16px',
+      boxShadow: '0 8px 24px rgba(15,23,42,.06)',
+    }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: 18,
+        alignItems: 'flex-start',
+        flexWrap: 'wrap',
+      }}>
+        <div>
+          <div style={{
+            fontSize: 14,
+            fontWeight: 700,
+            color: ESTIMATE_MUTED,
+            textTransform: 'uppercase',
+            letterSpacing: 0.5,
+            marginBottom: 6,
+          }}>
+            Recurring total
+          </div>
+          <div style={{ fontSize: 15, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+            Combined recurring services before any one-time items.
+          </div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{
+            fontFamily: FONTS.serif,
+            fontSize: quoteRequired ? 34 : 46,
+            lineHeight: 1,
+            color: ESTIMATE_TEXT,
+            fontWeight: 500,
+          }}>
+            {quoteRequired ? 'Quote required' : fmtMoney(monthly)}
+            {!quoteRequired ? <span style={{ fontFamily: FONT_BODY, fontSize: 20, color: ESTIMATE_MUTED }}> /mo</span> : null}
+          </div>
+          {!quoteRequired && annual ? (
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8 }}>
+              {fmtMoney(annual)} / year
+            </div>
+          ) : null}
+          {quoteRequired && quoteReason ? (
+            <div style={{ fontSize: 14, color: '#92400E', marginTop: 10, lineHeight: 1.4, fontWeight: 700, maxWidth: 320 }}>
+              {quoteReason}
+            </div>
+          ) : null}
+          {waveGuardTier ? (
+            <div style={{
+              display: 'inline-block',
+              marginTop: 10,
+              padding: '5px 11px',
+              background: '#EEF2FF',
+              color: ESTIMATE_TEXT,
+              borderRadius: 6,
+              fontSize: 14,
+              fontWeight: 700,
+            }}>
+              WaveGuard {waveGuardTier}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      {!quoteRequired && manualDiscount && manualDiscountMonthly > 0 ? (
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          gap: 12,
+          alignItems: 'center',
+          marginTop: 16,
+          padding: '10px 12px',
+          border: '1px solid #DCFCE7',
+          borderRadius: 10,
+          background: '#F0FDF4',
+          color: COLORS.green,
+          fontSize: 14,
+          fontWeight: 800,
+          lineHeight: 1.35,
+        }}>
+          <span>{manualDiscount.label || 'Discount'}</span>
+          <strong style={{ whiteSpace: 'nowrap' }}>-{fmtMoney(manualDiscountMonthly)} /mo</strong>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -688,7 +887,7 @@ function CountdownLine({ secondsRemaining }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
   return (
-    <div style={{ fontSize: 14, color: COLORS.textCaption, textAlign: 'center' }}>
+    <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center' }}>
       Slot held for {m}:{String(s).padStart(2, '0')}
     </div>
   );
@@ -712,7 +911,7 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
           : 'At the visit'
         }</strong>
       </div>
-      <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 4 }}>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
         Slot: {slotId}
       </div>
       <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div>
@@ -729,8 +928,8 @@ function ReviewPhase({ slotId, paymentPreference, secondsRemaining, onConfirm, o
           type="button"
           onClick={onCancel}
           style={{
-            padding: '12px 20px', background: 'transparent', color: COLORS.textBody,
-            border: `1px solid ${COLORS.grayLight}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+            padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
+            border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
           }}
         >Go back</button>
       </div>
@@ -758,7 +957,7 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {invoiceLinkDelivered ? 'Thanks — your invoice is on the way.' : 'Thanks — your estimate is approved.'}
         </div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
         {invoiceLinkDelivered
           ? 'Use the invoice pay link we sent to complete payment. Your service request has been received and our team will confirm the schedule.'
           : 'Our team will follow up with the invoice details. Your service request has been received and our team will confirm the schedule.'}
@@ -777,7 +976,7 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           Your annual prepay is approved.
         </div>
-        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
           Our team will review and send the annual prepay invoice{prepayAmountText}. Your service request has been received and our team will confirm the schedule.
         </div>
       </div>
@@ -794,7 +993,7 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved for a one-time service.
         </div>
-        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
           {bookingUrl
             ? 'Check your phone for the booking link, or pick your appointment now.'
             : 'Our team will follow up to help schedule your appointment.'}
@@ -823,7 +1022,7 @@ function SuccessCard({ acceptResult }) {
         <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're booked.
         </div>
-        <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
           Check your phone for the confirmation text. Finish setup to keep your appointment moving.
         </div>
         {onboardingToken ? (
@@ -850,7 +1049,7 @@ function SuccessCard({ acceptResult }) {
       <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
         You're booked.
       </div>
-      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 10, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.55 }}>
         Check your phone for the confirmation text. Our team will confirm the schedule.
       </div>
     </div>
@@ -901,7 +1100,7 @@ function AcceptanceModeCard({ acceptance }) {
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>{title}</div>
-      <div style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55 }}>{body}</div>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>{body}</div>
       <a href={`tel:${WAVES_PHONE_TEL}`} style={{
         display: 'inline-block',
         marginTop: 14,
@@ -1018,7 +1217,7 @@ export default function EstimateViewPage() {
   }, [selected]);
 
   const services = useMemo(() => pricingServices(data?.pricing), [data]);
-  const selectedFrequency = useMemo(() => primarySelectedFrequencyKey(services, selected), [services, selected]);
+  const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   const currentFrequency = useMemo(() => {
     const pestSection = services.find((section) => section.key === 'pest_control');
     const primarySection = pestSection || services.find((section) => section.isRecurring) || services[0];
@@ -1186,12 +1385,21 @@ export default function EstimateViewPage() {
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
-    setSelected((prev) => ({ ...prev, [sectionKey]: nextFrequency }));
-    const section = services.find((item) => item.key === sectionKey);
-    const frequency = section?.frequencies?.find((item) => item.key === nextFrequency);
+    const affectedSections = services.filter((section) => (
+      section.key === sectionKey
+      || section.frequencies?.some((item) => item.key === nextFrequency)
+    ));
+    setSelected((prev) => affectedSections.reduce((next, section) => ({
+      ...next,
+      [section.key]: nextFrequency,
+    }), { ...prev }));
     setSelectedAddOns((prev) => ({
       ...prev,
-      [sectionKey]: new Set((frequency?.addOns || []).filter((addOn) => addOn.preChecked).map((addOn) => addOn.key)),
+      ...affectedSections.reduce((next, section) => {
+        const frequency = section.frequencies?.find((item) => item.key === nextFrequency);
+        next[section.key] = new Set((frequency?.addOns || []).filter((addOn) => addOn.preChecked).map((addOn) => addOn.key));
+        return next;
+      }, {}),
     }));
     setSelectedSlotId(null);
     setPaymentPreference(null);
@@ -1273,6 +1481,8 @@ export default function EstimateViewPage() {
   const acceptance = estimate?.acceptance || { mode: 'standard_slot_pick' };
   const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
   const waveGuardTier = renderFlags.showWaveGuardTierUi === false ? null : (pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier);
+  const combinedFrequency = selectedCombinedFrequency(pricing, selectedFrequency);
+  const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
 
   if (!canAccept) {
     return (
@@ -1292,6 +1502,7 @@ export default function EstimateViewPage() {
           state={cta.terminalState}
           customerFirstName={estimate.customerFirstName}
           address={estimate.address}
+          quoteReason={quoteRequiredReason}
         />
         <GuaranteeStrip licenseNumber={estimate.licenseNumber} />
       </Page>
@@ -1405,6 +1616,14 @@ export default function EstimateViewPage() {
                 );
               })}
 
+              {services.length > 1 && renderFlags.showRecurringSummary ? (
+                <CombinedRecurringPriceCard
+                  combined={pricing.combinedRecurring}
+                  selectedFrequency={combinedFrequency}
+                  waveGuardTier={waveGuardTier}
+                />
+              ) : null}
+
               {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
                 (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
                   ? pricing.firstVisitFees
@@ -1421,7 +1640,10 @@ export default function EstimateViewPage() {
             </>
           ) : (
             <>
-              <OneTimePriceCard oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0} />
+              <OneTimePriceCard
+                oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+                breakdown={pricing.oneTimeBreakdown}
+              />
               <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
               {renderFlags.showOneTimePestAddOns === true ? (
                 services
