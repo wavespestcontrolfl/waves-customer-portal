@@ -123,6 +123,25 @@ describe('content registry live status helpers', () => {
     }));
   });
 
+  test('marks redirect target fetch failures as errors', async () => {
+    const result = await liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-redirect-error', canonical_url_normalized: '/legacy-error/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-error/': response(302, '', { location: '/timeout/' }),
+          'https://www.wavespestcontrol.com/timeout/': new Error('timeout'),
+        }),
+      },
+    );
+
+    expect(result).toEqual(expect.objectContaining({
+      http_status: '302',
+      live_status: 'error',
+      redirect_target_url: 'https://www.wavespestcontrol.com/timeout/',
+      error: 'Redirect target check failed: timeout',
+    }));
+  });
+
   test('classifies missing and noindex pages', async () => {
     await expect(liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-3', canonical_url_normalized: '/missing/' },

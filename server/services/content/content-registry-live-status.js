@@ -164,6 +164,7 @@ async function checkRegistryRowLiveStatus(row, {
     let canonicalTargetUrl = extractCanonical(first.text, requestedUrl);
     let noindex = isNoindex(first.text);
     let finalStatus = null;
+    let followError = null;
 
     if (redirectTargetUrl && first.res.status >= 300 && first.res.status < 400) {
       try {
@@ -171,8 +172,8 @@ async function checkRegistryRowLiveStatus(row, {
         finalStatus = String(follow.res.status);
         canonicalTargetUrl = extractCanonical(follow.text, follow.res.url || redirectTargetUrl) || canonicalTargetUrl;
         noindex = noindex || isNoindex(follow.text);
-      } catch {
-        // The redirect itself is still useful signal; keep the row check successful.
+      } catch (err) {
+        followError = `Redirect target check failed: ${err.message}`;
       }
     }
 
@@ -182,7 +183,7 @@ async function checkRegistryRowLiveStatus(row, {
       redirectTargetUrl,
       canonicalTargetUrl,
     });
-    const liveStatus = redirectTargetUrl
+    const liveStatus = followError ? 'error' : redirectTargetUrl
       ? classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex })
       : classifyLiveStatus({
         status,
@@ -203,7 +204,7 @@ async function checkRegistryRowLiveStatus(row, {
       noindex_detected: noindex,
       sitemap_present: sitemap.present,
       sitemap_status: sitemap.status,
-      error: null,
+      error: followError,
     };
   } catch (err) {
     const sitemap = sitemapSignal({

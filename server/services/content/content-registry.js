@@ -13,6 +13,15 @@ const fm = require('../content-astro/frontmatter');
 
 const DEFAULT_COLLECTION_ROOT = path.join('src', 'content');
 const WAVES_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+const LIVE_MIRROR_FIELDS = [
+  'sitemap_status',
+  'http_status',
+  'live_status',
+  'redirect_target_url',
+  'canonical_target_url',
+  'noindex_detected',
+  'sitemap_present',
+];
 
 function normalizeContentUrl(value) {
   const raw = String(value || '').trim();
@@ -247,7 +256,7 @@ function reconcileContent({ astroItems = [], dbItems = [], previousRows = [] } =
       base.reconciliation_status = changeStatus(base, previous) || 'astro_only';
     }
 
-    rows.push(finalizeRegistryRow(base));
+    rows.push(finalizeRegistryRow(preserveLiveMirrorFields(base, previous)));
   }
 
   for (const item of dbItems) {
@@ -265,7 +274,7 @@ function reconcileContent({ astroItems = [], dbItems = [], previousRows = [] } =
       row.reconciliation_status = changeStatus(row, previous)
         || (row.workflow_status === 'published' ? 'db_published_missing_astro' : 'db_only');
     }
-    rows.push(finalizeRegistryRow(row));
+    rows.push(finalizeRegistryRow(preserveLiveMirrorFields(row, previous)));
   }
 
   const summary = summarizeRows(rows, astroItems.length, dbItems.length);
@@ -303,6 +312,22 @@ function changeStatus(row, previous) {
   if (row.astro_file_hash && prev.astro_file_hash && row.astro_file_hash !== prev.astro_file_hash) return 'astro_changed_since_sync';
   if (row.db_row_hash && prev.db_row_hash && row.db_row_hash !== prev.db_row_hash) return 'db_changed_since_sync';
   return null;
+}
+
+function preserveLiveMirrorFields(row, previous) {
+  const prev = previous.byAstroPath.get(row.astro_source_path) || previous.byDbId.get(row.db_blog_id);
+  if (!prev || liveTargetChanged(row, prev)) return row;
+  const out = { ...row };
+  for (const field of LIVE_MIRROR_FIELDS) {
+    if (typeof prev[field] !== 'undefined') out[field] = prev[field];
+  }
+  return out;
+}
+
+function liveTargetChanged(row, prev) {
+  const current = normalizeContentUrl(row.live_url || row.canonical_url || row.canonical_url_normalized);
+  const previous = normalizeContentUrl(prev.live_url || prev.canonical_url || prev.canonical_url_normalized);
+  return Boolean(current && previous && current !== previous);
 }
 
 function finalizeRegistryRow(row) {
@@ -761,12 +786,15 @@ module.exports = {
   slugFromUrl,
   stableStringify,
   stableHash,
+  LIVE_MIRROR_FIELDS,
   normalizeFrontmatterForHash,
   normalizeHashValue,
   scanAstroContent,
   astroFileToItem,
   dbBlogRowToItem,
   reconcileContent,
+  preserveLiveMirrorFields,
+  liveTargetChanged,
   summarizeRows,
   runContentRegistrySync,
   syncRunCountColumns,
