@@ -58,6 +58,7 @@ const PROTECTED_EMAIL_TEMPLATE_KEYS = new Set([
   'onboarding.72h_reminder',
   'onboarding.expiring_notice',
   'payment.autopay_enabled',
+  'payment.ach_processing',
   'payment.failed',
   'payment.method_expiring',
   'payment.method_updated',

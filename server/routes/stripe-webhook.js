@@ -8,7 +8,7 @@ const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./strip
 const { triggerNotification } = require('../services/notification-triggers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const {
   assertInvoicePaymentIntentTenderMatches,
   isAchPaymentIntent,
@@ -46,6 +46,25 @@ async function sendBillingSms(customer, body, metadata = {}) {
     entryPoint: 'stripe_webhook',
     metadata,
   });
+}
+
+// Advance `from` by `days` ET weekdays (Mon–Fri). Used to render the
+// "expected to clear" date in the ACH-processing acknowledgment so the
+// copy ("3–5 business days") doesn't surface a weekend date when the
+// payment was initiated late in the week.
+//
+// Uses ET calendar helpers because Railway runs TZ=UTC: a Sunday-evening-ET
+// payment is already Monday UTC, so native getDay()/getDate() would count
+// the wrong weekday and shift the "expected to clear" date by a day.
+function addBusinessDays(from, days) {
+  let cursor = from;
+  let added = 0;
+  while (added < days) {
+    cursor = addETDays(cursor, 1);
+    const dow = etParts(cursor).dayOfWeek;
+    if (dow !== 0 && dow !== 6) added += 1;
+  }
+  return cursor;
 }
 
 /**
@@ -328,7 +347,7 @@ router.post(
           break;
 
         case 'payment_intent.processing':
-          await handlePaymentIntentProcessing(event.data.object);
+          await handlePaymentIntentProcessing(event.data.object, event.created, event.id);
           break;
 
         case 'payment_intent.requires_action':
@@ -905,11 +924,18 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
   if (failedInvoice?.status === 'processing') {
     const nextStatus = nextInvoiceStatusAfterFailedPayment(failedInvoice);
+    // Clearing ach_processing_notified_at means a re-attempted ACH on
+    // the same invoice (different bank account, customer retries, etc.)
+    // will trigger a fresh "we got it" acknowledgment when its
+    // payment_intent.processing fires. Without this, the per-invoice
+    // dedupe lock from the first attempt would permanently suppress
+    // notifications for every subsequent attempt on the same invoice.
     await db('invoices')
       .where({ id: failedInvoice.id })
       .update({
         status: nextStatus,
         paid_at: null,
+        ach_processing_notified_at: null,
       });
   }
 
@@ -1288,8 +1314,21 @@ async function handleAchFailure(paymentIntent, failureReason) {
  * payment_intent.processing — ACH money in flight (3–5 business days to clear).
  * Mark payment/invoice as processing so admin sees "pending bank transfer"
  * instead of "unpaid". Do NOT mark invoice paid until succeeded fires.
+ *
+ * `eventCreated` is the Stripe event's unix-seconds timestamp — i.e. the
+ * moment Stripe recorded the processing transition, which is the closest
+ * proxy we have for "customer authorized the ACH transfer". Don't use
+ * paymentIntent.created: the PI is minted at /pay/:token/setup and reused
+ * via /update-amount, so it can predate authorization by hours or days.
+ *
+ * `eventId` is the Stripe event id and is unique per processing-transition
+ * delivery. It's used in the email idempotency key so that a re-attempted
+ * ACH against the same PI (services/stripe.js updates the existing PI in
+ * requires_payment_method instead of minting a new one) still gets a
+ * fresh acknowledgment email, while genuine duplicate webhook deliveries
+ * of the same event remain deduped at the email_messages level.
  */
-async function handlePaymentIntentProcessing(paymentIntent) {
+async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null, eventId = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent processing (ACH in flight): ${piId}`);
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
@@ -1415,6 +1454,121 @@ async function handlePaymentIntentProcessing(paymentIntent) {
         payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
         total: amount,
       });
+  });
+
+  // ── Customer-facing ACH "we got it, processing" acknowledgment ──
+  //
+  // The customer initiated a bank transfer; ACH takes 3–5 business days
+  // to clear. Without an acknowledgment the invoice silently flips from
+  // Sent → Processing in the portal and the customer hears nothing
+  // until the receipt fires days later (or worse, a failure SMS).
+  //
+  // At-most-once dispatch via a claim-style UPDATE on
+  // invoices.ach_processing_notified_at: the worker whose update flips
+  // the column from NULL to a timestamp wins the one-shot lock and
+  // proceeds to send. Concurrent duplicates and Stripe replays lose
+  // the race (affected rows == 0) and bail. A failure to deliver after
+  // the claim is deliberately not retried here — see the prior threads
+  // on this PR for the trade-off rationale; the per-attempt clear in
+  // handlePaymentIntentFailed handles the realistic re-attempt case.
+  // Channels run independently: missing phone skips SMS but email
+  // still fires, and vice versa.
+  //
+  // Fire-and-forget via setImmediate so a Twilio/SendGrid hiccup
+  // doesn't make Stripe retry the entire webhook (which would re-run
+  // the amount-mismatch + status guards above).
+  setImmediate(async () => {
+    try {
+      const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
+      if (!freshInvoice) return;
+      if (freshInvoice.ach_processing_notified_at) return;
+      if (freshInvoice.status !== 'processing') return;
+
+      const customer = freshInvoice.customer_id
+        ? await db('customers').where({ id: freshInvoice.customer_id }).first()
+        : null;
+      if (!customer) return;
+
+      // Atomic claim: the UPDATE doubles as the dedupe lock. Two concurrent
+      // workers (Stripe duplicate delivery, processing-after-downgrade
+      // replay) both reach the pre-read with notified_at NULL; only the one
+      // whose UPDATE flips rows from 0 to 1 proceeds to dispatch. The
+      // status filter also closes a race with payment_intent.succeeded —
+      // if .succeeded flipped the invoice to 'paid' between the pre-read
+      // and this UPDATE, affectedRows is 0 and we bail rather than send a
+      // contradictory "processing" message after the receipt fired.
+      // Stripe doesn't guarantee webhook ordering. A stale processing
+      // event for a prior, abandoned PI on the same invoice could
+      // otherwise win this claim and send an acknowledgment for the
+      // wrong attempt. The transaction above already bound
+      // invoices.stripe_payment_intent_id to piId, so requiring it
+      // here matches "this event is for the currently active PI."
+      const claimed = await db('invoices')
+        .where({ id: freshInvoice.id })
+        .where({ status: 'processing' })
+        .where({ stripe_payment_intent_id: piId })
+        .whereNull('ach_processing_notified_at')
+        .update({ ach_processing_notified_at: new Date() });
+      if (!claimed) return;
+
+      if (customer.phone) {
+        try {
+          const smsBody = await renderRequiredSmsTemplate('ach_payment_processing', {
+            first_name: customer.first_name || 'there',
+            invoice_number: freshInvoice.invoice_number || '',
+          });
+          const smsResult = await sendBillingSms(customer, smsBody, {
+            original_message_type: 'ach_payment_processing',
+            stripe_payment_intent_id: piId,
+            invoice_id: freshInvoice.id,
+          });
+          if (!smsResult.sent) {
+            logger.warn(`[stripe-webhook] ACH processing SMS blocked/failed for invoice ${freshInvoice.invoice_number}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          }
+        } catch (smsErr) {
+          logger.error(`[stripe-webhook] ACH processing SMS failed for invoice ${freshInvoice.invoice_number}: ${smsErr.message}`);
+        }
+      }
+
+      // Anchor on the Stripe event's recorded transition time — that's
+      // the closest proxy for "customer authorized the transfer." Never
+      // use paymentIntent.created: the PI is minted upstream at
+      // /pay/:token/setup and reused via /update-amount, so its created
+      // timestamp can predate authorization by hours or days. Fall back
+      // to now() only when the event timestamp wasn't threaded through.
+      const initiatedAt = eventCreated
+        ? new Date(eventCreated * 1000)
+        : new Date();
+      const expectedClearDate = addBusinessDays(initiatedAt, 5);
+      const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
+        customerId: freshInvoice.customer_id,
+        invoiceId: freshInvoice.id,
+        amountPaid: amount,
+        initiatedAt,
+        expectedClearDate,
+        // Scope by event id, not just (invoice, PI). services/stripe.js
+        // updates an existing PI in requires_payment_method on retry
+        // instead of minting a new one, so piId is stable across attempts
+        // and a key of `{invoiceId}:{piId}` would dedupe forever after the
+        // first send. Every payment_intent.processing delivery has a
+        // unique event id; duplicate webhook deliveries of the *same*
+        // event share an id (so email_messages.idempotency_key still
+        // dedupes those), but a genuine new attempt fires a new event id
+        // and gets a fresh email. Falls back to (invoice, PI) if the
+        // event id wasn't threaded — preserves the prior behavior.
+        idempotencyKey: eventId
+          ? `payment.ach_processing:${freshInvoice.id}:${eventId}`
+          : `payment.ach_processing:${freshInvoice.id}:${piId}`,
+      }).catch((err) => ({ ok: false, error: err.message }));
+      if (!emailResult?.ok) {
+        const reason = emailResult?.reason || emailResult?.error || 'unknown';
+        if (reason !== 'missing_email' && reason !== 'customer_not_found') {
+          logger.warn(`[stripe-webhook] ACH processing email not sent for invoice ${freshInvoice.invoice_number}: ${reason}`);
+        }
+      }
+    } catch (err) {
+      logger.error(`[stripe-webhook] ACH processing acknowledgment failed for PI ${piId}: ${err.message}`, { stack: err.stack });
+    }
   });
 }
 

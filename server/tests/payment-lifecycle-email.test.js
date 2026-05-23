@@ -295,6 +295,70 @@ describe('payment lifecycle email sender', () => {
     expect(JSON.stringify(payload)).not.toMatch(/pi_sensitive|re_sensitive|pm_/);
   });
 
+  test('sends ACH processing acknowledgment with invoice metadata and explicit idempotency key', async () => {
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      ...lifecycleQueues(),
+    });
+
+    const result = await PaymentLifecycleEmail.sendAchProcessing({
+      customerId: 'cust-1',
+      invoiceId: 'inv-1',
+      amountPaid: '117.00',
+      initiatedAt: '2026-05-22',
+      expectedClearDate: '2026-05-29',
+      idempotencyKey: 'payment.ach_processing:inv-1:evt_abc',
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.ach_processing',
+      idempotencyKey: 'payment.ach_processing:inv-1:evt_abc',
+      suppressionGroupKey: 'transactional_required',
+      payload: expect.objectContaining({
+        first_name: 'Taylor',
+        invoice_title: 'Quarterly Pest Control',
+        invoice_number: 'INV-1001',
+        amount_paid: '$117.00',
+        pay_url: expect.stringContaining('/pay/pay-token'),
+      }),
+    }));
+  });
+
+  test('falls back to invoice total and default idempotency key when amountPaid is omitted', async () => {
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      ...lifecycleQueues(),
+    });
+
+    await PaymentLifecycleEmail.sendAchProcessing({
+      customerId: 'cust-1',
+      invoiceId: 'inv-1',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.ach_processing',
+      idempotencyKey: 'payment.ach_processing:inv-1',
+      payload: expect.objectContaining({
+        amount_paid: '$129.00',
+      }),
+    }));
+  });
+
+  test('skips ACH processing send when invoice cannot be found', async () => {
+    setDbQueues({
+      invoices: [chain({ first: null })],
+    });
+
+    const result = await PaymentLifecycleEmail.sendAchProcessing({
+      customerId: 'cust-1',
+      invoiceId: 'missing',
+    });
+
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'invoice_not_found' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('still sends required payment notices when general customer email is disabled', async () => {
     const interaction = chain();
     setDbQueues({
