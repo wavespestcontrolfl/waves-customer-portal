@@ -83,25 +83,12 @@ describe('re-service-impact: extractReServiceImpact (mocked knex)', () => {
 
   test('two qualifying callbacks → 4', async () => {
     const knex = mockKnex([
-      { id: 'cb1', service_date: '2026-04-10', service_type: 'Callback', cancellation_reason: null },
-      { id: 'cb2', service_date: '2026-04-25', service_type: 'Callback', cancellation_reason: null },
+      { id: 'cb1', service_date: '2026-04-10', service_type: 'Callback' },
+      { id: 'cb2', service_date: '2026-04-25', service_type: 'Callback' },
     ]);
     const result = await extractReServiceImpact({ knex, ...baseArgs });
     expect(result.value).toBe(4);
     expect(result.count).toBe(2);
-  });
-
-  test('excludes cancelled / no-show / administrative_reschedule', async () => {
-    const knex = mockKnex([
-      { id: 'cb1', service_date: '2026-04-10', cancellation_reason: 'no_show' },
-      { id: 'cb2', service_date: '2026-04-15', cancellation_reason: 'cancelled' },
-      { id: 'cb3', service_date: '2026-04-20', cancellation_reason: 'administrative_reschedule' },
-      { id: 'cb4', service_date: '2026-04-25', cancellation_reason: null },
-    ]);
-    const result = await extractReServiceImpact({ knex, ...baseArgs });
-    expect(result.value).toBe(3); // 1 qualifying callback
-    expect(result.count).toBe(1);
-    expect(result.rawCount).toBe(4);
   });
 });
 

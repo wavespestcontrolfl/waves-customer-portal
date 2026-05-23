@@ -30,6 +30,7 @@ const ProjectEmail = require('../services/project-email');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
 const {
+  buildProjectCloseoutPreview,
   completeProjectBackedService,
   resolveProjectPortalAttachment,
 } = require('../services/project-completion');
@@ -1002,6 +1003,13 @@ router.get('/:id', async (req, res, next) => {
         .first();
     }
 
+    const closeoutPreview = isAdmin(req)
+      ? await buildProjectCloseoutPreview(project.id).catch((err) => {
+        logger.warn(`[projects] closeout preview failed for ${project.id}: ${err.message}`);
+        return null;
+      })
+      : null;
+
     res.json({
       project: {
         ...project,
@@ -1016,6 +1024,7 @@ router.get('/:id', async (req, res, next) => {
         technicianName: upcomingAppointment.technician_name,
       } : null,
       photos,
+      closeoutPreview,
     });
   } catch (err) { next(err); }
 });
@@ -1550,8 +1559,19 @@ router.post('/:id/close', requireAdmin, async (req, res, next) => {
       portalAttached: !!result.portalAttached,
       portalAttachReason: result.portalAttachReason || null,
       reportUrl: result.reportPath || null,
+      billing: result.billing || null,
+      followup: result.followup || null,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status || err.statusCode) {
+      return res.status(err.status || err.statusCode).json({
+        error: err.message,
+        code: err.code || null,
+        details: err.details || null,
+      });
+    }
+    next(err);
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -260,13 +260,25 @@ function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppres
   return null;
 }
 
+function uniqueCategories(values = []) {
+  const seen = new Set();
+  return values
+    .map((value) => String(value || '').trim())
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+}
+
 function categoriesFor(template, extra = []) {
-  return [
+  const extraCategories = Array.isArray(extra) ? extra : [extra];
+  return uniqueCategories([
     'email_template',
     `template_${String(template.template_key || '').replace(/[^a-zA-Z0-9_-]/g, '_')}`,
     `stream_${String(template.send_stream || 'service').replace(/[^a-zA-Z0-9_-]/g, '_')}`,
-    ...extra,
-  ].filter(Boolean);
+    ...extraCategories,
+  ]);
 }
 
 function redactedPayloadSnapshot(value) {

@@ -5,6 +5,7 @@ const SERVICE_LINE_LABELS = {
   lawn: 'Lawn Care',
   mosquito: 'Mosquito',
   tree_shrub: 'Tree & Shrub',
+  palm_injection: 'Palm Injection',
   rodent: 'Rodent',
   termite: 'Termite',
 };
@@ -15,9 +16,10 @@ const SERVICE_LINE_PATTERNS = [
   ['termite', /termite|trench(?:ing)?|bora\s*care|boracare|termidor|trelona|advance|preslab|pre\s*slab|wdo/],
   ['mosquito', /mosquito/],
   ['rodent', /rodent|rat|mouse|mice/],
+  ['palm_injection', /\bpalm\s*injection\b|\bpalm\s*treatment\b|\blethal\s*bronzing\b|\bpalms?\b/],
   ['lawn', /lawn|turf|fertili[sz]|weed|topdress|top\s*dress|dethatch|plugging|overseed/],
-  ['tree_shrub', /tree|shrub|palm|ornamental/],
-  ['pest', /pest|roach|cockroach|flea|wasp|bed\s*bug|bedbug|ant|spider|silverfish|earwig|general/],
+  ['tree_shrub', /tree|shrub|ornamental/],
+  ['pest', /pest|exterminator|roach|cockroach|palmetto\s+knockdown|flea|wasp|bed\s*bug|bedbug|ant|spider|silverfish|earwig|general/],
 ];
 
 function parseEstimateData(estimateData) {
@@ -69,6 +71,11 @@ function numberOrNull(...values) {
 function measurementMetadata(source = {}) {
   const metadata = {};
   if (source.measurements) metadata.measurements = source.measurements;
+  if (source.palmCountSource !== undefined) metadata.palmCountSource = source.palmCountSource;
+  if (source.palmCountWasManualOverride !== undefined) metadata.palmCountWasManualOverride = !!source.palmCountWasManualOverride;
+  if (source.servicePalmCountDiffersFromPropertyPalmCount !== undefined) {
+    metadata.servicePalmCountDiffersFromPropertyPalmCount = !!source.servicePalmCountDiffersFromPropertyPalmCount;
+  }
   if (Array.isArray(source.measurementWarnings)) metadata.measurementWarnings = source.measurementWarnings;
   if (source.requiresMeasurement !== undefined) metadata.requiresMeasurement = !!source.requiresMeasurement;
   if (source.requiresManualReview !== undefined) metadata.requiresManualReview = !!source.requiresManualReview;
@@ -98,6 +105,11 @@ function mergeMeasurementMetadata(existing = {}, next = {}) {
     merged.requiresManualReview = !!merged.requiresManualReview || !!next.requiresManualReview;
   }
   if (next.inputSourceSummary) merged.inputSourceSummary = next.inputSourceSummary;
+  if (next.palmCountSource !== undefined) merged.palmCountSource = next.palmCountSource;
+  if (next.palmCountWasManualOverride !== undefined) merged.palmCountWasManualOverride = !!next.palmCountWasManualOverride;
+  if (next.servicePalmCountDiffersFromPropertyPalmCount !== undefined) {
+    merged.servicePalmCountDiffersFromPropertyPalmCount = !!next.servicePalmCountDiffersFromPropertyPalmCount;
+  }
   return merged;
 }
 
@@ -178,7 +190,6 @@ function addLine(linesByKey, key, amount, amountBasis = 'monthly', metadata = {}
 function recurringServicesFromData(data) {
   const recurring = data?.result?.recurring || data?.engineResult?.recurring || null;
   const services = Array.isArray(recurring?.services) ? recurring.services : [];
-  if (!services.length) return [];
 
   const rawAmounts = services.map((service) =>
     numberOrNull(
@@ -206,6 +217,23 @@ function recurringServicesFromData(data) {
     const prorated = Number.isFinite(amount) && amount > 0 ? amount * ratio : amount;
     addLine(linesByKey, keys[0] || 'unknown', prorated, 'monthly', measurementMetadata(service));
   });
+
+  const injection = data?.result?.results?.injection || data?.result?.injection || data?.engineResult?.results?.injection;
+  const palmMonthly = numberOrNull(
+    injection?.mo,
+    injection?.monthly,
+    recurring?.palmInjectionMo,
+    recurring?.palm_injection_mo,
+  );
+  if (Number.isFinite(palmMonthly) && palmMonthly > 0) {
+    addLine(
+      linesByKey,
+      'palm_injection',
+      palmMonthly,
+      'monthly',
+      measurementMetadata(injection || {})
+    );
+  }
 
   return Array.from(linesByKey.values());
 }
@@ -261,7 +289,8 @@ function selectedServiceKeysFromInputs(inputs = {}) {
   if (inputs.svcPest || inputs.svcOnetimePest || inputs.svcRoach || inputs.svcFlea || inputs.svcFleaExterior || inputs.svcWasp || inputs.svcBedbug) keys.push('pest');
   if (inputs.svcLawn || inputs.svcOnetimeLawn || inputs.svcPlugging || inputs.svcTopdress || inputs.svcDethatch) keys.push('lawn');
   if (inputs.svcMosquito || inputs.svcOnetimeMosquito) keys.push('mosquito');
-  if (inputs.svcTs || inputs.svcInjection) keys.push('tree_shrub');
+  if (inputs.svcTs) keys.push('tree_shrub');
+  if (inputs.svcInjection) keys.push('palm_injection');
   if (inputs.svcRodentBait || inputs.svcRodentTrap || inputs.svcRodentSanitation || inputs.svcExclusion) keys.push('rodent');
   if (inputs.svcTermiteBait || inputs.svcTrenching || inputs.svcBoracare || inputs.svcPreslab || inputs.svcFoam) keys.push('termite');
   return unique(keys);

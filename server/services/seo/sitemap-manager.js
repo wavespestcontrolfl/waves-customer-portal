@@ -49,6 +49,19 @@ class SitemapManager {
   }
 
   /**
+   * Return raw <loc> URLs from the cached sitemap (original casing +
+   * host preserved). Operator scripts use this for batch URL
+   * Inspection — rebuilding URLs from the normalized lookup set
+   * stripped `www.` and broke ownership checks on www-verified GSC
+   * properties.
+   */
+  async listUrls({ sitemapUrl = DEFAULT_SITEMAP_URL, limit = null, fetchFn = fetch } = {}) {
+    const entry = await this._getCachedOrFetch(sitemapUrl, fetchFn);
+    const urls = entry.originals;
+    return limit ? urls.slice(0, limit) : urls.slice();
+  }
+
+  /**
    * Force a re-fetch on next hasUrl call (e.g. immediately after a
    * deploy). Clears just the targeted sitemap entry — other cached
    * sitemaps stay warm.
@@ -80,8 +93,9 @@ class SitemapManager {
     const res = await fetchFn(sitemapUrl);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const xml = await res.text();
-    const urls = extractUrls(xml);
-    const entry = { fetchedAt: new Date(), urls };
+    const originals = extractRawUrls(xml);
+    const urls = new Set(originals.map(normalize));
+    const entry = { fetchedAt: new Date(), urls, originals };
     this._cache.set(sitemapUrl, entry);
     logger.info(`[sitemap-manager] cached ${urls.size} URLs from ${sitemapUrl}`);
     return entry;
@@ -99,13 +113,21 @@ class SitemapManager {
  * explicitly when needed. Most Astro builds produce a flat sitemap.
  */
 function extractUrls(xml) {
-  const urls = new Set();
+  return new Set(extractRawUrls(xml).map(normalize));
+}
+
+function extractRawUrls(xml) {
+  const out = [];
+  const seen = new Set();
   const re = /<loc>\s*([^<\s]+)\s*<\/loc>/g;
   let m;
   while ((m = re.exec(xml)) !== null) {
-    urls.add(normalize(m[1]));
+    const raw = m[1];
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    out.push(raw);
   }
-  return urls;
+  return out;
 }
 
 function normalize(url) {
@@ -124,5 +146,6 @@ module.exports._internals = {
   DEFAULT_SITEMAP_URL,
   CACHE_TTL_MS,
   extractUrls,
+  extractRawUrls,
   normalize,
 };

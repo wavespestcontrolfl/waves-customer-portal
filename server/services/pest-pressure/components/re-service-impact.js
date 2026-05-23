@@ -13,22 +13,16 @@
  * that classifies callbacks by severity. For Phase 1, every completed
  * pest-related callback in the window counts as a confirmed re-service.
  *
- * Excluded statuses (per spec):
- *   - cancelled
- *   - rescheduled (administrative reschedules don't represent pressure)
- *   - pending / confirmed (not yet performed)
+ * Cancelled/rescheduled visits are naturally excluded: service_records
+ * only carries completed work (filtered by status='completed' below).
+ * Cancellation lives on scheduled_services and never produces a
+ * service_records row.
  *
  * "Non-pest-related" exclusion: Waves tags callbacks via is_callback on
  * scheduled_services and service_records. The default scope is pest. A
  * caller that wants to count only a specific service_line passes it in
  * via `serviceLine`.
  */
-
-const EXCLUDED_REASONS = new Set([
-  'administrative_reschedule',
-  'no_show',
-  'cancelled',
-]);
 
 function mapCountToRating(count) {
   if (count <= 0) return 0;
@@ -55,20 +49,15 @@ async function extractReServiceImpact({ knex, customerId, serviceRecordId, revie
     query.where('service_line', serviceLine);
   }
 
-  const rows = await query.select('id', 'service_date', 'service_type', 'cancellation_reason');
+  const rows = await query.select('id', 'service_date', 'service_type');
 
-  const qualifying = rows.filter((r) => {
-    const reason = (r.cancellation_reason || '').toLowerCase();
-    return !EXCLUDED_REASONS.has(reason);
-  });
-
-  const value = mapCountToRating(qualifying.length);
+  const value = mapCountToRating(rows.length);
 
   return {
     value,
     present: true,
     source: 'callback_history',
-    count: qualifying.length,
+    count: rows.length,
     rawCount: rows.length,
   };
 }
@@ -76,5 +65,4 @@ async function extractReServiceImpact({ knex, customerId, serviceRecordId, revie
 module.exports = {
   extractReServiceImpact,
   mapCountToRating,
-  EXCLUDED_REASONS,
 };

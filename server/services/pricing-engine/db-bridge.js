@@ -49,6 +49,10 @@ function isNonNegativeNumber(value) {
   return isFiniteNumber(value) && Number(value) >= 0;
 }
 
+function isTerminalInfinity(value) {
+  return value === Infinity || value === 'Infinity';
+}
+
 function validateSortedBrackets(errors, name, rows, key, valueKey, options = {}) {
   if (!Array.isArray(rows) || rows.length === 0) {
     errors.push(`${name} must contain at least one bracket`);
@@ -75,9 +79,16 @@ function validateSortedBrackets(errors, name, rows, key, valueKey, options = {})
   }
 }
 
+function requirePalmTierSizes(errors, treatment, name) {
+  const sizes = new Set((treatment?.tiers || []).map(t => t.size));
+  for (const size of ['small', 'medium', 'large']) {
+    if (!sizes.has(size)) errors.push(`PALM.treatments.${name}.tiers must include ${size}`);
+  }
+}
+
 function validatePestPricingConfig(snapshot = constants) {
   const errors = [];
-  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE } = snapshot;
+  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE, MOSQUITO, PALM, WAVEGUARD } = snapshot;
 
   if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
   if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
@@ -119,6 +130,59 @@ function validatePestPricingConfig(snapshot = constants) {
 
   if (!isPositiveNumber(ONE_TIME.pest?.multiplier)) errors.push('ONE_TIME.pest.multiplier must be positive');
   if (!isPositiveNumber(ONE_TIME.pest?.floor)) errors.push('ONE_TIME.pest.floor must be positive');
+
+  const mosquitoCategories = Array.isArray(MOSQUITO.lotCategories) ? MOSQUITO.lotCategories : [];
+  const mosquitoPrograms = Array.isArray(MOSQUITO.programs) ? MOSQUITO.programs : ['seasonal9', 'monthly12'];
+  if (!mosquitoCategories.length) errors.push('MOSQUITO.lotCategories is required');
+  let previousMosquitoMax = -Infinity;
+  for (const [index, category] of mosquitoCategories.entries()) {
+    if (!category?.key) errors.push(`MOSQUITO.lotCategories[${index}].key is required`);
+    const maxSqFt = category?.maxSqFt;
+    const normalizedMax = maxSqFt === Infinity || maxSqFt === 'Infinity' || maxSqFt === null
+      ? Infinity
+      : Number(maxSqFt);
+    if (!(Number.isFinite(normalizedMax) || normalizedMax === Infinity)) {
+      errors.push(`MOSQUITO.lotCategories[${index}].maxSqFt must be finite or Infinity`);
+    }
+    if (normalizedMax < previousMosquitoMax) errors.push('MOSQUITO.lotCategories must be sorted ascending');
+    previousMosquitoMax = normalizedMax;
+    const prices = MOSQUITO.basePrices?.[category?.key];
+    if (!Array.isArray(prices) || prices.length < mosquitoPrograms.length) {
+      errors.push(`MOSQUITO.basePrices.${category?.key} must include all programs`);
+    } else {
+      mosquitoPrograms.forEach((program, programIndex) => {
+        if (!isPositiveNumber(prices[programIndex])) {
+          errors.push(`MOSQUITO.basePrices.${category.key}.${program} must be positive`);
+        }
+      });
+    }
+  }
+  for (const program of ['seasonal9', 'monthly12']) {
+    if (!isPositiveNumber(MOSQUITO.tierVisits?.[program])) {
+      errors.push(`MOSQUITO.tierVisits.${program} must be positive`);
+    }
+  }
+  for (const [key, addOn] of Object.entries(MOSQUITO.addOns || {})) {
+    if (!isNonNegativeNumber(addOn?.price)) errors.push(`MOSQUITO.addOns.${key}.price must be non-negative`);
+    if (!isNonNegativeNumber(addOn?.cost)) errors.push(`MOSQUITO.addOns.${key}.cost must be non-negative`);
+  }
+  for (const [key, value] of Object.entries(MOSQUITO.pressureFactors || {})) {
+    if (!isFiniteNumber(value)) errors.push(`MOSQUITO.pressureFactors.${key} must be finite`);
+  }
+  if (!isPositiveNumber(MOSQUITO.pressureCap)) errors.push('MOSQUITO.pressureCap must be positive');
+
+  const onetimeMosquito = ONE_TIME.mosquito || {};
+  for (const bucket of ['SMALL', 'STANDARD', 'LARGE', 'XL', 'ESTATE', 'ACRE_CLASS', 'OVER_ACRE']) {
+    if (!isPositiveNumber(onetimeMosquito[bucket])) errors.push(`ONE_TIME.mosquito.${bucket} must be positive`);
+  }
+  if (!isPositiveNumber(onetimeMosquito.overAcreIncrementSqFt)) {
+    errors.push('ONE_TIME.mosquito.overAcreIncrementSqFt must be positive');
+  }
+  if (!isPositiveNumber(onetimeMosquito.overAcreIncrementPrice)) {
+    errors.push('ONE_TIME.mosquito.overAcreIncrementPrice must be positive');
+  }
+  if (!isNonNegativeNumber(onetimeMosquito.stationAddOn)) errors.push('ONE_TIME.mosquito.stationAddOn must be non-negative');
+  if (!isNonNegativeNumber(onetimeMosquito.dunkAddOn)) errors.push('ONE_TIME.mosquito.dunkAddOn must be non-negative');
 
   const germanRoach = SPECIALTY.germanRoach || {};
   if (!isPositiveNumber(germanRoach.base)) errors.push('SPECIALTY.germanRoach.base must be positive');
@@ -265,6 +329,40 @@ function validatePestPricingConfig(snapshot = constants) {
       errors.push(`SPECIALTY.preSlabTermiticide.volumeDiscounts.${key} is required`);
     }
   }
+  for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
+    const tiers = preSlabTermiticide.minimums?.[context];
+    if (!Array.isArray(tiers) || tiers.length === 0) {
+      errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context} is required`);
+    } else {
+      let previousMax = 0;
+      tiers.forEach((tier, index) => {
+        const terminal = isTerminalInfinity(tier.maxSqFt);
+        const maxSqFt = terminal ? Infinity : Number(tier.maxSqFt);
+        if (!terminal && !isPositiveNumber(tier.maxSqFt)) {
+          errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context}.${index}.maxSqFt must be positive`);
+        }
+        if (terminal && index !== tiers.length - 1) {
+          errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context}.${index}.maxSqFt terminal Infinity must be last`);
+        }
+        if (!terminal && Number.isFinite(maxSqFt) && maxSqFt <= previousMax) {
+          errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context} must be sorted by ascending maxSqFt`);
+        }
+        previousMax = maxSqFt;
+        if (!isNonNegativeNumber(tier.floor)) {
+          errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context}.${index}.floor must be non-negative`);
+        }
+      });
+      if (!isTerminalInfinity(tiers[tiers.length - 1]?.maxSqFt)) {
+        errors.push(`SPECIALTY.preSlabTermiticide.minimums.${context} must end with terminal Infinity maxSqFt`);
+      }
+    }
+    if (typeof preSlabTermiticide.includeDriveCostByContext?.[context] !== 'boolean') {
+      errors.push(`SPECIALTY.preSlabTermiticide.includeDriveCostByContext.${context} must be boolean`);
+    }
+  }
+  if (!isNonNegativeNumber(preSlabTermiticide.complianceAdminCost)) {
+    errors.push('SPECIALTY.preSlabTermiticide.complianceAdminCost must be non-negative');
+  }
   for (const key of ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p']) {
     const product = products[key] || {};
     if (!isPositiveNumber(product.containerCost)) {
@@ -279,12 +377,58 @@ function validatePestPricingConfig(snapshot = constants) {
     if (!isPositiveNumber(product.marginDivisor) || Number(product.marginDivisor) >= 1) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.marginDivisor must be positive and less than 1`);
     }
-    if (!isNonNegativeNumber(product.floorBeforeVolumeDiscount)) {
+    if (product.floorBeforeVolumeDiscount !== undefined && !isNonNegativeNumber(product.floorBeforeVolumeDiscount)) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorBeforeVolumeDiscount must be non-negative`);
     }
-    if (!isNonNegativeNumber(product.floorAfterVolumeDiscount)) {
+    if (product.floorAfterVolumeDiscount !== undefined && !isNonNegativeNumber(product.floorAfterVolumeDiscount)) {
       errors.push(`SPECIALTY.preSlabTermiticide.products.${key}.floorAfterVolumeDiscount must be non-negative`);
     }
+  }
+
+  const palm = PALM || {};
+  const palmTreatments = palm.treatments || palm.treatmentTypes || {};
+  if (!isPositiveNumber(palm.minPerVisit)) errors.push('PALM.minPerVisit must be positive');
+  if (!isNonNegativeNumber(palm.flatCreditPerPalm)) errors.push('PALM.flatCreditPerPalm must be non-negative');
+  if (!WAVEGUARD?.tiers?.[palm.flatCreditMinTier]) errors.push('PALM.flatCreditMinTier must be a valid WaveGuard tier');
+  if (palm.tierQualifier !== false) errors.push('PALM.tierQualifier must remain false');
+  if (palm.excludeFromPctDiscount !== true) errors.push('PALM.excludeFromPctDiscount must remain true');
+
+  for (const key of ['nutrition', 'insecticide', 'combo', 'fungal', 'lethalBronzing', 'treeAge']) {
+    if (!palmTreatments[key]?.pricingType) errors.push(`PALM.treatments.${key}.pricingType is required`);
+  }
+  const nutrition = palmTreatments.nutrition || {};
+  if (!isPositiveNumber(nutrition.pricePerPalm)) errors.push('PALM.treatments.nutrition.pricePerPalm must be positive');
+  if (!Array.isArray(nutrition.allowedAppsPerYear) || !nutrition.allowedAppsPerYear.includes(1) || !nutrition.allowedAppsPerYear.includes(2)) {
+    errors.push('PALM.treatments.nutrition.allowedAppsPerYear must include 1 and 2');
+  }
+  requirePalmTierSizes(errors, palmTreatments.insecticide, 'insecticide');
+  requirePalmTierSizes(errors, palmTreatments.combo, 'combo');
+  const fungal = palmTreatments.fungal || {};
+  if (!isPositiveNumber(fungal.floorPerPalm)) errors.push('PALM.treatments.fungal.floorPerPalm must be positive');
+  if (!Array.isArray(fungal.products) || !fungal.products.includes('PHOSPHO-Jet') || !fungal.products.includes('Propizol')) {
+    errors.push('PALM.treatments.fungal.products must include PHOSPHO-Jet and Propizol');
+  }
+  const lethalBronzing = palmTreatments.lethalBronzing || {};
+  if (!isPositiveNumber(lethalBronzing.floorPerPalm)) errors.push('PALM.treatments.lethalBronzing.floorPerPalm must be positive');
+  if (Number(lethalBronzing.intervalMonths) !== 3) errors.push('PALM.treatments.lethalBronzing.intervalMonths must be 3');
+  if (Number(lethalBronzing.appsPerYear) !== 4) errors.push('PALM.treatments.lethalBronzing.appsPerYear must be 4');
+  if (Number(lethalBronzing.minimumProgramMonths) !== 24) errors.push('PALM.treatments.lethalBronzing.minimumProgramMonths must be 24');
+  if (!Array.isArray(lethalBronzing.eligibleStatuses) || lethalBronzing.eligibleStatuses.length === 0) {
+    errors.push('PALM.treatments.lethalBronzing.eligibleStatuses must be non-empty');
+  }
+  if (!Array.isArray(lethalBronzing.ineligibleStatuses) || lethalBronzing.ineligibleStatuses.length === 0) {
+    errors.push('PALM.treatments.lethalBronzing.ineligibleStatuses must be non-empty');
+  }
+  const treeAge = palmTreatments.treeAge || {};
+  if (!isPositiveNumber(treeAge.floorPerPalm)) errors.push('PALM.treatments.treeAge.floorPerPalm must be positive');
+  if (Number(treeAge.intervalMonths) !== 24) errors.push('PALM.treatments.treeAge.intervalMonths must be 24');
+  if (Number(treeAge.appsPerYear) !== 0.5) errors.push('PALM.treatments.treeAge.appsPerYear must be 0.5');
+  const dbhMaxes = new Set((treeAge.tiers || []).map(t => t.dbhMax));
+  for (const max of [10, 15, 20, null]) {
+    if (!dbhMaxes.has(max)) errors.push(`PALM.treatments.treeAge.tiers must include DBH max ${max}`);
+  }
+  if (!palm.internalCostBasis || typeof palm.internalCostBasis !== 'object') {
+    errors.push('PALM.internalCostBasis is required');
   }
 
   return { valid: errors.length === 0, errors };
@@ -989,7 +1133,29 @@ async function syncConstantsFromDB(dbInstance) {
       const termiticide = constants.SPECIALTY.preSlabTermiticide;
       setString(termiticide, 'defaultProductKey', ps.defaultProductKey ?? ps.default_product_key);
       setNumber(termiticide, 'equipCost', ps.ps_equip ?? ps.equipCost ?? ps.equip_cost, Number);
+      setNumber(termiticide, 'complianceAdminCost', ps.complianceAdminCost ?? ps.compliance_admin_cost, money);
       setNumber(termiticide, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
+      const minimumsOverlay = ps.minimums || ps.minimums_by_context;
+      if (minimumsOverlay && typeof minimumsOverlay === 'object' && !Array.isArray(minimumsOverlay)) {
+        for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
+          const tiers = minimumsOverlay[context];
+          if (!Array.isArray(tiers)) continue;
+          termiticide.minimums[context] = tiers
+            .map((tier) => ({
+              maxSqFt: tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity' || tier.max_sqft === Infinity || tier.max_sqft === 'Infinity'
+                ? 'Infinity'
+                : Number(tier.maxSqFt ?? tier.max_sqft),
+              floor: money(tier.floor ?? tier.minimum),
+            }))
+            .filter((tier) => (Number.isFinite(tier.maxSqFt) || tier.maxSqFt === Infinity || tier.maxSqFt === 'Infinity') && Number.isFinite(tier.floor));
+        }
+      }
+      const includeDriveOverlay = ps.includeDriveCostByContext || ps.include_drive_cost_by_context;
+      if (includeDriveOverlay && typeof includeDriveOverlay === 'object' && !Array.isArray(includeDriveOverlay)) {
+        for (const context of ['standalone', 'builderBatch', 'sameTripAddOn']) {
+          setBoolean(termiticide.includeDriveCostByContext, context, includeDriveOverlay[context]);
+        }
+      }
       const productOverlays = ps.products || ps.product_costs || {};
       const productKeys = ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'];
       const applyPreSlabProductOverlay = (key, data = {}) => {

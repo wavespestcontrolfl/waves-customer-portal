@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, Minus, Sparkles } from 'lucide-react';
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ResponsiveContainer,
+  XAxis,
+  YAxis,
+} from 'recharts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -56,6 +65,95 @@ function trendDeltaText(trend, delta) {
   if (rounded === 0) return 'no change vs. last visit';
   const sign = rounded > 0 ? '+' : '';
   return `${sign}${rounded.toFixed(1)} vs. last visit`;
+}
+
+const CADENCE_LABELS = {
+  quarterly: 'quarterly',
+  bimonthly: 'bi-monthly',
+  monthly: 'monthly',
+};
+
+function PressureHistoryChart({ history, cadence }) {
+  const points = useMemo(() => (
+    (history || [])
+      .map((row) => {
+        const t = Date.parse(`${row.serviceDate}T12:00:00`);
+        return Number.isFinite(t) ? { t, score: Number(row.score) } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.t - b.t)
+  ), [history]);
+
+  const tickValues = useMemo(() => points.map((p) => p.t), [points]);
+
+  if (points.length < 2) return null;
+
+  const cadenceWord = CADENCE_LABELS[cadence] || '';
+  const subtitle = cadenceWord
+    ? `Last ${points.length} ${cadenceWord} visit${points.length === 1 ? '' : 's'}`
+    : `Last ${points.length} visits`;
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700 }}>
+          Score history
+        </div>
+        <div style={{ fontSize: 12, color: '#6B7280' }}>{subtitle}</div>
+      </div>
+      <div style={{
+        width: '100%', height: 180, padding: 6, boxSizing: 'border-box',
+        background: '#F7F5EE', border: '1px solid #E7E2D7', borderRadius: 12,
+      }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={points} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
+            <CartesianGrid stroke="#E7E2D7" strokeDasharray="2 4" vertical={false} />
+            <XAxis
+              dataKey="t"
+              type="number"
+              scale="time"
+              domain={['dataMin', 'dataMax']}
+              ticks={tickValues}
+              tickFormatter={(t) => {
+                const date = new Date(t);
+                const month = date.toLocaleDateString('en-US', { month: 'short' });
+                return `${month} '${String(date.getFullYear()).slice(-2)}`;
+              }}
+              tick={{ fontSize: 10, fill: '#6B7280', fontFamily: "'Inter', system-ui, sans-serif" }}
+              tickLine={false}
+              axisLine={false}
+              interval="preserveStartEnd"
+            />
+            <YAxis
+              domain={[0, 5]}
+              ticks={[1, 2, 3, 4, 5]}
+              tick={{ fontSize: 10, fill: '#6B7280', fontFamily: "'Inter', system-ui, sans-serif" }}
+              tickLine={false}
+              axisLine={false}
+              width={20}
+            />
+            <Area type="monotone" dataKey="score" stroke="none" fill="#0B3A66" fillOpacity={0.08} isAnimationActive={false} />
+            <Line
+              type="monotone"
+              dataKey="score"
+              stroke="#0B3A66"
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              dot={{ r: 4, fill: '#FFFFFF', stroke: '#0B3A66', strokeWidth: 2 }}
+              activeDot={{ r: 5, fill: '#FFFFFF', stroke: '#0B3A66', strokeWidth: 2 }}
+              isAnimationActive={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      {cadenceWord ? (
+        <div style={{ marginTop: 8, fontSize: 12, color: '#6B7280', lineHeight: 1.45 }}>
+          X-axis spacing reflects this customer's service cadence — {cadenceWord}.
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function MeterSvg({ score, label }) {
@@ -179,10 +277,13 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
       marginTop: 12, marginBottom: 4, padding: 14,
       background: '#FAF8F3', border: '1px solid #E7E2D7', borderRadius: 10,
     }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: 4 }}>
+        Help us calibrate your Pest Pressure score
+      </div>
       <div style={{ fontSize: 13, fontWeight: 600, color: '#1B2C5B', marginBottom: 8 }}>
         {question}
       </div>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
         {[0, 1, 2, 3, 4, 5].map((n) => (
           <button
             key={n}
@@ -191,7 +292,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
             disabled={submitting}
             onClick={() => submit(n)}
             style={{
-              width: 40, height: 40, borderRadius: 8,
+              width: '100%', padding: '10px 0', borderRadius: 10,
               border: '1px solid #CFE7F5', background: '#F8FCFE',
               color: '#0B3A66', fontSize: 15, fontWeight: 600, lineHeight: 1,
               cursor: submitting ? 'wait' : 'pointer',
@@ -212,7 +313,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
   );
 }
 
-function SubmittedRatingNote({ rating }) {
+function SubmittedRatingNote() {
   return (
     <div style={{
       marginTop: 12, padding: 10,
@@ -220,7 +321,7 @@ function SubmittedRatingNote({ rating }) {
       display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#15803D',
     }}>
       <CheckCircle2 size={14} aria-hidden="true" />
-      <span>Thanks — you reported activity level <strong>{rating}</strong> for this period.</span>
+      <span>Thanks — your feedback helps us compare technician findings with what you are seeing at home.</span>
     </div>
   );
 }
@@ -268,7 +369,7 @@ export default function PestPressureCard({ data, token }) {
             Pest Pressure
           </div>
           <h2 style={{ margin: '4px 0 0', fontSize: 18, fontWeight: 700, color: '#1B2C5B' }}>
-            {isInsufficient ? 'Score not yet available' : `${labelName || 'Score'} — ${scoreNum.toFixed(1)} / ${MAX_SCORE}`}
+            {isInsufficient ? 'Pest Pressure is being calculated' : `${labelName || 'Score'} — ${scoreNum.toFixed(1)} / ${MAX_SCORE}`}
           </h2>
           {dateText ? (
             <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>As of {dateText}</div>
@@ -289,16 +390,18 @@ export default function PestPressureCard({ data, token }) {
         </p>
       ) : null}
 
+      <PressureHistoryChart history={effective.history} cadence={effective.cadence} />
+
       {effective.canCaptureClientRating && token ? (
         <ClientRatingPicker
           token={token}
-          question={effective.clientRatingQuestion || 'Since your last service, how much pest activity have you noticed?'}
+          question={effective.clientRatingQuestion || 'Over the past 3 months, how much pest activity have you noticed?'}
           onSubmitted={(updated) => setOverride(updated || effective)}
         />
       ) : null}
 
       {effective.submittedClientRating !== null && effective.submittedClientRating !== undefined ? (
-        <SubmittedRatingNote rating={effective.submittedClientRating} />
+        <SubmittedRatingNote />
       ) : null}
 
       {effective.showComponentBreakdown && effective.components ? (

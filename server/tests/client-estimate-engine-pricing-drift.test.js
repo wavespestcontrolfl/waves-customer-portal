@@ -2,13 +2,22 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const { priceGermanRoach, priceTopDressing } = require('../services/pricing-engine/service-pricing');
+const { priceGermanRoach, priceTopDressing, priceDethatching } = require('../services/pricing-engine/service-pricing');
 
 const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
 const legacyAdminEstimatePagePath = path.resolve(__dirname, '../../client/src/pages/admin/EstimatePage.jsx');
 const adminEstimateToolViewPath = path.resolve(__dirname, '../../client/src/pages/admin/EstimateToolViewV2.jsx');
 
 const TOP_DRESSING_LAWN_SQFT_CASES = [3000, 5000, 7500, 10000, 15000, 20000];
+const DETHATCHING_PARITY_CASES = [
+  { name: 'default/no cleanup', lawnSqFt: 4500, options: { cleanupLevel: 'none', access: 'easy', grassType: 'bermuda', thatchDepthInches: 0.75 } },
+  { name: 'light cleanup', lawnSqFt: 4500, options: { cleanupLevel: 'light', access: 'easy', grassType: 'bermuda', thatchDepthInches: 0.75 } },
+  { name: 'debris checkbox maps to light cleanup', lawnSqFt: 4500, options: { cleanupLevel: 'none', debrisRemovalIncluded: true, access: 'easy', grassType: 'bermuda', thatchDepthInches: 0.75 } },
+  { name: 'moderate cleanup', lawnSqFt: 4500, options: { cleanupLevel: 'moderate', access: 'easy', grassType: 'bermuda', thatchDepthInches: 0.75 } },
+  { name: 'heavy cleanup', lawnSqFt: 4500, options: { cleanupLevel: 'heavy', access: 'easy', grassType: 'zoysia', thatchDepthInches: 0.75 } },
+  { name: 'difficult access', lawnSqFt: 4500, options: { cleanupLevel: 'none', access: 'difficult', grassType: 'bermuda', thatchDepthInches: 0.75 } },
+  { name: 'St. Augustine manager metadata', lawnSqFt: 4500, options: { cleanupLevel: 'moderate', access: 'easy', grassType: 'st_augustine', thatchDepthInches: 0.8 } },
+];
 const TOP_DRESSING_EXPECTED = {
   eighth: {
     standalone: {
@@ -94,6 +103,30 @@ function clientTopDressingPrice(calculateEstimate, { lawnSqFt, depth, hasRecurri
   return tier.price;
 }
 
+function clientDethatchingLine(calculateEstimate, { lawnSqFt, options }) {
+  const estimate = calculateEstimate({
+    homeSqFt: 2000,
+    stories: 1,
+    lotSqFt: Math.max(lawnSqFt, 10000),
+    propertyType: 'single_family',
+    measuredTurfSf: lawnSqFt,
+    svcDethatch: true,
+    svcLawn: false,
+    grassType: options.grassType,
+    dethatchingCleanupLevel: options.cleanupLevel,
+    dethatchingAccess: options.access,
+    dethatchingDebrisRemovalIncluded: options.debrisRemovalIncluded ?? options.cleanupLevel !== 'none',
+    thatchDepthInches: options.thatchDepthInches,
+    urgency: 'NONE',
+    isAfterHours: false,
+    isRecurringCustomer: false,
+  });
+  expect(estimate.error).toBeUndefined();
+  const line = estimate.oneTime.items.find(item => item.service === 'dethatching');
+  expect(line).toBeDefined();
+  return line;
+}
+
 describe('deprecated client estimator pricing drift guards', () => {
   let source;
   let legacyAdminSource;
@@ -121,6 +154,22 @@ describe('deprecated client estimator pricing drift guards', () => {
   test('keeps recurring roach premium retired in the client display engine', () => {
     expect(source).toContain('const roachAddOn = 0;');
     expect(source).not.toMatch(/basePrice\s*\*\s*0\.15|pp\s*\*\s*0\.15|117\s*\*\s*0\.15/);
+  });
+
+  test('client fallback rejects palm injection without a positive treated-palm count', () => {
+    const estimate = calculateEstimate({
+      homeSqFt: 2200,
+      stories: 1,
+      lotSqFt: 9000,
+      propertyType: 'single_family',
+      svcInjection: true,
+      urgency: 'NONE',
+      isAfterHours: false,
+    });
+
+    expect(estimate).toEqual({
+      error: 'Palm count is required for palm injection pricing.',
+    });
   });
 
   test('client fallback quotes German Roach Cleanout as a no-discount total', () => {
@@ -225,6 +274,25 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(estimate.totals.year2).toBe(0);
   });
 
+  test('client fallback allows Pre-Slab-only estimates without home or lot size', () => {
+    const estimate = calculateEstimate({
+      svcPreslab: true,
+      preslabSqft: 1800,
+      preslabWarranty: 'NONE',
+      preslabLabelConfirmed: true,
+      urgency: 'NONE',
+      isAfterHours: false,
+    });
+
+    expect(estimate.error).toBeUndefined();
+    const preSlab = estimate.oneTime.items.find((item) => item.name === 'Pre-Slab');
+    expect(preSlab).toEqual(expect.objectContaining({
+      warrantyTier: 'NONE',
+      warrAdd: 0,
+    }));
+    expect(preSlab.price).toBe(preSlab.basePrice);
+  });
+
   test('keeps one-time pest floor as a final customer-facing floor', () => {
     expect(source).toContain('const fp = Math.max(199, otP(Math.max(199, Math.round(bpp * 1.75))));');
   });
@@ -278,5 +346,34 @@ describe('deprecated client estimator pricing drift guards', () => {
       '1/8" Depth — St. Augustine standard',
       '1/4" Depth — Bermuda / leveling — 2x material',
     ]);
+  });
+
+  test('matches server Dethatching pricing and review metadata for modifier scenarios', () => {
+    for (const testCase of DETHATCHING_PARITY_CASES) {
+      const server = priceDethatching(testCase.lawnSqFt, testCase.options);
+      const clientLine = clientDethatchingLine(calculateEstimate, testCase);
+
+      expect(clientLine.price).toBe(server.price);
+      expect(clientLine.cleanupLevel).toBe(server.cleanupLevel);
+      expect(clientLine.access).toBe(server.access);
+      expect(clientLine.timeMin).toBe(server.timeMin);
+      expect(clientLine.manualReviewReasons || []).toEqual(server.manualReviewReasons || []);
+      expect(!!clientLine.quoteRequired).toBe(!!server.quoteRequired);
+      expect(!!clientLine.requiresCustomQuote).toBe(!!server.requiresCustomQuote);
+      expect(!!clientLine.requiresManagerApproval).toBe(!!server.requiresManagerApproval);
+      if (server.requiresManagerApproval) {
+        expect(clientLine.managerApprovalReason).toBe('st_augustine_dethatching');
+      }
+    }
+  });
+
+  test('admin estimate pages expose dethatching hardening controls', () => {
+    expect(legacyAdminSource).toContain('dethatchingCleanupLevel');
+    expect(legacyAdminSource).toContain('DETHATCHING_ESTIMATE_RESET_FIELDS');
+    expect(legacyAdminSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
+    expect(adminToolViewSource).toContain('dethatchingCleanupLevel');
+    expect(adminToolViewSource).toContain('DETHATCHING_ESTIMATE_RESET_FIELDS');
+    expect(adminToolViewSource).toContain('Base price does not include bagging or debris hauling.');
+    expect(adminToolViewSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
   });
 });

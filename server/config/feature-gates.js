@@ -78,6 +78,24 @@ const gates = {
   // mode until SHADOW_MODE_<ACTION_TYPE>=false is set (per v3.1 plan
   // rollout — per-action-type trust-build before live publish).
   autonomousContentEngine: isProd ? process.env.GATE_AUTONOMOUS_CONTENT === 'true' : true,
+
+  // Data Hygiene Agent — split into sub-gates so each phase ships
+  // independently. All default OFF in prod, ON in dev — except auto-apply,
+  // which is opt-in in EVERY environment, and sensitive reveal, which is off
+  // by default outside explicit prod enablement. Dev/staging running against
+  // prod snapshots otherwise silently mutates or exposes shared data.
+  //   Scanner cron is double-gated: cronJobs AND dataHygieneScanner.
+  //   When dataHygieneAutoApply is OFF, would-be auto-tier proposals enqueue
+  //   as pending tier='high' for manual review instead.
+  dataHygieneScanner:          isProd ? process.env.GATE_DATA_HYGIENE_SCANNER    === 'true' : true,
+  dataHygieneReviewUi:         isProd ? process.env.GATE_DATA_HYGIENE_UI         === 'true' : true,
+  dataHygieneBootstrap:        isProd ? process.env.GATE_DATA_HYGIENE_BOOTSTRAP  === 'true' : true,
+  dataHygieneDedupeCandidates: isProd ? process.env.GATE_DATA_HYGIENE_DEDUPE     === 'true' : true,
+  // One extraction gate covers both Phase 4 call and SMS extractors.
+  dataHygieneExtraction:       isProd ? process.env.GATE_DATA_HYGIENE_EXTRACTION === 'true' : true,
+  dataHygieneAutoApply:                 process.env.GATE_DATA_HYGIENE_AUTO_APPLY === 'true',
+  // Vault decrypt/reveal is explicit opt-in in every shared environment.
+  dataHygieneSensitiveReveal: isProd ? process.env.GATE_DATA_HYGIENE_REVEAL === 'true' : false,
 };
 
 function isEnabled(gate) {

@@ -10,6 +10,7 @@ const { recordAuditEvent } = require('../services/audit-log');
 const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const { listCustomerPrepaidPlans } = require('../services/prepaid-series');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1400,7 +1401,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -1474,7 +1475,7 @@ router.get('/:id', async (req, res, next) => {
         .catch(e => { logger.warn(`[customers:${c.id}] service_photos: ${e.message}`); return []; }),
       db('notification_prefs').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] notification_prefs: ${e.message}`); return null; }),
       db('referral_promoters').where({ customer_id: c.id }).first().catch(e => { logger.warn(`[customers:${c.id}] referral_promoters: ${e.message}`); return null; }),
-      db('property_application_history').where({ customer_id: c.id }).orderBy('applied_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] property_application_history: ${e.message}`); return []; }),
+      db('property_application_history').where({ customer_id: c.id }).orderBy('application_date', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] property_application_history: ${e.message}`); return []; }),
       db('customer_discounts').where({ 'customer_discounts.customer_id': c.id }).leftJoin('discounts', 'customer_discounts.discount_id', 'discounts.id').select('customer_discounts.*', 'discounts.name as discount_name', 'discounts.discount_type', 'discounts.amount as discount_value').catch(e => { logger.warn(`[customers:${c.id}] customer_discounts: ${e.message}`); return []; }),
       db('property_nutrient_ledger')
         .where({ customer_id: c.id, application_year: currentYear })
@@ -1493,6 +1494,7 @@ router.get('/:id', async (req, res, next) => {
         .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger_summary: ${e.message}`); return null; }),
       accountPropertySummary(c.account_id, c.id).catch(e => { logger.warn(`[customers:${c.id}] account_properties: ${e.message}`); return []; }),
       annualPrepayTermsPromise,
+      listCustomerPrepaidPlans(db, c.id).catch(e => { logger.warn(`[customers:${c.id}] prepaid_plans: ${e.message}`); return []; }),
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -1650,6 +1652,11 @@ router.get('/:id', async (req, res, next) => {
         renewalNotes: term.renewal_notes,
         createdAt: term.created_at,
         updatedAt: term.updated_at,
+      })),
+      prepaidPlans: (prepaidPlans || []).map((plan) => ({
+        ...plan,
+        paidAt: plan.paidAt instanceof Date ? plan.paidAt.toISOString() : plan.paidAt,
+        nextVisitDate: dateOnlyForApi(plan.nextVisitDate),
       })),
       photos: signedPhotos,
       notificationPrefs: notificationPrefs || null,

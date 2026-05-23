@@ -650,18 +650,8 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // =========================================================================
-  // DAILY 9AM — Auto-renew expired estimates once (+7 days)
-  // =========================================================================
-  cron.schedule('0 9 * * *', async () => {
-    try {
-      const EstimateAutoRenew = require('./estimate-auto-renew');
-      const result = await EstimateAutoRenew.checkAll();
-      if (result.renewed > 0) logger.info(`Estimate auto-renew: ${result.renewed} renewed`);
-    } catch (err) {
-      logger.error(`Estimate auto-renew job failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
+  // Estimate extensions are manual-only. Do not auto-renew expired estimates
+  // from cron; staff can extend deliberately through the admin estimate route.
 
   // =========================================================================
   // EVERY 15 MIN — Release expired slot reservations

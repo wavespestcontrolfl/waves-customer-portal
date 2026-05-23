@@ -7,6 +7,10 @@ const {
   TREE_SHRUB, BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
+const {
+  resolveMosquitoTreatableArea,
+  resolveMosquitoLotCategory,
+} = require('./property-calculator');
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -596,6 +600,88 @@ function normalizePreSlabVolumeDiscount(value) {
   };
 }
 
+function normalizePreSlabWarranty(value) {
+  const requestedWarrantyTier = value;
+  const raw = normalizeToken(value || 'basic');
+  const aliases = {
+    none: 'none',
+    no: 'none',
+    no_warranty: 'none',
+    basic: 'basic',
+    basic_1yr: 'basic',
+    basic_1_year: 'basic',
+    one_year: 'basic',
+    one_year_included: 'basic',
+    included: 'basic',
+    extended: 'extended',
+    extended_5yr: 'extended',
+    extended_5_year: 'extended',
+    five_year: 'extended',
+    five_year_extended: 'extended',
+    '5yr': 'extended',
+    '5_year': 'extended',
+  };
+  const warrantyTier = aliases[raw] || 'basic';
+  const labels = {
+    none: 'No warranty',
+    basic: 'Basic 1-yr warranty',
+    extended: 'Extended 5-yr warranty',
+  };
+  return {
+    requestedWarrantyTier,
+    warrantyTier,
+    warrantyLabel: labels[warrantyTier],
+    warnings: raw && !aliases[raw] ? ['invalid_pre_slab_warranty_defaulted_to_basic'] : [],
+  };
+}
+
+function normalizePreSlabJobContext(value, volumeDiscount = 'none') {
+  const requestedJobContext = value;
+  const raw = normalizeToken(value || '');
+  const aliases = {
+    standalone: 'standalone',
+    one_off: 'standalone',
+    oneoff: 'standalone',
+    single_job: 'standalone',
+    builder: 'builderBatch',
+    builderbatch: 'builderBatch',
+    builder_batch: 'builderBatch',
+    batch: 'builderBatch',
+    same_site: 'builderBatch',
+    same_trip: 'sameTripAddOn',
+    sametripaddon: 'sameTripAddOn',
+    same_trip_add_on: 'sameTripAddOn',
+    same_trip_addon: 'sameTripAddOn',
+    addon: 'sameTripAddOn',
+    add_on: 'sameTripAddOn',
+  };
+  const jobContext = aliases[raw] || (
+    volumeDiscount === '5plus' || volumeDiscount === '10plus' ? 'builderBatch' : 'standalone'
+  );
+  return {
+    requestedJobContext,
+    jobContext,
+    warnings: raw && !aliases[raw] ? ['invalid_pre_slab_job_context_defaulted'] : [],
+  };
+}
+
+function lookupPreSlabMinimum(slabSqFt, jobContext) {
+  const cfg = SPECIALTY.preSlabTermiticide || {};
+  const minimums = cfg.minimums || {};
+  const tiers = minimums[jobContext] || minimums.standalone || [{ maxSqFt: Infinity, floor: 600 }];
+  const tier = tiers.find(row => Number(slabSqFt) <= Number(row.maxSqFt)) || tiers[tiers.length - 1];
+  const labels = {
+    standalone: 'Standalone one-off job',
+    builderBatch: 'Builder batch / same site',
+    sameTripAddOn: 'Same-trip add-on',
+  };
+  return {
+    floor: Number(tier.floor) || 0,
+    maxSqFt: tier.maxSqFt,
+    basis: `${labels[jobContext] || labels.standalone}, ${Number(tier.maxSqFt) === Infinity ? 'over 1,250' : `up to ${tier.maxSqFt}`} sqft`,
+  };
+}
+
 function normalizePreSlabTermiticideProduct(value, options = {}) {
   const cfg = SPECIALTY.preSlabTermiticide || {};
   const requestedProductKey = value;
@@ -1106,17 +1192,102 @@ function applyOneTimeFloor(price, floor) {
   return Math.max(floor, price);
 }
 
+function normalizeMosquitoProgramSelection(value) {
+  const requestedTier = value;
+  if (value == null || String(value).trim() === '') {
+    return { requestedTier, normalizedRequestedTier: null, warnings: [] };
+  }
+  const raw = String(value).trim().toLowerCase();
+  const aliases = {
+    seasonal9: 'seasonal9',
+    monthly12: 'monthly12',
+    seasonal: 'seasonal9',
+    monthly: 'monthly12',
+    residual_seasonal: 'seasonal9',
+    scion_seasonal: 'seasonal9',
+    upgraded_seasonal: 'seasonal9',
+    upgrade_seasonal: 'seasonal9',
+    residual_monthly: 'monthly12',
+    scion_monthly: 'monthly12',
+    scion: 'monthly12',
+    upgraded: 'monthly12',
+    upgrade: 'monthly12',
+    bronze: 'seasonal9',
+    silver: 'monthly12',
+    gold: 'monthly12',
+    platinum: 'monthly12',
+  };
+  return {
+    requestedTier,
+    normalizedRequestedTier: aliases[raw] || raw,
+    warnings: [],
+  };
+}
+
 function normalizeMosquitoProgramKey(value) {
-  if (value == null || value === '') return null;
-  const raw = String(value).toLowerCase();
-  if (raw === 'seasonal9' || raw === 'monthly12') return raw;
-  if (raw === 'seasonal') return 'seasonal9';
-  if (raw === 'monthly') return 'monthly12';
-  if (raw === 'residual_seasonal' || raw === 'scion_seasonal' || raw === 'upgraded_seasonal' || raw === 'upgrade_seasonal') return 'seasonal9';
-  if (raw === 'residual_monthly' || raw === 'scion_monthly' || raw === 'scion' || raw === 'upgraded' || raw === 'upgrade') return 'monthly12';
-  if (raw === 'bronze') return 'seasonal9';
-  if (raw === 'silver' || raw === 'gold' || raw === 'platinum') return 'monthly12';
-  return raw;
+  return normalizeMosquitoProgramSelection(value).normalizedRequestedTier;
+}
+
+function normalizeMosquitoWaterMultiplier(value) {
+  if (value == null || value === '') {
+    return {
+      waterMultiplier: 1.0,
+      waterMultiplierSource: 'default',
+      warnings: [],
+    };
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return {
+      waterMultiplier: 1.0,
+      waterMultiplierSource: 'defaulted_invalid',
+      warnings: ['invalid_mosquito_water_multiplier_defaulted'],
+    };
+  }
+  if (parsed < 1.0) {
+    return {
+      waterMultiplier: 1.0,
+      waterMultiplierSource: 'defaulted_below_one',
+      warnings: ['mosquito_water_multiplier_below_one_defaulted'],
+    };
+  }
+  const upperBound = Number.isFinite(Number(MOSQUITO.pressureCap)) && Number(MOSQUITO.pressureCap) > 1
+    ? Number(MOSQUITO.pressureCap)
+    : 2.0;
+  if (parsed > upperBound) {
+    return {
+      waterMultiplier: upperBound,
+      waterMultiplierSource: 'clamped',
+      warnings: ['mosquito_water_multiplier_clamped'],
+    };
+  }
+  return {
+    waterMultiplier: parsed,
+    waterMultiplierSource: 'provided',
+    warnings: [],
+  };
+}
+
+function normalizeMosquitoAddOnCount(value, key) {
+  if (value == null || value === '') return { count: 0, warnings: [] };
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return {
+      count: 0,
+      warnings: [`invalid_${key}_count_defaulted`],
+    };
+  }
+  if (parsed < 0) {
+    return {
+      count: 0,
+      warnings: [`negative_${key}_count_clamped`],
+    };
+  }
+  const rounded = Math.round(parsed);
+  return {
+    count: rounded,
+    warnings: Number.isInteger(parsed) ? [] : [`fractional_${key}_count_rounded`],
+  };
 }
 
 // ============================================================
@@ -2038,6 +2209,150 @@ function assertPositiveInteger(value, name) {
   return value;
 }
 
+function hasPalmCountCandidate(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function parsePositivePalmInteger(value) {
+  if (!hasPalmCountCandidate(value)) return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function resolvePalmCount(property = {}, options = {}) {
+  const warnings = [];
+  const manualReviewReasons = [];
+  const invalidCandidates = [];
+  const addInvalid = (source, value) => {
+    invalidCandidates.push({ source, value });
+    warnings.push('invalid_palm_count');
+    manualReviewReasons.push('invalid_palm_count');
+  };
+  const readCandidate = (source, value) => {
+    if (!hasPalmCountCandidate(value)) return null;
+    const palmCount = parsePositivePalmInteger(value);
+    if (palmCount) return { palmCount, source };
+    addInvalid(source, value);
+    return null;
+  };
+
+  const serviceDirectPresent = hasPalmCountCandidate(options.palmCount);
+  const serviceMeasurementPresent = hasPalmCountCandidate(options.measurements?.palmCount);
+  const propertyDirect = readCandidate('property_palm_count', property.palmCount);
+  const propertyInventory = readCandidate('property_palm_inventory', property.palmInventory?.palmCount);
+
+  // palmCount is required for every palm injection price. The service-level
+  // value means palms treated for this line; property-level count is only a
+  // default/prefill because not every palm on the property is necessarily treated.
+  if (serviceDirectPresent) {
+    const serviceDirect = readCandidate('service_manual_override', options.palmCount);
+    if (serviceDirect) {
+      warnings.push('palm_count_manual_override_used');
+      const propertyPalmCount = propertyDirect?.palmCount ?? propertyInventory?.palmCount;
+      const differs = parsePositivePalmInteger(propertyPalmCount) && serviceDirect.palmCount !== propertyPalmCount;
+      if (differs) warnings.push('service_palm_count_differs_from_property_palm_count');
+      return {
+        ...serviceDirect,
+        wasManualOverride: true,
+        wasDefaulted: false,
+        requiresMeasurement: false,
+        requiresManualReview: false,
+        manualReviewReasons: [...new Set(manualReviewReasons)],
+        warnings: [...new Set(warnings)],
+        servicePalmCountDiffersFromPropertyPalmCount: differs,
+        propertyPalmCount: propertyPalmCount || undefined,
+        invalidCandidates,
+      };
+    }
+    return {
+      palmCount: undefined,
+      source: 'missing',
+      wasManualOverride: false,
+      wasDefaulted: false,
+      requiresMeasurement: true,
+      requiresManualReview: true,
+      manualReviewReasons: [...new Set(manualReviewReasons)],
+      warnings: [...new Set(warnings)],
+      invalidCandidates,
+    };
+  }
+
+  if (serviceMeasurementPresent) {
+    const serviceMeasurement = readCandidate('service_manual_override', options.measurements.palmCount);
+    if (serviceMeasurement) {
+      warnings.push('palm_count_manual_override_used');
+      const propertyPalmCount = propertyDirect?.palmCount ?? propertyInventory?.palmCount;
+      const differs = parsePositivePalmInteger(propertyPalmCount) && serviceMeasurement.palmCount !== propertyPalmCount;
+      if (differs) warnings.push('service_palm_count_differs_from_property_palm_count');
+      return {
+        ...serviceMeasurement,
+        wasManualOverride: true,
+        wasDefaulted: false,
+        requiresMeasurement: false,
+        requiresManualReview: false,
+        manualReviewReasons: [...new Set(manualReviewReasons)],
+        warnings: [...new Set(warnings)],
+        servicePalmCountDiffersFromPropertyPalmCount: differs,
+        propertyPalmCount: propertyPalmCount || undefined,
+        invalidCandidates,
+      };
+    }
+    return {
+      palmCount: undefined,
+      source: 'missing',
+      wasManualOverride: false,
+      wasDefaulted: false,
+      requiresMeasurement: true,
+      requiresManualReview: true,
+      manualReviewReasons: [...new Set(manualReviewReasons)],
+      warnings: [...new Set(warnings)],
+      invalidCandidates,
+    };
+  }
+
+  if (propertyDirect) {
+    return {
+      ...propertyDirect,
+      wasManualOverride: false,
+      wasDefaulted: true,
+      requiresMeasurement: false,
+      requiresManualReview: false,
+      manualReviewReasons: [...new Set(manualReviewReasons)],
+      warnings: [...new Set(warnings)],
+      servicePalmCountDiffersFromPropertyPalmCount: false,
+      invalidCandidates,
+    };
+  }
+
+  if (propertyInventory) {
+    return {
+      ...propertyInventory,
+      wasManualOverride: false,
+      wasDefaulted: true,
+      requiresMeasurement: false,
+      requiresManualReview: false,
+      manualReviewReasons: [...new Set(manualReviewReasons)],
+      warnings: [...new Set(warnings)],
+      servicePalmCountDiffersFromPropertyPalmCount: false,
+      invalidCandidates,
+    };
+  }
+
+  warnings.push('missing_palm_count');
+  manualReviewReasons.push('missing_palm_count');
+  return {
+    palmCount: undefined,
+    source: 'missing',
+    wasManualOverride: false,
+    wasDefaulted: false,
+    requiresMeasurement: true,
+    requiresManualReview: true,
+    manualReviewReasons: [...new Set(manualReviewReasons)],
+    warnings: [...new Set(warnings)],
+    invalidCandidates,
+  };
+}
+
 function assertPositiveNumber(value, name) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     throw buildPricingError(`${name} must be a positive number`, { field: name, value });
@@ -2314,9 +2629,15 @@ function priceMosquito(property, options = {}) {
     dunkCount = 0,
   } = options;
 
-  const lotCategory = property.mosquitoLotCategory || property.lotCategory;
+  property = property || {};
+  const areaResolution = resolveMosquitoTreatableArea(property);
+  const categoryResolution = resolveMosquitoLotCategory(property, areaResolution);
+  const lotCategory = categoryResolution.lotCategory;
   const basePrices = MOSQUITO.basePrices[lotCategory];
   if (!basePrices) throw new Error(`Unknown lot category: ${lotCategory}`);
+  const waterMeta = normalizeMosquitoWaterMultiplier((modifiers || {}).mosquitoWaterMult);
+  const waterMultiplier = waterMeta.waterMultiplier;
+  const hasGraduatedWaterMultiplier = waterMultiplier > 1.0;
 
   // Pressure multiplier
   let pressure = 1.00;
@@ -2326,31 +2647,39 @@ function priceMosquito(property, options = {}) {
   if (f.complexity === 'complex') pressure += MOSQUITO.pressureFactors.complexity_complex;
   else if (f.complexity === 'moderate') pressure += MOSQUITO.pressureFactors.complexity_moderate;
   if (f.pool || f.poolCage) pressure += MOSQUITO.pressureFactors.pool;
-  if (f.nearWater) pressure += MOSQUITO.pressureFactors.nearWater;
+  if (f.nearWater && !hasGraduatedWaterMultiplier) pressure += MOSQUITO.pressureFactors.nearWater;
   if (f.irrigation) pressure += MOSQUITO.pressureFactors.irrigation;
   if (lotCategory === 'ACRE') pressure += MOSQUITO.pressureFactors.lot_acre;
   else if (lotCategory === 'HALF') pressure += MOSQUITO.pressureFactors.lot_half;
-  // v2 graduated water proximity replaces binary nearWater when provided
-  const waterMultiplier = Number(modifiers.mosquitoWaterMult || 1);
   if (waterMultiplier && waterMultiplier !== 1.0) {
     pressure *= waterMultiplier;
   }
+  const pressureBeforeCap = pressure;
   pressure = Math.min(pressure, MOSQUITO.pressureCap);
 
-  const recommendedProgram = (
-    pressure >= 1.30 ||
-    waterMultiplier >= 1.20 ||
-    f.trees === 'heavy'
-  ) ? 'monthly12' : 'seasonal9';
-  const selectedProgram = normalizeMosquitoProgramKey(tier) || recommendedProgram;
+  const recommendationReasons = [];
+  if (pressure >= 1.30) recommendationReasons.push('pressure_at_or_above_1_30');
+  if (waterMultiplier >= 1.20) recommendationReasons.push('water_multiplier_at_or_above_1_20');
+  if (f.trees === 'heavy') recommendationReasons.push('heavy_trees');
+  const recommendedProgram = recommendationReasons.length > 0 ? 'monthly12' : 'seasonal9';
+  if (recommendedProgram === 'seasonal9') recommendationReasons.push('seasonal_default_low_pressure');
+
+  const programMeta = normalizeMosquitoProgramSelection(tier);
+  const normalizedRequestedTier = programMeta.normalizedRequestedTier;
+  const selectedProgram = normalizedRequestedTier || recommendedProgram;
   const tierIndex = MOSQUITO.programs.indexOf(selectedProgram);
   if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
+  const tierWasForced = !!normalizedRequestedTier && selectedProgram !== recommendedProgram;
+  if (tierWasForced) recommendationReasons.push('forced_by_request');
   const basePrice = basePrices[tierIndex];
 
   const perVisit = Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
-  const stationQty = Math.max(0, Math.round(Number(stationCount) || 0));
-  const dunkQty = Math.max(0, Math.round(Number(dunkCount) || 0));
+  const stationMeta = normalizeMosquitoAddOnCount(stationCount, 'station');
+  const dunkMeta = normalizeMosquitoAddOnCount(dunkCount, 'dunk');
+  const stationQty = stationMeta.count;
+  const dunkQty = dunkMeta.count;
+  // Recurring mosquito add-ons are annual add-ons, not per-visit add-ons.
   const stationAddOn = stationQty * MOSQUITO.addOns.in2CareStation.price;
   const dunkAddOn = dunkQty * MOSQUITO.addOns.dunkTablet.price;
   const annualAddOns = stationAddOn + dunkAddOn;
@@ -2358,7 +2687,7 @@ function priceMosquito(property, options = {}) {
   const monthly = Math.round(annual / 12 * 100) / 100;
 
   // Cost estimate
-  const treatableThousands = Math.max(1, (property.mosquitoTreatableSqFt || 0) / 1000);
+  const treatableThousands = Math.max(1, areaResolution.mosquitoTreatableSqFt / 1000);
   const usage = MOSQUITO.productUsage;
   const costs = MOSQUITO.productCosts;
   const usesPrecisionAdulticide = false;
@@ -2371,6 +2700,7 @@ function priceMosquito(property, options = {}) {
   const laborPerVisitCost = laborCost(30);
   const annualCost = (materialPerVisit + laborPerVisitCost) * visits + addOnCost + GLOBAL.ADMIN_ANNUAL;
   const margin = annual > 0 ? (annual - annualCost) / annual : 0;
+  const marginFloorOk = margin >= GLOBAL.MARGIN_FLOOR;
 
   const tiers = MOSQUITO.programs.map((name, idx) => {
     const bp = basePrices[idx];
@@ -2384,19 +2714,56 @@ function priceMosquito(property, options = {}) {
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
       name: MOSQUITO.programLabels[name] || name.charAt(0).toUpperCase() + name.slice(1),
-      recommended: name === selectedProgram,
       selected: name === selectedProgram,
+      recommended: name === recommendedProgram,
       pressureRecommended: name === recommendedProgram,
+      isSelected: name === selectedProgram,
+      isRecommended: name === recommendedProgram,
     };
   });
+
+  const manualReviewReasons = uniqueList([
+    ...areaResolution.manualReviewReasons,
+    ...categoryResolution.manualReviewReasons,
+    pressureBeforeCap > MOSQUITO.pressureCap ? 'pressure_cap_reached' : null,
+    marginFloorOk ? null : 'margin_below_floor',
+    stationQty >= 6 ? 'high_station_count' : null,
+    dunkQty >= 10 ? 'high_dunk_count' : null,
+    lotCategory === 'ACRE' ? 'acre_or_larger_property' : null,
+  ]);
+  const warnings = uniqueList([
+    ...areaResolution.warnings,
+    ...categoryResolution.warnings,
+    ...waterMeta.warnings,
+    ...programMeta.warnings,
+    ...stationMeta.warnings,
+    ...dunkMeta.warnings,
+  ]);
 
   return {
     service: 'mosquito',
     tier: selectedProgram,
+    selectedProgram,
+    selectedTier: selectedProgram,
+    recommendedProgram,
+    recommendedTier: recommendedProgram,
+    recommendationReasons: uniqueList(recommendationReasons),
+    requestedTier: tier,
+    normalizedRequestedTier,
+    tierWasForced,
     lotCategory,
-    grossLotCategory: property.lotCategory,
-    mosquitoTreatableSqFt: property.mosquitoTreatableSqFt || 0,
+    grossLotCategory: categoryResolution.grossLotCategory || property.lotCategory,
+    lotCategorySource: categoryResolution.lotCategorySource,
+    lotCategoryGuardrailApplied: categoryResolution.lotCategoryGuardrailApplied,
+    originalLotCategory: categoryResolution.originalLotCategory,
+    adjustedLotCategory: categoryResolution.adjustedLotCategory,
+    mosquitoTreatableSqFt: areaResolution.mosquitoTreatableSqFt,
+    mosquitoTreatableSqFtSource: areaResolution.source,
+    mosquitoTreatableSqFtConfidence: areaResolution.confidence,
+    fallbackTreatableSqFt: areaResolution.fallbackTreatableSqFt,
+    missingAreaData: areaResolution.missingAreaData,
     basePrice, pressureMultiplier: pressure,
+    pressureBeforeCap,
     perVisit, visits, annual, monthly,
     tiers,
     addOns: {
@@ -2415,10 +2782,12 @@ function priceMosquito(property, options = {}) {
       annualCost: Math.round(annualCost),
     },
     margin: Math.round(margin * 1000) / 1000,
-    marginFloorOk: margin >= GLOBAL.MARGIN_FLOOR,
-    recommendedTier: selectedProgram,
-    recommendedProgram,
+    marginFloorOk,
+    requiresManualReview: manualReviewReasons.length > 0,
+    manualReviewReasons,
+    warnings,
     waterMultiplier,
+    waterMultiplierSource: waterMeta.waterMultiplierSource,
   };
 }
 
@@ -3046,17 +3415,14 @@ function getOneTimeMosquitoBase(mosquitoTreatableSqFt) {
 }
 
 function priceOneTimeMosquito(property, options = {}) {
-  const fallbackTreatableSqFt = Math.max(
-    0,
-    (Number(property.lotSqFt) || 0) - (Number(property.footprint) || 0) - (Number(property.hardscape) || 0)
-  );
-  const mosquitoTreatableSqFt = Math.max(
-    0,
-    Math.round(Number(property.mosquitoTreatableSqFt ?? fallbackTreatableSqFt) || 0)
-  );
+  property = property || {};
+  const areaResolution = resolveMosquitoTreatableArea(property);
+  const mosquitoTreatableSqFt = Math.max(0, Math.round(areaResolution.mosquitoTreatableSqFt || 0));
   const base = getOneTimeMosquitoBase(mosquitoTreatableSqFt);
-  const stationCount = Math.max(0, Math.round(Number(options.stationCount) || 0));
-  const dunkCount = Math.max(0, Math.round(Number(options.dunkCount) || 0));
+  const stationMeta = normalizeMosquitoAddOnCount(options.stationCount, 'station');
+  const dunkMeta = normalizeMosquitoAddOnCount(options.dunkCount, 'dunk');
+  const stationCount = stationMeta.count;
+  const dunkCount = dunkMeta.count;
   const stationAddOnTotal = stationCount * ONE_TIME.mosquito.stationAddOn;
   const dunkAddOnTotal = dunkCount * ONE_TIME.mosquito.dunkAddOn;
   const subtotalBeforeRecurringCustomerDiscount = base.basePrice + stationAddOnTotal + dunkAddOnTotal;
@@ -3067,6 +3433,17 @@ function priceOneTimeMosquito(property, options = {}) {
   const detailParts = [];
   if (stationCount > 0) detailParts.push(`${stationCount} mosquito station${stationCount === 1 ? '' : 's'} (+$${Math.round(stationAddOnTotal)})`);
   if (dunkCount > 0) detailParts.push(`${dunkCount} Bti dunk tablet${dunkCount === 1 ? '' : 's'} (+$${Math.round(dunkAddOnTotal)})`);
+  const manualReviewReasons = uniqueList([
+    ...areaResolution.manualReviewReasons,
+    base.requiresManualReview ? 'over_acre_mosquito_treatment' : null,
+    stationCount >= 6 ? 'high_station_count' : null,
+    dunkCount >= 10 ? 'high_dunk_count' : null,
+  ]);
+  const warnings = uniqueList([
+    ...areaResolution.warnings,
+    ...stationMeta.warnings,
+    ...dunkMeta.warnings,
+  ]);
   return {
     service: 'one_time_mosquito',
     key: 'oneTimeMosquito',
@@ -3074,6 +3451,10 @@ function priceOneTimeMosquito(property, options = {}) {
     recurring: false,
     price,
     mosquitoTreatableSqFt,
+    mosquitoTreatableSqFtSource: areaResolution.source,
+    mosquitoTreatableSqFtConfidence: areaResolution.confidence,
+    fallbackTreatableSqFt: areaResolution.fallbackTreatableSqFt,
+    missingAreaData: areaResolution.missingAreaData,
     areaBucket: base.areaBucket,
     lotCategory: base.areaBucket,
     basePrice: base.basePrice,
@@ -3084,7 +3465,9 @@ function priceOneTimeMosquito(property, options = {}) {
     subtotalBeforeRecurringCustomerDiscount,
     recurringCustomerDiscountRate: discounted.rate,
     recurringCustomerDiscountAmount: discounted.amount,
-    requiresManualReview: base.requiresManualReview,
+    requiresManualReview: manualReviewReasons.length > 0,
+    manualReviewReasons,
+    warnings,
     overageSqFt: base.overageSqFt || 0,
     incrementCount: base.incrementCount || 0,
     detail: detailParts.join(' + '),
@@ -3532,27 +3915,31 @@ function pricePreSlabTermiticide(input, options = {}) {
   const product = cfg.products[productResolution.productKey] || cfg.products[cfg.defaultProductKey];
   const measurement = resolvePreSlabSqFt(input, options);
   const volumeResolution = normalizePreSlabVolumeDiscount(options.volumeDiscount || 'none');
+  let warrantyResolution = normalizePreSlabWarranty(
+    hasValue(options.warranty)
+      ? options.warranty
+      : (hasValue(options.warrantyTier) ? options.warrantyTier : options.preslabWarranty)
+  );
   const volumeDiscountMultiplier = cfg.volumeDiscounts[volumeResolution.volumeDiscount] || 1.0;
+  const jobContextResolution = normalizePreSlabJobContext(options.jobContext || options.preSlabJobContext, volumeResolution.volumeDiscount);
   const productOzPer10SqFt = optionPositiveNumber(options, 'customProductOzPer10SqFt', product.productOzPer10SqFt);
   const containerCost = optionPositiveNumber(options, 'customContainerCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
-  const floorBeforeVolumeDiscount = optionNonNegativeNumber(
-    options,
-    'customFloorBeforeVolumeDiscount',
-    product.floorBeforeVolumeDiscount || 0,
-  );
-  const floorAfterVolumeDiscount = optionNonNegativeNumber(
-    options,
-    'customFloorAfterVolumeDiscount',
-    product.floorAfterVolumeDiscount || 0,
-  );
   const laborCfg = cfg.labor || {};
   const warrantyExtendedSelected = !!(
     options.includeWarrantyExtended ||
     options.warrantyExtended ||
-    options.warranty === 'EXTENDED'
+    warrantyResolution.warrantyTier === 'extended'
   );
+  if (warrantyExtendedSelected && warrantyResolution.warrantyTier !== 'extended') {
+    warrantyResolution = {
+      ...warrantyResolution,
+      warrantyTier: 'extended',
+      warrantyLabel: 'Extended 5-yr warranty',
+    };
+  }
   const warrantyExtendedPrice = warrantyExtendedSelected ? cfg.warrantyExtended : 0;
+  const warrantyAdder = warrantyExtendedPrice;
   const labelConfirmed = optionBooleanTrue(options.labelConfirmed);
   const requiresLabelConfirmation = product.requiresLabelConfirmation === true;
   const labelManualReviewReasons = requiresLabelConfirmation && !labelConfirmed
@@ -3563,13 +3950,30 @@ function pricePreSlabTermiticide(input, options = {}) {
     ...measurement.warnings,
     ...volumeResolution.warnings,
     ...productResolution.warnings,
+    ...warrantyResolution.warnings,
+    ...jobContextResolution.warnings,
   ]);
   const manualReviewReasons = uniqueList([
     ...measurement.manualReviewReasons,
     ...volumeResolution.warnings,
     ...productResolution.manualReviewReasons,
+    ...warrantyResolution.warnings,
+    ...jobContextResolution.warnings,
     ...labelManualReviewReasons,
   ]);
+  const contextualMinimum = measurement.value === null
+    ? lookupPreSlabMinimum(0, jobContextResolution.jobContext)
+    : lookupPreSlabMinimum(measurement.value, jobContextResolution.jobContext);
+  const floorBeforeVolumeDiscount = optionNonNegativeNumber(
+    options,
+    'customFloorBeforeVolumeDiscount',
+    contextualMinimum.floor,
+  );
+  const floorAfterVolumeDiscount = optionNonNegativeNumber(
+    options,
+    'customFloorAfterVolumeDiscount',
+    contextualMinimum.floor,
+  );
   const baseResult = {
     service: 'pre_slab_termiticide',
     legacyService: productResolution.productKey === 'termidor_sc' ? 'pre_slab_termidor' : null,
@@ -3586,16 +3990,28 @@ function pricePreSlabTermiticide(input, options = {}) {
     productOz: null,
     units: null,
     bottles: null,
+    containersRequired: null,
     containerOz,
     containerCost,
+    chemicalCostPerOz: roundMoney(containerCost / containerOz),
+    allocatedProductCost: null,
     productCost: null,
+    fullContainerProductCost: null,
     laborHrs: null,
     laborCost: null,
     equipCost: cfg.equipCost,
+    complianceAdminCost: cfg.complianceAdminCost || 0,
+    driveCost: null,
+    includeDriveCost: cfg.includeDriveCostByContext?.[jobContextResolution.jobContext] === true,
     cost: null,
     marginDivisor: product.marginDivisor,
     targetMargin: 1 - product.marginDivisor,
     rawPrice: null,
+    jobContext: jobContextResolution.jobContext,
+    preSlabJobContext: jobContextResolution.jobContext,
+    requestedJobContext: jobContextResolution.requestedJobContext,
+    contextualFloor: contextualMinimum.floor,
+    contextualMinimumBasis: contextualMinimum.basis,
     floorBeforeVolumeDiscount,
     floorAfterVolumeDiscount,
     priceBeforeVolumeDiscount: null,
@@ -3606,8 +4022,14 @@ function pricePreSlabTermiticide(input, options = {}) {
     priceAfterVolumeDiscount: null,
     treatmentPrice: null,
     price: null,
+    warrantyTier: warrantyResolution.warrantyTier,
+    requestedWarrantyTier: warrantyResolution.requestedWarrantyTier,
+    warrantyLabel: warrantyResolution.warrantyLabel,
+    warrantyAdder,
+    warrantyAdd: warrantyAdder,
     warrantyExtendedSelected,
     warrantyExtendedPrice,
+    warrantyStatus: warrantyExtendedSelected ? 'Extended 5-year warranty' : 'No extended warranty selected',
     addOns: warrantyExtendedSelected
       ? [{
           code: 'pre_slab_extended_warranty',
@@ -3624,11 +4046,13 @@ function pricePreSlabTermiticide(input, options = {}) {
       ...measurement.warnings,
       ...volumeResolution.warnings,
       ...productResolution.warnings,
+      ...jobContextResolution.warnings,
     ]),
     requiresMeasurement: measurement.requiresMeasurement,
     requiresManualReview: measurement.requiresManualReview ||
       volumeResolution.warnings.length > 0 ||
       productResolution.requiresManualReview ||
+      jobContextResolution.warnings.length > 0 ||
       labelManualReviewReasons.length > 0,
     manualReviewReasons,
     measurements: {
@@ -3649,13 +4073,19 @@ function pricePreSlabTermiticide(input, options = {}) {
   const slabSqFt = measurement.value;
   const productOz = slabSqFt / 10 * productOzPer10SqFt;
   const units = Math.max(1, Math.ceil(productOz / containerOz));
-  const productCost = units * containerCost;
+  const chemicalCostPerOz = containerCost / containerOz;
+  const allocatedProductCost = productOz * chemicalCostPerOz;
+  const fullContainerProductCost = units * containerCost;
   const laborHrs = Math.min(
     laborCfg.maxHours || 5,
     Math.max(laborCfg.minHours || 1, (laborCfg.baseHours || 0.5) + slabSqFt * (laborCfg.hoursPerSqFt || (1 / 1500))),
   );
   const laborCost = laborHrs * GLOBAL.LABOR_RATE;
-  const cost = productCost + laborCost + cfg.equipCost;
+  const complianceAdminCost = Number(cfg.complianceAdminCost || 0);
+  const driveCost = cfg.includeDriveCostByContext?.[jobContextResolution.jobContext] === true
+    ? GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60
+    : 0;
+  const cost = allocatedProductCost + laborCost + cfg.equipCost + complianceAdminCost + driveCost;
   const rawPrice = Math.round(cost / product.marginDivisor);
   const priceBeforeVolumeDiscount = Math.max(rawPrice, floorBeforeVolumeDiscount);
   const priceAfterVolumeDiscount = Math.max(
@@ -3669,9 +4099,15 @@ function pricePreSlabTermiticide(input, options = {}) {
     productOz: roundMoney(productOz),
     units,
     bottles: units,
-    productCost: roundMoney(productCost),
+    containersRequired: units,
+    chemicalCostPerOz: roundMoney(chemicalCostPerOz),
+    allocatedProductCost: roundMoney(allocatedProductCost),
+    productCost: roundMoney(allocatedProductCost),
+    fullContainerProductCost: roundMoney(fullContainerProductCost),
     laborHrs: roundMoney(laborHrs),
     laborCost: roundMoney(laborCost),
+    complianceAdminCost: roundMoney(complianceAdminCost),
+    driveCost: roundMoney(driveCost),
     cost: roundMoney(cost),
     rawPrice,
     priceBeforeVolumeDiscount,
@@ -4643,13 +5079,255 @@ function priceTopDressing(lawnSqFt, depth = 'eighth', hasRecurringLawn = false) 
   return { service: 'top_dressing', depth, lawnSqFt: Math.round(lawnEst), price };
 }
 
-function priceDethatching(lawnSqFt) {
-  const lawnEst = lawnSqFt;
-  const timeMin = lawnEst / 100 + lawnEst / 200 + 30;
-  const cost = GLOBAL.LABOR_RATE * (timeMin / 60) + (lawnEst / 1000) * SPECIALTY.dethatching.materialPer1K;
-  const price = Math.max(SPECIALTY.dethatching.floor, Math.round(cost / SPECIALTY.dethatching.marginDivisor));
+function normalizeDethatchingChoice(value, choices, fallback, warningCode) {
+  const raw = normalizeToken(value || fallback);
+  if (Object.prototype.hasOwnProperty.call(choices || {}, raw)) {
+    return { key: raw, warning: null };
+  }
+  return { key: fallback, warning: warningCode };
+}
 
-  return { service: 'dethatching', lawnSqFt, price };
+function normalizeDethatchingGrassType(options = {}) {
+  const requestedGrassType = options.grassType ?? options.track ?? options.turfTrack ?? options.grassTrack;
+  if (!hasValue(requestedGrassType)) {
+    return {
+      requestedGrassType,
+      grassType: 'unknown',
+      isStAugustine: false,
+      isKnown: false,
+      warnings: ['grass_type_not_recorded'],
+    };
+  }
+
+  const raw = normalizeToken(requestedGrassType);
+  const compact = String(requestedGrassType).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (
+    ['a', 'b', 'st_augustine', 'staugustine', 'staug', 'floratam'].includes(raw) ||
+    ['staugustine', 'staug'].includes(compact) ||
+    compact.includes('floratam')
+  ) {
+    return { requestedGrassType, grassType: 'st_augustine', isStAugustine: true, isKnown: true, warnings: [] };
+  }
+  if (['c1', 'bermuda'].includes(raw)) {
+    return { requestedGrassType, grassType: 'bermuda', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  if (['c2', 'zoysia'].includes(raw)) {
+    return { requestedGrassType, grassType: 'zoysia', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  if (['d', 'bahia'].includes(raw)) {
+    return { requestedGrassType, grassType: 'bahia', isStAugustine: false, isKnown: true, warnings: [] };
+  }
+  return {
+    requestedGrassType,
+    grassType: 'unknown',
+    isStAugustine: false,
+    isKnown: false,
+    warnings: ['unknown_grass_type_requires_dethatching_review'],
+  };
+}
+
+function resolveDethatchingProbe(options = {}) {
+  const probeValues = [
+    parseNonNegativeMeasurement(options.thatchProbe1Inches),
+    parseNonNegativeMeasurement(options.thatchProbe2Inches),
+    parseNonNegativeMeasurement(options.thatchProbe3Inches),
+  ];
+  const validProbeValues = probeValues.filter(value => value !== null);
+  const explicitDepth = parseNonNegativeMeasurement(options.thatchDepthInches);
+  const averageDepth = explicitDepth !== null
+    ? explicitDepth
+    : (validProbeValues.length > 0
+      ? validProbeValues.reduce((sum, value) => sum + value, 0) / validProbeValues.length
+      : null);
+  const warnings = [];
+  if (validProbeValues.length > 0 && validProbeValues.length < 3) {
+    warnings.push('partial_thatch_probe_readings');
+  }
+  if ((optionBooleanTrue(options.requireThatchDepth) || optionBooleanTrue(options.requireThatchProbe)) && averageDepth === null) {
+    warnings.push('thatch_depth_not_recorded');
+  }
+  return {
+    thatchDepthInches: averageDepth === null ? null : roundMoney(averageDepth),
+    thatchMeasurementSource: options.thatchMeasurementSource || (validProbeValues.length > 0 || explicitDepth !== null ? 'manual' : 'unknown'),
+    probeMeasurements: {
+      thatchProbe1Inches: probeValues[0],
+      thatchProbe2Inches: probeValues[1],
+      thatchProbe3Inches: probeValues[2],
+    },
+    warnings,
+  };
+}
+
+const DETHATCHING_MANAGER_APPROVAL_REASONS = new Set([
+  'verified_thatch_probe',
+  'customer_requested_after_warning',
+  'bermuda_or_zoysia_confirmed',
+  'manager_override',
+]);
+
+function normalizeDethatchingManagerApprovalReason(value) {
+  const raw = typeof value === 'string' ? normalizeToken(value) : '';
+  return DETHATCHING_MANAGER_APPROVAL_REASONS.has(raw) ? raw : null;
+}
+
+function priceDethatching(lawnSqFt, options = {}) {
+  const cfg = SPECIALTY.dethatching;
+  const lawnEst = Math.max(0, Number(lawnSqFt) || 0);
+  const cleanupChoice = normalizeDethatchingChoice(
+    options.cleanupLevel,
+    cfg.cleanup,
+    'none',
+    'invalid_dethatching_cleanup_level_defaulted'
+  );
+  const accessChoice = normalizeDethatchingChoice(
+    options.access ?? options.accessDifficulty,
+    cfg.accessMinutes,
+    'easy',
+    'invalid_dethatching_access_defaulted'
+  );
+  const debrisRemovalRequested = optionBooleanTrue(options.debrisRemovalIncluded);
+  const cleanupLevel = cleanupChoice.key === 'none' && debrisRemovalRequested ? 'light' : cleanupChoice.key;
+  const cleanup = cfg.cleanup[cleanupLevel] || cfg.cleanup.none;
+  const grass = normalizeDethatchingGrassType(options);
+  const probe = resolveDethatchingProbe(options);
+  const timeModel = cfg.timeModel || {};
+  const basePrimaryMin = lawnEst / (timeModel.primaryPassSqFtPerMin || 100);
+  const baseCrossMin = lawnEst / (timeModel.crossPassSqFtPerMin || 200);
+  const setupMin = Number(timeModel.setupMin || 30);
+  const cleanupMin = (lawnEst / 1000) * cleanup.minutesPer1K;
+  const accessMin = cfg.accessMinutes[accessChoice.key] || 0;
+  const timeMin = basePrimaryMin + baseCrossMin + setupMin + cleanupMin + accessMin;
+  const laborCostVal = GLOBAL.LABOR_RATE * timeMin / 60;
+  const materialCost = (lawnEst / 1000) * cfg.materialPer1K;
+  const cleanupPriceAdder = (lawnEst / 1000) * cleanup.pricePer1K;
+  const rawCost = laborCostVal + materialCost;
+  const formulaBasePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
+  const compatibilityBasePrice = cleanupLevel === 'none' && accessChoice.key === 'easy'
+    ? cfg.baseCompatibilityPrices?.[String(Math.round(lawnEst))]
+    : undefined;
+  const basePrice = Number.isFinite(Number(compatibilityBasePrice))
+    ? Number(compatibilityBasePrice)
+    : formulaBasePrice;
+  const calculatedPrice = Math.round(basePrice + cleanupPriceAdder);
+  const debrisRemovalIncluded = debrisRemovalRequested || cleanupLevel !== 'none';
+  const managerApproved = optionBooleanTrue(options.managerApproved);
+  const managerApprovalOverrideReason = normalizeDethatchingManagerApprovalReason(options.managerApprovalReason);
+  const requiresManagerApproval = !!(cfg.manualReview?.stAugustineRequiresApproval && grass.isStAugustine);
+  const warnings = uniqueList([
+    cleanupChoice.warning,
+    accessChoice.warning,
+    ...grass.warnings,
+    ...probe.warnings,
+    cleanupLevel === 'none' && !debrisRemovalIncluded ? 'base_price_excludes_bagging_or_debris_hauling' : null,
+    requiresManagerApproval ? 'Dethatching St. Augustine / Floratam can damage stolons. Manager approval required.' : null,
+  ]);
+  const manualReviewReasons = [];
+  const largeLawnSqFt = Number(cfg.manualReview?.largeLawnSqFt || 10000);
+  const heavyCleanupSqFt = Number(cfg.manualReview?.heavyCleanupSqFt || 6000);
+
+  if (lawnEst >= largeLawnSqFt) manualReviewReasons.push('large_lawn_dethatching_manual_review');
+  if (cleanupLevel === 'heavy' && lawnEst >= heavyCleanupSqFt) manualReviewReasons.push('heavy_cleanup_required');
+  if (accessChoice.key === 'difficult') manualReviewReasons.push('difficult_access_dethatching');
+  if (grass.grassType === 'unknown') manualReviewReasons.push('unknown_grass_dethatching_review');
+  if ((optionBooleanTrue(options.requireThatchDepth) || optionBooleanTrue(options.requireThatchProbe)) && probe.thatchDepthInches === null) {
+    manualReviewReasons.push('thatch_depth_not_recorded');
+  }
+  if (requiresManagerApproval && !managerApproved) {
+    manualReviewReasons.push('st_augustine_dethatching_manager_approval_required');
+  }
+  if (requiresManagerApproval && managerApproved && !managerApprovalOverrideReason) {
+    manualReviewReasons.push('st_augustine_dethatching_manager_approval_reason_missing');
+  }
+  if (optionBooleanTrue(options.isCommercial) || normalizeToken(options.propertyType) === 'commercial') {
+    manualReviewReasons.push('commercial_dethatching_manual_quote_required');
+  }
+
+  let dethatchingRecommended = false;
+  let recommendationReason = 'thatch_depth_not_recorded';
+  if (probe.thatchDepthInches !== null) {
+    if (grass.grassType === 'bermuda' || grass.grassType === 'zoysia') {
+      dethatchingRecommended = probe.thatchDepthInches > 0.5;
+      recommendationReason = dethatchingRecommended
+        ? 'bermuda_zoysia_thatch_above_half_inch'
+        : 'thatch_probe_threshold_not_met';
+      if (!dethatchingRecommended) manualReviewReasons.push('thatch_probe_threshold_not_met');
+    } else if (grass.isStAugustine) {
+      recommendationReason = probe.thatchDepthInches > 0.75
+        ? 'st_augustine_threshold_requires_manager_approval'
+        : 'st_augustine_no_auto_recommendation';
+    } else if (grass.grassType === 'unknown') {
+      recommendationReason = 'unknown_grass_manual_review';
+    } else {
+      recommendationReason = 'grass_track_not_configured_for_auto_recommendation';
+    }
+  }
+
+  const managerApprovalSatisfied = !requiresManagerApproval || (managerApproved && !!managerApprovalOverrideReason);
+  const manualReviewReasonList = uniqueList(manualReviewReasons);
+  const approvalBlocked = requiresManagerApproval && !managerApprovalSatisfied;
+  const approvalBlockReason = approvalBlocked
+    ? 'Manager approval is required before St. Augustine / Floratam dethatching can be quoted.'
+    : null;
+  const manualReviewBlockReason = !approvalBlockReason && manualReviewReasonList.length > 0
+    ? `Dethatching requires admin review: ${manualReviewReasonList.join(', ')}.`
+    : null;
+  const quoteRequired = approvalBlocked || manualReviewReasonList.length > 0;
+  const detailParts = [
+    'Double-pass machine time',
+    cleanup.label,
+    accessChoice.key === 'easy' ? null : `${accessChoice.key} access`,
+    debrisRemovalIncluded ? 'cleanup/debris removal included' : null,
+    approvalBlocked ? 'manager approval required' : null,
+  ].filter(Boolean);
+
+  return {
+    service: 'dethatching',
+    lawnSqFt: lawnEst,
+    manuallyEnteredLawnSqFt: options.manuallyEnteredLawnSqFt ?? null,
+    price: quoteRequired ? null : calculatedPrice,
+    estimatedPrice: calculatedPrice,
+    basePrice,
+    rawCost: roundMoney(rawCost),
+    timeMin: roundMoney(timeMin),
+    laborCost: roundMoney(laborCostVal),
+    materialCost: roundMoney(materialCost),
+    cleanupLevel,
+    requestedCleanupLevel: cleanupChoice.key,
+    cleanupLabel: cleanup.label,
+    cleanupMin: roundMoney(cleanupMin),
+    cleanupPriceAdder: roundMoney(cleanupPriceAdder),
+    debrisRemovalIncluded,
+    access: accessChoice.key,
+    accessMin,
+    grassType: grass.grassType,
+    requestedGrassType: grass.requestedGrassType,
+    thatchDepthInches: probe.thatchDepthInches,
+    thatchMeasurementSource: probe.thatchMeasurementSource,
+    probeMeasurements: probe.probeMeasurements,
+    dethatchingRecommended,
+    recommendationReason,
+    requiresManualReview: quoteRequired,
+    manualReviewReasons: manualReviewReasonList,
+    quoteRequired,
+    requiresCustomQuote: quoteRequired,
+    autoQuoteRequiresAdminApproval: quoteRequired,
+    customQuoteReason: approvalBlockReason || manualReviewBlockReason,
+    reason: approvalBlockReason || manualReviewBlockReason,
+    requiresManagerApproval,
+    managerApproved,
+    managerApprovalSatisfied,
+    managerApprovalReason: requiresManagerApproval ? 'st_augustine_dethatching' : null,
+    managerApprovalOverrideReason,
+    warnings,
+    warning: requiresManagerApproval
+      ? 'Dethatching St. Augustine / Floratam can damage stolons. Manager approval required.'
+      : null,
+    equipmentMetadata: {
+      ...(cfg.equipment || {}),
+      internalOnly: true,
+    },
+    detail: detailParts.join(' | '),
+  };
 }
 
 // ============================================================
@@ -5296,6 +5974,7 @@ module.exports = {
   interpolate, laborCost,
   getOneTimeUrgencyMultiplier, applyOneTimeRecurringCustomerDiscount,
   applyOneTimeFloor, getOneTimeMosquitoAreaBucket, getOneTimeMosquitoBase,
+  normalizeMosquitoProgramKey, normalizeMosquitoWaterMultiplier,
   normalizeGrassType, calcLawnAnnualCostFloor,
   recommendTreeShrubTier,
   evaluateTreeShrubTierRecommendation,
@@ -5305,6 +5984,7 @@ module.exports = {
   resolveTermiteFootprint,
   resolveTermiteBaitPerimeter,
   resolveTrenchingMeasurements,
+  resolvePalmCount,
   normalizeTrenchingTermiticideProduct,
   normalizeTrenchingApplicationRate,
   resolveBoraCareSqFt,

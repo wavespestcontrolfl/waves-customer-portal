@@ -143,6 +143,15 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(checkRedactionPassed({ body: 'Plain text.' }).ok).toBe(true);
     expect(checkRedactionPassed({ body: 'Email me at jane@example.com' }).ok).toBe(false);
   });
+  test('redaction: allows known Waves numbers, rejects other 941 / parenthesized', () => {
+    // Known Waves number — allowed.
+    expect(checkRedactionPassed({ body: 'Call us at 941-318-7612.' }).ok).toBe(true);
+    expect(checkRedactionPassed({ body: 'Reach Sarasota: (941) 297-2606.' }).ok).toBe(true);
+    // Non-Waves 941 number — rejected (earlier code wrongly allowed any 941/863).
+    expect(checkRedactionPassed({ body: 'Reach me at 941-555-9876.' }).ok).toBe(false);
+    // Parenthesized customer number — earlier regex missed this entirely.
+    expect(checkRedactionPassed({ body: 'My cell is (212) 555-1234.' }).ok).toBe(false);
+  });
 });
 
 // ── refresh checks ──────────────────────────────────────────────────
@@ -241,8 +250,12 @@ describe('evaluate (full gate)', () => {
     );
     expect(r.hard_failures.some((f) => f.name === 'localbusiness_service_schema')).toBe(true);
   });
-  test('MIN_TOTAL_SCORE exposed', () => {
-    expect(MIN_TOTAL_SCORE).toBe(75);
+  test('MIN_TOTAL_SCORE exposed and reachable', () => {
+    // 55/73 = ~75% of the achievable ceiling (city-service: 36 page-
+    // specific + 37 common = 73). 75 absolute would be unreachable.
+    // MIN = floor(MAX_ACHIEVABLE * 0.75). With city-service as the
+    // ceiling (common 37 + city-service 36 = 73), this resolves to 54.
+    expect(MIN_TOTAL_SCORE).toBe(54);
   });
   test('throws on missing inputs', () => {
     expect(() => evaluate(null, brief())).toThrow();

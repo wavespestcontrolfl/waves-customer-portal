@@ -1,3 +1,5 @@
+import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
+
 /**
  * Rendered in place of the slider / picker / CTAs when the estimate is
  * in a terminal state (accepted / declined / expired). Polite,
@@ -14,8 +16,9 @@ const W = {
 const WAVES_PHONE = '(941) 297-5749';
 const WAVES_TEL = '+19412975749';
 
-export default function TerminalStateCard({ state, customerFirstName, address }) {
+export default function TerminalStateCard({ state, customerFirstName, address, quoteReason }) {
   const who = customerFirstName || 'there';
+  const quoteReasonText = quoteReason ? quoteRequiredReasonText({ reason: quoteReason }, '') : '';
 
   if (state === 'accepted') {
     return (
@@ -71,6 +74,21 @@ export default function TerminalStateCard({ state, customerFirstName, address })
           Hi {who} — this estimate includes a treatment that needs a custom quote before it can be accepted online.
           Call <a href={`tel:${WAVES_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE}</a> and we'll finish it with you.
         </div>
+        {quoteReasonText ? (
+          <div style={{
+            marginTop: 12,
+            padding: '10px 12px',
+            border: '1px solid #FED7AA',
+            borderRadius: 10,
+            background: '#FFF7ED',
+            color: '#92400E',
+            fontSize: 15,
+            fontWeight: 700,
+            lineHeight: 1.45,
+          }}>
+            {quoteReasonText}
+          </div>
+        ) : null}
         <a href={`tel:${WAVES_TEL}`} style={{
           display: 'inline-block', marginTop: 14, padding: '12px 20px',
           background: W.blueBright, color: W.white, textDecoration: 'none',

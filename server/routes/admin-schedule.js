@@ -29,6 +29,12 @@ const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
+const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const {
+  stampSeriesPrepaid,
+  resolveSeriesParentId,
+  buildPrepaidSeriesContext,
+} = require('../services/prepaid-series');
 
 // ─── Destructive maintenance endpoints ──────────────────────────────────────
 // Defined BEFORE the router-level auth chain so `devOnly` runs first and
@@ -794,6 +800,63 @@ async function loadAddonsByServiceId(serviceIds) {
   }
 }
 
+function mapLinkedProject(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    status: row.status,
+    projectType: row.project_type,
+    title: row.title,
+    hasReportToken: !!row.report_token,
+    serviceRecordId: row.service_record_id || null,
+    portalVisible: row.portal_visible === true,
+  };
+}
+
+async function loadLinkedProjectsByServiceId(serviceIds) {
+  const ids = (serviceIds || []).filter(Boolean);
+  if (!ids.length) return new Map();
+  try {
+    const rows = await db('projects')
+      .whereIn('scheduled_service_id', ids)
+      .orderByRaw(`
+        CASE status
+          WHEN 'draft' THEN 1
+          WHEN 'sent' THEN 2
+          WHEN 'closed' THEN 3
+          ELSE 4
+        END
+      `)
+      .orderBy('created_at', 'desc')
+      .select('scheduled_service_id', 'id', 'status', 'project_type', 'title', 'report_token', 'service_record_id', 'portal_visible');
+    const map = new Map();
+    for (const row of rows) {
+      if (!map.has(row.scheduled_service_id)) map.set(row.scheduled_service_id, mapLinkedProject(row));
+    }
+    return map;
+  } catch (e) {
+    logger.warn(`[schedule] Linked project lookup failed: ${e.message}`);
+    return new Map();
+  }
+}
+
+async function loadProjectCompletionContextByServiceId(services) {
+  const rows = Array.isArray(services) ? services : [];
+  const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
+  const entries = await Promise.all(rows.map(async (service) => {
+    const completionProfile = await resolveCompletionProfileForScheduledService(service)
+      .catch((e) => {
+        logger.warn(`[schedule] completion profile lookup failed for ${service.id}: ${e.message}`);
+        return null;
+      });
+    return [service.id, {
+      completionProfile,
+      linkedProject: linkedProjectsByServiceId.get(service.id) || null,
+    }];
+  }));
+  return new Map(entries);
+}
+
 function getZone(city, zip) {
   const c = (city || '').toLowerCase();
   const z = zip || '';
@@ -849,6 +912,7 @@ router.get('/', async (req, res, next) => {
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
@@ -863,6 +927,7 @@ router.get('/', async (req, res, next) => {
       const category = detectServiceCategory(normalizedType);
       const serviceAddons = addonsByServiceId.get(s.id) || [];
       const serviceTypeDisplay = formatServiceDisplay(normalizedType, serviceAddons);
+      const projectCompletionContext = projectCompletionContextByServiceId.get(s.id) || {};
 
       const cleanedNotes = (s.notes || '').trim();
       let checkoutInvoice = null;
@@ -919,6 +984,8 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+        completionProfile: projectCompletionContext.completionProfile || null,
+        linkedProject: projectCompletionContext.linkedProject || null,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
@@ -1044,6 +1111,7 @@ router.get('/week', async (req, res, next) => {
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
         .select('scheduled_services.id', 'scheduled_services.customer_id',
+          'scheduled_services.service_id',
           'scheduled_services.service_type', 'scheduled_services.status',
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes',
@@ -1071,11 +1139,13 @@ router.get('/week', async (req, res, next) => {
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
       const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+      const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
         const serviceAddons = addonsByServiceId.get(s.id) || [];
         const serviceTypeDisplay = formatServiceDisplay(svcType, serviceAddons);
+        const projectCompletionContext = projectCompletionContextByServiceId.get(s.id) || {};
         let checkoutInvoice = null;
         try {
           checkoutInvoice = await db('invoices')
@@ -1118,6 +1188,8 @@ router.get('/week', async (req, res, next) => {
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+          completionProfile: projectCompletionContext.completionProfile || null,
+          linkedProject: projectCompletionContext.linkedProject || null,
           technicianId: s.technician_id,
           technicianName: s.tech_name,
           isRecurring: s.is_recurring,
@@ -2154,12 +2226,30 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // POST /api/admin/schedule/:id/prepaid — record payment taken in advance
 // (cash at door, phone CC, Zelle, etc.). Completion handler skips auto-invoice
 // when prepaid_amount >= the would-be invoice total.
+//
+// When `applyToSeries=true`, the amount represents the TOTAL the customer
+// paid to cover the whole recurring family (e.g. $360 for a quarterly plan)
+// and we split it evenly across every non-completed sibling so each visit
+// completes against its own slice — the per-visit invoice-skip logic keeps
+// working unchanged.
 router.post('/:id/prepaid', async (req, res, next) => {
   try {
-    const { amount, method, note } = req.body;
+    const { amount, method, note, applyToSeries } = req.body;
     const amt = Number(amount);
     if (!Number.isFinite(amt) || amt < 0) {
       return res.status(400).json({ error: 'amount must be a non-negative number' });
+    }
+    if (applyToSeries) {
+      const result = await stampSeriesPrepaid(db, {
+        anchorServiceId: req.params.id,
+        totalAmount: amt,
+        method,
+        note,
+      });
+      logger.info(
+        `[schedule] Marked series ${result.seriesParentId} prepaid: $${amt} across ${result.visitsCovered} visit(s) via ${method || 'unspecified'}`,
+      );
+      return res.json({ success: true, ...result });
     }
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
@@ -2173,12 +2263,36 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (!updated.length) return res.status(404).json({ error: 'Scheduled service not found' });
     logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);
     res.json({ success: true, ...updated[0] });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
-// DELETE /api/admin/schedule/:id/prepaid — clear a prepayment record
+// DELETE /api/admin/schedule/:id/prepaid — clear a prepayment record. When
+// `?series=1` is passed, every eligible sibling in the recurring family is
+// cleared too — symmetry with the POST flow so the operator doesn't have to
+// hunt down each prepaid visit individually if the customer asks for a refund.
 router.delete('/:id/prepaid', async (req, res, next) => {
   try {
+    if (req.query.series === '1' || req.query.series === 'true') {
+      const anchor = await db('scheduled_services').where({ id: req.params.id }).first();
+      if (!anchor) return res.status(404).json({ error: 'Scheduled service not found' });
+      const parentId = resolveSeriesParentId(anchor);
+      const cleared = await db('scheduled_services')
+        .where(function () {
+          this.where('recurring_parent_id', parentId).orWhere('id', parentId);
+        })
+        .whereNotNull('prepaid_amount')
+        .update({
+          prepaid_amount: null,
+          prepaid_method: null,
+          prepaid_note: null,
+          prepaid_at: null,
+        })
+        .returning(['id']);
+      return res.json({ success: true, clearedCount: cleared.length, seriesParentId: parentId });
+    }
     await db('scheduled_services').where({ id: req.params.id }).update({
       prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
     });

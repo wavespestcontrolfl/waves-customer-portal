@@ -26,7 +26,11 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 
-const SITE_URL = process.env.GSC_SITE_URL || 'https://wavespestcontrol.com';
+// URL Inspection requires siteUrl to match the verified GSC property
+// EXACTLY — URL-prefix properties must keep the trailing slash, and
+// the property is verified for the www host (apex is redirect-only).
+// The previous default failed inspection out of the box.
+const SITE_URL = process.env.GSC_SITE_URL || 'https://www.wavespestcontrol.com/';
 const INSPECTION_ENDPOINT = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
 
 // googleapis is heavy (~71MB) — lazy load only when first needed.
@@ -130,12 +134,24 @@ class IndexStatusMonitor {
     }
     const g = getGoogle();
     if (!g) return null;
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) return null;
+    const saEnv = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    if (!saEnv) return null;
     try {
-      const auth = new g.auth.GoogleAuth({
-        keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
-        scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
-      });
+      // Mirror search-console.js: accept raw JSON (Railway) OR file
+      // path (local dev). The keyFile-only fallback previously failed
+      // on Railway with no_access_token because the env var holds the
+      // JSON body, not a path.
+      const scopes = ['https://www.googleapis.com/auth/webmasters.readonly'];
+      let authOptions;
+      try {
+        let jsonStr = saEnv.trim();
+        if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) jsonStr += '\n}';
+        const credentials = JSON.parse(jsonStr);
+        authOptions = { credentials, scopes };
+      } catch {
+        authOptions = { keyFile: saEnv, scopes };
+      }
+      const auth = new g.auth.GoogleAuth(authOptions);
       const client = await auth.getClient();
       const token = await client.getAccessToken();
       return token?.token || null;
@@ -171,7 +187,10 @@ class IndexStatusMonitor {
 function parseInspection(url, data) {
   const inspection = data?.inspectionResult?.indexStatusResult;
   if (!inspection) return { ok: false, error: 'no_inspection_result', raw: data };
-  const declaredCanonical = url;
+  // Compare Google's canonical to the PAGE's declared canonical, not
+  // the requested URL. Otherwise inspecting a slash/no-slash variant
+  // or an alternate entry URL false-alarms as canonical-mismatch.
+  const declaredCanonical = inspection.userCanonical || url;
   const googleCanonical = inspection.googleCanonical || null;
   return {
     ok: true,
