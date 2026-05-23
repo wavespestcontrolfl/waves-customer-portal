@@ -51,15 +51,26 @@ function resolveClientRatingQuestion(config, serviceTypeText) {
   return questions[key] || questions.custom || DEFAULT_CONFIG.clientQuestionText.custom;
 }
 
+// Convert YYYY-MM-DD calendar string to a UTC-anchored timestamp.
+// Using Date.UTC instead of `new Date(...)` keeps cadence math
+// independent of the server's process timezone — Railway runs UTC
+// but AGENTS.md requires ET discipline, and we don't want gaps to
+// shift if the host TZ ever changes.
+function calendarDateToUtcMs(value) {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+  if (!match) return null;
+  const [, y, m, d] = match;
+  return Date.UTC(Number(y), Number(m) - 1, Number(d));
+}
+
 // Median gap-in-days between consecutive service dates → cadence label.
 // Quarterly ≈ 90d, bi-monthly ≈ 60d, monthly ≈ 30d. We classify on the
 // midpoints (45 / 75) so noisy data doesn't bounce between buckets.
 function detectCadenceFromHistory(history) {
   if (!Array.isArray(history) || history.length < 2) return null;
   const dates = history
-    .map((row) => row && row.serviceDate)
-    .filter(Boolean)
-    .map((d) => new Date(`${d}T12:00:00`).getTime())
+    .map((row) => calendarDateToUtcMs(row && row.serviceDate))
     .filter((t) => Number.isFinite(t))
     .sort((a, b) => a - b);
   if (dates.length < 2) return null;

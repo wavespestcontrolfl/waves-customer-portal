@@ -17,6 +17,7 @@ const {
 const {
   loadActiveConfig,
   loadScoreForServiceRecord,
+  loadHistoryForCustomer,
   pestPressureVisibilitySignature,
 } = require('../services/pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
@@ -419,13 +420,27 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
       customer_id: service.customer_id,
       service_type: service.service_type,
       service_line: service.service_line,
+      service_date: service.service_date,
       client_pest_rating: rounded,
     };
+
+    // Pull history with the same token-scoped service_date ceiling
+    // buildReportV1Data uses, so the rating-submit response preserves
+    // the chart + cadence the customer was just looking at instead of
+    // dropping them.
+    const historyRows = service.customer_id
+      ? await loadHistoryForCustomer(db, service.customer_id, {
+          serviceLine: service.service_line || null,
+          limit: 8,
+          beforeOrOnServiceDate: service.service_date || null,
+        }).catch(() => [])
+      : [];
 
     const pestPressure = buildPestPressureCustomerView({
       config,
       scoreRow: updatedScore,
       serviceRecord: updatedService,
+      historyRows,
     });
 
     return res.json({ pestPressure, submittedRating: rounded });
