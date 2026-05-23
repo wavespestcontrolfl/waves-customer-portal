@@ -53,8 +53,8 @@ describe('data hygiene deterministic normalizers', () => {
       ['first_name', 'AS', 'name.proper_case_first'],
       ['first_name', 'CJ', 'name.proper_case_first'],
       ['first_name', 'Mackenzie', 'name.proper_case_first'],
+      ['first_name', 'MACKENZIE', 'name.proper_case_first'],
       ['last_name', 'Smith-Mackenzie', 'name.proper_case_last'],
-      ['last_name', 'SMITH-MACKENZIE', 'name.proper_case_last'],
       ['last_name', 'LaSalle', 'name.proper_case_last'],
       ['last_name', 'DeSanto', 'name.proper_case_last'],
       ['last_name', 'DeFusco', 'name.proper_case_last'],
@@ -90,6 +90,8 @@ describe('data hygiene deterministic normalizers', () => {
       ['last_name', 'MOSER', 'name.proper_case_last', 'Moser'],
       ['last_name', 'Mcconaghy', 'name.proper_case_last', 'McConaghy'],
       ['last_name', 'Mccash', 'name.proper_case_last', 'McCash'],
+      ['last_name', 'MACDONALD', 'name.proper_case_last', 'MacDonald'],
+      ['last_name', 'SMITH-MACDONALD', 'name.proper_case_last', 'Smith-MacDonald'],
     ];
 
     for (const [field, value, ruleId, proposedValue] of safeCases) {

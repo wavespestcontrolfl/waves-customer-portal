@@ -197,7 +197,7 @@ function nameProperCase(field, value) {
 
   const proposed = properCaseName(compact);
   if (!proposed || proposed === current) return null;
-  const guard = properCaseProposalGuard(compact, proposed);
+  const guard = properCaseProposalGuard(field, compact, proposed);
   if (!guard.ok) return null;
 
   return proposal(field, current, proposed, {
@@ -211,14 +211,14 @@ function nameProperCase(field, value) {
   });
 }
 
-function properCaseProposalGuard(current, proposed) {
+function properCaseProposalGuard(field, current, proposed) {
   if (isAllCapsInitials(current)) {
     return { ok: false, reason: 'all_caps_initials' };
   }
   if (!isAllCapsName(current) && hasInternalCapital(current)) {
     return { ok: false, reason: 'existing_internal_capital' };
   }
-  if (introducesMacIntracap(current, proposed)) {
+  if (introducesMacIntracap(field, current, proposed)) {
     return { ok: false, reason: 'mac_intracap_false_positive' };
   }
   return { ok: true };
@@ -241,18 +241,23 @@ function hasInternalCapital(value) {
     .some((segment) => /[A-Z]/.test(segment.slice(1)));
 }
 
-function introducesMacIntracap(current, proposed) {
+function introducesMacIntracap(field, current, proposed) {
   const currentSegments = nameCaseSegments(current);
   const proposedSegments = nameCaseSegments(proposed);
   return proposedSegments.some((segment, index) => {
     if (!/^Mac[A-Z]/.test(segment)) return false;
     const currentSegment = currentSegments[index] || '';
-    return !/^Mac[A-Z]/.test(currentSegment);
+    return !isExistingMacIntracap(field, currentSegment);
   });
 }
 
 function nameCaseSegments(value) {
   return value.split(/\s+/).flatMap((word) => word.split('-'));
+}
+
+function isExistingMacIntracap(field, segment) {
+  if (/^Mac[A-Z]/.test(segment)) return true;
+  return field === 'last_name' && /^MAC[A-Z]/.test(segment);
 }
 
 function zipZeroPad(value, stateValue) {
