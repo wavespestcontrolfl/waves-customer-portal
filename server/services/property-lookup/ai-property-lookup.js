@@ -31,6 +31,13 @@ const MANATEE_PAO_BASE = 'https://www.manateepao.gov';
 const MANATEE_PAO_SEARCH_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-parcel-search-results.php`;
 const MANATEE_PAO_LAND_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-land.php`;
 const MANATEE_PAO_BUILDINGS_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-buildings.php`;
+const SARASOTA_PAO_BASE = 'https://www.sc-pa.com';
+const SARASOTA_PAO_SEARCH_URL = `${SARASOTA_PAO_BASE}/propertysearch/Result`;
+const SARASOTA_PAO_DETAIL_URL = `${SARASOTA_PAO_BASE}/propertysearch/parcel/details`;
+const CHARLOTTE_PAO_BASE = 'https://www.ccappraiser.com';
+const CHARLOTTE_GIS_ADDRESS_URL = 'https://agis3.charlottecountyfl.gov/arcgis/rest/services/Essentials/CCGISLayers/MapServer/0/query';
+const CHARLOTTE_GIS_OWNERSHIP_URL = 'https://agis3.charlottecountyfl.gov/arcgis/rest/services/Essentials/CCGISLayers/MapServer/27/query';
+const CHARLOTTE_PAO_RECORD_URL = `${CHARLOTTE_PAO_BASE}/Show_Parcel.asp`;
 const COUNTY_LOOKUP_MIN_REMAINING_MS = 750;
 const MANATEE_CITY_NAMES = new Set([
   'ANNA MARIA',
@@ -60,7 +67,47 @@ const MANATEE_CITY_NAMES = new Set([
   'WEST SAMOSET',
   'WHITFIELD',
 ]);
-const COUNTY_ADDRESS_CITY_HINTS = new Set([...MANATEE_CITY_NAMES, 'SARASOTA']);
+const SARASOTA_CITY_NAMES = new Set([
+  'BEE RIDGE',
+  'ENGLEWOOD',
+  'FRUITVILLE',
+  'GULF GATE ESTATES',
+  'LAKE SARASOTA',
+  'LAUREL',
+  'LONGBOAT KEY',
+  'NOKOMIS',
+  'NORTH PORT',
+  'OSPREY',
+  'PALMER RANCH',
+  'SARASOTA',
+  'SIESTA KEY',
+  'SOUTHGATE',
+  'SOUTH GATE RIDGE',
+  'THE MEADOWS',
+  'VENICE',
+]);
+const CHARLOTTE_CITY_NAMES = new Set([
+  'BABCOCK RANCH',
+  'BOCA GRANDE',
+  'CHARLOTTE HARBOR',
+  'CLEVELAND',
+  'EL JOBEAN',
+  'ENGLEWOOD',
+  'GROVE CITY',
+  'MANASOTA KEY',
+  'MURDOCK',
+  'PLACIDA',
+  'PORT CHARLOTTE',
+  'PUNTA GORDA',
+  'ROTONDA',
+  'ROTONDA WEST',
+  'SOUTH GULF COVE',
+]);
+const COUNTY_ADDRESS_CITY_HINTS = new Set([
+  ...MANATEE_CITY_NAMES,
+  ...SARASOTA_CITY_NAMES,
+  ...CHARLOTTE_CITY_NAMES,
+]);
 const MANATEE_ZIPS = new Set([
   '34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209',
   '34210', '34211', '34212', '34215', '34216', '34217', '34218', '34219', '34220',
@@ -68,7 +115,20 @@ const MANATEE_ZIPS = new Set([
   '34281', '34282',
 ]);
 const MANATEE_SHARED_ZIPS = new Set(['34202', '34228', '34240', '34243']);
-const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao']);
+const SARASOTA_ZIPS = new Set([
+  '34223', '34224', '34228', '34229', '34230', '34231', '34232', '34233', '34234',
+  '34235', '34236', '34237', '34238', '34239', '34240', '34241', '34242', '34243',
+  '34249', '34260', '34272', '34274', '34275', '34276', '34277', '34284', '34285',
+  '34286', '34287', '34288', '34289', '34290', '34291', '34292', '34293', '34295',
+]);
+const SARASOTA_SHARED_ZIPS = new Set(['34223', '34224', '34228', '34229', '34240', '34243', '34275']);
+const CHARLOTTE_ZIPS = new Set([
+  '33921', '33927', '33938', '33946', '33947', '33948', '33949', '33950', '33951',
+  '33952', '33953', '33954', '33955', '33980', '33981', '33982', '33983', '34223',
+  '34224',
+]);
+const CHARLOTTE_SHARED_ZIPS = new Set(['33921', '33946', '33947', '33955', '34223', '34224']);
+const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao', 'sarasota_pao', 'charlotte_pao']);
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
   'stories', 'constructionMaterial', 'foundationType', 'roofType',
@@ -321,6 +381,180 @@ async function lookupPropertyFromManateePAO(address, options = {}) {
   }
 }
 
+async function lookupPropertyFromSarasotaPAO(address, options = {}) {
+  if (!address || typeof address !== 'string' || address.trim().length < 5) return null;
+  if (!shouldQuerySarasotaPAO(address)) return null;
+
+  const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const t0 = Date.now();
+
+  try {
+    const search = await searchSarasotaParcel(address, timeoutMs, t0);
+    if (!search?.parcelId || !search?.html) return null;
+
+    const buildingDetailHtml = await fetchSarasotaPrimaryBuildingDetail(search.html, timeoutMs, t0).catch((err) => {
+      logger.warn('[county-property] Sarasota PAO building detail fetch failed', {
+        elapsedMs: Date.now() - t0,
+        parcelId: search.parcelId,
+        error: summarizeProviderError(err),
+      });
+      return null;
+    });
+    const parsed = parseSarasotaPaoRecord({
+      address,
+      search,
+      detailHtml: search.html,
+      buildingDetailHtml,
+    });
+    if (!hasAnyPropertyFact(parsed)) {
+      logger.info('[county-property] Sarasota PAO found parcel but no usable facts', {
+        elapsedMs: Date.now() - t0,
+        parcelId: search.parcelId,
+      });
+      return null;
+    }
+
+    const record = shapeAsPropertyRecord(parsed, address, 'sarasota_pao');
+    record._source = 'county';
+    record._raw = {
+      ...(record._raw || {}),
+      _source: 'county',
+      _provider: 'sarasota_pao',
+      parcelId: search.parcelId,
+      situsAddress: search.situsAddress,
+      postalCity: search.city,
+      detailUrl: search.detailUrl,
+    };
+    record.addressLine1 = search.situsAddress || '';
+    record.city = search.city || '';
+    record.state = 'FL';
+    record.county = 'Sarasota';
+    record._provider = 'sarasota_pao';
+    record._aiProviders = ['sarasota_pao'];
+
+    logger.info('[county-property] got Sarasota PAO facts', {
+      elapsedMs: Date.now() - t0,
+      parcelId: search.parcelId,
+      fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
+    });
+    return record;
+  } catch (err) {
+    logger.warn('[county-property] Sarasota PAO errored', {
+      elapsedMs: Date.now() - t0,
+      error: summarizeProviderError(err),
+    });
+    return null;
+  }
+}
+
+async function lookupPropertyFromCharlottePAO(address, options = {}) {
+  if (!address || typeof address !== 'string' || address.trim().length < 5) return null;
+  if (!shouldQueryCharlottePAO(address)) return null;
+
+  const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const t0 = Date.now();
+
+  try {
+    const search = await searchCharlotteParcel(address, timeoutMs, t0);
+    if (!search?.parcelId) return null;
+
+    const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
+    if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+    const [detailResult, ownershipResult] = await Promise.allSettled([
+      fetchCountyText(charlotteRecordUrl(search.parcelId), remainingMs, {
+        headers: {
+          Referer: `${CHARLOTTE_PAO_BASE}/RPSearchEnter.asp`,
+        },
+      }),
+      fetchCharlotteOwnership(search.parcelId, remainingMs),
+    ]);
+    if (detailResult.status === 'rejected') throw detailResult.reason;
+    const detail = detailResult.value;
+    const ownership = ownershipResult.status === 'fulfilled' ? ownershipResult.value : null;
+    if (ownershipResult.status === 'rejected') {
+      logger.warn('[county-property] Charlotte PAO ownership fetch failed', {
+        elapsedMs: Date.now() - t0,
+        parcelId: search.parcelId,
+        error: summarizeProviderError(ownershipResult.reason),
+      });
+    }
+
+    const parsed = parseCharlottePaoRecord({
+      address,
+      search,
+      detailHtml: detail.text,
+      ownership,
+    });
+    if (!hasAnyPropertyFact(parsed)) {
+      logger.info('[county-property] Charlotte PAO found parcel but no usable facts', {
+        elapsedMs: Date.now() - t0,
+        parcelId: search.parcelId,
+      });
+      return null;
+    }
+
+    const record = shapeAsPropertyRecord(parsed, address, 'charlotte_pao');
+    record._source = 'county';
+    record._raw = {
+      ...(record._raw || {}),
+      _source: 'county',
+      _provider: 'charlotte_pao',
+      parcelId: search.parcelId,
+      situsAddress: search.situsAddress,
+      postalCity: search.city,
+      zipCode: search.zipCode,
+      ownership: ownership?.attributes || null,
+      detailUrl: charlotteRecordUrl(search.parcelId),
+    };
+    record.addressLine1 = search.situsAddress || '';
+    record.city = search.city || '';
+    record.state = 'FL';
+    record.zipCode = search.zipCode || '';
+    record.county = 'Charlotte';
+    record._provider = 'charlotte_pao';
+    record._aiProviders = ['charlotte_pao'];
+
+    logger.info('[county-property] got Charlotte PAO facts', {
+      elapsedMs: Date.now() - t0,
+      parcelId: search.parcelId,
+      fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
+    });
+    return record;
+  } catch (err) {
+    logger.warn('[county-property] Charlotte PAO errored', {
+      elapsedMs: Date.now() - t0,
+      error: summarizeProviderError(err),
+    });
+    return null;
+  }
+}
+
+async function lookupPropertyFromCountyRecords(address, options = {}) {
+  const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const t0 = Date.now();
+  const providers = [
+    lookupPropertyFromManateePAO,
+    lookupPropertyFromSarasotaPAO,
+    lookupPropertyFromCharlottePAO,
+  ];
+
+  for (const provider of providers) {
+    const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
+    if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+    const record = await provider(address, { timeoutMs: remainingMs }).catch((err) => {
+      logger.warn('[county-property] provider lookup failed before AI fallback', {
+        provider: provider.name,
+        error: summarizeProviderError(err),
+      });
+      return null;
+    });
+    if (record) return record;
+  }
+  return null;
+}
+
 async function lookupPropertyFromAI(address) {
   if (!process.env.ANTHROPIC_API_KEY) {
     logger.info('[ai-property] skipped — ANTHROPIC_API_KEY not set');
@@ -565,7 +799,7 @@ async function lookupPropertyFromGemini(address) {
 }
 
 async function lookupPropertyFromAITrio(address) {
-  const countyRecord = await lookupPropertyFromManateePAO(address).catch((err) => {
+  const countyRecord = await lookupPropertyFromCountyRecords(address).catch((err) => {
     logger.warn('[county-property] lookup failed before AI fallback', {
       error: summarizeProviderError(err),
     });
@@ -641,6 +875,142 @@ async function fetchManateePaoJson(url, timeoutMs, init = {}) {
   }
 }
 
+async function searchSarasotaParcel(address, timeoutMs, startedAt = Date.now()) {
+  const candidates = countyAddressSearchCandidates(address);
+  for (const candidate of candidates) {
+    const requestTimeoutMs = remainingCountyLookupMs(startedAt, timeoutMs);
+    if (requestTimeoutMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+    const body = new URLSearchParams();
+    body.set('AddressKeywords', candidate);
+    body.set('OwnerKeywords', '');
+    body.set('Strap', '');
+    body.set('Subdivision', '');
+
+    const response = await fetchCountyText(SARASOTA_PAO_SEARCH_URL, requestTimeoutMs, {
+      method: 'POST',
+      body,
+      headers: {
+        Origin: SARASOTA_PAO_BASE,
+        Referer: `${SARASOTA_PAO_BASE}/propertysearch/`,
+      },
+    });
+    const match = pickSarasotaSearchResult(response.text, address, response.url);
+    if (!match?.parcelId) continue;
+
+    let detailHtml = response.text;
+    if (!/Property Record Information/i.test(detailHtml)) {
+      const detailTimeoutMs = remainingCountyLookupMs(startedAt, timeoutMs);
+      if (detailTimeoutMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+      detailHtml = (await fetchCountyText(sarasotaDetailUrl(match.parcelId), detailTimeoutMs, {
+        headers: { Referer: `${SARASOTA_PAO_BASE}/propertysearch/` },
+      })).text;
+    }
+    const detailMatch = pickSarasotaSearchResult(detailHtml, address, sarasotaDetailUrl(match.parcelId));
+    if (detailMatch?.parcelId) {
+      return {
+        ...detailMatch,
+        detailUrl: sarasotaDetailUrl(detailMatch.parcelId),
+        html: detailHtml,
+      };
+    }
+  }
+  return null;
+}
+
+async function fetchSarasotaPrimaryBuildingDetail(detailHtml, timeoutMs, startedAt = Date.now()) {
+  const link = pickSarasotaPrimaryBuildingLink(detailHtml);
+  if (!link?.href) return null;
+
+  const requestTimeoutMs = remainingCountyLookupMs(startedAt, timeoutMs);
+  if (requestTimeoutMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+  const response = await fetchCountyText(resolveCountyUrl(SARASOTA_PAO_BASE, link.href), requestTimeoutMs, {
+    headers: {
+      Referer: `${SARASOTA_PAO_BASE}/propertysearch/`,
+    },
+  });
+  return response.text;
+}
+
+async function searchCharlotteParcel(address, timeoutMs, startedAt = Date.now()) {
+  const candidates = countyAddressSearchCandidates(address);
+  for (const candidate of candidates) {
+    const requestTimeoutMs = remainingCountyLookupMs(startedAt, timeoutMs);
+    if (requestTimeoutMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+    const data = await fetchCharlotteAddressCandidates(candidate, requestTimeoutMs);
+    const match = pickCharlotteAddressResult(data, address);
+    if (match) return match;
+  }
+  return null;
+}
+
+async function fetchCharlotteAddressCandidates(candidate, timeoutMs) {
+  const params = new URLSearchParams();
+  params.set('f', 'json');
+  params.set('where', `STANDARD = '${escapeArcgisSqlLiteral(candidate)}'`);
+  params.set('outFields', 'NUMBER,STREET,STANDARD,ZIPCODE,POSTOFFICE,ACCOUNT,ACTIVE');
+  params.set('returnGeometry', 'false');
+  return fetchCountyJson(`${CHARLOTTE_GIS_ADDRESS_URL}?${params.toString()}`, timeoutMs, {
+    headers: {
+      Referer: 'https://agis.charlottecountyfl.gov/ccgis/',
+    },
+  });
+}
+
+async function fetchCharlotteOwnership(parcelId, timeoutMs) {
+  const params = new URLSearchParams();
+  params.set('f', 'json');
+  params.set('where', `ACCOUNT = '${escapeArcgisSqlLiteral(parcelId)}'`);
+  params.set('outFields', [
+    'ACCOUNT',
+    'landuse',
+    'description',
+    'usecode',
+    'propertyaddress',
+    'city',
+    'zipcode',
+    'FullPropertyAddress',
+    'SHAPE_Area',
+    'AccountLink',
+  ].join(','));
+  params.set('returnGeometry', 'true');
+  const data = await fetchCountyJson(`${CHARLOTTE_GIS_OWNERSHIP_URL}?${params.toString()}`, timeoutMs, {
+    headers: {
+      Referer: 'https://agis.charlottecountyfl.gov/ccgis/',
+    },
+  });
+  return data?.features?.[0] || null;
+}
+
+async function fetchCountyText(url, timeoutMs, init = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; WavesPropertyLookup/1.0)',
+        ...(init.headers || {}),
+      },
+    });
+    if (!resp.ok) throw new Error(`County lookup HTTP ${resp.status}`);
+    return {
+      text: await resp.text(),
+      url: resp.url || url,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchCountyJson(url, timeoutMs, init = {}) {
+  const response = await fetchCountyText(url, timeoutMs, init);
+  return JSON.parse(response.text);
+}
+
 function manateeAddressSearchCandidates(address) {
   const street = normalizeCountyStreetLine(address);
   if (!street) return [];
@@ -656,6 +1026,17 @@ function manateeAddressSearchCandidates(address) {
   return [...new Set(candidates.filter((candidate) => candidate.length >= 5))];
 }
 
+function countyAddressSearchCandidates(address) {
+  const street = normalizeCountyStreetLine(address);
+  if (!street) return [];
+
+  const candidates = [street];
+  const withoutSuffix = removeStreetSuffix(street);
+  if (withoutSuffix && withoutSuffix !== street) candidates.push(withoutSuffix);
+
+  return [...new Set(candidates.filter((candidate) => candidate.length >= 5))];
+}
+
 function shouldQueryManateePAO(address) {
   const zip = extractAddressZip(address);
   if (zip && MANATEE_ZIPS.has(zip)) return true;
@@ -663,6 +1044,24 @@ function shouldQueryManateePAO(address) {
   const city = extractCommaCity(address);
   if (!city) return false;
   return MANATEE_CITY_NAMES.has(city);
+}
+
+function shouldQuerySarasotaPAO(address) {
+  const zip = extractAddressZip(address);
+  if (zip && SARASOTA_ZIPS.has(zip)) return true;
+
+  const city = extractCommaCity(address);
+  if (!city) return false;
+  return SARASOTA_CITY_NAMES.has(city);
+}
+
+function shouldQueryCharlottePAO(address) {
+  const zip = extractAddressZip(address);
+  if (zip && CHARLOTTE_ZIPS.has(zip)) return true;
+
+  const city = extractCommaCity(address);
+  if (!city) return false;
+  return CHARLOTTE_CITY_NAMES.has(city);
 }
 
 function extractAddressZip(address) {
@@ -857,6 +1256,148 @@ function cleanManateeSearchMatch(row) {
   return match;
 }
 
+function pickSarasotaSearchResult(html, address, finalUrl = '') {
+  const detailParcelId = extractSarasotaDetailParcelId(html, finalUrl);
+  if (detailParcelId) {
+    const situsAddress = extractSarasotaSitusAddress(html);
+    const match = {
+      parcelId: detailParcelId,
+      situsAddress,
+      city: extractCountyResultCity(situsAddress),
+      detailUrl: sarasotaDetailUrl(detailParcelId),
+    };
+    return isUniqueCountyAddressMatch([match], address, shouldRequireSarasotaResultCityMatch(address));
+  }
+
+  const rows = parseSarasotaSearchResults(html);
+  return isUniqueCountyAddressMatch(rows, address, shouldRequireSarasotaResultCityMatch(address));
+}
+
+function parseSarasotaSearchResults(html) {
+  const rows = [];
+  const seen = new Set();
+  const re = /<a\b[^>]*href=["']\/propertysearch\/parcel\/details\/(\d+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = re.exec(String(html || '')))) {
+    const parcelId = match[1];
+    const text = cleanHtmlText(match[2]);
+    if (!text || /^\d+$/.test(text) || /^see more/i.test(text)) continue;
+
+    const key = `${parcelId}|${normalizeCountyStreetLine(text)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
+      parcelId,
+      situsAddress: text,
+      city: extractCountyResultCity(text),
+      detailUrl: sarasotaDetailUrl(parcelId),
+    });
+  }
+  return rows;
+}
+
+function pickCharlotteAddressResult(data, address) {
+  const rows = (Array.isArray(data?.features) ? data.features : [])
+    .map((feature) => feature?.attributes || {})
+    .filter((row) => row.ACCOUNT && row.STANDARD)
+    .filter((row) => !row.ACTIVE || String(row.ACTIVE).toUpperCase() === 'Y')
+    .map((row) => ({
+      parcelId: cleanHtmlText(row.ACCOUNT),
+      situsAddress: cleanHtmlText(row.STANDARD),
+      city: cleanHtmlText(row.POSTOFFICE),
+      zipCode: cleanHtmlText(row.ZIPCODE),
+      detailUrl: charlotteRecordUrl(row.ACCOUNT),
+    }));
+  return isUniqueCountyAddressMatch(rows, address, shouldRequireCharlotteResultCityMatch(address));
+}
+
+function isUniqueCountyAddressMatch(rows, address, requiresCityMatch) {
+  const target = normalizeCountyStreetLine(address);
+  const targetCity = requiresCityMatch ? extractCommaCity(address) : null;
+  if (!target || (requiresCityMatch && !targetCity)) return null;
+
+  const matches = rows
+    .map((row) => ({ ...row, normalizedAddress: normalizeCountyStreetLine(row.situsAddress) }))
+    .filter((row) => row.parcelId && row.situsAddress && row.normalizedAddress === target)
+    .filter((row) => {
+      if (!targetCity) return true;
+      const rowCity = normalizeCountyCityName(row.city) || extractCountyResultCity(row.situsAddress);
+      return rowCity === targetCity;
+    });
+
+  const unique = dedupeCountyMatches(matches);
+  if (unique.length !== 1) return null;
+
+  const { normalizedAddress, ...match } = unique[0];
+  return match;
+}
+
+function dedupeCountyMatches(matches) {
+  const unique = new Map();
+  for (const row of matches) {
+    const key = [
+      row.parcelId,
+      row.normalizedAddress,
+      normalizeCountyCityName(row.city),
+      row.zipCode || '',
+    ].join('|');
+    if (!unique.has(key)) unique.set(key, row);
+  }
+  return [...unique.values()];
+}
+
+function shouldRequireSarasotaResultCityMatch(address) {
+  const zip = extractAddressZip(address);
+  if (zip && SARASOTA_SHARED_ZIPS.has(zip)) return true;
+  return !(zip && SARASOTA_ZIPS.has(zip));
+}
+
+function shouldRequireCharlotteResultCityMatch(address) {
+  const zip = extractAddressZip(address);
+  if (zip && CHARLOTTE_SHARED_ZIPS.has(zip)) return true;
+  return !(zip && CHARLOTTE_ZIPS.has(zip));
+}
+
+function extractCountyResultCity(value) {
+  const normalized = normalizeCountyCityName(String(value || '')
+    .replace(/\b\d{5}(?:-\d{4})?\s*$/i, ''))
+    .replace(/\s+FL(?:ORIDA)?$/, '')
+    .trim();
+  return extractTrailingCountyCity(normalized) || '';
+}
+
+function extractSarasotaDetailParcelId(html, finalUrl = '') {
+  return String(finalUrl || '').match(/\/propertysearch\/parcel\/details\/(\d+)/i)?.[1]
+    || String(html || '').match(/Property Record Information for\s+(\d+)/i)?.[1]
+    || null;
+}
+
+function extractSarasotaSitusAddress(html) {
+  return cleanHtmlText(String(html || '').match(/Situs Address:\s*<\/li>\s*<li[^>]*>([\s\S]*?)<\/li>/i)?.[1]);
+}
+
+function sarasotaDetailUrl(parcelId) {
+  return `${SARASOTA_PAO_DETAIL_URL}/${encodeURIComponent(parcelId)}`;
+}
+
+function charlotteRecordUrl(parcelId) {
+  const params = new URLSearchParams({
+    acct: String(parcelId || '').trim(),
+    gen: 'T',
+    tax: 'T',
+    bld: 'T',
+    oth: 'T',
+    sal: 'T',
+    lnd: 'T',
+    leg: 'T',
+  });
+  return `${CHARLOTTE_PAO_RECORD_URL}?${params.toString()}`;
+}
+
+function escapeArcgisSqlLiteral(value) {
+  return String(value || '').replace(/'/g, "''");
+}
+
 function parseManateePaoRecord({ address, search, land, buildings }) {
   const buildingRows = parsePaoRows(buildings);
   const landRows = parsePaoRows(land);
@@ -882,6 +1423,126 @@ function parseManateePaoRecord({ address, search, land, buildings }) {
     county: 'Manatee',
     formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
   };
+}
+
+function parseSarasotaPaoRecord({ address, search, detailHtml, buildingDetailHtml }) {
+  const buildingRows = parseHtmlTableRows(findHtmlTableById(detailHtml, 'Buildings'));
+  const primaryBuilding = pickPrimaryHtmlBuilding(buildingRows, ['Living Area', 'Gross Area']);
+  const propertyUse = extractHtmlStrongLabelValue(detailHtml, 'Property Use');
+  const lotSize = coercePaoSqFootage(extractHtmlStrongLabelValue(detailHtml, 'Land Area'));
+  const detailFacts = parseSarasotaBuildingDetail(buildingDetailHtml);
+  const baths = coerceFloat(primaryBuilding.Baths, 0, 15);
+  const halfBaths = coerceFloat(primaryBuilding['Half Baths'], 0, 15) || 0;
+  const source = sarasotaDetailUrl(search.parcelId);
+  const situsAddress = search.situsAddress || extractSarasotaSitusAddress(detailHtml);
+  const city = search.city || extractCountyResultCity(situsAddress);
+
+  return {
+    squareFootage: coerceFirstInt([detailFacts.squareFootage, primaryBuilding['Living Area']], 500, 15000),
+    lotSize,
+    yearBuilt: coerceFirstInt([detailFacts.yearBuilt, primaryBuilding['Year Built']], 1900, new Date().getFullYear() + 1),
+    bedrooms: coerceFirstInt([detailFacts.bedrooms, primaryBuilding.Beds], 1, 15),
+    bathrooms: detailFacts.bathrooms ?? (baths == null ? null : baths + (halfBaths * 0.5)),
+    stories: coerceFirstInt([detailFacts.stories, primaryBuilding.Stories], 1, 4),
+    propertyType: normalizeCountyPropertyType(detailFacts.propertyType || propertyUse),
+    constructionMaterial: normalizeCountyConstruction(`${detailFacts.frame || ''} ${detailFacts.exteriorWalls || ''}`),
+    roofType: normalizeCountyRoof(`${detailFacts.roofMaterial || ''} ${detailFacts.roofStructure || ''}`),
+    source,
+    confidence: 'high',
+    county: 'Sarasota',
+    formattedAddress: situsAddress || [city, 'FL'].filter(Boolean).join(', ') || address,
+  };
+}
+
+function parseSarasotaBuildingDetail(html) {
+  if (!html) return {};
+  const bathrooms = coerceFloat(extractHtmlBulletValue(html, 'Bathrooms'), 0, 15);
+  const halfBaths = coerceFloat(extractHtmlBulletValue(html, 'Half Baths'), 0, 15) || 0;
+  return {
+    propertyType: extractHtmlBulletValue(html, 'Building Type'),
+    squareFootage: coerceInt(extractHtmlBulletValue(html, 'Finished Area S.F'), 500, 15000),
+    yearBuilt: coerceInt(extractHtmlBulletValue(html, 'Year Built'), 1900, new Date().getFullYear() + 1),
+    bedrooms: coerceInt(extractHtmlBulletValue(html, 'Bedrooms'), 1, 15),
+    bathrooms: bathrooms == null ? null : bathrooms + (halfBaths * 0.5),
+    stories: coerceInt(extractHtmlBulletValue(html, 'Number of Stories'), 1, 4),
+    roofMaterial: extractHtmlBulletValue(html, 'Roof Material'),
+    roofStructure: extractHtmlBulletValue(html, 'Roof Structure'),
+    frame: extractHtmlBulletValue(html, 'Frame'),
+    exteriorWalls: extractHtmlBulletValue(html, 'Exterior Walls'),
+  };
+}
+
+function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
+  const buildingRows = parseHtmlTableRows(findHtmlTableByCaption(detailHtml, 'Building Information'));
+  const componentRows = parseHtmlTableRows(findHtmlTableByCaption(detailHtml, 'Building Component Information'));
+  const primaryBuilding = pickPrimaryHtmlBuilding(buildingRows, ['A/C Area', 'Area', 'Total Area']);
+  const ownershipAttrs = ownership?.attributes || {};
+  const situsAddress = search.situsAddress || extractCharlottePairedValue(detailHtml, 'Property Address');
+  const cityZip = extractCharlottePairedValue(detailHtml, 'Property City & Zip');
+  const city = search.city || extractCharlotteCity(cityZip) || cleanHtmlText(ownershipAttrs.city);
+  const zipCode = search.zipCode || extractAddressZip(cityZip) || cleanHtmlText(ownershipAttrs.zipcode);
+  const currentUse = extractCharlottePairedValue(detailHtml, 'Current Use') || ownershipAttrs.description || ownershipAttrs.landuse;
+  const source = charlotteRecordUrl(search.parcelId);
+
+  return {
+    squareFootage: coerceFirstInt([primaryBuilding['A/C Area'], primaryBuilding.Area, primaryBuilding['Total Area']], 500, 15000),
+    lotSize: coerceCharlotteOwnershipLotSize(ownership),
+    yearBuilt: coerceInt(primaryBuilding['Year Built'], 1900, new Date().getFullYear() + 1),
+    bedrooms: coerceInt(primaryBuilding.Bedrooms, 1, 15),
+    bathrooms: null,
+    stories: coerceInt(primaryBuilding.Floors, 1, 4),
+    propertyType: normalizeCountyPropertyType(`${currentUse || ''} ${primaryBuilding.Description || ''}`),
+    constructionMaterial: normalizeCountyConstruction(findCharlotteComponentDescription(componentRows, 'Exterior Walls')),
+    roofType: normalizeCountyRoof(findCharlotteComponentDescription(componentRows, 'Roofing')),
+    source,
+    confidence: 'high',
+    county: 'Charlotte',
+    formattedAddress: [situsAddress, city, 'FL', zipCode].filter(Boolean).join(', ') || address,
+  };
+}
+
+function pickPrimaryHtmlBuilding(rows, areaFields) {
+  const index = pickPrimaryHtmlBuildingIndex(rows, areaFields);
+  return index >= 0 ? rows[index] : {};
+}
+
+function pickPrimaryHtmlBuildingIndex(rows, areaFields) {
+  let bestIndex = -1;
+  let bestArea = -1;
+  rows.forEach((row, index) => {
+    const area = coerceFirstInt(areaFields.map((field) => row[field]), 1, 100000) || 0;
+    if (area > bestArea) {
+      bestArea = area;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+
+function findCharlotteComponentDescription(rows, category) {
+  const match = rows.find((row) => normalizeCountyCityName(row.Category) === normalizeCountyCityName(category));
+  return match?.Description || '';
+}
+
+function coerceCharlotteOwnershipLotSize(ownership) {
+  const attrs = ownership?.attributes || {};
+  const areaSqMeters = Number(attrs.SHAPE_Area);
+  if (!Number.isFinite(areaSqMeters) || areaSqMeters <= 0) return null;
+
+  const latitude = webMercatorGeometryLatitude(ownership?.geometry);
+  const correctedSqMeters = latitude == null
+    ? areaSqMeters
+    : areaSqMeters * (Math.cos(latitude * Math.PI / 180) ** 2);
+  return clampLotSqft(Math.round(correctedSqMeters * 10.76391041671));
+}
+
+function webMercatorGeometryLatitude(geometry) {
+  const rings = Array.isArray(geometry?.rings) ? geometry.rings : [];
+  const points = rings.flat().filter((point) => Array.isArray(point) && Number.isFinite(point[1]));
+  if (!points.length) return null;
+  const avgY = points.reduce((sum, point) => sum + point[1], 0) / points.length;
+  const earthRadiusMeters = 6378137;
+  return (Math.atan(Math.sinh(avgY / earthRadiusMeters)) * 180) / Math.PI;
 }
 
 function pickPrimaryManateeBuilding(buildingRows) {
@@ -935,6 +1596,130 @@ function cleanPaoCell(value) {
   return String(value).replace(/^;+|;+$/g, '').replace(/;/g, '; ').replace(/\s+/g, ' ').trim();
 }
 
+function findHtmlTableById(html, id) {
+  const re = new RegExp(`<table\\b(?=[^>]*\\bid=["']${escapeRegex(id)}["'])[^>]*>[\\s\\S]*?<\\/table>`, 'i');
+  return String(html || '').match(re)?.[0] || '';
+}
+
+function findHtmlTableByCaption(html, caption) {
+  const tables = String(html || '').match(/<table\b[\s\S]*?<\/table>/gi) || [];
+  const target = normalizeCountyCityName(caption);
+  return tables.find((table) => {
+    const tableCaption = cleanHtmlText(table.match(/<caption\b[^>]*>([\s\S]*?)<\/caption>/i)?.[1]);
+    return normalizeCountyCityName(tableCaption) === target;
+  }) || '';
+}
+
+function parseHtmlTableRows(tableHtml) {
+  if (!tableHtml) return [];
+  const rowHtml = String(tableHtml).match(/<tr\b[\s\S]*?<\/tr>/gi) || [];
+  const headerRow = rowHtml.find((row) => /<th\b/i.test(row)) || '';
+  const headers = parseHtmlCells(headerRow).map(cleanHtmlText);
+  if (!headers.length) return [];
+
+  return rowHtml
+    .filter((row) => /<td\b/i.test(row))
+    .map((row) => {
+      const cells = parseHtmlCells(row);
+      return cells.reduce((out, cell, index) => {
+        const header = headers[index];
+        if (!header) return out;
+        out[header] = cleanHtmlText(cell);
+        const href = cell.match(/<a\b[^>]*href=["']([^"']+)["']/i)?.[1];
+        if (href) out[`${header}Href`] = decodeHtmlEntities(href);
+        return out;
+      }, {});
+    });
+}
+
+function parseHtmlCells(rowHtml) {
+  const cells = [];
+  const re = /<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]>/gi;
+  let match;
+  while ((match = re.exec(String(rowHtml || '')))) cells.push(match[1]);
+  return cells;
+}
+
+function extractHtmlStrongLabelValue(html, label) {
+  const re = new RegExp(`<strong>\\s*${escapeRegex(label)}\\s*:\\s*<\\/strong>\\s*([\\s\\S]*?)<\\/li>`, 'i');
+  return cleanHtmlText(String(html || '').match(re)?.[1]);
+}
+
+function extractHtmlBulletValue(html, label) {
+  const re = new RegExp(`<li>\\s*${escapeRegex(label)}\\s*:\\s*(?:<span>)?([\\s\\S]*?)(?:<\\/span>)?\\s*<\\/li>`, 'i');
+  return cleanHtmlText(String(html || '').match(re)?.[1]);
+}
+
+function extractCharlottePairedValue(html, label) {
+  const re = new RegExp(`<strong>\\s*(?:<a\\b[^>]*>)?\\s*${escapeRegex(label)}\\s*:\\s*(?:<\\/a>)?\\s*(?:&nbsp;)?\\s*<\\/strong>\\s*<\\/div>\\s*<div\\b[^>]*>([\\s\\S]*?)<\\/div>`, 'i');
+  return cleanHtmlText(String(html || '').match(re)?.[1]);
+}
+
+function extractCharlotteCity(value) {
+  return normalizeCountyCityName(String(value || '').replace(/\b\d{5}(?:-\d{4})?\b.*$/i, ''));
+}
+
+function extractSarasotaBuildingLinks(html) {
+  const table = findHtmlTableById(html, 'Buildings');
+  const links = [];
+  const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = re.exec(table))) {
+    links.push({
+      href: decodeHtmlEntities(match[1]),
+      text: cleanHtmlText(match[2]),
+    });
+  }
+  return links;
+}
+
+function pickSarasotaPrimaryBuildingLink(html) {
+  const buildingRows = parseHtmlTableRows(findHtmlTableById(html, 'Buildings'));
+  const primaryIndex = pickPrimaryHtmlBuildingIndex(buildingRows, ['Living Area', 'Gross Area']);
+  const primaryBuilding = primaryIndex >= 0 ? buildingRows[primaryIndex] : null;
+  const primaryHrefKey = primaryBuilding && Object.keys(primaryBuilding).find((key) => key.endsWith('Href'));
+  if (primaryHrefKey) {
+    const textKey = primaryHrefKey.replace(/Href$/, '');
+    return {
+      href: primaryBuilding[primaryHrefKey],
+      text: primaryBuilding[textKey] || '',
+    };
+  }
+
+  const links = extractSarasotaBuildingLinks(html);
+  return links[primaryIndex] || links[0] || null;
+}
+
+function cleanHtmlText(value) {
+  return decodeHtmlEntities(String(value ?? '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim());
+}
+
+function decodeHtmlEntities(value) {
+  return String(value ?? '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function resolveCountyUrl(base, href) {
+  return new URL(href, base).toString();
+}
+
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function parseManateeRooms(value) {
   const parts = String(value || '').split('/').map((part) => Number(part));
   const bedrooms = Number.isFinite(parts[0]) && parts[0] > 0 ? Math.round(parts[0]) : null;
@@ -947,7 +1732,11 @@ function parseManateeRooms(value) {
 }
 
 function normalizeManateePropertyType(type, classification) {
-  const text = `${type || ''} ${classification || ''}`.toUpperCase();
+  return normalizeCountyPropertyType(`${type || ''} ${classification || ''}`);
+}
+
+function normalizeCountyPropertyType(value) {
+  const text = String(value || '').toUpperCase();
   if (/HOA|COMMON\s+AREA/.test(text)) return 'HOA Common Area';
   if (/MEDICAL/.test(text)) return 'Medical Office';
   if (/OFFICE/.test(text)) return 'Office';
@@ -956,17 +1745,22 @@ function normalizeManateePropertyType(type, classification) {
   if (/RESTAURANT/.test(text)) return 'Restaurant';
   if (/SCHOOL/.test(text)) return 'School';
   if (/INDUSTRIAL/.test(text)) return 'Industrial';
+  if (/GOVERNMENT|MUNICIPAL/.test(text)) return 'Government Municipal';
   if (/\bCOM\b|\bCOMMERCIAL\b/.test(text)) return 'Commercial';
   if (/TOWN\s*HOME|TOWN\s*HOUSE|TOWNHOUSE/.test(text)) return 'Townhome';
   if (/DUPLEX/.test(text)) return 'Duplex';
   if (/APT|APARTMENT/.test(text)) return 'Apartment';
   if (/CONDO|CONDOMINIUM/.test(text)) return 'Condo';
   if (/MULTI|TRIPLEX|QUADPLEX|FOURPLEX/.test(text)) return 'Multifamily';
-  if (/RES|RESIDENTIAL/.test(text)) return 'Single Family';
+  if (/SINGLE\s+FAMILY|RES|RESIDENTIAL/.test(text)) return 'Single Family';
   return null;
 }
 
 function normalizeManateeConstruction(value) {
+  return normalizeCountyConstruction(value);
+}
+
+function normalizeCountyConstruction(value) {
   const text = String(value || '').toUpperCase();
   if (/WOOD|FRAME/.test(text)) return 'WOOD_FRAME';
   if (/BRICK/.test(text)) return 'BRICK';
@@ -976,12 +1770,17 @@ function normalizeManateeConstruction(value) {
 }
 
 function normalizeManateeRoof(material, type) {
-  const text = `${material || ''} ${type || ''}`.toUpperCase();
+  return normalizeCountyRoof(`${material || ''} ${type || ''}`) || String(material || type || '').trim() || null;
+}
+
+function normalizeCountyRoof(value) {
+  const raw = String(value || '').trim();
+  const text = raw.toUpperCase();
   if (/TILE|CLAY|BARREL/.test(text)) return 'TILE';
   if (/SHINGLE|SHINGLES|COMP|ASPHALT/.test(text)) return 'SHINGLE';
   if (/METAL|STEEL|TIN/.test(text)) return 'METAL';
   if (/FLAT|BUILT|TPO|MEMBRANE/.test(text)) return 'FLAT';
-  return String(material || type || '').trim() || null;
+  return raw || null;
 }
 
 function countCriticalPropertyFields(record) {
@@ -1711,19 +2510,32 @@ module.exports = {
   lookupPropertyFromOpenAI,
   lookupPropertyFromGemini,
   lookupPropertyFromManateePAO,
+  lookupPropertyFromSarasotaPAO,
+  lookupPropertyFromCharlottePAO,
+  lookupPropertyFromCountyRecords,
   lookupPropertyFromAITrio,
   _private: {
     buildPropertyDataQuality,
     hasCountyPricingCore,
     hasAnyPropertyFact,
     lookupPropertyFromManateePAO,
+    lookupPropertyFromSarasotaPAO,
+    lookupPropertyFromCharlottePAO,
+    lookupPropertyFromCountyRecords,
     manateeAddressSearchCandidates,
     mergePropertyRecords,
     normalizeLookupPropertyType,
     parseManateePaoRecord,
+    parseSarasotaPaoRecord,
+    parseCharlottePaoRecord,
     parsePropertyJSON,
     pickManateeSearchResult,
+    pickSarasotaPrimaryBuildingLink,
+    pickSarasotaSearchResult,
+    pickCharlotteAddressResult,
     shapeAsPropertyRecord,
     shouldQueryManateePAO,
+    shouldQuerySarasotaPAO,
+    shouldQueryCharlottePAO,
   },
 };

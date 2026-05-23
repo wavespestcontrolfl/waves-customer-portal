@@ -642,3 +642,226 @@ describe('Manatee PAO property lookup facts', () => {
     })).toBe(false);
   });
 });
+
+describe('Sarasota and Charlotte county property lookup facts', () => {
+  const sarasotaSearch = {
+    parcelId: '0757010259',
+    situsAddress: '12606 SHIMMERING OAK CIR VENICE, FL, 34293',
+    city: 'VENICE',
+  };
+  const sarasotaDetailHtml = `
+    <span class="large bold">Property Record Information for 0757010259</span>
+    <li class="med bold">Situs Address:</li>
+    <li>12606 SHIMMERING OAK CIR VENICE, FL, 34293</li>
+    <li><strong>Land Area:</strong> 3,839 Sq.Ft.</li>
+    <li><strong>Property Use:</strong> 0100 - Single Family Detached</li>
+    <table id="Buildings" class="grid">
+      <thead><tr><th>Situs - click address for building details</th><th>Bldg #</th><th>Beds</th><th>Baths</th><th>Half Baths</th><th>Year Built</th><th>Eff Yr Built</th><th>Gross Area</th><th>Living Area</th><th>Stories</th></tr></thead>
+      <tbody><tr><td><a href="/propertysearch/Building/Show?strap=0757010259&num=1">12606 SHIMMERING OAK CIR VENICE, FL, 34293</a></td><td>1</td><td>3</td><td>2</td><td>1</td><td>2015</td><td>2015</td><td>2,490</td><td>1,850</td><td>2</td></tr></tbody>
+    </table>
+  `;
+  const sarasotaBuildingDetailHtml = `
+    <ul class="bullet">
+      <li>Building Type: Single Family Detached</li>
+      <li>Finished Area S.F: 1,850</li>
+      <li>Year Built: 2015</li>
+      <li>Bathrooms:<span>2 <br /></span></li>
+      <li>Bedrooms:<span>3 <br /></span></li>
+      <li>Roof Material:<span>Asphalt or fbrgls shingles <br /></span></li>
+      <li>Roof Structure:<span>Gable <br /></span></li>
+      <li>Frame:<span>Masonry or poured concrete load-bearing walls <br /></span></li>
+      <li>Exterior Walls:<span>Stucco <br /></span></li>
+      <li>Half Baths:<span>1 <br /></span></li>
+      <li>Number of Stories:<span>2 <br /></span></li>
+    </ul>
+  `;
+  const charlotteSearch = {
+    parcelId: '402203459019',
+    situsAddress: '519 WATERSIDE ST',
+    city: 'Port Charlotte',
+    zipCode: '33954',
+  };
+  const charlotteDetailHtml = `
+    <h1>Property Record Information for 402203459019</h1>
+    <div><strong>Property Address:&nbsp;</strong></div><div>519 WATERSIDE ST<br /></div>
+    <div><strong>Property City & Zip:&nbsp;</strong></div><div>PORT CHARLOTTE 33954&nbsp;</div>
+    <div><strong><a href="downloads/land use codes.xlsx">Current Use:</a></strong></div><div>SINGLE FAMILY&nbsp;</div>
+    <table class="prctable"><caption class="blockcaption">Building Information</caption>
+      <tr><th>Building Number</th><th>Description</th><th>Quality</th><th>Building Use</th><th>Year Built</th><th>Year Cond</th><th>Floors</th><th>Rooms</th><th>Bedrooms</th><th>Plumbing Fixtures</th><th>Area</th><th>A/C Area</th><th>Total Area</th></tr>
+      <tr><td>1</td><td>SINGLE FAMILY RES</td><td>2.5</td><td>0100</td><td>1983</td><td>1983</td><td>2</td><td>0</td><td>6</td><td>11</td><td>2544</td><td>2544</td><td>3552</td></tr>
+    </table>
+    <table class="prctable"><caption class="blockcaption">Building Component Information</caption>
+      <tr><th>Bld #</th><th>Code</th><th>Description</th><th>Category</th><th>Area</th><th>Percent</th><th>Year Built</th><th>Year Cond</th><th>Type</th></tr>
+      <tr><td>1</td><td>109</td><td>Frame, Stucco</td><td>Exterior Walls</td><td>0</td><td>100</td><td>1983</td><td>1983</td><td>Construction Component</td></tr>
+      <tr><td>1</td><td>208</td><td>Composition Shingle</td><td>Roofing</td><td>0</td><td>100</td><td>1983</td><td>1983</td><td>Construction Component</td></tr>
+    </table>
+  `;
+
+  test('limits Sarasota and Charlotte county lookups to likely county addresses', () => {
+    expect(_private.shouldQuerySarasotaPAO('12606 Shimmering Oak Cir, Venice, FL 34293')).toBe(true);
+    expect(_private.shouldQuerySarasotaPAO('123 Main St, Sarasota, FL')).toBe(true);
+    expect(_private.shouldQuerySarasotaPAO('519 Waterside St, Port Charlotte, FL 33954')).toBe(false);
+
+    expect(_private.shouldQueryCharlottePAO('519 Waterside St, Port Charlotte, FL 33954')).toBe(true);
+    expect(_private.shouldQueryCharlottePAO('123 Beach Rd, Englewood, FL 34224')).toBe(true);
+    expect(_private.shouldQueryCharlottePAO('12606 Shimmering Oak Cir, Venice, FL 34293')).toBe(false);
+  });
+
+  test('selects exact Sarasota parcel rows and rejects shared ZIP matches without city', () => {
+    const searchHtml = `
+      <h2>Search Results</h2>
+      <span class="reg"><a href="/propertysearch/parcel/details/0757010258">12602 SHIMMERING OAK CIR VENICE, FL, 34293</a></span>
+      <span class="reg"><a href="/propertysearch/parcel/details/0757010259">12606 SHIMMERING OAK CIR VENICE, FL, 34293</a></span>
+    `;
+
+    expect(_private.pickSarasotaSearchResult(searchHtml, '12606 Shimmering Oak Cir, Venice, FL 34293')).toMatchObject({
+      parcelId: '0757010259',
+      city: 'VENICE',
+    });
+    expect(_private.pickSarasotaSearchResult(searchHtml, '12606 Shimmering Oak Cir, FL 34223')).toBeNull();
+  });
+
+  test('parses Sarasota PAO detail and building pages into estimator facts', () => {
+    expect(_private.parseSarasotaPaoRecord({
+      address: '12606 Shimmering Oak Cir, Venice, FL 34293',
+      search: sarasotaSearch,
+      detailHtml: sarasotaDetailHtml,
+      buildingDetailHtml: sarasotaBuildingDetailHtml,
+    })).toMatchObject({
+      squareFootage: 1850,
+      lotSize: 3839,
+      yearBuilt: 2015,
+      bedrooms: 3,
+      bathrooms: 2.5,
+      stories: 2,
+      propertyType: 'Single Family',
+      constructionMaterial: 'CBS',
+      roofType: 'SHINGLE',
+      county: 'Sarasota',
+    });
+  });
+
+  test('keeps Sarasota table facts when building detail is unavailable', () => {
+    expect(_private.parseSarasotaPaoRecord({
+      address: '12606 Shimmering Oak Cir, Venice, FL 34293',
+      search: sarasotaSearch,
+      detailHtml: sarasotaDetailHtml,
+      buildingDetailHtml: null,
+    })).toMatchObject({
+      squareFootage: 1850,
+      lotSize: 3839,
+      yearBuilt: 2015,
+      bedrooms: 3,
+      bathrooms: 2.5,
+      stories: 2,
+      propertyType: 'Single Family',
+      constructionMaterial: null,
+      roofType: null,
+    });
+  });
+
+  test('uses the dominant Sarasota building row for building detail links', () => {
+    const multiBuildingDetailHtml = `
+      <table id="Buildings" class="grid">
+        <thead><tr><th>Situs - click address for building details</th><th>Bldg #</th><th>Gross Area</th><th>Living Area</th></tr></thead>
+        <tbody>
+          <tr><td><a href="/propertysearch/Building/Show?strap=0757010259&num=1">Guest house</a></td><td>1</td><td>900</td><td>800</td></tr>
+          <tr><td><a href="/propertysearch/Building/Show?strap=0757010259&num=2">Main house</a></td><td>2</td><td>3,200</td><td>3,000</td></tr>
+        </tbody>
+      </table>
+    `;
+
+    expect(_private.pickSarasotaPrimaryBuildingLink(multiBuildingDetailHtml)).toMatchObject({
+      href: '/propertysearch/Building/Show?strap=0757010259&num=2',
+      text: 'Main house',
+    });
+  });
+
+  test('selects exact Charlotte GIS address rows and requires city for shared ZIPs', () => {
+    const addressResults = {
+      features: [
+        { attributes: { ACCOUNT: '402203459019', STANDARD: '519 WATERSIDE ST', ZIPCODE: '33954', POSTOFFICE: 'Port Charlotte', ACTIVE: 'Y' } },
+      ],
+    };
+    const sharedResults = {
+      features: [
+        { attributes: { ACCOUNT: '111', STANDARD: '123 BEACH RD', ZIPCODE: '34224', POSTOFFICE: 'Englewood', ACTIVE: 'Y' } },
+      ],
+    };
+
+    expect(_private.pickCharlotteAddressResult(addressResults, '519 Waterside Street, Port Charlotte, FL 33954')).toMatchObject({
+      parcelId: '402203459019',
+      city: 'Port Charlotte',
+    });
+    expect(_private.pickCharlotteAddressResult(sharedResults, '123 Beach Rd, FL 34224')).toBeNull();
+    expect(_private.pickCharlotteAddressResult(sharedResults, '123 Beach Rd, Englewood, FL 34224')).toMatchObject({
+      parcelId: '111',
+    });
+  });
+
+  test('parses Charlotte PAO record card plus GIS ownership area into estimator facts', () => {
+    const parsed = _private.parseCharlottePaoRecord({
+      address: '519 Waterside St, Port Charlotte, FL 33954',
+      search: charlotteSearch,
+      detailHtml: charlotteDetailHtml,
+      ownership: {
+        attributes: {
+          SHAPE_Area: 929.0304,
+          description: 'Single Family',
+        },
+      },
+    });
+
+    expect(parsed).toMatchObject({
+      squareFootage: 2544,
+      lotSize: 10000,
+      yearBuilt: 1983,
+      bedrooms: 6,
+      stories: 2,
+      propertyType: 'Single Family',
+      constructionMaterial: 'WOOD_FRAME',
+      roofType: 'SHINGLE',
+      county: 'Charlotte',
+      formattedAddress: '519 WATERSIDE ST, Port Charlotte, FL, 33954',
+    });
+    expect(parsed.bathrooms).toBeNull();
+  });
+
+  test('keeps Charlotte record-card facts when GIS ownership is unavailable', () => {
+    expect(_private.parseCharlottePaoRecord({
+      address: '519 Waterside St, Port Charlotte, FL 33954',
+      search: charlotteSearch,
+      detailHtml: charlotteDetailHtml,
+      ownership: null,
+    })).toMatchObject({
+      squareFootage: 2544,
+      lotSize: null,
+      yearBuilt: 1983,
+      bedrooms: 6,
+      stories: 2,
+      propertyType: 'Single Family',
+      constructionMaterial: 'WOOD_FRAME',
+      roofType: 'SHINGLE',
+      county: 'Charlotte',
+    });
+  });
+
+  test('new direct county providers keep county provenance', () => {
+    const parsed = _private.parseSarasotaPaoRecord({
+      address: '12606 Shimmering Oak Cir, Venice, FL 34293',
+      search: sarasotaSearch,
+      detailHtml: sarasotaDetailHtml,
+      buildingDetailHtml: sarasotaBuildingDetailHtml,
+    });
+    const record = _private.shapeAsPropertyRecord(parsed, '12606 Shimmering Oak Cir, Venice, FL 34293', 'sarasota_pao');
+    const merged = _private.mergePropertyRecords([record], '12606 Shimmering Oak Cir, Venice, FL 34293');
+
+    expect(merged._source).toBe('county');
+    expect(merged._provider).toBe('sarasota_pao');
+    expect(merged._fieldEvidence.squareFootage).toMatchObject({
+      sourceType: 'county',
+      winningProvider: 'sarasota_pao',
+      fieldVerify: false,
+    });
+  });
+});
