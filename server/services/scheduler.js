@@ -165,6 +165,24 @@ function initScheduledJobs() {
     logger.info('[feature-gates] Cron jobs DISABLED — skipping all scheduled tasks');
     return;
   }
+
+  // =========================================================================
+  // DAILY 3:15AM — Data Hygiene deterministic normalization scan
+  // =========================================================================
+  cron.schedule('15 3 * * *', async () => {
+    if (!isEnabled('dataHygieneScanner')) return;
+    logger.info('Running: Data Hygiene normalization scan');
+    try {
+      const result = await require('./data-hygiene').runScan({
+        mode: 'cron',
+        phases: ['normalization'],
+      });
+      logger.info(`[data-hygiene] scheduled normalization scan finished with status=${result.status}, run_id=${result.run_id}`);
+    } catch (err) {
+      logger.error(`Data Hygiene normalization scan failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // SEO COMMAND CENTER CRONS (gated behind GATE_SEO_INTELLIGENCE)
   // =========================================================================

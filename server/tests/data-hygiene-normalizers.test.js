@@ -1,0 +1,167 @@
+const {
+  normalizeUsState,
+  normalizationCandidatesForCustomer,
+  _private,
+} = require('../services/data-hygiene/normalizers');
+const {
+  buildIdempotencyKey,
+  isSensitiveProposal,
+  stableJson,
+  upsertProposal,
+} = require('../services/data-hygiene/proposal-store');
+
+describe('data hygiene deterministic normalizers', () => {
+  const id = '00000000-0000-0000-0000-000000000001';
+
+  test('emits conservative proposals for customer contact drift', () => {
+    const proposals = normalizationCandidatesForCustomer({
+      id,
+      first_name: ' JOHN ',
+      last_name: 'SMITH',
+      email: 'TEST@Example.COM ',
+      phone: '3174180397',
+      state: 'ma',
+      zip: '2123',
+    });
+
+    expect(proposals.map((p) => [p.rule_id, p.field, p.proposed_value, p.tier])).toEqual([
+      ['name.whitespace_trim', 'first_name', 'JOHN', 'high'],
+      ['name.proper_case_last', 'last_name', 'Smith', 'medium'],
+      ['email.lowercase_trim', 'email', 'test@example.com', 'high'],
+      ['phone.e164', 'phone', '+13174180397', 'high'],
+      ['state.normalize_to_us_2letter', 'state', 'MA', 'high'],
+      ['zip.zero_pad_5', 'zip', '02123', 'high'],
+    ]);
+    expect(new Set(proposals.map((p) => p.scope_id))).toEqual(new Set([id]));
+  });
+
+  test('does not rewrite foreign, vanity, or extension phone numbers', () => {
+    expect(_private.nanpPhoneGuard('+44 20 7946 0958').ok).toBe(false);
+    expect(_private.nanpPhoneGuard('1-800-FLOWERS').ok).toBe(false);
+    expect(_private.nanpPhoneGuard('317-418-0397 x2').ok).toBe(false);
+
+    const base = {
+      id,
+      first_name: 'John',
+      last_name: 'Smith',
+      email: 'john@example.com',
+      state: 'FL',
+      zip: '34202',
+    };
+    expect(normalizationCandidatesForCustomer({ ...base, phone: '+44 20 7946 0958' })
+      .some((p) => p.rule_id === 'phone.e164')).toBe(false);
+    expect(normalizationCandidatesForCustomer({ ...base, phone: '1-800-FLOWERS' })
+      .some((p) => p.rule_id === 'phone.e164')).toBe(false);
+    expect(normalizationCandidatesForCustomer({ ...base, phone: '317-418-0397 x2' })
+      .some((p) => p.rule_id === 'phone.e164')).toBe(false);
+  });
+
+  test('normalizes state names and abbreviations without touching invalid states', () => {
+    expect(normalizeUsState('fl')).toBe('FL');
+    expect(normalizeUsState('Florida')).toBe('FL');
+    expect(normalizeUsState('new york')).toBe('NY');
+    expect(normalizeUsState('not-a-state')).toBeNull();
+  });
+
+  test('does not zero-pad ZIP+4, foreign-looking, or wrong-state postal codes', () => {
+    const base = {
+      id,
+      first_name: 'John',
+      last_name: 'Smith',
+      email: 'john@example.com',
+      phone: '+13174180397',
+      state: 'FL',
+    };
+    expect(normalizationCandidatesForCustomer({ ...base, zip: '34470-1234' })
+      .some((p) => p.rule_id === 'zip.zero_pad_5')).toBe(false);
+    expect(normalizationCandidatesForCustomer({ ...base, zip: 'A1A 1A1' })
+      .some((p) => p.rule_id === 'zip.zero_pad_5')).toBe(false);
+    expect(normalizationCandidatesForCustomer({ ...base, zip: '3454' })
+      .some((p) => p.rule_id === 'zip.zero_pad_5')).toBe(false);
+  });
+
+  test('only zero-pads when the proposed ZIP prefix matches the state', () => {
+    const proposals = normalizationCandidatesForCustomer({
+      id,
+      first_name: 'John',
+      last_name: 'Smith',
+      email: 'john@example.com',
+      phone: '+13174180397',
+      state: 'MA',
+      zip: '2123',
+    });
+    expect(proposals.find((p) => p.rule_id === 'zip.zero_pad_5')).toMatchObject({
+      proposed_value: '02123',
+      evidence: { normalized_state: 'MA', zip3: '021' },
+    });
+  });
+
+  test('email lowercase proposals record auto-apply exclusions', () => {
+    const [proposal] = normalizationCandidatesForCustomer({
+      id,
+      first_name: 'John',
+      last_name: 'Smith',
+      email: '"John"@Example.COM',
+      phone: '+13174180397',
+      state: 'FL',
+      zip: '34202',
+    }).filter((p) => p.rule_id === 'email.lowercase_trim');
+
+    expect(proposal.proposed_value).toBe('"john"@example.com');
+    expect(proposal.evidence.auto_apply_eligible).toBe(false);
+    expect(proposal.evidence.auto_apply_exclusions).toContain('quoted_local_part');
+  });
+});
+
+describe('data hygiene proposal idempotency', () => {
+  test('stableJson orders object keys deterministically', () => {
+    expect(stableJson({ b: 2, a: 1 })).toBe(stableJson({ a: 1, b: 2 }));
+  });
+
+  test('idempotency includes scope and proposed value', () => {
+    const base = {
+      resource_type: 'customer',
+      resource_id: '00000000-0000-0000-0000-000000000001',
+      scope_type: 'customer',
+      scope_id: '00000000-0000-0000-0000-000000000001',
+      field: 'email',
+      proposed_value: 'test@example.com',
+      source: 'normalization',
+      rule_id: 'email.lowercase_trim',
+      rule_version: '1',
+      current_value: 'TEST@EXAMPLE.COM',
+      evidence: {},
+    };
+
+    expect(buildIdempotencyKey(base)).toBe(buildIdempotencyKey({ ...base }));
+    expect(buildIdempotencyKey(base)).not.toBe(buildIdempotencyKey({
+      ...base,
+      proposed_value: 'other@example.com',
+    }));
+    expect(buildIdempotencyKey(base)).not.toBe(buildIdempotencyKey({
+      ...base,
+      current_value: ' Test@Example.COM ',
+    }));
+  });
+
+  test('store refuses sensitive proposals until vault redaction is wired', async () => {
+    const proposal = {
+      resource_type: 'property_preferences',
+      resource_id: null,
+      scope_type: 'customer',
+      scope_id: '00000000-0000-0000-0000-000000000001',
+      field: 'lockbox_code',
+      current_value: null,
+      proposed_value: '1234',
+      source: 'message-extraction',
+      rule_id: 'extract.lockbox_code',
+      rule_version: '1',
+      confidence: 0.8,
+      tier: 'medium',
+      evidence: {},
+    };
+
+    expect(isSensitiveProposal(proposal)).toBe(true);
+    await expect(upsertProposal(proposal)).rejects.toThrow(/vault-backed redaction/);
+  });
+});
