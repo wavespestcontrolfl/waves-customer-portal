@@ -1,6 +1,24 @@
+const mockTwilioCreate = jest.fn();
+
+jest.mock('twilio', () => jest.fn(() => ({
+  messages: { create: mockTwilioCreate },
+})));
+jest.mock('../config', () => ({
+  twilio: {
+    accountSid: 'AC_test',
+    authToken: 'auth_test',
+    verifyServiceSid: 'VA_test',
+  },
+}));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-sms-templates', () => ({
   isTemplateActive: jest.fn(async () => true),
+}));
+jest.mock('../services/conversations', () => ({
+  recordTouchpoint: jest.fn(() => Promise.resolve()),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -17,6 +35,7 @@ const { triggerNotification } = require('../services/notification-triggers');
 describe('Twilio internal admin alert redirect', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockTwilioCreate.mockResolvedValue({ sid: 'SM_fallback' });
     process.env.ADAM_PHONE = '+19415993489';
     process.env.WAVES_OFFICE_PHONE = '+19413187612';
     delete process.env.OWNER_SMS_DISABLED;
@@ -55,6 +74,28 @@ describe('Twilio internal admin alert redirect', () => {
       title: 'CANCELLATION ALERT: customer wants to cancel',
       originalMessageType: 'admin_alert',
       originalToMasked: '***7612',
+    }));
+  });
+
+  test('falls back to Twilio SMS when notification redirect does not deliver', async () => {
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: false,
+      push: { subscriptions: 0, sent: 0, failed: 0, skipped: 0 },
+    });
+
+    const result = await TwilioService.sendSMS(
+      '+19415993489',
+      'New lead fallback path',
+      { messageType: 'internal_alert', link: '/admin/leads' },
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      sid: 'SM_fallback',
+    });
+    expect(mockTwilioCreate).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415993489',
+      body: 'New lead fallback path',
     }));
   });
 });

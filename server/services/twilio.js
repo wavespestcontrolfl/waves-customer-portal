@@ -82,6 +82,12 @@ function buildInternalAlertPayload(body, options = {}) {
   };
 }
 
+function internalAlertNotificationDelivered(stats) {
+  if (!stats || stats.error) return false;
+  if (stats.bellWritten) return true;
+  return Number(stats.push?.sent || 0) > 0;
+}
+
 async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
   if (options.allowOwnerSms === true) return null;
   if (!isKnownOwnerPhone(to) || !isInternalAdminAlertType(options.messageType)) return null;
@@ -89,10 +95,16 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
   const payload = buildInternalAlertPayload(body, options);
   try {
     const { triggerNotification } = require("./notification-triggers");
-    await triggerNotification("internal_admin_alert", {
+    const stats = await triggerNotification("internal_admin_alert", {
       ...payload,
       originalToMasked: maskPhone(to),
     });
+    if (!internalAlertNotificationDelivered(stats)) {
+      logger.warn(
+        `[twilio] internal alert notification redirect did not deliver; falling back to Twilio SMS (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
+      );
+      return null;
+    }
     logger.info(
       `[twilio] redirected owner/admin SMS to Waves notification (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
     );
@@ -103,14 +115,8 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
       notificationRedirected: true,
     };
   } catch (err) {
-    logger.error(`[twilio] internal alert notification redirect failed: ${err.message}`);
-    return {
-      success: false,
-      sid: null,
-      suppressed: true,
-      notificationRedirected: false,
-      error: err.message,
-    };
+    logger.error(`[twilio] internal alert notification redirect failed; falling back to Twilio SMS: ${err.message}`);
+    return null;
   }
 }
 
