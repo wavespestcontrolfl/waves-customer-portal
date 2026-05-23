@@ -216,6 +216,10 @@ describe('Manatee PAO property lookup facts', () => {
       ...searchResults,
       rows: [searchResults.rows[0]],
     }, '123 Main St, Sarasota, FL 34243')).toBeNull();
+    expect(_private.pickManateeSearchResult(searchResults, '123 Main St, Apt 2, Sarasota, FL 34243')).toMatchObject({
+      parcelId: '222',
+      city: 'SARASOTA',
+    });
   });
 
   test('allows PAO postal-city aliases when a non-shared Manatee ZIP is present', () => {
@@ -302,6 +306,27 @@ describe('Manatee PAO property lookup facts', () => {
     });
   });
 
+  test('deduplicates identical PAO search rows before deciding uniqueness', () => {
+    const searchResults = {
+      cols: [
+        { title: 'Parcel ID' },
+        { title: 'Property Type' },
+        { title: 'Owner(s)' },
+        { title: 'Situs Address' },
+        { title: 'Postal City' },
+      ],
+      rows: [
+        ['222', 'REAL PROPERTY', '', ';123 MAIN ST;', 'BRADENTON'],
+        ['222', 'REAL PROPERTY', '', ';123 MAIN ST;', 'BRADENTON'],
+      ],
+    };
+
+    expect(_private.pickManateeSearchResult(searchResults, '123 Main St, Bradenton, FL 34211')).toMatchObject({
+      parcelId: '222',
+      city: 'BRADENTON',
+    });
+  });
+
   test('parses Manatee land and building tables into estimator facts', () => {
     const parsed = _private.parseManateePaoRecord({
       address: '8920 49th Ave E, Bradenton, FL 34211',
@@ -324,6 +349,43 @@ describe('Manatee PAO property lookup facts', () => {
       formattedAddress: '8920 49TH AVE E, PALMETTO, FL',
     });
     expect(parsed.source).toBe('https://www.manateepao.gov/parcel/?parid=647302459');
+  });
+
+  test('chooses dominant PAO building row before classifying parcel', () => {
+    const mixedUseBuildings = {
+      ...manateeBuildings,
+      rows: [
+        ['RES', '1', 'RESIDENTIAL', '2017', '2017', 1, '2943', '1200', '2/1/0', 'MASONRY/STUCCO', 'SHINGLES COMP', 'HIP AND/OR GABLE'],
+        ['COM', '2', 'WAREHOUSE', '2017', '2017', 1, '6000', '5000', '', 'METAL', 'METAL', 'METAL'],
+      ],
+    };
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Mixed Use St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: mixedUseBuildings,
+    })).toMatchObject({
+      squareFootage: 5000,
+      propertyType: 'Warehouse',
+      constructionMaterial: 'METAL',
+    });
+  });
+
+  test('treats PAO land SqFootage as square feet', () => {
+    const smallPaoLand = {
+      ...manateeLand,
+      rows: [
+        ['1', 'UNIT', '20', '20', '25', '0.0115', '500', '1.00', ''],
+      ],
+    };
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Small Lot St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: smallPaoLand,
+      buildings: manateeBuildings,
+    }).lotSize).toBe(500);
   });
 
   test('keeps Manatee residential subtypes in estimator categories', () => {
@@ -370,6 +432,13 @@ describe('Manatee PAO property lookup facts', () => {
       land: manateeLand,
       buildings: withType('COM', 'COMMERCIAL OFFICE'),
     }).propertyType).toBe('Office');
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Common Area St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: withType('RES', 'COMMON AREA'),
+    }).propertyType).toBe('HOA Common Area');
   });
 
   test('does not classify wood-frame stucco as CBS', () => {

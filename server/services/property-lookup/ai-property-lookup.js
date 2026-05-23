@@ -660,9 +660,22 @@ function extractAddressZip(address) {
 }
 
 function extractCommaCity(address) {
-  const parts = String(address || '').split(',').map((part) => normalizeCountyCityName(part)).filter(Boolean);
+  const parts = String(address || '').split(',').map((part) => part.trim()).filter(Boolean);
   if (parts.length < 2) return null;
-  return parts[1].replace(/\bFL(?:ORIDA)?\b.*$/i, '').replace(/\s+\d{5}(?:-\d{4})?$/, '').trim();
+
+  for (let index = parts.length - 1; index > 0; index -= 1) {
+    if (/\bFL(?:ORIDA)?\b/i.test(parts[index]) || /\b\d{5}(?:-\d{4})?\b/.test(parts[index])) {
+      return normalizeCitySegment(parts[index - 1]);
+    }
+  }
+
+  return normalizeCitySegment(parts[parts.length - 1]);
+}
+
+function normalizeCitySegment(value) {
+  return normalizeCountyCityName(String(value || '')
+    .replace(/\bFL(?:ORIDA)?\b.*$/i, '')
+    .replace(/\s+\d{5}(?:-\d{4})?$/, ''));
 }
 
 function normalizeCountyCityName(value) {
@@ -777,14 +790,28 @@ function isRelaxedManateeStreetMatch(normalizedAddress, target, targetNoSuffix) 
 }
 
 function pickUniqueManateeMatch(matches, address) {
-  if (matches.length === 1) return cleanManateeSearchMatch(matches[0]);
-  if (matches.length < 2) return null;
+  const uniqueMatches = dedupeManateeMatches(matches);
+  if (uniqueMatches.length === 1) return cleanManateeSearchMatch(uniqueMatches[0]);
+  if (uniqueMatches.length < 2) return null;
 
   const targetCity = extractCommaCity(address);
   if (!targetCity) return null;
 
-  const cityMatches = matches.filter((row) => normalizeCountyCityName(row.city) === targetCity);
+  const cityMatches = uniqueMatches.filter((row) => normalizeCountyCityName(row.city) === targetCity);
   return cityMatches.length === 1 ? cleanManateeSearchMatch(cityMatches[0]) : null;
+}
+
+function dedupeManateeMatches(matches) {
+  const unique = new Map();
+  for (const row of matches) {
+    const key = [
+      row.parcelId,
+      row.normalizedAddress,
+      normalizeCountyCityName(row.city),
+    ].join('|');
+    if (!unique.has(key)) unique.set(key, row);
+  }
+  return [...unique.values()];
 }
 
 function cleanManateeSearchMatch(row) {
@@ -795,13 +822,9 @@ function cleanManateeSearchMatch(row) {
 function parseManateePaoRecord({ address, search, land, buildings }) {
   const buildingRows = parsePaoRows(buildings);
   const landRows = parsePaoRows(land);
-  const primaryBuilding = buildingRows
-    .filter((row) => String(row.Type || row.Classification || '').toUpperCase().includes('RES'))
-    .sort((a, b) => coerceInt(b.LivBus, 0, 100000) - coerceInt(a.LivBus, 0, 100000))[0]
-    || buildingRows.sort((a, b) => coerceInt(b.LivBus, 0, 100000) - coerceInt(a.LivBus, 0, 100000))[0]
-    || {};
+  const primaryBuilding = pickPrimaryManateeBuilding(buildingRows);
 
-  const lotSize = landRows.reduce((sum, row) => sum + (coerceLotSize(row.SqFootage) || 0), 0) || null;
+  const lotSize = landRows.reduce((sum, row) => sum + (coercePaoSqFootage(row.SqFootage) || 0), 0) || null;
   const rooms = parseManateeRooms(primaryBuilding.Rooms);
   const propertyType = normalizeManateePropertyType(primaryBuilding.Type, primaryBuilding.Classification);
   const source = `${MANATEE_PAO_BASE}/parcel/?parid=${encodeURIComponent(search.parcelId)}`;
@@ -821,6 +844,15 @@ function parseManateePaoRecord({ address, search, land, buildings }) {
     county: 'Manatee',
     formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
   };
+}
+
+function pickPrimaryManateeBuilding(buildingRows) {
+  return [...buildingRows]
+    .sort((a, b) => manateeBuildingArea(b) - manateeBuildingArea(a))[0] || {};
+}
+
+function manateeBuildingArea(row) {
+  return coerceInt(row?.LivBus, 1, 100000) || coerceInt(row?.UnRoof, 1, 100000) || 0;
 }
 
 function parsePaoRows(table) {
@@ -873,6 +905,7 @@ function parseManateeRooms(value) {
 
 function normalizeManateePropertyType(type, classification) {
   const text = `${type || ''} ${classification || ''}`.toUpperCase();
+  if (/HOA|COMMON\s+AREA/.test(text)) return 'HOA Common Area';
   if (/TOWN\s*HOME|TOWN\s*HOUSE|TOWNHOUSE/.test(text)) return 'Townhome';
   if (/DUPLEX/.test(text)) return 'Duplex';
   if (/APT|APARTMENT/.test(text)) return 'Apartment';
@@ -885,7 +918,7 @@ function normalizeManateePropertyType(type, classification) {
   if (/RESTAURANT/.test(text)) return 'Restaurant';
   if (/SCHOOL/.test(text)) return 'School';
   if (/INDUSTRIAL/.test(text)) return 'Industrial';
-  if (/COM|COMMERCIAL/.test(text)) return 'Commercial';
+  if (/\bCOM\b|\bCOMMERCIAL\b/.test(text)) return 'Commercial';
   if (/RES|RESIDENTIAL/.test(text)) return 'Single Family';
   return null;
 }
@@ -1015,6 +1048,13 @@ function coerceFirstInt(values, min, max) {
 const SQFT_PER_ACRE = 43560;
 const LOT_SQFT_MIN = 1000;
 const LOT_SQFT_MAX = 200_000;
+
+function coercePaoSqFootage(raw) {
+  if (raw == null || raw === '') return null;
+  const value = typeof raw === 'number' ? raw : parseFirstLotNumber(String(raw));
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.min(Math.round(value), LOT_SQFT_MAX);
+}
 
 function coerceParsedLotSize(raw) {
   if (!raw || typeof raw !== 'object') return coerceLotSize(raw);
