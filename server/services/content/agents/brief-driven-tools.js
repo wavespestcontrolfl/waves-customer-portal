@@ -153,9 +153,13 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       try {
         const filePath = urlToAstroPath(page_url);
         if (!filePath) return { error: `could not resolve page_url ${page_url} to Astro file` };
-        const raw = await gh.getFile(filePath);
-        if (!raw) return { error: `Astro file not found: ${filePath}` };
-        const parsed = fm.parse(raw);
+        const file = await gh.getFile(filePath);
+        if (!file) return { error: `Astro file not found: ${filePath}` };
+        // gh.getFile returns { sha, path, content, raw }. The frontmatter
+        // parser expects a markdown STRING, not the wrapper object —
+        // passing the wrapper yields empty frontmatter and a serialized
+        // object as body, which breaks refresh + meta rewrites.
+        const parsed = fm.parse(file.content);
         return { page_url, file_path: filePath, frontmatter: parsed.data, body: parsed.content };
       } catch (err) {
         return { error: `get_existing_page failed: ${err.message}` };

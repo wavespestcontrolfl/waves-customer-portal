@@ -25,6 +25,12 @@ const { executeBriefTool, getDraft, clearDraft } = require('./brief-driven-tools
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const API_BASE = 'https://api.anthropic.com/v1';
 const BETA_HEADER = 'managed-agents-2026-04-01';
+// Managed Agents now require an environment_id at session creation.
+// Same fallback chain as server/services/lead-response-agent.js so
+// operators can set CONTENT_AGENT_ENVIRONMENT_ID per-agent or fall
+// back to the org-wide ANTHROPIC_ENVIRONMENT_ID.
+const CONTENT_AGENT_ENVIRONMENT_ID =
+  process.env.CONTENT_AGENT_ENVIRONMENT_ID || process.env.ANTHROPIC_ENVIRONMENT_ID;
 
 // ── action → agent map ──────────────────────────────────────────────
 
@@ -156,11 +162,22 @@ class AgentDispatcher {
       };
     }
 
+    if (!CONTENT_AGENT_ENVIRONMENT_ID) {
+      return {
+        ok: false,
+        reason: 'agent_environment_not_configured',
+        env_var_missing: 'CONTENT_AGENT_ENVIRONMENT_ID (or ANTHROPIC_ENVIRONMENT_ID)',
+      };
+    }
+
     const t0 = Date.now();
     let session;
     try {
+      // Field is `agent`, not `agent_id`, per the live API contract
+      // already exercised by server/services/lead-response-agent.js:159.
       session = await apiCall('POST', '/sessions', {
-        agent_id: route.agent_id,
+        agent: route.agent_id,
+        environment_id: CONTENT_AGENT_ENVIRONMENT_ID,
         metadata: { source: 'autonomous-content-engine', opportunity_id: brief.opportunity_id },
       });
     } catch (err) {
@@ -169,13 +186,15 @@ class AgentDispatcher {
     const sessionId = session.id;
 
     // Post the initial input to the session. Schema mirrors the
-    // production content-agent.js pattern: type='user' (not the legacy
-    // 'user_message') and content as an array of text blocks (not a
-    // JSON-stringified payload).
+    // live Managed Agents contract used by lead-response-agent.js:
+    // events POST is wrapped in { events: [...] } and the event
+    // type is 'user.message' with content as text blocks.
     try {
       await apiCall('POST', `/sessions/${sessionId}/events`, {
-        type: 'user',
-        content: [{ type: 'text', text: JSON.stringify(payload) }],
+        events: [{
+          type: 'user.message',
+          content: [{ type: 'text', text: JSON.stringify(payload) }],
+        }],
       });
     } catch (err) {
       return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId };
@@ -254,16 +273,22 @@ class AgentDispatcher {
         // Mirrors managed-agents-2026-04-01 contract used by
         // server/services/lead-response-agent.js.
         if (isCustomToolUse) {
+          // Mirrors lead-response-agent.js:331-335 — events wrapped,
+          // content as text blocks, not a bare JSON string.
           await apiCall('POST', `/sessions/${sessionId}/events`, {
-            type: 'user.custom_tool_result',
-            custom_tool_use_id: toolUseId,
-            content: JSON.stringify(result),
+            events: [{
+              type: 'user.custom_tool_result',
+              custom_tool_use_id: toolUseId,
+              content: [{ type: 'text', text: JSON.stringify(result) }],
+            }],
           });
         } else {
           await apiCall('POST', `/sessions/${sessionId}/events`, {
-            type: 'tool_result',
-            tool_use_id: toolUseId,
-            content: [{ type: 'text', text: JSON.stringify(result) }],
+            events: [{
+              type: 'tool_result',
+              tool_use_id: toolUseId,
+              content: [{ type: 'text', text: JSON.stringify(result) }],
+            }],
           });
         }
         if (getDraft(sessionId)) return; // sink fired; agent finished
@@ -287,7 +312,10 @@ async function* streamSessionEvents(sessionId, deadline) {
   const timeoutMs = Math.max(0, deadline - Date.now());
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${API_BASE}/sessions/${sessionId}/events?stream=true`, {
+    // Dedicated streaming endpoint per the live API (used by
+    // lead-response-agent.js:75). The earlier `?stream=true` form was
+    // a misread of the legacy content-agent prototype.
+    const res = await fetch(`${API_BASE}/sessions/${sessionId}/events/stream`, {
       method: 'GET',
       headers: {
         'x-api-key': ANTHROPIC_API_KEY,
