@@ -328,6 +328,7 @@ app.use('/api/admin/compliance', adminComplianceRoutes);
 app.use('/api/admin/workflows', adminWorkflowRoutes);
 app.use('/api/admin/ads', adminAdsRoutes);
 app.use('/api/admin/seo', adminSeoRoutes);
+app.use('/api/admin/content-registry', require('./routes/admin-content-registry'));
 app.use('/api/admin/content', adminContentRoutes);
 app.use('/api/admin/knowledge', adminKnowledgeRoutes);
 app.use('/api/admin/csr', adminCsrRoutes);
