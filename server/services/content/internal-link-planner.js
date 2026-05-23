@@ -26,6 +26,7 @@ const { CITIES } = require('./scoring-config');
 
 const DEFAULT_LINK_CAP = 5; // per planning run
 const DEFAULT_PER_PAGE_CAP = 1; // per source file per target URL
+const ALLOWED_SITE_HOSTS = new Set(['www.wavespestcontrol.com', 'wavespestcontrol.com']);
 
 // ── anchor candidates (pure) ─────────────────────────────────────────
 
@@ -252,10 +253,12 @@ class InternalLinkPlanner {
    */
   applyTaskToBody(body, task) {
     if (!body || !task) return body;
+    const targetUrl = canonicalInternalPath(task.target_url);
+    if (!targetUrl || pageAlreadyLinksTo(body, targetUrl)) return body;
     const occ = findFirstUnlinkedOccurrence(body, task.anchor_text);
     if (!occ) return body;
     const anchor = body.slice(occ.index, occ.index + occ.length);
-    const replacement = `[${anchor}](${task.target_url})`;
+    const replacement = `[${anchor}](${targetUrl})`;
     return body.slice(0, occ.index) + replacement + body.slice(occ.index + occ.length);
   }
 
@@ -297,8 +300,27 @@ function sameUrl(a, b) {
 }
 
 function canonicalInternalPath(url) {
-  const p = normalizePath(url);
-  if (!p) return '';
+  const raw = String(url || '').trim();
+  if (!raw || /[\u0000-\u001F\\]/.test(raw)) return '';
+
+  let pathname;
+  if (/^https?:\/\//i.test(raw)) {
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      return '';
+    }
+    if (!ALLOWED_SITE_HOSTS.has(parsed.hostname.toLowerCase())) return '';
+    pathname = parsed.pathname;
+  } else if (raw.startsWith('/') && !raw.startsWith('//')) {
+    pathname = raw.replace(/[?#].*$/, '');
+  } else {
+    return '';
+  }
+
+  const p = pathname.replace(/\/+$/, '').toLowerCase();
+  if (!p || !p.startsWith('/') || p.startsWith('//')) return '';
   return `${p}/`;
 }
 
@@ -334,6 +356,7 @@ module.exports.InternalLinkPlanner = InternalLinkPlanner;
 module.exports._internals = {
   DEFAULT_LINK_CAP,
   DEFAULT_PER_PAGE_CAP,
+  ALLOWED_SITE_HOSTS,
   anchorCandidates,
   maskExcludedRegions,
   findFirstUnlinkedOccurrence,

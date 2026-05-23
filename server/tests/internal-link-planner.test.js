@@ -238,6 +238,12 @@ describe('stripHost / sameUrl / deriveUrlFromFile', () => {
   test('canonicalInternalPath strips query/hash and keeps a trailing slash', () => {
     expect(canonicalInternalPath('https://www.wavespestcontrol.com/Pest-Control-Bradenton-FL/?utm=x#faq')).toBe('/pest-control-bradenton-fl/');
   });
+  test('canonicalInternalPath rejects unsafe or external targets', () => {
+    expect(canonicalInternalPath('javascript:alert(1)')).toBe('');
+    expect(canonicalInternalPath('//evil.example/path')).toBe('');
+    expect(canonicalInternalPath('https://evil.example/pest-control/')).toBe('');
+    expect(canonicalInternalPath('/safe-path/')).toBe('/safe-path/');
+  });
   test('deriveUrlFromFile', () => {
     expect(deriveUrlFromFile('blog', 'foo.md')).toBe('/blog/foo/');
     expect(deriveUrlFromFile('services', 'pest-control-bradenton-fl.md')).toBe('/pest-control-bradenton-fl/');
@@ -332,6 +338,9 @@ describe('planForTarget', () => {
   test('returns [] for target with no anchor candidates', () => {
     expect(planner.planForTarget({ url: '/x/' }, { corpus })).toEqual([]);
   });
+  test('returns [] for unsafe target URL', () => {
+    expect(planner.planForTarget({ url: 'javascript:alert(1)', keyword: 'pest control bradenton' }, { corpus })).toEqual([]);
+  });
 });
 
 // ── applyTaskToBody integration ─────────────────────────────────────
@@ -352,6 +361,16 @@ describe('applyTaskToBody', () => {
   test('no-op when the phrase isn\'t present', () => {
     const body = 'Different topic entirely.';
     const task = { anchor_text: 'pest control bradenton', target_url: '/x/' };
+    expect(planner.applyTaskToBody(body, task)).toBe(body);
+  });
+  test('no-op for unsafe task target URL', () => {
+    const body = 'I need pest control bradenton next week.';
+    const task = { anchor_text: 'pest control bradenton', target_url: 'javascript:alert(1)' };
+    expect(planner.applyTaskToBody(body, task)).toBe(body);
+  });
+  test('re-checks existing target links before applying stale tasks', () => {
+    const body = 'I need pest control bradenton next week. [Already linked](/pest-control-bradenton-fl/#faq)';
+    const task = { anchor_text: 'pest control bradenton', target_url: '/pest-control-bradenton-fl/' };
     expect(planner.applyTaskToBody(body, task)).toBe(body);
   });
 });
