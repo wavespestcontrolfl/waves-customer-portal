@@ -350,9 +350,13 @@ const SocialMediaService = {
   async publishToAll({ title, description, link, guid, source, imageUrl, customContent }) {
     const platformResults = [];
 
-    // Generate AI image if no image provided
+    // Generate AI image if no image provided. generateImage() now
+    // delegates to the provider chain (OpenAI → Gemini); the chain
+    // returns null when no provider is configured, so the explicit
+    // GEMINI_API_KEY gate here used to silently disable Instagram on
+    // OpenAI-only deploys.
     let generatedImageUrl = imageUrl || null;
-    if (!generatedImageUrl && process.env.GEMINI_API_KEY) {
+    if (!generatedImageUrl) {
       try {
         const img = await generateImage(title);
         if (img && img.base64) {
