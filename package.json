@@ -30,6 +30,7 @@
     "twilio:flow:verify": "node scripts/twilio/verify-studio-flow-contract.js",
     "verify:blog-schema": "node packages/blog-schema/scripts/verify-vendor.js",
     "sync:blog-schema": "node packages/blog-schema/scripts/sync-from-astro.js",
+    "content:registry:live-status": "node server/scripts/check-content-registry-live-status.js",
     "prepare": "git config core.hooksPath scripts/hooks 2>/dev/null || true",
     "hooks:install": "git config core.hooksPath scripts/hooks"
   },

@@ -19,6 +19,8 @@ const REGISTRY_FIELDS = [
   'sitemap_status',
   'http_status',
   'live_status',
+  'redirect_target_url',
+  'canonical_target_url',
   'reconciliation_status',
   'title',
   'target_keyword',
@@ -169,6 +171,11 @@ async function listContentRegistry({ database = db, query = {} } = {}) {
     .count('* as count')
     .groupBy('source');
 
+  const liveStatusCountsQuery = database('content_registry')
+    .select('live_status')
+    .count('* as count')
+    .groupBy('live_status');
+
   const latestSyncRunQuery = database('content_registry_sync_runs')
     .select(SYNC_RUN_FIELDS)
     .orderBy('started_at', 'desc')
@@ -185,6 +192,7 @@ async function listContentRegistry({ database = db, query = {} } = {}) {
     statusRows,
     contentTypeRows,
     sourceRows,
+    liveStatusRows,
     latestSyncRun,
     recentSyncRuns,
   ] = await Promise.all([
@@ -193,6 +201,7 @@ async function listContentRegistry({ database = db, query = {} } = {}) {
     statusCountsQuery,
     contentTypeCountsQuery,
     sourceCountsQuery,
+    liveStatusCountsQuery,
     latestSyncRunQuery,
     recentSyncRunsQuery,
   ]);
@@ -207,6 +216,7 @@ async function listContentRegistry({ database = db, query = {} } = {}) {
     facets: {
       content_type: rowsByKey(contentTypeRows, 'content_type'),
       source: rowsByKey(sourceRows, 'source'),
+      live_status: rowsByKey(liveStatusRows, 'live_status'),
     },
     latest_sync_run: latestSyncRun || null,
     recent_sync_runs: recentSyncRuns || [],
