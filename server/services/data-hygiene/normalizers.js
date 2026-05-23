@@ -197,6 +197,8 @@ function nameProperCase(field, value) {
 
   const proposed = properCaseName(compact);
   if (!proposed || proposed === current) return null;
+  const guard = properCaseProposalGuard(field, compact, proposed);
+  if (!guard.ok) return null;
 
   return proposal(field, current, proposed, {
     rule_id: field === 'first_name' ? 'name.proper_case_first' : 'name.proper_case_last',
@@ -207,6 +209,55 @@ function nameProperCase(field, value) {
       reason: 'proper_case_is_proposal_only',
     },
   });
+}
+
+function properCaseProposalGuard(field, current, proposed) {
+  if (isAllCapsInitials(current)) {
+    return { ok: false, reason: 'all_caps_initials' };
+  }
+  if (!isAllCapsName(current) && hasInternalCapital(current)) {
+    return { ok: false, reason: 'existing_internal_capital' };
+  }
+  if (introducesMacIntracap(field, current, proposed)) {
+    return { ok: false, reason: 'mac_intracap_false_positive' };
+  }
+  return { ok: true };
+}
+
+function isAllCapsInitials(value) {
+  if (!isAllCapsName(value)) return false;
+  const tokens = value.match(/[A-Za-z]+/g) || [];
+  return tokens.length > 0 && tokens.every((token) => token.length <= 2);
+}
+
+function isAllCapsName(value) {
+  const letters = value.replace(/[^A-Za-z]/g, '');
+  return !!letters && letters === letters.toUpperCase();
+}
+
+function hasInternalCapital(value) {
+  return value
+    .split(/[\s'-]+/)
+    .some((segment) => /[A-Z]/.test(segment.slice(1)));
+}
+
+function introducesMacIntracap(field, current, proposed) {
+  const currentSegments = nameCaseSegments(current);
+  const proposedSegments = nameCaseSegments(proposed);
+  return proposedSegments.some((segment, index) => {
+    if (!/^Mac[A-Z]/.test(segment)) return false;
+    const currentSegment = currentSegments[index] || '';
+    return !isExistingMacIntracap(field, currentSegment);
+  });
+}
+
+function nameCaseSegments(value) {
+  return value.split(/\s+/).flatMap((word) => word.split('-'));
+}
+
+function isExistingMacIntracap(field, segment) {
+  if (/^Mac[A-Z]/.test(segment)) return true;
+  return field === 'last_name' && /^MAC[A-Z]/.test(segment);
 }
 
 function zipZeroPad(value, stateValue) {
@@ -318,5 +369,6 @@ module.exports = {
   _private: {
     emailAutoApplyExclusions,
     nanpPhoneGuard,
+    properCaseProposalGuard,
   },
 };

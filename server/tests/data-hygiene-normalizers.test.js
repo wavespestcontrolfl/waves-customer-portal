@@ -39,6 +39,74 @@ describe('data hygiene deterministic normalizers', () => {
     expect(new Set(proposals.map((p) => p.scope_id))).toEqual(new Set([id]));
   });
 
+  test('proper-case name proposals skip known unsafe casing changes', () => {
+    const base = {
+      id,
+      first_name: 'John',
+      last_name: 'Smith',
+      email: 'john@example.com',
+      phone: '+13174180397',
+      state: 'FL',
+      zip: '34202',
+    };
+    const unsafeCases = [
+      ['first_name', 'AS', 'name.proper_case_first'],
+      ['first_name', 'CJ', 'name.proper_case_first'],
+      ['first_name', 'Mackenzie', 'name.proper_case_first'],
+      ['first_name', 'MACKENZIE', 'name.proper_case_first'],
+      ['last_name', 'Smith-Mackenzie', 'name.proper_case_last'],
+      ['last_name', 'LaSalle', 'name.proper_case_last'],
+      ['last_name', 'DeSanto', 'name.proper_case_last'],
+      ['last_name', 'DeFusco', 'name.proper_case_last'],
+      ['last_name', 'DeJoseph', 'name.proper_case_last'],
+      ['last_name', 'VanMeter', 'name.proper_case_last'],
+      ['last_name', 'LaCourte', 'name.proper_case_last'],
+      ['last_name', 'DiStefano', 'name.proper_case_last'],
+      ['last_name', 'LaRue', 'name.proper_case_last'],
+    ];
+
+    for (const [field, value, ruleId] of unsafeCases) {
+      const proposals = normalizationCandidatesForCustomer({
+        ...base,
+        [field]: value,
+      });
+
+      expect(proposals.some((p) => p.field === field && p.rule_id === ruleId)).toBe(false);
+    }
+  });
+
+  test('proper-case name proposals keep safe all-caps cleanup and Mc fixes', () => {
+    const base = {
+      id,
+      first_name: 'John',
+      last_name: 'Smith',
+      email: 'john@example.com',
+      phone: '+13174180397',
+      state: 'FL',
+      zip: '34202',
+    };
+    const safeCases = [
+      ['first_name', 'BILLY', 'name.proper_case_first', 'Billy'],
+      ['last_name', 'MOSER', 'name.proper_case_last', 'Moser'],
+      ['last_name', 'Mcconaghy', 'name.proper_case_last', 'McConaghy'],
+      ['last_name', 'Mccash', 'name.proper_case_last', 'McCash'],
+      ['last_name', 'MACDONALD', 'name.proper_case_last', 'MacDonald'],
+      ['last_name', 'SMITH-MACDONALD', 'name.proper_case_last', 'Smith-MacDonald'],
+    ];
+
+    for (const [field, value, ruleId, proposedValue] of safeCases) {
+      const proposals = normalizationCandidatesForCustomer({
+        ...base,
+        [field]: value,
+      });
+
+      expect(proposals.find((p) => p.field === field && p.rule_id === ruleId)).toMatchObject({
+        current_value: value,
+        proposed_value: proposedValue,
+      });
+    }
+  });
+
   test('does not rewrite foreign, vanity, or extension phone numbers', () => {
     expect(_private.nanpPhoneGuard('+44 20 7946 0958').ok).toBe(false);
     expect(_private.nanpPhoneGuard('1-800-FLOWERS').ok).toBe(false);
