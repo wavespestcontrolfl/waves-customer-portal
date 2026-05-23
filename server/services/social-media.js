@@ -358,7 +358,10 @@ const SocialMediaService = {
     // credits and discard the result.
     let generatedImageUrl = imageUrl || null;
     const canConsumeGeneratedImage =
-      !!process.env.FACEBOOK_ACCESS_TOKEN && !!config.s3.accessKeyId && !!config.s3.bucket;
+      !!process.env.FACEBOOK_ACCESS_TOKEN
+      && !!config.s3.accessKeyId
+      && !!config.s3.secretAccessKey
+      && !!config.s3.bucket;
     if (!generatedImageUrl && canConsumeGeneratedImage) {
       try {
         const img = await generateImage(title);
