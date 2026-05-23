@@ -179,6 +179,8 @@ describe('Manatee PAO property lookup facts', () => {
 
   test('limits Manatee county lookup to likely Manatee addresses', () => {
     expect(_private.shouldQueryManateePAO('8920 49th Ave E, Bradenton, FL 34211')).toBe(true);
+    expect(_private.shouldQueryManateePAO('123 Main St, Bradenton, FL')).toBe(true);
+    expect(_private.shouldQueryManateePAO('8920 49th Ave E')).toBe(false);
     expect(_private.shouldQueryManateePAO('123 Main St, Sarasota, FL 34243')).toBe(true);
     expect(_private.shouldQueryManateePAO('123 Main St, Sarasota, FL 34231')).toBe(false);
     expect(_private.shouldQueryManateePAO('123 Main St, Venice, FL')).toBe(false);
@@ -234,6 +236,31 @@ describe('Manatee PAO property lookup facts', () => {
       parcelId: '647302459',
       city: 'PALMETTO',
     });
+  });
+
+  test('prefers exact PAO street matches and rejects wrong suffix matches', () => {
+    const searchResults = {
+      cols: [
+        { title: 'Parcel ID' },
+        { title: 'Property Type' },
+        { title: 'Owner(s)' },
+        { title: 'Situs Address' },
+        { title: 'Postal City' },
+      ],
+      rows: [
+        ['111', 'REAL PROPERTY', '', ';8920 49TH ST E;', 'BRADENTON'],
+        ['222', 'REAL PROPERTY', '', ';8920 49TH AVE E;', 'PALMETTO'],
+      ],
+    };
+
+    expect(_private.pickManateeSearchResult(searchResults, '8920 49th Ave E, Bradenton, FL 34211')).toMatchObject({
+      parcelId: '222',
+      city: 'PALMETTO',
+    });
+    expect(_private.pickManateeSearchResult({
+      ...searchResults,
+      rows: [searchResults.rows[0]],
+    }, '8920 49th Ave E, Bradenton, FL 34211')).toBeNull();
   });
 
   test('parses Manatee land and building tables into estimator facts', () => {

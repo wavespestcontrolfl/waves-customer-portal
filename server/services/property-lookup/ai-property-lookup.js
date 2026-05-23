@@ -651,7 +651,7 @@ function shouldQueryManateePAO(address) {
   if (zip) return MANATEE_ZIPS.has(zip);
 
   const city = extractCommaCity(address);
-  if (!city) return true;
+  if (!city) return false;
   return MANATEE_CITY_NAMES.has(city);
 }
 
@@ -705,6 +705,14 @@ function removeStreetSuffix(street) {
     .trim();
 }
 
+function extractStreetSuffix(street) {
+  return String(street || '').match(/\b(AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)\b/i)?.[1]?.toUpperCase() || null;
+}
+
+function extractPostSuffixDirection(street) {
+  return String(street || '').match(/\b(?:AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)\s+([NSEW])\b/i)?.[1]?.toUpperCase() || null;
+}
+
 function pickManateeSearchResult(data, address) {
   const rows = Array.isArray(data?.rows) ? data.rows : [];
   if (!rows.length) return null;
@@ -718,21 +726,28 @@ function pickManateeSearchResult(data, address) {
   const targetNoSuffix = removeStreetSuffix(target);
   const targetNumber = target.match(/^\d+/)?.[0] || null;
   const targetCity = shouldRequireManateeResultCityMatch(address) ? extractCommaCity(address) : null;
-  const matches = rows
+  const candidates = rows
     .map((row) => ({
       parcelId: cleanPaoCell(row[parcelIdx >= 0 ? parcelIdx : 0]),
       situsAddress: cleanPaoCell(row[addressIdx >= 0 ? addressIdx : 3]),
       city: cleanPaoCell(row[cityIdx >= 0 ? cityIdx : 4]),
     }))
+    .map((row) => ({ ...row, normalizedAddress: normalizeCountyStreetLine(row.situsAddress) }))
     .filter((row) => row.parcelId && row.situsAddress)
     .filter((row) => {
-      const normalized = normalizeCountyStreetLine(row.situsAddress);
-      if (targetNumber && !normalized.startsWith(`${targetNumber} `)) return false;
+      if (targetNumber && !row.normalizedAddress.startsWith(`${targetNumber} `)) return false;
       if (targetCity && normalizeCountyCityName(row.city) !== targetCity) return false;
-      return normalized === target || removeStreetSuffix(normalized) === targetNoSuffix || normalized.includes(targetNoSuffix);
+      return true;
     });
 
-  return matches[0] || null;
+  const exactMatches = candidates.filter((row) => row.normalizedAddress === target || row.normalizedAddress.startsWith(`${target} `));
+  if (exactMatches.length) return cleanManateeSearchMatch(exactMatches[0]);
+
+  const relaxedMatches = candidates.filter((row) => isRelaxedManateeStreetMatch(row.normalizedAddress, target, targetNoSuffix));
+  if (relaxedMatches.length === 1 && shouldQueryManateePAO(address)) {
+    return cleanManateeSearchMatch(relaxedMatches[0]);
+  }
+  return null;
 }
 
 function shouldRequireManateeResultCityMatch(address) {
@@ -741,6 +756,23 @@ function shouldRequireManateeResultCityMatch(address) {
   // PAO postal city can differ from the entered municipality; require it when
   // the ZIP cannot disambiguate the Manatee parcel search by itself.
   return !zip || MANATEE_SHARED_ZIPS.has(zip);
+}
+
+function isRelaxedManateeStreetMatch(normalizedAddress, target, targetNoSuffix) {
+  const targetSuffix = extractStreetSuffix(target);
+  const resultSuffix = extractStreetSuffix(normalizedAddress);
+  if (targetSuffix && resultSuffix !== targetSuffix) return false;
+
+  const targetDirection = extractPostSuffixDirection(target);
+  const resultDirection = extractPostSuffixDirection(normalizedAddress);
+  if (targetDirection && resultDirection !== targetDirection) return false;
+
+  return removeStreetSuffix(normalizedAddress) === targetNoSuffix;
+}
+
+function cleanManateeSearchMatch(row) {
+  const { normalizedAddress, ...match } = row;
+  return match;
 }
 
 function parseManateePaoRecord({ address, search, land, buildings }) {
