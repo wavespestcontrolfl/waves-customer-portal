@@ -2696,6 +2696,41 @@ function coverageZoneKey(item) {
   return `id:${item.id}`;
 }
 
+// When a zone has multiple coverage rows (e.g. completed + needs-attention),
+// the map can only render one marker per zone after dedupe — and that
+// marker has to be the most attention-worthy status so a green "completed"
+// doesn't paper over an orange "needs follow-up". Higher = more urgent.
+// List card and map use the same picker so click activation lines up.
+const COVERAGE_TONE_SEVERITY = {
+  red: 5,
+  orange: 4,
+  'light-green': 3,
+  blue: 2,
+  gray: 1,
+  green: 0,
+};
+
+function coverageItemSeverity(item) {
+  if (!item) return -1;
+  const tone = coverageStatusConfig(item.status).tone;
+  return COVERAGE_TONE_SEVERITY[tone] ?? 0;
+}
+
+function pickRepresentativeCoverageItem(items) {
+  if (!Array.isArray(items) || !items.length) return null;
+  let best = items[0];
+  let bestSeverity = coverageItemSeverity(best);
+  for (let i = 1; i < items.length; i += 1) {
+    const candidate = items[i];
+    const sev = coverageItemSeverity(candidate);
+    if (sev > bestSeverity) {
+      best = candidate;
+      bestSeverity = sev;
+    }
+  }
+  return best;
+}
+
 function ServiceCoverageMap({
   coverage,
   evidenceLevel,
@@ -2723,17 +2758,24 @@ function ServiceCoverageMap({
   const renderableLocations = displayLocations.filter(hasRenderableCoverageGeometry);
   // Dedupe by zone identity so multi-status zones don't paint stacked
   // geometries on top of each other (the underlying one is unclickable
-  // and `activeItemId` may target the hidden marker). First entry per
-  // zone wins for color/marker letter; the list card below this map
-  // surfaces every status for the zone in its detail.
+  // and `activeItemId` may target the hidden marker). Within a zone we
+  // keep the most attention-worthy item via pickRepresentativeCoverageItem
+  // so an orange needs-attention doesn't get hidden under a green completed.
+  // The list card below this map still surfaces every status for the zone.
   const mapLocations = useMemo(() => {
-    const seen = new Set();
-    return renderableLocations.filter((loc) => {
+    const order = [];
+    const byKey = new Map();
+    for (const loc of renderableLocations) {
       const key = coverageZoneKey(loc);
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+      if (!key) continue;
+      if (byKey.has(key)) {
+        byKey.get(key).push(loc);
+      } else {
+        order.push(key);
+        byKey.set(key, [loc]);
+      }
+    }
+    return order.map((key) => pickRepresentativeCoverageItem(byKey.get(key)));
   }, [renderableLocations]);
   const projection = useMemo(() => buildCoverageProjection(mapLocations), [mapLocations]);
   const legend = Array.isArray(coverage?.legend) && coverage.legend.length
@@ -2854,31 +2896,47 @@ function productNamesForCoverageItem(item = {}, applications = []) {
 function mergeCoverageItemsByMarker(items, applications) {
   const order = [];
   const byKey = new Map();
+  // First pass: bucket the raw items by zone key (preserves order)
   for (const item of items) {
     const key = coverageZoneKey(item);
-    const config = coverageStatusConfig(item.status);
-    const entry = {
-      id: item.id,
-      status: item.status,
-      tone: config.tone,
-      statusLabel: item.customerStatusLabel || item.statusLabel || config.label,
-      description: item.customerDescription,
-      products: productNamesForCoverageItem(item, applications),
-    };
+    if (!key) continue;
     if (byKey.has(key)) {
-      byKey.get(key).entries.push(entry);
+      byKey.get(key).rawItems.push(item);
     } else {
       order.push(key);
       byKey.set(key, {
         key,
         markerLabel: item.markerLabel,
         areaName: item.areaName,
-        firstItemId: item.id,
-        entries: [entry],
+        rawItems: [item],
       });
     }
   }
-  return order.map((key) => byKey.get(key));
+  // Second pass: shape entries + pick the representative id by severity
+  // (matches the same picker the map uses for its dedupe, so clicking a
+  // merged card activates the marker actually visible on the satellite).
+  return order.map((key) => {
+    const zone = byKey.get(key);
+    const representative = pickRepresentativeCoverageItem(zone.rawItems);
+    const entries = zone.rawItems.map((item) => {
+      const config = coverageStatusConfig(item.status);
+      return {
+        id: item.id,
+        status: item.status,
+        tone: config.tone,
+        statusLabel: item.customerStatusLabel || item.statusLabel || config.label,
+        description: item.customerDescription,
+        products: productNamesForCoverageItem(item, applications),
+      };
+    });
+    return {
+      key: zone.key,
+      markerLabel: zone.markerLabel,
+      areaName: zone.areaName,
+      firstItemId: representative ? representative.id : zone.rawItems[0].id,
+      entries,
+    };
+  });
 }
 
 function ServiceCoverageList({ coverage, activeItemId, onActivate, applications = [] }) {
