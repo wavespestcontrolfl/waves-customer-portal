@@ -277,6 +277,23 @@ describe('Manatee PAO property lookup facts', () => {
     }, '8920 49th Ave E, Bradenton, FL 34211')).toBeNull();
   });
 
+  test('does not treat saint street-name tokens as terminal suffixes', () => {
+    const searchResults = {
+      cols: [
+        { title: 'Parcel ID' },
+        { title: 'Property Type' },
+        { title: 'Owner(s)' },
+        { title: 'Situs Address' },
+        { title: 'Postal City' },
+      ],
+      rows: [
+        ['111', 'REAL PROPERTY', '', ';123 ST GEORGE ST;', 'BRADENTON'],
+      ],
+    };
+
+    expect(_private.pickManateeSearchResult(searchResults, '123 St George Dr, Bradenton, FL 34211')).toBeNull();
+  });
+
   test('rejects ambiguous PAO prefix matches without a unique discriminator', () => {
     const searchResults = {
       cols: [
@@ -314,6 +331,31 @@ describe('Manatee PAO property lookup facts', () => {
       parcelId: '222',
       city: 'BRADENTON',
     });
+  });
+
+  test('requires city match when Manatee lookup is enabled by city fallback', () => {
+    const searchResults = {
+      cols: [
+        { title: 'Parcel ID' },
+        { title: 'Property Type' },
+        { title: 'Owner(s)' },
+        { title: 'Situs Address' },
+        { title: 'Postal City' },
+      ],
+      rows: [
+        ['111', 'REAL PROPERTY', '', ';123 MAIN ST;', 'PALMETTO'],
+        ['222', 'REAL PROPERTY', '', ';123 MAIN ST;', 'LAKEWOOD RANCH'],
+      ],
+    };
+
+    expect(_private.pickManateeSearchResult(searchResults, '123 Main St, Lakewood Ranch, FL 34240')).toMatchObject({
+      parcelId: '222',
+      city: 'LAKEWOOD RANCH',
+    });
+    expect(_private.pickManateeSearchResult({
+      ...searchResults,
+      rows: [searchResults.rows[0]],
+    }, '123 Main St, Lakewood Ranch, FL 34240')).toBeNull();
   });
 
   test('deduplicates identical PAO search rows before deciding uniqueness', () => {

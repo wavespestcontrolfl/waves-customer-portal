@@ -665,7 +665,9 @@ function shouldQueryManateePAO(address) {
 }
 
 function extractAddressZip(address) {
-  return String(address || '').match(/\b(\d{5})(?:-\d{4})?\b/)?.[1] || null;
+  const parts = String(address || '').split(',').map((part) => part.trim()).filter(Boolean);
+  const tail = parts[parts.length - 1] || String(address || '');
+  return tail.match(/\b(\d{5})(?:-\d{4})?\s*$/)?.[1] || null;
 }
 
 function extractCommaCity(address) {
@@ -728,7 +730,7 @@ function removeStreetSuffix(street) {
 }
 
 function extractStreetSuffix(street) {
-  return String(street || '').match(/\b(AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)\b/i)?.[1]?.toUpperCase() || null;
+  return String(street || '').match(/\b(AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)(?:\s+[NSEW])?$/i)?.[1]?.toUpperCase() || null;
 }
 
 function extractPostSuffixDirection(street) {
@@ -783,7 +785,7 @@ function shouldRequireManateeResultCityMatch(address) {
   const zip = extractAddressZip(address);
   // PAO postal city can differ from the entered municipality; require it when
   // the ZIP cannot disambiguate the Manatee parcel search by itself.
-  return !zip || MANATEE_SHARED_ZIPS.has(zip);
+  return !(zip && MANATEE_ZIPS.has(zip) && !MANATEE_SHARED_ZIPS.has(zip));
 }
 
 function isRelaxedManateeStreetMatch(normalizedAddress, target, targetNoSuffix) {
