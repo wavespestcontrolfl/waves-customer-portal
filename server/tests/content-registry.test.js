@@ -292,6 +292,124 @@ describe('content-registry reconciliation', () => {
     expect(summary.conflict_count).toBe(3);
   });
 
+  test('archived DB rows do not match Astro files or create active conflicts', () => {
+    const astroItems = [{
+      canonical_url_normalized: '/legacy-post/',
+      slug: 'legacy-post',
+      astro_source_path: 'src/content/blog/legacy-post.md',
+      content_type: 'blog',
+      astro_status: 'present',
+    }];
+    const dbItems = [
+      registry.dbBlogRowToItem({
+        id: '00000000-0000-0000-0000-000000000010',
+        title: 'Archived Legacy Post',
+        slug: 'legacy-post',
+        status: 'archived',
+      }),
+    ];
+
+    const { rows, summary } = registry.reconcileContent({ astroItems, dbItems });
+    const astroRow = rows.find((row) => row.astro_source_path);
+    const dbRow = rows.find((row) => row.db_blog_id);
+
+    expect(astroRow.reconciliation_status).toBe('astro_only');
+    expect(astroRow.db_blog_id).toBeNull();
+    expect(dbRow.reconciliation_status).toBe('db_only');
+    expect(dbRow.workflow_status).toBe('archived');
+    expect(summary.conflict_count).toBe(0);
+    expect(summary.matched_count).toBe(0);
+  });
+
+  test('archived DB rows stay archived even when old Astro live fields remain', () => {
+    const item = registry.dbBlogRowToItem({
+      id: '00000000-0000-0000-0000-000000000013',
+      title: 'Archived Live Mirror',
+      slug: 'archived-live-mirror',
+      status: 'archived',
+      astro_status: 'live',
+      astro_live_url: 'https://www.wavespestcontrol.com/archived-live-mirror/',
+    });
+
+    expect(item.workflow_status).toBe('archived');
+
+    const { rows, summary } = registry.reconcileContent({
+      astroItems: [{
+        canonical_url_normalized: '/archived-live-mirror/',
+        slug: 'archived-live-mirror',
+        astro_source_path: 'src/content/blog/archived-live-mirror.md',
+        content_type: 'blog',
+        astro_status: 'present',
+      }],
+      dbItems: [item],
+    });
+    const dbRow = rows.find((row) => row.db_blog_id === item.db_blog_id);
+
+    expect(dbRow.workflow_status).toBe('archived');
+    expect(dbRow.reconciliation_status).toBe('db_only');
+    expect(summary.matched_count).toBe(0);
+  });
+
+  test('archived DB rows stay dormant when archive updates change the DB hash', () => {
+    const item = registry.dbBlogRowToItem({
+      id: '00000000-0000-0000-0000-000000000014',
+      title: 'Archived Changed Row',
+      slug: 'archived-changed-row',
+      status: 'archived',
+      updated_at: '2026-05-23T12:00:00Z',
+    });
+    const previousRows = [{
+      db_blog_id: item.db_blog_id,
+      db_row_hash: 'old-db-row-hash',
+      canonical_url_normalized: item.canonical_url_normalized,
+      live_url: item.live_url,
+    }];
+
+    const { rows } = registry.reconcileContent({
+      astroItems: [],
+      dbItems: [item],
+      previousRows,
+    });
+
+    expect(rows[0].workflow_status).toBe('archived');
+    expect(rows[0].reconciliation_status).toBe('db_only');
+  });
+
+  test('archived DB duplicate does not block active DB canonical matching', () => {
+    const astroItems = [{
+      canonical_url_normalized: '/active-post/',
+      slug: 'active-post',
+      astro_source_path: 'src/content/blog/active-post.md',
+      content_type: 'blog',
+      astro_status: 'present',
+    }];
+    const dbItems = [
+      registry.dbBlogRowToItem({
+        id: '00000000-0000-0000-0000-000000000011',
+        title: 'Active Post',
+        slug: 'active-post',
+        status: 'published',
+      }),
+      registry.dbBlogRowToItem({
+        id: '00000000-0000-0000-0000-000000000012',
+        title: 'Archived Duplicate',
+        slug: 'active-post',
+        status: 'archived',
+      }),
+    ];
+
+    const { rows, summary } = registry.reconcileContent({ astroItems, dbItems });
+    const matched = rows.find((row) => row.astro_source_path);
+    const archived = rows.find((row) => row.db_blog_id === '00000000-0000-0000-0000-000000000012');
+
+    expect(matched.reconciliation_status).toBe('matched');
+    expect(matched.db_blog_id).toBe('00000000-0000-0000-0000-000000000011');
+    expect(archived.reconciliation_status).toBe('db_only');
+    expect(archived.workflow_status).toBe('archived');
+    expect(summary.conflict_count).toBe(0);
+    expect(summary.matched_count).toBe(1);
+  });
+
   test('detects Astro and DB changes compared with prior registry rows', () => {
     const astroRows = [{ canonical_url_normalized: '/a/', slug: 'a', astro_source_path: 'src/content/blog/a.md', content_type: 'blog', astro_status: 'present', astro_file_hash: 'new' }];
     const dbRows = [registry.dbBlogRowToItem({ id: '00000000-0000-0000-0000-000000000004', title: 'B', slug: 'b', status: 'draft', content: 'new' })];
