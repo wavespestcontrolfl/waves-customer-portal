@@ -182,9 +182,9 @@ describe('blog Astro frontmatter validation', () => {
     };
 
     expect(AstroPublisher.canPublishDraftBrief(draft, { action_type: 'new_supporting_blog' })).toBe(true);
-    expect(AstroPublisher.canPublishDraftBrief(draft, { action_type: 'create_customer_question_page' })).toBe(true);
+    expect(AstroPublisher.canPublishDraftBrief(draft, { action_type: 'create_customer_question_page' })).toBe(false);
     expect(AstroPublisher.canPublishDraftBrief(draft, { action_type: 'refresh_existing_page' })).toBe(false);
-    expect(AstroPublisher.canPublishDraftBrief({ ...draft, body: '' }, { action_type: 'new_supporting_blog' })).toBe(false);
+    expect(AstroPublisher.canPublishDraftBrief({ ...draft, body: '   ' }, { action_type: 'new_supporting_blog' })).toBe(false);
   });
 
   test('opens an Astro PR for supported autonomous draft briefs', async () => {
@@ -217,6 +217,8 @@ describe('blog Astro frontmatter validation', () => {
     }));
     expect(result).toMatchObject({
       url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
+      status: 'pr_open',
+      live: false,
       pr_number: 123,
       pr_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123',
       commit_sha: 'file-sha',

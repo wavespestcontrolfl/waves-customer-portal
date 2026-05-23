@@ -392,6 +392,8 @@ async function publishOrUpdatePage(draft, brief = {}) {
 
   return {
     url: frontmatter.canonical || `/${slug}/`,
+    status: 'pr_open',
+    live: false,
     pr_number: pr.number,
     pr_url: pr.html_url,
     branch,
@@ -406,8 +408,8 @@ function canPublishDraftBrief(draft, brief = {}) {
     draft
     && draft.type === 'draft'
     && draft.frontmatter
-    && draft.body
-    && ['new_supporting_blog', 'create_customer_question_page'].includes(actionType)
+    && String(draft.body || '').trim()
+    && actionType === 'new_supporting_blog'
   );
 }
 

@@ -355,6 +355,8 @@ describe('runNext post-publish bookkeeping', () => {
       const publisher = {
         publishOrUpdatePage: jest.fn().mockResolvedValue({
           url: '/blog/live-test/',
+          status: 'live',
+          live: true,
           pr_url: 'https://github.com/wavespestcontrolfl/astro/pull/123',
         }),
       };
@@ -378,6 +380,88 @@ describe('runNext post-publish bookkeeping', () => {
         claimToken: claimedAt,
       });
       expect(queue.pendingReview).toHaveBeenCalledWith('opp_publish_1', 'published_queue_complete_failed', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('parks opened Astro PRs for review instead of treating them as live published pages', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const claimedAt = new Date('2026-05-23T05:20:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_pr_1',
+          action_type: 'new_supporting_blog',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_pr_1',
+          action_type: 'new_supporting_blog',
+          page_type: 'blog',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { url: '/blog/pr-test/', title: 'PR Test' },
+        }),
+      };
+      const uniquenessGate = {
+        evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({
+          ok: true,
+          hard_failures: [],
+          soft_failures: [],
+          total_score: 100,
+          min_total_score: 80,
+        }),
+      };
+      const indexNow = { submit: jest.fn().mockResolvedValue({ ok: true, status: 'ok' }) };
+      const publisher = {
+        publishOrUpdatePage: jest.fn().mockResolvedValue({
+          url: '/blog/pr-test/',
+          status: 'pr_open',
+          live: false,
+          pr_url: 'https://github.com/wavespestcontrolfl/astro/pull/124',
+        }),
+      };
+      const runner = loadRunnerWith({
+        queue,
+        briefBuilder,
+        dispatcher,
+        uniquenessGate,
+        qualityGate,
+        publisher,
+        indexNow,
+        linkPlanner: {},
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.published_url).toBeNull();
+      expect(result.astro_pr_url).toBe('https://github.com/wavespestcontrolfl/astro/pull/124');
+      expect(indexNow.submit).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_pr_1', 'astro_pr_pending_merge', { claimToken: claimedAt });
+      expect(queue.complete).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;

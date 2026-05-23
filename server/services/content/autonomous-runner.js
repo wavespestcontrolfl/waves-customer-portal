@@ -320,6 +320,30 @@ class AutonomousRunner {
     }
 
     Object.assign(run, publishOutcome);
+    if (!publishOutcome.published_url) {
+      const reason = 'astro_pr_pending_merge';
+      const notes = publishOutcome.astro_pr_url
+        ? `Astro PR opened: ${publishOutcome.astro_pr_url}. Merge and verify deployment before indexing.`
+        : 'Publish adapter completed without a live URL; route manually before indexing.';
+      let finalized;
+      try {
+        finalized = await finalize(run, t0, {
+          outcome: 'completed_pending_review',
+          skip_reason: reason,
+          reviewer_notes: notes,
+        });
+      } catch (err) {
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_audit_failed', { claimToken }, err);
+        throw err;
+      }
+      try {
+        await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
+      } catch (err) {
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_queue_transition_failed', { claimToken }, err);
+      }
+      return finalized;
+    }
+
     let finalized;
     try {
       finalized = await finalize(run, t0, { outcome: 'completed_published' });
@@ -523,7 +547,10 @@ class AutonomousRunner {
     const t1 = Date.now();
     if (publisher?.publishOrUpdatePage) {
       const r = await publisher.publishOrUpdatePage(draft, brief);
-      out.published_url = r?.url || draft.url || null;
+      const isLive = r?.live === true || r?.status === 'live' || r?.merged === true;
+      out.published_url = isLive ? (r?.url || draft.url || null) : null;
+      out.pending_url = isLive ? null : (r?.url || draft.url || null);
+      out.publish_status = r?.status || (isLive ? 'live' : (r?.pr_url ? 'pr_open' : null));
       out.astro_pr_url = r?.pr_url || null;
     } else {
       throw new Error('astro-publisher draft/brief adapter unavailable');
