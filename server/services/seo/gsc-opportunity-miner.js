@@ -800,7 +800,8 @@ class GscOpportunityMiner {
       };
 
       // ON CONFLICT (dedupe_key) DO UPDATE — keeps latest score + mined_at,
-      // resets status back to pending unless the row is already claimed/done.
+      // resets status back to pending unless the row is already claimed,
+      // done, or waiting on autonomous review.
       const result = await db.raw(
         `INSERT INTO opportunity_queue
            (bucket, action_type, query, page_url, service, city,
@@ -814,7 +815,7 @@ class GscOpportunityMiner {
                mined_at = EXCLUDED.mined_at,
                expires_at = EXCLUDED.expires_at,
                action_type = EXCLUDED.action_type,
-               status = CASE WHEN opportunity_queue.status IN ('claimed', 'done')
+               status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review')
                              THEN opportunity_queue.status
                              ELSE 'pending'
                         END,

@@ -228,7 +228,7 @@ class AutonomousRunner {
     } else if (uniquenessGate && needsUniquenessGate) {
       const t4 = Date.now();
       try {
-        const siblingPages = await this._loadSiblingPages(brief, { required: !run.shadow_mode });
+        const siblingPages = await this._loadSiblingPages(brief, { required: true });
         uniquenessResult = uniquenessGate.evaluate(draft, brief, { siblingPages });
       } catch (err) {
         uniquenessResult = { ok: false, error: err.message };

@@ -355,6 +355,8 @@ class ContentBriefBuilder {
       },
       customer_signal: signals.customer_signal
         ? {
+            city: signals.customer_signal.city || opportunity.city || null,
+            service: signals.customer_signal.service || opportunity.service || null,
             topic: signals.customer_signal.topic,
             normalized_question: signals.customer_signal.normalized_question,
             total_count: signals.customer_signal.total_count,
