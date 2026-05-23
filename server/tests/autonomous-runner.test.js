@@ -125,7 +125,16 @@ describe('autonomousContentEngine feature gate is registered', () => {
 
 // ── dry-run claim handling ─────────────────────────────────────────
 
-function loadRunnerWith({ queue, briefBuilder, dispatcher = {}, qualityGate = null, uniquenessGate = null }) {
+function loadRunnerWith({
+  queue,
+  briefBuilder,
+  dispatcher = {},
+  qualityGate = null,
+  uniquenessGate = null,
+  publisher = null,
+  indexNow = null,
+  linkPlanner = null,
+}) {
   jest.resetModules();
   const dbMock = jest.fn(() => ({
     insert: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })),
@@ -137,6 +146,9 @@ function loadRunnerWith({ queue, briefBuilder, dispatcher = {}, qualityGate = nu
   jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
   if (qualityGate) jest.doMock('../services/content/content-quality-gate', () => qualityGate);
   if (uniquenessGate) jest.doMock('../services/content/uniqueness-gate', () => uniquenessGate);
+  if (publisher) jest.doMock('../services/content-astro/astro-publisher', () => publisher);
+  if (indexNow) jest.doMock('../services/seo/indexnow-submit', () => indexNow);
+  if (linkPlanner) jest.doMock('../services/content/internal-link-planner', () => linkPlanner);
   return require('../services/content/autonomous-runner');
 }
 
@@ -292,5 +304,86 @@ describe('runNext general shadow behavior', () => {
     expect(queue.release).toHaveBeenCalledWith('opp_blog_1', { claimToken: claimedAt });
     expect(queue.complete).not.toHaveBeenCalled();
     expect(queue.pendingReview).not.toHaveBeenCalled();
+  });
+});
+
+describe('runNext post-publish bookkeeping', () => {
+  test('does not release a claim after publish succeeds but queue completion fails', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const claimedAt = new Date('2026-05-23T05:10:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_publish_1',
+          action_type: 'new_supporting_blog',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(false),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_publish_1',
+          action_type: 'new_supporting_blog',
+          page_type: 'blog',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { url: '/blog/live-test/', title: 'Live Test' },
+        }),
+      };
+      const uniquenessGate = {
+        evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({
+          ok: true,
+          hard_failures: [],
+          soft_failures: [],
+          total_score: 100,
+          min_total_score: 80,
+        }),
+      };
+      const publisher = {
+        publishOrUpdatePage: jest.fn().mockResolvedValue({
+          url: '/blog/live-test/',
+          pr_url: 'https://github.com/wavespestcontrolfl/astro/pull/123',
+        }),
+      };
+      const runner = loadRunnerWith({
+        queue,
+        briefBuilder,
+        dispatcher,
+        uniquenessGate,
+        qualityGate,
+        publisher,
+        indexNow: { submit: jest.fn().mockResolvedValue({ ok: true, status: 'ok' }) },
+        linkPlanner: {},
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_published');
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalled();
+      expect(queue.complete).toHaveBeenCalledWith('opp_publish_1', {
+        notes: 'published:/blog/live-test/',
+        claimToken: claimedAt,
+      });
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_publish_1', 'published_queue_complete_failed', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
   });
 });

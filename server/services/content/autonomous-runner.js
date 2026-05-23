@@ -297,7 +297,7 @@ class AutonomousRunner {
       return finalized;
     }
 
-    if (!this._hasDraftBriefPublisher()) {
+    if (!this._hasDraftBriefPublisher(draft, brief)) {
       const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: 'publisher_adapter_unavailable',
@@ -308,12 +308,9 @@ class AutonomousRunner {
     }
 
     // 8. Publish + index + plan links.
+    let publishOutcome;
     try {
-      const publishOutcome = await this._publishAndDistribute(draft, brief, run);
-      Object.assign(run, publishOutcome);
-      const finalized = await finalize(run, t0, { outcome: 'completed_published' });
-      await this._completeClaimOrThrow(queue, opp.id, { notes: `published:${publishOutcome.published_url || 'unknown'}`, claimToken });
-      return finalized;
+      publishOutcome = await this._publishAndDistribute(draft, brief, run);
     } catch (err) {
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken }); // let next run retry
       return finalize(run, t0, {
@@ -321,6 +318,22 @@ class AutonomousRunner {
         failure_message: err.message,
       });
     }
+
+    Object.assign(run, publishOutcome);
+    let finalized;
+    try {
+      finalized = await finalize(run, t0, { outcome: 'completed_published' });
+    } catch (err) {
+      await this._parkPublishedClaimForReconciliation(queue, opp.id, 'published_audit_failed', { claimToken }, err);
+      throw err;
+    }
+
+    try {
+      await this._completeClaimOrThrow(queue, opp.id, { notes: `published:${publishOutcome.published_url || 'unknown'}`, claimToken });
+    } catch (err) {
+      await this._parkPublishedClaimForReconciliation(queue, opp.id, 'published_queue_complete_failed', { claimToken }, err);
+    }
+    return finalized;
   }
 
   /**
@@ -422,6 +435,15 @@ class AutonomousRunner {
     if (!ok) throw new Error('queue_release_failed_or_stale_claim');
   }
 
+  async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause) {
+    logger.error(`[autonomous-runner] published ${opportunityId} but ${reason}: ${cause.message}`);
+    try {
+      await this._pendingReviewClaimOrThrow(queue, opportunityId, reason, payload);
+    } catch (err) {
+      logger.error(`[autonomous-runner] failed to park published ${opportunityId} for reconciliation: ${err.message}`);
+    }
+  }
+
   async _getTrustBuildCount(actionType) {
     try {
       const rows = await db('autonomous_runs')
@@ -481,9 +503,11 @@ class AutonomousRunner {
     };
   }
 
-  _hasDraftBriefPublisher() {
+  _hasDraftBriefPublisher(draft, brief) {
     const publisher = getAstroPublisher();
-    return !!publisher?.publishOrUpdatePage;
+    if (!publisher?.publishOrUpdatePage) return false;
+    if (typeof publisher.canPublishDraftBrief === 'function') return publisher.canPublishDraftBrief(draft, brief);
+    return true;
   }
 
   async _publishAndDistribute(draft, brief, run) {
@@ -507,9 +531,15 @@ class AutonomousRunner {
     run.publish_ms = Date.now() - t1;
 
     // IndexNow submission.
-    if (indexNow && out.published_url) {
+    if (indexNow?.submit && out.published_url) {
       const t2 = Date.now();
-      const r = await indexNow.submit(out.published_url).catch((err) => ({ ok: false, error: err.message }));
+      let r;
+      try {
+        r = await indexNow.submit(out.published_url);
+      } catch (err) {
+        logger.warn(`[autonomous-runner] indexnow failed: ${err.message}`);
+        r = { ok: false, error: err.message };
+      }
       out.indexnow_status = r.status || (r.ok ? 'ok' : 'error');
       run.index_submit_ms = Date.now() - t2;
     }

@@ -173,6 +173,105 @@ describe('blog Astro frontmatter validation', () => {
       target_sites: ['https://example.com/blog'],
     })).toBe('https://www.wavespestcontrol.com/bad-host/');
   });
+
+  test('recognizes only supported autonomous draft briefs for direct Astro publish', () => {
+    const draft = {
+      type: 'draft',
+      frontmatter: validFrontmatter(),
+      body: 'Waves Pest Control guidance for Bradenton homeowners.',
+    };
+
+    expect(AstroPublisher.canPublishDraftBrief(draft, { action_type: 'new_supporting_blog' })).toBe(true);
+    expect(AstroPublisher.canPublishDraftBrief(draft, { action_type: 'create_customer_question_page' })).toBe(true);
+    expect(AstroPublisher.canPublishDraftBrief(draft, { action_type: 'refresh_existing_page' })).toBe(false);
+    expect(AstroPublisher.canPublishDraftBrief({ ...draft, body: '' }, { action_type: 'new_supporting_blog' })).toBe(false);
+  });
+
+  test('opens an Astro PR for supported autonomous draft briefs', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 123, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123' });
+
+    const frontmatter = validFrontmatter({ slug: '/ant-trails-bradenton/' });
+    const result = await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter,
+        body: 'Waves Pest Control guidance for Bradenton homeowners.',
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+
+    expect(gh.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/autonomous-ant-trails-bradenton-/));
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/ant-trails-bradenton.md',
+      content: expect.stringContaining('Waves Pest Control guidance'),
+      message: 'feat(blog): publish ant-trails-bradenton',
+      sha: undefined,
+    }));
+    expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Blog: Ant Trails in Bradenton',
+      body: expect.stringContaining('**Autonomous content publish**'),
+    }));
+    expect(result).toMatchObject({
+      url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
+      pr_number: 123,
+      pr_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123',
+      commit_sha: 'file-sha',
+    });
+  });
+});
+
+describe('Astro publisher autonomous draft adapter', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('opens an Astro PR from a supported emitted blog draft', async () => {
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 42, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42' });
+
+    const frontmatter = validFrontmatter({
+      title: 'Autonomous Ant Control in Bradenton',
+      slug: '/autonomous-ant-control-bradenton/',
+      canonical: 'https://www.wavespestcontrol.com/autonomous-ant-control-bradenton/',
+    });
+    const result = await AstroPublisher.publishOrUpdatePage({
+      type: 'draft',
+      frontmatter,
+      body: 'Ant control guidance for Bradenton homeowners.',
+    }, {
+      action_type: 'new_supporting_blog',
+    });
+
+    expect(result).toMatchObject({
+      url: 'https://www.wavespestcontrol.com/autonomous-ant-control-bradenton/',
+      pr_number: 42,
+      pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42',
+    });
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'src/content/blog/autonomous-ant-control-bradenton.md',
+      branch: expect.stringMatching(/^content\/autonomous-autonomous-ant-control-bradenton-/),
+      sha: undefined,
+    }));
+    expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Blog: Autonomous Ant Control in Bradenton',
+    }));
+  });
+
+  test('declines unsupported autonomous action types', () => {
+    expect(AstroPublisher.canPublishDraftBrief({
+      type: 'draft',
+      frontmatter: validFrontmatter(),
+      body: 'Body',
+    }, {
+      action_type: 'refresh_existing_page',
+    })).toBe(false);
+  });
 });
 
 describe('Pages poll merged-to-live transition', () => {
