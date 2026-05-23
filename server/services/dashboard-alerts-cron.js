@@ -1,11 +1,11 @@
-// Dashboard alerts cron — fires Web Push + SMS when an operational
+// Dashboard alerts cron — fires admin notifications when an operational
 // alert NEWLY appears or escalates (count grows past what was last
 // pushed).
 //
 // Reads current alerts via dashboard-alerts.computeDashboardAlerts(),
 // diffs against the dashboard_alert_state table, and:
-//   - new alert (state row absent)        → INSERT state, push + SMS (if critical)
-//   - escalated alert (count > last_push) → UPDATE state, push + SMS (if critical)
+//   - new alert (state row absent)        → INSERT state, notify admins
+//   - escalated alert (count > last_push) → UPDATE state, notify admins
 //   - same alert, same/lower count        → UPDATE last_seen_at only (no notify)
 //   - cleared alert (in state, not now)   → DELETE state row (alert resolved silently)
 //
@@ -17,16 +17,12 @@
 // previous in-process flag was sufficient for single-replica deploys
 // but two replicas firing in lockstep would each classify the same
 // alert as "new" before either one upserted state, causing duplicate
-// push + duplicate owner SMS.
-//
-// SMS goes to OWNER_PHONE (env, fallback ADAM_PHONE) and ONLY for
-// severity='critical' — warn-tier alerts get a Web Push banner but
-// don't pull anyone out of dinner over a card-expiring-in-7-days.
+// push notifications.
 //
 // Notification dispatch happens AFTER the state-write transaction
 // commits — never inside it. If notifications were inside the same
 // transaction, a later DB error would roll back state upserts that
-// already triggered push/SMS, and the next cron tick would see the
+// already triggered notifications, and the next cron tick would see the
 // same alerts as new and re-fan-out duplicate notifications. Codex
 // P1 on PR #532; redone in PR-against-main with the post-commit
 // pattern below.
@@ -35,35 +31,12 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { computeDashboardAlerts } = require('./dashboard-alerts');
 const { triggerNotification } = require('./notification-triggers');
-const TwilioService = require('./twilio');
 
 // Stable advisory-lock key. hashtext() produces an int4 from a string
 // so the value is reproducible across replicas without coordination.
 // Keep this string fixed; changing it would break cross-replica
 // serialization until every replica redeploys.
 const ADVISORY_LOCK_KEY = 'dashboard-alerts-cron';
-
-function ownerPhone() {
-  return process.env.OWNER_PHONE || process.env.ADAM_PHONE || null;
-}
-
-// Best-effort owner SMS — single retry on failure, swallow & log on
-// total failure so the cron's other side-effects (push, state already
-// committed) don't get undone by an SMS provider blip.
-async function smsOwner(message) {
-  const phone = ownerPhone();
-  if (!phone) {
-    logger.warn('[dashboard-alerts-cron] OWNER_PHONE / ADAM_PHONE not set — skipping SMS');
-    return false;
-  }
-  try {
-    await TwilioService.sendSMS(phone, message, { messageType: 'internal_alert', skipLogo: true });
-    return true;
-  } catch (err) {
-    logger.error(`[dashboard-alerts-cron] owner SMS failed: ${err.message}`);
-    return false;
-  }
-}
 
 // In-process mutex — fast short-circuit so we don't open a Postgres
 // transaction we'd immediately roll back when a slow previous tick is
@@ -209,9 +182,6 @@ async function runDashboardAlertsCheckInner() {
       logger.error(`[dashboard-alerts-cron] post-commit triggerNotification failed for ${alert.id}: ${err.message}`);
     }
 
-    if (alert.severity === 'critical') {
-      await smsOwner(`Waves alert: ${alert.label}${alert.amount ? ` ($${Math.round(alert.amount).toLocaleString()})` : ''}\n${alert.href}`);
-    }
   }
 
   return { fired, cleared, current: current.length };

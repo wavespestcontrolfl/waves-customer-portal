@@ -5168,17 +5168,9 @@ router.post('/:token/bundle-inquiry', async (req, res, next) => {
       logger.error(`[estimate] Bundle re-price failed, falling back to inquiry: ${err.message}`);
     }
 
-    // Always fire the office SMS / admin notification so the team has a
+    // Always fire the admin notification so the team has a
     // heads-up — either the customer wants a bundle we couldn't auto-apply,
     // or they've just self-served a tier upgrade and we should follow up.
-    try {
-      const preMonthly = Number(estimate.monthly_total || 0);
-      const smsBody = bundled
-        ? `\u{1F4E6} Bundle SELF-APPLIED by ${estimate.customer_name}:\nAdded: ${bundled.addedService}\nWas: ${estimate.waveguard_tier || 'Bronze'} @ $${preMonthly}/mo\nNow: ${bundled.tier} @ $${bundled.newMonthly}/mo\nProperty: ${estimate.address || 'N/A'}\nPhone: ${estimate.customer_phone || 'N/A'}`
-        : `\u{1F4E6} Bundle inquiry from ${estimate.customer_name}:\nCurrently quoted: ${estimate.waveguard_tier || 'Bronze'} at $${preMonthly}/mo\nInterested in adding: ${suggestedService || 'another service'}\nProperty: ${estimate.address || 'N/A'}\nPhone: ${estimate.customer_phone || 'N/A'}`;
-      await TwilioService.sendSMS(WAVES_OFFICE_PHONE, smsBody);
-    } catch (e) { logger.error(`[estimate] Bundle inquiry SMS failed: ${e.message}`); }
-
     try {
       const NotificationService = require('../services/notification-service');
       await NotificationService.notifyAdmin('estimate',

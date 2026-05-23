@@ -333,7 +333,7 @@ router.post('/:id/interest', async (req, res, next) => {
     const svc = SERVICES[serviceType] || {};
     const discountedPrice = svc.monthlyPrice ? (svc.monthlyPrice * (1 - newDiscount)).toFixed(2) : '?';
 
-    // SMS to office
+    // Internal office notification
     try {
       await TwilioService.sendSMS(
         WAVES_OFFICE_PHONE,
@@ -343,10 +343,11 @@ router.post('/:id/interest', async (req, res, next) => {
         `Currently: ${customer.waveguard_tier} WaveGuard (${currentCount} services)\n` +
         `Adding this → ${newTier} (${newDiscount * 100}% off)\n` +
         `Their price: $${discountedPrice}/mo\n\n` +
-        `Follow up!`
+        `Follow up!`,
+        { messageType: 'internal_alert', link: '/admin/customers' }
       );
     } catch (smsErr) {
-      logger.error(`Failed to send upsell SMS: ${smsErr.message}`);
+      logger.error(`Failed to send upsell notification: ${smsErr.message}`);
     }
 
     // SMS to customer

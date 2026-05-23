@@ -401,18 +401,6 @@ class GoogleBusinessService {
                 metadata: JSON.stringify({ locationId: loc.id, rating, reviewerName }),
               });
 
-              // --- Negative review escalation ---
-              try {
-                const WAVES_ADMIN_PHONE = '+19413187612';
-                const TwilioService = require('./twilio');
-                await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-                  `⚠️ ${rating}-star review from ${reviewerName} on ${loc.name}: "${(reviewText || 'No comment').substring(0, 100)}..."`,
-                  { messageType: 'internal_alert' }
-                );
-              } catch (smsErr) {
-                logger.error(`[gbp] Negative review SMS alert failed: ${smsErr.message}`);
-              }
-
               // Store generated drafts with a sentinel prefix so the Reviews UI
               // can surface them without counting them as real Google replies.
               try {

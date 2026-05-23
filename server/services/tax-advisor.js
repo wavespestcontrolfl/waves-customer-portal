@@ -403,10 +403,11 @@ Please search for current FL and federal tax changes, then provide your analysis
       if (alerts) msg += `\n${alerts}\n`;
       msg += `\nFull report in admin portal → Tax Center`;
 
-      await TwilioService.sendSMS({
-        to: process.env.ADMIN_PHONE,
-        body: msg.substring(0, 1500),
-      });
+      await TwilioService.sendSMS(
+        process.env.ADMIN_PHONE,
+        msg.substring(0, 1500),
+        { messageType: 'internal_alert', link: '/admin/tax' },
+      );
 
       await db('tax_advisor_reports')
         .where('report_date', report.report_date)

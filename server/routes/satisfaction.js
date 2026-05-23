@@ -226,7 +226,8 @@ router.post('/', async (req, res, next) => {
         `Tech: ${service.technician_name || 'Unknown'}\n` +
         (feedbackText ? `Feedback: "${feedbackText}"\n` : '') +
         `Phone: ${customer.phone}\n\n` +
-        (isDetractor ? 'Follow up ASAP — detractor score.' : 'Follow up within 24 hours.')
+        (isDetractor ? 'Follow up ASAP — detractor score.' : 'Follow up within 24 hours.'),
+        { messageType: 'internal_alert', link: '/admin/reviews' }
       );
     } catch (smsErr) {
       logger.error(`Failed to send office alert SMS: ${smsErr.message}`);

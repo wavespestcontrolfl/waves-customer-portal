@@ -371,7 +371,7 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
       try {
         const twilioService = require('./twilio');
         const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
-        await twilioService.sendSMS(ownerPhone, alertMsg);
+        await twilioService.sendSMS(ownerPhone, alertMsg, { messageType: 'internal_alert', link: '/admin/credentials' });
         logger.info('[token-health] SMS alert sent');
       } catch {
         logger.warn('[token-health] Could not send SMS alert — Twilio not available');
