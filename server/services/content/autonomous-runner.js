@@ -159,7 +159,7 @@ class AutonomousRunner {
       }
       const finalized = await finalize(run, t0, result.patch);
       if (result.patch.outcome === 'skipped_shadow_mode') {
-        await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes || 'shadow_internal_links', claimToken });
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       } else {
         await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken });
       }
@@ -277,7 +277,7 @@ class AutonomousRunner {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
       });
-      await this._completeClaimOrThrow(queue, opp.id, { notes: `shadow_${wouldPublish ? 'would_publish' : 'would_gate'}`, claimToken });
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       return finalized;
     }
 

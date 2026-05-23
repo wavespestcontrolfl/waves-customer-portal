@@ -125,7 +125,7 @@ describe('autonomousContentEngine feature gate is registered', () => {
 
 // ── dry-run claim handling ─────────────────────────────────────────
 
-function loadRunnerWith({ queue, briefBuilder, dispatcher = {} }) {
+function loadRunnerWith({ queue, briefBuilder, dispatcher = {}, qualityGate = null, uniquenessGate = null }) {
   jest.resetModules();
   const dbMock = jest.fn(() => ({
     insert: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })),
@@ -135,6 +135,8 @@ function loadRunnerWith({ queue, briefBuilder, dispatcher = {} }) {
   jest.doMock('../services/content/opportunity-queue', () => queue);
   jest.doMock('../services/content/content-brief-builder', () => briefBuilder);
   jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
+  if (qualityGate) jest.doMock('../services/content/content-quality-gate', () => qualityGate);
+  if (uniquenessGate) jest.doMock('../services/content/uniqueness-gate', () => uniquenessGate);
   return require('../services/content/autonomous-runner');
 }
 
@@ -216,7 +218,7 @@ describe('runNext claim failures', () => {
 });
 
 describe('runNext internal-link shadow behavior', () => {
-  test('completes shadow internal-link claims instead of parking them in pending review', async () => {
+  test('releases shadow internal-link claims instead of parking them in pending review', async () => {
     const claimedAt = new Date('2026-05-23T05:00:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -241,10 +243,54 @@ describe('runNext internal-link shadow behavior', () => {
 
     expect(result.outcome).toBe('skipped_shadow_mode');
     expect(result.skip_reason).toBe('shadow_internal_links');
-    expect(queue.complete).toHaveBeenCalledWith('opp_links_1', {
-      notes: 'shadow_internal_links',
-      claimToken: claimedAt,
-    });
+    expect(queue.release).toHaveBeenCalledWith('opp_links_1', { claimToken: claimedAt });
+    expect(queue.complete).not.toHaveBeenCalled();
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+  });
+});
+
+describe('runNext general shadow behavior', () => {
+  test('releases shadow claims so unpublished opportunities remain eligible', async () => {
+    const claimedAt = new Date('2026-05-23T05:05:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_blog_1',
+        action_type: 'new_supporting_blog',
+        claimed_at: claimedAt,
+      }),
+      complete: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_blog_1',
+        action_type: 'new_supporting_blog',
+        page_type: 'blog',
+      }),
+    };
+    const dispatcher = {
+      runWithBrief: jest.fn().mockResolvedValue({
+        ok: true,
+        draft: { url: '/blog/test-shadow/', title: 'Test Shadow' },
+      }),
+    };
+    const qualityGate = {
+      evaluate: jest.fn().mockReturnValue({
+        ok: true,
+        hard_failures: [],
+        soft_failures: [],
+        total_score: 100,
+        min_total_score: 80,
+      }),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, qualityGate });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('skipped_shadow_mode');
+    expect(queue.release).toHaveBeenCalledWith('opp_blog_1', { claimToken: claimedAt });
+    expect(queue.complete).not.toHaveBeenCalled();
     expect(queue.pendingReview).not.toHaveBeenCalled();
   });
 });
