@@ -15,6 +15,7 @@ const { isEnabled } = require('../config/feature-gates');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
+const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -28,7 +29,7 @@ function notifyTwilioFailure(payload) {
 
 function capitalizeName(name) {
   if (!name) return '';
-  return name.trim().toLowerCase()
+  return cleanText(name).toLowerCase()
     .replace(/\b\w/g, c => c.toUpperCase())
     .replace(/\bMc(\w)/g, (_, c) => 'Mc' + c.toUpperCase())
     .replace(/\bO'(\w)/g, (_, c) => "O'" + c.toUpperCase());
@@ -46,7 +47,7 @@ router.post('/', async (req, res) => {
     const body = req.body;
 
     // Map raw form field names (garbled → clean)
-    const email = body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '';
+    const email = cleanEmail(body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '');
     const rawPhone = body.phone || body['Got A Number We Can Call Or Text'] || findField(body, /number|phone|call|text/i) || '';
     const rawAddress = body.address || body['And Whats Your Address'] || findField(body, /address/i) || '';
     const normalizedAddress = normalizeLeadAddress({
