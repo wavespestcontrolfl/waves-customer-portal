@@ -278,11 +278,11 @@ router.post('/run-pipeline', requireAdmin, async (req, res) => {
     }
 
     // Step 2: Site audit (fetches pages, computes body_text_5k + internal_link_targets)
-    logger.info(`[pipeline] Step 2/8: Site audit`);
+    logger.info(`[pipeline] Step 2/8: Site audit for ${domain}`);
     try {
       const SiteAuditor = require('../services/seo/site-auditor');
-      const auditResult = await SiteAuditor.runSiteAudit();
-      steps.push({ step: 'site_audit', status: 'ok', pages: auditResult?.pages?.length || 0 });
+      const auditResult = await SiteAuditor.runSiteAudit({ domain });
+      steps.push({ step: 'site_audit', status: 'ok', pages: Number(auditResult?.pages || 0) });
     } catch (err) {
       steps.push({ step: 'site_audit', status: 'failed', error: err.message });
       logger.warn(`[pipeline] Site audit failed: ${err.message}`);

@@ -1541,8 +1541,8 @@ async function runSeoPipeline(input, context = {}) {
     }
     try {
       const SiteAuditor = require('../seo/site-auditor');
-      const result = await SiteAuditor.runSiteAudit();
-      steps.push({ step: 'site_audit', status: 'ok', pages: result?.pages?.length || 0 });
+      const result = await SiteAuditor.runSiteAudit({ domain });
+      steps.push({ step: 'site_audit', status: 'ok', pages: Number(result?.pages || 0) });
     } catch (e) {
       steps.push({ step: 'site_audit', status: 'failed', error: e.message });
       logger.warn(`[IB pipeline] site audit: ${e.message}`);

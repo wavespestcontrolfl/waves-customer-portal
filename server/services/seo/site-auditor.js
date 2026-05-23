@@ -8,6 +8,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const crypto = require('crypto');
 const { etDateString } = require('../../utils/datetime-et');
+const { extractDomain } = require('../../utils/normalize-url');
 
 const SITE_URL = process.env.WAVES_SITE_URL || 'https://www.wavespestcontrol.com';
 const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];
@@ -16,6 +17,21 @@ const FL_PESTS = /palmetto bug|fire ant|chinch bug|ghost ant|german roach|subter
 const FL_CONTEXT = /southwest florida|swfl|gulf coast|rainy season|hurricane season|fdacs|florida department/i;
 const NAP_PHONE = /(941).*318.*7612|9413187612/;
 const NAP_NAME = /waves pest control/i;
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function siteUrlForAudit(target) {
+  const defaultDomain = extractDomain(SITE_URL) || 'wavespestcontrol.com';
+  const domain = extractDomain(target) || defaultDomain;
+  const base = domain === defaultDomain ? SITE_URL : `https://${domain}`;
+  return {
+    domain,
+    siteUrl: base.endsWith('/') ? base : `${base}/`,
+    isDefaultDomain: domain === defaultDomain,
+  };
+}
 
 class SiteAuditor {
   async discoverUrlsFromSitemaps(siteUrl) {
@@ -151,8 +167,11 @@ class SiteAuditor {
   /**
    * Full site audit — crawl all known pages, audit each, aggregate.
    */
-  async runSiteAudit() {
-    logger.info('Site audit starting...');
+  async runSiteAudit(options = {}) {
+    const target = typeof options === 'string' ? options : (options.siteUrl || options.domain);
+    const { domain, siteUrl, isDefaultDomain } = siteUrlForAudit(target);
+
+    logger.info(`Site audit starting for ${domain}...`);
     const startTime = Date.now();
 
     const [auditRun] = await db('seo_site_audit_runs').insert({
@@ -162,11 +181,18 @@ class SiteAuditor {
     try {
       // Get pages from sitemap first, with DB/known-page fallbacks for local or
       // newly staged content not yet present in sitemap.xml.
-      const blogPages = await db('blog_posts').whereIn('status', ['published']).select('id', 'title', 'slug', 'content', 'content_html', 'keyword', 'city');
-      const servicePages = [
+      const blogQuery = db('blog_posts')
+        .whereIn('status', ['published'])
+        .where((builder) => {
+          builder.where('target_domain', domain);
+          if (isDefaultDomain) builder.orWhereNull('target_domain');
+        })
+        .select('id', 'title', 'slug', 'content', 'content_html', 'keyword', 'city');
+      const blogPages = await blogQuery;
+      const servicePages = isDefaultDomain ? [
         '/pest-control-bradenton-fl/', '/pest-control-sarasota-fl/', '/lawn-care/', '/mosquito-control/',
         '/termite-control/', '/rodent-control/', '/tree-and-shrub/', '/',
-      ];
+      ] : ['/'];
 
       const pageMap = new Map();
       const addPage = (page) => {
@@ -174,12 +200,12 @@ class SiteAuditor {
         pageMap.set(page.url, page);
       };
 
-      const sitemapUrls = await this.discoverUrlsFromSitemaps(SITE_URL);
+      const sitemapUrls = await this.discoverUrlsFromSitemaps(siteUrl);
       sitemapUrls.forEach((url) => addPage({ url, type: this.classifyUrlType(url), keyword: null, city: null }));
-      servicePages.forEach(p => addPage({ url: new URL(p, SITE_URL).toString(), type: 'service_page', keyword: null, city: null }));
+      servicePages.forEach(p => addPage({ url: new URL(p, siteUrl).toString(), type: 'service_page', keyword: null, city: null }));
       blogPages.forEach(p => {
         if (!p.slug) return;
-        addPage({ url: new URL(`/${p.slug.replace(/^\/+|\/+$/g, '')}/`, SITE_URL).toString(), type: 'blog', keyword: p.keyword, city: p.city, blogPostId: p.id });
+        addPage({ url: new URL(`/${p.slug.replace(/^\/+|\/+$/g, '')}/`, siteUrl).toString(), type: 'blog', keyword: p.keyword, city: p.city, blogPostId: p.id });
       });
 
       const maxPages = parseInt(process.env.SEO_SITE_AUDIT_MAX_PAGES || '250', 10);
@@ -204,10 +230,10 @@ class SiteAuditor {
             logger.warn(`Fetch failed for ${page.url}: ${fetchErr.message}`);
           }
 
-          const audit = await this.auditPage(page.url, html, statusCode, responseTime, page.keyword, page.city, page.type);
+          const audit = await this.auditPage(page.url, html, statusCode, responseTime, page.keyword, page.city, page.type, siteUrl);
 
           await db('seo_page_audits').insert({
-            ...audit, audit_date: etDateString(),
+            ...audit, domain, audit_date: etDateString(),
           }).onConflict(['url', 'audit_date']).merge();
 
           auditResults.push(audit);
@@ -277,7 +303,7 @@ class SiteAuditor {
         });
       }
 
-      logger.info(`Site audit complete: ${auditResults.length} pages, avg score ${avgScore}, ${critical} critical`);
+      logger.info(`Site audit complete for ${domain}: ${auditResults.length} pages, avg score ${avgScore}, ${critical} critical`);
       return { pages: auditResults.length, avgScore, healthy, warning, critical, duration: Math.round((Date.now() - startTime) / 1000) };
 
     } catch (err) {
@@ -290,7 +316,7 @@ class SiteAuditor {
   /**
    * Audit a single page — returns full audit object.
    */
-  async auditPage(url, html, statusCode, responseTime, keyword, city, pageType) {
+  async auditPage(url, html, statusCode, responseTime, keyword, city, pageType, siteUrl = SITE_URL) {
     const lower = (html || '').toLowerCase();
     const issues = [];
 
@@ -360,10 +386,16 @@ class SiteAuditor {
     // Canonical
     const canonicalUrl = this.getCanonicalUrl(html);
     const canonicalSelf = canonicalUrl ? canonicalUrl.replace(/\/$/, '') === url.replace(/\/$/, '') : false;
-    const internalLinks = (html.match(/href=["'](?:https?:\/\/(?:www\.)?wavespestcontrol\.com|\/(?!\/))/gi) || []);
-    const externalLinks = (html.match(/href=["']https?:\/\/(?!www\.wavespestcontrol\.com|wavespestcontrol\.com)/gi) || []);
+    const siteHost = new URL(siteUrl).hostname.replace(/^www\./, '');
+    const hostPattern = escapeRegExp(siteHost);
+    const absoluteInternalHref = `https?:\\/\\/(?:www\\.)?${hostPattern}(?::\\d+)?`;
+    const internalHrefPattern = new RegExp(`href=["'](?:${absoluteInternalHref}|\\/(?!\\/))`, 'gi');
+    const externalHrefPattern = new RegExp(`href=["']https?:\\/\\/(?!(?:www\\.)?${hostPattern}(?::\\d+)?(?:\\/|$))`, 'gi');
+    const hrefTargetPattern = new RegExp(`href=["']((?:${absoluteInternalHref}|\\/(?!\\/))[^"'#?]*)`, 'gi');
+    const internalLinks = (html.match(internalHrefPattern) || []);
+    const externalLinks = (html.match(externalHrefPattern) || []);
     const internalLinkTargets = [];
-    const hrefMatches = html.matchAll(/href=["']((?:https?:\/\/(?:www\.)?wavespestcontrol\.com|\/(?!\/))[^"'#?]*)/gi);
+    const hrefMatches = html.matchAll(hrefTargetPattern);
     for (const m of hrefMatches) internalLinkTargets.push(m[1]);
 
     // Score
