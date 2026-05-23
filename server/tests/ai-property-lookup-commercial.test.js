@@ -741,6 +741,25 @@ describe('Sarasota and Charlotte county property lookup facts', () => {
     });
   });
 
+  test('keeps Sarasota table facts when building detail is unavailable', () => {
+    expect(_private.parseSarasotaPaoRecord({
+      address: '12606 Shimmering Oak Cir, Venice, FL 34293',
+      search: sarasotaSearch,
+      detailHtml: sarasotaDetailHtml,
+      buildingDetailHtml: null,
+    })).toMatchObject({
+      squareFootage: 1850,
+      lotSize: 3839,
+      yearBuilt: 2015,
+      bedrooms: 3,
+      bathrooms: 2.5,
+      stories: 2,
+      propertyType: 'Single Family',
+      constructionMaterial: null,
+      roofType: null,
+    });
+  });
+
   test('uses the dominant Sarasota building row for building detail links', () => {
     const multiBuildingDetailHtml = `
       <table id="Buildings" class="grid">
@@ -806,6 +825,25 @@ describe('Sarasota and Charlotte county property lookup facts', () => {
       formattedAddress: '519 WATERSIDE ST, Port Charlotte, FL, 33954',
     });
     expect(parsed.bathrooms).toBeNull();
+  });
+
+  test('keeps Charlotte record-card facts when GIS ownership is unavailable', () => {
+    expect(_private.parseCharlottePaoRecord({
+      address: '519 Waterside St, Port Charlotte, FL 33954',
+      search: charlotteSearch,
+      detailHtml: charlotteDetailHtml,
+      ownership: null,
+    })).toMatchObject({
+      squareFootage: 2544,
+      lotSize: null,
+      yearBuilt: 1983,
+      bedrooms: 6,
+      stories: 2,
+      propertyType: 'Single Family',
+      constructionMaterial: 'WOOD_FRAME',
+      roofType: 'SHINGLE',
+      county: 'Charlotte',
+    });
   });
 
   test('new direct county providers keep county provenance', () => {

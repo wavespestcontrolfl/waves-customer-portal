@@ -392,7 +392,14 @@ async function lookupPropertyFromSarasotaPAO(address, options = {}) {
     const search = await searchSarasotaParcel(address, timeoutMs, t0);
     if (!search?.parcelId || !search?.html) return null;
 
-    const buildingDetailHtml = await fetchSarasotaPrimaryBuildingDetail(search.html, timeoutMs, t0);
+    const buildingDetailHtml = await fetchSarasotaPrimaryBuildingDetail(search.html, timeoutMs, t0).catch((err) => {
+      logger.warn('[county-property] Sarasota PAO building detail fetch failed', {
+        elapsedMs: Date.now() - t0,
+        parcelId: search.parcelId,
+        error: summarizeProviderError(err),
+      });
+      return null;
+    });
     const parsed = parseSarasotaPaoRecord({
       address,
       search,
@@ -454,7 +461,7 @@ async function lookupPropertyFromCharlottePAO(address, options = {}) {
     const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
     if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
 
-    const [detail, ownership] = await Promise.all([
+    const [detailResult, ownershipResult] = await Promise.allSettled([
       fetchCountyText(charlotteRecordUrl(search.parcelId), remainingMs, {
         headers: {
           Referer: `${CHARLOTTE_PAO_BASE}/RPSearchEnter.asp`,
@@ -462,6 +469,16 @@ async function lookupPropertyFromCharlottePAO(address, options = {}) {
       }),
       fetchCharlotteOwnership(search.parcelId, remainingMs),
     ]);
+    if (detailResult.status === 'rejected') throw detailResult.reason;
+    const detail = detailResult.value;
+    const ownership = ownershipResult.status === 'fulfilled' ? ownershipResult.value : null;
+    if (ownershipResult.status === 'rejected') {
+      logger.warn('[county-property] Charlotte PAO ownership fetch failed', {
+        elapsedMs: Date.now() - t0,
+        parcelId: search.parcelId,
+        error: summarizeProviderError(ownershipResult.reason),
+      });
+    }
 
     const parsed = parseCharlottePaoRecord({
       address,
