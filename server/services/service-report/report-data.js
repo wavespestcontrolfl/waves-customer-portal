@@ -1294,7 +1294,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     pestPressureConfigPromise,
     loadScoreForServiceRecord(knex, service.id).catch(() => null),
     service.customer_id
-      ? loadHistoryForCustomer(knex, service.customer_id, { serviceLine: serviceLine || null, limit: 8 }).catch(() => [])
+      ? loadHistoryForCustomer(knex, service.customer_id, {
+          serviceLine: serviceLine || null,
+          limit: 8,
+          beforeOrOnServiceDate: service.service_date || null,
+        }).catch(() => [])
       : Promise.resolve([]),
     serviceCoverageConfigPromise,
     visitTimelineConfigPromise,
