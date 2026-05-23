@@ -269,6 +269,25 @@ function parseJsonbColumns(row, keys) {
   return out;
 }
 
+// Bare service hub slugs (e.g. /lawn-care/, /mosquito-control/) live
+// in src/content/services/ alongside the city-service combos — same
+// Astro collection, no -fl suffix. The earlier heuristic sent them to
+// /locations/ and broke refresh/meta actions for canonical service URLs.
+const SERVICE_HUB_SLUGS = new Set([
+  'pest-control',
+  'lawn-care',
+  'mosquito-control',
+  'termite-control',
+  'rodent-control',
+  'bed-bug-control',
+  'commercial-pest-control',
+  'pest-control-services',
+  'pest-control-quote',
+  'termite-inspection',
+  'tree-shrub-care',
+  'tree-and-shrub-care',
+]);
+
 /**
  * Map a public URL ('/pest-control-bradenton-fl/') to an Astro
  * content collection file path. This is a heuristic — the Astro
@@ -282,6 +301,8 @@ function urlToAstroPath(url) {
   if (cleaned.startsWith('blog/')) return `src/content/blog/${cleaned.slice(5)}.md`;
   // city-service slugs live in services collection
   if (/-fl$/.test(cleaned)) return `src/content/services/${cleaned}.md`;
+  // pure-service hub pages also live in services collection
+  if (SERVICE_HUB_SLUGS.has(cleaned)) return `src/content/services/${cleaned}.md`;
   // generic location pages
   return `src/content/locations/${cleaned}.md`;
 }

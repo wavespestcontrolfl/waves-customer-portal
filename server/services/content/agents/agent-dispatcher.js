@@ -347,11 +347,15 @@ async function* streamSessionEvents(sessionId, deadline) {
       const { done, value } = await reader.read();
       if (done) return;
       buf += decoder.decode(value, { stream: true });
-      // SSE frames are separated by blank lines (\n\n).
-      let idx;
-      while ((idx = buf.indexOf('\n\n')) !== -1) {
-        const frame = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
+      // SSE frames are separated by a blank line. The spec allows LF,
+      // CRLF, or bare CR boundaries — only matching \n\n loses frames
+      // on servers that emit \r\n\r\n and the dispatcher times out
+      // with streaming_failed even though events were arriving.
+      const FRAME_SEP = /\r\n\r\n|\n\n|\r\r/;
+      let m;
+      while ((m = FRAME_SEP.exec(buf))) {
+        const frame = buf.slice(0, m.index);
+        buf = buf.slice(m.index + m[0].length);
         let evName = currentEvent;
         let dataLines = [];
         for (const rawLine of frame.split('\n')) {
