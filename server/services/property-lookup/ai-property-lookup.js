@@ -878,17 +878,24 @@ function normalizeManateePropertyType(type, classification) {
   if (/APT|APARTMENT/.test(text)) return 'Apartment';
   if (/CONDO/.test(text)) return 'Condo';
   if (/MULTI|TRIPLEX|QUADPLEX|FOURPLEX/.test(text)) return 'Multifamily';
-  if (/COM|COMMERCIAL|OFFICE|RETAIL|WAREHOUSE|INDUSTRIAL/.test(text)) return 'Commercial';
+  if (/MEDICAL/.test(text)) return 'Medical Office';
+  if (/OFFICE/.test(text)) return 'Office';
+  if (/RETAIL/.test(text)) return 'Retail';
+  if (/WAREHOUSE/.test(text)) return 'Warehouse';
+  if (/RESTAURANT/.test(text)) return 'Restaurant';
+  if (/SCHOOL/.test(text)) return 'School';
+  if (/INDUSTRIAL/.test(text)) return 'Industrial';
+  if (/COM|COMMERCIAL/.test(text)) return 'Commercial';
   if (/RES|RESIDENTIAL/.test(text)) return 'Single Family';
   return null;
 }
 
 function normalizeManateeConstruction(value) {
   const text = String(value || '').toUpperCase();
-  if (/MASONRY|CONCRETE|BLOCK|CBS|STUCCO/.test(text)) return 'CBS';
   if (/WOOD|FRAME/.test(text)) return 'WOOD_FRAME';
   if (/BRICK/.test(text)) return 'BRICK';
   if (/METAL|STEEL/.test(text)) return 'METAL';
+  if (/MASONRY|CONCRETE|BLOCK|CBS|CMU/.test(text)) return 'CBS';
   return null;
 }
 

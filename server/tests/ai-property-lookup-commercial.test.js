@@ -349,6 +349,52 @@ describe('Manatee PAO property lookup facts', () => {
     }).propertyType).toBe('Townhome');
   });
 
+  test('keeps Manatee commercial subtypes in estimator categories', () => {
+    const withType = (type, classification) => ({
+      ...manateeBuildings,
+      rows: [
+        [type, '1', classification, '2017', '2017', 1, '2943', '2310', '4/2/0', 'MASONRY/STUCCO', 'SHINGLES COMP', 'HIP AND/OR GABLE'],
+      ],
+    });
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Warehouse St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: withType('COM', 'WAREHOUSE'),
+    }).propertyType).toBe('Warehouse');
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Office St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: withType('COM', 'COMMERCIAL OFFICE'),
+    }).propertyType).toBe('Office');
+  });
+
+  test('does not classify wood-frame stucco as CBS', () => {
+    const withConstruction = (construction) => ({
+      ...manateeBuildings,
+      rows: [
+        ['RES', '1', 'RESIDENTIAL', '2017', '2017', 1, '2943', '2310', '4/2/0', construction, 'SHINGLES COMP', 'HIP AND/OR GABLE'],
+      ],
+    });
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Frame St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: withConstruction('WOOD FRAME/STUCCO'),
+    }).constructionMaterial).toBe('WOOD_FRAME');
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Stucco St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: withConstruction('STUCCO'),
+    }).constructionMaterial).toBeNull();
+  });
+
   test('merged county records remain authoritative and high quality', () => {
     const parsed = _private.parseManateePaoRecord({
       address: '8920 49th Ave E, Bradenton, FL 34211',
