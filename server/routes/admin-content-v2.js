@@ -116,46 +116,23 @@ function normalizeGenerateBody(body = {}) {
 // Call sites are expected to wrap this in try/catch and store the
 // error string alongside the post for display.
 async function generateFeaturedImage({ title, topic, keyword }) {
-  if (!process.env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY missing — set it in Railway env to enable image generation');
+  // Delegates to the provider-chained image-generator (gpt-image-2 →
+  // gpt-image-1.5 → gpt-image-1 → gemini by default; override via
+  // BLOG_IMAGE_PROVIDER env). Gemini is still in the chain by default
+  // so this keeps working with only GEMINI_API_KEY set.
+  const imageGenerator = require('../services/content/image-generator');
+  try {
+    const result = await imageGenerator.generate({ title, topic, keyword, mode: 'blog-hero' });
+    logger.info(`[content] Generated featured image for "${title}" via ${result.model}`);
+    return result.dataUrl;
+  } catch (err) {
+    // Match the legacy throw contract — single-line Error the
+    // /blog/:id/regenerate-image handler stores against the post.
+    const attempts = (err.attempts || [])
+      .map((a) => `${a.provider}:${a.result.status || a.result.reason || (a.result.dataUrl ? 'ok' : 'unknown')}`)
+      .join(', ');
+    throw new Error(`image-generator: ${err.message}${attempts ? ` (attempts: ${attempts})` : ''}`);
   }
-  const imgPrompt = `Create a high-quality, photorealistic hero image for a pest control blog article.
-Title: "${title}"
-Topic: ${keyword || topic || title}
-Style: Bright, professional, clean. Southwest Florida setting (palm trees, tropical landscaping, sunny).
-DO NOT include any text, words, or watermarks in the image.
-The image should feel like a professional stock photo suitable for a blog featured image.
-Landscape orientation, 1200x630px aspect ratio.`;
-
-  const imgRes = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: imgPrompt }] }],
-        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-      }),
-    }
-  );
-
-  if (!imgRes.ok) {
-    const body = await imgRes.text().catch(() => '');
-    throw new Error(`Gemini HTTP ${imgRes.status}: ${body.slice(0, 240)}`);
-  }
-
-  const imgData = await imgRes.json();
-  const imagePart = imgData.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-  if (!imagePart?.inlineData) {
-    // Gemini returned text only — most commonly a safety/policy response
-    // ("I can't generate that"). Expose it so the operator can edit the
-    // prompt instead of guessing why nothing came back.
-    const textPart = imgData.candidates?.[0]?.content?.parts?.find(p => p.text)?.text || '';
-    throw new Error(`Gemini returned no image${textPart ? ` — ${textPart.slice(0, 200)}` : ''}`);
-  }
-
-  logger.info(`[content] Generated featured image for "${title}"`);
-  return `data:${imagePart.inlineData.mimeType || 'image/png'};base64,${imagePart.inlineData.data}`;
 }
 
 // =========================================================================
