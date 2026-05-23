@@ -11,6 +11,7 @@ const {
   NETWORK_DOMAINS,
 } = require('../../utils/normalize-url');
 const { computeBodySimilarity } = require('../../utils/text-similarity');
+const crypto = require('crypto');
 
 // Geographic conversion weights from docs/seo/waves-seo-rubric.yaml
 const GEO_WEIGHTS = {
@@ -289,15 +290,18 @@ class UrlIntelligence {
     const service = inferServiceFromUrl(url);
     const pageType = classifyPageType(url);
 
+    // Source tables may store URLs with scheme/www/trailing slash — try multiple forms
+    const urlVariants = [url, `https://${url}`, `https://${url}/`, `https://www.${url}`, `https://www.${url}/`];
+
     // Fetch latest audit data
     const audit = await db('seo_page_audits')
-      .where('url', url)
+      .whereIn('url', urlVariants)
       .orderBy('audit_date', 'desc')
       .first();
 
     // Fetch index status
     const indexStatus = await db('content_index_status')
-      .where('url', url)
+      .whereIn('url', urlVariants)
       .first();
 
     // Fetch 28d GSC performance — try exact match, then with https:// prefix
@@ -693,7 +697,7 @@ class UrlIntelligence {
 
         // Quick check: if content_hash matches exactly → 100%
         if (a.content_hash && b.content_hash && a.content_hash === b.content_hash) {
-          const clusterId = clusterMap.get(a.url) || clusterMap.get(b.url) || db.raw('gen_random_uuid()');
+          const clusterId = clusterMap.get(a.url) || clusterMap.get(b.url) || crypto.randomUUID();
           clusterMap.set(a.url, clusterId);
           clusterMap.set(b.url, clusterId);
           similarityMap.set(a.url, Math.max(similarityMap.get(a.url) || 0, 100));
@@ -744,11 +748,14 @@ class UrlIntelligence {
       }
     }
 
-    // Update seo_url_intelligence with similarity data
+    // Update seo_url_intelligence with similarity + cluster data
     for (const [url, similarity] of similarityMap) {
+      const clusterId = clusterMap.get(url);
+      const update = { body_similarity_max: similarity };
+      if (clusterId) update.duplicate_cluster_id = clusterId;
       await db('seo_url_intelligence')
         .where('url', url)
-        .update({ body_similarity_max: similarity });
+        .update(update);
     }
 
     logger.info(`[UrlIntelligence] buildDuplicateClusters ${d}: ${clustersFound} duplicate pairs found`);
@@ -966,7 +973,9 @@ class UrlIntelligence {
     const d = domain ? extractDomain(domain) : null;
     let query = db('seo_url_intelligence')
       .where('in_sitemap', true)
-      .where('internal_links_in', '<', 2)
+      .where(function () {
+        this.where('internal_links_in', '<', 2).orWhereNull('internal_links_in');
+      })
       .orderBy('priority_score', 'desc');
     if (d) query = query.where('domain', d);
     return query;

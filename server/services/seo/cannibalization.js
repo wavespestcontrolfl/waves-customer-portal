@@ -54,22 +54,30 @@ class CannibalizationDetector {
         const wasteImpressions = totalImpr - parseInt(winner.impressions);
         const urls = pages.map((p) => p.page_url);
 
-        await db('seo_cannibalization_flags')
-          .insert({
-            query: q.query,
-            urls: JSON.stringify(urls),
-            impressions_split: JSON.stringify(impressionsSplit),
-            clicks_split: JSON.stringify(clicksSplit),
-            recommendation: `Consolidate content — ${urls.length} URLs splitting impressions for "${q.query}". Winner: ${winner.page_url}`,
-            winner_url: winner.page_url,
-            winner_clicks: parseInt(winner.clicks),
-            winner_impressions: parseInt(winner.impressions),
-            total_waste_impressions: wasteImpressions,
-            domain: q.domain,
-            status: 'open',
-          })
-          .onConflict(db.raw('(query) WHERE status = \'open\''))
-          .merge();
+        const existing = await db('seo_cannibalization_flags')
+          .where('query', q.query)
+          .where('status', 'open')
+          .first();
+
+        const row = {
+          query: q.query,
+          urls: JSON.stringify(urls),
+          impressions_split: JSON.stringify(impressionsSplit),
+          clicks_split: JSON.stringify(clicksSplit),
+          recommendation: `Consolidate content — ${urls.length} URLs splitting impressions for "${q.query}". Winner: ${winner.page_url}`,
+          winner_url: winner.page_url,
+          winner_clicks: parseInt(winner.clicks),
+          winner_impressions: parseInt(winner.impressions),
+          total_waste_impressions: wasteImpressions,
+          domain: q.domain,
+          status: 'open',
+        };
+
+        if (existing) {
+          await db('seo_cannibalization_flags').where('id', existing.id).update(row);
+        } else {
+          await db('seo_cannibalization_flags').insert(row);
+        }
         flagged++;
       }
     }

@@ -1475,26 +1475,39 @@ async function seoExperimentResults(input) {
 
 async function runSeoPipeline(input) {
   const domain = input.domain || 'wavespestcontrol.com';
-  // Trigger via internal HTTP-like call — the pipeline runs in background
-  // and logs progress. We just confirm it started.
-  try {
-    const fetch = globalThis.fetch || require('node-fetch');
-    // Fire-and-forget to the pipeline endpoint
-    const baseUrl = process.env.INTERNAL_API_URL || 'http://localhost:' + (process.env.PORT || 3000);
-    fetch(`${baseUrl}/api/admin/seo/url-intelligence/run-pipeline`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ domain }),
-    }).catch(() => {});
-  } catch {
-    // If internal fetch fails, run directly
-    const SearchConsole = require('../seo/search-console-v2');
-    SearchConsole.syncDailyData(7, domain).catch(() => {});
-  }
+  // Call services directly instead of hitting the authenticated HTTP endpoint
+  const runPipeline = async () => {
+    try {
+      const SearchConsole = require('../seo/search-console-v2');
+      await SearchConsole.syncDailyData(7, domain);
+    } catch (e) { logger.warn(`[IB pipeline] GSC sync: ${e.message}`); }
+    try {
+      await UrlIntelligence.refreshDomain(domain);
+    } catch (e) { logger.warn(`[IB pipeline] refresh: ${e.message}`); }
+    try {
+      const SitemapValidator = require('../seo/sitemap-validator');
+      await SitemapValidator.validateDomain(domain);
+    } catch (e) { logger.warn(`[IB pipeline] sitemap: ${e.message}`); }
+    try {
+      await UrlIntelligence.buildDuplicateClusters(domain);
+    } catch (e) { logger.warn(`[IB pipeline] duplicates: ${e.message}`); }
+    try {
+      await Promise.allSettled([
+        UrlIntelligence.buildIntentMap(domain),
+        UrlIntelligence.buildInternalLinkGraph(domain),
+      ]);
+    } catch (e) { logger.warn(`[IB pipeline] intent/links: ${e.message}`); }
+    try {
+      const SeoActionGenerator = require('../seo/seo-action-generator');
+      await SeoActionGenerator.generateActionsFromDiagnosis(domain);
+      await SeoActionGenerator.autoApprove();
+    } catch (e) { logger.warn(`[IB pipeline] actions: ${e.message}`); }
+  };
+  runPipeline().catch((e) => logger.error(`[IB pipeline] fatal: ${e.message}`));
   return {
     status: 'started',
     domain,
-    message: `Full SEO pipeline started for ${domain}. Steps: GSC sync → site audit → URL Intelligence refresh → sitemap validation → duplicate detection → intent routing → link graph → cannibalization. Check the URL Intel dashboard in a few minutes for results.`,
+    message: `Full SEO pipeline started for ${domain}. Steps: GSC sync → URL Intelligence refresh → sitemap validation → duplicate detection → intent routing → link graph → action generation. Check the URL Intel dashboard in a few minutes for results.`,
   };
 }
 
