@@ -8,7 +8,7 @@ const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./strip
 const { triggerNotification } = require('../services/notification-triggers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const {
   assertInvoicePaymentIntentTenderMatches,
   isAchPaymentIntent,
@@ -48,19 +48,23 @@ async function sendBillingSms(customer, body, metadata = {}) {
   });
 }
 
-// Advance `from` by `days` weekdays (Mon–Fri). Used to render the
+// Advance `from` by `days` ET weekdays (Mon–Fri). Used to render the
 // "expected to clear" date in the ACH-processing acknowledgment so the
 // copy ("3–5 business days") doesn't surface a weekend date when the
 // payment was initiated late in the week.
+//
+// Uses ET calendar helpers because Railway runs TZ=UTC: a Sunday-evening-ET
+// payment is already Monday UTC, so native getDay()/getDate() would count
+// the wrong weekday and shift the "expected to clear" date by a day.
 function addBusinessDays(from, days) {
-  const result = new Date(from);
+  let cursor = from;
   let added = 0;
   while (added < days) {
-    result.setDate(result.getDate() + 1);
-    const day = result.getDay();
-    if (day !== 0 && day !== 6) added += 1;
+    cursor = addETDays(cursor, 1);
+    const dow = etParts(cursor).dayOfWeek;
+    if (dow !== 0 && dow !== 6) added += 1;
   }
-  return result;
+  return cursor;
 }
 
 /**
@@ -1508,7 +1512,13 @@ async function handlePaymentIntentProcessing(paymentIntent) {
         amountPaid: amount,
         initiatedAt: new Date(),
         expectedClearDate,
-        idempotencyKey: `payment.ach_processing:${freshInvoice.id}`,
+        // Scope by PI so the per-attempt reset of ach_processing_notified_at
+        // (cleared in handlePaymentIntentFailed / handlePaymentIntentCanceled)
+        // actually allows a fresh email on the next attempt — without this,
+        // email_messages.idempotency_key would dedupe permanently per invoice
+        // and silently suppress the second ack even though the SMS path went
+        // through.
+        idempotencyKey: `payment.ach_processing:${freshInvoice.id}:${piId}`,
       }).catch((err) => ({ ok: false, error: err.message }));
       if (!emailResult?.ok) {
         const reason = emailResult?.reason || emailResult?.error || 'unknown';
@@ -1566,6 +1576,18 @@ async function handlePaymentIntentCanceled(paymentIntent) {
     .where({ stripe_payment_intent_id: piId })
     .whereNotIn('status', ['paid', 'refunded'])
     .update({ status: 'canceled' })
+    .catch(() => {});
+
+  // Match the failed-payment path: clear the ACH ack dedupe lock so a new
+  // ACH attempt on the same invoice can send a fresh "we got it" notice.
+  // Stripe allows canceling a processing ACH inside its cancellation
+  // window, after which the customer may re-initiate against the same
+  // invoice — without this, the per-invoice lock would silently suppress
+  // the next acknowledgment.
+  await db('invoices')
+    .where({ stripe_payment_intent_id: piId })
+    .whereNotNull('ach_processing_notified_at')
+    .update({ ach_processing_notified_at: null })
     .catch(() => {});
 }
 
