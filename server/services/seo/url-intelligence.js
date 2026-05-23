@@ -138,6 +138,22 @@ const DIAGNOSIS_TO_ACTION = {
   unknown: { action: 'Run site audit and GSC sync to populate data.', alt: null, approval: 'review' },
 };
 
+function hubSpokeConflictPair(urlA, urlB) {
+  const domA = extractDomain(urlA);
+  const domB = extractDomain(urlB);
+  if (!domA || !domB || domA === domB) return null;
+
+  const roleA = classifyDomainRole(domA);
+  const roleB = classifyDomainRole(domB);
+  const isHubSpokePair = (roleA === 'hub' && roleB === 'spoke') || (roleA === 'spoke' && roleB === 'hub');
+  if (!isHubSpokePair) return null;
+
+  return {
+    spokeIsA: roleA === 'spoke',
+    hubIsA: roleA === 'hub',
+  };
+}
+
 // Concurrency-limited promise pool
 async function promisePool(items, concurrency, fn) {
   const results = [];
@@ -753,11 +769,10 @@ class UrlIntelligence {
           clustersFound++;
 
           // Hub/spoke pair with high similarity → canonical conflict
-          const domA = extractDomain(a.url);
-          const domB = extractDomain(b.url);
-          if (domA !== domB && similarity_pct > 85) {
-            const spoke = classifyDomainRole(domA) === 'spoke' ? a : b;
-            const hub = spoke === a ? b : a;
+          const pair = similarity_pct > 85 ? hubSpokeConflictPair(a.url, b.url) : null;
+          if (pair) {
+            const spoke = pair.spokeIsA ? a : b;
+            const hub = pair.hubIsA ? a : b;
             await db('seo_canonical_conflicts')
               .insert({
                 spoke_url: spoke.url,
@@ -1099,4 +1114,7 @@ class UrlIntelligence {
   }
 }
 
-module.exports = new UrlIntelligence();
+const urlIntelligence = new UrlIntelligence();
+urlIntelligence._internals = { hubSpokeConflictPair };
+
+module.exports = urlIntelligence;

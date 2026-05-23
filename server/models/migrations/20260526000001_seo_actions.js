@@ -50,8 +50,8 @@ exports.up = async function (knex) {
     t.uuid('batch_id');
     t.string('batch_label', 100);
 
-    // Dedupe
-    t.string('dedupe_key', 200);
+    // Dedupe key is action type + sha256(normalized URL), not raw URL text.
+    t.string('dedupe_key', 140);
     t.unique(['dedupe_key']);
 
     // State

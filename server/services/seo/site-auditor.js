@@ -8,6 +8,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const crypto = require('crypto');
 const { etDateString } = require('../../utils/datetime-et');
+const { extractDomain, NETWORK_DOMAINS } = require('../../utils/normalize-url');
 
 const SITE_URL = process.env.WAVES_SITE_URL || 'https://www.wavespestcontrol.com';
 const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];
@@ -16,6 +17,31 @@ const FL_PESTS = /palmetto bug|fire ant|chinch bug|ghost ant|german roach|subter
 const FL_CONTEXT = /southwest florida|swfl|gulf coast|rainy season|hurricane season|fdacs|florida department/i;
 const NAP_PHONE = /(941).*318.*7612|9413187612/;
 const NAP_NAME = /waves pest control/i;
+const EXTRA_AUDIT_DOMAINS = String(process.env.SEO_AUDIT_ALLOWED_DOMAINS || '')
+  .split(',')
+  .map((d) => extractDomain(d))
+  .filter(Boolean);
+const AUDIT_ALLOWED_DOMAINS = new Set([...NETWORK_DOMAINS, extractDomain(SITE_URL), ...EXTRA_AUDIT_DOMAINS].filter(Boolean));
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function siteUrlForAudit(target) {
+  const defaultDomain = extractDomain(SITE_URL) || 'wavespestcontrol.com';
+  const domain = extractDomain(target) || defaultDomain;
+  if (!AUDIT_ALLOWED_DOMAINS.has(domain)) {
+    const err = new Error(`Unsupported SEO audit domain: ${domain}`);
+    err.status = 400;
+    throw err;
+  }
+  const base = domain === defaultDomain ? SITE_URL : `https://${domain}`;
+  return {
+    domain,
+    siteUrl: base.endsWith('/') ? base : `${base}/`,
+    isDefaultDomain: domain === defaultDomain,
+  };
+}
 
 class SiteAuditor {
   async discoverUrlsFromSitemaps(siteUrl) {
@@ -151,22 +177,32 @@ class SiteAuditor {
   /**
    * Full site audit — crawl all known pages, audit each, aggregate.
    */
-  async runSiteAudit() {
-    logger.info('Site audit starting...');
+  async runSiteAudit(options = {}) {
+    const target = typeof options === 'string' ? options : (options.siteUrl || options.domain);
+    const { domain, siteUrl, isDefaultDomain } = siteUrlForAudit(target);
+
+    logger.info(`Site audit starting for ${domain}...`);
     const startTime = Date.now();
 
     const [auditRun] = await db('seo_site_audit_runs').insert({
-      run_date: new Date(), status: 'running',
+      run_date: new Date(), status: 'running', domain,
     }).returning('*');
 
     try {
       // Get pages from sitemap first, with DB/known-page fallbacks for local or
       // newly staged content not yet present in sitemap.xml.
-      const blogPages = await db('blog_posts').whereIn('status', ['published']).select('id', 'title', 'slug', 'content', 'content_html', 'keyword', 'city');
-      const servicePages = [
+      const blogQuery = db('blog_posts')
+        .whereIn('status', ['published'])
+        .where((builder) => {
+          builder.where('target_domain', domain);
+          if (isDefaultDomain) builder.orWhereNull('target_domain');
+        })
+        .select('id', 'title', 'slug', 'content', 'content_html', 'keyword', 'city');
+      const blogPages = await blogQuery;
+      const servicePages = isDefaultDomain ? [
         '/pest-control-bradenton-fl/', '/pest-control-sarasota-fl/', '/lawn-care/', '/mosquito-control/',
         '/termite-control/', '/rodent-control/', '/tree-and-shrub/', '/',
-      ];
+      ] : ['/'];
 
       const pageMap = new Map();
       const addPage = (page) => {
@@ -174,12 +210,12 @@ class SiteAuditor {
         pageMap.set(page.url, page);
       };
 
-      const sitemapUrls = await this.discoverUrlsFromSitemaps(SITE_URL);
+      const sitemapUrls = await this.discoverUrlsFromSitemaps(siteUrl);
       sitemapUrls.forEach((url) => addPage({ url, type: this.classifyUrlType(url), keyword: null, city: null }));
-      servicePages.forEach(p => addPage({ url: new URL(p, SITE_URL).toString(), type: 'service_page', keyword: null, city: null }));
+      servicePages.forEach(p => addPage({ url: new URL(p, siteUrl).toString(), type: 'service_page', keyword: null, city: null }));
       blogPages.forEach(p => {
         if (!p.slug) return;
-        addPage({ url: new URL(`/${p.slug.replace(/^\/+|\/+$/g, '')}/`, SITE_URL).toString(), type: 'blog', keyword: p.keyword, city: p.city, blogPostId: p.id });
+        addPage({ url: new URL(`/${p.slug.replace(/^\/+|\/+$/g, '')}/`, siteUrl).toString(), type: 'blog', keyword: p.keyword, city: p.city, blogPostId: p.id });
       });
 
       const maxPages = parseInt(process.env.SEO_SITE_AUDIT_MAX_PAGES || '250', 10);
@@ -204,10 +240,10 @@ class SiteAuditor {
             logger.warn(`Fetch failed for ${page.url}: ${fetchErr.message}`);
           }
 
-          const audit = await this.auditPage(page.url, html, statusCode, responseTime, page.keyword, page.city, page.type);
+          const audit = await this.auditPage(page.url, html, statusCode, responseTime, page.keyword, page.city, page.type, siteUrl);
 
           await db('seo_page_audits').insert({
-            ...audit, audit_date: etDateString(),
+            ...audit, domain, audit_date: etDateString(),
           }).onConflict(['url', 'audit_date']).merge();
 
           auditResults.push(audit);
@@ -230,7 +266,12 @@ class SiteAuditor {
       const avgScore = auditResults.length > 0 ? Math.round(auditResults.reduce((s, r) => s + r.technical_health_score, 0) / auditResults.length) : 0;
 
       // Get previous run for delta
-      const prevRun = await db('seo_site_audit_runs').where('id', '!=', auditRun.id).where('status', 'completed').orderBy('run_date', 'desc').first();
+      const prevRun = await db('seo_site_audit_runs')
+        .where('id', '!=', auditRun.id)
+        .where('status', 'completed')
+        .where('domain', domain)
+        .orderBy('run_date', 'desc')
+        .first();
       const scoreDelta = prevRun?.avg_health_score ? avgScore - parseFloat(prevRun.avg_health_score) : 0;
 
       await db('seo_site_audit_runs').where('id', auditRun.id).update({
@@ -277,7 +318,7 @@ class SiteAuditor {
         });
       }
 
-      logger.info(`Site audit complete: ${auditResults.length} pages, avg score ${avgScore}, ${critical} critical`);
+      logger.info(`Site audit complete for ${domain}: ${auditResults.length} pages, avg score ${avgScore}, ${critical} critical`);
       return { pages: auditResults.length, avgScore, healthy, warning, critical, duration: Math.round((Date.now() - startTime) / 1000) };
 
     } catch (err) {
@@ -290,7 +331,7 @@ class SiteAuditor {
   /**
    * Audit a single page — returns full audit object.
    */
-  async auditPage(url, html, statusCode, responseTime, keyword, city, pageType) {
+  async auditPage(url, html, statusCode, responseTime, keyword, city, pageType, siteUrl = SITE_URL) {
     const lower = (html || '').toLowerCase();
     const issues = [];
 
@@ -360,10 +401,18 @@ class SiteAuditor {
     // Canonical
     const canonicalUrl = this.getCanonicalUrl(html);
     const canonicalSelf = canonicalUrl ? canonicalUrl.replace(/\/$/, '') === url.replace(/\/$/, '') : false;
-    const internalLinks = (html.match(/href=["'](?:https?:\/\/(?:www\.)?wavespestcontrol\.com|\/(?!\/))/gi) || []);
-    const externalLinks = (html.match(/href=["']https?:\/\/(?!www\.wavespestcontrol\.com|wavespestcontrol\.com)/gi) || []);
+    const siteHost = new URL(siteUrl).hostname.replace(/^www\./, '');
+    const hostPattern = escapeRegExp(siteHost);
+    const absoluteInternalHref = `https?:\\/\\/(?:www\\.)?${hostPattern}(?::\\d+)?`;
+    const sameHostBoundary = `(?:[/?#"'\\s]|$)`;
+    const sameHostHref = `(?:www\\.)?${hostPattern}(?::\\d+)?${sameHostBoundary}`;
+    const internalHrefPattern = new RegExp(`href=["'](?:${absoluteInternalHref}|\\/(?!\\/))`, 'gi');
+    const externalHrefPattern = new RegExp(`href=["']https?:\\/\\/(?!${sameHostHref})`, 'gi');
+    const hrefTargetPattern = new RegExp(`href=["']((?:${absoluteInternalHref}|\\/(?!\\/))[^"'#?]*)`, 'gi');
+    const internalLinks = (html.match(internalHrefPattern) || []);
+    const externalLinks = (html.match(externalHrefPattern) || []);
     const internalLinkTargets = [];
-    const hrefMatches = html.matchAll(/href=["']((?:https?:\/\/(?:www\.)?wavespestcontrol\.com|\/(?!\/))[^"'#?]*)/gi);
+    const hrefMatches = html.matchAll(hrefTargetPattern);
     for (const m of hrefMatches) internalLinkTargets.push(m[1]);
 
     // Score
@@ -472,12 +521,14 @@ class SiteAuditor {
     return Object.entries(groups).filter(([, urls]) => urls.length > 1).map(([value, urls]) => ({ value: value.substring(0, 100), urls }));
   }
 
-  async getDashboard() {
-    const latestRun = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').first();
+  async getDashboard(domainInput = null) {
+    const domain = extractDomain(domainInput) || 'wavespestcontrol.com';
+    const latestRun = await db('seo_site_audit_runs').where('status', 'completed').where('domain', domain).orderBy('run_date', 'desc').first();
     if (!latestRun) return { hasData: false };
 
     const pages = await db('seo_page_audits')
       .where('audit_date', latestRun.run_date.toISOString?.().split('T')[0] || etDateString())
+      .where('domain', domain)
       .orderBy('technical_health_score', 'asc');
 
     const issues = await db('seo_audit_issue_trends')
@@ -485,10 +536,11 @@ class SiteAuditor {
       .orderByRaw("CASE WHEN severity = 'critical' THEN 0 WHEN severity = 'warning' THEN 1 ELSE 2 END")
       .orderBy('affected_count', 'desc');
 
-    const history = await db('seo_site_audit_runs').where('status', 'completed').orderBy('run_date', 'desc').limit(12);
+    const history = await db('seo_site_audit_runs').where('status', 'completed').where('domain', domain).orderBy('run_date', 'desc').limit(12);
 
     return {
       hasData: true,
+      domain,
       latestRun,
       pages,
       issues,
@@ -496,8 +548,11 @@ class SiteAuditor {
     };
   }
 
-  async getPageDetail(url) {
-    const audits = await db('seo_page_audits').where('url', url).orderBy('audit_date', 'desc').limit(10);
+  async getPageDetail(url, domainInput = null) {
+    const domain = extractDomain(domainInput) || extractDomain(url);
+    let query = db('seo_page_audits').where('url', url);
+    if (domain) query = query.where('domain', domain);
+    const audits = await query.orderBy('audit_date', 'desc').limit(10);
     return { audits, latest: audits[0] };
   }
 }

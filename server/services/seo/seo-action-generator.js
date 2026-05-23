@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const crypto = require('crypto');
 const { normalizeUrl, extractDomain, urlLookupVariants } = require('../../utils/normalize-url');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -34,6 +35,16 @@ const SCORING_WEIGHTS = {
   title_meta_below_competitor: 15,
 };
 
+function buildActionDedupeKey(actionType, url) {
+  const normalizedUrl = normalizeUrl(url);
+  const digest = crypto.createHash('sha256').update(normalizedUrl).digest('hex');
+  return `${String(actionType || '').slice(0, 60)}:${digest}`;
+}
+
+function buildLegacyActionDedupeKey(actionType, url) {
+  return `${actionType}:${url}`;
+}
+
 class SeoActionGenerator {
   async generateActionsFromDiagnosis(domain) {
     const d = extractDomain(domain) || 'wavespestcontrol.com';
@@ -54,7 +65,26 @@ class SeoActionGenerator {
       const mapping = DIAGNOSIS_ACTION_MAP[row.primary_diagnosis];
       if (!mapping) continue;
 
-      const dedupeKey = `${mapping.action}:${row.url}`;
+      const dedupeKey = buildActionDedupeKey(mapping.action, row.url);
+      const legacyDedupeKey = buildLegacyActionDedupeKey(mapping.action, row.url);
+
+      const existingAction = await db('seo_actions')
+        .whereIn('dedupe_key', [dedupeKey, legacyDedupeKey])
+        .first();
+      if (existingAction) {
+        if (existingAction.dedupe_key === legacyDedupeKey) {
+          try {
+            await db('seo_actions')
+              .where('id', existingAction.id)
+              .where('dedupe_key', legacyDedupeKey)
+              .update({ dedupe_key: dedupeKey });
+          } catch (err) {
+            logger.warn(`[SeoActionGenerator] legacy dedupe key update skipped for ${existingAction.id}: ${err.message}`);
+          }
+        }
+        skipped++;
+        continue;
+      }
 
       const impactScore = (SCORING_WEIGHTS[row.primary_diagnosis] || 30) *
         (row.priority_score / 100);
@@ -393,4 +423,7 @@ Return JSON: { "title": "...", "meta_description": "...", "reasoning": "..." }`,
   }
 }
 
-module.exports = new SeoActionGenerator();
+const generator = new SeoActionGenerator();
+generator._internals = { buildActionDedupeKey, buildLegacyActionDedupeKey };
+
+module.exports = generator;
