@@ -1,7 +1,7 @@
 /**
  * Data Hygiene Agent — Phase 0 schema.
  *
- * Three tables that together back the data-hygiene proposal/review pipeline.
+ * Four tables that together back the data-hygiene proposal/review pipeline.
  * Phase 0 ships schema + audit helpers + feature gates only; no scanner code
  * writes rows yet (Phase 1 wires the deterministic scanner; Phase 1.5 wires
  * the call_log.ai_extraction bootstrap; Phase 4 wires LLM extraction).
@@ -32,11 +32,20 @@
  *                                       schema change) or the source body
  *                                       itself changes.
  *
+ *  - data_hygiene_sensitive_vault       encrypted raw before/after values for
+ *                                       sensitive proposals (gate codes,
+ *                                       lockbox codes, access notes). Normal
+ *                                       proposal/audit tables keep redacted
+ *                                       display values only; safe revert reads
+ *                                       this vault under admin permission.
+ *
  * Allowed enum values are enforced via CHECK constraints rather than Postgres
  * enums so the application can evolve them without ALTER TYPE pain.
  */
 
 exports.up = async function up(knex) {
+  await knex.raw('CREATE EXTENSION IF NOT EXISTS pgcrypto');
+
   // -----------------------------------------------------------------
   // 1. data_hygiene_runs — created first so proposals can FK to it.
   // -----------------------------------------------------------------
@@ -91,8 +100,8 @@ exports.up = async function up(knex) {
     // status='lock_busy' row + 409 response. Unlike session-scoped
     // pg_try_advisory_lock, this survives connection pooling correctly.
     // Ops note: stuck runs (finished_at IS NULL AND started_at < now() -
-    // interval '2 hours') should be reaped to clear the lock — handled in
-    // Phase 1 watchdog, not here.
+    // interval '2 hours') are reaped by server/services/data-hygiene/reaper.js
+    // before each runScan attempt.
     await knex.raw(`
       CREATE UNIQUE INDEX one_running_data_hygiene_scan
         ON data_hygiene_runs ((1))
@@ -264,6 +273,20 @@ exports.up = async function up(knex) {
         ADD CONSTRAINT data_hygiene_proposals_confidence_range_check
         CHECK (confidence >= 0 AND confidence <= 1)
     `);
+    await knex.raw(`
+      ALTER TABLE data_hygiene_proposals
+        ADD CONSTRAINT data_hygiene_proposals_resource_id_presence_check
+        CHECK (
+          resource_id IS NOT NULL
+          OR (
+            resource_type = 'property_preferences'
+            AND field IN (
+              'neighborhood_gate_code','property_gate_code','garage_code',
+              'lockbox_code','parking_notes','access_notes','pet_details'
+            )
+          )
+        )
+    `);
   }
 
   // -----------------------------------------------------------------
@@ -287,13 +310,15 @@ exports.up = async function up(knex) {
       // re-processes naturally.
       t.string('source_hash', 64).notNullable();
 
-      // Outcome. parse_error and failed get retried per scan tick; ok and
-      // no_fields are skipped on the next tick. The orchestrator uses this
-      // distinction to keep the LLM budget bounded.
-      t.string('status', 16).notNullable();
-      //  ok | parse_error | no_fields | failed
+      // Outcome. parse_error and failed get retried up to attempt_count=3;
+      // failed_max_retries is terminal until extractor_version/source_hash
+      // changes. ok and no_fields are skipped on the next tick.
+      t.string('status', 24).notNullable();
+      //  ok | parse_error | no_fields | failed | failed_max_retries
       t.integer('proposal_count').notNullable().defaultTo(0);
+      t.integer('attempt_count').notNullable().defaultTo(1);
       t.text('error_message');
+      t.timestamp('last_attempted_at').notNullable().defaultTo(knex.fn.now());
       t.timestamp('processed_at').notNullable().defaultTo(knex.fn.now());
 
       t.unique(
@@ -311,14 +336,51 @@ exports.up = async function up(knex) {
     await knex.raw(`
       ALTER TABLE data_hygiene_source_extractions
         ADD CONSTRAINT data_hygiene_source_extractions_status_check
-        CHECK (status IN ('ok','parse_error','no_fields','failed'))
+        CHECK (status IN ('ok','parse_error','no_fields','failed','failed_max_retries'))
     `);
+    await knex.raw(`
+      ALTER TABLE data_hygiene_source_extractions
+        ADD CONSTRAINT data_hygiene_source_extractions_attempt_count_check
+        CHECK (attempt_count >= 1)
+    `);
+  }
+
+  // -----------------------------------------------------------------
+  // 4. data_hygiene_sensitive_vault — encrypted raw sensitive values.
+  // -----------------------------------------------------------------
+  if (!(await knex.schema.hasTable('data_hygiene_sensitive_vault'))) {
+    await knex.schema.createTable('data_hygiene_sensitive_vault', (t) => {
+      t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
+      t.uuid('proposal_id')
+        .notNullable()
+        .references('id')
+        .inTable('data_hygiene_proposals')
+        .onDelete('CASCADE');
+
+      // Set by the apply handler once the critical audit_log row exists.
+      // Kept nullable so the vault row can be staged inside the same apply
+      // transaction before audit insertion returns.
+      t.uuid('audit_log_id');
+
+      t.string('field', 64).notNullable();
+      t.binary('before_encrypted');
+      t.binary('after_encrypted');
+      t.string('before_hash', 64).notNullable();
+      t.string('after_hash', 64).notNullable();
+      t.timestamp('created_at').notNullable().defaultTo(knex.fn.now());
+
+      t.unique(['proposal_id', 'field'], { indexName: 'data_hygiene_sensitive_vault_unique_field' });
+      t.index(['proposal_id'], 'data_hygiene_sensitive_vault_proposal_idx');
+      t.index(['audit_log_id'], 'data_hygiene_sensitive_vault_audit_idx');
+    });
   }
 };
 
 exports.down = async function down(knex) {
-  // Drop in reverse FK order. data_hygiene_proposals.run_id FKs to
-  // data_hygiene_runs; drop proposals first so the FK does not block.
+  // Drop in reverse FK order. Vault FKs to proposals; proposals FK to runs.
+  if (await knex.schema.hasTable('data_hygiene_sensitive_vault')) {
+    await knex.schema.dropTable('data_hygiene_sensitive_vault');
+  }
   if (await knex.schema.hasTable('data_hygiene_source_extractions')) {
     await knex.schema.dropTable('data_hygiene_source_extractions');
   }

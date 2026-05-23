@@ -270,16 +270,19 @@ async function auditPestPressureScoreOverride({
  * apply rolls back — no orphaned mutation.
  *
  * Metadata shape is consistent across all four so BI queries do not have to
- * guess at field names: { proposal_id, rule_id, rule_version, field,
- * resource_type, resource_id, scope_type, scope_id, before, after, source,
- * confidence, ... }. Sensitive proposals (gate codes, lockbox codes, access
- * notes) write only the redacted form into before/after — never raw codes;
- * see P6. The full unredacted value lives in the live row only.
+ * guess at field names. Every event gets:
+ * { proposal_id, rule_id, rule_version, source, field, scope_type, scope_id,
+ *   is_sensitive, reviewed_via }.
+ *
+ * Apply/revert store `before_redacted` / `after_redacted` plus hashes and
+ * `vault_id`. For non-sensitive proposals the redacted values are simply the
+ * raw values and vault_id is null. Sensitive raw values never live in
+ * audit_log; the apply/revert path stores them in data_hygiene_sensitive_vault.
  */
 async function auditHygieneProposalCreate({
   proposal_id, rule_id, rule_version, source, tier, confidence, is_sensitive,
   resource_type, resource_id, scope_type, scope_id, field,
-  evidence_summary = null,
+  reviewed_via = 'agent', evidence_summary = null,
 }) {
   return recordAuditEvent({
     actor_type: 'agent',
@@ -291,6 +294,7 @@ async function auditHygieneProposalCreate({
       proposal_id, rule_id, rule_version, source, tier, confidence,
       is_sensitive: !!is_sensitive,
       scope_type, scope_id, field,
+      reviewed_via,
       evidence_summary,
     },
   });
@@ -299,7 +303,8 @@ async function auditHygieneProposalCreate({
 async function auditHygieneProposalApply({
   trx, proposal_id, rule_id, rule_version, source, field,
   resource_type, resource_id, scope_type, scope_id,
-  before, after, reviewer_id, reviewed_via, is_sensitive,
+  before_redacted, after_redacted, before_hash = null, after_hash = null,
+  vault_id = null, reviewer_id, reviewed_via, is_sensitive,
 }) {
   return recordAuditEvent({
     actor_type: reviewed_via === 'auto' ? 'agent' : 'technician',
@@ -310,10 +315,14 @@ async function auditHygieneProposalApply({
     metadata: {
       proposal_id, rule_id, rule_version, source, field,
       scope_type, scope_id,
-      before, after,
-      reviewer_id: reviewer_id || null,
-      reviewed_via,
       is_sensitive: !!is_sensitive,
+      reviewed_via,
+      before_redacted,
+      after_redacted,
+      before_hash,
+      after_hash,
+      vault_id: vault_id || null,
+      reviewer_id: reviewer_id || null,
     },
     critical: true,
     trx,
@@ -323,7 +332,8 @@ async function auditHygieneProposalApply({
 async function auditHygieneProposalReject({
   proposal_id, rule_id, rule_version, source, field,
   resource_type, resource_id, scope_type, scope_id,
-  reject_reason, reviewer_id, reviewed_via,
+  reject_reason, reviewer_id, reviewed_via = 'ui', is_sensitive,
+  evidence_summary = null,
 }) {
   return recordAuditEvent({
     actor_type: 'technician',
@@ -334,17 +344,21 @@ async function auditHygieneProposalReject({
     metadata: {
       proposal_id, rule_id, rule_version, source, field,
       scope_type, scope_id,
+      is_sensitive: !!is_sensitive,
+      reviewed_via,
       reject_reason,
       reviewer_id: reviewer_id || null,
-      reviewed_via,
+      evidence_summary,
     },
   });
 }
 
 async function auditHygieneProposalRevert({
-  trx, proposal_id, rule_id, field,
+  trx, proposal_id, rule_id, rule_version, source, field,
   resource_type, resource_id, scope_type, scope_id,
-  before, after, original_audit_id, reverted_by,
+  before_redacted, after_redacted, before_hash = null, after_hash = null,
+  vault_id = null, original_audit_id, reverted_by, is_sensitive,
+  reviewed_via = 'ui',
 }) {
   return recordAuditEvent({
     actor_type: 'technician',
@@ -353,9 +367,15 @@ async function auditHygieneProposalRevert({
     resource_type,
     resource_id: resource_id || null,
     metadata: {
-      proposal_id, rule_id, field,
+      proposal_id, rule_id, rule_version, source, field,
       scope_type, scope_id,
-      before, after,
+      is_sensitive: !!is_sensitive,
+      reviewed_via,
+      before_redacted,
+      after_redacted,
+      before_hash,
+      after_hash,
+      vault_id: vault_id || null,
       original_audit_id: original_audit_id || null,
       reverted_by: reverted_by || null,
     },

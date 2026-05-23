@@ -4,13 +4,15 @@
  * This file is intentionally minimal in Phase 0. Its only responsibilities
  * for the first ship are:
  *
- *   1. Open a data_hygiene_runs row with status='running'.
- *   2. Honor the database-backed run lock (P8) — if a concurrent run is
+ *   1. Reap stale 'running' rows older than 2 hours so a missed close never
+ *      permanently blocks future scans.
+ *   2. Open a data_hygiene_runs row with status='running'.
+ *   3. Honor the database-backed run lock (P8) — if a concurrent run is
  *      already 'running', the partial unique index `one_running_data_hygiene_scan`
  *      raises a unique-violation; catch it, write a status='lock_busy' row,
  *      and surface a structured result the caller (route or cron) can
  *      translate into a 409.
- *   3. Mark the run 'ok' (or 'failed' on uncaught error) in a finally block.
+ *   4. Mark the run 'ok' (or 'failed' on uncaught error) in a finally block.
  *
  * No scanner phases execute yet. Phase 1 plugs in deterministic normalizers;
  * Phase 1.5 plugs in the call_log.ai_extraction bootstrap; Phase 3 plugs in
@@ -35,6 +37,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
+const { reapStuckRuns } = require('./reaper');
 
 const SCANNER_VERSION = 'v1';
 
@@ -44,6 +47,8 @@ async function runScan({ mode, phases = [], triggeredBy = null } = {}) {
   if (!VALID_MODES.includes(mode)) {
     throw new Error(`runScan: invalid mode '${mode}' — must be one of ${VALID_MODES.join(', ')}`);
   }
+
+  await reapStuckRuns();
 
   let runId = null;
   try {
@@ -105,9 +110,9 @@ async function runScan({ mode, phases = [], triggeredBy = null } = {}) {
           error_message: errorMessage,
         });
     } catch (updateErr) {
-      // If we cannot close the run row, log it loudly — the partial unique
-      // index will block the next scan until an ops watchdog reaps stuck
-      // rows (finished_at IS NULL AND started_at < now() - interval '2 hours').
+      // If we cannot close the run row, log it loudly. The next runScan()
+      // call reaps stale rows older than two hours before acquiring the
+      // database-backed run lock.
       logger.error(`[data-hygiene] failed to close run ${runId}: ${updateErr.message}`);
     }
   }
@@ -115,4 +120,4 @@ async function runScan({ mode, phases = [], triggeredBy = null } = {}) {
   return { run_id: runId, status: finalStatus, lock_busy: false };
 }
 
-module.exports = { runScan, SCANNER_VERSION };
+module.exports = { runScan, reapStuckRuns, SCANNER_VERSION };
