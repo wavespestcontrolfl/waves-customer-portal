@@ -19,6 +19,7 @@ const {
   stripHost,
   sameUrl,
   deriveUrlFromFile,
+  extractFrontmatterSlug,
 } = planner._internals;
 
 // ── anchorCandidates ────────────────────────────────────────────────
@@ -76,6 +77,15 @@ Bradenton pest control here.`;
     expect(masked.indexOf('<!--')).toBe(-1);
     expect(masked.indexOf('real')).toBe(src.indexOf('real'));
   });
+  test('does not mask later markdown thematic blocks as frontmatter', () => {
+    const src = `Intro
+---
+Pest control bradenton appears inside normal content.
+---
+Outro`;
+    const masked = maskExcludedRegions(src);
+    expect(masked.indexOf('Pest control bradenton')).toBe(src.indexOf('Pest control bradenton'));
+  });
 });
 
 // ── isInsideLink ────────────────────────────────────────────────────
@@ -83,6 +93,11 @@ Bradenton pest control here.`;
 describe('isInsideLink', () => {
   test('detects markdown link inner text', () => {
     const t = 'See [our pest control bradenton page](/pest-control-bradenton-fl/) for details';
+    const idx = t.indexOf('pest control bradenton');
+    expect(isInsideLink(t, idx, idx + 'pest control bradenton'.length)).toBe(true);
+  });
+  test('detects reference-style markdown link inner text', () => {
+    const t = 'See [our pest control bradenton page][pest-ref] for details\n\n[pest-ref]: /pest-control-bradenton-fl/';
     const idx = t.indexOf('pest control bradenton');
     expect(isInsideLink(t, idx, idx + 'pest control bradenton'.length)).toBe(true);
   });
@@ -116,6 +131,11 @@ describe('findFirstUnlinkedOccurrence', () => {
     const t = `[pest control bradenton](/a/) and [pest control bradenton](/b/)`;
     expect(findFirstUnlinkedOccurrence(t, 'pest control bradenton')).toBeNull();
   });
+  test('skips reference-style markdown links, finds next plain occurrence', () => {
+    const t = `[pest control bradenton][pest-ref] and later pest control bradenton\n\n[pest-ref]: /pest-control-bradenton-fl/`;
+    const r = findFirstUnlinkedOccurrence(t, 'pest control bradenton');
+    expect(r.index).toBe(t.indexOf('later pest control bradenton') + 'later '.length);
+  });
   test('case-insensitive match, preserves source casing in snippet', () => {
     const t = 'Pest Control Bradenton service area.';
     const r = findFirstUnlinkedOccurrence(t, 'pest control bradenton');
@@ -143,6 +163,18 @@ describe('findFirstUnlinkedOccurrence', () => {
 describe('pageAlreadyLinksTo', () => {
   test('detects markdown link to target', () => {
     expect(pageAlreadyLinksTo('[x](/pest-control-bradenton-fl/)', '/pest-control-bradenton-fl/')).toBe(true);
+  });
+  test('detects markdown link to target when link has a title', () => {
+    expect(pageAlreadyLinksTo(
+      '[x](/pest-control-bradenton-fl/ "Pest Control Bradenton")',
+      '/pest-control-bradenton-fl/'
+    )).toBe(true);
+  });
+  test('detects reference definition to target', () => {
+    expect(pageAlreadyLinksTo(
+      '[x][pest-ref]\n\n[pest-ref]: /pest-control-bradenton-fl/ "Pest Control Bradenton"',
+      '/pest-control-bradenton-fl/'
+    )).toBe(true);
   });
   test('detects href= to target', () => {
     expect(pageAlreadyLinksTo('<a href="/pest-control-bradenton-fl/">x</a>', '/pest-control-bradenton-fl/')).toBe(true);
@@ -193,6 +225,15 @@ describe('stripHost / sameUrl / deriveUrlFromFile', () => {
     expect(deriveUrlFromFile('blog', 'foo.md')).toBe('/blog/foo/');
     expect(deriveUrlFromFile('services', 'pest-control-bradenton-fl.md')).toBe('/pest-control-bradenton-fl/');
     expect(deriveUrlFromFile('locations', 'siesta-key.mdx')).toBe('/siesta-key/');
+  });
+  test('deriveUrlFromFile prefers frontmatter slug when present', () => {
+    const body = `---
+title: Get Rid of Treehoppers
+slug: "/tree-shrub/get-rid-of-treehoppers/" # canonical Astro route
+---
+Body`;
+    expect(extractFrontmatterSlug(body)).toBe('/tree-shrub/get-rid-of-treehoppers/');
+    expect(deriveUrlFromFile('blog', 'get-rid-of-treehoppers.md', body)).toBe('/tree-shrub/get-rid-of-treehoppers/');
   });
 });
 
@@ -253,6 +294,18 @@ describe('planForTarget', () => {
   test('never links page to itself', () => {
     const c = [{ file: 'src/content/services/pest-control-bradenton-fl.md', body: 'pest control bradenton here', url: '/pest-control-bradenton-fl/' }];
     expect(planner.planForTarget(target, { corpus: c })).toEqual([]);
+  });
+  test('never links blog target to itself when corpus URL came from frontmatter slug', () => {
+    const blogTarget = {
+      url: '/tree-shrub/get-rid-of-treehoppers/',
+      keyword: 'treehoppers',
+    };
+    const c = [{
+      file: 'src/content/blog/get-rid-of-treehoppers.md',
+      body: 'treehoppers can damage ornamental plants.',
+      url: '/tree-shrub/get-rid-of-treehoppers/',
+    }];
+    expect(planner.planForTarget(blogTarget, { corpus: c })).toEqual([]);
   });
   test('returns [] for target with no anchor candidates', () => {
     expect(planner.planForTarget({ url: '/x/' }, { corpus })).toEqual([]);

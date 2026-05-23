@@ -73,7 +73,7 @@ function anchorCandidates(target) {
 function maskExcludedRegions(text) {
   let s = String(text || '');
   // Frontmatter at the very top.
-  s = s.replace(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/m, (m) => ' '.repeat(m.length));
+  s = s.replace(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/, (m) => ' '.repeat(m.length));
   // Fenced code blocks.
   s = s.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length));
   // HTML comments.
@@ -119,9 +119,10 @@ function isInsideLink(text, start, end) {
     const ch = text[i];
     if (ch === ']' || ch === '\n') break; // closed bracket or line break — not inside
     if (ch === '[') {
-      // Look forward from start for the closing `](`
+      // Look forward from start for inline `[text](url)` or
+      // reference-style `[text][id]` link syntax.
       const rest = text.slice(end, end + 250);
-      if (/^[^\n\]]*\]\(/.test(rest)) return true;
+      if (/^[^\n\]]*\](?:\(|\[[^\]\n]*\])/.test(rest)) return true;
       break;
     }
   }
@@ -149,16 +150,25 @@ function pageAlreadyLinksTo(text, targetUrl) {
   if (!text || !targetUrl) return false;
   const target = normalizePath(targetUrl);
   if (!target) return false;
-  const mdLink = /\]\(([^)\s]+)\)/g;
+  const mdLink = /\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
   let m;
   while ((m = mdLink.exec(text)) !== null) {
-    if (normalizePath(m[1]) === target) return true;
+    if (normalizePath(unwrapAngleHref(m[1])) === target) return true;
+  }
+  const refDef = /^\s{0,3}\[[^\]\n]+\]:\s*(<[^>]+>|[^\s]+)(?:\s+.*)?$/gm;
+  while ((m = refDef.exec(text)) !== null) {
+    if (normalizePath(unwrapAngleHref(m[1])) === target) return true;
   }
   const href = /href=["']([^"']+)["']/g;
   while ((m = href.exec(text)) !== null) {
     if (normalizePath(m[1]) === target) return true;
   }
   return false;
+}
+
+function unwrapAngleHref(href) {
+  const s = String(href || '').trim();
+  return s.startsWith('<') && s.endsWith('>') ? s.slice(1, -1) : s;
 }
 
 /**
@@ -259,7 +269,7 @@ class InternalLinkPlanner {
         out.push({
           file: path.relative(astroRoot, full),
           body,
-          url: deriveUrlFromFile(c, file),
+          url: deriveUrlFromFile(c, file, body),
         });
       }
     }
@@ -280,10 +290,31 @@ function sameUrl(a, b) {
   return ax === bx;
 }
 
-function deriveUrlFromFile(collection, file) {
+function deriveUrlFromFile(collection, file, body = '') {
+  const slug = extractFrontmatterSlug(body);
+  if (slug) return slug;
   const base = file.replace(/\.mdx?$/, '');
   if (collection === 'blog') return `/blog/${base}/`;
   return `/${base}/`;
+}
+
+function extractFrontmatterSlug(body) {
+  const m = String(body || '').match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!m) return null;
+  const slugLine = m[1].match(/^\s*slug\s*:\s*(.+?)\s*$/m);
+  if (!slugLine) return null;
+  let slug = slugLine[1].trim();
+  if (slug.startsWith('"') || slug.startsWith("'")) {
+    const q = slug[0];
+    const end = slug.indexOf(q, 1);
+    if (end !== -1) slug = slug.slice(1, end).trim();
+  } else {
+    slug = slug.replace(/\s+#.*$/, '').trim();
+  }
+  if (!slug) return null;
+  if (!slug.startsWith('/')) slug = `/${slug}`;
+  if (!slug.endsWith('/')) slug += '/';
+  return slug;
 }
 
 module.exports = new InternalLinkPlanner();
@@ -297,8 +328,10 @@ module.exports._internals = {
   isInsideLink,
   snippetAround,
   pageAlreadyLinksTo,
+  unwrapAngleHref,
   normalizePath,
   stripHost,
   sameUrl,
   deriveUrlFromFile,
+  extractFrontmatterSlug,
 };
