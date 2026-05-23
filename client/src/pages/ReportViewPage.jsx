@@ -1594,7 +1594,6 @@ export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = tr
     ['#service-coverage', 'Map'],
     hasProducts ? ['#products-applied', 'Products'] : null,
     hasPestPressure ? ['#pest-pressure', 'Pest Pressure'] : null,
-    ['#what-to-expect', 'Next steps'],
   ].filter(Boolean);
 }
 

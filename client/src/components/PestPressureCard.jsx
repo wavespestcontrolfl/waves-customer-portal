@@ -73,23 +73,18 @@ const CADENCE_LABELS = {
   monthly: 'monthly',
 };
 
-function shortMonthLabel(value) {
-  if (!value) return '';
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
-  if (!match) return '';
-  const [, y, m, d] = match;
-  const date = new Date(Number(y), Number(m) - 1, Number(d), 12);
-  const month = date.toLocaleDateString('en-US', { month: 'short' });
-  return `${month} '${String(date.getFullYear()).slice(-2)}`;
-}
-
 function PressureHistoryChart({ history, cadence }) {
   const points = useMemo(() => (
-    (history || []).map((row) => ({
-      label: shortMonthLabel(row.serviceDate),
-      score: Number(row.score),
-    }))
+    (history || [])
+      .map((row) => {
+        const t = Date.parse(`${row.serviceDate}T12:00:00`);
+        return Number.isFinite(t) ? { t, score: Number(row.score) } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.t - b.t)
   ), [history]);
+
+  const tickValues = useMemo(() => points.map((p) => p.t), [points]);
 
   if (points.length < 2) return null;
 
@@ -114,7 +109,16 @@ function PressureHistoryChart({ history, cadence }) {
           <ComposedChart data={points} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
             <CartesianGrid stroke="#E7E2D7" strokeDasharray="2 4" vertical={false} />
             <XAxis
-              dataKey="label"
+              dataKey="t"
+              type="number"
+              scale="time"
+              domain={['dataMin', 'dataMax']}
+              ticks={tickValues}
+              tickFormatter={(t) => {
+                const date = new Date(t);
+                const month = date.toLocaleDateString('en-US', { month: 'short' });
+                return `${month} '${String(date.getFullYear()).slice(-2)}`;
+              }}
               tick={{ fontSize: 10, fill: '#6B7280', fontFamily: "'Inter', system-ui, sans-serif" }}
               tickLine={false}
               axisLine={false}
