@@ -156,20 +156,20 @@ function snippetAround(text, start, length, padding = 50) {
  */
 function pageAlreadyLinksTo(text, targetUrl) {
   if (!text || !targetUrl) return false;
-  const target = normalizePath(targetUrl);
+  const target = canonicalInternalPath(targetUrl);
   if (!target) return false;
   const mdLink = /\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
   let m;
   while ((m = mdLink.exec(text)) !== null) {
-    if (normalizePath(unwrapAngleHref(m[1])) === target) return true;
+    if (canonicalInternalPath(unwrapAngleHref(m[1])) === target) return true;
   }
   const refDef = /^\s{0,3}\[[^\]\n]+\]:\s*(<[^>]+>|[^\s]+)(?:\s+.*)?$/gm;
   while ((m = refDef.exec(text)) !== null) {
-    if (normalizePath(unwrapAngleHref(m[1])) === target) return true;
+    if (canonicalInternalPath(unwrapAngleHref(m[1])) === target) return true;
   }
   const href = /href=["']([^"']+)["']/g;
   while ((m = href.exec(text)) !== null) {
-    if (normalizePath(m[1]) === target) return true;
+    if (canonicalInternalPath(m[1]) === target) return true;
   }
   return false;
 }
@@ -328,7 +328,6 @@ function deriveUrlFromFile(collection, file, body = '') {
   const slug = extractFrontmatterSlug(body);
   if (slug) return slug;
   const base = file.replace(/\.mdx?$/, '');
-  if (collection === 'blog') return `/blog/${base}/`;
   return `/${base}/`;
 }
 

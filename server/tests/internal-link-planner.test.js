@@ -196,7 +196,17 @@ describe('pageAlreadyLinksTo', () => {
     expect(pageAlreadyLinksTo(
       '[x](https://www.wavespestcontrol.com/pest-control-bradenton-fl/)',
       'https://other.host/pest-control-bradenton-fl/'
+    )).toBe(false);
+    expect(pageAlreadyLinksTo(
+      '[x](https://www.wavespestcontrol.com/pest-control-bradenton-fl/)',
+      'https://www.wavespestcontrol.com/pest-control-bradenton-fl/'
     )).toBe(true);
+  });
+  test('external same-path links do not count as internal target links', () => {
+    expect(pageAlreadyLinksTo(
+      '[x](https://example.com/pest-control-bradenton-fl/)',
+      '/pest-control-bradenton-fl/'
+    )).toBe(false);
   });
   test('matches across trailing slash + hash + query (normalized)', () => {
     // Existing link with no trailing slash + hash, target with slash.
@@ -245,7 +255,7 @@ describe('stripHost / sameUrl / deriveUrlFromFile', () => {
     expect(canonicalInternalPath('/safe-path/')).toBe('/safe-path/');
   });
   test('deriveUrlFromFile', () => {
-    expect(deriveUrlFromFile('blog', 'foo.md')).toBe('/blog/foo/');
+    expect(deriveUrlFromFile('blog', 'foo.md')).toBe('/foo/');
     expect(deriveUrlFromFile('services', 'pest-control-bradenton-fl.md')).toBe('/pest-control-bradenton-fl/');
     expect(deriveUrlFromFile('locations', 'siesta-key.mdx')).toBe('/siesta-key/');
   });
