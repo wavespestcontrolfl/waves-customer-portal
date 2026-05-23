@@ -30,8 +30,27 @@ describe('intake contact normalization', () => {
     expect(normalizePhoneForStorage(' 12345 ')).toBe('12345');
   });
 
+  test('website quote contact rejects non-string required values', () => {
+    const contact = normalizeWebsiteQuoteContact({
+      firstName: false,
+      lastName: 0,
+      email: false,
+      phone: 0,
+    });
+
+    expect(contact).toMatchObject({
+      firstName: '',
+      lastName: '',
+      email: '',
+      phoneRaw: '',
+      phoneE164: null,
+      phoneForStorage: null,
+    });
+  });
+
   test('email cleanup is trim plus lowercase only', () => {
     expect(cleanEmail(' Customer+Tag@Example.COM ')).toBe('customer+tag@example.com');
+    expect(cleanEmail(false)).toBe('');
   });
 
   test('call extraction sanitizes transcript-derived customer fields', () => {
@@ -75,6 +94,30 @@ describe('intake contact normalization', () => {
   test('call extraction only keeps Florida state values', () => {
     expect(normalizeCallExtraction({ state: 'Florida' }).state).toBe('FL');
     expect(normalizeCallExtraction({ state: 'GA' }).state).toBeNull();
+    expect(normalizeCallExtraction({ state: '' }).state).toBeNull();
+    expect(normalizeCallExtraction({}).state).toBeNull();
+  });
+
+  test('call extraction rejects non-string contact text fields', () => {
+    const extracted = normalizeCallExtraction({
+      first_name: false,
+      last_name: 0,
+      address_line1: true,
+      city: 34239,
+      state: false,
+      zip: 34239,
+      call_summary: false,
+    });
+
+    expect(extracted).toMatchObject({
+      first_name: null,
+      last_name: null,
+      address_line1: null,
+      city: null,
+      state: null,
+      zip: null,
+      call_summary: null,
+    });
   });
 
   test('call extraction tolerates non-object JSON responses', () => {
@@ -82,12 +125,12 @@ describe('intake contact normalization', () => {
       first_name: null,
       email: null,
       phone: '+19415550100',
-      state: 'FL',
+      state: null,
     });
     expect(normalizeCallExtraction(['bad'])).toMatchObject({
       first_name: null,
       phone: null,
-      state: 'FL',
+      state: null,
     });
   });
 });

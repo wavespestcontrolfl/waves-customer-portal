@@ -5,7 +5,8 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 function cleanText(value) {
   if (value === null || value === undefined) return '';
-  return collapseWhitespace(String(value));
+  if (typeof value !== 'string') return '';
+  return collapseWhitespace(value);
 }
 
 function cleanNullableText(value) {
@@ -14,6 +15,7 @@ function cleanNullableText(value) {
 }
 
 function cleanEmail(value) {
+  if (typeof value !== 'string') return '';
   const email = normalizeEmail(value);
   return email || '';
 }
@@ -60,7 +62,7 @@ function normalizeZip(value) {
 
 function normalizeCallState(value) {
   const raw = cleanText(value);
-  if (!raw) return 'FL';
+  if (!raw) return null;
   const upper = raw.toUpperCase();
   if (upper === 'FL' || upper === 'FLORIDA') return 'FL';
   return null;
