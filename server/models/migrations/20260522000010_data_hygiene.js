@@ -365,6 +365,8 @@ exports.up = async function up(knex) {
       t.string('field', 64).notNullable();
       t.binary('before_encrypted');
       t.binary('after_encrypted');
+      // HMAC-SHA256 with DATA_HYGIENE_VAULT_KEY, not plain SHA-256.
+      // Gate/lockbox codes are low-entropy; unkeyed hashes are reversible.
       t.string('before_hash', 64).notNullable();
       t.string('after_hash', 64).notNullable();
       t.timestamp('created_at').notNullable().defaultTo(knex.fn.now());

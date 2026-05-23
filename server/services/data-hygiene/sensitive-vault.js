@@ -8,8 +8,11 @@ function stableValueString(value) {
   return value === null || value === undefined ? NULL_SENTINEL : JSON.stringify(value);
 }
 
-function hashSensitiveValue(value) {
-  return crypto.createHash('sha256').update(stableValueString(value)).digest('hex');
+function hashSensitiveValue(value, key = vaultKey()) {
+  return crypto
+    .createHmac('sha256', key)
+    .update(stableValueString(value))
+    .digest('hex');
 }
 
 function redactSensitiveValue(value, field = '') {
@@ -54,20 +57,22 @@ async function vaultStoreSensitive({
   const key = vaultKey();
   const beforeText = before_raw === null || before_raw === undefined ? null : stableValueString(before_raw);
   const afterText = after_raw === null || after_raw === undefined ? null : stableValueString(after_raw);
+  const beforeHash = hashSensitiveValue(before_raw, key);
+  const afterHash = hashSensitiveValue(after_raw, key);
 
   const [row] = await conn('data_hygiene_sensitive_vault')
     .insert({
       proposal_id,
       field,
-      before_hash: hashSensitiveValue(before_raw),
-      after_hash: hashSensitiveValue(after_raw),
+      before_hash: beforeHash,
+      after_hash: afterHash,
       before_encrypted: beforeText === null ? null : conn.raw('pgp_sym_encrypt(?, ?)', [beforeText, key]),
       after_encrypted: afterText === null ? null : conn.raw('pgp_sym_encrypt(?, ?)', [afterText, key]),
     })
     .onConflict(['proposal_id', 'field'])
     .merge({
-      before_hash: hashSensitiveValue(before_raw),
-      after_hash: hashSensitiveValue(after_raw),
+      before_hash: beforeHash,
+      after_hash: afterHash,
       before_encrypted: beforeText === null ? null : conn.raw('pgp_sym_encrypt(?, ?)', [beforeText, key]),
       after_encrypted: afterText === null ? null : conn.raw('pgp_sym_encrypt(?, ?)', [afterText, key]),
     })

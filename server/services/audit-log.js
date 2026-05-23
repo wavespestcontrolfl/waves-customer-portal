@@ -1,6 +1,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+const DATA_HYGIENE_AGENT_ACTOR_ID = '0d0c4979-b8b8-5a37-a82b-5a7d8f7a7c2f';
+
 /**
  * Writer for the generic audit_log table.
  *
@@ -286,7 +288,7 @@ async function auditHygieneProposalCreate({
 }) {
   return recordAuditEvent({
     actor_type: 'agent',
-    actor_id: 'data-hygiene-agent',
+    actor_id: DATA_HYGIENE_AGENT_ACTOR_ID,
     action: 'data_hygiene.proposal.create',
     resource_type,
     resource_id: resource_id || null,
@@ -308,7 +310,7 @@ async function auditHygieneProposalApply({
 }) {
   return recordAuditEvent({
     actor_type: reviewed_via === 'auto' ? 'agent' : 'technician',
-    actor_id: reviewed_via === 'auto' ? 'data-hygiene-agent' : (reviewer_id || null),
+    actor_id: reviewed_via === 'auto' ? DATA_HYGIENE_AGENT_ACTOR_ID : (reviewer_id || null),
     action: 'data_hygiene.proposal.apply',
     resource_type,
     resource_id: resource_id || null,
