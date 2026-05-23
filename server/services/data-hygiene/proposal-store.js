@@ -45,7 +45,7 @@ function isSensitiveProposal(proposal) {
 
 async function upsertProposal(proposal, { trx = null, run_id = null } = {}) {
   const client = trx || db;
-  const isSensitive = proposal.is_sensitive === undefined ? isSensitiveProposal(proposal) : !!proposal.is_sensitive;
+  const isSensitive = isSensitiveProposal(proposal) || proposal.is_sensitive === true;
   if (isSensitive) {
     throw new Error('Sensitive data-hygiene proposals require vault-backed redaction before insertion');
   }

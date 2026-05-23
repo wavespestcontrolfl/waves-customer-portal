@@ -169,6 +169,27 @@ describe('data hygiene proposal idempotency', () => {
     await expect(upsertProposal(proposal)).rejects.toThrow(/vault-backed redaction/);
   });
 
+  test('caller cannot override inferred sensitive detection', async () => {
+    const proposal = {
+      resource_type: 'property_preferences',
+      resource_id: null,
+      scope_type: 'customer',
+      scope_id: '00000000-0000-0000-0000-000000000001',
+      field: 'gate_code',
+      current_value: null,
+      proposed_value: '4321',
+      source: 'message-extraction',
+      rule_id: 'extract.gate_code',
+      rule_version: '1',
+      confidence: 0.8,
+      tier: 'medium',
+      evidence: {},
+      is_sensitive: false,
+    };
+
+    await expect(upsertProposal(proposal)).rejects.toThrow(/vault-backed redaction/);
+  });
+
   test('parking_notes is sensitive even outside extract rule ids', () => {
     expect(isSensitiveProposal({
       resource_type: 'property_preferences',
