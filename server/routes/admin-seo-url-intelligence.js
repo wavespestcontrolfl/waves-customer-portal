@@ -2,6 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const UrlIntelligence = require('../services/seo/url-intelligence');
+const {
+  claimPipelineRun,
+  completePipelineRun,
+  failPipelineRun,
+} = require('../services/seo/seo-pipeline-runs');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -220,11 +225,45 @@ router.get('/orphan-pages', async (req, res) => {
 router.post('/run-pipeline', requireAdmin, async (req, res) => {
   const domain = req.body.domain || 'wavespestcontrol.com';
   const daysBack = req.body.daysBack || 7;
+  const idempotencyKey = req.body.idempotencyKey
+    || req.body.idempotency_key
+    || `seo-pipeline:${domain}:${daysBack}:${Math.floor(Date.now() / 60000)}`;
+  let pipelineRun = null;
   const steps = [];
   const start = Date.now();
 
+  try {
+    const claim = await claimPipelineRun({
+      domain,
+      idempotencyKey,
+      requestedBy: req.technicianId || null,
+    });
+    if (claim.error) return res.status(400).json({ error: claim.error });
+    if (!claim.claimed) {
+      return res.status(claim.run.status === 'running' ? 202 : 200).json({
+        status: claim.run.status,
+        domain: claim.run.domain,
+        idempotencyKey,
+        deduped: true,
+        started_at: claim.run.started_at,
+        completed_at: claim.run.completed_at,
+        result: claim.run.result || null,
+      });
+    }
+    pipelineRun = claim.run;
+  } catch (err) {
+    logger.error('[pipeline] claim failed', err);
+    return res.status(500).json({ error: 'Pipeline claim failed' });
+  }
+
   // Return immediately with 202, run pipeline in background
-  res.status(202).json({ status: 'started', domain, message: 'Pipeline running in background. Check /dashboard for results.' });
+  res.status(202).json({
+    status: 'started',
+    domain,
+    idempotencyKey,
+    run_id: pipelineRun.id,
+    message: 'Pipeline running in background. Check /dashboard for results.',
+  });
 
   try {
     // Step 1: GSC sync (query + page + query-page map)
@@ -343,8 +382,17 @@ router.post('/run-pipeline', requireAdmin, async (req, res) => {
     const failed = steps.filter((s) => s.status === 'failed').length;
 
     logger.info(`[pipeline] Complete: ${succeeded} succeeded, ${failed} failed, ${duration}ms`, { steps });
+    await completePipelineRun(
+      pipelineRun.id,
+      { steps, duration_ms: duration, succeeded, failed },
+      failed > 0 ? 'completed_with_errors' : 'completed',
+    );
   } catch (err) {
     logger.error(`[pipeline] Fatal error: ${err.message}`, err);
+    if (pipelineRun?.id) {
+      await failPipelineRun(pipelineRun.id, err)
+        .catch((persistErr) => logger.warn(`[pipeline] failed to persist fatal status: ${persistErr.message}`));
+    }
   }
 });
 

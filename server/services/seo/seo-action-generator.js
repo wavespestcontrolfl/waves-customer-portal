@@ -56,20 +56,10 @@ class SeoActionGenerator {
 
       const dedupeKey = `${mapping.action}:${row.url}`;
 
-      const existing = await db('seo_actions')
-        .where('dedupe_key', dedupeKey)
-        .where('status', 'open')
-        .first();
-
-      if (existing) {
-        skipped++;
-        continue;
-      }
-
       const impactScore = (SCORING_WEIGHTS[row.primary_diagnosis] || 30) *
         (row.priority_score / 100);
 
-      await db('seo_actions').insert({
+      const [inserted] = await db('seo_actions').insert({
         url_intelligence_id: row.id,
         url: row.url,
         domain: row.domain,
@@ -93,8 +83,10 @@ class SeoActionGenerator {
         batch_id: batchId,
         batch_label: batchLabel,
         dedupe_key: dedupeKey,
-      });
-      created++;
+      }).onConflict('dedupe_key').ignore().returning('id');
+
+      if (inserted?.id) created++;
+      else skipped++;
     }
 
     logger.info(`[SeoActionGenerator] ${d}: ${created} actions created, ${skipped} skipped (dedup)`);

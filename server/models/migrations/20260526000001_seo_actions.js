@@ -52,6 +52,7 @@ exports.up = async function (knex) {
 
     // Dedupe
     t.string('dedupe_key', 200);
+    t.unique(['dedupe_key']);
 
     // State
     t.string('status', 20).notNullable().defaultTo('open');
@@ -68,9 +69,9 @@ exports.up = async function (knex) {
     t.index('priority_score');
     t.index('batch_id');
     t.index('status');
-    t.index('dedupe_key');
     t.index(['status', 'approval_tier', 'priority_score']);
   });
+
 };
 
 exports.down = async function (knex) {

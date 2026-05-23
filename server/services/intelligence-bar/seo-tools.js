@@ -10,6 +10,11 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { extractDomain } = require('../../utils/normalize-url');
+const {
+  claimPipelineRun,
+  completePipelineRun,
+  failPipelineRun,
+} = require('../seo/seo-pipeline-runs');
 
 const SEO_TOOLS = [
   {
@@ -1445,16 +1450,25 @@ async function seoActionQueueReport(input) {
 async function approveSeoAction(input, context) {
   if (!input.action_id) return { error: 'action_id is required' };
   if (!context?.isAdmin) return { error: 'Admin access required to approve SEO actions' };
-  const action = await db('seo_actions').where('id', input.action_id).first();
-  if (!action) return { error: `Action ${input.action_id} not found` };
-  await db('seo_actions').where('id', input.action_id).update({
-    approval_status: 'approved',
-    approved_by_admin_id: context?.technicianId || null,
-    approved_at: new Date(),
-    approval_notes: input.notes || 'Approved via Intelligence Bar',
-  });
-  try {
-    await db('seo_decisions').insert({
+
+  return db.transaction(async (trx) => {
+    const action = await trx('seo_actions').where('id', input.action_id).first();
+    if (!action) return { error: `Action ${input.action_id} not found` };
+
+    const updated = await trx('seo_actions')
+      .where({ id: input.action_id, status: 'open', approval_status: 'pending' })
+      .update({
+        approval_status: 'approved',
+        approved_by_admin_id: context?.technicianId || null,
+        approved_at: new Date(),
+        approval_notes: input.notes || 'Approved via Intelligence Bar',
+      });
+
+    if (updated !== 1) {
+      return { error: 'Action is not pending approval' };
+    }
+
+    await trx('seo_decisions').insert({
       diagnosis_id: action.diagnosis_id,
       issue_type: action.issue_type,
       target_url: action.url,
@@ -1466,8 +1480,9 @@ async function approveSeoAction(input, context) {
       decided_by_admin_id: context?.technicianId || null,
       decided_at: new Date(),
     });
-  } catch {}
-  return { approved: true, id: input.action_id, url: action.url, action_type: action.action_type };
+
+    return { approved: true, id: input.action_id, url: action.url, action_type: action.action_type };
+  });
 }
 
 async function seoExperimentResults(input) {
@@ -1490,40 +1505,12 @@ async function seoExperimentResults(input) {
   };
 }
 
-async function claimSeoPipelineRun({ domain, idempotencyKey, requestedBy }) {
-  const key = String(idempotencyKey || '').trim();
-  if (!key) return { error: 'idempotencyKey is required to run SEO pipeline' };
-  const d = extractDomain(domain) || 'wavespestcontrol.com';
-
-  const existing = await db('seo_pipeline_runs').where({ idempotency_key: key }).first();
-  if (existing) return { claimed: false, run: existing };
-
-  try {
-    const [created] = await db('seo_pipeline_runs')
-      .insert({
-        idempotency_key: key,
-        domain: d,
-        status: 'running',
-        requested_by: requestedBy || null,
-        started_at: new Date(),
-      })
-      .returning('*');
-    return { claimed: true, run: created };
-  } catch (err) {
-    if (err.code === '23505') {
-      const replayed = await db('seo_pipeline_runs').where({ idempotency_key: key }).first();
-      if (replayed) return { claimed: false, run: replayed };
-    }
-    throw err;
-  }
-}
-
 async function runSeoPipeline(input, context = {}) {
   if (!context?.isAdmin) return { error: 'Admin access required to run SEO pipeline' };
   if (context?.confirmed !== true) return { error: 'Explicit confirmation is required to run SEO pipeline' };
   const domain = extractDomain(input.domain) || 'wavespestcontrol.com';
   const idempotencyKey = input.idempotencyKey || input.idempotency_key;
-  const claim = await claimSeoPipelineRun({
+  const claim = await claimPipelineRun({
     domain,
     idempotencyKey,
     requestedBy: input.requestedBy || context.technicianId || null,
@@ -1630,20 +1617,15 @@ async function runSeoPipeline(input, context = {}) {
       logger.warn(`[IB pipeline] actions: ${e.message}`);
     }
 
-    await db('seo_pipeline_runs')
-      .where('id', claim.run.id)
-      .update({
-        status: steps.some((s) => s.status === 'failed') ? 'completed_with_errors' : 'completed',
-        completed_at: new Date(),
-        result: { steps },
-        updated_at: new Date(),
-      });
+    await completePipelineRun(
+      claim.run.id,
+      { steps },
+      steps.some((s) => s.status === 'failed') ? 'completed_with_errors' : 'completed',
+    );
   };
   runPipeline().catch(async (e) => {
     logger.error(`[IB pipeline] fatal: ${e.message}`);
-    await db('seo_pipeline_runs')
-      .where('id', claim.run.id)
-      .update({ status: 'failed', completed_at: new Date(), error: e.message, updated_at: new Date() })
+    await failPipelineRun(claim.run.id, e)
       .catch((err) => logger.warn(`[IB pipeline] failed to persist fatal status: ${err.message}`));
   });
   return {

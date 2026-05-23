@@ -68,19 +68,24 @@ router.post('/generate', requireAdmin, async (req, res) => {
 // POST /:id/approve — approve action + write seo_decisions
 router.post('/:id/approve', requireAdmin, async (req, res) => {
   try {
-    const action = await db('seo_actions').where('id', req.params.id).first();
-    if (!action) return res.status(404).json({ error: 'Action not found' });
+    const result = await db.transaction(async (trx) => {
+      const action = await trx('seo_actions').where('id', req.params.id).first();
+      if (!action) return { status: 404, body: { error: 'Action not found' } };
 
-    await db('seo_actions').where('id', req.params.id).update({
-      approval_status: 'approved',
-      approved_by_admin_id: req.technicianId,
-      approved_at: db.fn.now(),
-      approval_notes: req.body.notes || null,
-    });
+      const updated = await trx('seo_actions')
+        .where({ id: req.params.id, status: 'open', approval_status: 'pending' })
+        .update({
+          approval_status: 'approved',
+          approved_by_admin_id: req.technicianId,
+          approved_at: trx.fn.now(),
+          approval_notes: req.body.notes || null,
+        });
 
-    // Write to seo_decisions for learning loop
-    try {
-      await db('seo_decisions').insert({
+      if (updated !== 1) {
+        return { status: 409, body: { error: 'Action is not pending approval' } };
+      }
+
+      await trx('seo_decisions').insert({
         diagnosis_id: action.diagnosis_id,
         issue_type: action.issue_type,
         target_url: action.url,
@@ -92,11 +97,11 @@ router.post('/:id/approve', requireAdmin, async (req, res) => {
         decided_by_admin_id: req.technicianId,
         decided_at: new Date(),
       });
-    } catch (decErr) {
-      logger.warn('[seo-actions] seo_decisions write failed', decErr.message);
-    }
 
-    res.json({ approved: true, id: req.params.id });
+      return { status: 200, body: { approved: true, id: req.params.id } };
+    });
+
+    res.status(result.status).json(result.body);
   } catch (err) {
     logger.error('[seo-actions] approve error', err);
     res.status(500).json({ error: 'Approval failed' });
@@ -106,19 +111,25 @@ router.post('/:id/approve', requireAdmin, async (req, res) => {
 // POST /:id/reject — reject action + write seo_decisions
 router.post('/:id/reject', requireAdmin, async (req, res) => {
   try {
-    const action = await db('seo_actions').where('id', req.params.id).first();
-    if (!action) return res.status(404).json({ error: 'Action not found' });
+    const result = await db.transaction(async (trx) => {
+      const action = await trx('seo_actions').where('id', req.params.id).first();
+      if (!action) return { status: 404, body: { error: 'Action not found' } };
 
-    await db('seo_actions').where('id', req.params.id).update({
-      approval_status: 'rejected',
-      approved_by_admin_id: req.technicianId,
-      approved_at: db.fn.now(),
-      approval_notes: req.body.notes || null,
-      status: 'closed',
-    });
+      const updated = await trx('seo_actions')
+        .where({ id: req.params.id, status: 'open', approval_status: 'pending' })
+        .update({
+          approval_status: 'rejected',
+          approved_by_admin_id: req.technicianId,
+          approved_at: trx.fn.now(),
+          approval_notes: req.body.notes || null,
+          status: 'closed',
+        });
 
-    try {
-      await db('seo_decisions').insert({
+      if (updated !== 1) {
+        return { status: 409, body: { error: 'Action is not pending approval' } };
+      }
+
+      await trx('seo_decisions').insert({
         diagnosis_id: action.diagnosis_id,
         issue_type: action.issue_type,
         target_url: action.url,
@@ -130,11 +141,11 @@ router.post('/:id/reject', requireAdmin, async (req, res) => {
         decided_by_admin_id: req.technicianId,
         decided_at: new Date(),
       });
-    } catch (decErr) {
-      logger.warn('[seo-actions] seo_decisions write failed', decErr.message);
-    }
 
-    res.json({ rejected: true, id: req.params.id });
+      return { status: 200, body: { rejected: true, id: req.params.id } };
+    });
+
+    res.status(result.status).json(result.body);
   } catch (err) {
     logger.error('[seo-actions] reject error', err);
     res.status(500).json({ error: 'Rejection failed' });
@@ -161,15 +172,23 @@ router.post('/:id/execute', requireAdmin, async (req, res) => {
     const action = await db('seo_actions').where('id', req.params.id).first();
     if (!action) return res.status(404).json({ error: 'Action not found' });
 
-    await db('seo_actions').where('id', req.params.id).update({
-      execution_status: 'done',
-      started_at: action.started_at || db.fn.now(),
-      completed_at: db.fn.now(),
-      execution_notes: req.body.notes || 'Manually marked as executed',
-      executor: 'manual',
-    });
+    const [updatedAction] = await db('seo_actions')
+      .where({ id: req.params.id, status: 'open', approval_status: 'approved' })
+      .whereNot('execution_status', 'done')
+      .update({
+        execution_status: 'done',
+        started_at: action.started_at || db.fn.now(),
+        completed_at: db.fn.now(),
+        execution_notes: req.body.notes || 'Manually marked as executed',
+        executor: 'manual',
+      })
+      .returning('*');
 
-    const experiment = await SeoActionGenerator.createExperiment(action);
+    if (!updatedAction) {
+      return res.status(409).json({ error: 'Action must be open, approved, and not already executed' });
+    }
+
+    const experiment = await SeoActionGenerator.createExperiment(updatedAction);
     res.json({ executed: true, id: req.params.id, experiment_id: experiment?.id });
   } catch (err) {
     logger.error('[seo-actions] execute error', err);
