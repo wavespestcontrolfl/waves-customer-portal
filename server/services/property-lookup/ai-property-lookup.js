@@ -906,11 +906,6 @@ function parseManateeRooms(value) {
 function normalizeManateePropertyType(type, classification) {
   const text = `${type || ''} ${classification || ''}`.toUpperCase();
   if (/HOA|COMMON\s+AREA/.test(text)) return 'HOA Common Area';
-  if (/TOWN\s*HOME|TOWN\s*HOUSE|TOWNHOUSE/.test(text)) return 'Townhome';
-  if (/DUPLEX/.test(text)) return 'Duplex';
-  if (/APT|APARTMENT/.test(text)) return 'Apartment';
-  if (/CONDO/.test(text)) return 'Condo';
-  if (/MULTI|TRIPLEX|QUADPLEX|FOURPLEX/.test(text)) return 'Multifamily';
   if (/MEDICAL/.test(text)) return 'Medical Office';
   if (/OFFICE/.test(text)) return 'Office';
   if (/RETAIL/.test(text)) return 'Retail';
@@ -919,6 +914,11 @@ function normalizeManateePropertyType(type, classification) {
   if (/SCHOOL/.test(text)) return 'School';
   if (/INDUSTRIAL/.test(text)) return 'Industrial';
   if (/\bCOM\b|\bCOMMERCIAL\b/.test(text)) return 'Commercial';
+  if (/TOWN\s*HOME|TOWN\s*HOUSE|TOWNHOUSE/.test(text)) return 'Townhome';
+  if (/DUPLEX/.test(text)) return 'Duplex';
+  if (/APT|APARTMENT/.test(text)) return 'Apartment';
+  if (/CONDO|CONDOMINIUM/.test(text)) return 'Condo';
+  if (/MULTI|TRIPLEX|QUADPLEX|FOURPLEX/.test(text)) return 'Multifamily';
   if (/RES|RESIDENTIAL/.test(text)) return 'Single Family';
   return null;
 }

@@ -434,6 +434,13 @@ describe('Manatee PAO property lookup facts', () => {
     }).propertyType).toBe('Office');
 
     expect(_private.parseManateePaoRecord({
+      address: '123 Office Condo St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: withType('COM', 'OFFICE CONDOMINIUM'),
+    }).propertyType).toBe('Office');
+
+    expect(_private.parseManateePaoRecord({
       address: '123 Common Area St, Bradenton, FL 34211',
       search: manateeSearch,
       land: manateeLand,
