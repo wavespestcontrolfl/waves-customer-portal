@@ -3024,12 +3024,12 @@ function ServiceCoverageCard({
   applications = [],
 }) {
   const [activeItemId, setActiveItemId] = useState(null);
-  if (!coverage?.enabled) return null;
-
-  const items = Array.isArray(coverage.items) ? coverage.items : [];
-  const showSummary = coverage.settings?.showSummaryCounts !== false;
-  const showList = coverage.settings?.showList !== false && items.length > 0;
-  const showMap = coverage.settings?.showMap !== false && coverage.map?.available;
+  // ALL hooks (useState, useMemo, etc.) must run on every render of this
+  // component instance — keep them above any early `return null` guard
+  // so a disabled→enabled transition doesn't change hook count and crash
+  // the report with a Rules of Hooks violation. coverage may be null
+  // here; the optional chaining + Array.isArray fallback keeps inputs safe.
+  const items = Array.isArray(coverage?.items) ? coverage.items : [];
   // Initial active id has to be the deduped representative of the first
   // zone, not items[0] itself. The map renders one marker per zone after
   // severity-based dedupe, so if items[0] isn't the chosen representative
@@ -3044,6 +3044,12 @@ function ServiceCoverageCard({
     const representative = pickRepresentativeCoverageItem(zoneItems);
     return representative?.id || items[0]?.id || null;
   }, [items]);
+
+  if (!coverage?.enabled) return null;
+
+  const showSummary = coverage.settings?.showSummaryCounts !== false;
+  const showList = coverage.settings?.showList !== false && items.length > 0;
+  const showMap = coverage.settings?.showMap !== false && coverage.map?.available;
   const activeId = activeItemId || initialActiveId;
   const meta = [
     coverage.address,
