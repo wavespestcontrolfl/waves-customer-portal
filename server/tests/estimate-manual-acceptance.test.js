@@ -235,6 +235,40 @@ describe('estimate manual acceptance', () => {
     expect(inserts).toEqual([]);
   });
 
+  test('rejects unresolved manager approval before closing estimates accepted', async () => {
+    const estimate = {
+      id: 'estimate-manager-approval',
+      status: 'viewed',
+      customer_id: 'customer-manager-approval',
+      estimate_data: {
+        result: {
+          oneTime: {
+            items: [
+              {
+                service: 'dethatching',
+                requiresManagerApproval: true,
+                managerApprovalReason: 'st_augustine_dethatching',
+                managerApprovalSatisfied: false,
+              },
+            ],
+          },
+        },
+      },
+    };
+    const { database, updates, inserts } = makeDb(estimate);
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      database,
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Manager approval is required before this estimate can be manually accepted.',
+    });
+
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
   test('rejects estimates with one-time choice before closing them accepted', async () => {
     const estimate = {
       id: 'estimate-5',

@@ -34,6 +34,7 @@ jest.mock('../services/pest-pressure/orchestrate', () => ({
 jest.mock('../services/pest-pressure/store', () => ({
   loadActiveConfig: jest.fn(),
   loadScoreForServiceRecord: jest.fn(),
+  loadHistoryForCustomer: jest.fn().mockResolvedValue([]),
 }));
 
 const express = require('express');

@@ -432,20 +432,6 @@ function positiveNumber(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function advisoryDisplayRows(advisory = {}) {
-  return [
-    positiveNumber(advisory.exterior_reentry_min) != null
-      ? ['Exterior re-entry', `${Math.round(positiveNumber(advisory.exterior_reentry_min))} min`]
-      : null,
-    positiveNumber(advisory.interior_reentry_min) != null
-      ? ['Interior re-entry', `${Math.round(positiveNumber(advisory.interior_reentry_min))} min`]
-      : null,
-    positiveNumber(advisory.irrigation_hold_hr) != null
-      ? ['Irrigation hold', `${Math.round(positiveNumber(advisory.irrigation_hold_hr))} hr`]
-      : null,
-  ].filter(Boolean);
-}
-
 function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
   const key = `${token}:${eventName}:${JSON.stringify(metadata)}`;
@@ -1394,18 +1380,19 @@ function ServiceStatusCard({ data, mode }) {
 
 function ReportActionBar({ pdfUrl, token, onShare }) {
   return (
-    <div className="report-action-bar" aria-label="Report actions">
-      <div>
-        <div className="section-eyebrow">Report tools</div>
-        <div className="report-action-copy">Download, share, or print this report for your records.</div>
-      </div>
+    <section className="report-action-bar" aria-label="Report tools">
+      <div className="section-eyebrow">Report Tools</div>
+      <h2 className="report-action-title">Download, share, or print</h2>
+      <p className="report-action-copy">For your records.</p>
       <div className="report-action-buttons">
-        <a href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> View my account</a>
-        {pdfUrl && <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('plain')}><Download size={16} /> Download PDF</a>}
-        <button type="button" onClick={onShare} style={actionButtonStyle('plain')}><Share2 size={16} /> Share</button>
-        <button type="button" onClick={() => window.print()} style={actionButtonStyle('plain')}><Printer size={16} /> Print</button>
+        {pdfUrl
+          ? <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
+          : <span style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
+        <button type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
+        <button type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
+        <a href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -1593,7 +1580,6 @@ export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = tr
     ['#service-coverage', 'Map'],
     hasProducts ? ['#products-applied', 'Products'] : null,
     hasPestPressure ? ['#pest-pressure', 'Pest Pressure'] : null,
-    ['#what-to-expect', 'Next steps'],
   ].filter(Boolean);
 }
 
@@ -1878,78 +1864,6 @@ function WhyActivityCard({ context, embedded = false }) {
   );
 }
 
-function whatToExpectCopy(context = {}, serviceLine = 'pest', data = {}, coverage = {}) {
-  if (serviceLine === 'lawn') {
-    return context.body || 'Lawn treatments are evaluated over time. Conditions can continue changing between visits based on irrigation, mowing, rainfall, heat, and turf response.';
-  }
-  if ((coverage.items || []).some((item) => isInaccessibleCoverageStatus(item.status))) {
-    return 'The serviced areas were completed today. If you want Waves to return for an inaccessible area, contact us from this report or your customer portal.';
-  }
-  if (highPriorityFindings(data).length) {
-    return 'We treated the documented activity today. Watch the noted area through the treatment window and contact Waves if activity moves indoors or gets worse.';
-  }
-  return 'You may see light activity over the next 1-2 weeks as pests contact treated exterior zones. Occasional activity near exterior entry points can be normal during that window.';
-}
-
-function WhatToExpectNextSection({ context, serviceLine, data, coverage }) {
-  return (
-    <section className="sr-section what-to-expect-section" id="what-to-expect">
-      <h2>What to Expect Next</h2>
-      <p>{whatToExpectCopy(context, serviceLine, data, coverage)}</p>
-    </section>
-  );
-}
-
-function whenToContactItems(data = {}, coverage = {}) {
-  if ((coverage.items || []).some((item) => isInaccessibleCoverageStatus(item.status))) {
-    return ['You want us to return for the locked or inaccessible area.', 'You need us to update access instructions.'];
-  }
-  if (highPriorityFindings(data).length) {
-    return ['Activity continues after the treatment window.', 'You see pests moving indoors.', 'The documented problem area gets worse.'];
-  }
-  return ['You see increased activity indoors.', 'You notice pests in the same area for more than 10-14 days.', 'You need us to update access instructions.'];
-}
-
-function WhenToContactUsSection({ data, coverage }) {
-  const items = whenToContactItems(data, coverage);
-  return (
-    <section className="sr-section contact-waves-section" id="when-to-contact">
-      <h2>When to Contact Us</h2>
-      <p>Text us if:</p>
-      <ul>
-        {items.map((item) => <li key={item}>{item}</li>)}
-      </ul>
-      <a href="sms:+19412975749" className="contact-waves-cta">Text Waves</a>
-    </section>
-  );
-}
-
-function PropertyMemoryBlock({ data, coverage, timeline }) {
-  const areaText = shortList((coverage?.items || []).map((item) => item.areaName), 4);
-  const contact = (timeline?.details || []).find((detail) => detail.type === 'customer_contact')?.text;
-  const pressure = data.dynamicContext?.pressureTrend?.customerSummary
-    || (data.pestPressure?.dataCompleteness === 'insufficient' ? 'We are still building your Pest Pressure history.' : null);
-  const rows = [
-    areaText ? ['Service areas', `${areaText} are part of this report.`] : null,
-    contact ? ['Access notes', contact] : null,
-    pressure ? ['Recent trend', pressure] : null,
-  ].filter(Boolean);
-  if (!rows.length) return null;
-  return (
-    <section className="sr-section property-memory-section" id="property-memory">
-      <h2>What Waves Remembered from Your Property</h2>
-      <div className="property-memory-grid">
-        {rows.map(([label, value]) => (
-          <div className="property-memory-item" key={label}>
-            <div className="sr-cell-label">{label}</div>
-            <p>{value}</p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 export function reviewRequestCopy(placement = 'top') {
   if (placement === 'bottom') {
     return {
@@ -2098,33 +2012,6 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
     );
   }
   return actions.slice(0, 3);
-}
-
-function CustomerActionItemsSection({ data, coverage, primaryMove, aiSummary, mode = 'live' }) {
-  const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
-  const actions = customerActionItems({ data, coverage, primaryMove, aiSummary, nowMs });
-  const shouldAvoidNoActionCopy = highPriorityFindings(data).length > 0
-    || (coverage?.items || []).some((item) => isActionNeededCoverageStatus(item.status));
-  const fallbackCopy = shouldAvoidNoActionCopy
-    ? 'Review the findings and service area notes above, then contact Waves if the documented issue continues or gets worse.'
-    : 'No action needed. Your routine service was completed, and Waves will continue monitoring this property on the regular service schedule.';
-  return (
-    <section className="sr-section customer-action-section" id="customer-actions">
-      <h2>Recommended Next Step</h2>
-      {actions.length ? (
-        <div className="customer-action-list">
-          {actions.map((action) => (
-            <div className="customer-action-item" key={action.label}>
-              <div className="customer-action-title">{action.label}</div>
-              {action.detail && <p>{action.detail}</p>}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p>{fallbackCopy}</p>
-      )}
-    </section>
-  );
 }
 
 function WhatHappenedWhere({ data, token, mode = 'live' }) {
@@ -2789,14 +2676,65 @@ function CoverageMapGeometry({ location, projection, active = false, onActivate 
     return (
       <g className={`coverage-marker ${toneClass} status-${location.status}${active ? ' is-active' : ''}`} transform={`translate(${point.x} ${point.y})`} {...activateProps}>
         <title>{label}</title>
-        <circle r="13" className="coverage-marker-outer" />
-        <circle r="9" className="coverage-marker-inner" />
-        <text y="3.5" textAnchor="middle" className="coverage-marker-text">{location.markerLabel || coverageMarkerText(location.status)}</text>
+        <circle r="16" className="coverage-marker-outer" />
+        <circle r="12" className="coverage-marker-inner" />
+        <text y="4.5" textAnchor="middle" className="coverage-marker-text">{location.markerLabel || coverageMarkerText(location.status)}</text>
         <text x="16" y="4" className="coverage-map-label coverage-point-label">{labelText}</text>
       </g>
     );
   }
   return null;
+}
+
+// Zone identity key for both list and map dedupe. markerLabel alone isn't
+// stable — manual labels can collide, auto-labels wrap A-Z past 26 zones,
+// and the same letter can appear in two different service-line groups.
+// So we compose with areaName and prefix with the item's serviceLine
+// (set by normalizeServiceCoverage on every item). Falls back to row id;
+// finally to the array index when neither markerLabel nor id exists so
+// markerless rows don't all collapse into one bucket.
+function coverageZoneKey(item, fallbackIndex = null) {
+  if (!item) return null;
+  const scope = item.serviceLine ? `${item.serviceLine}::` : '';
+  if (item.markerLabel) return `${scope}marker:${item.markerLabel}|${item.areaName || ''}`;
+  if (item.id) return `${scope}id:${item.id}`;
+  if (fallbackIndex != null) return `${scope}idx:${fallbackIndex}`;
+  return null;
+}
+
+// When a zone has multiple coverage rows (e.g. completed + needs-attention),
+// the map can only render one marker per zone after dedupe — and that
+// marker has to be the most attention-worthy status so a green "completed"
+// doesn't paper over an orange "needs follow-up". Higher = more urgent.
+// List card and map use the same picker so click activation lines up.
+const COVERAGE_TONE_SEVERITY = {
+  red: 5,
+  orange: 4,
+  'light-green': 3,
+  blue: 2,
+  gray: 1,
+  green: 0,
+};
+
+function coverageItemSeverity(item) {
+  if (!item) return -1;
+  const tone = coverageStatusConfig(item.status).tone;
+  return COVERAGE_TONE_SEVERITY[tone] ?? 0;
+}
+
+function pickRepresentativeCoverageItem(items) {
+  if (!Array.isArray(items) || !items.length) return null;
+  let best = items[0];
+  let bestSeverity = coverageItemSeverity(best);
+  for (let i = 1; i < items.length; i += 1) {
+    const candidate = items[i];
+    const sev = coverageItemSeverity(candidate);
+    if (sev > bestSeverity) {
+      best = candidate;
+      bestSeverity = sev;
+    }
+  }
+  return best;
 }
 
 function ServiceCoverageMap({
@@ -2806,6 +2744,7 @@ function ServiceCoverageMap({
   mapAttribution,
   activeItemId,
   onActivate,
+  hasStatusText = true,
 }) {
   const normalizedServiceType = normalizeCoverageServiceType(coverage?.serviceLine);
   const locations = Array.isArray(coverage?.items) ? coverage.items : [];
@@ -2823,7 +2762,28 @@ function ServiceCoverageMap({
     [locations, canUseImageGeometry],
   );
   const renderableLocations = displayLocations.filter(hasRenderableCoverageGeometry);
-  const projection = useMemo(() => buildCoverageProjection(renderableLocations), [renderableLocations]);
+  // Dedupe by zone identity so multi-status zones don't paint stacked
+  // geometries on top of each other (the underlying one is unclickable
+  // and `activeItemId` may target the hidden marker). Within a zone we
+  // keep the most attention-worthy item via pickRepresentativeCoverageItem
+  // so an orange needs-attention doesn't get hidden under a green completed.
+  // The list card below this map still surfaces every status for the zone.
+  const mapLocations = useMemo(() => {
+    const order = [];
+    const byKey = new Map();
+    renderableLocations.forEach((loc, idx) => {
+      const key = coverageZoneKey(loc, idx);
+      if (!key) return;
+      if (byKey.has(key)) {
+        byKey.get(key).push(loc);
+      } else {
+        order.push(key);
+        byKey.set(key, [loc]);
+      }
+    });
+    return order.map((key) => pickRepresentativeCoverageItem(byKey.get(key)));
+  }, [renderableLocations]);
+  const projection = useMemo(() => buildCoverageProjection(mapLocations), [mapLocations]);
   const legend = Array.isArray(coverage?.legend) && coverage.legend.length
     ? coverage.legend.map((entry) => {
       const config = coverageStatusConfig(entry.key);
@@ -2870,7 +2830,7 @@ function ServiceCoverageMap({
                 <path d="M456 217L512 310" className="coverage-map-drive" />
               </>
             )}
-            {renderableLocations.map((location) => (
+            {mapLocations.map((location) => (
               <CoverageMapGeometry
                 key={location.id || `${location.areaName || location.name}-${location.status}`}
                 location={location}
@@ -2886,7 +2846,13 @@ function ServiceCoverageMap({
         {activeMapBackgroundUrl && mapAttribution && <div className="map-attribution coverage-map-attribution">{mapAttribution}</div>}
       </div>
 
-      {legend.length > 0 && (
+      {/* Legend kept whenever the per-zone list is hidden. Summary counts
+          alone don't replace it — ServiceCoverageSummary only labels four
+          buckets (Completed / Inspected / Inaccessible / Needs Attention)
+          and doesn't cover red (blocked), gray (not-serviced/not-included),
+          or light-green (partially treated) tones the markers may use.
+          The list does label every status per zone in text. */}
+      {!hasStatusText && legend.length > 0 && (
         <div className="coverage-legend" aria-label="Service coverage legend">
           {legend.map(({ key, label, tone, Icon }) => (
             <div className={`coverage-legend-item status-${tone}`} key={key}>
@@ -2930,6 +2896,56 @@ function productNamesForCoverageItem(item = {}, applications = []) {
     .slice(0, 4);
 }
 
+// Dedupe coverage items by markerLabel — same physical zone listed with
+// multiple statuses (e.g., "Completed" + "Inspected") collapses into one
+// card with multiple status rows underneath. Items without a markerLabel
+// stay as their own card (keyed by id) so nothing gets dropped.
+function mergeCoverageItemsByMarker(items, applications) {
+  const order = [];
+  const byKey = new Map();
+  // First pass: bucket the raw items by zone key (preserves order)
+  items.forEach((item, idx) => {
+    const key = coverageZoneKey(item, idx);
+    if (!key) return;
+    if (byKey.has(key)) {
+      byKey.get(key).rawItems.push(item);
+    } else {
+      order.push(key);
+      byKey.set(key, {
+        key,
+        markerLabel: item.markerLabel,
+        areaName: item.areaName,
+        rawItems: [item],
+      });
+    }
+  });
+  // Second pass: shape entries + pick the representative id by severity
+  // (matches the same picker the map uses for its dedupe, so clicking a
+  // merged card activates the marker actually visible on the satellite).
+  return order.map((key) => {
+    const zone = byKey.get(key);
+    const representative = pickRepresentativeCoverageItem(zone.rawItems);
+    const entries = zone.rawItems.map((item) => {
+      const config = coverageStatusConfig(item.status);
+      return {
+        id: item.id,
+        status: item.status,
+        tone: config.tone,
+        statusLabel: item.customerStatusLabel || item.statusLabel || config.label,
+        description: item.customerDescription,
+        products: productNamesForCoverageItem(item, applications),
+      };
+    });
+    return {
+      key: zone.key,
+      markerLabel: zone.markerLabel,
+      areaName: zone.areaName,
+      firstItemId: representative ? representative.id : zone.rawItems[0].id,
+      entries,
+    };
+  });
+}
+
 function ServiceCoverageList({ coverage, activeItemId, onActivate, applications = [] }) {
   const groups = Array.isArray(coverage?.groups) && coverage.groups.length
     ? coverage.groups
@@ -2938,49 +2954,64 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
 
   return (
     <div className="service-coverage-list" aria-label="Service coverage areas">
-      {groups.map((group) => (
-        <div className="service-coverage-list-group" key={group.serviceLine || group.title || 'coverage'}>
-          {showGroupTitles && <h3>{group.title || formatEnumLabel(group.serviceLine)}</h3>}
-          {(group.items || []).map((item) => {
-            const config = coverageStatusConfig(item.status);
-            const statusLabel = item.customerStatusLabel || item.statusLabel || config.label;
-            const productNames = productNamesForCoverageItem(item, applications);
-            return (
-              <article
-                className={`coverage-summary-row zone-service-row service-coverage-item${activeItemId === item.id ? ' is-active' : ''}`}
-                key={item.id}
-                tabIndex={0}
-                role="button"
-                aria-pressed={activeItemId === item.id ? 'true' : 'false'}
-                onClick={() => onActivate(item.id)}
-                onFocus={() => onActivate(item.id)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onActivate(item.id);
-                  }
-                }}
-              >
-                <div className="zone-service-identity">
-                  <span className="zone-letter-badge" aria-label={item.markerLabel ? `Coverage marker ${item.markerLabel}` : 'Service coverage marker'}>
-                    {item.markerLabel}
-                  </span>
-                  <div className="zone-service-copy">
-                    <h3>{item.areaName}</h3>
-                    <p>{item.customerDescription}</p>
-                    {productNames.length > 0 && (
-                      <div className="coverage-product-line">
-                        Products used: {productNames.join(' · ')}
-                      </div>
-                    )}
+      {groups.map((group) => {
+        const merged = mergeCoverageItemsByMarker(group.items || [], applications);
+        return (
+          <div className="service-coverage-list-group" key={group.serviceLine || group.title || 'coverage'}>
+            {showGroupTitles && <h3>{group.title || formatEnumLabel(group.serviceLine)}</h3>}
+            {merged.map((zone) => {
+              const isActive = zone.entries.some((entry) => entry.id === activeItemId);
+              const allProducts = Array.from(new Set(zone.entries.flatMap((entry) => entry.products)));
+              return (
+                <article
+                  className={`coverage-summary-row zone-service-row service-coverage-item${isActive ? ' is-active' : ''}`}
+                  key={zone.key}
+                  tabIndex={0}
+                  role="button"
+                  aria-pressed={isActive ? 'true' : 'false'}
+                  onClick={() => onActivate(zone.firstItemId)}
+                  onFocus={() => onActivate(zone.firstItemId)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      onActivate(zone.firstItemId);
+                    }
+                  }}
+                >
+                  <div className="zone-service-identity">
+                    <span className="zone-letter-badge" aria-label={zone.markerLabel ? `Coverage marker ${zone.markerLabel}` : 'Service coverage marker'}>
+                      {zone.markerLabel}
+                    </span>
+                    <div className="zone-service-copy">
+                      <h3>{zone.areaName}</h3>
+                      {zone.entries.map((entry) => (
+                        <p key={`desc-${entry.id}`} className="zone-status-description">
+                          {entry.description}
+                        </p>
+                      ))}
+                      {allProducts.length > 0 && (
+                        <div className="coverage-product-line">
+                          Products used: {allProducts.join(' · ')}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <span className={`coverage-status-chip zone-status-chip status-${config.tone}`}>{statusLabel}</span>
-              </article>
-            );
-          })}
-        </div>
-      ))}
+                  <div className="zone-status-chips">
+                    {zone.entries.map((entry) => (
+                      <span
+                        key={entry.id}
+                        className={`coverage-status-chip zone-status-chip status-${entry.tone}`}
+                      >
+                        {entry.statusLabel}
+                      </span>
+                    ))}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2993,13 +3024,33 @@ function ServiceCoverageCard({
   applications = [],
 }) {
   const [activeItemId, setActiveItemId] = useState(null);
+  // ALL hooks (useState, useMemo, etc.) must run on every render of this
+  // component instance — keep them above any early `return null` guard
+  // so a disabled→enabled transition doesn't change hook count and crash
+  // the report with a Rules of Hooks violation. coverage may be null
+  // here; the optional chaining + Array.isArray fallback keeps inputs safe.
+  const items = Array.isArray(coverage?.items) ? coverage.items : [];
+  // Initial active id has to be the deduped representative of the first
+  // zone, not items[0] itself. The map renders one marker per zone after
+  // severity-based dedupe, so if items[0] isn't the chosen representative
+  // (e.g. the first entry is "completed" and the second is "needs
+  // attention" for the same zone), the active list card would point at
+  // an id the map never paints — visible card with no map highlight.
+  const initialActiveId = useMemo(() => {
+    if (!items.length) return null;
+    const firstKey = coverageZoneKey(items[0], 0);
+    if (!firstKey) return items[0]?.id || null;
+    const zoneItems = items.filter((item, idx) => coverageZoneKey(item, idx) === firstKey);
+    const representative = pickRepresentativeCoverageItem(zoneItems);
+    return representative?.id || items[0]?.id || null;
+  }, [items]);
+
   if (!coverage?.enabled) return null;
 
-  const items = Array.isArray(coverage.items) ? coverage.items : [];
   const showSummary = coverage.settings?.showSummaryCounts !== false;
   const showList = coverage.settings?.showList !== false && items.length > 0;
   const showMap = coverage.settings?.showMap !== false && coverage.map?.available;
-  const activeId = activeItemId || items[0]?.id || null;
+  const activeId = activeItemId || initialActiveId;
   const meta = [
     coverage.address,
     coverage.serviceDate ? formatDate(coverage.serviceDate) : null,
@@ -3044,6 +3095,7 @@ function ServiceCoverageCard({
               mapAttribution={mapAttribution}
               activeItemId={activeId}
               onActivate={setActiveItemId}
+              hasStatusText={showList}
             />
           ) : (
             <p className="coverage-map-unavailable">Coverage map was not recorded for this visit.</p>
@@ -3677,138 +3729,6 @@ function ServiceReportCoverageAndWorkflow({
   );
 }
 
-function SupportingDetailsSection({
-  data,
-  token,
-  mode,
-  showDetails,
-  serviceNotes,
-  findings,
-  recommendations,
-  advisoryRows,
-}) {
-  const pressureTrend = data.dynamicContext?.pressureTrend;
-  const weatherRows = conditionRows(data.conditions || {});
-  const reportPublished = (data.workflowEvents || []).find((event) => event.type === 'report_published');
-  const showReportGeneratedDetail = data.visitTimeline?.config?.showReportGenerated === true;
-  const pressureOpen = mode !== 'live' || showDetails;
-
-  return (
-    <section className="sr-section supporting-details-section" id="supporting-details">
-      <h2>Supporting Details</h2>
-      <div className="supporting-details-list">
-        <details className="report-accordion" open={mode !== 'live'}>
-          <summary>
-            <span>Conditions at application</span>
-            <span className="accordion-action">Details</span>
-          </summary>
-          <div className="accordion-body">
-            <p className="supporting-detail-copy">{conditionInterpretation(data.conditions || {})}</p>
-            {weatherRows.length > 0 && (
-              <div className="supporting-detail-grid">
-                {weatherRows.map(([label, value]) => (
-                  <div className="sr-cell" key={label}>
-                    <div className="sr-cell-label">{label}</div>
-                    <div className="sr-cell-value">{value}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </details>
-
-        {/* The standalone PestPressureCard above is the primary surface
-            for Pest Pressure (built from the new engine's customer-view).
-            The legacy multi-visit trend chart + neighborhood comparison
-            still render inside the AI summary cards above. */}
-
-        {showDetails && (data.metrics || []).length > 0 && (
-          <details className="report-accordion">
-            <summary>
-              <span>Service metrics</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              <div className="sr-band supporting-metrics" aria-label="Service metrics">
-                {(data.metrics || []).map((metric) => (
-                  <div className="sr-metric" key={metric.key} title={metricHelpText(metric)}>
-                    <div className="sr-metric-value">{formatMetric(metric)}</div>
-                    <div className="sr-metric-label">{metric.label}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </details>
-        )}
-
-        {showDetails && ((data.applications || []).length > 0 || findings.length > 0 || recommendations.length > 0 || serviceNotes) && (
-          <details className="report-accordion">
-            <summary>
-              <span>Service record</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body supporting-metadata">
-              {showReportGeneratedDetail && reportPublished?.timestamp && <p>Report generated: {formatDate(reportPublished.timestamp)} at {formatClockTime(reportPublished.timestamp)}</p>}
-              {data.serviceRecordId && <p>Service record: {data.serviceRecordId}</p>}
-              {serviceNotes && <p className="supporting-note">{serviceNotes}</p>}
-              {findings.length > 0 && (
-                <div className="sr-list">
-                  {findings.map((finding) => (
-                    <div className={`sr-row ${['high', 'critical'].includes(finding.severity) ? 'sr-finding-high' : ''}`} key={finding.id}>
-                      <div>
-                        <div className="sr-row-title">{finding.title}</div>
-                        {(finding.detail || finding.recommendation) && (
-                          <div className="sr-row-detail">
-                            {finding.detail}
-                            {finding.recommendation && (
-                              <>
-                                {finding.detail ? ' ' : ''}
-                                <strong>Recommended next step:</strong> {finding.recommendation}
-                              </>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                      <div className="sr-pill">{formatEnumLabel(finding.severity)}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {recommendations.map((rec) => (
-                <div className="sr-row" key={rec}>
-                  <div className="sr-row-title">{rec}</div>
-                  <div className="sr-pill">Recommended next step</div>
-                </div>
-              ))}
-              {!findings.length && !recommendations.length && <p>No activity was observed this visit. Routine protective service will continue on schedule.</p>}
-            </div>
-          </details>
-        )}
-
-        {showDetails && (advisoryRows.length > 0 || data.advisory?.pet_advisory) && (
-          <details className="report-accordion">
-            <summary>
-              <span>Advisory details</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              <div className="sr-advisory">
-                {advisoryRows.map(([label, value]) => (
-                  <div key={label}>
-                    <strong>{value}</strong>
-                    <span>{label}</span>
-                  </div>
-                ))}
-              </div>
-              {data.advisory?.pet_advisory && <p className="supporting-detail-copy">{data.advisory.pet_advisory}</p>}
-            </div>
-          </details>
-        )}
-      </div>
-    </section>
-  );
-}
-
 function overlayBox(geometry = {}) {
   if (geometry.type === 'circle') {
     const r = Number(geometry.r || 8);
@@ -4340,31 +4260,8 @@ function LegacyReport({ data, token }) {
 function ServiceReportV1({ data, token, mode = 'live' }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
-  const serviceNotes = String(data.legacy?.notes || '').trim();
-  const visitSummary = String(data.summary || '').trim();
-  const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas.filter(Boolean) : [];
   const serviceCoverage = normalizeServiceCoverage(data);
-  const findings = Array.isArray(data.findings) ? data.findings : [];
-  const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
   const hasApplications = (data.applications || []).length > 0;
-  const visitTimingRows = [
-    ['Arrival', formatTimelineTime(getReportArrivalTime(data))],
-    ['Exit', formatTimelineTime(getReportCompletionTime(data))],
-  ].filter(([, value]) => value);
-  const measurements = data.measurements || data.legacy?.measurements || {};
-  const measurementRows = [
-    ['Soil temp', measurements.soilTemp, '°F'],
-    ['Thatch', measurements.thatch, '"'],
-    ['Soil pH', measurements.soilPh, ''],
-    ['Moisture', measurements.moisture, '%'],
-  ].filter(([, value]) => value != null && value !== '');
-  const hasVisitSummary = Boolean(
-    visitSummary ||
-    data.customerInteraction ||
-    serviceAreas.length ||
-    visitTimingRows.length ||
-    measurementRows.length,
-  );
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
@@ -4374,8 +4271,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     trackReportEvent(token, 'service_report_viewed');
   }, [mode, token]);
 
-  const showDetails = mode !== 'live';
-  const advisoryRows = advisoryDisplayRows(data.advisory || {});
   const visitTimelineServiceType = data.coverageServiceType || data.serviceLine || data.serviceType;
   const normalizedVisitTimeline = normalizeVisitTimeline({
     visitTimeline: data.visitTimeline,
@@ -4487,28 +4382,40 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
-          margin-top: 16px;
-          padding: 20px;
+          display: block;
+          margin: 0 0 18px;
+          padding: 20px 22px;
           background: var(--paper);
           border: 1px solid var(--line);
           border-radius: 16px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 16px;
+        }
+        .report-action-bar .section-eyebrow {
+          margin-bottom: 6px;
+        }
+        .report-action-title {
+          margin: 6px 0 4px;
+          font-family: ${FONTS.serif};
+          font-weight: 500;
+          font-size: 24px;
+          line-height: 1.2;
+          color: var(--text);
         }
         .report-action-copy {
-          margin-top: 4px;
+          margin: 2px 0 0;
           color: ${ESTIMATE_BODY};
           font-size: 14px;
           line-height: 1.45;
         }
         .report-action-buttons {
-          display: flex;
-          align-items: center;
-          justify-content: flex-end;
-          flex-wrap: wrap;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
           gap: 10px;
+          margin-top: 16px;
+        }
+        .report-action-buttons > a,
+        .report-action-buttons > button,
+        .report-action-buttons > span {
+          width: 100%;
         }
         .service-report-hero {
           padding: 8px 0 0;
@@ -4735,7 +4642,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: var(--line);
         }
         .service-status-grid {
-          grid-template-columns: minmax(0, 1.45fr) minmax(0, .8fr) minmax(0, .8fr);
+          grid-template-columns: 1fr;
         }
         .service-status-timeline {
           margin-top: 16px;
@@ -5135,7 +5042,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-area.status-green,
         .coverage-marker.status-green .coverage-marker-inner {
-          fill: #16a34a;
+          fill: #15803D;
           stroke: #14532d;
         }
         .coverage-area.status-light-green,
@@ -5178,7 +5085,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-linejoin: round;
           opacity: .92;
         }
-        .coverage-line.status-green { stroke: #16a34a; }
+        .coverage-line.status-green { stroke: #15803D; }
         .coverage-line.status-light-green { stroke: #65a30d; stroke-dasharray: 12 8; }
         .coverage-line.status-blue { stroke: #2563eb; stroke-dasharray: 7 7; }
         .coverage-line.status-orange { stroke: #f59e0b; stroke-dasharray: 10 8; }
@@ -5211,7 +5118,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-marker-text {
           fill: #fff;
           font-family: Inter, Arial, sans-serif;
-          font-size: 7px;
+          font-size: 14px;
           font-weight: 850;
           letter-spacing: 0;
         }
@@ -5366,6 +5273,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-status-chip.zone-status-chip {
           font-weight: 850;
+        }
+        .zone-status-chips {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          flex-shrink: 0;
+          align-items: flex-end;
+        }
+        .zone-status-description {
+          margin: 4px 0 0;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
+        .zone-status-description + .zone-status-description {
+          margin-top: 2px;
         }
         .coverage-empty-state {
           border: 1px dashed var(--line);
@@ -6823,9 +6746,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
           .sr-shell { padding: 14px 14px 36px; }
-          .report-action-bar { align-items: stretch; flex-direction: column; }
-          .report-action-buttons { justify-content: stretch; }
-          .report-action-buttons a, .report-action-buttons button { flex: 1 1 140px; }
+          .report-action-bar { padding: 18px 16px; }
+          .report-action-buttons { grid-template-columns: 1fr; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
           .sr-pressure { justify-self: stretch; }
@@ -6897,6 +6819,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       </header>
 
       <main className="sr-shell">
+        {mode === 'live' && <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />}
+
         <ServiceStatusCard data={data} mode={mode} />
 
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
@@ -6913,6 +6837,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         </section>
+
+        {/* Only pass token in live mode so the interactive rating picker
+            doesn't render into generated/cached PDFs (mode === 'pdf' /
+            'static') where the controls would be non-functional anyway. */}
+        <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />
 
         <QuickNavigationAndAsk
           mode={mode}
@@ -6946,30 +6875,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           mode={mode}
         />
 
-        {/* Only pass token in live mode so the interactive rating picker
-            doesn't render into generated/cached PDFs (mode === 'pdf' /
-            'static') where the controls would be non-functional anyway. */}
-        <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />
-
-        <CustomerActionItemsSection
-          data={data}
-          coverage={serviceCoverage}
-          aiSummary={dynamicContext.aiSummary}
-          primaryMove={premium.primaryMove}
-          mode={mode}
-        />
-
-        <WhatToExpectNextSection
-          context={premium.whyActivity}
-          serviceLine={data.serviceLine}
-          data={data}
-          coverage={serviceCoverage}
-        />
-
-        <WhenToContactUsSection data={data} coverage={serviceCoverage} />
-
-        <PropertyMemoryBlock data={data} coverage={serviceCoverage} timeline={normalizedVisitTimeline} />
-
         {(data.photos || []).length > 0 && (
           <section className="sr-section" id="photos">
             <h2>Field photos</h2>
@@ -6985,19 +6890,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         )}
 
         <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />
-
-        {mode === 'live' && <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />}
-
-        <SupportingDetailsSection
-          data={data}
-          token={token}
-          mode={mode}
-          showDetails={showDetails}
-          serviceNotes={serviceNotes}
-          findings={findings}
-          recommendations={recommendations}
-          advisoryRows={advisoryRows}
-        />
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.

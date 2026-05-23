@@ -779,6 +779,13 @@ const SPECIALTY = {
     floor: r(150),
     marginDivisor: 0.40,
     materialPer1K: 2.10,
+    baseCompatibilityPrices: {
+      1500: 150,
+      3000: 150,
+      4500: 166,
+      6000: 205,
+      10000: 315,
+    },
     timeModel: {
       primaryPassSqFtPerMin: 100,
       crossPassSqFtPerMin: 200,

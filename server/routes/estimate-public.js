@@ -43,6 +43,9 @@ const {
 const {
   pricingBundleMatchesEstimateTotals,
 } = require('../services/estimate-pricing-bundle-utils');
+const {
+  estimateDataHasUnresolvedManagerApproval,
+} = require('../services/estimate-delivery-options');
 
 const WAVES_OFFICE_PHONE = '+19413187612';
 const ESTIMATE_ASK_TOKEN_SECRET = process.env.ESTIMATE_ASK_TOKEN_SECRET
@@ -4218,9 +4221,13 @@ router.put('/:token/accept', async (req, res, next) => {
     const pricingBundle = await buildPricingBundle(estimateForPricing);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
+      const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
       return res.status(409).json({
-        error: 'This estimate requires an inspection before it can be accepted online',
+        error: needsManagerApproval
+          ? 'Manager approval is required before this estimate can be accepted online'
+          : 'This estimate requires an inspection before it can be accepted online',
         quoteRequired: true,
+        managerApprovalRequired: needsManagerApproval,
         reason: quoteRequirement.reason || 'QUOTE_REQUIRED',
       });
     }
@@ -5627,16 +5634,22 @@ function normalizeOneTimeBreakdown(estData) {
 function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const breakdown = pricingBundle?.oneTimeBreakdown
     || (estData ? normalizeOneTimeBreakdown(estData) : null);
+  const managerApprovalRequired = estimateDataHasUnresolvedManagerApproval(
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  );
   const quoteRequiredItems = Array.isArray(breakdown?.quoteRequiredItems)
     ? breakdown.quoteRequiredItems
     : (Array.isArray(breakdown?.items) ? breakdown.items.filter((item) => item.quoteRequired === true) : []);
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
-    || quoteRequiredItems.length > 0;
+    || quoteRequiredItems.length > 0
+    || managerApprovalRequired;
 
   return {
     quoteRequired,
-    reason: quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason || null,
+    reason: managerApprovalRequired
+      ? 'st_augustine_dethatching'
+      : (quoteRequiredItems[0]?.reason || pricingBundle?.quoteRequiredReason || null),
     items: quoteRequiredItems,
   };
 }
@@ -5648,7 +5661,7 @@ function annualPrepayEligibleForEstimateData(estData) {
 }
 
 function attachQuoteRequirement(payload, estData = null) {
-  const quoteState = resolveEstimateQuoteRequirement(payload);
+  const quoteState = resolveEstimateQuoteRequirement(payload, estData);
   return {
     ...payload,
     annualPrepayEligible: annualPrepayEligibleForEstimateData(estData),
@@ -6960,7 +6973,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
   const withQuoteState = attachQuoteRequirement(payload, estData);
   const withContract = attachPublicPricingContract(withQuoteState, estimate, estData);
-  const quoteState = resolveEstimateQuoteRequirement(withContract);
+  const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
     quoteRequired: quoteState.quoteRequired,

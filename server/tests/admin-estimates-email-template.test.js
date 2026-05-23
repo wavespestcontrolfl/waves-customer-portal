@@ -17,6 +17,17 @@ jest.mock('../services/estimate-delivery-options', () => ({
       data?.quoteRequired === true ||
       data?.result?.specItems?.some((item) => item.quoteRequired === true);
   }),
+  estimateDataHasUnresolvedManagerApproval: jest.fn((estimateData) => {
+    const data = typeof estimateData === 'string' ? JSON.parse(estimateData) : estimateData;
+    const inputsApproved = data?.inputs?.dethatchingManagerApproved === true &&
+      data?.inputs?.dethatchingManagerApprovalTrusted === true &&
+      String(data?.inputs?.dethatchingManagerApprovalReason || '').trim().length > 0;
+    return !inputsApproved && data?.result?.oneTime?.items?.some((item) => (
+      item.requiresManagerApproval === true &&
+      item.managerApprovalReason === 'st_augustine_dethatching' &&
+      item.managerApprovalSatisfied !== true
+    ));
+  }),
   validateEstimateDeliveryOptions: jest.fn(),
 }));
 jest.mock('../services/estimate-pricing-audit', () => ({
@@ -39,8 +50,19 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn() }));
 
 const router = require('../routes/admin-estimates');
+const db = require('../models/db');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { bookingServiceFor } = require('../routes/estimate-public');
+
+function routeHandler(path, method = 'post') {
+  const layer = router.stack.find((entry) => (
+    entry.route?.path === path && entry.route?.methods?.[method]
+  ));
+  if (!layer) throw new Error(`Route not found: ${method.toUpperCase()} ${path}`);
+  return layer.route.stack[layer.route.stack.length - 1].handle;
+}
 
 describe('admin estimate email delivery', () => {
   beforeEach(() => {
@@ -133,6 +155,152 @@ describe('admin estimate email delivery', () => {
         },
       },
     })).toThrow(/Quote-required estimates need manual review/);
+  });
+
+  test('blocks sending estimates with unresolved manager approval', () => {
+    expect(() => router._internals.assertEstimateSendable({
+      id: 'estimate-manager-approval',
+      status: 'draft',
+      estimate_data: {
+        result: {
+          oneTime: {
+            items: [
+              {
+                service: 'dethatching',
+                requiresManagerApproval: true,
+                managerApprovalReason: 'st_augustine_dethatching',
+                managerApprovalSatisfied: false,
+              },
+            ],
+          },
+        },
+      },
+    })).toThrow(/Manager approval is required/);
+  });
+
+  test('blocks follow-up SMS for estimates with unresolved manager approval', async () => {
+    const query = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'estimate-manager-approval',
+        token: 'estimate-token',
+        customer_name: 'Taylor Smith',
+        customer_phone: '+15555550123',
+        customer_id: null,
+        status: 'sent',
+        estimate_data: {
+          result: {
+            oneTime: {
+              items: [
+                {
+                  service: 'dethatching',
+                  requiresManagerApproval: true,
+                  managerApprovalReason: 'st_augustine_dethatching',
+                  managerApprovalSatisfied: false,
+                },
+              ],
+            },
+          },
+        },
+      }),
+      update: jest.fn(),
+    };
+    db.mockReturnValue(query);
+
+    const res = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn(),
+    };
+    const next = jest.fn();
+
+    await routeHandler('/:id/follow-up')({
+      params: { id: 'estimate-manager-approval' },
+      body: {},
+    }, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: expect.stringMatching(/Manager approval is required/),
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('blocks manual booking-link SMS for estimates with unresolved manager approval', async () => {
+    const query = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'estimate-manager-approval',
+        token: 'estimate-token',
+        customer_name: 'Taylor Smith',
+        customer_phone: '+15555550123',
+        customer_id: null,
+        status: 'viewed',
+        bill_by_invoice: false,
+        estimate_data: {
+          result: {
+            oneTime: {
+              items: [
+                {
+                  service: 'dethatching',
+                  name: 'Dethatching',
+                  price: 150,
+                  requiresManagerApproval: true,
+                  managerApprovalReason: 'st_augustine_dethatching',
+                  managerApprovalSatisfied: false,
+                },
+              ],
+            },
+          },
+        },
+      }),
+      update: jest.fn(),
+    };
+    db.mockReturnValue(query);
+
+    const res = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn(),
+    };
+    const next = jest.fn();
+
+    await routeHandler('/:id/send-booking-link')({
+      params: { id: 'estimate-manager-approval' },
+      body: {},
+    }, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: expect.stringMatching(/Manager approval is required/),
+    });
+    expect(bookingServiceFor).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('allows manager-approval estimates after approval reason is recorded', () => {
+    expect(() => router._internals.assertEstimateSendable({
+      id: 'estimate-manager-approved',
+      status: 'draft',
+      estimate_data: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+          dethatchingManagerApprovalTrusted: true,
+        },
+        result: {
+          oneTime: {
+            items: [
+              {
+                service: 'dethatching',
+                requiresManagerApproval: true,
+                managerApprovalReason: 'st_augustine_dethatching',
+              },
+            ],
+          },
+        },
+      },
+    })).not.toThrow();
   });
 
   test('sent-only estimate scope includes delivery attempts but not generated drafts', () => {

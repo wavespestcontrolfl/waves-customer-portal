@@ -53,6 +53,403 @@ function estimateDataHasQuoteRequirement(estimateData) {
   return containsQuoteRequirement(parseEstimateData(estimateData));
 }
 
+function approvalInputsSatisfied(root = {}) {
+  if (hasApprovalInputFields(root?.inputs)) {
+    return !!trustedApprovalStateFromInputs(root.inputs);
+  }
+  return !!trustedApprovalStateFromInputs(root?.result?.inputs);
+}
+
+function hasApprovalInputFields(inputs) {
+  if (!inputs || typeof inputs !== 'object') return false;
+  return [
+    'dethatchingManagerApproved',
+    'managerApproved',
+    'dethatchingManagerApprovalReason',
+    'managerApprovalReason',
+    'dethatchingManagerApprovalTrusted',
+    'managerApprovalTrusted',
+  ].some((key) => Object.prototype.hasOwnProperty.call(inputs, key));
+}
+
+function trustedApprovalStateFromInputs(inputs) {
+  if (!inputs || typeof inputs !== 'object') return null;
+  const approved = inputs.dethatchingManagerApproved === true || inputs.managerApproved === true;
+  const trusted = inputs.dethatchingManagerApprovalTrusted === true ||
+    inputs.managerApprovalTrusted === true;
+  const reason = normalizeDethatchingApprovalReason(
+    inputs.dethatchingManagerApprovalReason || inputs.managerApprovalReason
+  );
+  if (!approved || !trusted || reason.length === 0) return null;
+  return {
+    reason,
+    approvedBy: inputs.dethatchingManagerApprovedBy || inputs.managerApprovedBy || null,
+    approvedByRole: inputs.dethatchingManagerApprovedByRole || inputs.managerApprovedByRole || null,
+    approvedAt: inputs.dethatchingManagerApprovedAt || inputs.managerApprovedAt || null,
+  };
+}
+
+function looksLikeDethatchingApprovalItem(value = {}) {
+  const service = String(value.service || value.key || '').toLowerCase();
+  const label = String(value.name || value.label || value.displayName || '').toLowerCase();
+  return service.includes('dethatch') ||
+    label.includes('dethatch') ||
+    value.cleanupLevel !== undefined ||
+    value.probeMeasurements !== undefined ||
+    value.thatchDepthInches !== undefined;
+}
+
+function itemHasStAugustineApprovalReason(value = {}) {
+  const reasons = Array.isArray(value.manualReviewReasons) ? value.manualReviewReasons : [];
+  const hasManagerReason = isDethatchingManagerApprovalReviewReason(value.managerApprovalReason);
+  const hasManualReviewReason = reasons.some((reason) => isDethatchingManagerApprovalReviewReason(reason));
+  return hasManagerReason ||
+    (hasManualReviewReason && looksLikeDethatchingApprovalItem(value));
+}
+
+function itemManagerApprovalSatisfied(value = {}, root = {}) {
+  return approvalInputsSatisfied(root);
+}
+
+function booleanInputTrue(value) {
+  return value === true || value === 'true' || value === 'TRUE' || value === 'YES' || value === 'yes' || value === 1 || value === '1';
+}
+
+function booleanInputFalse(value) {
+  return value === false || value === 'false' || value === 'FALSE' || value === 'NO' || value === 'no' || value === 0 || value === '0';
+}
+
+function normalizeApprovalToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+function isStAugustineLike(value) {
+  const raw = normalizeApprovalToken(value);
+  const compact = String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return ['a', 'b', 'st_augustine', 'staugustine', 'staug', 'floratam'].includes(raw) ||
+    compact.includes('staugustine') ||
+    compact.includes('floratam');
+}
+
+function rootInputObjects(root = {}) {
+  return [
+    root?.inputs,
+    root?.result?.inputs,
+    root?.engineInputs,
+    root?.result?.engineInputs,
+  ].filter((item) => item && typeof item === 'object');
+}
+
+function inputRequestsDethatching(value) {
+  if (booleanInputTrue(value)) return true;
+  if (booleanInputFalse(value)) return false;
+  if (!value || typeof value !== 'object') return false;
+
+  const explicitState = [
+    value.selected,
+    value.enabled,
+    value.active,
+    value.requested,
+  ].filter((item) => item !== undefined);
+  if (explicitState.some((item) => booleanInputTrue(item))) return true;
+  if (explicitState.some((item) => booleanInputFalse(item))) return false;
+  return true;
+}
+
+function rootRequestsDethatching(root = {}) {
+  return rootInputObjects(root).some((inputs) => (
+    inputRequestsDethatching(inputs.svcDethatch) ||
+    inputRequestsDethatching(inputs.dethatching) ||
+    inputRequestsDethatching(inputs.services?.dethatching)
+  ));
+}
+
+function rootHasStAugustineGrass(root = {}) {
+  return rootInputObjects(root).some((inputs) => (
+    isStAugustineLike(inputs.grassType) ||
+    isStAugustineLike(inputs.track) ||
+    isStAugustineLike(inputs.turfTrack) ||
+    isStAugustineLike(inputs.grassTrack)
+  ));
+}
+
+function rootRequiresLegacyStAugustineDethatchingApproval(root = {}) {
+  return rootRequestsDethatching(root) && rootHasStAugustineGrass(root) && !approvalInputsSatisfied(root);
+}
+
+function containsUnresolvedManagerApproval(value, root, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => containsUnresolvedManagerApproval(item, root, depth + 1));
+  }
+  if (typeof value !== 'object') return false;
+  const legacyRootRequiresApproval = rootRequiresLegacyStAugustineDethatchingApproval(root);
+  const requiresManagerApproval = value.requiresManagerApproval === true ||
+    itemHasStAugustineApprovalReason(value) ||
+    (legacyRootRequiresApproval && looksLikeDethatchingApprovalItem(value));
+  if (requiresManagerApproval && !itemManagerApprovalSatisfied(value, root)) return true;
+  return Object.values(value).some((item) => containsUnresolvedManagerApproval(item, root, depth + 1));
+}
+
+function estimateDataHasUnresolvedManagerApproval(estimateData) {
+  const data = parseEstimateData(estimateData);
+  return containsUnresolvedManagerApproval(data, data) ||
+    rootRequiresLegacyStAugustineDethatchingApproval(data);
+}
+
+function cloneEstimateData(data) {
+  if (!data || typeof data !== 'object') return data;
+  return JSON.parse(JSON.stringify(data));
+}
+
+const DETHATCHING_MANAGER_APPROVAL_REVIEW_REASONS = new Set([
+  'st_augustine_dethatching',
+  'st_augustine_dethatching_manager_approval_required',
+  'st_augustine_dethatching_manager_approval_reason_missing',
+]);
+
+function isDethatchingManagerApprovalReviewReason(value) {
+  return DETHATCHING_MANAGER_APPROVAL_REVIEW_REASONS.has(normalizeApprovalToken(value));
+}
+
+const DETHATCHING_MANAGER_APPROVAL_REASONS = new Set([
+  'verified_thatch_probe',
+  'customer_requested_after_warning',
+  'bermuda_or_zoysia_confirmed',
+  'manager_override',
+]);
+
+function normalizeDethatchingApprovalReason(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return DETHATCHING_MANAGER_APPROVAL_REASONS.has(normalized) ? normalized : '';
+}
+
+function normalizeMoneyValue(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+}
+
+function uniqueStringList(values = []) {
+  const list = Array.isArray(values) ? values : [values];
+  return [...new Set(list.filter(Boolean).map((value) => String(value)))];
+}
+
+function normalizeDethatchingApprovalDerivedFields(value, {
+  trustedApproval,
+  reason,
+} = {}) {
+  const estimatedPrice = normalizeMoneyValue(value.estimatedPrice)
+    ?? normalizeMoneyValue(value.baseEstimatePrice)
+    ?? normalizeMoneyValue(value.price);
+  if (estimatedPrice !== null) {
+    value.estimatedPrice = estimatedPrice;
+    value.baseEstimatePrice = value.baseEstimatePrice ?? estimatedPrice;
+  }
+
+  const reviewReasons = uniqueStringList(value.manualReviewReasons)
+    .filter((item) => !isDethatchingManagerApprovalReviewReason(item));
+  if (!trustedApproval) {
+    reviewReasons.push('st_augustine_dethatching_manager_approval_required');
+  }
+  if (trustedApproval && estimatedPrice === null) {
+    reviewReasons.push('dethatching_price_not_recorded');
+  }
+  value.manualReviewReasons = uniqueStringList(reviewReasons);
+
+  const quoteRequired = value.manualReviewReasons.length > 0;
+  value.requiresManualReview = quoteRequired;
+  value.quoteRequired = quoteRequired;
+  value.requiresCustomQuote = quoteRequired;
+  value.autoQuoteRequiresAdminApproval = quoteRequired;
+  value.price = quoteRequired ? null : (estimatedPrice !== null ? estimatedPrice : value.price);
+
+  if (quoteRequired) {
+    const approvalReason = !trustedApproval
+      ? 'Manager approval is required before St. Augustine / Floratam dethatching can be quoted.'
+      : null;
+    const reviewReason = value.manualReviewReasons.length > 0
+      ? `Dethatching requires admin review: ${value.manualReviewReasons.join(', ')}.`
+      : null;
+    value.customQuoteReason = approvalReason || reviewReason;
+    value.reason = value.customQuoteReason;
+  } else {
+    value.customQuoteReason = null;
+    value.reason = null;
+  }
+
+  if (trustedApproval && reason) {
+    value.managerApprovalOverrideReason = reason;
+  }
+}
+
+function containsChildQuoteRequirement(value, depth = 0) {
+  if (!value || depth > 12) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => containsQuoteRequirement(item, depth + 1));
+  }
+  if (typeof value !== 'object') return false;
+  return Object.values(value).some((item) => containsQuoteRequirement(item, depth + 1));
+}
+
+function reconcileAggregateQuoteState(value, depth = 0) {
+  if (!value || depth > 12) return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => reconcileAggregateQuoteState(item, depth + 1));
+    return;
+  }
+  if (typeof value !== 'object') return;
+
+  Object.values(value).forEach((item) => reconcileAggregateQuoteState(item, depth + 1));
+
+  if (Array.isArray(value.quoteRequiredItems)) {
+    value.quoteRequiredItems = value.quoteRequiredItems.filter((item) => containsQuoteRequirement(item));
+  }
+
+  const isAggregateQuoteContainer = Array.isArray(value.quoteRequiredItems) ||
+    value.oneTime !== undefined ||
+    value.recurring !== undefined ||
+    value.results !== undefined ||
+    value.pricingMetadata !== undefined;
+  if (!isAggregateQuoteContainer) return;
+
+  const hasQuoteRequirement = containsChildQuoteRequirement({
+    quoteRequiredItems: value.quoteRequiredItems || [],
+    oneTime: value.oneTime,
+    recurring: value.recurring,
+    specItems: value.specItems,
+    lineItems: value.lineItems,
+    items: value.items,
+  });
+  if (!hasQuoteRequirement) {
+    if (Object.prototype.hasOwnProperty.call(value, 'quoteRequired')) value.quoteRequired = false;
+    if (Object.prototype.hasOwnProperty.call(value, 'requiresCustomQuote')) value.requiresCustomQuote = false;
+    if (Object.prototype.hasOwnProperty.call(value, 'autoQuoteRequiresAdminApproval')) value.autoQuoteRequiresAdminApproval = false;
+    if (Object.prototype.hasOwnProperty.call(value, 'quoteRequiredReason')) value.quoteRequiredReason = null;
+    if (Object.prototype.hasOwnProperty.call(value, 'customQuoteReason')) value.customQuoteReason = null;
+    if (Object.prototype.hasOwnProperty.call(value, 'reason')) value.reason = null;
+  }
+}
+
+function normalizeEstimateDethatchingManagerApproval(estimateData, {
+  technician,
+  technicianId,
+  now = () => new Date(),
+} = {}) {
+  const parsed = parseEstimateData(estimateData);
+  if (!parsed || typeof parsed !== 'object') return estimateData;
+
+  const data = cloneEstimateData(parsed);
+  const inputs = data.inputs && typeof data.inputs === 'object'
+    ? data.inputs
+    : (data.inputs = {});
+  const requestedApproved = inputs.dethatchingManagerApproved === true || inputs.managerApproved === true;
+  const requestedReason = normalizeDethatchingApprovalReason(
+    inputs.dethatchingManagerApprovalReason || inputs.managerApprovalReason
+  );
+  const isAdmin = String(technician?.role || '').toLowerCase() === 'admin';
+  const hasTopLevelApprovalFields = hasApprovalInputFields(inputs);
+  const topLevelTrustedApproval = isAdmin ? trustedApprovalStateFromInputs(inputs) : null;
+  const reusableTopLevelApproval = topLevelTrustedApproval && (
+    topLevelTrustedApproval.approvedBy ||
+    topLevelTrustedApproval.approvedByRole ||
+    topLevelTrustedApproval.approvedAt
+  )
+    ? topLevelTrustedApproval
+    : null;
+  const requestedTrustedApproval = !reusableTopLevelApproval &&
+    requestedApproved && requestedReason.length > 0 && isAdmin
+    ? {
+      reason: requestedReason,
+      approvedBy: technicianId || technician?.id || null,
+      approvedByRole: technician?.role || 'admin',
+      approvedAt: now().toISOString(),
+    }
+    : null;
+  const existingTrustedApproval = isAdmin
+    ? (!hasTopLevelApprovalFields ? trustedApprovalStateFromInputs(data.result?.inputs) : null)
+    : null;
+  const approval = reusableTopLevelApproval || requestedTrustedApproval || existingTrustedApproval;
+  const trustedApproval = !!approval;
+  const reason = approval?.reason || requestedReason;
+
+  function applyApprovalToEngineInputs(engineInputs) {
+    if (!engineInputs || typeof engineInputs !== 'object') return;
+    engineInputs.dethatchingManagerApprovalTrusted = trustedApproval;
+    engineInputs.dethatchingManagerApproved = trustedApproval;
+    engineInputs.dethatchingManagerApprovalReason = trustedApproval ? reason : '';
+    delete engineInputs.managerApproved;
+    delete engineInputs.managerApprovalReason;
+
+    const selected = inputRequestsDethatching(engineInputs.services?.dethatching);
+    if (!selected) return;
+    if (!engineInputs.services || typeof engineInputs.services !== 'object') {
+      engineInputs.services = {};
+    }
+    if (!engineInputs.services.dethatching || typeof engineInputs.services.dethatching !== 'object') {
+      engineInputs.services.dethatching = { selected: true };
+    }
+    engineInputs.services.dethatching.managerApproved = trustedApproval;
+    engineInputs.services.dethatching.managerApprovalReason = trustedApproval ? reason : '';
+  }
+
+  inputs.dethatchingManagerApprovalTrusted = trustedApproval;
+  inputs.dethatchingManagerApproved = trustedApproval;
+  inputs.dethatchingManagerApprovalReason = trustedApproval ? reason : '';
+  delete inputs.managerApproved;
+  delete inputs.managerApprovalReason;
+  if (trustedApproval) {
+    inputs.dethatchingManagerApprovedBy = approval.approvedBy;
+    inputs.dethatchingManagerApprovedByRole = approval.approvedByRole;
+    inputs.dethatchingManagerApprovedAt = approval.approvedAt;
+  } else {
+    delete inputs.dethatchingManagerApprovedBy;
+    delete inputs.dethatchingManagerApprovedByRole;
+    delete inputs.dethatchingManagerApprovedAt;
+  }
+  applyApprovalToEngineInputs(inputs);
+  applyApprovalToEngineInputs(data.result?.inputs);
+  applyApprovalToEngineInputs(data.engineInputs);
+  applyApprovalToEngineInputs(data.result?.engineInputs);
+
+  function applyTrustedApproval(value, depth = 0) {
+    if (!value || depth > 12) return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => applyTrustedApproval(item, depth + 1));
+      return;
+    }
+    if (typeof value !== 'object') return;
+    if (looksLikeDethatchingApprovalItem(value) && (
+      value.requiresManagerApproval === true ||
+      itemHasStAugustineApprovalReason(value)
+    )) {
+      value.managerApproved = trustedApproval;
+      value.managerApprovalSatisfied = trustedApproval;
+      value.managerApprovalOverrideReason = trustedApproval ? reason : null;
+      normalizeDethatchingApprovalDerivedFields(value, { trustedApproval, reason });
+      if (trustedApproval) {
+        value.managerApprovalApprovedBy = inputs.dethatchingManagerApprovedBy;
+        value.managerApprovalApprovedByRole = inputs.dethatchingManagerApprovedByRole;
+        value.managerApprovalApprovedAt = inputs.dethatchingManagerApprovedAt;
+      } else {
+        delete value.managerApprovalApprovedBy;
+        delete value.managerApprovalApprovedByRole;
+        delete value.managerApprovalApprovedAt;
+      }
+    }
+    Object.values(value).forEach((item) => applyTrustedApproval(item, depth + 1));
+  }
+
+  applyTrustedApproval(data);
+  reconcileAggregateQuoteState(data);
+  return data;
+}
+
 function recurringServiceRowsFromEstimateData(estimateData) {
   const data = parseEstimateData(estimateData);
   const result = data?.result && typeof data.result === 'object'
@@ -92,6 +489,8 @@ function nonPestRecurringServicesForOneTimeOption(estimateData) {
 
 module.exports = {
   estimateDataHasQuoteRequirement,
+  estimateDataHasUnresolvedManagerApproval,
+  normalizeEstimateDethatchingManagerApproval,
   nonPestRecurringServicesForOneTimeOption,
   validateEstimateDeliveryOptions,
 };

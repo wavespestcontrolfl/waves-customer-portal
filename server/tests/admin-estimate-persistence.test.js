@@ -10,6 +10,8 @@ const {
   getEstimatePricingCache,
   setEstimatePricingCache,
 } = require('../services/estimate-pricing-cache');
+const { generateEstimate } = require('../services/pricing-engine');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
 function makeDatabase({ lead, estimate, emptyEstimateUpdate = false }) {
   const updates = [];
@@ -100,6 +102,189 @@ describe('admin estimate persistence', () => {
     expect(fields.service_interest).toBe('Lawn Care + Pest Control');
   });
 
+  test('preserves full recurring annual totals when legacy annualAfterDiscount excludes add-ons', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      estimateData: {
+        result: {
+          recurring: {
+            grandTotal: 140,
+            monthlyTotal: 140,
+            annualAfterDiscount: 1320,
+            services: [
+              { service: 'lawn_care', name: 'Lawn Care', mo: 110 },
+              { service: 'rodent_bait', name: 'Rodent Bait', mo: 30 },
+            ],
+          },
+          totals: {
+            year2mo: 140,
+            year2: 1680,
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.monthly_total).toBe(140);
+    expect(fields.annual_total).toBe(1680);
+    expect(data.result.totals.year2).toBe(1680);
+    expect(data.result.recurring.annualAfterDiscount).toBe(1320);
+  });
+
+  test('derives full recurring annual totals from monthly total before annualAfterDiscount', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      estimateData: {
+        result: {
+          recurring: {
+            grandTotal: 140,
+            monthlyTotal: 140,
+            annualAfterDiscount: 1320,
+            services: [
+              { service: 'lawn_care', name: 'Lawn Care', mo: 110 },
+              { service: 'rodent_bait', name: 'Rodent Bait', mo: 30 },
+            ],
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.monthly_total).toBe(140);
+    expect(fields.annual_total).toBe(1680);
+    expect(data.result.recurring.annualAfterDiscount).toBe(1320);
+  });
+
+  test('preserves signed one-time discounts when deriving persisted totals', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: {
+            total: 275,
+            items: [
+              { service: 'one_time_pest', name: 'One-Time Pest', price: 300 },
+              { service: 'bundle_discount', name: 'Bundle Discount', price: -25 },
+            ],
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.onetime_total).toBe(275);
+    expect(data.result.oneTime.total).toBe(275);
+  });
+
+  test('preserves explicit discounted one-time totals below row sum', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: {
+            total: 250,
+            items: [
+              { service: 'one_time_pest', name: 'One-Time Pest', price: 300 },
+            ],
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.onetime_total).toBe(250);
+    expect(data.result.oneTime.total).toBe(250);
+  });
+
+  test('preserves explicit free one-time totals below row sum', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: {
+            total: 0,
+            items: [
+              { service: 'one_time_pest', name: 'One-Time Pest', price: 300 },
+            ],
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.onetime_total).toBe(0);
+    expect(data.result.oneTime.total).toBe(0);
+  });
+
+  test('falls back to top-level spec rows when one-time rows are absent', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 425,
+      estimateData: {
+        result: {
+          specItems: [
+            { service: 'rodent_trapping', name: 'Rodent Trapping', price: 425 },
+          ],
+        },
+      },
+    });
+
+    expect(fields.onetime_total).toBe(425);
+  });
+
+  test('excludes recurring-program spec rows from top-level one-time fallback', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 425,
+      estimateData: {
+        result: {
+          specItems: [
+            { service: 'general_pest', name: 'General Pest', price: 99, onProg: true },
+            { service: 'mosquito', name: 'Mosquito', price: 75, includedOnProgram: true },
+            { service: 'rodent_trapping', name: 'Rodent Trapping', price: 425 },
+          ],
+        },
+      },
+    });
+
+    expect(fields.onetime_total).toBe(425);
+  });
+
+  test('derives one-time total from membership fee without one-time rows', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: {
+            membershipFee: 49,
+          },
+        },
+      },
+    });
+
+    expect(fields.onetime_total).toBe(49);
+  });
+
   test('zeros persisted totals when estimate data contains quote-required lines', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
@@ -129,6 +314,350 @@ describe('admin estimate persistence', () => {
     expect(fields.annual_total).toBe(0);
     expect(fields.onetime_total).toBe(0);
     expect(fields.service_interest).toBe('Commercial Pest Control + Mosquito');
+  });
+
+  test('strips client-supplied dethatching manager approval from non-admin saves', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+          dethatchingManagerApprovalTrusted: true,
+        },
+        result: {
+          quoteRequired: true,
+          quoteRequiredItems: [
+            {
+              service: 'dethatching',
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+              managerApprovalSatisfied: false,
+              price: null,
+              estimatedPrice: 166,
+              quoteRequired: true,
+              requiresCustomQuote: true,
+              manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+            },
+          ],
+          oneTime: {
+            items: [
+              {
+                service: 'dethatching',
+                requiresManagerApproval: true,
+                managerApprovalReason: 'st_augustine_dethatching',
+                managerApprovalSatisfied: true,
+                price: 166,
+                estimatedPrice: 166,
+                quoteRequired: false,
+                requiresCustomQuote: false,
+                manualReviewReasons: [],
+              },
+            ],
+          },
+        },
+      },
+    }, {
+      technicianId: 'tech-1',
+      technician: { id: 'tech-1', role: 'technician' },
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(data.inputs.dethatchingManagerApproved).toBe(false);
+    expect(data.inputs.dethatchingManagerApprovalTrusted).toBe(false);
+    expect(data.inputs.dethatchingManagerApprovalReason).toBe('');
+    expect(data.result.oneTime.items[0].managerApproved).toBe(false);
+    expect(data.result.oneTime.items[0].managerApprovalSatisfied).toBe(false);
+    expect(data.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: null,
+      estimatedPrice: 166,
+      quoteRequired: true,
+      requiresCustomQuote: true,
+      customQuoteReason: expect.stringMatching(/Manager approval is required/),
+    }));
+    expect(data.result.oneTime.items[0].manualReviewReasons).toContain('st_augustine_dethatching_manager_approval_required');
+    expect(fields.monthly_total).toBe(0);
+    expect(fields.annual_total).toBe(0);
+    expect(fields.onetime_total).toBe(0);
+  });
+
+  test('persists trusted dethatching manager approval only for admin saves', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+        },
+        result: {
+          quoteRequired: true,
+          quoteRequiredItems: [
+            {
+              service: 'dethatching',
+              requiresManagerApproval: true,
+              managerApprovalReason: 'st_augustine_dethatching',
+              managerApprovalSatisfied: false,
+              price: null,
+              estimatedPrice: 166,
+              quoteRequired: true,
+              requiresCustomQuote: true,
+              manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+            },
+          ],
+          oneTime: {
+            items: [
+              {
+                service: 'dethatching',
+                requiresManagerApproval: true,
+                managerApprovalReason: 'st_augustine_dethatching',
+                managerApprovalSatisfied: false,
+                price: null,
+                estimatedPrice: 166,
+                quoteRequired: true,
+                requiresCustomQuote: true,
+                manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+                customQuoteReason: 'Manager approval is required before St. Augustine / Floratam dethatching can be quoted.',
+              },
+            ],
+          },
+        },
+      },
+    }, {
+      technicianId: 'admin-1',
+      technician: { id: 'admin-1', role: 'admin' },
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(data.inputs).toEqual(expect.objectContaining({
+      dethatchingManagerApproved: true,
+      dethatchingManagerApprovalTrusted: true,
+      dethatchingManagerApprovalReason: 'verified_thatch_probe',
+      dethatchingManagerApprovedBy: 'admin-1',
+      dethatchingManagerApprovedByRole: 'admin',
+      dethatchingManagerApprovedAt: '2026-05-22T12:00:00.000Z',
+    }));
+    expect(data.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      managerApproved: true,
+      managerApprovalSatisfied: true,
+      managerApprovalOverrideReason: 'verified_thatch_probe',
+      managerApprovalApprovedBy: 'admin-1',
+      price: 166,
+      estimatedPrice: 166,
+      quoteRequired: false,
+      requiresCustomQuote: false,
+      customQuoteReason: null,
+    }));
+    expect(data.result.oneTime.items[0].manualReviewReasons).toEqual([]);
+    expect(data.result.quoteRequired).toBe(false);
+    expect(data.result.quoteRequiredItems).toEqual([]);
+    expect(fields.monthly_total).toBe(baseBody.monthlyTotal);
+  });
+
+  test('trusted dethatching approval does not turn missing prices into zero-dollar quotes', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+        },
+        result: {
+          oneTime: {
+            items: [
+              {
+                service: 'dethatching',
+                requiresManagerApproval: true,
+                managerApprovalReason: 'st_augustine_dethatching',
+                managerApprovalSatisfied: false,
+                price: null,
+                quoteRequired: true,
+                requiresCustomQuote: true,
+                manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+              },
+            ],
+          },
+        },
+      },
+    }, {
+      technicianId: 'admin-1',
+      technician: { id: 'admin-1', role: 'admin' },
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(data.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: null,
+      quoteRequired: true,
+      requiresCustomQuote: true,
+      managerApprovalSatisfied: true,
+    }));
+    expect(data.result.oneTime.items[0].estimatedPrice).toBeUndefined();
+    expect(data.result.oneTime.items[0].manualReviewReasons).toContain('dethatching_price_not_recorded');
+    expect(fields.monthly_total).toBe(0);
+    expect(fields.annual_total).toBe(0);
+    expect(fields.onetime_total).toBe(0);
+  });
+
+  test('recomputes one-time total when trusted approval clears server-mapped dethatching quote', () => {
+    const mapped = mapV1ToLegacyShape(generateEstimate({
+      homeSqFt: 2200,
+      stories: 1,
+      lotSqFt: 12000,
+      measuredTurfSf: 4500,
+      propertyType: 'single_family',
+      grassType: 'st_augustine',
+      services: {
+        dethatching: {
+          thatchDepthInches: 0.8,
+        },
+      },
+    }));
+    const mappedSpec = mapped.oneTime.specItems.find((item) => item.service === 'dethatching');
+    expect(mappedSpec.price).toBeNull();
+    expect(mappedSpec.estimatedPrice).toBeGreaterThan(0);
+    mapped.oneTime.items.push({
+      service: 'one_time_pest',
+      name: 'One-Time Pest',
+      price: 200,
+    });
+    mapped.oneTime.total = 200;
+    mapped.oneTime.otSubtotal = 200;
+    const approvedOneTimeTotal = 200 + mappedSpec.estimatedPrice;
+
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        inputs: {
+          svcDethatch: true,
+          grassType: 'st_augustine',
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+        },
+        result: mapped,
+      },
+    }, {
+      technicianId: 'admin-1',
+      technician: { id: 'admin-1', role: 'admin' },
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    const normalizedSpec = data.result.oneTime.specItems.find((item) => item.service === 'dethatching');
+    expect(normalizedSpec).toEqual(expect.objectContaining({
+      price: mappedSpec.estimatedPrice,
+      estimatedPrice: mappedSpec.estimatedPrice,
+      quoteRequired: false,
+      requiresCustomQuote: false,
+    }));
+    expect(data.result.quoteRequired).toBe(false);
+    expect(data.result.quoteRequiredItems).toEqual([]);
+    expect(data.result.oneTime.total).toBe(approvedOneTimeTotal);
+    expect(data.result.oneTime.otSubtotal).toBe(approvedOneTimeTotal);
+    expect(fields.monthly_total).toBe(0);
+    expect(fields.annual_total).toBe(0);
+    expect(fields.onetime_total).toBe(approvedOneTimeTotal);
+  });
+
+  test('trusted dethatching approval rejects malformed price fields before clearing quote-required', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'verified_thatch_probe',
+        },
+        result: {
+          oneTime: {
+            items: [
+              {
+                service: 'dethatching',
+                requiresManagerApproval: true,
+                managerApprovalReason: 'st_augustine_dethatching',
+                managerApprovalSatisfied: false,
+                price: null,
+                estimatedPrice: [],
+                baseEstimatePrice: true,
+                quoteRequired: true,
+                requiresCustomQuote: true,
+                manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+              },
+            ],
+          },
+        },
+      },
+    }, {
+      technicianId: 'admin-1',
+      technician: { id: 'admin-1', role: 'admin' },
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(data.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: null,
+      quoteRequired: true,
+      requiresCustomQuote: true,
+      managerApprovalSatisfied: true,
+    }));
+    expect(data.result.oneTime.items[0].estimatedPrice).toEqual([]);
+    expect(data.result.oneTime.items[0].baseEstimatePrice).toBe(true);
+    expect(data.result.oneTime.items[0].manualReviewReasons).toContain('dethatching_price_not_recorded');
+    expect(fields.monthly_total).toBe(0);
+    expect(fields.annual_total).toBe(0);
+    expect(fields.onetime_total).toBe(0);
+  });
+
+  test('rejects invalid admin manager approval reasons during persistence normalization', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        inputs: {
+          dethatchingManagerApproved: true,
+          dethatchingManagerApprovalReason: 'anything truthy',
+        },
+        result: {
+          oneTime: {
+            items: [
+              {
+                service: 'dethatching',
+                requiresManagerApproval: true,
+                managerApprovalReason: 'st_augustine_dethatching',
+                managerApprovalSatisfied: false,
+                price: null,
+                estimatedPrice: 166,
+                quoteRequired: true,
+                requiresCustomQuote: true,
+                manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+              },
+            ],
+          },
+        },
+      },
+    }, {
+      technicianId: 'admin-1',
+      technician: { id: 'admin-1', role: 'admin' },
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(data.inputs.dethatchingManagerApproved).toBe(false);
+    expect(data.inputs.dethatchingManagerApprovalTrusted).toBe(false);
+    expect(data.inputs.dethatchingManagerApprovalReason).toBe('');
+    expect(data.result.oneTime.items[0]).toEqual(expect.objectContaining({
+      price: null,
+      estimatedPrice: 166,
+      quoteRequired: true,
+      requiresCustomQuote: true,
+      managerApprovalSatisfied: false,
+    }));
+    expect(data.result.oneTime.items[0].manualReviewReasons).toContain('st_augustine_dethatching_manager_approval_required');
+    expect(fields.monthly_total).toBe(0);
+    expect(fields.annual_total).toBe(0);
+    expect(fields.onetime_total).toBe(0);
   });
 
   test('reuses an existing lead-linked draft instead of creating a second estimate', async () => {

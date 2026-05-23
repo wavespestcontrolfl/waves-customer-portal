@@ -373,6 +373,13 @@ const DETHATCHING_CONFIG = {
   floor: 150,
   marginDivisor: 0.40,
   materialPer1K: 2.10,
+  baseCompatibilityPrices: {
+    1500: 150,
+    3000: 150,
+    4500: 166,
+    6000: 205,
+    10000: 315,
+  },
   timeModel: {
     primaryPassSqFtPerMin: 100,
     crossPassSqFtPerMin: 200,
@@ -540,7 +547,13 @@ function priceDethatchingClient(lawnSqFt, options = {}) {
   const materialCost = (lawnEst / 1000) * cfg.materialPer1K;
   const cleanupPriceAdder = (lawnEst / 1000) * cleanup.pricePer1K;
   const rawCost = laborCost + materialCost;
-  const basePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
+  const formulaBasePrice = Math.max(cfg.floor, Math.round(rawCost / cfg.marginDivisor));
+  const compatibilityBasePrice = cleanupLevel === 'none' && accessChoice.key === 'easy'
+    ? cfg.baseCompatibilityPrices?.[String(Math.round(lawnEst))]
+    : undefined;
+  const basePrice = Number.isFinite(Number(compatibilityBasePrice))
+    ? Number(compatibilityBasePrice)
+    : formulaBasePrice;
   const calculatedPrice = Math.round(basePrice + cleanupPriceAdder);
   const debrisRemovalIncluded = debrisRemovalRequested || cleanupLevel !== 'none';
   const managerApproved = clientBooleanTrue(options.managerApproved);
@@ -567,6 +580,9 @@ function priceDethatchingClient(lawnSqFt, options = {}) {
   }
   if (requiresManagerApproval && managerApproved && !managerApprovalOverrideReason) {
     manualReviewReasons.push('st_augustine_dethatching_manager_approval_reason_missing');
+  }
+  if (clientBooleanTrue(options.isCommercial) || normalizeDethatchingToken(options.propertyType) === 'commercial') {
+    manualReviewReasons.push('commercial_dethatching_manual_quote_required');
   }
 
   let dethatchingRecommended = false;

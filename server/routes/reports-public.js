@@ -10,6 +10,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
+const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const {
   runAndSwallowErrors: runPestPressureForServiceRecord,
   calculateAndPersistForServiceRecord,
@@ -17,6 +18,7 @@ const {
 const {
   loadActiveConfig,
   loadScoreForServiceRecord,
+  loadHistoryForCustomer,
   pestPressureVisibilitySignature,
 } = require('../services/pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
@@ -419,13 +421,31 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
       customer_id: service.customer_id,
       service_type: service.service_type,
       service_line: service.service_line,
+      service_date: service.service_date,
       client_pest_rating: rounded,
     };
+
+    // Pull history with the same token-scoped service_date ceiling
+    // buildReportV1Data uses, so the rating-submit response preserves
+    // the chart + cadence the customer was just looking at instead of
+    // dropping them. Resolve service_line the same way buildReportV1Data
+    // does — for legacy rows where the column is null, falling back to
+    // detectServiceLine(service_type) keeps history scoped to one line
+    // instead of pulling mixed lawn+pest visits.
+    const resolvedServiceLine = service.service_line || detectServiceLine(service.service_type);
+    const historyRows = service.customer_id
+      ? await loadHistoryForCustomer(db, service.customer_id, {
+          serviceLine: resolvedServiceLine || null,
+          limit: 8,
+          beforeOrOnServiceDate: service.service_date || null,
+        }).catch(() => [])
+      : [];
 
     const pestPressure = buildPestPressureCustomerView({
       config,
       scoreRow: updatedScore,
       serviceRecord: updatedService,
+      historyRows,
     });
 
     return res.json({ pestPressure, submittedRating: rounded });
