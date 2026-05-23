@@ -53,7 +53,26 @@ exports.up = async function (knex) {
               ''
             ),
             'sha256'
-          ), 'hex') AS new_key
+          ), 'hex') AS new_key,
+          row_number() OVER (
+            PARTITION BY left(action_type, 60) || ':' || encode(digest(
+              regexp_replace(
+                regexp_replace(
+                  regexp_replace(
+                    regexp_replace(lower(trim(url)), '\\?.*$', ''),
+                    '#.*$',
+                    ''
+                  ),
+                  '/$',
+                  ''
+                ),
+                '^https?://(www\\.)?',
+                ''
+              ),
+              'sha256'
+            ), 'hex')
+            ORDER BY created_at NULLS LAST, id
+          ) AS normalized_rank
         FROM seo_actions
         WHERE dedupe_key = action_type || ':' || url
       )
@@ -61,6 +80,7 @@ exports.up = async function (knex) {
       SET dedupe_key = normalized.new_key
       FROM normalized
       WHERE action.id = normalized.id
+        AND normalized.normalized_rank = 1
         AND NOT EXISTS (
           SELECT 1
           FROM seo_actions existing
