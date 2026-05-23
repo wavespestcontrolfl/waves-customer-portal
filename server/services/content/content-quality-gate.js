@@ -6,9 +6,10 @@
  * Per v3.1 plan:
  *
  *   Common to all page types (hard checks):
- *     schema_valid, no_duplicate_intent, serp_brief_attached,
- *     gsc_signal_attached, canonical_self_referencing, indexable,
- *     sitemap_updated, preview_success
+ *     schema_valid, title_meta_spam_free, no_duplicate_intent,
+ *     serp_brief_attached, gsc_signal_attached,
+ *     canonical_self_referencing, indexable, sitemap_updated,
+ *     preview_success
  *
  *   Extra checks by page type:
  *     city-service        nap_consistent, local_proof_present,
@@ -29,6 +30,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
+const { evaluateTitleMetaSpam } = require('./title-meta-spam-gate');
 
 // Compute the achievable maximum score from the weight map so the
 // pass threshold is always a reachable fraction of it. The v3.1 plan
@@ -57,6 +59,7 @@ let MIN_TOTAL_SCORE;
 
 const HARD_CHECKS = [
   { name: 'schema_valid', weight: 8, evaluate: checkSchemaValid },
+  { name: 'title_meta_spam_free', weight: 0, evaluate: checkTitleMetaSpamFree },
   { name: 'serp_brief_attached', weight: 4, evaluate: checkSerpBriefAttached },
   { name: 'gsc_signal_attached', weight: 4, evaluate: checkGscSignalAttached },
   { name: 'no_duplicate_intent', weight: 6, evaluate: checkNoDuplicateIntent },
@@ -179,6 +182,27 @@ function checkSchemaValid(draft) {
   // String schema must parse as JSON-LD.
   try { JSON.parse(schema); return { ok: true }; }
   catch { return { ok: false, reason: 'schema_not_valid_json' }; }
+}
+
+function checkTitleMetaSpamFree(draft, brief) {
+  const result = evaluateTitleMetaSpam({
+    title: draft.title || draft.frontmatter?.title,
+    meta_description: draft.meta_description || draft.frontmatter?.meta_description,
+    city: brief.city,
+    service: brief.service,
+    target_keyword: brief.target_keyword,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: result.hard_failures.map((f) => f.reason || f.code).join(','),
+      soft_warnings: result.soft_failures,
+    };
+  }
+  return {
+    ok: true,
+    soft_warnings: result.soft_failures,
+  };
 }
 
 function isPageOnlyOpportunity(brief) {
@@ -459,7 +483,7 @@ module.exports._internals = {
   PAGE_TYPE_CHECKS,
   MIN_TOTAL_SCORE,
   // individual evaluators surfaced for unit tests:
-  checkSchemaValid, checkSerpBriefAttached, checkGscSignalAttached,
+  checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,

@@ -9,6 +9,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { normalizeSpokeSites, invalidSpokeSites } = require('../services/content-astro/spoke-sites');
+const autonomousReviewQueue = require('../services/content/autonomous-review-queue');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -153,6 +154,30 @@ router.get('/authors', async (_req, res) => {
     logger.warn(`[content] authors list failed: ${err.message}`);
     res.json({ authors: [], error: err.message });
   }
+});
+
+// =========================================================================
+// AUTONOMOUS CONTENT REVIEW QUEUE
+// =========================================================================
+
+// GET /api/admin/content/autonomous/review?status=pending_review&limit=50
+router.get('/autonomous/review', async (req, res, next) => {
+  try {
+    const review = await autonomousReviewQueue.listReviewItems({
+      status: req.query.status,
+      limit: req.query.limit,
+    });
+    res.json(review);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/content/autonomous/review/:id
+router.get('/autonomous/review/:id', async (req, res, next) => {
+  try {
+    const item = await autonomousReviewQueue.getReviewItem(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Review item not found' });
+    res.json({ item });
+  } catch (err) { next(err); }
 });
 
 // =========================================================================

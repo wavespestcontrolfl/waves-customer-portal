@@ -48,6 +48,7 @@ import {
   Sparkles,
   Send,
   Newspaper,
+  Bot,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags } from "../hooks/useFeatureFlag";
@@ -103,6 +104,7 @@ const NAV_SECTIONS = [
     items: [
       { path: "/admin/ppc", icon: Megaphone, label: "PPC" },
       { path: "/admin/seo", icon: Search, label: "SEO" },
+      { path: "/admin/content-engine", icon: Bot, label: "Content Engine" },
       { path: "/admin/social-media", icon: Share2, label: "Social Media" },
       { path: "/admin/blog", icon: Newspaper, label: "Blog" },
       { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
