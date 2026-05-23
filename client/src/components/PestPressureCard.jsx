@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, Minus, Sparkles } from 'lucide-react';
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ResponsiveContainer,
+  XAxis,
+  YAxis,
+} from 'recharts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -56,6 +65,95 @@ function trendDeltaText(trend, delta) {
   if (rounded === 0) return 'no change vs. last visit';
   const sign = rounded > 0 ? '+' : '';
   return `${sign}${rounded.toFixed(1)} vs. last visit`;
+}
+
+const CADENCE_LABELS = {
+  quarterly: 'quarterly',
+  bimonthly: 'bi-monthly',
+  monthly: 'monthly',
+};
+
+function PressureHistoryChart({ history, cadence }) {
+  const points = useMemo(() => (
+    (history || [])
+      .map((row) => {
+        const t = Date.parse(`${row.serviceDate}T12:00:00`);
+        return Number.isFinite(t) ? { t, score: Number(row.score) } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.t - b.t)
+  ), [history]);
+
+  const tickValues = useMemo(() => points.map((p) => p.t), [points]);
+
+  if (points.length < 2) return null;
+
+  const cadenceWord = CADENCE_LABELS[cadence] || '';
+  const subtitle = cadenceWord
+    ? `Last ${points.length} ${cadenceWord} visit${points.length === 1 ? '' : 's'}`
+    : `Last ${points.length} visits`;
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#6B7280', fontWeight: 700 }}>
+          Score history
+        </div>
+        <div style={{ fontSize: 12, color: '#6B7280' }}>{subtitle}</div>
+      </div>
+      <div style={{
+        width: '100%', height: 180, padding: 6, boxSizing: 'border-box',
+        background: '#F7F5EE', border: '1px solid #E7E2D7', borderRadius: 12,
+      }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={points} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
+            <CartesianGrid stroke="#E7E2D7" strokeDasharray="2 4" vertical={false} />
+            <XAxis
+              dataKey="t"
+              type="number"
+              scale="time"
+              domain={['dataMin', 'dataMax']}
+              ticks={tickValues}
+              tickFormatter={(t) => {
+                const date = new Date(t);
+                const month = date.toLocaleDateString('en-US', { month: 'short' });
+                return `${month} '${String(date.getFullYear()).slice(-2)}`;
+              }}
+              tick={{ fontSize: 10, fill: '#6B7280', fontFamily: "'Inter', system-ui, sans-serif" }}
+              tickLine={false}
+              axisLine={false}
+              interval="preserveStartEnd"
+            />
+            <YAxis
+              domain={[0, 5]}
+              ticks={[1, 2, 3, 4, 5]}
+              tick={{ fontSize: 10, fill: '#6B7280', fontFamily: "'Inter', system-ui, sans-serif" }}
+              tickLine={false}
+              axisLine={false}
+              width={20}
+            />
+            <Area type="monotone" dataKey="score" stroke="none" fill="#0B3A66" fillOpacity={0.08} isAnimationActive={false} />
+            <Line
+              type="monotone"
+              dataKey="score"
+              stroke="#0B3A66"
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              dot={{ r: 4, fill: '#FFFFFF', stroke: '#0B3A66', strokeWidth: 2 }}
+              activeDot={{ r: 5, fill: '#FFFFFF', stroke: '#0B3A66', strokeWidth: 2 }}
+              isAnimationActive={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      {cadenceWord ? (
+        <div style={{ marginTop: 8, fontSize: 12, color: '#6B7280', lineHeight: 1.45 }}>
+          X-axis spacing reflects this customer's service cadence — {cadenceWord}.
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function MeterSvg({ score, label }) {
@@ -291,6 +389,8 @@ export default function PestPressureCard({ data, token }) {
           {effective.summary}
         </p>
       ) : null}
+
+      <PressureHistoryChart history={effective.history} cadence={effective.cadence} />
 
       {effective.canCaptureClientRating && token ? (
         <ClientRatingPicker
