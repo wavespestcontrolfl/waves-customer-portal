@@ -824,7 +824,7 @@ function parseManateePaoRecord({ address, search, land, buildings }) {
   const landRows = parsePaoRows(land);
   const primaryBuilding = pickPrimaryManateeBuilding(buildingRows);
 
-  const lotSize = landRows.reduce((sum, row) => sum + (coercePaoSqFootage(row.SqFootage) || 0), 0) || null;
+  const lotSize = sumPaoLotSqFootage(landRows);
   const rooms = parseManateeRooms(primaryBuilding.Rooms);
   const propertyType = normalizeManateePropertyType(primaryBuilding.Type, primaryBuilding.Classification);
   const source = `${MANATEE_PAO_BASE}/parcel/?parid=${encodeURIComponent(search.parcelId)}`;
@@ -853,6 +853,11 @@ function pickPrimaryManateeBuilding(buildingRows) {
 
 function manateeBuildingArea(row) {
   return coerceInt(row?.LivBus, 1, 100000) || coerceInt(row?.UnRoof, 1, 100000) || 0;
+}
+
+function sumPaoLotSqFootage(landRows) {
+  const total = landRows.reduce((sum, row) => sum + (coercePaoSqFootage(row.SqFootage) || 0), 0);
+  return total > 0 ? Math.min(total, LOT_SQFT_MAX) : null;
 }
 
 function parsePaoRows(table) {

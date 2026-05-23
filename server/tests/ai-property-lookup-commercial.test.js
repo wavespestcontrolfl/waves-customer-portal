@@ -388,6 +388,23 @@ describe('Manatee PAO property lookup facts', () => {
     }).lotSize).toBe(500);
   });
 
+  test('caps aggregate PAO land SqFootage at the pricing limit', () => {
+    const largePaoLand = {
+      ...manateeLand,
+      rows: [
+        ['1', 'UNIT', '100', '100', '1500', '3.4435', '150,000', '1.00', ''],
+        ['2', 'UNIT', '100', '100', '1000', '2.2957', '100,000', '1.00', ''],
+      ],
+    };
+
+    expect(_private.parseManateePaoRecord({
+      address: '123 Large Lot St, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: largePaoLand,
+      buildings: manateeBuildings,
+    }).lotSize).toBe(200000);
+  });
+
   test('keeps Manatee residential subtypes in estimator categories', () => {
     const withClassification = (classification) => ({
       ...manateeBuildings,
