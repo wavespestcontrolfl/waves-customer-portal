@@ -223,7 +223,7 @@ class AutonomousRunner {
     } else if (uniquenessGate && needsUniquenessGate) {
       const t4 = Date.now();
       try {
-        const siblingPages = await this._loadSiblingPages(brief).catch(() => []);
+        const siblingPages = await this._loadSiblingPages(brief, { required: !run.shadow_mode });
         uniquenessResult = uniquenessGate.evaluate(draft, brief, { siblingPages });
       } catch (err) {
         uniquenessResult = { ok: false, error: err.message };
@@ -239,7 +239,8 @@ class AutonomousRunner {
       const t5 = Date.now();
       const sitemap = getSitemap();
       const ctx = {};
-      if (sitemap && draft.url) {
+      const checkSitemapBeforePublish = ['refresh_existing_page'].includes(brief.action_type);
+      if (sitemap && draft.url && checkSitemapBeforePublish) {
         const has = await sitemap.hasUrl(draft.url).catch(() => null);
         if (has) ctx.sitemapHasUrl = has.present;
       }
@@ -295,7 +296,7 @@ class AutonomousRunner {
     try {
       const publishOutcome = await this._publishAndDistribute(draft, brief, run);
       Object.assign(run, publishOutcome);
-      await queue.complete(opp.id, { notes: `published:${publishOutcome.published_url || 'unknown'}`, claimToken }).catch(() => {});
+      await this._completeClaimOrThrow(queue, opp.id, { notes: `published:${publishOutcome.published_url || 'unknown'}`, claimToken });
       return finalize(run, t0, { outcome: 'completed_published' });
     } catch (err) {
       await queue.release(opp.id, { claimToken }).catch(() => {}); // let next run retry
@@ -359,21 +360,35 @@ class AutonomousRunner {
     }
   }
 
-  async _loadSiblingPages(brief) {
+  async _loadSiblingPages(brief, { required = false } = {}) {
     // For city-service and customer-question, load sibling pages
     // matching the service for Jaccard comparison. For now we read
     // from the local Astro corpus via the link planner's loader; in
     // a future iteration this could pull from github-client directly.
     if (brief.page_type !== 'city-service' && brief.page_type !== 'customer-question') return [];
     const planner = getLinkPlanner();
-    if (!planner?.loadAstroCorpus) return [];
+    if (!planner?.loadAstroCorpus) {
+      if (required) throw new Error('sibling_corpus_loader_unavailable');
+      return [];
+    }
     const astroDir = process.env.ASTRO_REPO_DIR;
-    if (!astroDir) return [];
+    if (!astroDir) {
+      if (required) throw new Error('ASTRO_REPO_DIR required for live uniqueness gate');
+      return [];
+    }
     try {
       const corpus = planner.loadAstroCorpus(astroDir, { collections: ['services', 'locations'] });
       const service = (brief.service || '').toLowerCase();
       return corpus.filter((p) => service && p.file.toLowerCase().includes(service));
-    } catch { return []; }
+    } catch (err) {
+      if (required) throw err;
+      return [];
+    }
+  }
+
+  async _completeClaimOrThrow(queue, opportunityId, payload) {
+    const ok = await queue.complete(opportunityId, payload);
+    if (!ok) throw new Error('queue_complete_failed_or_stale_claim');
   }
 
   async _getTrustBuildCount(actionType) {

@@ -30,7 +30,13 @@ const ARGS = Object.fromEntries(
   })
 );
 
-const LIVE = !!ARGS.live;
+function parseBooleanFlag(value) {
+  if (value === true) return true;
+  const s = String(value || '').toLowerCase();
+  return s === 'true' || s === '1' || s === 'yes' || s === 'on';
+}
+
+const LIVE = parseBooleanFlag(ARGS.live);
 const MIN_SCORE = ARGS['min-score'] ? parseInt(ARGS['min-score'], 10) : undefined;
 
 function redactCli(value) {
