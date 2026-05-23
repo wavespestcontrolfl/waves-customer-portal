@@ -432,20 +432,6 @@ function positiveNumber(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function advisoryDisplayRows(advisory = {}) {
-  return [
-    positiveNumber(advisory.exterior_reentry_min) != null
-      ? ['Exterior re-entry', `${Math.round(positiveNumber(advisory.exterior_reentry_min))} min`]
-      : null,
-    positiveNumber(advisory.interior_reentry_min) != null
-      ? ['Interior re-entry', `${Math.round(positiveNumber(advisory.interior_reentry_min))} min`]
-      : null,
-    positiveNumber(advisory.irrigation_hold_hr) != null
-      ? ['Irrigation hold', `${Math.round(positiveNumber(advisory.irrigation_hold_hr))} hr`]
-      : null,
-  ].filter(Boolean);
-}
-
 function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
   const key = `${token}:${eventName}:${JSON.stringify(metadata)}`;
@@ -1878,78 +1864,6 @@ function WhyActivityCard({ context, embedded = false }) {
   );
 }
 
-function whatToExpectCopy(context = {}, serviceLine = 'pest', data = {}, coverage = {}) {
-  if (serviceLine === 'lawn') {
-    return context.body || 'Lawn treatments are evaluated over time. Conditions can continue changing between visits based on irrigation, mowing, rainfall, heat, and turf response.';
-  }
-  if ((coverage.items || []).some((item) => isInaccessibleCoverageStatus(item.status))) {
-    return 'The serviced areas were completed today. If you want Waves to return for an inaccessible area, contact us from this report or your customer portal.';
-  }
-  if (highPriorityFindings(data).length) {
-    return 'We treated the documented activity today. Watch the noted area through the treatment window and contact Waves if activity moves indoors or gets worse.';
-  }
-  return 'You may see light activity over the next 1-2 weeks as pests contact treated exterior zones. Occasional activity near exterior entry points can be normal during that window.';
-}
-
-function WhatToExpectNextSection({ context, serviceLine, data, coverage }) {
-  return (
-    <section className="sr-section what-to-expect-section" id="what-to-expect">
-      <h2>What to Expect Next</h2>
-      <p>{whatToExpectCopy(context, serviceLine, data, coverage)}</p>
-    </section>
-  );
-}
-
-function whenToContactItems(data = {}, coverage = {}) {
-  if ((coverage.items || []).some((item) => isInaccessibleCoverageStatus(item.status))) {
-    return ['You want us to return for the locked or inaccessible area.', 'You need us to update access instructions.'];
-  }
-  if (highPriorityFindings(data).length) {
-    return ['Activity continues after the treatment window.', 'You see pests moving indoors.', 'The documented problem area gets worse.'];
-  }
-  return ['You see increased activity indoors.', 'You notice pests in the same area for more than 10-14 days.', 'You need us to update access instructions.'];
-}
-
-function WhenToContactUsSection({ data, coverage }) {
-  const items = whenToContactItems(data, coverage);
-  return (
-    <section className="sr-section contact-waves-section" id="when-to-contact">
-      <h2>When to Contact Us</h2>
-      <p>Text us if:</p>
-      <ul>
-        {items.map((item) => <li key={item}>{item}</li>)}
-      </ul>
-      <a href="sms:+19412975749" className="contact-waves-cta">Text Waves</a>
-    </section>
-  );
-}
-
-function PropertyMemoryBlock({ data, coverage, timeline }) {
-  const areaText = shortList((coverage?.items || []).map((item) => item.areaName), 4);
-  const contact = (timeline?.details || []).find((detail) => detail.type === 'customer_contact')?.text;
-  const pressure = data.dynamicContext?.pressureTrend?.customerSummary
-    || (data.pestPressure?.dataCompleteness === 'insufficient' ? 'We are still building your Pest Pressure history.' : null);
-  const rows = [
-    areaText ? ['Service areas', `${areaText} are part of this report.`] : null,
-    contact ? ['Access notes', contact] : null,
-    pressure ? ['Recent trend', pressure] : null,
-  ].filter(Boolean);
-  if (!rows.length) return null;
-  return (
-    <section className="sr-section property-memory-section" id="property-memory">
-      <h2>What Waves Remembered from Your Property</h2>
-      <div className="property-memory-grid">
-        {rows.map(([label, value]) => (
-          <div className="property-memory-item" key={label}>
-            <div className="sr-cell-label">{label}</div>
-            <p>{value}</p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 export function reviewRequestCopy(placement = 'top') {
   if (placement === 'bottom') {
     return {
@@ -2098,33 +2012,6 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
     );
   }
   return actions.slice(0, 3);
-}
-
-function CustomerActionItemsSection({ data, coverage, primaryMove, aiSummary, mode = 'live' }) {
-  const nowMs = useReadinessNow(data.dynamicContext?.reentry, mode);
-  const actions = customerActionItems({ data, coverage, primaryMove, aiSummary, nowMs });
-  const shouldAvoidNoActionCopy = highPriorityFindings(data).length > 0
-    || (coverage?.items || []).some((item) => isActionNeededCoverageStatus(item.status));
-  const fallbackCopy = shouldAvoidNoActionCopy
-    ? 'Review the findings and service area notes above, then contact Waves if the documented issue continues or gets worse.'
-    : 'No action needed. Your routine service was completed, and Waves will continue monitoring this property on the regular service schedule.';
-  return (
-    <section className="sr-section customer-action-section" id="customer-actions">
-      <h2>Recommended Next Step</h2>
-      {actions.length ? (
-        <div className="customer-action-list">
-          {actions.map((action) => (
-            <div className="customer-action-item" key={action.label}>
-              <div className="customer-action-title">{action.label}</div>
-              {action.detail && <p>{action.detail}</p>}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p>{fallbackCopy}</p>
-      )}
-    </section>
-  );
 }
 
 function WhatHappenedWhere({ data, token, mode = 'live' }) {
@@ -3677,138 +3564,6 @@ function ServiceReportCoverageAndWorkflow({
   );
 }
 
-function SupportingDetailsSection({
-  data,
-  token,
-  mode,
-  showDetails,
-  serviceNotes,
-  findings,
-  recommendations,
-  advisoryRows,
-}) {
-  const pressureTrend = data.dynamicContext?.pressureTrend;
-  const weatherRows = conditionRows(data.conditions || {});
-  const reportPublished = (data.workflowEvents || []).find((event) => event.type === 'report_published');
-  const showReportGeneratedDetail = data.visitTimeline?.config?.showReportGenerated === true;
-  const pressureOpen = mode !== 'live' || showDetails;
-
-  return (
-    <section className="sr-section supporting-details-section" id="supporting-details">
-      <h2>Supporting Details</h2>
-      <div className="supporting-details-list">
-        <details className="report-accordion" open={mode !== 'live'}>
-          <summary>
-            <span>Conditions at application</span>
-            <span className="accordion-action">Details</span>
-          </summary>
-          <div className="accordion-body">
-            <p className="supporting-detail-copy">{conditionInterpretation(data.conditions || {})}</p>
-            {weatherRows.length > 0 && (
-              <div className="supporting-detail-grid">
-                {weatherRows.map(([label, value]) => (
-                  <div className="sr-cell" key={label}>
-                    <div className="sr-cell-label">{label}</div>
-                    <div className="sr-cell-value">{value}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </details>
-
-        {/* The standalone PestPressureCard above is the primary surface
-            for Pest Pressure (built from the new engine's customer-view).
-            The legacy multi-visit trend chart + neighborhood comparison
-            still render inside the AI summary cards above. */}
-
-        {showDetails && (data.metrics || []).length > 0 && (
-          <details className="report-accordion">
-            <summary>
-              <span>Service metrics</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              <div className="sr-band supporting-metrics" aria-label="Service metrics">
-                {(data.metrics || []).map((metric) => (
-                  <div className="sr-metric" key={metric.key} title={metricHelpText(metric)}>
-                    <div className="sr-metric-value">{formatMetric(metric)}</div>
-                    <div className="sr-metric-label">{metric.label}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </details>
-        )}
-
-        {showDetails && ((data.applications || []).length > 0 || findings.length > 0 || recommendations.length > 0 || serviceNotes) && (
-          <details className="report-accordion">
-            <summary>
-              <span>Service record</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body supporting-metadata">
-              {showReportGeneratedDetail && reportPublished?.timestamp && <p>Report generated: {formatDate(reportPublished.timestamp)} at {formatClockTime(reportPublished.timestamp)}</p>}
-              {data.serviceRecordId && <p>Service record: {data.serviceRecordId}</p>}
-              {serviceNotes && <p className="supporting-note">{serviceNotes}</p>}
-              {findings.length > 0 && (
-                <div className="sr-list">
-                  {findings.map((finding) => (
-                    <div className={`sr-row ${['high', 'critical'].includes(finding.severity) ? 'sr-finding-high' : ''}`} key={finding.id}>
-                      <div>
-                        <div className="sr-row-title">{finding.title}</div>
-                        {(finding.detail || finding.recommendation) && (
-                          <div className="sr-row-detail">
-                            {finding.detail}
-                            {finding.recommendation && (
-                              <>
-                                {finding.detail ? ' ' : ''}
-                                <strong>Recommended next step:</strong> {finding.recommendation}
-                              </>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                      <div className="sr-pill">{formatEnumLabel(finding.severity)}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {recommendations.map((rec) => (
-                <div className="sr-row" key={rec}>
-                  <div className="sr-row-title">{rec}</div>
-                  <div className="sr-pill">Recommended next step</div>
-                </div>
-              ))}
-              {!findings.length && !recommendations.length && <p>No activity was observed this visit. Routine protective service will continue on schedule.</p>}
-            </div>
-          </details>
-        )}
-
-        {showDetails && (advisoryRows.length > 0 || data.advisory?.pet_advisory) && (
-          <details className="report-accordion">
-            <summary>
-              <span>Advisory details</span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              <div className="sr-advisory">
-                {advisoryRows.map(([label, value]) => (
-                  <div key={label}>
-                    <strong>{value}</strong>
-                    <span>{label}</span>
-                  </div>
-                ))}
-              </div>
-              {data.advisory?.pet_advisory && <p className="supporting-detail-copy">{data.advisory.pet_advisory}</p>}
-            </div>
-          </details>
-        )}
-      </div>
-    </section>
-  );
-}
-
 function overlayBox(geometry = {}) {
   if (geometry.type === 'circle') {
     const r = Number(geometry.r || 8);
@@ -4340,31 +4095,8 @@ function LegacyReport({ data, token }) {
 function ServiceReportV1({ data, token, mode = 'live' }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
-  const serviceNotes = String(data.legacy?.notes || '').trim();
-  const visitSummary = String(data.summary || '').trim();
-  const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas.filter(Boolean) : [];
   const serviceCoverage = normalizeServiceCoverage(data);
-  const findings = Array.isArray(data.findings) ? data.findings : [];
-  const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
   const hasApplications = (data.applications || []).length > 0;
-  const visitTimingRows = [
-    ['Arrival', formatTimelineTime(getReportArrivalTime(data))],
-    ['Exit', formatTimelineTime(getReportCompletionTime(data))],
-  ].filter(([, value]) => value);
-  const measurements = data.measurements || data.legacy?.measurements || {};
-  const measurementRows = [
-    ['Soil temp', measurements.soilTemp, '°F'],
-    ['Thatch', measurements.thatch, '"'],
-    ['Soil pH', measurements.soilPh, ''],
-    ['Moisture', measurements.moisture, '%'],
-  ].filter(([, value]) => value != null && value !== '');
-  const hasVisitSummary = Boolean(
-    visitSummary ||
-    data.customerInteraction ||
-    serviceAreas.length ||
-    visitTimingRows.length ||
-    measurementRows.length,
-  );
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
@@ -4374,8 +4106,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     trackReportEvent(token, 'service_report_viewed');
   }, [mode, token]);
 
-  const showDetails = mode !== 'live';
-  const advisoryRows = advisoryDisplayRows(data.advisory || {});
   const visitTimelineServiceType = data.coverageServiceType || data.serviceLine || data.serviceType;
   const normalizedVisitTimeline = normalizeVisitTimeline({
     visitTimeline: data.visitTimeline,
@@ -6963,21 +6693,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           data={data}
           mode={mode}
         />
-
-        {/*
-          Intentionally NOT rendered as of the report-view-rewrite PR
-          (approved by Adam, see PR #1078):
-            - CustomerActionItemsSection ("Recommended Next Step")
-            - WhatToExpectNextSection
-            - WhenToContactUsSection
-            - PropertyMemoryBlock
-            - SupportingDetailsSection
-          Function definitions kept in this file so any test imports
-          continue to resolve; remove in a follow-up once we confirm
-          no surface consumes them. PDF/static modes also lose
-          SupportingDetails on purpose — the approved template has
-          no equivalent section.
-        */}
 
         {(data.photos || []).length > 0 && (
           <section className="sr-section" id="photos">
