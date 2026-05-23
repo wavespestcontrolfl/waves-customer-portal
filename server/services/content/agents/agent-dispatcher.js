@@ -294,11 +294,20 @@ class AgentDispatcher {
         if (getDraft(sessionId)) return; // sink fired; agent finished
         continue;
       }
-      // Session/turn termination events — exit if a draft was captured.
-      if (event === 'done' || event === 'session_complete' || event === 'turn_end' || event === 'session_end') {
-        if (getDraft(sessionId)) return;
+      // Terminal session/turn events — always exit the stream. If a
+      // draft was captured runWithBrief returns it; if not it returns
+      // agent_did_not_emit_draft. The earlier code only returned when
+      // a draft existed, which made an agent that finished without
+      // calling emit_draft / emit_metadata_only stall here until the
+      // 5-minute deadline before reporting streaming_failed instead
+      // of the more accurate did-not-emit reason.
+      const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
+      if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || event === 'turn_end' || event === 'session_end') return;
+      if (stopReason === 'end_turn') return;
+      if (event === 'error' || event === 'session.error') {
+        logger.error(`[agent-dispatcher] session ${sessionId} error: ${JSON.stringify(data)}`);
+        return;
       }
-      if (data?.stop_reason === 'end_turn' && getDraft(sessionId)) return;
     }
     throw new Error(`session ${sessionId} timed out after ${timeoutMs}ms`);
   }
