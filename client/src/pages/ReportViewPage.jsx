@@ -2687,13 +2687,19 @@ function CoverageMapGeometry({ location, projection, active = false, onActivate 
 }
 
 // Zone identity key for both list and map dedupe. markerLabel alone isn't
-// stable — manual labels can collide and auto-labels wrap A-Z past 26
-// zones — so we compose with areaName. Falls back to row id when no
-// markerLabel exists (single-status zones don't need to merge).
-function coverageZoneKey(item) {
+// stable — manual labels can collide, auto-labels wrap A-Z past 26 zones,
+// and the same letter can appear in two different service-line groups.
+// So we compose with areaName and prefix with the item's serviceLine
+// (set by normalizeServiceCoverage on every item). Falls back to row id;
+// finally to the array index when neither markerLabel nor id exists so
+// markerless rows don't all collapse into one bucket.
+function coverageZoneKey(item, fallbackIndex = null) {
   if (!item) return null;
-  if (item.markerLabel) return `marker:${item.markerLabel}|${item.areaName || ''}`;
-  return `id:${item.id}`;
+  const scope = item.serviceLine ? `${item.serviceLine}::` : '';
+  if (item.markerLabel) return `${scope}marker:${item.markerLabel}|${item.areaName || ''}`;
+  if (item.id) return `${scope}id:${item.id}`;
+  if (fallbackIndex != null) return `${scope}idx:${fallbackIndex}`;
+  return null;
 }
 
 // When a zone has multiple coverage rows (e.g. completed + needs-attention),
@@ -2765,16 +2771,16 @@ function ServiceCoverageMap({
   const mapLocations = useMemo(() => {
     const order = [];
     const byKey = new Map();
-    for (const loc of renderableLocations) {
-      const key = coverageZoneKey(loc);
-      if (!key) continue;
+    renderableLocations.forEach((loc, idx) => {
+      const key = coverageZoneKey(loc, idx);
+      if (!key) return;
       if (byKey.has(key)) {
         byKey.get(key).push(loc);
       } else {
         order.push(key);
         byKey.set(key, [loc]);
       }
-    }
+    });
     return order.map((key) => pickRepresentativeCoverageItem(byKey.get(key)));
   }, [renderableLocations]);
   const projection = useMemo(() => buildCoverageProjection(mapLocations), [mapLocations]);
@@ -2898,9 +2904,9 @@ function mergeCoverageItemsByMarker(items, applications) {
   const order = [];
   const byKey = new Map();
   // First pass: bucket the raw items by zone key (preserves order)
-  for (const item of items) {
-    const key = coverageZoneKey(item);
-    if (!key) continue;
+  items.forEach((item, idx) => {
+    const key = coverageZoneKey(item, idx);
+    if (!key) return;
     if (byKey.has(key)) {
       byKey.get(key).rawItems.push(item);
     } else {
@@ -2912,7 +2918,7 @@ function mergeCoverageItemsByMarker(items, applications) {
         rawItems: [item],
       });
     }
-  }
+  });
   // Second pass: shape entries + pick the representative id by severity
   // (matches the same picker the map uses for its dedupe, so clicking a
   // merged card activates the marker actually visible on the satellite).
@@ -3024,7 +3030,21 @@ function ServiceCoverageCard({
   const showSummary = coverage.settings?.showSummaryCounts !== false;
   const showList = coverage.settings?.showList !== false && items.length > 0;
   const showMap = coverage.settings?.showMap !== false && coverage.map?.available;
-  const activeId = activeItemId || items[0]?.id || null;
+  // Initial active id has to be the deduped representative of the first
+  // zone, not items[0] itself. The map renders one marker per zone after
+  // severity-based dedupe, so if items[0] isn't the chosen representative
+  // (e.g. the first entry is "completed" and the second is "needs
+  // attention" for the same zone), the active list card would point at
+  // an id the map never paints — visible card with no map highlight.
+  const initialActiveId = useMemo(() => {
+    if (!items.length) return null;
+    const firstKey = coverageZoneKey(items[0], 0);
+    if (!firstKey) return items[0]?.id || null;
+    const zoneItems = items.filter((item, idx) => coverageZoneKey(item, idx) === firstKey);
+    const representative = pickRepresentativeCoverageItem(zoneItems);
+    return representative?.id || items[0]?.id || null;
+  }, [items]);
+  const activeId = activeItemId || initialActiveId;
   const meta = [
     coverage.address,
     coverage.serviceDate ? formatDate(coverage.serviceDate) : null,
