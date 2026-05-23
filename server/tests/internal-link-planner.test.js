@@ -179,6 +179,11 @@ describe('findFirstUnlinkedOccurrence', () => {
     const r = findFirstUnlinkedOccurrence(t, 'termite');
     expect(r.index).toBe(t.indexOf('termite service'));
   });
+  test('skips matches inside markdown href destinations with balanced parentheses', () => {
+    const t = '[details](/foo(bar)termite-control-sarasota/) and termite service details';
+    const r = findFirstUnlinkedOccurrence(t, 'termite');
+    expect(r.index).toBe(t.indexOf('termite service'));
+  });
   test('skips matches inside reference definition destinations', () => {
     const t = '[details][termite-ref]\n\n[termite-ref]: /termite-control-sarasota/';
     expect(findFirstUnlinkedOccurrence(t, 'termite')).toBeNull();
@@ -202,6 +207,12 @@ describe('findFirstUnlinkedOccurrence', () => {
   });
   test('word-boundary: pest does not match inside pesticide', () => {
     expect(findFirstUnlinkedOccurrence('Apply pesticide carefully.', 'pest')).toBeNull();
+  });
+  test('matches phrase candidates that end with punctuation', () => {
+    const t = 'Do termites fly? Learn what to do next.';
+    const r = findFirstUnlinkedOccurrence(t, 'Do termites fly?');
+    expect(r.index).toBe(0);
+    expect(r.length).toBe('Do termites fly?'.length);
   });
 });
 
