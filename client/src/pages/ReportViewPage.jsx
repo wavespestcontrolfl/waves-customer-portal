@@ -2676,14 +2676,65 @@ function CoverageMapGeometry({ location, projection, active = false, onActivate 
     return (
       <g className={`coverage-marker ${toneClass} status-${location.status}${active ? ' is-active' : ''}`} transform={`translate(${point.x} ${point.y})`} {...activateProps}>
         <title>{label}</title>
-        <circle r="13" className="coverage-marker-outer" />
-        <circle r="9" className="coverage-marker-inner" />
-        <text y="3.5" textAnchor="middle" className="coverage-marker-text">{location.markerLabel || coverageMarkerText(location.status)}</text>
+        <circle r="16" className="coverage-marker-outer" />
+        <circle r="12" className="coverage-marker-inner" />
+        <text y="4.5" textAnchor="middle" className="coverage-marker-text">{location.markerLabel || coverageMarkerText(location.status)}</text>
         <text x="16" y="4" className="coverage-map-label coverage-point-label">{labelText}</text>
       </g>
     );
   }
   return null;
+}
+
+// Zone identity key for both list and map dedupe. markerLabel alone isn't
+// stable — manual labels can collide, auto-labels wrap A-Z past 26 zones,
+// and the same letter can appear in two different service-line groups.
+// So we compose with areaName and prefix with the item's serviceLine
+// (set by normalizeServiceCoverage on every item). Falls back to row id;
+// finally to the array index when neither markerLabel nor id exists so
+// markerless rows don't all collapse into one bucket.
+function coverageZoneKey(item, fallbackIndex = null) {
+  if (!item) return null;
+  const scope = item.serviceLine ? `${item.serviceLine}::` : '';
+  if (item.markerLabel) return `${scope}marker:${item.markerLabel}|${item.areaName || ''}`;
+  if (item.id) return `${scope}id:${item.id}`;
+  if (fallbackIndex != null) return `${scope}idx:${fallbackIndex}`;
+  return null;
+}
+
+// When a zone has multiple coverage rows (e.g. completed + needs-attention),
+// the map can only render one marker per zone after dedupe — and that
+// marker has to be the most attention-worthy status so a green "completed"
+// doesn't paper over an orange "needs follow-up". Higher = more urgent.
+// List card and map use the same picker so click activation lines up.
+const COVERAGE_TONE_SEVERITY = {
+  red: 5,
+  orange: 4,
+  'light-green': 3,
+  blue: 2,
+  gray: 1,
+  green: 0,
+};
+
+function coverageItemSeverity(item) {
+  if (!item) return -1;
+  const tone = coverageStatusConfig(item.status).tone;
+  return COVERAGE_TONE_SEVERITY[tone] ?? 0;
+}
+
+function pickRepresentativeCoverageItem(items) {
+  if (!Array.isArray(items) || !items.length) return null;
+  let best = items[0];
+  let bestSeverity = coverageItemSeverity(best);
+  for (let i = 1; i < items.length; i += 1) {
+    const candidate = items[i];
+    const sev = coverageItemSeverity(candidate);
+    if (sev > bestSeverity) {
+      best = candidate;
+      bestSeverity = sev;
+    }
+  }
+  return best;
 }
 
 function ServiceCoverageMap({
@@ -2693,6 +2744,7 @@ function ServiceCoverageMap({
   mapAttribution,
   activeItemId,
   onActivate,
+  hasStatusText = true,
 }) {
   const normalizedServiceType = normalizeCoverageServiceType(coverage?.serviceLine);
   const locations = Array.isArray(coverage?.items) ? coverage.items : [];
@@ -2710,7 +2762,28 @@ function ServiceCoverageMap({
     [locations, canUseImageGeometry],
   );
   const renderableLocations = displayLocations.filter(hasRenderableCoverageGeometry);
-  const projection = useMemo(() => buildCoverageProjection(renderableLocations), [renderableLocations]);
+  // Dedupe by zone identity so multi-status zones don't paint stacked
+  // geometries on top of each other (the underlying one is unclickable
+  // and `activeItemId` may target the hidden marker). Within a zone we
+  // keep the most attention-worthy item via pickRepresentativeCoverageItem
+  // so an orange needs-attention doesn't get hidden under a green completed.
+  // The list card below this map still surfaces every status for the zone.
+  const mapLocations = useMemo(() => {
+    const order = [];
+    const byKey = new Map();
+    renderableLocations.forEach((loc, idx) => {
+      const key = coverageZoneKey(loc, idx);
+      if (!key) return;
+      if (byKey.has(key)) {
+        byKey.get(key).push(loc);
+      } else {
+        order.push(key);
+        byKey.set(key, [loc]);
+      }
+    });
+    return order.map((key) => pickRepresentativeCoverageItem(byKey.get(key)));
+  }, [renderableLocations]);
+  const projection = useMemo(() => buildCoverageProjection(mapLocations), [mapLocations]);
   const legend = Array.isArray(coverage?.legend) && coverage.legend.length
     ? coverage.legend.map((entry) => {
       const config = coverageStatusConfig(entry.key);
@@ -2757,7 +2830,7 @@ function ServiceCoverageMap({
                 <path d="M456 217L512 310" className="coverage-map-drive" />
               </>
             )}
-            {renderableLocations.map((location) => (
+            {mapLocations.map((location) => (
               <CoverageMapGeometry
                 key={location.id || `${location.areaName || location.name}-${location.status}`}
                 location={location}
@@ -2773,7 +2846,13 @@ function ServiceCoverageMap({
         {activeMapBackgroundUrl && mapAttribution && <div className="map-attribution coverage-map-attribution">{mapAttribution}</div>}
       </div>
 
-      {legend.length > 0 && (
+      {/* Legend kept whenever the per-zone list is hidden. Summary counts
+          alone don't replace it — ServiceCoverageSummary only labels four
+          buckets (Completed / Inspected / Inaccessible / Needs Attention)
+          and doesn't cover red (blocked), gray (not-serviced/not-included),
+          or light-green (partially treated) tones the markers may use.
+          The list does label every status per zone in text. */}
+      {!hasStatusText && legend.length > 0 && (
         <div className="coverage-legend" aria-label="Service coverage legend">
           {legend.map(({ key, label, tone, Icon }) => (
             <div className={`coverage-legend-item status-${tone}`} key={key}>
@@ -2817,6 +2896,56 @@ function productNamesForCoverageItem(item = {}, applications = []) {
     .slice(0, 4);
 }
 
+// Dedupe coverage items by markerLabel — same physical zone listed with
+// multiple statuses (e.g., "Completed" + "Inspected") collapses into one
+// card with multiple status rows underneath. Items without a markerLabel
+// stay as their own card (keyed by id) so nothing gets dropped.
+function mergeCoverageItemsByMarker(items, applications) {
+  const order = [];
+  const byKey = new Map();
+  // First pass: bucket the raw items by zone key (preserves order)
+  items.forEach((item, idx) => {
+    const key = coverageZoneKey(item, idx);
+    if (!key) return;
+    if (byKey.has(key)) {
+      byKey.get(key).rawItems.push(item);
+    } else {
+      order.push(key);
+      byKey.set(key, {
+        key,
+        markerLabel: item.markerLabel,
+        areaName: item.areaName,
+        rawItems: [item],
+      });
+    }
+  });
+  // Second pass: shape entries + pick the representative id by severity
+  // (matches the same picker the map uses for its dedupe, so clicking a
+  // merged card activates the marker actually visible on the satellite).
+  return order.map((key) => {
+    const zone = byKey.get(key);
+    const representative = pickRepresentativeCoverageItem(zone.rawItems);
+    const entries = zone.rawItems.map((item) => {
+      const config = coverageStatusConfig(item.status);
+      return {
+        id: item.id,
+        status: item.status,
+        tone: config.tone,
+        statusLabel: item.customerStatusLabel || item.statusLabel || config.label,
+        description: item.customerDescription,
+        products: productNamesForCoverageItem(item, applications),
+      };
+    });
+    return {
+      key: zone.key,
+      markerLabel: zone.markerLabel,
+      areaName: zone.areaName,
+      firstItemId: representative ? representative.id : zone.rawItems[0].id,
+      entries,
+    };
+  });
+}
+
 function ServiceCoverageList({ coverage, activeItemId, onActivate, applications = [] }) {
   const groups = Array.isArray(coverage?.groups) && coverage.groups.length
     ? coverage.groups
@@ -2825,49 +2954,64 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
 
   return (
     <div className="service-coverage-list" aria-label="Service coverage areas">
-      {groups.map((group) => (
-        <div className="service-coverage-list-group" key={group.serviceLine || group.title || 'coverage'}>
-          {showGroupTitles && <h3>{group.title || formatEnumLabel(group.serviceLine)}</h3>}
-          {(group.items || []).map((item) => {
-            const config = coverageStatusConfig(item.status);
-            const statusLabel = item.customerStatusLabel || item.statusLabel || config.label;
-            const productNames = productNamesForCoverageItem(item, applications);
-            return (
-              <article
-                className={`coverage-summary-row zone-service-row service-coverage-item${activeItemId === item.id ? ' is-active' : ''}`}
-                key={item.id}
-                tabIndex={0}
-                role="button"
-                aria-pressed={activeItemId === item.id ? 'true' : 'false'}
-                onClick={() => onActivate(item.id)}
-                onFocus={() => onActivate(item.id)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onActivate(item.id);
-                  }
-                }}
-              >
-                <div className="zone-service-identity">
-                  <span className="zone-letter-badge" aria-label={item.markerLabel ? `Coverage marker ${item.markerLabel}` : 'Service coverage marker'}>
-                    {item.markerLabel}
-                  </span>
-                  <div className="zone-service-copy">
-                    <h3>{item.areaName}</h3>
-                    <p>{item.customerDescription}</p>
-                    {productNames.length > 0 && (
-                      <div className="coverage-product-line">
-                        Products used: {productNames.join(' · ')}
-                      </div>
-                    )}
+      {groups.map((group) => {
+        const merged = mergeCoverageItemsByMarker(group.items || [], applications);
+        return (
+          <div className="service-coverage-list-group" key={group.serviceLine || group.title || 'coverage'}>
+            {showGroupTitles && <h3>{group.title || formatEnumLabel(group.serviceLine)}</h3>}
+            {merged.map((zone) => {
+              const isActive = zone.entries.some((entry) => entry.id === activeItemId);
+              const allProducts = Array.from(new Set(zone.entries.flatMap((entry) => entry.products)));
+              return (
+                <article
+                  className={`coverage-summary-row zone-service-row service-coverage-item${isActive ? ' is-active' : ''}`}
+                  key={zone.key}
+                  tabIndex={0}
+                  role="button"
+                  aria-pressed={isActive ? 'true' : 'false'}
+                  onClick={() => onActivate(zone.firstItemId)}
+                  onFocus={() => onActivate(zone.firstItemId)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      onActivate(zone.firstItemId);
+                    }
+                  }}
+                >
+                  <div className="zone-service-identity">
+                    <span className="zone-letter-badge" aria-label={zone.markerLabel ? `Coverage marker ${zone.markerLabel}` : 'Service coverage marker'}>
+                      {zone.markerLabel}
+                    </span>
+                    <div className="zone-service-copy">
+                      <h3>{zone.areaName}</h3>
+                      {zone.entries.map((entry) => (
+                        <p key={`desc-${entry.id}`} className="zone-status-description">
+                          {entry.description}
+                        </p>
+                      ))}
+                      {allProducts.length > 0 && (
+                        <div className="coverage-product-line">
+                          Products used: {allProducts.join(' · ')}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <span className={`coverage-status-chip zone-status-chip status-${config.tone}`}>{statusLabel}</span>
-              </article>
-            );
-          })}
-        </div>
-      ))}
+                  <div className="zone-status-chips">
+                    {zone.entries.map((entry) => (
+                      <span
+                        key={entry.id}
+                        className={`coverage-status-chip zone-status-chip status-${entry.tone}`}
+                      >
+                        {entry.statusLabel}
+                      </span>
+                    ))}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2880,13 +3024,33 @@ function ServiceCoverageCard({
   applications = [],
 }) {
   const [activeItemId, setActiveItemId] = useState(null);
+  // ALL hooks (useState, useMemo, etc.) must run on every render of this
+  // component instance — keep them above any early `return null` guard
+  // so a disabled→enabled transition doesn't change hook count and crash
+  // the report with a Rules of Hooks violation. coverage may be null
+  // here; the optional chaining + Array.isArray fallback keeps inputs safe.
+  const items = Array.isArray(coverage?.items) ? coverage.items : [];
+  // Initial active id has to be the deduped representative of the first
+  // zone, not items[0] itself. The map renders one marker per zone after
+  // severity-based dedupe, so if items[0] isn't the chosen representative
+  // (e.g. the first entry is "completed" and the second is "needs
+  // attention" for the same zone), the active list card would point at
+  // an id the map never paints — visible card with no map highlight.
+  const initialActiveId = useMemo(() => {
+    if (!items.length) return null;
+    const firstKey = coverageZoneKey(items[0], 0);
+    if (!firstKey) return items[0]?.id || null;
+    const zoneItems = items.filter((item, idx) => coverageZoneKey(item, idx) === firstKey);
+    const representative = pickRepresentativeCoverageItem(zoneItems);
+    return representative?.id || items[0]?.id || null;
+  }, [items]);
+
   if (!coverage?.enabled) return null;
 
-  const items = Array.isArray(coverage.items) ? coverage.items : [];
   const showSummary = coverage.settings?.showSummaryCounts !== false;
   const showList = coverage.settings?.showList !== false && items.length > 0;
   const showMap = coverage.settings?.showMap !== false && coverage.map?.available;
-  const activeId = activeItemId || items[0]?.id || null;
+  const activeId = activeItemId || initialActiveId;
   const meta = [
     coverage.address,
     coverage.serviceDate ? formatDate(coverage.serviceDate) : null,
@@ -2931,6 +3095,7 @@ function ServiceCoverageCard({
               mapAttribution={mapAttribution}
               activeItemId={activeId}
               onActivate={setActiveItemId}
+              hasStatusText={showList}
             />
           ) : (
             <p className="coverage-map-unavailable">Coverage map was not recorded for this visit.</p>
@@ -4477,7 +4642,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: var(--line);
         }
         .service-status-grid {
-          grid-template-columns: minmax(0, 1.45fr) minmax(0, .8fr) minmax(0, .8fr);
+          grid-template-columns: 1fr;
         }
         .service-status-timeline {
           margin-top: 16px;
@@ -4953,7 +5118,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-marker-text {
           fill: #fff;
           font-family: Inter, Arial, sans-serif;
-          font-size: 10px;
+          font-size: 14px;
           font-weight: 850;
           letter-spacing: 0;
         }
@@ -5108,6 +5273,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-status-chip.zone-status-chip {
           font-weight: 850;
+        }
+        .zone-status-chips {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          flex-shrink: 0;
+          align-items: flex-end;
+        }
+        .zone-status-description {
+          margin: 4px 0 0;
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.45;
+        }
+        .zone-status-description + .zone-status-description {
+          margin-top: 2px;
         }
         .coverage-empty-state {
           border: 1px dashed var(--line);
@@ -6638,9 +6819,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       </header>
 
       <main className="sr-shell">
-        <ServiceStatusCard data={data} mode={mode} />
-
         {mode === 'live' && <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />}
+
+        <ServiceStatusCard data={data} mode={mode} />
 
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 

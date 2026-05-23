@@ -283,7 +283,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
       <div style={{ fontSize: 13, fontWeight: 600, color: '#1B2C5B', marginBottom: 8 }}>
         {question}
       </div>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
         {[0, 1, 2, 3, 4, 5].map((n) => (
           <button
             key={n}
@@ -292,7 +292,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
             disabled={submitting}
             onClick={() => submit(n)}
             style={{
-              width: 40, height: 40, borderRadius: 8,
+              width: '100%', padding: '10px 0', borderRadius: 10,
               border: '1px solid #CFE7F5', background: '#F8FCFE',
               color: '#0B3A66', fontSize: 15, fontWeight: 600, lineHeight: 1,
               cursor: submitting ? 'wait' : 'pointer',
