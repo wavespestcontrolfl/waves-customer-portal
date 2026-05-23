@@ -27,6 +27,7 @@ const { CITIES } = require('./scoring-config');
 const DEFAULT_LINK_CAP = 5; // per planning run
 const DEFAULT_PER_PAGE_CAP = 1; // per source file per target URL
 const ALLOWED_SITE_HOSTS = new Set(['www.wavespestcontrol.com', 'wavespestcontrol.com']);
+const INLINE_MARKDOWN_LINK_RE = /\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|(?:[^\s()\n]+|\([^()\n]*\))*)(?:\s+[^)]*)?\)/g;
 
 // ── anchor candidates (pure) ─────────────────────────────────────────
 
@@ -81,7 +82,7 @@ function maskExcludedRegions(text) {
   // Markdown links and reference definitions. This masks both labels
   // and destinations; otherwise short anchors can match inside hrefs
   // like [details](/termite-control-sarasota/) and corrupt the URL.
-  s = s.replace(/\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|[^\n)]*)\)/g, blankRegion);
+  s = s.replace(INLINE_MARKDOWN_LINK_RE, blankRegion);
   s = s.replace(/\[[^\]\n]+\]\[[^\]\n]*\]/g, blankRegion);
   s = s.replace(/^\s{0,3}\[[^\]\n]+\]:\s*(?:<[^>\n]+>|[^\s]+)(?:\s+.*)?$/gm, blankRegion);
   // Remaining MDX/HTML tags. Leave children visible, but prevent matches
@@ -113,15 +114,16 @@ function blankRegion(region) {
 function findFirstUnlinkedOccurrence(text, phrase) {
   if (!text || !phrase) return null;
   const masked = maskExcludedRegions(text);
-  // Require word boundaries — raw indexOf matched short keywords like
+  // Require word-like phrase boundaries — raw indexOf matched short keywords like
   // "ant" inside "plant" or "pest" inside "pesticide" and corrupted
   // the rendered markdown when applyTaskToBody wrapped the partial.
   const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`\\b${escaped}\\b`, 'gi');
+  const re = new RegExp(escaped, 'gi');
   let m;
   while ((m = re.exec(masked)) !== null) {
     const idx = m.index;
     const length = m[0].length;
+    if (!hasPhraseBoundary(masked, idx, length, phrase)) continue;
     if (isInsideLink(masked, idx, idx + length)) continue;
     return {
       index: idx,
@@ -130,6 +132,25 @@ function findFirstUnlinkedOccurrence(text, phrase) {
     };
   }
   return null;
+}
+
+function hasPhraseBoundary(text, start, length, phrase) {
+  if (startsWithWordChar(phrase) && isWordChar(text[start - 1])) return false;
+  if (endsWithWordChar(phrase) && isWordChar(text[start + length])) return false;
+  return true;
+}
+
+function startsWithWordChar(value) {
+  return isWordChar(String(value || '')[0]);
+}
+
+function endsWithWordChar(value) {
+  const s = String(value || '');
+  return isWordChar(s[s.length - 1]);
+}
+
+function isWordChar(ch) {
+  return /[A-Za-z0-9_]/.test(ch || '');
 }
 
 /**
@@ -395,11 +416,14 @@ module.exports._internals = {
   DEFAULT_LINK_CAP,
   DEFAULT_PER_PAGE_CAP,
   ALLOWED_SITE_HOSTS,
+  INLINE_MARKDOWN_LINK_RE,
   anchorCandidates,
   maskExcludedRegions,
   maskNonContentRegions,
   blankRegion,
   findFirstUnlinkedOccurrence,
+  hasPhraseBoundary,
+  isWordChar,
   isInsideLink,
   snippetAround,
   pageAlreadyLinksTo,
