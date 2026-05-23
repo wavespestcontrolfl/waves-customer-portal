@@ -67,20 +67,35 @@ function normalizeInternalTarget(value) {
   return registry.normalizeContentUrl(value);
 }
 
+function parseTagAttributes(tag) {
+  const attrs = {};
+  const re = /([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+  let m;
+  while ((m = re.exec(String(tag || ''))) !== null) {
+    attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? '';
+  }
+  return attrs;
+}
+
 function extractCanonical(html, requestedUrl) {
   const text = String(html || '');
-  const m = text.match(/<link\b[^>]*\brel=["'][^"']*\bcanonical\b[^"']*["'][^>]*>/i);
-  if (!m) return '';
-  const href = m[0].match(/\bhref=["']([^"']+)["']/i);
-  return href ? absoluteFromLocation(href[1], requestedUrl) : '';
+  for (const match of text.matchAll(/<link\b[^>]*>/gi)) {
+    const attrs = parseTagAttributes(match[0]);
+    const relTokens = String(attrs.rel || '').toLowerCase().split(/\s+/);
+    if (!relTokens.includes('canonical')) continue;
+    return attrs.href ? absoluteFromLocation(attrs.href, requestedUrl) : '';
+  }
+  return '';
 }
 
 function extractRobots(html) {
   const text = String(html || '');
-  const m = text.match(/<meta\b[^>]*\bname=["']robots["'][^>]*>/i);
-  if (!m) return '';
-  const content = m[0].match(/\bcontent=["']([^"']+)["']/i);
-  return content ? content[1] : '';
+  for (const match of text.matchAll(/<meta\b[^>]*>/gi)) {
+    const attrs = parseTagAttributes(match[0]);
+    if (String(attrs.name || '').toLowerCase() !== 'robots') continue;
+    return attrs.content || '';
+  }
+  return '';
 }
 
 function isNoindex(html) {
@@ -313,14 +328,20 @@ async function loadRegistryRows(database, { statuses, limit }) {
 }
 
 function liveUpdatePayload(row, result, now = new Date()) {
+  const nextSitemapPresent = result.sitemap_status === 'unknown' && result.sitemap_present == null
+    ? row.sitemap_present ?? null
+    : result.sitemap_present;
+  const nextSitemapStatus = result.sitemap_status === 'unknown' && result.sitemap_present == null
+    ? row.sitemap_status || 'unknown'
+    : result.sitemap_status || 'unknown';
   const updates = {
     http_status: result.http_status || 'unknown',
     live_status: result.live_status || 'unknown',
     redirect_target_url: result.redirect_target_url || null,
     canonical_target_url: result.canonical_target_url || null,
     noindex_detected: Boolean(result.noindex_detected),
-    sitemap_present: result.sitemap_present,
-    sitemap_status: result.sitemap_status || 'unknown',
+    sitemap_present: nextSitemapPresent,
+    sitemap_status: nextSitemapStatus,
     updated_at: now,
   };
   return updates;
@@ -444,6 +465,7 @@ module.exports = {
   buildAbsoluteUrl,
   targetUrlForRow,
   absoluteFromLocation,
+  parseTagAttributes,
   extractCanonical,
   extractRobots,
   isNoindex,

@@ -56,6 +56,17 @@ describe('content registry live status helpers', () => {
     expect(liveStatus.buildAbsoluteUrl('https://example.com/x')).toBe('https://example.com/x');
   });
 
+  test('extracts canonical and robots attributes independent of HTML order', () => {
+    const html = `
+      <link href="/canonical-first/" data-x="1" rel="preload canonical">
+      <meta content="noindex,nofollow" name="robots">
+    `;
+    expect(liveStatus.extractCanonical(html, 'https://www.wavespestcontrol.com/source/'))
+      .toBe('https://www.wavespestcontrol.com/canonical-first/');
+    expect(liveStatus.extractRobots(html)).toBe('noindex,nofollow');
+    expect(liveStatus.isNoindex(html)).toBe(true);
+  });
+
   test('classifies direct canonicalized pages', async () => {
     const result = await liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-1', canonical_url_normalized: '/old/' },
@@ -225,6 +236,24 @@ describe('content registry live status helpers', () => {
       redirect_target_url: 'https://www.wavespestcontrol.com/new/',
     }));
     expect(database.updates[0].payload).not.toHaveProperty('registry_hash');
+  });
+
+  test('liveUpdatePayload preserves sitemap fields when sitemap was not checked', () => {
+    const payload = liveStatus.liveUpdatePayload(
+      { sitemap_present: true, sitemap_status: 'present' },
+      {
+        http_status: '200',
+        live_status: 'live',
+        sitemap_present: null,
+        sitemap_status: 'unknown',
+      },
+      new Date('2026-05-23T12:00:00Z'),
+    );
+
+    expect(payload).toEqual(expect.objectContaining({
+      sitemap_present: true,
+      sitemap_status: 'present',
+    }));
   });
 
   test('fetchSitemapPaths recurses sitemap indexes instead of treating child sitemaps as pages', async () => {
