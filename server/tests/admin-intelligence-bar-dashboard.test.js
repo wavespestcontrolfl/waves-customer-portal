@@ -1,6 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const mockExecuteDashboardTool = jest.fn();
+const mockExecuteSeoTool = jest.fn();
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -23,7 +24,13 @@ jest.mock('../services/intelligence-bar/dashboard-tools', () => ({
   ],
   executeDashboardTool: (...args) => mockExecuteDashboardTool(...args),
 }));
-jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], executeSeoTool: jest.fn() }));
+jest.mock('../services/intelligence-bar/seo-tools', () => ({
+  SEO_TOOLS: [
+    { name: 'run_seo_pipeline', input_schema: { type: 'object', properties: {} } },
+    { name: 'seo_action_queue', input_schema: { type: 'object', properties: {} } },
+  ],
+  executeSeoTool: (...args) => mockExecuteSeoTool(...args),
+}));
 jest.mock('../services/intelligence-bar/procurement-tools', () => ({ PROCUREMENT_TOOLS: [], executeProcurementTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/tech-tools', () => ({ TECH_TOOLS: [], executeTechTool: jest.fn() }));
@@ -139,6 +146,89 @@ describe('dashboard intelligence-bar guard', () => {
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
       expect(mockExecuteDashboardTool).toHaveBeenCalledWith('get_kpi_snapshot', { period: 'mtd' });
+    });
+  });
+
+  test('technician cannot execute confirmed SEO actions', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'run_seo_pipeline',
+          params: { domain: 'wavespestcontrol.com' },
+          confirmed: true,
+          idempotency_key: 'seo-pipeline-test-1',
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(403);
+      expect(body.error).toBe('Admin access required for SEO actions');
+      expect(mockExecuteSeoTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('admin must explicitly confirm SEO actions', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'run_seo_pipeline',
+          params: { domain: 'wavespestcontrol.com' },
+          idempotency_key: 'seo-pipeline-test-2',
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toBe('Explicit confirmation is required for this action');
+      expect(mockExecuteSeoTool).not.toHaveBeenCalled();
+    });
+  });
+
+  test('admin confirmed SEO actions require idempotency and pass admin context', async () => {
+    mockExecuteSeoTool.mockResolvedValue({ status: 'started' });
+
+    await withServer(async (baseUrl) => {
+      const missingKey = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'run_seo_pipeline',
+          params: { domain: 'wavespestcontrol.com' },
+          confirmed: true,
+        }),
+      });
+      const missingKeyBody = await missingKey.json();
+      expect(missingKey.status).toBe(400);
+      expect(missingKeyBody.error).toBe('A valid idempotency key is required for this action');
+
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/execute`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'run_seo_pipeline',
+          params: { domain: 'wavespestcontrol.com' },
+          confirmed: true,
+          idempotency_key: 'seo-pipeline-test-3',
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.success).toBe(true);
+      expect(mockExecuteSeoTool).toHaveBeenCalledWith(
+        'run_seo_pipeline',
+        expect.objectContaining({
+          domain: 'wavespestcontrol.com',
+          idempotencyKey: 'seo-pipeline-test-3',
+          requestedBy: 'admin-1',
+        }),
+        expect.objectContaining({
+          isAdmin: true,
+          technicianId: 'admin-1',
+          confirmed: true,
+        }),
+      );
     });
   });
 });

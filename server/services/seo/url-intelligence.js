@@ -718,7 +718,7 @@ class UrlIntelligence {
 
         if (similarity_pct > 80) {
           const existingCluster = clusterMap.get(a.url) || clusterMap.get(b.url);
-          const clusterId = existingCluster || db.raw('gen_random_uuid()');
+          const clusterId = existingCluster || crypto.randomUUID();
           clusterMap.set(a.url, clusterId);
           clusterMap.set(b.url, clusterId);
           similarityMap.set(a.url, Math.max(similarityMap.get(a.url) || 0, similarity_pct));
@@ -917,7 +917,9 @@ class UrlIntelligence {
       }
     }
 
-    let linksInserted = 0;
+    const now = new Date();
+    const edgeRows = [];
+    const edgeKeys = new Set();
     for (const [sourceUrl, audit] of latestByUrl) {
       let targets;
       try {
@@ -927,6 +929,9 @@ class UrlIntelligence {
       } catch { continue; }
 
       if (!Array.isArray(targets)) continue;
+      const normalizedSource = normalizeUrl(sourceUrl);
+      if (!normalizedSource) continue;
+      if (extractDomain(normalizedSource) !== d) continue;
 
       for (const target of targets) {
         // Resolve relative URLs against the source domain
@@ -934,32 +939,41 @@ class UrlIntelligence {
         if (resolved.startsWith('/')) resolved = `${d}${resolved}`;
         const normalizedTarget = normalizeUrl(resolved);
         if (!normalizedTarget) continue;
+        if (extractDomain(normalizedTarget) !== d) continue;
 
-        await db('seo_internal_link_graph')
-          .insert({
-            source_url: normalizeUrl(sourceUrl),
-            target_url: normalizedTarget,
-            domain: d,
-            last_seen_at: db.fn.now(),
-          })
-          .onConflict(['source_url', 'target_url'])
-          .merge({ last_seen_at: db.fn.now() });
-        linksInserted++;
+        const edgeKey = `${normalizedSource}::${normalizedTarget}`;
+        if (edgeKeys.has(edgeKey)) continue;
+        edgeKeys.add(edgeKey);
+        edgeRows.push({
+          source_url: normalizedSource,
+          target_url: normalizedTarget,
+          domain: d,
+          last_seen_at: now,
+        });
       }
     }
 
-    // Compute inbound counts and update seo_url_intelligence
-    const inboundCounts = await db('seo_internal_link_graph')
-      .where('domain', d)
-      .select('target_url')
-      .count('id as inbound')
-      .groupBy('target_url');
+    await db.transaction(async (trx) => {
+      await trx('seo_internal_link_graph').where('domain', d).del();
+      await trx('seo_url_intelligence').where('domain', d).update({ internal_links_in: 0 });
 
-    for (const row of inboundCounts) {
-      await db('seo_url_intelligence')
-        .where('url', row.target_url)
-        .update({ internal_links_in: parseInt(row.inbound) });
-    }
+      for (let i = 0; i < edgeRows.length; i += 500) {
+        await trx('seo_internal_link_graph').insert(edgeRows.slice(i, i + 500));
+      }
+
+      // Compute inbound counts and update seo_url_intelligence
+      const inboundCounts = await trx('seo_internal_link_graph')
+        .where('domain', d)
+        .select('target_url')
+        .count('id as inbound')
+        .groupBy('target_url');
+
+      for (const row of inboundCounts) {
+        await trx('seo_url_intelligence')
+          .where('url', row.target_url)
+          .update({ internal_links_in: parseInt(row.inbound) });
+      }
+    });
 
     // Find orphans: in sitemap but < 2 inbound links
     const orphans = await db('seo_url_intelligence')
@@ -968,8 +982,8 @@ class UrlIntelligence {
       .where('internal_links_in', '<', 2)
       .orderBy('priority_score', 'desc');
 
-    logger.info(`[UrlIntelligence] buildInternalLinkGraph ${d}: ${linksInserted} links, ${orphans.length} orphan pages`);
-    return { domain: d, links_inserted: linksInserted, orphan_pages: orphans.length, orphans: orphans.slice(0, 20) };
+    logger.info(`[UrlIntelligence] buildInternalLinkGraph ${d}: ${edgeRows.length} links, ${orphans.length} orphan pages`);
+    return { domain: d, links_inserted: edgeRows.length, orphan_pages: orphans.length, orphans: orphans.slice(0, 20) };
   }
 
   async getOrphanPages(domain) {

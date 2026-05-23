@@ -333,7 +333,7 @@ Use for: "find orphan pages", "internal linking gaps", "which pages have no inbo
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeSeoTool(toolName, input) {
+async function executeSeoTool(toolName, input, context = {}) {
   try {
     switch (toolName) {
       case 'query_gsc_performance': return await queryGscPerformance(input);
@@ -357,9 +357,9 @@ async function executeSeoTool(toolName, input) {
       case 'detect_duplicates': return await detectDuplicatesReport(input);
       case 'intent_routing_report': return await intentRoutingReport(input);
       case 'internal_link_graph': return await internalLinkGraphReport(input);
-      case 'run_seo_pipeline': return await runSeoPipeline(input);
+      case 'run_seo_pipeline': return await runSeoPipeline(input, context);
       case 'seo_action_queue': return await seoActionQueueReport(input);
-      case 'approve_seo_action': return await approveSeoAction(input);
+      case 'approve_seo_action': return await approveSeoAction(input, context);
       case 'seo_experiment_results': return await seoExperimentResults(input);
       default: return { error: `Unknown SEO tool: ${toolName}` };
     }
@@ -1489,7 +1489,9 @@ async function seoExperimentResults(input) {
   };
 }
 
-async function runSeoPipeline(input) {
+async function runSeoPipeline(input, context = {}) {
+  if (!context?.isAdmin) return { error: 'Admin access required to run SEO pipeline' };
+  if (context?.confirmed !== true) return { error: 'Explicit confirmation is required to run SEO pipeline' };
   const domain = input.domain || 'wavespestcontrol.com';
   // Call services directly instead of hitting the authenticated HTTP endpoint
   const runPipeline = async () => {

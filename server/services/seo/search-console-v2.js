@@ -385,34 +385,43 @@ class SearchConsoleService {
         requestBody: {
           startDate,
           endDate,
-          dimensions: ['query', 'page'],
-          rowLimit: 5000,
+          dimensions: ['date', 'query', 'page'],
+          rowLimit: 25000,
           type: 'web',
         },
       });
 
       const rows = response.data.rows || [];
-      for (const row of rows) {
-        const query = row.keys[0];
-        const pageUrl = row.keys[1];
+      await db.transaction(async (trx) => {
+        await trx('gsc_query_page_map')
+          .where('domain', domain)
+          .where('date_from', '<=', endDate)
+          .where('date_to', '>=', startDate)
+          .del();
 
-        await db('gsc_query_page_map')
-          .insert({
-            query,
-            page_url: pageUrl,
-            domain,
-            clicks: row.clicks || 0,
-            impressions: row.impressions || 0,
-            ctr: row.ctr || 0,
-            position: row.position || 0,
-            date_from: startDate,
-            date_to: endDate,
-          })
-          .onConflict(['query', 'page_url', 'domain', 'date_from'])
-          .merge({ clicks: row.clicks || 0, impressions: row.impressions || 0, ctr: row.ctr || 0, position: row.position || 0, updated_at: new Date() });
-      }
+        for (const row of rows) {
+          const date = row.keys[0];
+          const query = row.keys[1];
+          const pageUrl = row.keys[2];
 
-      logger.info(`GSC query-page map synced: ${rows.length} rows for ${domain}`);
+          await trx('gsc_query_page_map')
+            .insert({
+              query,
+              page_url: pageUrl,
+              domain,
+              clicks: row.clicks || 0,
+              impressions: row.impressions || 0,
+              ctr: row.ctr || 0,
+              position: row.position || 0,
+              date_from: date,
+              date_to: date,
+            })
+            .onConflict(['query', 'page_url', 'domain', 'date_from'])
+            .merge({ clicks: row.clicks || 0, impressions: row.impressions || 0, ctr: row.ctr || 0, position: row.position || 0, date_to: date, updated_at: new Date() });
+        }
+      });
+
+      logger.info(`GSC query-page map synced: ${rows.length} daily rows for ${domain}`);
     } catch (err) {
       logger.warn(`GSC query-page map sync failed for ${domain}: ${err.message}`);
     }
