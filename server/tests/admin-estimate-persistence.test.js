@@ -102,6 +102,63 @@ describe('admin estimate persistence', () => {
     expect(fields.service_interest).toBe('Lawn Care + Pest Control');
   });
 
+  test('preserves full recurring annual totals when legacy annualAfterDiscount excludes add-ons', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      estimateData: {
+        result: {
+          recurring: {
+            grandTotal: 140,
+            monthlyTotal: 140,
+            annualAfterDiscount: 1320,
+            services: [
+              { service: 'lawn_care', name: 'Lawn Care', mo: 110 },
+              { service: 'rodent_bait', name: 'Rodent Bait', mo: 30 },
+            ],
+          },
+          totals: {
+            year2mo: 140,
+            year2: 1680,
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.monthly_total).toBe(140);
+    expect(fields.annual_total).toBe(1680);
+    expect(data.result.totals.year2).toBe(1680);
+    expect(data.result.recurring.annualAfterDiscount).toBe(1320);
+  });
+
+  test('derives full recurring annual totals from monthly total before annualAfterDiscount', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      estimateData: {
+        result: {
+          recurring: {
+            grandTotal: 140,
+            monthlyTotal: 140,
+            annualAfterDiscount: 1320,
+            services: [
+              { service: 'lawn_care', name: 'Lawn Care', mo: 110 },
+              { service: 'rodent_bait', name: 'Rodent Bait', mo: 30 },
+            ],
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.monthly_total).toBe(140);
+    expect(fields.annual_total).toBe(1680);
+    expect(data.result.recurring.annualAfterDiscount).toBe(1320);
+  });
+
   test('zeros persisted totals when estimate data contains quote-required lines', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,

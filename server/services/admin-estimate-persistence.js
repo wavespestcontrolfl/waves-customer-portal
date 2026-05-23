@@ -105,11 +105,12 @@ function deriveTotalsFromEstimateData(estimateData) {
     ? Math.max(explicitOneTimeTotal, derivedOneTimeTotal)
     : (explicitOneTimeTotal ?? derivedOneTimeTotal);
 
-  const annualTotal = positiveMoney(recurring.annualAfterDiscount) ??
+  const annualTotal = positiveMoney(result.totals?.year2) ??
     positiveMoney(recurring.annualTotal) ??
-    positiveMoney(nestedRecurring.annualAfterDiscount) ??
-    positiveMoney(result.totals?.year2) ??
-    (monthlyTotal !== null ? roundMoney(monthlyTotal * 12) : null);
+    positiveMoney(nestedRecurring.annualTotal) ??
+    (monthlyTotal !== null ? roundMoney(monthlyTotal * 12) : null) ??
+    positiveMoney(recurring.annualAfterDiscount) ??
+    positiveMoney(nestedRecurring.annualAfterDiscount);
 
   return {
     monthlyTotal,
@@ -145,8 +146,8 @@ function applyResolvedTotalsToEstimateData(estimateData, totals, quoteRequired) 
   if (result.recurring && typeof result.recurring === 'object' && totals.monthlyTotal > 0) {
     result.recurring.grandTotal = totals.monthlyTotal;
     result.recurring.monthlyTotal = totals.monthlyTotal;
-    if (totals.annualTotal > 0) {
-      result.recurring.annualAfterDiscount = totals.annualTotal;
+    if (totals.annualTotal > 0 && Object.prototype.hasOwnProperty.call(result.recurring, 'annualTotal')) {
+      result.recurring.annualTotal = totals.annualTotal;
     }
   }
 
