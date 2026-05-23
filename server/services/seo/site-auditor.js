@@ -362,6 +362,9 @@ class SiteAuditor {
     const canonicalSelf = canonicalUrl ? canonicalUrl.replace(/\/$/, '') === url.replace(/\/$/, '') : false;
     const internalLinks = (html.match(/href=["'](?:https?:\/\/(?:www\.)?wavespestcontrol\.com|\/(?!\/))/gi) || []);
     const externalLinks = (html.match(/href=["']https?:\/\/(?!www\.wavespestcontrol\.com|wavespestcontrol\.com)/gi) || []);
+    const internalLinkTargets = [];
+    const hrefMatches = html.matchAll(/href=["']((?:https?:\/\/(?:www\.)?wavespestcontrol\.com|\/(?!\/))[^"'#?]*)/gi);
+    for (const m of hrefMatches) internalLinkTargets.push(m[1]);
 
     // Score
     const criticalCount = issues.filter(i => i.severity === 'critical').length;
@@ -398,12 +401,14 @@ class SiteAuditor {
       word_count: wordCount,
       keyword_in_first_100_words: keyword ? bodyText.substring(0, 600).toLowerCase().includes(keyword.toLowerCase()) : null,
       content_hash: contentHash,
+      body_text_5k: bodyText.substring(0, 5000),
       thin_content_flag: thinContent,
       total_images: imgs.length,
       images_missing_alt: missingAlt,
       images_over_200kb: 0, // Would need image size checking
       internal_links_count: internalLinks.length,
       external_links_count: externalLinks.length,
+      internal_link_targets: JSON.stringify(internalLinkTargets),
       broken_links: JSON.stringify([]),
       broken_links_count: 0,
       schema_types_found: JSON.stringify(schemaTypes),

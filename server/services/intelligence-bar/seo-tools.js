@@ -9,6 +9,12 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { extractDomain } = require('../../utils/normalize-url');
+const {
+  claimPipelineRun,
+  completePipelineRun,
+  failPipelineRun,
+} = require('../seo/seo-pipeline-runs');
 
 const SEO_TOOLS = [
   {
@@ -188,12 +194,152 @@ Use for: "create a content brief for pest control bradenton", "workflow brief fo
       required: ['target_keyword'],
     },
   },
+  {
+    name: 'inspect_url',
+    description: `Get full URL intelligence for a specific URL. Shows indexation status, canonical analysis, technical health, GSC performance, diagnosis, priority score, and recommended actions.
+Use for: "inspect wavespestcontrol.com/pest-control-bradenton-fl", "what's wrong with this URL?", "check status of our Venice page"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The URL to inspect (with or without https://)' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'scan_url_issues',
+    description: `Find URLs with specific SEO issues. Filter by diagnosis type and domain. Returns URLs sorted by priority score.
+Use for: "which URLs have indexation problems?", "find canonical issues", "show me URLs with ranking decay", "any cannibalization issues?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        diagnosis: { type: 'string', enum: ['indexation_problem', 'canonical_problem', 'duplicate_content', 'technical_performance', 'cannibalization', 'ranking_decay', 'ctr_problem', 'thin_local_proof', 'structured_data', 'internal_linking', 'freshness', 'low_value', 'healthy'], description: 'Filter by diagnosis type (omit for all)' },
+        domain: { type: 'string', description: 'Filter by domain (e.g. bradentonflpestcontrol.com)' },
+        limit: { type: 'number', description: 'Max results (default 15)' },
+      },
+    },
+  },
+  {
+    name: 'indexation_report',
+    description: `Get the indexation gap report showing submitted vs indexed URLs. Shows how many URLs are in the sitemap but not indexed by Google, broken down by coverage state.
+Use for: "how's our indexation?", "indexation gap for the spoke sites", "how many pages are not indexed?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Specific domain (omit for all domains)' },
+      },
+    },
+  },
+  {
+    name: 'canonical_conflicts',
+    description: `Get the canonical conflict queue showing hub/spoke URL conflicts where Google selected a different canonical than what we declared.
+Use for: "any canonical conflicts?", "hub spoke canonical issues", "which spoke pages are being canonicalized to the hub?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Filter by domain (omit for all)' },
+      },
+    },
+  },
+  {
+    name: 'sitemap_validation',
+    description: `Validate sitemap URLs against known issues — finds redirects, noindex pages, broken URLs, canonical mismatches, and duplicates in the sitemap.
+Use for: "validate our sitemap", "any sitemap issues?", "check for redirects in sitemap"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Domain to validate (default: wavespestcontrol.com)' },
+      },
+    },
+  },
+  {
+    name: 'detect_duplicates',
+    description: `Find pages with similar body content that may be competing or cannibalizing across hub/spoke domains. Uses Jaccard trigram similarity to compute real percentages.
+Use for: "find duplicate content", "which spoke pages are too similar to hub?", "body similarity check"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Domain to check (default: wavespestcontrol.com)' },
+      },
+    },
+  },
+  {
+    name: 'intent_routing_report',
+    description: `Check if queries are routing to the right page types. Finds transactional queries landing on blog pages, wrong-city misroutes, and competing pages splitting impressions.
+Use for: "any intent misroutes?", "are blog pages ranking for service queries?", "wrong city rankings"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Domain to check' },
+        severity: { type: 'string', enum: ['severe', 'moderate', 'mild'], description: 'Filter by severity' },
+      },
+    },
+  },
+  {
+    name: 'run_seo_pipeline',
+    description: `Run the full SEO pipeline for a domain: GSC sync → site audit → URL Intelligence refresh → sitemap validation → duplicate detection → intent routing → link graph → cannibalization. Returns immediately (runs in background).
+Use for: "run the full SEO pipeline", "populate SEO data", "refresh everything for wavespestcontrol.com"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Domain to process (default: wavespestcontrol.com)' },
+      },
+    },
+  },
+  {
+    name: 'seo_action_queue',
+    description: `Check the SEO action queue. Shows pending actions by approval tier, recent approvals, and execution status.
+Use for: "what SEO actions are pending?", "how many actions need approval?", "action queue summary"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        tier: { type: 'string', enum: ['auto', 'editor', 'seo', 'owner'], description: 'Filter by approval tier' },
+        limit: { type: 'number', description: 'Max results (default 10)' },
+      },
+    },
+  },
+  {
+    name: 'approve_seo_action',
+    description: `Approve a specific SEO action by ID. Moves it from pending to approved and queues for execution.
+Use for: "approve action [id]", "approve the top priority action"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        action_id: { type: 'string', description: 'UUID of the action to approve' },
+        notes: { type: 'string', description: 'Optional approval notes' },
+      },
+      required: ['action_id'],
+    },
+  },
+  {
+    name: 'seo_experiment_results',
+    description: `Check SEO experiment results. Shows pre/post KPI comparisons for completed SEO actions — which title rewrites, content refreshes, and fixes actually improved traffic.
+Use for: "how did our SEO experiments perform?", "experiment results", "which actions worked?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['running', 'measuring', 'accepted', 'rejected'], description: 'Filter by experiment status' },
+        limit: { type: 'number', description: 'Max results (default 10)' },
+      },
+    },
+  },
+  {
+    name: 'internal_link_graph',
+    description: `Analyze internal link structure. Find orphan pages with few or no inbound internal links — these are underlinked and may struggle to get indexed.
+Use for: "find orphan pages", "internal linking gaps", "which pages have no inbound links?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Domain to analyze' },
+      },
+    },
+  },
 ];
 
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeSeoTool(toolName, input) {
+async function executeSeoTool(toolName, input, context = {}) {
   try {
     switch (toolName) {
       case 'query_gsc_performance': return await queryGscPerformance(input);
@@ -209,6 +355,18 @@ async function executeSeoTool(toolName, input) {
       case 'get_semantic_concept_map': return await getSemanticConceptMap(input);
       case 'score_page_refresh_priority': return await scorePageRefreshPriority(input);
       case 'get_content_workflow_brief': return await getContentWorkflowBrief(input);
+      case 'inspect_url': return await inspectUrl(input);
+      case 'scan_url_issues': return await scanUrlIssues(input);
+      case 'indexation_report': return await indexationReport(input);
+      case 'canonical_conflicts': return await canonicalConflictsReport(input);
+      case 'sitemap_validation': return await sitemapValidationReport(input);
+      case 'detect_duplicates': return await detectDuplicatesReport(input);
+      case 'intent_routing_report': return await intentRoutingReport(input);
+      case 'internal_link_graph': return await internalLinkGraphReport(input);
+      case 'run_seo_pipeline': return await runSeoPipeline(input, context);
+      case 'seo_action_queue': return await seoActionQueueReport(input);
+      case 'approve_seo_action': return await approveSeoAction(input, context);
+      case 'seo_experiment_results': return await seoExperimentResults(input);
       default: return { error: `Unknown SEO tool: ${toolName}` };
     }
   } catch (err) {
@@ -1118,5 +1276,373 @@ async function getContentWorkflowBrief(input) {
   };
 }
 
+
+// ── URL Intelligence tools ──────────────────────────────────────────
+
+const UrlIntelligence = require('../seo/url-intelligence');
+
+async function inspectUrl(input) {
+  const { url } = input;
+  if (!url) return { error: 'url is required' };
+  const data = await UrlIntelligence.getUrlIntelligence(url);
+  if (!data) return { error: `URL not found: ${url}. Try running a domain refresh first.` };
+  return {
+    url: data.url,
+    domain: data.domain,
+    hub_or_spoke: data.hub_or_spoke,
+    page_type: data.page_type,
+    city: data.city,
+    service: data.service,
+    status: data.primary_status,
+    diagnosis: data.primary_diagnosis,
+    priority_score: data.priority_score,
+    coverage_state: data.coverage_state,
+    canonical_match: data.canonical_match,
+    user_canonical: data.user_declared_canonical,
+    google_canonical: data.google_selected_canonical,
+    gsc_clicks_28d: data.gsc_clicks_28d,
+    gsc_impressions_28d: data.gsc_impressions_28d,
+    gsc_ctr_28d: data.gsc_ctr_28d,
+    gsc_avg_position_28d: data.gsc_avg_position_28d,
+    word_count: data.word_count,
+    backlinks: data.backlinks_count,
+    technical_qa: data.technical_qa_score,
+    content_qa: data.content_qa_score,
+    local_qa: data.local_qa_score,
+    recommended_action: data.recommended_action,
+    alternative_action: data.alternative_action,
+    approval_level: data.approval_level,
+    title: data.title,
+    h1: data.h1,
+    decay_alerts: (data.decay_alerts || []).length,
+    cannibalization_flags: (data.cannibalization_flags || []).length,
+  };
+}
+
+async function scanUrlIssues(input) {
+  const { diagnosis, domain, limit } = input;
+  const result = await UrlIntelligence.scanByDiagnosis(
+    diagnosis || null,
+    domain || null,
+    { limit: limit || 15, offset: 0 },
+  );
+  return {
+    total: result.total,
+    showing: result.urls.length,
+    urls: result.urls.map((u) => ({
+      url: u.url,
+      diagnosis: u.primary_diagnosis,
+      status: u.primary_status,
+      priority: u.priority_score,
+      clicks_28d: u.gsc_clicks_28d,
+      position: u.gsc_avg_position_28d,
+      action: u.recommended_action,
+    })),
+  };
+}
+
+async function indexationReport(input) {
+  const result = await UrlIntelligence.getIndexationGap(input.domain || null);
+  return result;
+}
+
+async function canonicalConflictsReport(input) {
+  const conflicts = await UrlIntelligence.getCanonicalConflicts(input.domain || null);
+  return {
+    total: conflicts.length,
+    conflicts: conflicts.slice(0, 15).map((c) => ({
+      spoke_url: c.spoke_url,
+      hub_url: c.hub_url,
+      body_similarity: c.body_similarity_pct,
+      google_canonical: c.google_selected_canonical,
+      status: c.status,
+      fix: c.recommended_fix,
+    })),
+  };
+}
+
+async function sitemapValidationReport(input) {
+  const SitemapValidator = require('../seo/sitemap-validator');
+  const summary = await SitemapValidator.getSummary(input.domain);
+  const issues = await SitemapValidator.getIssues(input.domain, { limit: 15 });
+  return {
+    ...summary,
+    top_issues: issues.map((i) => ({
+      url: i.page_url,
+      type: i.issue_type,
+      severity: i.severity,
+      detail: i.detail,
+    })),
+  };
+}
+
+async function detectDuplicatesReport(input) {
+  const clusters = await UrlIntelligence.getDuplicateClusters(input.domain);
+  return {
+    total: clusters.length,
+    duplicates: clusters.slice(0, 15).map((c) => ({
+      url: c.url,
+      similarity: c.body_similarity_max,
+      city: c.city,
+      service: c.service,
+      page_type: c.page_type,
+      domain: c.domain,
+    })),
+  };
+}
+
+async function intentRoutingReport(input) {
+  const routes = await UrlIntelligence.getIntentRoutes(input.domain, {
+    severity: input.severity,
+    limit: 15,
+  });
+  const misroutes = routes.filter((r) => r.misroute_type !== 'aligned');
+  return {
+    total_routes: routes.length,
+    misroutes: misroutes.length,
+    details: misroutes.slice(0, 15).map((r) => ({
+      query: r.query_cluster,
+      intent: r.intent_type,
+      expected: r.expected_page_type,
+      actual_winner: r.actual_winner_url,
+      actual_type: r.actual_winner_page_type,
+      misroute: r.misroute_type,
+      severity: r.misroute_severity,
+      impressions: r.impressions_total,
+    })),
+  };
+}
+
+async function internalLinkGraphReport(input) {
+  const orphans = await UrlIntelligence.getOrphanPages(input.domain);
+  return {
+    orphan_count: orphans.length,
+    orphans: orphans.slice(0, 15).map((o) => ({
+      url: o.url,
+      inbound_links: o.internal_links_in,
+      in_sitemap: o.in_sitemap,
+      priority: o.priority_score,
+      diagnosis: o.primary_diagnosis,
+    })),
+  };
+}
+
+async function seoActionQueueReport(input) {
+  const SeoActionGenerator = require('../seo/seo-action-generator');
+  const summary = await SeoActionGenerator.getSummary();
+  let query = db('seo_actions').where('status', 'open').where('approval_status', 'pending').orderBy('priority_score', 'desc').limit(input.limit || 10);
+  if (input.tier) query = query.where('approval_tier', input.tier);
+  const actions = await query;
+  return {
+    ...summary,
+    top_pending: actions.map((a) => ({
+      id: a.id,
+      url: a.url,
+      issue: a.issue_type,
+      action: a.action_type,
+      priority: a.priority_score,
+      tier: a.approval_tier,
+      summary: a.summary,
+    })),
+  };
+}
+
+async function approveSeoAction(input, context) {
+  if (!input.action_id) return { error: 'action_id is required' };
+  if (!context?.isAdmin) return { error: 'Admin access required to approve SEO actions' };
+
+  return db.transaction(async (trx) => {
+    const action = await trx('seo_actions').where('id', input.action_id).first();
+    if (!action) return { error: `Action ${input.action_id} not found` };
+
+    const updated = await trx('seo_actions')
+      .where({ id: input.action_id, status: 'open', approval_status: 'pending' })
+      .update({
+        approval_status: 'approved',
+        approved_by_admin_id: context?.technicianId || null,
+        approved_at: new Date(),
+        approval_notes: input.notes || 'Approved via Intelligence Bar',
+      });
+
+    if (updated !== 1) {
+      return { error: 'Action is not pending approval' };
+    }
+
+    await trx('seo_decisions').insert({
+      diagnosis_id: action.diagnosis_id,
+      issue_type: action.issue_type,
+      target_url: action.url,
+      agent_recommendation: JSON.stringify({ action_type: action.action_type, summary: action.summary }),
+      agent_impact_score: action.impact_score,
+      agent_effort_score: action.effort_score,
+      decision: 'accepted',
+      decision_reason: input.notes || 'Approved via Intelligence Bar',
+      decided_by_admin_id: context?.technicianId || null,
+      decided_at: new Date(),
+    });
+
+    return { approved: true, id: input.action_id, url: action.url, action_type: action.action_type };
+  });
+}
+
+async function seoExperimentResults(input) {
+  let query = db('seo_url_experiments').orderBy('created_at', 'desc').limit(input.limit || 10);
+  if (input.status) query = query.where('status', input.status);
+  const experiments = await query;
+  return {
+    total: experiments.length,
+    experiments: experiments.map((e) => ({
+      url: e.url,
+      action: e.action_type,
+      published: e.publish_date,
+      pre_clicks: e.pre_28d_clicks,
+      post_clicks: e.post_28d_clicks,
+      clicks_delta: e.pre_28d_clicks && e.post_28d_clicks ? `${Math.round(((e.post_28d_clicks - e.pre_28d_clicks) / Math.max(1, e.pre_28d_clicks)) * 100)}%` : null,
+      pre_position: e.pre_28d_position,
+      post_position: e.post_28d_position,
+      status: e.status,
+    })),
+  };
+}
+
+async function runSeoPipeline(input, context = {}) {
+  if (!context?.isAdmin) return { error: 'Admin access required to run SEO pipeline' };
+  if (context?.confirmed !== true) return { error: 'Explicit confirmation is required to run SEO pipeline' };
+  const domain = extractDomain(input.domain) || 'wavespestcontrol.com';
+  const idempotencyKey = input.idempotencyKey || input.idempotency_key;
+  const claim = await claimPipelineRun({
+    domain,
+    idempotencyKey,
+    requestedBy: input.requestedBy || context.technicianId || null,
+  });
+  if (claim.error) return { error: claim.error };
+  if (!claim.claimed) {
+    return {
+      status: claim.run.status,
+      domain: claim.run.domain,
+      idempotencyKey,
+      deduped: true,
+      started_at: claim.run.started_at,
+      completed_at: claim.run.completed_at,
+      result: claim.run.result || null,
+    };
+  }
+
+  // Call services directly instead of hitting the authenticated HTTP endpoint
+  const runPipeline = async () => {
+    const steps = [];
+    try {
+      const SearchConsole = require('../seo/search-console-v2');
+      const result = await SearchConsole.syncDailyData(7, domain);
+      steps.push({ step: 'gsc_sync', status: 'ok', result });
+    } catch (e) {
+      steps.push({ step: 'gsc_sync', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] GSC sync: ${e.message}`);
+    }
+    try {
+      const SiteAuditor = require('../seo/site-auditor');
+      const result = await SiteAuditor.runSiteAudit();
+      steps.push({ step: 'site_audit', status: 'ok', pages: result?.pages?.length || 0 });
+    } catch (e) {
+      steps.push({ step: 'site_audit', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] site audit: ${e.message}`);
+    }
+    try {
+      const result = await UrlIntelligence.refreshDomain(domain);
+      steps.push({ step: 'url_intelligence_refresh', status: 'ok', result });
+    } catch (e) {
+      steps.push({ step: 'url_intelligence_refresh', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] refresh: ${e.message}`);
+    }
+    try {
+      const SitemapValidator = require('../seo/sitemap-validator');
+      const result = await SitemapValidator.validateDomain(domain);
+      steps.push({ step: 'sitemap_validation', status: 'ok', result });
+    } catch (e) {
+      steps.push({ step: 'sitemap_validation', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] sitemap: ${e.message}`);
+    }
+    try {
+      const result = await UrlIntelligence.buildDuplicateClusters(domain);
+      steps.push({ step: 'duplicate_detection', status: 'ok', result });
+    } catch (e) {
+      steps.push({ step: 'duplicate_detection', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] duplicates: ${e.message}`);
+    }
+    try {
+      const [intentResult, linkResult] = await Promise.allSettled([
+        UrlIntelligence.buildIntentMap(domain),
+        UrlIntelligence.buildInternalLinkGraph(domain),
+      ]);
+      steps.push({
+        step: 'intent_map',
+        status: intentResult.status === 'fulfilled' ? 'ok' : 'failed',
+        result: intentResult.value,
+        error: intentResult.reason?.message,
+      });
+      steps.push({
+        step: 'internal_link_graph',
+        status: linkResult.status === 'fulfilled' ? 'ok' : 'failed',
+        result: linkResult.value,
+        error: linkResult.reason?.message,
+      });
+    } catch (e) {
+      steps.push({ step: 'intent_map_and_link_graph', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] intent/links: ${e.message}`);
+    }
+    try {
+      const Cannibalization = require('../seo/cannibalization');
+      const [cannibalResult, conflictResult] = await Promise.allSettled([
+        Cannibalization.detect(domain),
+        UrlIntelligence.detectCanonicalConflicts(),
+      ]);
+      steps.push({
+        step: 'cannibalization',
+        status: cannibalResult.status === 'fulfilled' ? 'ok' : 'failed',
+        result: cannibalResult.value,
+        error: cannibalResult.reason?.message,
+      });
+      steps.push({
+        step: 'canonical_conflicts',
+        status: conflictResult.status === 'fulfilled' ? 'ok' : 'failed',
+        result: conflictResult.value,
+        error: conflictResult.reason?.message,
+      });
+    } catch (e) {
+      steps.push({ step: 'cannibalization_and_conflicts', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] cannibal/conflicts: ${e.message}`);
+    }
+    try {
+      const SeoActionGenerator = require('../seo/seo-action-generator');
+      const diagnosisResult = await UrlIntelligence.refreshDiagnoses(domain);
+      steps.push({ step: 'diagnosis_refresh', status: 'ok', result: diagnosisResult });
+      const actionResult = await SeoActionGenerator.generateActionsFromDiagnosis(domain);
+      steps.push({ step: 'action_generation', status: 'ok', result: actionResult });
+      const approveResult = await SeoActionGenerator.autoApprove(domain);
+      steps.push({ step: 'auto_approve', status: 'ok', result: approveResult });
+    } catch (e) {
+      steps.push({ step: 'action_generation', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] actions: ${e.message}`);
+    }
+
+    await completePipelineRun(
+      claim.run.id,
+      { steps },
+      steps.some((s) => s.status === 'failed') ? 'completed_with_errors' : 'completed',
+    );
+  };
+  runPipeline().catch(async (e) => {
+    logger.error(`[IB pipeline] fatal: ${e.message}`);
+    await failPipelineRun(claim.run.id, e)
+      .catch((err) => logger.warn(`[IB pipeline] failed to persist fatal status: ${err.message}`));
+  });
+  return {
+    status: 'started',
+    domain,
+    idempotencyKey,
+    run_id: claim.run.id,
+    message: `Full SEO pipeline started for ${domain}. Steps: GSC sync → URL Intelligence refresh → sitemap validation → duplicate detection → intent routing → link graph → action generation. Check the URL Intel dashboard in a few minutes for results.`,
+  };
+}
 
 module.exports = { SEO_TOOLS, executeSeoTool };

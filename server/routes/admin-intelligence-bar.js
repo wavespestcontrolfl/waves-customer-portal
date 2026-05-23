@@ -36,7 +36,12 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
-const CONFIRMED_ACTION_TOOL_NAMES = new Set(['request_instant_payout', 'request_standard_payout']);
+const SEO_CONFIRMED_ACTION_TOOL_NAMES = new Set(['run_seo_pipeline', 'approve_seo_action']);
+const CONFIRMED_ACTION_TOOL_NAMES = new Set([
+  'request_instant_payout',
+  'request_standard_payout',
+  ...SEO_CONFIRMED_ACTION_TOOL_NAMES,
+]);
 
 function isToolFailure(result) {
   return result && typeof result === 'object' && (result.error || result.failed === true);
@@ -67,6 +72,7 @@ const LEADS_TOOL_NAMES = new Set(LEADS_TOOLS.map(t => t.name));
 const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
 const BANKING_TOOL_NAMES = new Set(BANKING_TOOLS.map(t => t.name));
 const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
+const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
 
 function isNonAdminDashboardRequest(req) {
   return req.techRole !== 'admin';
@@ -529,7 +535,7 @@ function getToolsForContext(context) {
     return [...TOOLS, ...DASHBOARD_TOOLS];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...TOOLS, ...SEO_TOOLS];
+    return [...TOOLS, ...SEO_QUERY_TOOLS];
   }
   if (context === 'procurement' || context === 'inventory') {
     return [...TOOLS, ...PROCUREMENT_TOOLS];
@@ -565,7 +571,7 @@ function getToolsForContext(context) {
 }
 
 // techContext is only set for tech portal calls
-function executeToolByName(toolName, input, techContext) {
+function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (TECH_TOOL_NAMES.has(toolName)) {
     return executeTechTool(toolName, input, techContext || {});
   }
@@ -597,7 +603,7 @@ function executeToolByName(toolName, input, techContext) {
     return executeDashboardTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
-    return executeSeoTool(toolName, input);
+    return executeSeoTool(toolName, input, actionContext);
   }
   if (PROCUREMENT_TOOL_NAMES.has(toolName)) {
     return executeProcurementTool(toolName, input);
@@ -739,6 +745,10 @@ router.post('/query', async (req, res, next) => {
           result = { error: 'Admin access required for dashboard intelligence' };
           failed = true;
           errorMessage = result.error;
+        } else if (CONFIRMED_ACTION_TOOL_NAMES.has(toolUse.name)) {
+          result = { error: 'Explicit confirmation is required for this action. Use the confirmed action endpoint.' };
+          failed = true;
+          errorMessage = result.error;
         } else if (adminToolBreaker.isTripped()) {
           result = adminToolBreaker.fastFailResult();
           failed = true;
@@ -841,6 +851,9 @@ router.post('/execute', async (req, res, next) => {
     if (BANKING_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for banking actions' });
     }
+    if (SEO_CONFIRMED_ACTION_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required for SEO actions' });
+    }
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
     }
@@ -858,7 +871,12 @@ router.post('/execute', async (req, res, next) => {
       };
     }
 
-    const result = await executeToolByName(action, executionParams);
+    const actionContext = {
+      isAdmin: req.techRole === 'admin',
+      technicianId: req.technicianId || req.technician?.id || null,
+      confirmed: confirmed === true,
+    };
+    const result = await executeToolByName(action, executionParams, null, actionContext);
 
     logger.info(`[intelligence-bar] Executed action: ${action}`, {
       ...executionParams,
