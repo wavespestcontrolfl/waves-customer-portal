@@ -10,6 +10,7 @@ describe('quote workflow service interest labels', () => {
 
   const {
     normalizeLeadServiceInterest,
+    serviceInterestUpdateFromTriage,
     shouldApplyTriageServiceInterest,
   } = leadWebhookRouter._test;
 
@@ -94,5 +95,16 @@ describe('quote workflow service interest labels', () => {
     expect(shouldApplyTriageServiceInterest('Pest Control Consultation', 'General Pest Control')).toBe(false);
     expect(shouldApplyTriageServiceInterest('Pest Control', 'General Pest Control')).toBe(true);
     expect(shouldApplyTriageServiceInterest('', 'General Pest Control')).toBe(true);
+  });
+
+  test('AI triage update value can be reused for matching draft estimates', () => {
+    expect(serviceInterestUpdateFromTriage('Pest Control', 'Recurring Pest Control'))
+      .toBe('Recurring Pest Control');
+    expect(serviceInterestUpdateFromTriage('Pest Control', 'Recurring Pest Control + Recurring Lawn Care'))
+      .toBe('Recurring Pest Control + Recurring Lawn Care');
+    expect(serviceInterestUpdateFromTriage('Recurring Pest Control', 'General Pest Control'))
+      .toBeNull();
+    expect(serviceInterestUpdateFromTriage('Pest Control', ''))
+      .toBeNull();
   });
 });

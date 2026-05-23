@@ -451,6 +451,8 @@ router.post('/', async (req, res) => {
     } catch (e) { logger.error(`Lead enroll failed: ${e.message}`); }
 
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
+    let createdEstimateId = null;
+    let createdEstimateServiceInterest = serviceInterest || null;
     try {
       await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
         const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
@@ -460,7 +462,7 @@ router.post('/', async (req, res) => {
         } else {
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');
-          await trx('estimates').insert({
+          const [estimateRow] = await trx('estimates').insert({
             customer_id: customer.id,
             customer_name: `${firstName} ${lastName}`,
             customer_phone: phoneFormatted,
@@ -473,7 +475,9 @@ router.post('/', async (req, res) => {
             lead_source_detail: leadSource.detail,
             token: estimateToken,
             notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}.`,
-          });
+          }).returning(['id', 'service_interest']);
+          createdEstimateId = estimateRow?.id || null;
+          createdEstimateServiceInterest = estimateRow?.service_interest || createdEstimateServiceInterest;
         }
       });
     } catch (estErr) {
@@ -511,14 +515,37 @@ router.post('/', async (req, res) => {
           if (!triageResult) return;
           try {
             const updates = {};
-            if (shouldApplyTriageServiceInterest(leadRecord.service_interest, triageResult.serviceInterest)) {
-              updates.service_interest = triageResult.serviceInterest;
+            const triageServiceInterestUpdate = serviceInterestUpdateFromTriage(
+              leadRecord.service_interest,
+              triageResult.serviceInterest
+            );
+            if (triageServiceInterestUpdate) {
+              updates.service_interest = triageServiceInterestUpdate;
             }
             if (triageResult.urgency) updates.urgency = triageResult.urgency;
             if (triageResult.extractedData) updates.extracted_data = JSON.stringify(triageResult.extractedData);
             if (Object.keys(updates).length > 0) {
               updates.updated_at = new Date();
               await db('leads').where('id', leadRecord.id).update(updates);
+            }
+            if (createdEstimateId && triageServiceInterestUpdate) {
+              const estimateUpdateQuery = db('estimates')
+                .where({
+                  id: createdEstimateId,
+                  source: 'lead_webhook',
+                  status: 'draft',
+                });
+              if (createdEstimateServiceInterest) {
+                estimateUpdateQuery.where('service_interest', createdEstimateServiceInterest);
+              } else {
+                estimateUpdateQuery.where((q) => {
+                  q.whereNull('service_interest').orWhere('service_interest', '');
+                });
+              }
+              await estimateUpdateQuery.update({
+                service_interest: triageServiceInterestUpdate,
+                updated_at: new Date(),
+              });
             }
             await db('lead_activities').insert({
               lead_id: leadRecord.id,
@@ -762,10 +789,15 @@ function isWorkflowSpecificServiceInterest(value) {
   return /\b(one[- ]?time|recurring|consultation|quarterly|bi[- ]?monthly|monthly|semiannual|semi[- ]annual)\b/.test(text);
 }
 
+function serviceInterestUpdateFromTriage(currentServiceInterest, triageServiceInterest) {
+  const next = firstNonEmpty(triageServiceInterest);
+  if (!next) return null;
+  if (!firstNonEmpty(currentServiceInterest)) return next;
+  return isWorkflowSpecificServiceInterest(currentServiceInterest) ? null : next;
+}
+
 function shouldApplyTriageServiceInterest(currentServiceInterest, triageServiceInterest) {
-  if (!firstNonEmpty(triageServiceInterest)) return false;
-  if (!firstNonEmpty(currentServiceInterest)) return true;
-  return !isWorkflowSpecificServiceInterest(currentServiceInterest);
+  return !!serviceInterestUpdateFromTriage(currentServiceInterest, triageServiceInterest);
 }
 
 function cleanPhone(value) {
@@ -866,5 +898,6 @@ module.exports = router;
 module.exports._test = {
   normalizeLeadServiceInterest,
   formatServiceInterestForFrequency,
+  serviceInterestUpdateFromTriage,
   shouldApplyTriageServiceInterest,
 };
