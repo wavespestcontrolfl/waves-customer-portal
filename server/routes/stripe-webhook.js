@@ -1479,9 +1479,16 @@ async function handlePaymentIntentProcessing(paymentIntent) {
       // if .succeeded flipped the invoice to 'paid' between the pre-read
       // and this UPDATE, affectedRows is 0 and we bail rather than send a
       // contradictory "processing" message after the receipt fired.
+      // Stripe doesn't guarantee webhook ordering. A stale processing
+      // event for a prior, abandoned PI on the same invoice could
+      // otherwise win this claim and send an acknowledgment for the
+      // wrong attempt. The transaction above already bound
+      // invoices.stripe_payment_intent_id to piId, so requiring it
+      // here matches "this event is for the currently active PI."
       const claimed = await db('invoices')
         .where({ id: freshInvoice.id })
         .where({ status: 'processing' })
+        .where({ stripe_payment_intent_id: piId })
         .whereNull('ach_processing_notified_at')
         .update({ ach_processing_notified_at: new Date() });
       if (!claimed) return;
@@ -1505,12 +1512,20 @@ async function handlePaymentIntentProcessing(paymentIntent) {
         }
       }
 
-      const expectedClearDate = addBusinessDays(new Date(), 5);
+      // Anchor the initiated + expected-clear dates on the PaymentIntent's
+      // own creation timestamp (Stripe's unix seconds). Webhook delivery can
+      // lag hours or days behind initiation; basing copy on `new Date()`
+      // would overstate the remaining clearing window and misreport when
+      // the customer actually authorized the transfer.
+      const initiatedAt = paymentIntent.created
+        ? new Date(paymentIntent.created * 1000)
+        : new Date();
+      const expectedClearDate = addBusinessDays(initiatedAt, 5);
       const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
         customerId: freshInvoice.customer_id,
         invoiceId: freshInvoice.id,
         amountPaid: amount,
-        initiatedAt: new Date(),
+        initiatedAt,
         expectedClearDate,
         // Scope by PI so the per-attempt reset of ach_processing_notified_at
         // (cleared in handlePaymentIntentFailed / handlePaymentIntentCanceled)
