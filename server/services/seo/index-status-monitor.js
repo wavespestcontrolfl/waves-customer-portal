@@ -130,12 +130,24 @@ class IndexStatusMonitor {
     }
     const g = getGoogle();
     if (!g) return null;
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) return null;
+    const saEnv = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    if (!saEnv) return null;
     try {
-      const auth = new g.auth.GoogleAuth({
-        keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
-        scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
-      });
+      // Mirror search-console.js: accept raw JSON (Railway) OR file
+      // path (local dev). The keyFile-only fallback previously failed
+      // on Railway with no_access_token because the env var holds the
+      // JSON body, not a path.
+      const scopes = ['https://www.googleapis.com/auth/webmasters.readonly'];
+      let authOptions;
+      try {
+        let jsonStr = saEnv.trim();
+        if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) jsonStr += '\n}';
+        const credentials = JSON.parse(jsonStr);
+        authOptions = { credentials, scopes };
+      } catch {
+        authOptions = { keyFile: saEnv, scopes };
+      }
+      const auth = new g.auth.GoogleAuth(authOptions);
       const client = await auth.getClient();
       const token = await client.getAccessToken();
       return token?.token || null;
