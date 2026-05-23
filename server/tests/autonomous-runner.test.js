@@ -10,7 +10,13 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { _internals } = require('../services/content/autonomous-runner');
-const { isShadow, TRUST_BUILD_THRESHOLD, DEFAULT_MIN_SCORE, countsTowardTrustBuild } = _internals;
+const {
+  isShadow,
+  TRUST_BUILD_THRESHOLD,
+  DEFAULT_MIN_SCORE,
+  countsTowardTrustBuild,
+  isDeterministicPublishError,
+} = _internals;
 
 const ORIGINAL_ENV = { ...process.env };
 afterEach(() => {
@@ -93,6 +99,17 @@ describe('countsTowardTrustBuild', () => {
       trust_build_approved_at: new Date(),
     })).toBe(false);
     expect(countsTowardTrustBuild({ outcome: 'failed_agent' })).toBe(false);
+  });
+});
+
+describe('isDeterministicPublishError', () => {
+  test('identifies draft validation errors that should not be retried automatically', () => {
+    const frontmatterError = new Error('Astro frontmatter validation failed');
+    frontmatterError.code = 'BLOG_FRONTMATTER_INVALID';
+
+    expect(isDeterministicPublishError(frontmatterError)).toBe(true);
+    expect(isDeterministicPublishError(new Error('autonomous draft canonical must match slug /x/'))).toBe(true);
+    expect(isDeterministicPublishError(new Error('GitHub PUT https://api.github.com/repos/x/y -> 502'))).toBe(false);
   });
 });
 
@@ -230,7 +247,7 @@ describe('runNext claim failures', () => {
 });
 
 describe('runNext internal-link shadow behavior', () => {
-  test('releases shadow internal-link claims instead of parking them in pending review', async () => {
+  test('parks shadow internal-link claims so the queue can advance', async () => {
     const claimedAt = new Date('2026-05-23T05:00:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -255,14 +272,14 @@ describe('runNext internal-link shadow behavior', () => {
 
     expect(result.outcome).toBe('skipped_shadow_mode');
     expect(result.skip_reason).toBe('shadow_internal_links');
-    expect(queue.release).toHaveBeenCalledWith('opp_links_1', { claimToken: claimedAt });
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_1', 'shadow_internal_links', { claimToken: claimedAt });
     expect(queue.complete).not.toHaveBeenCalled();
-    expect(queue.pendingReview).not.toHaveBeenCalled();
+    expect(queue.release).not.toHaveBeenCalled();
   });
 });
 
 describe('runNext general shadow behavior', () => {
-  test('releases shadow claims so unpublished opportunities remain eligible', async () => {
+  test('parks shadow claims after persisting the run so one opportunity cannot starve the queue', async () => {
     const claimedAt = new Date('2026-05-23T05:05:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -301,9 +318,10 @@ describe('runNext general shadow behavior', () => {
     const result = await runner.runNext();
 
     expect(result.outcome).toBe('skipped_shadow_mode');
-    expect(queue.release).toHaveBeenCalledWith('opp_blog_1', { claimToken: claimedAt });
+    expect(result.skip_reason).toBe('shadow_would_gate');
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_blog_1', 'shadow_would_gate', { claimToken: claimedAt });
     expect(queue.complete).not.toHaveBeenCalled();
-    expect(queue.pendingReview).not.toHaveBeenCalled();
+    expect(queue.release).not.toHaveBeenCalled();
   });
 });
 
@@ -463,6 +481,79 @@ describe('runNext post-publish bookkeeping', () => {
       expect(queue.pendingReview).toHaveBeenCalledWith('opp_pr_1', 'astro_pr_pending_merge', { claimToken: claimedAt });
       expect(queue.complete).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('parks deterministic publish validation failures instead of retrying the same opportunity', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const claimedAt = new Date('2026-05-23T05:30:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_invalid_1',
+          action_type: 'new_supporting_blog',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_invalid_1',
+          action_type: 'new_supporting_blog',
+          page_type: 'blog',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { url: '/blog/invalid/', title: 'Invalid Draft' },
+        }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({
+          ok: true,
+          hard_failures: [],
+          soft_failures: [],
+          total_score: 100,
+          min_total_score: 80,
+        }),
+      };
+      const err = new Error('Astro frontmatter validation failed: title is required');
+      err.code = 'BLOG_FRONTMATTER_INVALID';
+      const publisher = {
+        publishOrUpdatePage: jest.fn().mockRejectedValue(err),
+      };
+      const runner = loadRunnerWith({
+        queue,
+        briefBuilder,
+        dispatcher,
+        qualityGate,
+        publisher,
+        indexNow: { submit: jest.fn() },
+        linkPlanner: {},
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('publish_validation_failed');
+      expect(result.failure_message).toBe(err.message);
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_invalid_1', 'publish_validation_failed', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(queue.complete).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
       else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
