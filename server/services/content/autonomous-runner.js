@@ -92,6 +92,7 @@ class AutonomousRunner {
 
     const queue = getQueue();
     if (!queue) return finalize(run, t0, { outcome: 'failed', failure_message: 'opportunity-queue unavailable' });
+    if (dryRun) return this._previewNext({ queue, minScore, t0 });
 
     // 1. Claim.
     const t1 = Date.now();
@@ -147,9 +148,14 @@ class AutonomousRunner {
     }
 
     if (brief.action_type === 'add_internal_links') {
-      const result = await this._handleInternalLinksAction(brief, run);
-      await queue.complete(opp.id, { notes: result.notes, claimToken }).catch(() => {});
-      return finalize(run, t0, result.patch);
+      try {
+        const result = await this._handleInternalLinksAction(brief, run);
+        await queue.complete(opp.id, { notes: result.notes, claimToken }).catch(() => {});
+        return finalize(run, t0, result.patch);
+      } catch (err) {
+        await queue.release(opp.id, { claimToken }).catch(() => {});
+        return finalize(run, t0, { outcome: 'failed', failure_message: `internal_links:${err.message}` });
+      }
     }
 
     if (brief.action_type === 'gbp_post') {
@@ -191,6 +197,9 @@ class AutonomousRunner {
     }
 
     const draft = dispatchResult.draft;
+    run.agent_id = dispatchResult.agent_id || null;
+    run.agent_session_id = dispatchResult.session_id || null;
+    run.draft_payload = draft || null;
     if (!draft) {
       await queue.skip(opp.id, 'agent_no_draft', { claimToken }).catch(() => {});
       return finalize(run, t0, { outcome: 'failed_agent', failure_message: 'no draft from agent' });
@@ -311,6 +320,45 @@ class AutonomousRunner {
 
   // ── internals ────────────────────────────────────────────────────
 
+  async _previewNext({ queue, minScore, t0 }) {
+    const run = {
+      claimed_at: new Date(t0),
+      shadow_mode: true,
+      outcome: 'skipped_no_opportunity',
+    };
+
+    const rows = await queue.peek({ limit: 1, minScore }).catch((err) => {
+      logger.warn(`[autonomous-runner] preview peek failed: ${err.message}`);
+      return [];
+    });
+    const opp = rows?.[0];
+    if (!opp) return finalize(run, t0, { outcome: 'skipped_no_opportunity' }, { persist: false });
+
+    run.opportunity_id = opp.id;
+    run.action_type = opp.action_type;
+
+    const briefBuilder = getBriefBuilder();
+    if (!briefBuilder) {
+      return finalize(run, t0, { outcome: 'failed', failure_message: 'brief-builder unavailable' }, { persist: false });
+    }
+
+    try {
+      const brief = await briefBuilder.compose(opp.id, { persist: false, skipSerp: true });
+      run.brief_id = brief.id || null;
+      run.page_type = brief.page_type;
+      run.action_type = brief.action_type || opp.action_type;
+      run.shadow_mode = isShadow(run.action_type);
+      return finalize(run, t0, {
+        outcome: brief.action_type === 'do_not_publish' ? 'skipped_gate_fail' : 'skipped_shadow_mode',
+        skip_reason: brief.action_type === 'do_not_publish'
+          ? (brief.human_review_reason || 'router_do_not_publish')
+          : 'dry_run_via_cli',
+      }, { persist: false });
+    } catch (err) {
+      return finalize(run, t0, { outcome: 'failed', failure_message: `brief_compose:${err.message}` }, { persist: false });
+    }
+  }
+
   async _loadSiblingPages(brief) {
     // For city-service and customer-question, load sibling pages
     // matching the service for Jaccard comparison. For now we read
@@ -366,17 +414,23 @@ class AutonomousRunner {
       { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },
       { corpus, opportunityId: run.opportunity_id }
     );
+    let insertedCount = 0;
     for (const task of tasks) {
-      await db('content_internal_link_tasks').insert(task).onConflict(['source_file', 'target_url', 'anchor_text']).ignore().catch(() => {});
+      const inserted = await db('content_internal_link_tasks')
+        .insert(task)
+        .onConflict(['source_file', 'target_url', 'anchor_text'])
+        .ignore()
+        .returning('id');
+      insertedCount += Array.isArray(inserted) ? inserted.length : (inserted ? 1 : 0);
     }
     run.link_plan_ms = Date.now() - t;
     return {
-      notes: `internal_links_queued:${tasks.length}`,
+      notes: `internal_links_queued:${insertedCount}`,
       patch: {
         outcome: 'completed_pending_review',
         skip_reason: 'internal_links_queued',
-        link_tasks_queued: tasks.length,
-        reviewer_notes: `Queued ${tasks.length} internal-link task(s) for manual/apply review.`,
+        link_tasks_queued: insertedCount,
+        reviewer_notes: `Queued ${insertedCount} internal-link task(s) for manual/apply review.`,
       },
     };
   }
@@ -467,8 +521,9 @@ class AutonomousRunner {
 
 // ── finalize: persist autonomous_runs row + return it ───────────────
 
-async function finalize(run, t0, patch) {
+async function finalize(run, t0, patch, { persist = true } = {}) {
   Object.assign(run, patch, { total_ms: Date.now() - t0, completed_at: new Date() });
+  if (!persist) return run;
   try {
     const [persisted] = await db('autonomous_runs').insert({
       opportunity_id: run.opportunity_id || null,
@@ -490,6 +545,9 @@ async function finalize(run, t0, patch) {
       failure_message: run.failure_message || null,
       uniqueness_gate_result: JSON.stringify(run.uniqueness_gate_result || {}),
       quality_gate_result: JSON.stringify(run.quality_gate_result || {}),
+      draft_payload: JSON.stringify(run.draft_payload || {}),
+      agent_id: run.agent_id || null,
+      agent_session_id: run.agent_session_id || null,
       trust_build_count_after: run.trust_build_count_after || 0,
       published_url: run.published_url || null,
       astro_pr_url: run.astro_pr_url || null,

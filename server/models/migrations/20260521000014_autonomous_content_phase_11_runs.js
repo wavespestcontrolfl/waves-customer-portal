@@ -49,6 +49,9 @@ exports.up = async function (knex) {
     // Gate snapshot — what each gate returned.
     t.jsonb('uniqueness_gate_result').notNullable().defaultTo('{}');
     t.jsonb('quality_gate_result').notNullable().defaultTo('{}');
+    t.jsonb('draft_payload').notNullable().defaultTo('{}');
+    t.string('agent_id', 120);
+    t.string('agent_session_id', 120);
 
     // Trust-build accounting. completed_published rows count
     // automatically; completed_pending_review rows count only after

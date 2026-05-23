@@ -132,10 +132,10 @@ function loadRunnerWith({ queue, briefBuilder, dispatcher = {} }) {
 }
 
 describe('runNext dry-run behavior', () => {
-  test('releases claimed opportunity and does not call dispatcher setup checks', async () => {
-    const claimedAt = new Date('2026-05-23T04:00:00Z');
+  test('previews with peek and does not claim, release, or call dispatcher setup checks', async () => {
     const queue = {
-      claimNext: jest.fn().mockResolvedValue({ id: 'opp_1', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
+      peek: jest.fn().mockResolvedValue([{ id: 'opp_1', action_type: 'new_supporting_blog' }]),
+      claimNext: jest.fn().mockResolvedValue(null),
       release: jest.fn().mockResolvedValue(),
       skip: jest.fn().mockResolvedValue(),
       complete: jest.fn().mockResolvedValue(),
@@ -157,16 +157,19 @@ describe('runNext dry-run behavior', () => {
     expect(result.outcome).toBe('skipped_shadow_mode');
     expect(result.skip_reason).toBe('dry_run_via_cli');
     expect(result.action_type).toBe('create_or_refresh_city_service_page');
+    expect(queue.peek).toHaveBeenCalledWith({ limit: 1, minScore: expect.any(Number) });
+    expect(briefBuilder.compose).toHaveBeenCalledWith('opp_1', { persist: false, skipSerp: true });
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
-    expect(queue.release).toHaveBeenCalledWith('opp_1', { claimToken: claimedAt });
+    expect(queue.claimNext).not.toHaveBeenCalled();
+    expect(queue.release).not.toHaveBeenCalled();
     expect(queue.skip).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
   });
 
-  test('releases do_not_publish dry-runs instead of permanently skipping queue item', async () => {
-    const claimedAt = new Date('2026-05-23T04:05:00Z');
+  test('do_not_publish dry-runs do not permanently skip queue item', async () => {
     const queue = {
-      claimNext: jest.fn().mockResolvedValue({ id: 'opp_2', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
+      peek: jest.fn().mockResolvedValue([{ id: 'opp_2', action_type: 'new_supporting_blog' }]),
+      claimNext: jest.fn().mockResolvedValue(null),
       release: jest.fn().mockResolvedValue(),
       skip: jest.fn().mockResolvedValue(),
       complete: jest.fn().mockResolvedValue(),
@@ -184,7 +187,8 @@ describe('runNext dry-run behavior', () => {
 
     expect(result.outcome).toBe('skipped_gate_fail');
     expect(result.skip_reason).toBe('router_public_health');
-    expect(queue.release).toHaveBeenCalledWith('opp_2', { claimToken: claimedAt });
+    expect(queue.claimNext).not.toHaveBeenCalled();
+    expect(queue.release).not.toHaveBeenCalled();
     expect(queue.skip).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
   });
