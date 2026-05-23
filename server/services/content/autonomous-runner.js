@@ -105,11 +105,12 @@ class AutonomousRunner {
     run.opportunity_id = opp.id;
     run.action_type = opp.action_type;
     run.shadow_mode = isShadow(opp.action_type);
+    const claimToken = opp.claimed_at;
 
     // 2. Compose brief.
     const briefBuilder = getBriefBuilder();
     if (!briefBuilder) {
-      await queue.release(opp.id);
+      await queue.release(opp.id, { claimToken });
       return finalize(run, t0, { outcome: 'failed', failure_message: 'brief-builder unavailable' });
     }
     const t2 = Date.now();
@@ -117,18 +118,20 @@ class AutonomousRunner {
     try {
       brief = await briefBuilder.compose(opp.id, { persist: !dryRun, skipSerp: false });
     } catch (err) {
-      if (dryRun) await queue.release(opp.id).catch(() => {});
-      else await queue.skip(opp.id, `brief_compose_failed:${err.message}`).catch(() => {});
+      if (dryRun) await queue.release(opp.id, { claimToken }).catch(() => {});
+      else await queue.skip(opp.id, `brief_compose_failed:${err.message}`, { claimToken }).catch(() => {});
       return finalize(run, t0, { outcome: 'failed', failure_message: `brief_compose:${err.message}` });
     }
     run.brief_ms = Date.now() - t2;
     run.brief_id = brief.id || null;
     run.page_type = brief.page_type;
+    run.action_type = brief.action_type || opp.action_type;
+    run.shadow_mode = isShadow(run.action_type);
 
     // 2a. Router blocked the action — record + skip.
     if (brief.action_type === 'do_not_publish') {
-      if (dryRun) await queue.release(opp.id).catch(() => {});
-      else await queue.skip(opp.id, brief.human_review_reason || 'router_do_not_publish').catch(() => {});
+      if (dryRun) await queue.release(opp.id, { claimToken }).catch(() => {});
+      else await queue.skip(opp.id, brief.human_review_reason || 'router_do_not_publish', { claimToken }).catch(() => {});
       return finalize(run, t0, {
         outcome: 'skipped_gate_fail',
         skip_reason: brief.human_review_reason || 'router_do_not_publish',
@@ -136,17 +139,32 @@ class AutonomousRunner {
     }
 
     if (dryRun) {
-      await queue.release(opp.id).catch(() => {});
+      await queue.release(opp.id, { claimToken }).catch(() => {});
       return finalize(run, t0, {
         outcome: 'skipped_shadow_mode',
         skip_reason: 'dry_run_via_cli',
       });
     }
 
+    if (brief.action_type === 'add_internal_links') {
+      const result = await this._handleInternalLinksAction(brief, run);
+      await queue.complete(opp.id, { notes: result.notes, claimToken }).catch(() => {});
+      return finalize(run, t0, result.patch);
+    }
+
+    if (brief.action_type === 'gbp_post') {
+      await queue.complete(opp.id, { notes: 'pending_review:gbp_post_not_implemented', claimToken }).catch(() => {});
+      return finalize(run, t0, {
+        outcome: 'completed_pending_review',
+        skip_reason: 'gbp_post_not_implemented',
+        reviewer_notes: 'GBP post distribution handler is not wired yet; route this opportunity manually.',
+      });
+    }
+
     // 3. Dispatch agent — unless dryRun.
     const dispatcher = getDispatcher();
     if (!dispatcher) {
-      await queue.release(opp.id);
+      await queue.release(opp.id, { claimToken });
       return finalize(run, t0, { outcome: 'failed', failure_message: 'agent-dispatcher unavailable' });
     }
     const t3 = Date.now();
@@ -157,7 +175,7 @@ class AutonomousRunner {
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
-        await queue.release(opp.id).catch(() => {});
+        await queue.release(opp.id, { claimToken }).catch(() => {});
         // Defensive dryRun short-circuit — finalize as if shadow_mode skipped.
         return finalize(run, t0, {
           outcome: 'skipped_shadow_mode',
@@ -165,7 +183,7 @@ class AutonomousRunner {
         });
       }
       // No release — agent failures shouldn't loop the same opp.
-      await queue.skip(opp.id, `agent_${dispatchResult.reason}`).catch(() => {});
+      await queue.skip(opp.id, `agent_${dispatchResult.reason}`, { claimToken }).catch(() => {});
       return finalize(run, t0, {
         outcome: 'failed_agent',
         failure_message: dispatchResult.reason,
@@ -174,8 +192,17 @@ class AutonomousRunner {
 
     const draft = dispatchResult.draft;
     if (!draft) {
-      await queue.skip(opp.id, 'agent_no_draft').catch(() => {});
+      await queue.skip(opp.id, 'agent_no_draft', { claimToken }).catch(() => {});
       return finalize(run, t0, { outcome: 'failed_agent', failure_message: 'no draft from agent' });
+    }
+
+    if (brief.action_type === 'rewrite_title_meta') {
+      await queue.complete(opp.id, { notes: 'pending_review:metadata_requires_existing_page_hydration', claimToken }).catch(() => {});
+      return finalize(run, t0, {
+        outcome: 'completed_pending_review',
+        skip_reason: 'metadata_requires_existing_page_hydration',
+        reviewer_notes: 'Metadata-only agent output must be hydrated with the existing page before gates/publish; route manually until that adapter is wired.',
+      });
     }
 
     // 4. Uniqueness gate (only applies to certain page types).
@@ -224,7 +251,7 @@ class AutonomousRunner {
     if (dryRun || run.shadow_mode) {
       // Shadow / dry: never publish. Record what would have happened.
       const wouldPublish = gatesPass && trustBuildSatisfied && !brief.human_review_required;
-      await queue.complete(opp.id, { notes: `shadow_${wouldPublish ? 'would_publish' : 'would_gate'}` }).catch(() => {});
+      await queue.complete(opp.id, { notes: `shadow_${wouldPublish ? 'would_publish' : 'would_gate'}`, claimToken }).catch(() => {});
       return finalize(run, t0, {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
@@ -235,7 +262,7 @@ class AutonomousRunner {
       const reason = !gatesPass ? 'gate_fail'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
-      await queue.complete(opp.id, { notes: `pending_review:${reason}` }).catch(() => {});
+      await queue.complete(opp.id, { notes: `pending_review:${reason}`, claimToken }).catch(() => {});
       return finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: reason,
@@ -247,10 +274,10 @@ class AutonomousRunner {
     try {
       const publishOutcome = await this._publishAndDistribute(draft, brief, run);
       Object.assign(run, publishOutcome);
-      await queue.complete(opp.id, { notes: `published:${publishOutcome.published_url || 'unknown'}` }).catch(() => {});
+      await queue.complete(opp.id, { notes: `published:${publishOutcome.published_url || 'unknown'}`, claimToken }).catch(() => {});
       return finalize(run, t0, { outcome: 'completed_published' });
     } catch (err) {
-      await queue.release(opp.id).catch(() => {}); // let next run retry
+      await queue.release(opp.id, { claimToken }).catch(() => {}); // let next run retry
       return finalize(run, t0, {
         outcome: 'failed_publish',
         failure_message: err.message,
@@ -295,9 +322,51 @@ class AutonomousRunner {
         .where('action_type', actionType)
         .where('shadow_mode', false)
         .whereIn('outcome', ['completed_published', 'completed_pending_review'])
-        .select('outcome', 'skip_reason');
+        .select('outcome', 'trust_build_approved_at');
       return (rows || []).filter(countsTowardTrustBuild).length;
     } catch { return 0; }
+  }
+
+  async _handleInternalLinksAction(brief, run) {
+    if (run.shadow_mode) {
+      return {
+        notes: 'shadow_internal_links',
+        patch: { outcome: 'skipped_shadow_mode', skip_reason: 'shadow_internal_links' },
+      };
+    }
+
+    const planner = getLinkPlanner();
+    if (!planner?.planForTarget) {
+      return {
+        notes: 'pending_review:internal_link_planner_unavailable',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'internal_link_planner_unavailable',
+          reviewer_notes: 'Internal-link planner module was unavailable; route manually.',
+        },
+      };
+    }
+
+    const t = Date.now();
+    const astroDir = process.env.ASTRO_REPO_DIR;
+    const corpus = astroDir && planner.loadAstroCorpus ? planner.loadAstroCorpus(astroDir) : [];
+    const tasks = planner.planForTarget(
+      { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },
+      { corpus, opportunityId: run.opportunity_id }
+    );
+    for (const task of tasks) {
+      await db('content_internal_link_tasks').insert(task).onConflict(['source_file', 'target_url', 'anchor_text']).ignore().catch(() => {});
+    }
+    run.link_plan_ms = Date.now() - t;
+    return {
+      notes: `internal_links_queued:${tasks.length}`,
+      patch: {
+        outcome: 'completed_pending_review',
+        skip_reason: 'internal_links_queued',
+        link_tasks_queued: tasks.length,
+        reviewer_notes: `Queued ${tasks.length} internal-link task(s) for manual/apply review.`,
+      },
+    };
   }
 
   async _publishAndDistribute(draft, brief, run) {
@@ -315,12 +384,8 @@ class AutonomousRunner {
       const r = await publisher.publishOrUpdatePage(draft, brief);
       out.published_url = r?.url || draft.url || null;
       out.astro_pr_url = r?.pr_url || null;
-    } else if (publisher?.publishAstro) {
-      // Legacy interface — best-effort; publishAstro takes a blog_post id.
-      // For new actions we don't have that yet. Skip with a log.
-      logger.info('[autonomous-runner] publishAstro path skipped — needs Step 11.5 wiring for content_briefs → blog_posts shim');
     } else {
-      throw new Error('astro-publisher unavailable');
+      throw new Error('astro-publisher draft/brief adapter unavailable');
     }
     run.publish_ms = Date.now() - t1;
 
@@ -427,8 +492,7 @@ async function finalize(run, t0, patch) {
 
 function countsTowardTrustBuild(row) {
   if (row?.outcome === 'completed_published') return true;
-  return row?.outcome === 'completed_pending_review'
-    && /^trust_build_\d+_of_\d+$/.test(String(row.skip_reason || ''));
+  return row?.outcome === 'completed_pending_review' && !!row.trust_build_approved_at;
 }
 
 module.exports = new AutonomousRunner();

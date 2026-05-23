@@ -50,8 +50,12 @@ exports.up = async function (knex) {
     t.jsonb('uniqueness_gate_result').notNullable().defaultTo('{}');
     t.jsonb('quality_gate_result').notNullable().defaultTo('{}');
 
-    // Trust-build accounting (counted only for completed_published).
+    // Trust-build accounting. completed_published rows count
+    // automatically; completed_pending_review rows count only after
+    // explicit human approval is recorded here.
     t.integer('trust_build_count_after').notNullable().defaultTo(0);
+    t.timestamp('trust_build_approved_at');
+    t.string('trust_build_approved_by', 100);
 
     // Publication artifacts (when applicable).
     t.string('published_url', 500);

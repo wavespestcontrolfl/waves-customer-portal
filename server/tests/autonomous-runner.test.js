@@ -68,17 +68,18 @@ describe('TRUST_BUILD_THRESHOLD default', () => {
 });
 
 describe('countsTowardTrustBuild', () => {
-  test('counts published live runs and trust-build pending-review runs', () => {
+  test('counts published live runs and explicitly approved pending-review runs', () => {
     expect(countsTowardTrustBuild({ outcome: 'completed_published' })).toBe(true);
     expect(countsTowardTrustBuild({
       outcome: 'completed_pending_review',
-      skip_reason: 'trust_build_2_of_3',
+      trust_build_approved_at: new Date(),
     })).toBe(true);
   });
-  test('does not count unrelated pending-review rows or shadow/gate failures', () => {
+  test('does not count unapproved pending-review rows or failures', () => {
     expect(countsTowardTrustBuild({
       outcome: 'completed_pending_review',
-      skip_reason: 'gate_fail',
+      skip_reason: 'trust_build_2_of_3',
+      trust_build_approved_at: null,
     })).toBe(false);
     expect(countsTowardTrustBuild({
       outcome: 'completed_pending_review',
@@ -132,8 +133,9 @@ function loadRunnerWith({ queue, briefBuilder, dispatcher = {} }) {
 
 describe('runNext dry-run behavior', () => {
   test('releases claimed opportunity and does not call dispatcher setup checks', async () => {
+    const claimedAt = new Date('2026-05-23T04:00:00Z');
     const queue = {
-      claimNext: jest.fn().mockResolvedValue({ id: 'opp_1', action_type: 'new_supporting_blog' }),
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_1', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
       release: jest.fn().mockResolvedValue(),
       skip: jest.fn().mockResolvedValue(),
       complete: jest.fn().mockResolvedValue(),
@@ -141,8 +143,8 @@ describe('runNext dry-run behavior', () => {
     const briefBuilder = {
       compose: jest.fn().mockResolvedValue({
         id: 'brief_1',
-        action_type: 'new_supporting_blog',
-        page_type: 'supporting-blog',
+        action_type: 'create_or_refresh_city_service_page',
+        page_type: 'city-service',
       }),
     };
     const dispatcher = {
@@ -154,15 +156,17 @@ describe('runNext dry-run behavior', () => {
 
     expect(result.outcome).toBe('skipped_shadow_mode');
     expect(result.skip_reason).toBe('dry_run_via_cli');
+    expect(result.action_type).toBe('create_or_refresh_city_service_page');
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
-    expect(queue.release).toHaveBeenCalledWith('opp_1');
+    expect(queue.release).toHaveBeenCalledWith('opp_1', { claimToken: claimedAt });
     expect(queue.skip).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
   });
 
   test('releases do_not_publish dry-runs instead of permanently skipping queue item', async () => {
+    const claimedAt = new Date('2026-05-23T04:05:00Z');
     const queue = {
-      claimNext: jest.fn().mockResolvedValue({ id: 'opp_2', action_type: 'new_supporting_blog' }),
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_2', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
       release: jest.fn().mockResolvedValue(),
       skip: jest.fn().mockResolvedValue(),
       complete: jest.fn().mockResolvedValue(),
@@ -180,7 +184,7 @@ describe('runNext dry-run behavior', () => {
 
     expect(result.outcome).toBe('skipped_gate_fail');
     expect(result.skip_reason).toBe('router_public_health');
-    expect(queue.release).toHaveBeenCalledWith('opp_2');
+    expect(queue.release).toHaveBeenCalledWith('opp_2', { claimToken: claimedAt });
     expect(queue.skip).not.toHaveBeenCalled();
     expect(queue.complete).not.toHaveBeenCalled();
   });
