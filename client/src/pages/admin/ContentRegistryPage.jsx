@@ -49,6 +49,16 @@ const STATUS_TONE = {
   matched: "green",
 };
 
+const LIVE_TONE = {
+  live: "green",
+  redirected: "blue",
+  canonicalized: "blue",
+  noindex: "amber",
+  missing: "red",
+  error: "red",
+  blocked: "amber",
+};
+
 function labelize(value) {
   return String(value || "unknown")
     .replace(/_/g, " ")
@@ -144,11 +154,12 @@ function Field({ label, value, mono = false }) {
   );
 }
 
-function buildQuery({ status, contentType, source, search }) {
+function buildQuery({ status, contentType, source, liveStatus, search }) {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (contentType) params.set("content_type", contentType);
   if (source) params.set("source", source);
+  if (liveStatus) params.set("live_status", liveStatus);
   if (search.trim()) params.set("search", search.trim());
   params.set("limit", "100");
   return `/admin/content-registry?${params.toString()}`;
@@ -159,6 +170,7 @@ export default function ContentRegistryPage() {
   const [status, setStatus] = useState("");
   const [contentType, setContentType] = useState("");
   const [source, setSource] = useState("");
+  const [liveStatus, setLiveStatus] = useState("");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -168,7 +180,7 @@ export default function ContentRegistryPage() {
     setLoading(true);
     setError("");
     try {
-      const next = await adminFetch(buildQuery({ status, contentType, source, search }));
+      const next = await adminFetch(buildQuery({ status, contentType, source, liveStatus, search }));
       setData(next);
       setSelectedId((current) => (
         next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null
@@ -178,7 +190,7 @@ export default function ContentRegistryPage() {
     } finally {
       setLoading(false);
     }
-  }, [status, contentType, source, search]);
+  }, [status, contentType, source, liveStatus, search]);
 
   useEffect(() => {
     const timer = setTimeout(load, 250);
@@ -194,6 +206,7 @@ export default function ContentRegistryPage() {
   ), [counts]);
   const contentTypes = Object.keys(data?.facets?.content_type || {}).sort();
   const sources = Object.keys(data?.facets?.source || {}).sort();
+  const liveStatuses = Object.keys(data?.facets?.live_status || {}).sort();
   const selectedHref = liveHref(selected);
   const mismatchReasons = arrayValue(selected?.mismatch_reasons);
 
@@ -247,6 +260,14 @@ export default function ContentRegistryPage() {
           >
             <option value="">All sources</option>
             {sources.map((item) => <option key={item} value={item}>{labelize(item)}</option>)}
+          </select>
+          <select
+            value={liveStatus}
+            onChange={(e) => setLiveStatus(e.target.value)}
+            style={{ minHeight: 40, border: `1px solid ${D.border}`, borderRadius: 6, background: "#FAFAFA", color: D.text, padding: "0 10px", fontSize: 13 }}
+          >
+            <option value="">All live statuses</option>
+            {liveStatuses.map((item) => <option key={item} value={item}>{labelize(item)}</option>)}
           </select>
         </div>
         <div style={{ borderTop: `1px solid ${D.border}`, padding: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -310,7 +331,7 @@ export default function ContentRegistryPage() {
                             <Chip tone={item.db_status === "present" ? "green" : item.db_status === "missing" ? "amber" : "neutral"}>DB {labelize(item.db_status)}</Chip>
                           </div>
                         </td>
-                        <td style={cellStyle}><Chip tone={item.live_status === "live" ? "green" : "neutral"}>{labelize(item.live_status)}</Chip></td>
+                        <td style={cellStyle}><Chip tone={LIVE_TONE[item.live_status] || "neutral"}>{labelize(item.live_status)}</Chip></td>
                         <td style={{ ...cellStyle, color: D.muted, fontSize: 12 }}>{formatDate(item.last_synced_at)}</td>
                       </tr>
                     );
@@ -334,6 +355,7 @@ export default function ContentRegistryPage() {
                 <div style={{ color: D.heading, fontSize: 18, lineHeight: 1.25, fontWeight: 850 }}>{selected.title || selected.slug || "Untitled"}</div>
                 <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
                   <Chip tone={STATUS_TONE[selected.reconciliation_status]}>{labelize(selected.reconciliation_status)}</Chip>
+                  <Chip tone={LIVE_TONE[selected.live_status] || "neutral"}>{labelize(selected.live_status)}</Chip>
                   <Chip>{labelize(selected.workflow_status)}</Chip>
                   {selected.noindex_detected && <Chip tone="amber">Noindex</Chip>}
                   {selected.match_confidence && <Chip tone="blue">{labelize(selected.match_confidence)}</Chip>}
@@ -355,6 +377,10 @@ export default function ContentRegistryPage() {
               <div style={{ display: "grid", gap: 12 }}>
                 <Field label="Canonical URL" value={selected.canonical_url_normalized || selected.canonical_url} mono />
                 <Field label="Live URL" value={selected.live_url} mono />
+                <Field label="HTTP / Live Status" value={[selected.http_status, labelize(selected.live_status)].filter(Boolean).join(" / ")} mono />
+                <Field label="Redirect Target" value={selected.redirect_target_url} mono />
+                <Field label="Canonical Target" value={selected.canonical_target_url} mono />
+                <Field label="Sitemap" value={[labelize(selected.sitemap_status), selected.sitemap_present === true ? "present" : selected.sitemap_present === false ? "missing" : null].filter(Boolean).join(" / ")} />
                 <Field label="Astro Source" value={selected.astro_source_path} mono />
                 <Field label="DB Blog ID" value={selected.db_blog_id} mono />
                 <Field label="Target Keyword" value={selected.target_keyword} />

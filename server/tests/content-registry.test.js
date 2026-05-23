@@ -307,6 +307,97 @@ describe('content-registry reconciliation', () => {
     }).rows[0].reconciliation_status).toBe('db_changed_since_sync');
   });
 
+  test('preserves live-check mirror fields across registry syncs for the same URL', () => {
+    const astroItems = [{
+      canonical_url_normalized: '/same-url/',
+      live_url: 'https://www.wavespestcontrol.com/same-url/',
+      slug: 'same-url',
+      astro_source_path: 'src/content/blog/same-url.md',
+      content_type: 'blog',
+      astro_status: 'present',
+      astro_file_hash: 'same',
+    }];
+    const previousRows = [{
+      astro_source_path: 'src/content/blog/same-url.md',
+      canonical_url_normalized: '/same-url/',
+      live_url: 'https://www.wavespestcontrol.com/same-url/',
+      http_status: '301',
+      live_status: 'redirected',
+      redirect_target_url: 'https://www.wavespestcontrol.com/canonical-url/',
+      canonical_target_url: 'https://www.wavespestcontrol.com/canonical-url/',
+      noindex_detected: false,
+      sitemap_present: true,
+      sitemap_status: 'present',
+      astro_file_hash: 'same',
+    }];
+
+    const row = registry.reconcileContent({ astroItems, previousRows }).rows[0];
+    expect(row).toEqual(expect.objectContaining({
+      http_status: '301',
+      live_status: 'redirected',
+      redirect_target_url: 'https://www.wavespestcontrol.com/canonical-url/',
+      canonical_target_url: 'https://www.wavespestcontrol.com/canonical-url/',
+      sitemap_present: true,
+      sitemap_status: 'present',
+    }));
+  });
+
+  test('does not preserve live-check mirror fields after target URL changes', () => {
+    const row = registry.reconcileContent({
+      astroItems: [{
+        canonical_url_normalized: '/new-url/',
+        live_url: 'https://www.wavespestcontrol.com/new-url/',
+        slug: 'new-url',
+        astro_source_path: 'src/content/blog/post.md',
+        content_type: 'blog',
+        astro_status: 'present',
+      }],
+      previousRows: [{
+        astro_source_path: 'src/content/blog/post.md',
+        canonical_url_normalized: '/old-url/',
+        live_url: 'https://www.wavespestcontrol.com/old-url/',
+        http_status: '301',
+        live_status: 'redirected',
+        sitemap_present: true,
+      }],
+    }).rows[0];
+
+    expect(row.http_status).toBe('unknown');
+    expect(row.live_status).toBe('unknown');
+    expect(row.sitemap_present).toBeNull();
+  });
+
+  test('does not preserve live-check mirror fields when URL is gained or lost', () => {
+    const gained = registry.preserveLiveMirrorFields(
+      { canonical_url_normalized: '/new-url/', astro_source_path: 'src/content/blog/post.md' },
+      {
+        byAstroPath: new Map([['src/content/blog/post.md', {
+          astro_source_path: 'src/content/blog/post.md',
+          http_status: '200',
+          live_status: 'live',
+        }]]),
+        byDbId: new Map(),
+      },
+    );
+    const lost = registry.preserveLiveMirrorFields(
+      { astro_source_path: 'src/content/blog/post.md' },
+      {
+        byAstroPath: new Map([['src/content/blog/post.md', {
+          astro_source_path: 'src/content/blog/post.md',
+          canonical_url_normalized: '/old-url/',
+          http_status: '200',
+          live_status: 'live',
+        }]]),
+        byDbId: new Map(),
+      },
+    );
+
+    expect(gained.http_status).toBeUndefined();
+    expect(gained.live_status).toBeUndefined();
+    expect(lost.http_status).toBeUndefined();
+    expect(lost.live_status).toBeUndefined();
+  });
+
   test('repeated reconciliation without previous changes is stable', () => {
     const astroItems = [{ canonical_url_normalized: '/stable/', slug: 'stable', astro_source_path: 'src/content/blog/stable.md', content_type: 'blog', astro_status: 'present', astro_file_hash: 'same' }];
     const first = registry.reconcileContent({ astroItems, dbItems: [] });
