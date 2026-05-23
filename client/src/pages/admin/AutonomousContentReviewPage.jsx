@@ -50,6 +50,7 @@ function formatDate(value) {
   if (!value) return "—";
   try {
     return new Date(value).toLocaleString(undefined, {
+      timeZone: "America/New_York",
       month: "short",
       day: "numeric",
       hour: "numeric",
@@ -99,8 +100,8 @@ function Kpi({ label, value, tone }) {
 
 function gateTone(summary) {
   if (!summary) return "neutral";
-  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false) return "red";
-  if ((summary.soft_failures || []).length > 0 || summary.uniqueness_ok === false) return "amber";
+  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false) return "red";
+  if ((summary.soft_failures || []).length > 0) return "amber";
   return "green";
 }
 
@@ -149,6 +150,7 @@ export default function AutonomousContentReviewPage() {
   const gateSummary = selected?.run?.gate_summary;
   const hardFailures = gateSummary?.hard_failures || [];
   const softFailures = gateSummary?.soft_failures || [];
+  const uniquenessFailures = gateSummary?.uniqueness_failures || [];
   const pendingCount = counts.pending_review || 0;
   const shadowCount = useMemo(() => items.filter((item) => item.run?.shadow_mode).length, [items]);
 
@@ -211,7 +213,7 @@ export default function AutonomousContentReviewPage() {
                         <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, verticalAlign: "top" }}><Chip>{item.action_type}</Chip></td>
                         <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, fontFamily: MONO, fontSize: 13 }}>{item.final_score ?? item.score ?? "—"}</td>
                         <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}` }}>
-                          <Chip tone={gateTone(summary)}>{summary?.quality_ok === true ? "Passed" : "Review"}</Chip>
+                          <Chip tone={gateTone(summary)}>{summary?.quality_ok === true && summary?.uniqueness_ok !== false ? "Passed" : "Review"}</Chip>
                         </td>
                         <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.text, fontSize: 12 }}>{item.skip_reason || "—"}</td>
                         <td style={{ padding: "12px", borderBottom: `1px solid ${D.border}`, color: D.muted, fontSize: 12 }}>{formatDate(item.updated_at || item.completed_at)}</td>
@@ -251,7 +253,7 @@ export default function AutonomousContentReviewPage() {
 
               <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 800, color: D.heading, marginBottom: 8 }}>
-                  {hardFailures.length === 0 ? <CheckCircle2 size={16} color={D.green} /> : <AlertTriangle size={16} color={D.red} />}
+                  {hardFailures.length === 0 && uniquenessFailures.length === 0 ? <CheckCircle2 size={16} color={D.green} /> : <AlertTriangle size={16} color={D.red} />}
                   Gate Summary
                 </div>
                 <div style={{ fontSize: 12, color: D.text, lineHeight: 1.6 }}>
@@ -260,6 +262,8 @@ export default function AutonomousContentReviewPage() {
                   Hard: {hardFailures.length ? hardFailures.join(", ") : "none"}
                   <br />
                   Soft: {softFailures.length ? softFailures.join(", ") : "none"}
+                  <br />
+                  Uniqueness: {uniquenessFailures.length ? uniquenessFailures.join(", ") : (gateSummary?.uniqueness_ok === false ? "failed" : "none")}
                 </div>
               </div>
 
