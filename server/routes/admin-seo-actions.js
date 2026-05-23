@@ -191,7 +191,8 @@ router.post('/generate-drafts', requireAdmin, async (req, res) => {
 // POST /auto-approve
 router.post('/auto-approve', requireAdmin, async (req, res) => {
   try {
-    const result = await SeoActionGenerator.autoApprove();
+    if (!req.body.domain) return res.status(400).json({ error: 'domain is required' });
+    const result = await SeoActionGenerator.autoApprove(req.body.domain);
     res.json(result);
   } catch (err) {
     logger.error('[seo-actions] auto-approve error', err);
@@ -202,7 +203,8 @@ router.post('/auto-approve', requireAdmin, async (req, res) => {
 // POST /auto-execute
 router.post('/auto-execute', requireAdmin, async (req, res) => {
   try {
-    const result = await SeoActionGenerator.autoExecute();
+    if (!req.body.domain) return res.status(400).json({ error: 'domain is required' });
+    const result = await SeoActionGenerator.autoExecute(req.body.domain);
     res.json(result);
   } catch (err) {
     logger.error('[seo-actions] auto-execute error', err);

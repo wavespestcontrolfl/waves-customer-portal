@@ -9,6 +9,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { extractDomain } = require('../../utils/normalize-url');
 
 const SEO_TOOLS = [
   {
@@ -1489,42 +1490,167 @@ async function seoExperimentResults(input) {
   };
 }
 
+async function claimSeoPipelineRun({ domain, idempotencyKey, requestedBy }) {
+  const key = String(idempotencyKey || '').trim();
+  if (!key) return { error: 'idempotencyKey is required to run SEO pipeline' };
+  const d = extractDomain(domain) || 'wavespestcontrol.com';
+
+  const existing = await db('seo_pipeline_runs').where({ idempotency_key: key }).first();
+  if (existing) return { claimed: false, run: existing };
+
+  try {
+    const [created] = await db('seo_pipeline_runs')
+      .insert({
+        idempotency_key: key,
+        domain: d,
+        status: 'running',
+        requested_by: requestedBy || null,
+        started_at: new Date(),
+      })
+      .returning('*');
+    return { claimed: true, run: created };
+  } catch (err) {
+    if (err.code === '23505') {
+      const replayed = await db('seo_pipeline_runs').where({ idempotency_key: key }).first();
+      if (replayed) return { claimed: false, run: replayed };
+    }
+    throw err;
+  }
+}
+
 async function runSeoPipeline(input, context = {}) {
   if (!context?.isAdmin) return { error: 'Admin access required to run SEO pipeline' };
   if (context?.confirmed !== true) return { error: 'Explicit confirmation is required to run SEO pipeline' };
-  const domain = input.domain || 'wavespestcontrol.com';
+  const domain = extractDomain(input.domain) || 'wavespestcontrol.com';
+  const idempotencyKey = input.idempotencyKey || input.idempotency_key;
+  const claim = await claimSeoPipelineRun({
+    domain,
+    idempotencyKey,
+    requestedBy: input.requestedBy || context.technicianId || null,
+  });
+  if (claim.error) return { error: claim.error };
+  if (!claim.claimed) {
+    return {
+      status: claim.run.status,
+      domain: claim.run.domain,
+      idempotencyKey,
+      deduped: true,
+      started_at: claim.run.started_at,
+      completed_at: claim.run.completed_at,
+      result: claim.run.result || null,
+    };
+  }
+
   // Call services directly instead of hitting the authenticated HTTP endpoint
   const runPipeline = async () => {
+    const steps = [];
     try {
       const SearchConsole = require('../seo/search-console-v2');
-      await SearchConsole.syncDailyData(7, domain);
-    } catch (e) { logger.warn(`[IB pipeline] GSC sync: ${e.message}`); }
+      const result = await SearchConsole.syncDailyData(7, domain);
+      steps.push({ step: 'gsc_sync', status: 'ok', result });
+    } catch (e) {
+      steps.push({ step: 'gsc_sync', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] GSC sync: ${e.message}`);
+    }
     try {
-      await UrlIntelligence.refreshDomain(domain);
-    } catch (e) { logger.warn(`[IB pipeline] refresh: ${e.message}`); }
+      const result = await UrlIntelligence.refreshDomain(domain);
+      steps.push({ step: 'url_intelligence_refresh', status: 'ok', result });
+    } catch (e) {
+      steps.push({ step: 'url_intelligence_refresh', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] refresh: ${e.message}`);
+    }
     try {
       const SitemapValidator = require('../seo/sitemap-validator');
-      await SitemapValidator.validateDomain(domain);
-    } catch (e) { logger.warn(`[IB pipeline] sitemap: ${e.message}`); }
+      const result = await SitemapValidator.validateDomain(domain);
+      steps.push({ step: 'sitemap_validation', status: 'ok', result });
+    } catch (e) {
+      steps.push({ step: 'sitemap_validation', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] sitemap: ${e.message}`);
+    }
     try {
-      await UrlIntelligence.buildDuplicateClusters(domain);
-    } catch (e) { logger.warn(`[IB pipeline] duplicates: ${e.message}`); }
+      const result = await UrlIntelligence.buildDuplicateClusters(domain);
+      steps.push({ step: 'duplicate_detection', status: 'ok', result });
+    } catch (e) {
+      steps.push({ step: 'duplicate_detection', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] duplicates: ${e.message}`);
+    }
     try {
-      await Promise.allSettled([
+      const [intentResult, linkResult] = await Promise.allSettled([
         UrlIntelligence.buildIntentMap(domain),
         UrlIntelligence.buildInternalLinkGraph(domain),
       ]);
-    } catch (e) { logger.warn(`[IB pipeline] intent/links: ${e.message}`); }
+      steps.push({
+        step: 'intent_map',
+        status: intentResult.status === 'fulfilled' ? 'ok' : 'failed',
+        result: intentResult.value,
+        error: intentResult.reason?.message,
+      });
+      steps.push({
+        step: 'internal_link_graph',
+        status: linkResult.status === 'fulfilled' ? 'ok' : 'failed',
+        result: linkResult.value,
+        error: linkResult.reason?.message,
+      });
+    } catch (e) {
+      steps.push({ step: 'intent_map_and_link_graph', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] intent/links: ${e.message}`);
+    }
+    try {
+      const Cannibalization = require('../seo/cannibalization');
+      const [cannibalResult, conflictResult] = await Promise.allSettled([
+        Cannibalization.detect(domain),
+        UrlIntelligence.detectCanonicalConflicts(),
+      ]);
+      steps.push({
+        step: 'cannibalization',
+        status: cannibalResult.status === 'fulfilled' ? 'ok' : 'failed',
+        result: cannibalResult.value,
+        error: cannibalResult.reason?.message,
+      });
+      steps.push({
+        step: 'canonical_conflicts',
+        status: conflictResult.status === 'fulfilled' ? 'ok' : 'failed',
+        result: conflictResult.value,
+        error: conflictResult.reason?.message,
+      });
+    } catch (e) {
+      steps.push({ step: 'cannibalization_and_conflicts', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] cannibal/conflicts: ${e.message}`);
+    }
     try {
       const SeoActionGenerator = require('../seo/seo-action-generator');
-      await SeoActionGenerator.generateActionsFromDiagnosis(domain);
-      await SeoActionGenerator.autoApprove();
-    } catch (e) { logger.warn(`[IB pipeline] actions: ${e.message}`); }
+      const diagnosisResult = await UrlIntelligence.refreshDiagnoses(domain);
+      steps.push({ step: 'diagnosis_refresh', status: 'ok', result: diagnosisResult });
+      const actionResult = await SeoActionGenerator.generateActionsFromDiagnosis(domain);
+      steps.push({ step: 'action_generation', status: 'ok', result: actionResult });
+      const approveResult = await SeoActionGenerator.autoApprove(domain);
+      steps.push({ step: 'auto_approve', status: 'ok', result: approveResult });
+    } catch (e) {
+      steps.push({ step: 'action_generation', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] actions: ${e.message}`);
+    }
+
+    await db('seo_pipeline_runs')
+      .where('id', claim.run.id)
+      .update({
+        status: steps.some((s) => s.status === 'failed') ? 'completed_with_errors' : 'completed',
+        completed_at: new Date(),
+        result: { steps },
+        updated_at: new Date(),
+      });
   };
-  runPipeline().catch((e) => logger.error(`[IB pipeline] fatal: ${e.message}`));
+  runPipeline().catch(async (e) => {
+    logger.error(`[IB pipeline] fatal: ${e.message}`);
+    await db('seo_pipeline_runs')
+      .where('id', claim.run.id)
+      .update({ status: 'failed', completed_at: new Date(), error: e.message, updated_at: new Date() })
+      .catch((err) => logger.warn(`[IB pipeline] failed to persist fatal status: ${err.message}`));
+  });
   return {
     status: 'started',
     domain,
+    idempotencyKey,
+    run_id: claim.run.id,
     message: `Full SEO pipeline started for ${domain}. Steps: GSC sync → URL Intelligence refresh → sitemap validation → duplicate detection → intent routing → link graph → action generation. Check the URL Intel dashboard in a few minutes for results.`,
   };
 }

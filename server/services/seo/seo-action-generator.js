@@ -101,47 +101,76 @@ class SeoActionGenerator {
     return { domain: d, actions_created: created, actions_skipped_dedup: skipped };
   }
 
-  async autoApprove() {
-    const updated = await db('seo_actions')
+  async autoApprove(domain = null) {
+    const d = domain ? extractDomain(domain) : null;
+    if (!d) return { error: 'domain is required for auto-approve', auto_approved: 0 };
+    let query = db('seo_actions')
       .where('status', 'open')
       .where('approval_tier', 'auto')
-      .where('approval_status', 'pending')
-      .update({
-        approval_status: 'approved',
-        approved_at: db.fn.now(),
-        executor: 'system',
-      });
+      .where('approval_status', 'pending');
+    if (d) query = query.where('domain', d);
 
-    logger.info(`[SeoActionGenerator] Auto-approved ${updated} actions`);
-    return { auto_approved: updated };
+    const updated = await query.update({
+      approval_status: 'approved',
+      approved_at: db.fn.now(),
+      executor: 'system',
+    });
+
+    logger.info(`[SeoActionGenerator] Auto-approved ${updated} actions${d ? ` for ${d}` : ''}`);
+    return { domain: d || 'all', auto_approved: updated };
   }
 
-  async autoExecute() {
-    const actions = await db('seo_actions')
+  async autoExecute(domain = null) {
+    const d = domain ? extractDomain(domain) : null;
+    if (!d) return { error: 'domain is required for auto-execute', auto_executed: 0, manual_required: 0, failed: 0 };
+    let query = db('seo_actions')
       .where('approval_status', 'approved')
       .where('execution_status', 'queued')
       .where('approval_tier', 'auto')
       .where('status', 'open');
+    if (d) query = query.where('domain', d);
+
+    const actions = await query;
 
     let executed = 0;
+    let skipped = 0;
+    let failed = 0;
     for (const action of actions) {
       try {
         let notes = '';
+        let done = false;
 
         if (action.action_type === 'submit_indexnow') {
-          try {
-            const IndexNow = require('./indexnow-submit');
-            await IndexNow.submit(action.url);
-            notes = 'IndexNow submission sent';
-          } catch (err) {
-            notes = `IndexNow failed: ${err.message}`;
+          const IndexNow = require('./indexnow-submit');
+          const result = await IndexNow.submit(action.url);
+          if (!result?.ok) {
+            const reason = result?.error || result?.status || 'IndexNow submission failed';
+            await db('seo_actions').where('id', action.id).update({
+              execution_status: 'failed',
+              started_at: db.fn.now(),
+              completed_at: db.fn.now(),
+              execution_notes: `IndexNow failed: ${reason}`,
+            });
+            failed++;
+            continue;
           }
+          notes = result.throttled ? 'IndexNow submission skipped: recently submitted' : 'IndexNow submission sent';
+          done = true;
         } else if (action.action_type === 'add_schema') {
           notes = 'Schema template changes require spoke repo deploy';
         } else if (action.action_type === 'add_internal_links') {
           notes = 'Internal link suggestions logged in seo_internal_link_graph';
         } else {
           notes = `Auto-execution not supported for ${action.action_type}`;
+        }
+
+        if (!done) {
+          await db('seo_actions').where('id', action.id).update({
+            execution_status: 'manual_required',
+            execution_notes: notes,
+          });
+          skipped++;
+          continue;
         }
 
         await db('seo_actions').where('id', action.id).update({
@@ -158,11 +187,12 @@ class SeoActionGenerator {
           execution_status: 'failed',
           execution_notes: err.message,
         });
+        failed++;
       }
     }
 
-    logger.info(`[SeoActionGenerator] Auto-executed ${executed} actions`);
-    return { auto_executed: executed };
+    logger.info(`[SeoActionGenerator] Auto-executed ${executed} actions${d ? ` for ${d}` : ''}`);
+    return { domain: d || 'all', auto_executed: executed, manual_required: skipped, failed };
   }
 
   async generateAIDrafts(actionIds) {

@@ -3865,7 +3865,7 @@ function ActionsTab({ domain }) {
         {canAdmin && subTab === "queue" && (
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <button onClick={() => adminPost("/admin/seo/actions/generate", { domain }).then(loadData)} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, background: D.heading, color: D.white, border: "none", cursor: "pointer" }}>Generate Actions</button>
-            <button onClick={() => adminPost("/admin/seo/actions/auto-approve", {}).then(loadData)} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, background: "transparent", color: D.text, border: `1px solid ${D.border}`, cursor: "pointer" }}>Auto-Approve</button>
+            <button onClick={() => adminPost("/admin/seo/actions/auto-approve", { domain }).then(loadData)} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, background: "transparent", color: D.text, border: `1px solid ${D.border}`, cursor: "pointer" }}>Auto-Approve</button>
           </div>
         )}
         {canAdmin && subTab === "drafts" && (

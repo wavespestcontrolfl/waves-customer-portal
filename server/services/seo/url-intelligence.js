@@ -156,6 +156,35 @@ async function promisePool(items, concurrency, fn) {
   return results;
 }
 
+function urlLookupVariants(rawUrl) {
+  const normalized = normalizeUrl(rawUrl);
+  if (!normalized) return [];
+  const withoutWww = normalized.replace(/^www\./, '');
+  const withWww = withoutWww ? `www.${withoutWww}` : normalized;
+  const bases = [...new Set([normalized, withoutWww, withWww].filter(Boolean))];
+  return [...new Set(bases.flatMap((u) => [
+    u,
+    `${u}/`,
+    `https://${u}`,
+    `https://${u}/`,
+    `http://${u}`,
+    `http://${u}/`,
+  ]))];
+}
+
+function applyDiagnosisFields(record, service) {
+  const primaryDiagnosis = service.diagnoseUrl(record);
+  const actionDef = DIAGNOSIS_TO_ACTION[primaryDiagnosis] || DIAGNOSIS_TO_ACTION.unknown;
+  return {
+    primary_diagnosis: primaryDiagnosis,
+    primary_status: DIAGNOSIS_TO_STATUS[primaryDiagnosis] || 'unknown',
+    priority_score: service.computePriorityScore({ ...record, primary_diagnosis: primaryDiagnosis }),
+    recommended_action: actionDef.action,
+    alternative_action: actionDef.alt,
+    approval_level: actionDef.approval,
+  };
+}
+
 class UrlIntelligence {
   // ── Pure functions ──────────────────────────────────────────────────
 
@@ -291,7 +320,7 @@ class UrlIntelligence {
     const pageType = classifyPageType(url);
 
     // Source tables may store URLs with scheme/www/trailing slash — try multiple forms
-    const urlVariants = [url, `https://${url}`, `https://${url}/`, `https://www.${url}`, `https://www.${url}/`];
+    const urlVariants = urlLookupVariants(url);
 
     // Fetch latest audit data
     const audit = await db('seo_page_audits')
@@ -320,7 +349,6 @@ class UrlIntelligence {
 
     // If no match on normalized URL, try with https://
     if (!gsc || !gsc.impressions) {
-      const fullUrl = `https://${url.startsWith('www.') ? '' : ''}${url}`;
       gsc = await db('gsc_pages')
         .where('page_url', 'like', `%${url}%`)
         .where('date', '>=', d28ago)
@@ -427,18 +455,7 @@ class UrlIntelligence {
       record.canonical_match = indexStatus.canonical_matches;
     }
 
-    // Diagnose
-    record.primary_diagnosis = this.diagnoseUrl(record);
-    record.primary_status = DIAGNOSIS_TO_STATUS[record.primary_diagnosis] || 'unknown';
-
-    // Priority score
-    record.priority_score = this.computePriorityScore(record);
-
-    // Recommended actions
-    const actionDef = DIAGNOSIS_TO_ACTION[record.primary_diagnosis] || DIAGNOSIS_TO_ACTION.unknown;
-    record.recommended_action = actionDef.action;
-    record.alternative_action = actionDef.alt;
-    record.approval_level = actionDef.approval;
+    Object.assign(record, applyDiagnosisFields(record, this));
 
     // Strip transient flags before upsert
     const { _has_decay_alerts, _has_cannibalization, ...upsertData } = record;
@@ -498,6 +515,42 @@ class UrlIntelligence {
       urls_total: urls.length,
       duration_ms: Date.now() - start,
     };
+  }
+
+  async refreshDiagnoses(domain) {
+    const d = extractDomain(domain) || 'wavespestcontrol.com';
+    const rows = await db('seo_url_intelligence').where('domain', d);
+    let updated = 0;
+
+    for (const row of rows) {
+      const [decayCount, cannibalCount] = await Promise.all([
+        db('seo_content_decay_alerts')
+          .where('url', row.url)
+          .where('status', 'open')
+          .count('id as count')
+          .first(),
+        db('seo_cannibalization_flags')
+          .whereRaw("urls::text LIKE ?", [`%${row.url}%`])
+          .where('status', 'open')
+          .count('id as count')
+          .first(),
+      ]);
+
+      const diagnosisRecord = {
+        ...row,
+        _has_decay_alerts: parseInt(decayCount?.count) > 0,
+        _has_cannibalization: parseInt(cannibalCount?.count) > 0,
+      };
+      const fields = applyDiagnosisFields(diagnosisRecord, this);
+
+      await db('seo_url_intelligence')
+        .where('id', row.id)
+        .update({ ...fields, last_refreshed_at: db.fn.now() });
+      updated++;
+    }
+
+    logger.info(`[UrlIntelligence] refreshDiagnoses ${d}: ${updated} URLs refreshed`);
+    return { domain: d, diagnoses_refreshed: updated };
   }
 
   // ── Query methods ───────────────────────────────────────────────────
@@ -708,8 +761,8 @@ class UrlIntelligence {
 
         // Fetch body text for Jaccard comparison
         const [auditA, auditB] = await Promise.all([
-          db('seo_page_audits').where('url', a.url).whereNotNull('body_text_5k').orderBy('audit_date', 'desc').first(),
-          db('seo_page_audits').where('url', b.url).whereNotNull('body_text_5k').orderBy('audit_date', 'desc').first(),
+          db('seo_page_audits').whereIn('url', urlLookupVariants(a.url)).whereNotNull('body_text_5k').orderBy('audit_date', 'desc').first(),
+          db('seo_page_audits').whereIn('url', urlLookupVariants(b.url)).whereNotNull('body_text_5k').orderBy('audit_date', 'desc').first(),
         ]);
 
         if (!auditA?.body_text_5k || !auditB?.body_text_5k) continue;

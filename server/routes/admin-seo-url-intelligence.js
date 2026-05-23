@@ -327,9 +327,11 @@ router.post('/run-pipeline', requireAdmin, async (req, res) => {
     logger.info(`[pipeline] Step 8/8: Generate actions for ${domain}`);
     try {
       const SeoActionGenerator = require('../services/seo/seo-action-generator');
+      const diagnosisResult = await UrlIntelligence.refreshDiagnoses(domain);
+      steps.push({ step: 'diagnosis_refresh', status: 'ok', ...diagnosisResult });
       const actionResult = await SeoActionGenerator.generateActionsFromDiagnosis(domain);
       steps.push({ step: 'action_generation', status: 'ok', ...actionResult });
-      const autoResult = await SeoActionGenerator.autoApprove();
+      const autoResult = await SeoActionGenerator.autoApprove(domain);
       steps.push({ step: 'auto_approve', status: 'ok', ...autoResult });
     } catch (err) {
       steps.push({ step: 'action_generation', status: 'failed', error: err.message });
