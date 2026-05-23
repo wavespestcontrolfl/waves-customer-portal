@@ -5,6 +5,7 @@ jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 const SiteAuditor = require('../services/seo/site-auditor');
 const SeoActionGenerator = require('../services/seo/seo-action-generator');
 const UrlIntelligence = require('../services/seo/url-intelligence');
+const db = require('../models/db');
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -16,6 +17,15 @@ afterEach(() => {
 });
 
 describe('SEO Command Center guards', () => {
+  test('site audit rejects unsupported target domains before server-side fetch setup', async () => {
+    db.mockClear();
+
+    await expect(SiteAuditor.runSiteAudit({ domain: 'https://127.0.0.1/admin' }))
+      .rejects
+      .toThrow(/Unsupported SEO audit domain/);
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('site audit counts requested spoke-domain links as internal', async () => {
     delete process.env.GOOGLE_API_KEY;
 
@@ -68,7 +78,7 @@ describe('SEO Command Center guards', () => {
   });
 
   test('SEO action dedupe keys hash normalized URLs instead of storing raw URL text', () => {
-    const { buildActionDedupeKey } = SeoActionGenerator._internals;
+    const { buildActionDedupeKey, buildLegacyActionDedupeKey } = SeoActionGenerator._internals;
     const longUrl = `https://www.wavespestcontrol.com/${'very-long-path-segment/'.repeat(20)}?utm_source=test`;
 
     const key = buildActionDedupeKey('refresh_content', longUrl);
@@ -77,5 +87,6 @@ describe('SEO Command Center guards', () => {
     expect(key.length).toBeLessThanOrEqual(140);
     expect(key).toBe(buildActionDedupeKey('refresh_content', longUrl.toUpperCase()));
     expect(key).not.toContain('very-long-path-segment');
+    expect(buildLegacyActionDedupeKey('refresh_content', longUrl)).toBe(`refresh_content:${longUrl}`);
   });
 });

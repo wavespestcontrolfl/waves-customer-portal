@@ -8,7 +8,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const crypto = require('crypto');
 const { etDateString } = require('../../utils/datetime-et');
-const { extractDomain } = require('../../utils/normalize-url');
+const { extractDomain, NETWORK_DOMAINS } = require('../../utils/normalize-url');
 
 const SITE_URL = process.env.WAVES_SITE_URL || 'https://www.wavespestcontrol.com';
 const CITIES = ['Bradenton', 'Sarasota', 'Lakewood Ranch', 'Venice', 'Parrish', 'North Port', 'Port Charlotte'];
@@ -17,6 +17,11 @@ const FL_PESTS = /palmetto bug|fire ant|chinch bug|ghost ant|german roach|subter
 const FL_CONTEXT = /southwest florida|swfl|gulf coast|rainy season|hurricane season|fdacs|florida department/i;
 const NAP_PHONE = /(941).*318.*7612|9413187612/;
 const NAP_NAME = /waves pest control/i;
+const EXTRA_AUDIT_DOMAINS = String(process.env.SEO_AUDIT_ALLOWED_DOMAINS || '')
+  .split(',')
+  .map((d) => extractDomain(d))
+  .filter(Boolean);
+const AUDIT_ALLOWED_DOMAINS = new Set([...NETWORK_DOMAINS, extractDomain(SITE_URL), ...EXTRA_AUDIT_DOMAINS].filter(Boolean));
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -25,6 +30,11 @@ function escapeRegExp(value) {
 function siteUrlForAudit(target) {
   const defaultDomain = extractDomain(SITE_URL) || 'wavespestcontrol.com';
   const domain = extractDomain(target) || defaultDomain;
+  if (!AUDIT_ALLOWED_DOMAINS.has(domain)) {
+    const err = new Error(`Unsupported SEO audit domain: ${domain}`);
+    err.status = 400;
+    throw err;
+  }
   const base = domain === defaultDomain ? SITE_URL : `https://${domain}`;
   return {
     domain,

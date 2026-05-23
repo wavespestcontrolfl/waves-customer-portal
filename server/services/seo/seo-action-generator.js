@@ -41,6 +41,10 @@ function buildActionDedupeKey(actionType, url) {
   return `${String(actionType || '').slice(0, 60)}:${digest}`;
 }
 
+function buildLegacyActionDedupeKey(actionType, url) {
+  return `${actionType}:${url}`;
+}
+
 class SeoActionGenerator {
   async generateActionsFromDiagnosis(domain) {
     const d = extractDomain(domain) || 'wavespestcontrol.com';
@@ -62,6 +66,25 @@ class SeoActionGenerator {
       if (!mapping) continue;
 
       const dedupeKey = buildActionDedupeKey(mapping.action, row.url);
+      const legacyDedupeKey = buildLegacyActionDedupeKey(mapping.action, row.url);
+
+      const existingAction = await db('seo_actions')
+        .whereIn('dedupe_key', [dedupeKey, legacyDedupeKey])
+        .first();
+      if (existingAction) {
+        if (existingAction.dedupe_key === legacyDedupeKey) {
+          try {
+            await db('seo_actions')
+              .where('id', existingAction.id)
+              .where('dedupe_key', legacyDedupeKey)
+              .update({ dedupe_key: dedupeKey });
+          } catch (err) {
+            logger.warn(`[SeoActionGenerator] legacy dedupe key update skipped for ${existingAction.id}: ${err.message}`);
+          }
+        }
+        skipped++;
+        continue;
+      }
 
       const impactScore = (SCORING_WEIGHTS[row.primary_diagnosis] || 30) *
         (row.priority_score / 100);
@@ -401,6 +424,6 @@ Return JSON: { "title": "...", "meta_description": "...", "reasoning": "..." }`,
 }
 
 const generator = new SeoActionGenerator();
-generator._internals = { buildActionDedupeKey };
+generator._internals = { buildActionDedupeKey, buildLegacyActionDedupeKey };
 
 module.exports = generator;

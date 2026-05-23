@@ -31,6 +31,44 @@ exports.up = async function (knex) {
   if (await knex.schema.hasTable('seo_pipeline_runs')) {
     await knex.raw('ALTER TABLE seo_pipeline_runs ALTER COLUMN status TYPE varchar(40)');
   }
+
+  if (await knex.schema.hasTable('seo_actions')) {
+    await knex.raw('CREATE EXTENSION IF NOT EXISTS pgcrypto');
+    await knex.raw(`
+      WITH normalized AS (
+        SELECT
+          id,
+          left(action_type, 60) || ':' || encode(digest(
+            regexp_replace(
+              regexp_replace(
+                regexp_replace(
+                  regexp_replace(lower(trim(url)), '\\?.*$', ''),
+                  '#.*$',
+                  ''
+                ),
+                '/$',
+                ''
+              ),
+              '^https?://(www\\.)?',
+              ''
+            ),
+            'sha256'
+          ), 'hex') AS new_key
+        FROM seo_actions
+        WHERE dedupe_key = action_type || ':' || url
+      )
+      UPDATE seo_actions AS action
+      SET dedupe_key = normalized.new_key
+      FROM normalized
+      WHERE action.id = normalized.id
+        AND NOT EXISTS (
+          SELECT 1
+          FROM seo_actions existing
+          WHERE existing.dedupe_key = normalized.new_key
+            AND existing.id <> action.id
+        )
+    `);
+  }
 };
 
 exports.down = async function (knex) {
