@@ -155,6 +155,55 @@ describe('pricing engine DB bridge', () => {
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
   });
 
+  test('validates active mosquito recurring and one-time config defaults', () => {
+    expect(validatePestPricingConfig(constants)).toEqual(expect.objectContaining({ valid: true }));
+    expect(constants.MOSQUITO.basePrices).toEqual(expect.objectContaining({
+      SMALL: [105, 90],
+      QUARTER: [115, 100],
+      THIRD: [130, 115],
+      HALF: [155, 135],
+      ACRE: [195, 175],
+    }));
+    expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
+    expect(constants.ONE_TIME.mosquito).toEqual(expect.objectContaining({
+      SMALL: 225,
+      STANDARD: 275,
+      LARGE: 325,
+      XL: 385,
+      ESTATE: 425,
+      ACRE_CLASS: 475,
+      OVER_ACRE: 475,
+      overAcreIncrementSqFt: 10000,
+      overAcreIncrementPrice: 75,
+      stationAddOn: 75,
+      dunkAddOn: 15,
+    }));
+  });
+
+  test('rejects drifted mosquito config values during validation', () => {
+    const snapshot = JSON.parse(JSON.stringify(constants));
+    snapshot.MOSQUITO.basePrices.SMALL = [0, 90];
+    snapshot.MOSQUITO.tierVisits.monthly12 = 0;
+    snapshot.MOSQUITO.pressureFactors.nearWater = 'bad';
+    snapshot.MOSQUITO.pressureCap = 0;
+    snapshot.ONE_TIME.mosquito.OVER_ACRE = 0;
+    snapshot.ONE_TIME.mosquito.overAcreIncrementSqFt = 0;
+    snapshot.ONE_TIME.mosquito.overAcreIncrementPrice = 0;
+
+    const result = validatePestPricingConfig(snapshot);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      'MOSQUITO.basePrices.SMALL.seasonal9 must be positive',
+      'MOSQUITO.tierVisits.monthly12 must be positive',
+      'MOSQUITO.pressureFactors.nearWater must be finite',
+      'MOSQUITO.pressureCap must be positive',
+      'ONE_TIME.mosquito.OVER_ACRE must be positive',
+      'ONE_TIME.mosquito.overAcreIncrementSqFt must be positive',
+      'ONE_TIME.mosquito.overAcreIncrementPrice must be positive',
+    ]));
+  });
+
   test('restores all constants when pest config validation fails', async () => {
     const originalLaborRate = constants.GLOBAL.LABOR_RATE;
     const originalMosquitoSmall = [...constants.MOSQUITO.basePrices.SMALL];
@@ -326,6 +375,25 @@ describe('pricing engine DB bridge', () => {
     expect(constants.PALM.flatCreditMinTier).toBe('silver');
   });
 
+  test('validates PALM treatment protocol config invariants', () => {
+    expect(validatePestPricingConfig(constants)).toEqual(expect.objectContaining({ valid: true }));
+
+    constants.PALM.tierQualifier = true;
+    constants.PALM.excludeFromPctDiscount = false;
+    constants.PALM.treatments.nutrition.allowedAppsPerYear = [2];
+    constants.PALM.treatments.insecticide.tiers = constants.PALM.treatments.insecticide.tiers
+      .filter(t => t.size !== 'large');
+
+    const result = validatePestPricingConfig(constants);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      'PALM.tierQualifier must remain false',
+      'PALM.excludeFromPctDiscount must remain true',
+      'PALM.treatments.nutrition.allowedAppsPerYear must include 1 and 2',
+      'PALM.treatments.insecticide.tiers must include large',
+    ]));
+  });
+
   test('syncs complete bed bug specialty pricing protocol from pricing_config', async () => {
     const db = pricingConfigDb([{
       config_key: 'onetime_bed_bug',
@@ -403,6 +471,14 @@ describe('pricing engine DB bridge', () => {
     snapshot.SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost = 0;
     snapshot.SPECIALTY.preSlabTermiticide.products.bifen_it.productOzPer10SqFt = -1;
     snapshot.SPECIALTY.preSlabTermiticide.products.talstar_p.marginDivisor = 1;
+    snapshot.SPECIALTY.preSlabTermiticide.minimums.standalone = [
+      { maxSqFt: 500, floor: 225 },
+      { maxSqFt: 250, floor: 150 },
+      { maxSqFt: 'Infinity', floor: 600 },
+    ];
+    snapshot.SPECIALTY.preSlabTermiticide.minimums.builderBatch = [
+      { maxSqFt: 250, floor: 150 },
+    ];
 
     const result = validatePestPricingConfig(snapshot);
 
@@ -422,6 +498,8 @@ describe('pricing engine DB bridge', () => {
       'SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost must be positive',
       'SPECIALTY.preSlabTermiticide.products.bifen_it.productOzPer10SqFt must be positive',
       'SPECIALTY.preSlabTermiticide.products.talstar_p.marginDivisor must be positive and less than 1',
+      'SPECIALTY.preSlabTermiticide.minimums.standalone must be sorted by ascending maxSqFt',
+      'SPECIALTY.preSlabTermiticide.minimums.builderBatch must end with terminal Infinity maxSqFt',
     ]));
   });
 

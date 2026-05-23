@@ -91,6 +91,34 @@ describe('lead-estimate link service', () => {
     expect(activities).toEqual([]);
   });
 
+  test('allows replacing a stale linked estimate when the caller opts in', async () => {
+    const lead = {
+      id: 'lead-1',
+      status: 'estimate_sent',
+      phone: '9415550101',
+      estimate_id: 'estimate-old',
+    };
+    const { database, updates, activities } = makeDb(lead);
+
+    await attachLeadToEstimate({
+      database,
+      leadId: lead.id,
+      estimateId: 'estimate-new',
+      estimate: { id: 'estimate-new', customer_phone: '+1 (941) 555-0101' },
+      technician: { first_name: 'Ava', last_name: 'Tech' },
+      allowReplacingEstimateId: true,
+    });
+
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'leads',
+        clause: { id: lead.id },
+        patch: expect.objectContaining({ estimate_id: 'estimate-new' }),
+      }),
+    ]));
+    expect(activities.map((a) => a.row.activity_type)).toEqual(['estimate_created']);
+  });
+
   test('records first response after linked estimate is sent', async () => {
     const lead = {
       id: 'lead-1',

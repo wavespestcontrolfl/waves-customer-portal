@@ -234,6 +234,59 @@ describe('email template library rendering', () => {
     }));
   });
 
+  test('deduplicates SendGrid categories before queueing and sending', async () => {
+    const queuedMessage = {
+      id: 'msg-1',
+      status: 'queued',
+      subject_snapshot: 'Your estimate expires June 12',
+    };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-1' };
+    const queueInsert = chain({ returning: [queuedMessage] });
+    const sentUpdate = chain({ returning: [sentMessage] });
+
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [
+        queueInsert,
+        sentUpdate,
+      ],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: {
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        expires_at: 'June 12',
+      },
+      categories: [
+        'template_estimate_expiring_notice',
+        'estimate_expiring_notice',
+        'estimate_expiring_notice',
+        'stream_service_operational',
+        'custom',
+        'custom',
+      ],
+    });
+
+    const expectedCategories = [
+      'email_template',
+      'template_estimate_expiring_notice',
+      'stream_service_operational',
+      'estimate_expiring_notice',
+      'custom',
+    ];
+
+    expect(JSON.parse(queueInsert.insert.mock.calls[0][0].categories)).toEqual(expectedCategories);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      categories: expectedCategories,
+    }));
+  });
+
   test('keeps manual suppressions scoped to their selected preference group', async () => {
     const marketingSuppression = {
       id: 'suppression-1',

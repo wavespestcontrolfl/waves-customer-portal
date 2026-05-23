@@ -210,8 +210,16 @@ describe('derivePageType', () => {
   ])('%s → %s', (action, profile, expected) => {
     expect(derivePageType(action, profile)).toBe(expected);
   });
-  test('refresh_existing_page uses SERP dominant_page_type', () => {
+  test('refresh_existing_page maps SERP dominant_page_type to brief template keys', () => {
+    // Direct matches.
     expect(derivePageType('refresh_existing_page', { dominant_page_type: 'city-service' })).toBe('city-service');
+    // SERP → brief template normalization.
+    expect(derivePageType('refresh_existing_page', { dominant_page_type: 'blog' })).toBe('supporting-blog');
+    expect(derivePageType('refresh_existing_page', { dominant_page_type: 'faq' })).toBe('customer-question');
+    expect(derivePageType('refresh_existing_page', { dominant_page_type: 'service' })).toBe('city-service');
+    // Unknown / non-brief types fall back to generic 'refresh' template.
+    expect(derivePageType('refresh_existing_page', { dominant_page_type: 'directory' })).toBe('refresh');
+    expect(derivePageType('refresh_existing_page', { dominant_page_type: 'home' })).toBe('refresh');
     expect(derivePageType('refresh_existing_page', null)).toBe('refresh');
   });
 });

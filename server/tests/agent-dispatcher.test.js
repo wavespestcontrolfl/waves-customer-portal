@@ -203,12 +203,31 @@ describe('urlToAstroPath', () => {
     ['https://www.wavespestcontrol.com/lawn-care-sarasota-fl/', 'src/content/services/lawn-care-sarasota-fl.md'],
     ['/lakewood-ranch-fl/', 'src/content/services/lakewood-ranch-fl.md'],
     ['/longboat-key/', 'src/content/locations/longboat-key.md'],
+    // bare service hubs must land in services/, not locations/
+    ['/lawn-care/', 'src/content/services/lawn-care.md'],
+    ['/mosquito-control/', 'src/content/services/mosquito-control.md'],
+    ['/pest-control/', 'src/content/services/pest-control.md'],
+    ['/termite-control/', 'src/content/services/termite-control.md'],
+    ['/pest-control-services/', 'src/content/services/pest-control-services.md'],
   ])('%s → %s', (url, expected) => {
     expect(urlToAstroPath(url)).toBe(expected);
   });
   test('null/empty', () => {
     expect(urlToAstroPath(null)).toBeNull();
     expect(urlToAstroPath('')).toBeNull();
+  });
+  test.each([
+    '/blog/../../../../README',
+    '/../etc/passwd',
+    '/pages/../config/db',
+    '/blog/post%2e%2e/secret',
+    '/blog/post\\..\\secret',
+    '/UPPERCASE/path',
+    '/has space/seg',
+    '/-leadinghyphen/',
+    '/trailinghyphen-/',
+  ])('rejects unsafe path %s', (url) => {
+    expect(urlToAstroPath(url)).toBeNull();
   });
 });
 

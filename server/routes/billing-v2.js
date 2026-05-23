@@ -124,7 +124,24 @@ router.post('/cards', async (req, res, next) => {
 
     const { paymentMethodId } = await schema.validateAsync(req.body);
 
-    const card = await StripeService.savePaymentMethod(req.customerId, paymentMethodId);
+    const currentAutopayMethod = await db('payment_methods')
+      .where({
+        customer_id: req.customerId,
+        processor: 'stripe',
+        is_default: true,
+        autopay_enabled: true,
+      })
+      .whereNotNull('stripe_payment_method_id')
+      .first('id');
+
+    // Adding a saved card is not the same as enrolling in Auto Pay. The
+    // customer-facing Auto Pay card explicitly selects and enables the
+    // payment method through /api/billing/autopay after save. If another
+    // method already powers autopay, keep it as the default until then.
+    const card = await StripeService.savePaymentMethod(req.customerId, paymentMethodId, {
+      enableAutopay: false,
+      makeDefault: !currentAutopayMethod,
+    });
 
     // Record consent — the portal add-card modal shows SaveCardConsent
     // as locked + checked because saving is the whole point of the

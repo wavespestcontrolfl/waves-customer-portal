@@ -1161,6 +1161,10 @@ export default function DispatchPageV2({
   const pendingPaymentAfterCompletionRef = useRef(null);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
+  // When MarkPrepaidModal is opened from inside EditServiceModal we want to
+  // return to the edit view (with fresh prepaid state) instead of punching
+  // straight to CompletionPanel like the completion-flow entry does.
+  const [prepaidEntryContext, setPrepaidEntryContext] = useState(null);
   const [protocolService, setProtocolService] = useState(null);
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
@@ -2284,6 +2288,10 @@ export default function DispatchPageV2({
             setEditingService(null);
             fetchSchedule(date);
           }}
+          onMarkPrepaid={(svc) => {
+            setPrepaidEntryContext('edit');
+            setPrepaidService(svc);
+          }}
         />
       )}
       {protocolService && (
@@ -2420,12 +2428,25 @@ export default function DispatchPageV2({
       {prepaidService && (
         <MarkPrepaidModal
           service={prepaidService}
-          onClose={() => setPrepaidService(null)}
-          onSaved={() => {
-            const svc = prepaidService;
+          onClose={() => {
             setPrepaidService(null);
-            setCompletingService(svc);
-            fetchSchedule(date);
+            setPrepaidEntryContext(null);
+          }}
+          onSaved={async () => {
+            const svc = prepaidService;
+            const entry = prepaidEntryContext;
+            setPrepaidService(null);
+            setPrepaidEntryContext(null);
+            const fresh = await fetchSchedule(date);
+            if (entry === 'edit') {
+              // Re-seat the editing service with the post-save row so the
+              // EditServiceModal banner reflects the new prepaid state
+              // without forcing the operator to close + reopen.
+              const updated = fresh?.services?.find((s) => s.id === svc.id);
+              if (updated) setEditingService(updated);
+            } else {
+              setCompletingService(svc);
+            }
           }}
         />
       )}
