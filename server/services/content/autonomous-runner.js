@@ -281,10 +281,13 @@ class AutonomousRunner {
       const reason = !gatesPass ? 'gate_fail'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
+      const trustBuildNote = reason.startsWith('trust_build_')
+        ? 'Review autonomous_runs.draft_payload, then approve with server/scripts/approve-autonomous-run.js --id=<run_id> --by=<operator>.'
+        : null;
       const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: reason,
-        reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, brief),
+        reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, brief), trustBuildNote].filter(Boolean).join(' | '),
       });
       await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
       return finalized;
