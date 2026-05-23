@@ -48,6 +48,21 @@ async function sendBillingSms(customer, body, metadata = {}) {
   });
 }
 
+// Advance `from` by `days` weekdays (Mon–Fri). Used to render the
+// "expected to clear" date in the ACH-processing acknowledgment so the
+// copy ("3–5 business days") doesn't surface a weekend date when the
+// payment was initiated late in the week.
+function addBusinessDays(from, days) {
+  const result = new Date(from);
+  let added = 0;
+  while (added < days) {
+    result.setDate(result.getDate() + 1);
+    const day = result.getDay();
+    if (day !== 0 && day !== 6) added += 1;
+  }
+  return result;
+}
+
 /**
  * Stripe Webhook Handler
  *
@@ -905,11 +920,18 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
   if (failedInvoice?.status === 'processing') {
     const nextStatus = nextInvoiceStatusAfterFailedPayment(failedInvoice);
+    // Clearing ach_processing_notified_at means a re-attempted ACH on
+    // the same invoice (different bank account, customer retries, etc.)
+    // will trigger a fresh "we got it" acknowledgment when its
+    // payment_intent.processing fires. Without this, the per-invoice
+    // dedupe lock from the first attempt would permanently suppress
+    // notifications for every subsequent attempt on the same invoice.
     await db('invoices')
       .where({ id: failedInvoice.id })
       .update({
         status: nextStatus,
         paid_at: null,
+        ach_processing_notified_at: null,
       });
   }
 
@@ -1479,8 +1501,7 @@ async function handlePaymentIntentProcessing(paymentIntent) {
         }
       }
 
-      const expectedClearDate = new Date();
-      expectedClearDate.setDate(expectedClearDate.getDate() + 5);
+      const expectedClearDate = addBusinessDays(new Date(), 5);
       const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
         customerId: freshInvoice.customer_id,
         invoiceId: freshInvoice.id,
