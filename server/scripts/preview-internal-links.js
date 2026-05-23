@@ -20,47 +20,57 @@ const os = require('os');
 const path = require('path');
 const planner = require('../services/content/internal-link-planner');
 
-const ARGS = Object.fromEntries(
-  process.argv.slice(2).map((a) => {
+function parseArgs(argv = process.argv.slice(2)) {
+  return Object.fromEntries(argv.map((a) => {
     if (!a.startsWith('--')) return [a, true];
-    const [k, v] = a.slice(2).split('=');
+    const raw = a.slice(2);
+    const eq = raw.indexOf('=');
+    if (eq === -1) return [raw, true];
+    const k = raw.slice(0, eq);
+    const v = raw.slice(eq + 1);
     return [k, v === undefined ? true : v];
-  })
-);
-
-const ASTRO_DIR = ARGS['astro-dir'] || path.join(os.homedir(), 'Downloads', 'wavespestcontrol-astro');
-const TARGET = ARGS.target;
-const KEYWORD = ARGS.keyword || null;
-const CITY = ARGS.city || null;
-const SERVICE = ARGS.service || null;
-const TITLE = ARGS.title || null;
-const CAP = parseInt(ARGS.cap || 5, 10);
-
-if (!TARGET) {
-  console.error('Required: --target=<path or url>');
-  console.error('Recommended: --keyword="<primary keyword>" [--city=X --service=Y]');
-  process.exit(1);
+  }));
 }
 
-(function main() {
-  const target = { url: TARGET, keyword: KEYWORD, city: CITY, service: SERVICE, title: TITLE };
+function parseCap(value, fallback = 5) {
+  const n = Number.parseInt(value ?? fallback, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
-  console.log(`\nLoading Astro corpus from ${ASTRO_DIR}…`);
+function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  const astroDir = args['astro-dir'] || path.join(os.homedir(), 'Downloads', 'wavespestcontrol-astro');
+  const targetUrl = args.target;
+  const keyword = args.keyword || null;
+  const city = args.city || null;
+  const service = args.service || null;
+  const title = args.title || null;
+  const cap = parseCap(args.cap);
+
+  if (!targetUrl) {
+    console.error('Required: --target=<path or url>');
+    console.error('Recommended: --keyword="<primary keyword>" [--city=X --service=Y]');
+    process.exit(1);
+  }
+
+  const target = { url: targetUrl, keyword, city, service, title };
+
+  console.log(`\nLoading Astro corpus from ${astroDir}…`);
   let corpus;
   try {
-    corpus = planner.loadAstroCorpus(ASTRO_DIR);
+    corpus = planner.loadAstroCorpus(astroDir);
   } catch (err) {
     console.error(`Failed to load corpus: ${err.message}`);
     process.exit(1);
   }
   console.log(`Loaded ${corpus.length} page(s) across blog + services + locations.\n`);
 
-  const tasks = planner.planForTarget(target, { corpus, cap: CAP });
+  const tasks = planner.planForTarget(target, { corpus, cap });
 
   console.log(`Target:    ${target.url}`);
   console.log(`Keyword:   ${target.keyword || '—'}`);
   console.log(`City/svc:  ${target.city || '—'} / ${target.service || '—'}`);
-  console.log(`Cap:       ${CAP} new link(s) per planning run`);
+  console.log(`Cap:       ${cap} new link(s) per planning run`);
   console.log('');
 
   if (!tasks.length) {
@@ -81,4 +91,14 @@ if (!TARGET) {
     console.log(`  context:  ${t.context_snippet}`);
     console.log('');
   });
-})();
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  parseArgs,
+  parseCap,
+  main,
+};
