@@ -117,7 +117,8 @@ class AutonomousRunner {
     try {
       brief = await briefBuilder.compose(opp.id, { persist: !dryRun, skipSerp: false });
     } catch (err) {
-      await queue.skip(opp.id, `brief_compose_failed:${err.message}`).catch(() => {});
+      if (dryRun) await queue.release(opp.id).catch(() => {});
+      else await queue.skip(opp.id, `brief_compose_failed:${err.message}`).catch(() => {});
       return finalize(run, t0, { outcome: 'failed', failure_message: `brief_compose:${err.message}` });
     }
     run.brief_ms = Date.now() - t2;
@@ -126,10 +127,19 @@ class AutonomousRunner {
 
     // 2a. Router blocked the action — record + skip.
     if (brief.action_type === 'do_not_publish') {
-      await queue.skip(opp.id, brief.human_review_reason || 'router_do_not_publish').catch(() => {});
+      if (dryRun) await queue.release(opp.id).catch(() => {});
+      else await queue.skip(opp.id, brief.human_review_reason || 'router_do_not_publish').catch(() => {});
       return finalize(run, t0, {
         outcome: 'skipped_gate_fail',
         skip_reason: brief.human_review_reason || 'router_do_not_publish',
+      });
+    }
+
+    if (dryRun) {
+      await queue.release(opp.id).catch(() => {});
+      return finalize(run, t0, {
+        outcome: 'skipped_shadow_mode',
+        skip_reason: 'dry_run_via_cli',
       });
     }
 
@@ -147,7 +157,8 @@ class AutonomousRunner {
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
-        // dryRun short-circuit — finalize as if shadow_mode skipped.
+        await queue.release(opp.id).catch(() => {});
+        // Defensive dryRun short-circuit — finalize as if shadow_mode skipped.
         return finalize(run, t0, {
           outcome: 'skipped_shadow_mode',
           skip_reason: 'dry_run_via_cli',
@@ -280,12 +291,12 @@ class AutonomousRunner {
 
   async _getTrustBuildCount(actionType) {
     try {
-      const r = await db('autonomous_runs')
+      const rows = await db('autonomous_runs')
         .where('action_type', actionType)
-        .where('outcome', 'completed_published')
         .where('shadow_mode', false)
-        .count('* as c').first();
-      return parseInt(r?.c || 0, 10);
+        .whereIn('outcome', ['completed_published', 'completed_pending_review'])
+        .select('outcome', 'skip_reason');
+      return (rows || []).filter(countsTowardTrustBuild).length;
     } catch { return 0; }
   }
 
@@ -414,10 +425,17 @@ async function finalize(run, t0, patch) {
   return run;
 }
 
+function countsTowardTrustBuild(row) {
+  if (row?.outcome === 'completed_published') return true;
+  return row?.outcome === 'completed_pending_review'
+    && /^trust_build_\d+_of_\d+$/.test(String(row.skip_reason || ''));
+}
+
 module.exports = new AutonomousRunner();
 module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
   isShadow,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,
+  countsTowardTrustBuild,
 };

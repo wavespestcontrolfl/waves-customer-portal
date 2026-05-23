@@ -10,7 +10,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { _internals } = require('../services/content/autonomous-runner');
-const { isShadow, TRUST_BUILD_THRESHOLD, DEFAULT_MIN_SCORE } = _internals;
+const { isShadow, TRUST_BUILD_THRESHOLD, DEFAULT_MIN_SCORE, countsTowardTrustBuild } = _internals;
 
 const ORIGINAL_ENV = { ...process.env };
 afterEach(() => {
@@ -67,6 +67,27 @@ describe('TRUST_BUILD_THRESHOLD default', () => {
   });
 });
 
+describe('countsTowardTrustBuild', () => {
+  test('counts published live runs and trust-build pending-review runs', () => {
+    expect(countsTowardTrustBuild({ outcome: 'completed_published' })).toBe(true);
+    expect(countsTowardTrustBuild({
+      outcome: 'completed_pending_review',
+      skip_reason: 'trust_build_2_of_3',
+    })).toBe(true);
+  });
+  test('does not count unrelated pending-review rows or shadow/gate failures', () => {
+    expect(countsTowardTrustBuild({
+      outcome: 'completed_pending_review',
+      skip_reason: 'gate_fail',
+    })).toBe(false);
+    expect(countsTowardTrustBuild({
+      outcome: 'completed_pending_review',
+      skip_reason: 'brief_requires_human_review',
+    })).toBe(false);
+    expect(countsTowardTrustBuild({ outcome: 'failed_agent' })).toBe(false);
+  });
+});
+
 describe('DEFAULT_MIN_SCORE', () => {
   test('matches scoring-config.THRESHOLDS.minScoreToAct', () => {
     const { THRESHOLDS } = require('../services/content/scoring-config');
@@ -91,5 +112,76 @@ describe('autonomousContentEngine feature gate is registered', () => {
   test('gates module exports autonomousContentEngine', () => {
     const gates = require('../config/feature-gates').gates;
     expect(gates).toHaveProperty('autonomousContentEngine');
+  });
+});
+
+// ── dry-run claim handling ─────────────────────────────────────────
+
+function loadRunnerWith({ queue, briefBuilder, dispatcher = {} }) {
+  jest.resetModules();
+  const dbMock = jest.fn(() => ({
+    insert: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })),
+  }));
+  jest.doMock('../models/db', () => dbMock);
+  jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+  jest.doMock('../services/content/opportunity-queue', () => queue);
+  jest.doMock('../services/content/content-brief-builder', () => briefBuilder);
+  jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
+  return require('../services/content/autonomous-runner');
+}
+
+describe('runNext dry-run behavior', () => {
+  test('releases claimed opportunity and does not call dispatcher setup checks', async () => {
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_1', action_type: 'new_supporting_blog' }),
+      release: jest.fn().mockResolvedValue(),
+      skip: jest.fn().mockResolvedValue(),
+      complete: jest.fn().mockResolvedValue(),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_1',
+        action_type: 'new_supporting_blog',
+        page_type: 'supporting-blog',
+      }),
+    };
+    const dispatcher = {
+      runWithBrief: jest.fn().mockResolvedValue({ ok: false, reason: 'missing_agent_id' }),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder, dispatcher });
+
+    const result = await runner.runNext({ dryRun: true });
+
+    expect(result.outcome).toBe('skipped_shadow_mode');
+    expect(result.skip_reason).toBe('dry_run_via_cli');
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+    expect(queue.release).toHaveBeenCalledWith('opp_1');
+    expect(queue.skip).not.toHaveBeenCalled();
+    expect(queue.complete).not.toHaveBeenCalled();
+  });
+
+  test('releases do_not_publish dry-runs instead of permanently skipping queue item', async () => {
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_2', action_type: 'new_supporting_blog' }),
+      release: jest.fn().mockResolvedValue(),
+      skip: jest.fn().mockResolvedValue(),
+      complete: jest.fn().mockResolvedValue(),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_2',
+        action_type: 'do_not_publish',
+        human_review_reason: 'router_public_health',
+      }),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder });
+
+    const result = await runner.runNext({ dryRun: true });
+
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('router_public_health');
+    expect(queue.release).toHaveBeenCalledWith('opp_2');
+    expect(queue.skip).not.toHaveBeenCalled();
+    expect(queue.complete).not.toHaveBeenCalled();
   });
 });
