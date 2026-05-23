@@ -193,3 +193,17 @@ describe('runNext dry-run behavior', () => {
     expect(queue.complete).not.toHaveBeenCalled();
   });
 });
+
+describe('runNext claim failures', () => {
+  test('records claim exceptions as failed, not no-op', async () => {
+    const queue = {
+      claimNext: jest.fn().mockRejectedValue(new Error('database down')),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder: {} });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('failed');
+    expect(result.failure_message).toBe('claim:database down');
+  });
+});

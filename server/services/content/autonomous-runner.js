@@ -96,10 +96,13 @@ class AutonomousRunner {
 
     // 1. Claim.
     const t1 = Date.now();
-    const opp = await queue.claimNext({ minScore }).catch((err) => {
+    let opp;
+    try {
+      opp = await queue.claimNext({ minScore });
+    } catch (err) {
       logger.warn(`[autonomous-runner] claim failed: ${err.message}`);
-      return null;
-    });
+      return finalize(run, t0, { outcome: 'failed', failure_message: `claim:${err.message}` });
+    }
     run.claim_ms = Date.now() - t1;
     if (!opp) return finalize(run, t0, { outcome: 'skipped_no_opportunity' });
 
