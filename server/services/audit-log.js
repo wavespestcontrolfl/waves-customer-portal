@@ -1,6 +1,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+const DATA_HYGIENE_AGENT_ACTOR_ID = '0d0c4979-b8b8-5a37-a82b-5a7d8f7a7c2f';
+
 /**
  * Writer for the generic audit_log table.
  *
@@ -49,8 +51,10 @@ async function recordAuditEvent({
 
   const auditDb = trx || db;
   if (critical) {
-    await auditDb('audit_log').insert(row);
-    return;
+    const [inserted] = await auditDb('audit_log')
+      .insert(row)
+      .returning(['id']);
+    return inserted?.id || null;
   }
 
   try {
@@ -257,6 +261,133 @@ async function auditPestPressureScoreOverride({
   });
 }
 
+/**
+ * Data Hygiene Agent — proposal lifecycle events.
+ *
+ * Four typed helpers, one per proposal-lifecycle transition. Two are CRITICAL
+ * (apply / revert — they mutate live customer data; a missing audit row would
+ * make a wrong write untraceable later) and two are fire-and-forget (create /
+ * reject — the proposal row itself is the primary record).
+ *
+ * The CRITICAL helpers take a `trx` so the audit row commits in the same
+ * transaction as the underlying UPDATE. If the audit insert fails, the whole
+ * apply rolls back — no orphaned mutation.
+ *
+ * Metadata shape is consistent across all four so BI queries do not have to
+ * guess at field names. Every event gets:
+ * { proposal_id, rule_id, rule_version, source, field, scope_type, scope_id,
+ *   is_sensitive, reviewed_via }.
+ *
+ * Apply/revert store `before_redacted` / `after_redacted` plus hashes and
+ * `vault_id`. For non-sensitive proposals the redacted values are simply the
+ * raw values and vault_id is null. Sensitive raw values never live in
+ * audit_log; the apply/revert path stores them in data_hygiene_sensitive_vault.
+ */
+async function auditHygieneProposalCreate({
+  proposal_id, rule_id, rule_version, source, tier, confidence, is_sensitive,
+  resource_type, resource_id, scope_type, scope_id, field,
+  reviewed_via = 'agent', evidence_summary = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'agent',
+    actor_id: DATA_HYGIENE_AGENT_ACTOR_ID,
+    action: 'data_hygiene.proposal.create',
+    resource_type,
+    resource_id: resource_id || null,
+    metadata: {
+      proposal_id, rule_id, rule_version, source, tier, confidence,
+      is_sensitive: !!is_sensitive,
+      scope_type, scope_id, field,
+      reviewed_via,
+      evidence_summary,
+    },
+  });
+}
+
+async function auditHygieneProposalApply({
+  trx, proposal_id, rule_id, rule_version, source, field,
+  resource_type, resource_id, scope_type, scope_id,
+  before_redacted, after_redacted, before_hash = null, after_hash = null,
+  vault_id = null, reviewer_id, reviewed_via, is_sensitive,
+}) {
+  return recordAuditEvent({
+    actor_type: reviewed_via === 'auto' ? 'agent' : 'technician',
+    actor_id: reviewed_via === 'auto' ? DATA_HYGIENE_AGENT_ACTOR_ID : (reviewer_id || null),
+    action: 'data_hygiene.proposal.apply',
+    resource_type,
+    resource_id: resource_id || null,
+    metadata: {
+      proposal_id, rule_id, rule_version, source, field,
+      scope_type, scope_id,
+      is_sensitive: !!is_sensitive,
+      reviewed_via,
+      before_redacted,
+      after_redacted,
+      before_hash,
+      after_hash,
+      vault_id: vault_id || null,
+      reviewer_id: reviewer_id || null,
+    },
+    critical: true,
+    trx,
+  });
+}
+
+async function auditHygieneProposalReject({
+  proposal_id, rule_id, rule_version, source, field,
+  resource_type, resource_id, scope_type, scope_id,
+  reject_reason, reviewer_id, reviewed_via = 'ui', is_sensitive,
+  evidence_summary = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: reviewer_id || null,
+    action: 'data_hygiene.proposal.reject',
+    resource_type,
+    resource_id: resource_id || null,
+    metadata: {
+      proposal_id, rule_id, rule_version, source, field,
+      scope_type, scope_id,
+      is_sensitive: !!is_sensitive,
+      reviewed_via,
+      reject_reason,
+      reviewer_id: reviewer_id || null,
+      evidence_summary,
+    },
+  });
+}
+
+async function auditHygieneProposalRevert({
+  trx, proposal_id, rule_id, rule_version, source, field,
+  resource_type, resource_id, scope_type, scope_id,
+  before_redacted, after_redacted, before_hash = null, after_hash = null,
+  vault_id = null, original_audit_id, reverted_by, is_sensitive,
+  reviewed_via = 'ui',
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: reverted_by || null,
+    action: 'data_hygiene.proposal.revert',
+    resource_type,
+    resource_id: resource_id || null,
+    metadata: {
+      proposal_id, rule_id, rule_version, source, field,
+      scope_type, scope_id,
+      is_sensitive: !!is_sensitive,
+      reviewed_via,
+      before_redacted,
+      after_redacted,
+      before_hash,
+      after_hash,
+      vault_id: vault_id || null,
+      original_audit_id: original_audit_id || null,
+      reverted_by: reverted_by || null,
+    },
+    critical: true,
+    trx,
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -274,6 +405,10 @@ module.exports = {
   auditServiceCatalogChange,
   auditPestPressureConfigChange,
   auditPestPressureScoreOverride,
+  auditHygieneProposalCreate,
+  auditHygieneProposalApply,
+  auditHygieneProposalReject,
+  auditHygieneProposalRevert,
   ipFromReq,
   uaFromReq,
 };
