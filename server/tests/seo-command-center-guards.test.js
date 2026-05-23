@@ -5,6 +5,7 @@ jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 const SiteAuditor = require('../services/seo/site-auditor');
 const SeoActionGenerator = require('../services/seo/seo-action-generator');
 const UrlIntelligence = require('../services/seo/url-intelligence');
+const pageAuditDomainRepair = require('../models/migrations/20260526000004_repair_seo_page_audit_domains');
 const db = require('../models/db');
 
 const ORIGINAL_ENV = { ...process.env };
@@ -88,5 +89,27 @@ describe('SEO Command Center guards', () => {
     expect(key).toBe(buildActionDedupeKey('refresh_content', longUrl.toUpperCase()));
     expect(key).not.toContain('very-long-path-segment');
     expect(buildLegacyActionDedupeKey('refresh_content', longUrl)).toBe(`refresh_content:${longUrl}`);
+  });
+
+  test('page audit domain repair migration recomputes protocol-only domains from URL', async () => {
+    const raw = jest.fn().mockResolvedValue();
+    const alterTable = jest.fn().mockResolvedValue();
+    const knex = {
+      schema: {
+        hasTable: jest.fn().mockResolvedValue(true),
+        hasColumn: jest.fn().mockResolvedValue(true),
+        alterTable,
+      },
+      raw,
+    };
+
+    await pageAuditDomainRepair.up(knex);
+
+    expect(alterTable).not.toHaveBeenCalled();
+    const repairSql = raw.mock.calls[0][0];
+    expect(repairSql).toContain("lower(trim(domain)) IN ('http:', 'https:')");
+    expect(repairSql).toContain("regexp_replace(lower(trim(url)), '^https?://(www\\.)?', '')");
+    expect(repairSql).toContain("lower(trim(domain)) LIKE 'https:%'");
+    expect(raw.mock.calls.at(-1)[0]).toContain('CREATE INDEX IF NOT EXISTS seo_page_audits_domain_index');
   });
 });
