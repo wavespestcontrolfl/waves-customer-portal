@@ -149,23 +149,26 @@ class AutonomousRunner {
     }
 
     if (brief.action_type === 'add_internal_links') {
+      let result;
       try {
-        const result = await this._handleInternalLinksAction(brief, run);
-        await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes, claimToken });
-        return finalize(run, t0, result.patch);
+        result = await this._handleInternalLinksAction(brief, run);
       } catch (err) {
         await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
         return finalize(run, t0, { outcome: 'failed', failure_message: `internal_links:${err.message}` });
       }
+      const finalized = await finalize(run, t0, result.patch);
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      return finalized;
     }
 
     if (brief.action_type === 'gbp_post') {
-      await this._completeClaimOrThrow(queue, opp.id, { notes: 'pending_review:gbp_post_not_implemented', claimToken });
-      return finalize(run, t0, {
+      const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: 'gbp_post_not_implemented',
         reviewer_notes: 'GBP post distribution handler is not wired yet; route this opportunity manually.',
       });
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      return finalized;
     }
 
     // 3. Dispatch agent — unless dryRun.
@@ -206,12 +209,13 @@ class AutonomousRunner {
     }
 
     if (brief.action_type === 'rewrite_title_meta') {
-      await this._completeClaimOrThrow(queue, opp.id, { notes: 'pending_review:metadata_requires_existing_page_hydration', claimToken });
-      return finalize(run, t0, {
+      const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: 'metadata_requires_existing_page_hydration',
         reviewer_notes: 'Metadata-only agent output must be hydrated with the existing page before gates/publish; route manually until that adapter is wired.',
       });
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      return finalized;
     }
 
     // 4. Uniqueness gate (only applies to certain page types).
@@ -275,21 +279,23 @@ class AutonomousRunner {
       const reason = !gatesPass ? 'gate_fail'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
         : 'brief_requires_human_review';
-      await this._completeClaimOrThrow(queue, opp.id, { notes: `pending_review:${reason}`, claimToken });
-      return finalize(run, t0, {
+      const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: reason,
         reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, brief),
       });
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      return finalized;
     }
 
     if (!this._hasDraftBriefPublisher()) {
-      await queue.complete(opp.id, { notes: 'pending_review:publisher_adapter_unavailable', claimToken }).catch(() => {});
-      return finalize(run, t0, {
+      const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: 'publisher_adapter_unavailable',
         reviewer_notes: 'Astro draft/brief publisher adapter is not wired yet; route this approved draft manually.',
       });
+      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      return finalized;
     }
 
     // 8. Publish + index + plan links.
@@ -584,8 +590,8 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
     }).returning('id');
     run.id = persisted?.id || persisted;
   } catch (err) {
-    // Table may not exist yet — log + return unpersisted.
     logger.warn(`[autonomous-runner] persist failed: ${err.message}`);
+    throw err;
   }
   return run;
 }
