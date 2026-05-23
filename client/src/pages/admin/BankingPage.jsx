@@ -96,6 +96,19 @@ function newPayoutIdempotencyKey(method = "standard") {
     : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
+function payoutLimitForMethod(method, available, instantAvailable) {
+  const standardLimit = Math.max(0, Number(available || 0));
+  if (method === "instant") {
+    return Math.max(0, Number(instantAvailable || 0));
+  }
+  return standardLimit;
+}
+
+function payoutAmountInput(limit) {
+  const normalized = Number(limit || 0);
+  return normalized > 0 ? normalized.toFixed(2) : "";
+}
+
 function Badge({ children, color }) {
   return (
     <span
@@ -1228,7 +1241,11 @@ function PayoutModal({
   onSuccess,
 }) {
   const [method, setMethod] = useState(initialMethod);
-  const [amount, setAmount] = useState(available || 0);
+  const [amount, setAmount] = useState(() =>
+    payoutAmountInput(
+      payoutLimitForMethod(initialMethod, available, instantAvailable),
+    ),
+  );
   const [idempotencyKey, setIdempotencyKey] = useState(() =>
     newPayoutIdempotencyKey(initialMethod),
   );
@@ -1238,15 +1255,23 @@ function PayoutModal({
   const isInstant = method === "instant";
   const fee = isInstant ? parsedAmount * INSTANT_PAYOUT_FEE_RATE : 0;
   const net = parsedAmount - fee;
-  // Stripe enforces a separate `instant_available` bucket for instant payouts —
-  // typically smaller than `available`. Clamp the local guard to whichever
-  // bucket applies so we surface the limit before hitting Stripe's 400.
-  const methodLimit = isInstant
-    ? (instantAvailable != null ? instantAvailable : (available || 0))
-    : (available || 0);
+  const methodLimit = payoutLimitForMethod(method, available, instantAvailable);
+  const isOverLimit = parsedAmount > methodLimit;
+  const canSubmit = !submitting && parsedAmount > 0 && methodLimit > 0 && !isOverLimit;
+  const submitLabel = submitting
+    ? "Processing..."
+    : isInstant && methodLimit <= 0
+      ? "Instant Unavailable"
+      : `Confirm ${isInstant ? "Instant" : "Standard"}`;
 
   const selectMethod = (nextMethod) => {
+    const nextLimit = payoutLimitForMethod(nextMethod, available, instantAvailable);
     setMethod(nextMethod);
+    setAmount((currentAmount) => {
+      const current = parseFloat(currentAmount) || 0;
+      if (current <= 0 || current > nextLimit) return payoutAmountInput(nextLimit);
+      return currentAmount;
+    });
     setIdempotencyKey(newPayoutIdempotencyKey(nextMethod));
   };
 
@@ -1338,11 +1363,17 @@ function PayoutModal({
             { key: "instant", label: "Instant", note: "~1.5% fee", Icon: Zap },
           ].map(({ key, label, note, Icon }) => {
             const selected = method === key;
+            const disabled =
+              key === "instant" &&
+              payoutLimitForMethod(key, available, instantAvailable) <= 0;
             return (
               <button
                 key={key}
                 type="button"
-                onClick={() => selectMethod(key)}
+                disabled={disabled}
+                onClick={() => {
+                  if (!disabled) selectMethod(key);
+                }}
                 style={{
                   border: `1px solid ${selected ? D.heading : D.border}`,
                   background: selected ? D.heading : D.bg,
@@ -1350,8 +1381,9 @@ function PayoutModal({
                   borderRadius: 8,
                   padding: "10px 12px",
                   textAlign: "left",
-                  cursor: "pointer",
+                  cursor: disabled ? "not-allowed" : "pointer",
                   minHeight: 58,
+                  opacity: disabled ? 0.5 : 1,
                 }}
               >
                 <span
@@ -1374,7 +1406,7 @@ function PayoutModal({
                     color: selected ? "#D4D4D8" : D.muted,
                   }}
                 >
-                  {note}
+                  {disabled ? "Unavailable" : note}
                 </span>
               </button>
             );
@@ -1413,7 +1445,12 @@ function PayoutModal({
           />{" "}
           <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
             {isInstant ? "Instant available" : "Available"}:{" "}
-            <span style={{ fontFamily: MONO, color: D.green }}>
+            <span
+              style={{
+                fontFamily: MONO,
+                color: methodLimit > 0 ? D.green : D.red,
+              }}
+            >
               {fmtM(methodLimit)}
             </span>
           </div>{" "}
@@ -1499,7 +1536,7 @@ function PayoutModal({
           </button>{" "}
           <button
             onClick={handleSubmit}
-            disabled={submitting || !amount || parseFloat(amount) <= 0}
+            disabled={!canSubmit}
             style={{
               flex: 1,
               background: D.green,
@@ -1509,13 +1546,11 @@ function PayoutModal({
               color: "#fff",
               fontSize: 13,
               fontWeight: 700,
-              cursor: submitting ? "not-allowed" : "pointer",
-              opacity: submitting ? 0.6 : 1,
+              cursor: canSubmit ? "pointer" : "not-allowed",
+              opacity: canSubmit ? 1 : 0.6,
             }}
           >
-            {submitting
-              ? "Processing..."
-              : `Confirm ${isInstant ? "Instant" : "Standard"}`}
+            {submitLabel}
           </button>{" "}
         </div>{" "}
       </div>{" "}
@@ -1561,6 +1596,7 @@ export default function BankingPage() {
   const available = balance?.total_available ?? 0;
   const pending = balance?.total_pending ?? 0;
   const instantAvailable = balance?.total_instant_available ?? null;
+  const instantPayoutAvailable = instantAvailable > 0;
 
   const handlePayoutSuccess = () => {
     setPayoutModalMethod(null);
@@ -1642,7 +1678,12 @@ export default function BankingPage() {
           </button>{" "}
           <button
             onClick={() => setPayoutModalMethod("instant")}
-            disabled={!available || available <= 0}
+            disabled={!instantPayoutAvailable}
+            title={
+              instantPayoutAvailable
+                ? "Create an instant payout"
+                : "No instant-available Stripe balance"
+            }
             style={{
               background: D.card,
               border: `1px solid ${D.border}`,
@@ -1651,8 +1692,8 @@ export default function BankingPage() {
               color: D.text,
               fontSize: 14,
               fontWeight: 600,
-              cursor: !available || available <= 0 ? "not-allowed" : "pointer",
-              opacity: !available || available <= 0 ? 0.4 : 1,
+              cursor: !instantPayoutAvailable ? "not-allowed" : "pointer",
+              opacity: !instantPayoutAvailable ? 0.4 : 1,
               minHeight: 44,
             }}
           >

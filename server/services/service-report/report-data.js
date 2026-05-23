@@ -2,7 +2,7 @@ const db = require('../../models/db');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
-const { loadActiveConfig, loadScoreForServiceRecord } = require('../pest-pressure/store');
+const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -1290,9 +1290,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const visitTimelineConfigPromise = preloadedVisitTimelineConfig === undefined
     ? loadVisitTimelineConfig(knex).catch(() => null)
     : Promise.resolve(preloadedVisitTimelineConfig);
-  const [pestPressureConfig, pestPressureRow, serviceCoverageConfig, visitTimelineConfig] = await Promise.all([
+  const [pestPressureConfig, pestPressureRow, pestPressureHistory, serviceCoverageConfig, visitTimelineConfig] = await Promise.all([
     pestPressureConfigPromise,
     loadScoreForServiceRecord(knex, service.id).catch(() => null),
+    service.customer_id
+      ? loadHistoryForCustomer(knex, service.customer_id, {
+          serviceLine: serviceLine || null,
+          limit: 8,
+          beforeOrOnServiceDate: service.service_date || null,
+        }).catch(() => [])
+      : Promise.resolve([]),
     serviceCoverageConfigPromise,
     visitTimelineConfigPromise,
   ]);
@@ -1300,6 +1307,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     config: pestPressureConfig,
     scoreRow: pestPressureRow,
     serviceRecord: service,
+    historyRows: pestPressureHistory,
   });
 
   // buildPestPressureCustomerView returns null ONLY when Pest Pressure is

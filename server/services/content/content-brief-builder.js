@@ -15,10 +15,42 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { THRESHOLDS } = require('./scoring-config');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
+
+// ── keyword overlap helpers for customer-cluster topic match ────────
+
+const KEYWORD_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'with',
+  'of', 'is', 'are', 'do', 'does', 'how', 'what', 'why', 'when', 'where',
+  'my', 'your', 'our', 'this', 'that', 'near', 'me', 'us', 'pest',
+  // 'pest' is too generic to be a useful topic-match anchor — it's
+  // already the dominant service in the brief; topic match should pull
+  // on more specific words.
+]);
+
+function extractKeywords(text) {
+  if (!text) return new Set();
+  return new Set(
+    String(text)
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 3 && !KEYWORD_STOP_WORDS.has(w))
+  );
+}
+
+function sharesKeyword(clusterText, opportunityKeywords) {
+  if (!opportunityKeywords.size) return false;
+  const clusterWords = extractKeywords(clusterText);
+  for (const w of clusterWords) {
+    if (opportunityKeywords.has(w)) return true;
+  }
+  return false;
+}
 
 // Lazily-loaded dependencies — these may not all exist on every
 // branch in the stack, so we defer until first use.
@@ -114,6 +146,21 @@ const VOICE_CONSTRAINTS = {
     'reference SWFL conditions (sandy soil, afternoon storms, St. Augustine)',
     'use "you" and "your" naturally',
   ],
+};
+
+// Canonical URL slug component per service for city-service pages.
+// pest → "pest-control" (so URL is /pest-control-bradenton-fl/)
+// lawn → "lawn-care" (NOT lawn-control — that's not a real page)
+// tree-shrub doesn't ship as a city-service slug today; surface no
+// link instead of fabricating one.
+const SERVICE_CITY_SLUG = {
+  pest: 'pest-control',
+  lawn: 'lawn-care',
+  mosquito: 'mosquito-control',
+  termite: 'termite-control',
+  rodent: 'rodent-control',
+  // tree-shrub / specialty: no canonical city-service slug pattern;
+  // fall back to the service hub link only.
 };
 
 const SERVICE_HUB_LINKS = {
@@ -216,16 +263,46 @@ class ContentBriefBuilder {
 
   async _matchCustomerCluster(opportunity) {
     if (!opportunity.service && !opportunity.city) return null;
+    // Recency filter: stale clusters can hold a misleading high
+    // total_count long past their useful window. customerClusterRecencyDays
+    // is the cap that customer-insights-miner uses on the read side too.
+    const sinceLastSeen = new Date(
+      Date.now() - THRESHOLDS.customerClusterRecencyDays * 86400_000
+    );
     let q = db('customer_insight_clusters').orderBy('total_count', 'desc');
     if (opportunity.city) q = q.where('city', opportunity.city);
     if (opportunity.service) q = q.where('service', opportunity.service);
-    const row = await q.first();
-    if (!row) return null;
+    q = q.where('last_seen', '>=', sinceLastSeen);
+
+    // Topic match: when the opportunity has a query/keyword, prefer
+    // clusters whose topic / normalized_question shares a content word
+    // with it. Without this, the highest-total cluster for the (city,
+    // service) pair gets attached even if the topic is unrelated —
+    // can incorrectly boost customerDemand and reroute new_supporting_blog
+    // → create_customer_question_page on a mismatched question.
+    const rows = await q.limit(20).select('*');
+    if (!rows.length) return null;
+    const opportunityKeywords = extractKeywords(opportunity.query || opportunity.target_keyword || '');
+
+    let chosen = null;
+    if (opportunityKeywords.size > 0) {
+      for (const r of rows) {
+        const clusterText = `${r.topic || ''} ${r.normalized_question || ''}`;
+        if (sharesKeyword(clusterText, opportunityKeywords)) { chosen = r; break; }
+      }
+    }
+    // If nothing topic-matched, fall back to the highest-count cluster
+    // for this (city, service) pair — only when the opportunity itself
+    // doesn't carry a discernible topic (e.g. local_gap or refresh of
+    // a generic page).
+    if (!chosen && opportunityKeywords.size === 0) chosen = rows[0];
+    if (!chosen) return null;
+
     return {
-      ...row,
-      source_counts: typeof row.source_counts === 'string'
-        ? JSON.parse(row.source_counts)
-        : (row.source_counts || {}),
+      ...chosen,
+      source_counts: typeof chosen.source_counts === 'string'
+        ? JSON.parse(chosen.source_counts)
+        : (chosen.source_counts || {}),
     };
   }
 
@@ -317,13 +394,30 @@ class ContentBriefBuilder {
     const links = new Set();
     const hubs = SERVICE_HUB_LINKS[opportunity.service] || [];
     for (const h of hubs) links.add(h);
+    // City-service link uses the canonical service slug, NOT
+    // `${service}-control-` (lawn would produce /lawn-control-…-fl/
+    // which isn't a real page; the real slug is /lawn-care-…-fl/).
+    // Services without a canonical city-service slug pattern (e.g.
+    // tree-shrub, specialty) get only the hub link.
     if (opportunity.city && opportunity.service) {
-      const citySlug = opportunity.city.toLowerCase().replace(/\s+/g, '-');
-      links.add(`/${opportunity.service}-control-${citySlug}-fl/`);
+      const slug = SERVICE_CITY_SLUG[opportunity.service];
+      if (slug) {
+        const citySlug = opportunity.city.toLowerCase().replace(/\s+/g, '-');
+        links.add(`/${slug}-${citySlug}-fl/`);
+      }
     }
     return Array.from(links).slice(0, 5);
   }
 
+  /**
+   * Persist the brief. Throws on failure — earlier iteration swallowed
+   * insert errors and returned null, so compose() resolved as if the
+   * brief was saved when content_briefs was missing / mis-migrated or
+   * an (opportunity_id, version) conflict fired. That silently dropped
+   * the brief from the audit trail and let the pipeline continue
+   * state transitions against a phantom brief. Now any persistence
+   * failure rejects compose() so the runner can act on it.
+   */
   async _persist(brief) {
     try {
       const [row] = await db('content_briefs')
@@ -356,8 +450,11 @@ class ContentBriefBuilder {
         .returning('id');
       return row?.id || row;
     } catch (err) {
-      logger.warn(`[brief-builder] persist failed: ${err.message}`);
-      return null;
+      // Log + rethrow. compose() bubbles this up; the runner records
+      // a failed brief outcome and the queue row gets released for
+      // retry instead of silently advancing to publish.
+      logger.warn(`[brief-builder] persist failed for opp ${brief.opportunity_id}: ${err.message}`);
+      throw new Error(`content_briefs persist failed: ${err.message}`);
     }
   }
 }
@@ -366,16 +463,24 @@ class ContentBriefBuilder {
 
 function nextWeekday9amET() {
   // 9am ET on the next Monday–Friday that's at least 6 hours away.
+  // Earlier iteration hardcoded UTC 13:00 as "9am ET" which is only
+  // true during EDT; in EST it scheduled at 8am ET — wrong for half
+  // the year. parseETDateTime("YYYY-MM-DDT09:00") anchors to actual
+  // 9am ET regardless of DST.
   // Crude — the autonomous-runner (later phase) will replace with a
   // calendar-aware slot picker that avoids already-scheduled days.
   const now = new Date();
-  let target = new Date(now);
-  target.setUTCHours(13, 0, 0, 0); // 9am ET ≈ 13:00 UTC (EDT) — accept skew
-  if (target - now < 6 * 3600 * 1000) target.setUTCDate(target.getUTCDate() + 1);
-  while (target.getUTCDay() === 0 || target.getUTCDay() === 6) {
-    target.setUTCDate(target.getUTCDate() + 1);
+  for (let offset = 0; offset < 14; offset++) {
+    const etDay = etDateString(addETDays(now, offset));
+    const target = parseETDateTime(`${etDay}T09:00`);
+    if (target - now < 6 * 3600 * 1000) continue;
+    // Skip weekends in ET.
+    const etWeekday = target.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
+    if (etWeekday === 'Sat' || etWeekday === 'Sun') continue;
+    return target;
   }
-  return target;
+  // Fallback (shouldn't hit — 14 days always contains a weekday).
+  return parseETDateTime(`${etDateString(addETDays(now, 1))}T09:00`);
 }
 
 module.exports = new ContentBriefBuilder();

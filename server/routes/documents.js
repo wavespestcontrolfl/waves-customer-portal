@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
+const { getProjectType } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const {
@@ -696,13 +697,20 @@ router.get('/', authenticate, async (req, res, next) => {
       const typeLabels = {
         wdo_inspection: 'WDO Inspection',
         termite_inspection: 'Termite Inspection',
+        termite_treatment: 'Termite Treatment',
         pest_inspection: 'Pest Inspection',
         flea: 'Flea Service',
         rodent_exclusion: 'Rodent Exclusion',
+        rodent_trapping: 'Rodent Trapping',
+        wildlife_trapping: 'Wildlife Trapping',
+        one_time_pest_treatment: 'One-Time Pest Treatment',
+        one_time_lawn_treatment: 'One-Time Lawn Treatment',
+        mosquito_event: 'Mosquito Event Spray',
+        palm_injection: 'Palm Injection',
         bed_bug: 'Bed Bug Treatment',
         pre_treatment_termite_certificate: 'Certificate of Compliance',
       };
-      const label = typeLabels[p.project_type] || 'Inspection';
+      const label = typeLabels[p.project_type] || getProjectType(p.project_type)?.label || 'Project';
       const viewUrl = await projectReportPathForProject(db, p, p);
       // Compliance certificates belong in the Compliance category, not
       // Service Reports — they live in the permit folder and are referenced

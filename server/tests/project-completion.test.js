@@ -1,11 +1,91 @@
 const {
+  buildProjectCloseoutPreview,
   buildServiceRecordInsert,
+  buildServiceRecordProjectCompletionUpdate,
   hasMembership,
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
+  projectFollowupSuggestion,
   projectReviewedForPortalAttachment,
+  serviceRecordMatchesScheduledService,
   shouldAttachProjectToPortal,
 } = require('../services/project-completion');
+
+function previewKnexForRoutineLinkedProject() {
+  const calls = [];
+  const knex = jest.fn((table) => {
+    calls.push(table);
+    const chain = {
+      leftJoin: jest.fn(() => chain),
+      where: jest.fn(() => chain),
+      whereRaw: jest.fn(() => chain),
+      orderBy: jest.fn(() => chain),
+      first: jest.fn(async () => {
+        if (table === 'projects') {
+          return {
+            id: 'project-1',
+            status: 'draft',
+            customer_id: 'cust-1',
+            scheduled_service_id: 'svc-1',
+          };
+        }
+        if (table === 'scheduled_services as s') {
+          return {
+            id: 'svc-1',
+            customer_id: 'cust-1',
+            service_type: 'Quarterly Pest Control Service',
+            service_id: 'catalog-1',
+            status: 'pending',
+            estimated_price: '350.00',
+            create_invoice_on_complete: true,
+            waveguard_tier: 'Gold',
+            monthly_rate: '99.00',
+            customer_active: true,
+          };
+        }
+        if (table === 'services') {
+          return {
+            service_key: 'pest_general_quarterly',
+            name: 'Quarterly Pest Control Service',
+            category: 'pest_control',
+            billing_type: 'recurring',
+          };
+        }
+        if (table === 'service_records') return null;
+        throw new Error(`Unexpected table query: ${table}`);
+      }),
+    };
+    return chain;
+  });
+  knex.schema = {
+    hasTable: jest.fn(async () => false),
+  };
+  knex._calls = calls;
+  return knex;
+}
+
+function previewKnexForMissingLinkedScheduledService() {
+  const knex = jest.fn((table) => {
+    const chain = {
+      leftJoin: jest.fn(() => chain),
+      where: jest.fn(() => chain),
+      first: jest.fn(async () => {
+        if (table === 'projects') {
+          return {
+            id: 'project-1',
+            status: 'draft',
+            customer_id: 'cust-1',
+            scheduled_service_id: 'svc-missing',
+          };
+        }
+        if (table === 'scheduled_services as s') return null;
+        throw new Error(`Unexpected table query: ${table}`);
+      }),
+    };
+    return chain;
+  });
+  return knex;
+}
 
 describe('project completion helpers', () => {
   test('recurring_customer policy attaches only for recurring customers', () => {
@@ -52,6 +132,248 @@ describe('project completion helpers', () => {
     })).toBe(99);
     expect(prepaidCoversAmount({ prepaid_amount: '350.00' }, 350)).toBe(true);
     expect(prepaidCoversAmount({ prepaid_amount: '100.00' }, 350)).toBe(false);
+  });
+
+  test('project follow-up suggestion uses profile policy and default interval', () => {
+    expect(projectFollowupSuggestion({
+      scheduledService: { scheduled_date: '2026-05-21' },
+      project: { project_date: '2026-05-21' },
+      profile: { followupPolicy: 'none' },
+    })).toMatchObject({
+      required: false,
+      policy: 'none',
+      suggestedDate: null,
+    });
+
+    expect(projectFollowupSuggestion({
+      scheduledService: { scheduled_date: '2026-05-21' },
+      project: { project_date: '2026-05-21' },
+      profile: { followupPolicy: 'alert', defaultFollowupDays: 3 },
+    })).toMatchObject({
+      required: true,
+      policy: 'alert',
+      days: 3,
+      suggestedDate: '2026-05-24',
+      alertType: 'follow_up_needed',
+    });
+
+    expect(projectFollowupSuggestion({
+      scheduledService: { scheduled_date: '2026-05-21' },
+      project: { project_date: '2026-05-21' },
+      profile: { followupPolicy: 'auto_schedule', defaultFollowupDays: 3 },
+    })).toMatchObject({
+      required: true,
+      policy: 'auto_schedule',
+      days: 3,
+      suggestedDate: '2026-05-24',
+      alertType: null,
+      unsupported: true,
+      reason: 'auto_schedule_not_implemented',
+    });
+  });
+
+  test('required follow-up alert write failures are surfaced', async () => {
+    jest.resetModules();
+    jest.doMock('../services/dispatch-alerts', () => ({
+      createAlertOnce: jest.fn(async () => {
+        throw new Error('alert insert failed');
+      }),
+    }));
+
+    const {
+      createProjectFollowupAlert,
+    } = require('../services/project-completion');
+
+    const alertRead = {
+      where: jest.fn(() => alertRead),
+      whereNull: jest.fn(() => alertRead),
+      first: jest.fn(async () => null),
+    };
+    const trx = jest.fn(() => alertRead);
+
+    await expect(createProjectFollowupAlert({
+      scheduledService: {
+        id: 'svc-1',
+        technician_id: 'tech-1',
+        customer_id: 'cust-1',
+        service_type: 'Rodent Trapping Service',
+      },
+      project: {
+        id: 'project-1',
+        project_type: 'rodent_trapping',
+      },
+      serviceRecord: { id: 'record-1' },
+      profile: { serviceName: 'Rodent Trapping Service' },
+      customer: { first_name: 'Adam', last_name: 'Martinez' },
+      followup: {
+        required: true,
+        policy: 'alert',
+        alertType: 'follow_up_needed',
+        days: 3,
+        suggestedDate: '2026-05-22',
+      },
+      trx,
+    })).rejects.toThrow('alert insert failed');
+
+    jest.dontMock('../services/dispatch-alerts');
+  });
+
+  test('project follow-up alert reports existing id when atomic insert is deduped', async () => {
+    jest.resetModules();
+    jest.doMock('../services/dispatch-alerts', () => ({
+      createAlertOnce: jest.fn(async () => ({
+        created: false,
+        row: { id: 'alert-existing' },
+      })),
+    }));
+
+    const {
+      createProjectFollowupAlert,
+    } = require('../services/project-completion');
+
+    const alertRead = {
+      where: jest.fn(() => alertRead),
+      whereNull: jest.fn(() => alertRead),
+      first: jest.fn(async () => null),
+    };
+    const trx = jest.fn(() => alertRead);
+
+    await expect(createProjectFollowupAlert({
+      scheduledService: {
+        id: 'svc-1',
+        technician_id: 'tech-1',
+        customer_id: 'cust-1',
+        service_type: 'Rodent Trapping Service',
+      },
+      project: {
+        id: 'project-1',
+        project_type: 'rodent_trapping',
+      },
+      serviceRecord: { id: 'record-1' },
+      profile: { serviceName: 'Rodent Trapping Service' },
+      customer: { first_name: 'Adam', last_name: 'Martinez' },
+      followup: {
+        required: true,
+        policy: 'alert',
+        alertType: 'follow_up_needed',
+        days: 3,
+        suggestedDate: '2026-05-22',
+      },
+      trx,
+    })).resolves.toMatchObject({
+      required: true,
+      created: false,
+      existingAlertId: 'alert-existing',
+    });
+
+    jest.dontMock('../services/dispatch-alerts');
+  });
+
+  test('project follow-up alert keeps existing open follow-up card regardless of source', async () => {
+    jest.resetModules();
+    const createAlertOnce = jest.fn();
+    jest.doMock('../services/dispatch-alerts', () => ({
+      createAlertOnce,
+    }));
+
+    const {
+      createProjectFollowupAlert,
+    } = require('../services/project-completion');
+
+    const alertRead = {
+      where: jest.fn(() => alertRead),
+      whereNull: jest.fn(() => alertRead),
+      first: jest.fn(async () => ({ id: 'alert-normal-completion' })),
+    };
+    const trx = jest.fn(() => alertRead);
+
+    await expect(createProjectFollowupAlert({
+      scheduledService: {
+        id: 'svc-1',
+        technician_id: 'tech-1',
+        customer_id: 'cust-1',
+        service_type: 'Rodent Trapping Service',
+      },
+      project: {
+        id: 'project-1',
+        project_type: 'rodent_trapping',
+      },
+      serviceRecord: { id: 'record-1' },
+      profile: { serviceName: 'Rodent Trapping Service' },
+      customer: { first_name: 'Adam', last_name: 'Martinez' },
+      followup: {
+        required: true,
+        policy: 'alert',
+        alertType: 'follow_up_needed',
+        days: 3,
+        suggestedDate: '2026-05-22',
+      },
+      trx,
+    })).resolves.toMatchObject({
+      required: true,
+      created: false,
+      existingAlertId: 'alert-normal-completion',
+    });
+    expect(createAlertOnce).not.toHaveBeenCalled();
+
+    jest.dontMock('../services/dispatch-alerts');
+  });
+
+  test('closeout preview does not put billing holds on routine linked projects', async () => {
+    const knex = previewKnexForRoutineLinkedProject();
+
+    const preview = await buildProjectCloseoutPreview('project-1', knex);
+
+    expect(preview.serviceCompletion).toMatchObject({
+      linked: true,
+      willCompleteService: false,
+      projectBacked: false,
+    });
+    expect(preview.billing).toMatchObject({
+      required: false,
+      resolved: true,
+      reason: 'project_not_completing_service',
+    });
+    expect(preview.portal).toMatchObject({
+      attached: false,
+      reason: 'not_project_backed_service',
+      recurringCustomer: null,
+    });
+    expect(preview.canClose).toBe(true);
+    expect(knex._calls).not.toContain('invoices');
+    expect(knex._calls).not.toContain('service_records');
+  });
+
+  test('closeout preview blocks close when linked scheduled service is missing', async () => {
+    const knex = previewKnexForMissingLinkedScheduledService();
+
+    const preview = await buildProjectCloseoutPreview('project-1', knex);
+
+    expect(preview.serviceCompletion).toMatchObject({
+      linked: true,
+      willCompleteService: false,
+      reason: 'linked_scheduled_service_missing',
+    });
+    expect(preview.portal).toMatchObject({
+      attached: false,
+      reason: 'linked_scheduled_service_missing',
+    });
+    expect(preview.canClose).toBe(false);
+  });
+
+  test('existing service record reuse requires the same scheduled service link', () => {
+    expect(serviceRecordMatchesScheduledService(
+      { id: 'record-1', scheduled_service_id: 'svc-1' },
+      { id: 'svc-1' },
+    )).toBe(true);
+    expect(serviceRecordMatchesScheduledService(
+      { id: 'record-1', scheduled_service_id: 'svc-other' },
+      { id: 'svc-1' },
+    )).toBe(false);
+    expect(serviceRecordMatchesScheduledService(
+      { id: 'record-1' },
+      { id: 'svc-1' },
+    )).toBe(false);
   });
 
   test('service record insert marks project completion without creating a routine report token', () => {
@@ -109,6 +431,78 @@ describe('project completion helpers', () => {
       portalAttached: true,
       projectReport: {
         url: '/report/project/customer-0123456789ab',
+      },
+    });
+  });
+
+  test('existing service record update converts routine report fields to project completion', () => {
+    const update = buildServiceRecordProjectCompletionUpdate({
+      serviceRecord: {
+        id: 'record-1',
+        structured_notes: JSON.stringify({ existingNote: true }),
+        service_data: JSON.stringify({ existingData: true }),
+        report_view_token: 'legacy-report-token',
+        report_template_version: 'service_report_v1',
+      },
+      project: {
+        id: 'project-1',
+        project_type: 'rodent_trapping',
+        title: 'Rodent trapping',
+        report_token: '0123456789abcdef0123456789abcdef',
+        findings: { traps_set: 'Attic' },
+      },
+      profile: {
+        completionMode: 'project_required',
+        portalVisibility: 'token_only',
+        portalAttachPolicy: 'recurring_customer',
+      },
+      serviceRecordCols: {
+        status: true,
+        structured_notes: true,
+        completion_source: true,
+        protocol_defaults_used: true,
+        service_data: true,
+        report_view_token: true,
+        report_template_version: true,
+        pdf_storage_key: true,
+        updated_at: true,
+      },
+      lifecycleUpdates: {
+        actual_end_time: new Date('2026-05-21T16:00:00Z'),
+      },
+      portalAttached: false,
+      reportPath: '/report/project/customer-0123456789ab',
+      nowValue: 'NOW',
+    });
+
+    expect(update).toMatchObject({
+      status: 'completed',
+      completion_source: 'project_completion',
+      protocol_defaults_used: false,
+      report_view_token: null,
+      report_template_version: null,
+      pdf_storage_key: null,
+      updated_at: 'NOW',
+    });
+    expect(update.actual_end_time).toBeUndefined();
+    const notes = JSON.parse(update.structured_notes);
+    expect(notes).toMatchObject({
+      existingNote: true,
+      projectCompletion: true,
+      projectId: 'project-1',
+      projectType: 'rodent_trapping',
+      portalAttached: false,
+      projectReport: {
+        tokenOnly: true,
+      },
+    });
+    const serviceData = JSON.parse(update.service_data);
+    expect(serviceData).toMatchObject({
+      existingData: true,
+      project: {
+        id: 'project-1',
+        type: 'rodent_trapping',
+        findings: { traps_set: 'Attic' },
       },
     });
   });

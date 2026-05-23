@@ -123,8 +123,13 @@
       "ts": [
         {
           "mo": 55.75,
-          "recommended": true,
+          "recommended": false,
           "name": "Standard"
+        },
+        {
+          "mo": 90.83,
+          "recommended": true,
+          "name": "Enhanced"
         }
       ],
       "mq": [
@@ -541,8 +546,13 @@
       "ts": [
         {
           "mo": 55.75,
-          "recommended": true,
+          "recommended": false,
           "name": "Standard"
+        },
+        {
+          "mo": 90.83,
+          "recommended": true,
+          "name": "Enhanced"
         }
       ],
       "mq": [],

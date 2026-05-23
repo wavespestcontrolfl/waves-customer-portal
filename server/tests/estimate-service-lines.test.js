@@ -11,6 +11,11 @@ describe('estimate service line inference', () => {
     expect(serviceKeysFromText('Commercial Pest Control')).toEqual(['commercial_pest']);
     expect(serviceKeysFromText('Commercial Lawn Treatment')).toEqual(['commercial_lawn']);
     expect(serviceKeysFromText('Commercial Pest Control + Commercial Lawn')).toEqual(['commercial_pest', 'commercial_lawn']);
+    expect(serviceKeysFromText('Palm Injection')).toEqual(['palm_injection']);
+    expect(serviceKeysFromText('Palms to treat')).toEqual(['palm_injection']);
+    expect(serviceKeysFromText('Native / Palmetto / American roaches')).toEqual(['pest']);
+    expect(serviceKeysFromText('Initial Palmetto Knockdown')).toEqual(['pest']);
+    expect(serviceKeysFromText('palmettoexterminator.com lead')).toEqual(['pest']);
     expect(serviceKeysFromText('')).toEqual([]);
   });
 
@@ -36,6 +41,48 @@ describe('estimate service line inference', () => {
     ]);
     expect(inferEstimateServiceInterest({ estimateData: { result: { recurring: { services: [{ service: 'pest_control', mo: 30 }] } } } }))
       .toBe('Pest Control');
+  });
+
+  test('surfaces palm injection count metadata from saved legacy estimate results', () => {
+    const lines = inferEstimateServiceLines({
+      estimateData: {
+        result: {
+          recurring: {
+            palmInjectionMo: 31.25,
+            services: [],
+          },
+          results: {
+            injection: {
+              palms: 5,
+              mo: 31.25,
+              measurements: {
+                palmCount: { value: 5, source: 'service_manual_override' },
+              },
+              palmCountSource: 'service_manual_override',
+              palmCountWasManualOverride: true,
+              servicePalmCountDiffersFromPropertyPalmCount: true,
+              measurementWarnings: ['service_palm_count_differs_from_property_palm_count'],
+            },
+          },
+        },
+      },
+    });
+
+    expect(lines).toEqual([
+      expect.objectContaining({
+        key: 'palm_injection',
+        amount: 31.25,
+        amountBasis: 'monthly',
+        measurements: {
+          palmCount: { value: 5, source: 'service_manual_override' },
+        },
+        palmCountSource: 'service_manual_override',
+        palmCountWasManualOverride: true,
+        servicePalmCountDiffersFromPropertyPalmCount: true,
+        measurementWarnings: ['service_palm_count_differs_from_property_palm_count'],
+      }),
+    ]);
+    expect(inferEstimateServiceInterest({ estimateData: { inputs: { svcInjection: true } } })).toBe('Palm Injection');
   });
 
   test('surfaces unknown service data instead of assigning pest', () => {

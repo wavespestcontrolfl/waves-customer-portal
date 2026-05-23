@@ -55,6 +55,7 @@ import {
   isServiceSpecificCredit,
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
+import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -92,24 +93,39 @@ const PRE_SLAB_PRODUCT_OPTIONS = [
   { value: "talstar_p", label: "Talstar P - Bifenthrin, branded repellent barrier" },
 ];
 
+const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
+  { value: "standalone", label: "Standalone one-off job" },
+  { value: "builderBatch", label: "Builder batch / same site" },
+  { value: "sameTripAddOn", label: "Same-trip add-on" },
+];
+
 const PRE_SLAB_PRODUCT_META = {
   termidor_sc: {
     warning: "Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.",
-    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | $600 floor",
+    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | contextual minimum",
   },
   taurus_sc: {
     warning: "Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.",
-    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | $600 floor",
+    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | contextual minimum",
   },
   bifen_it: {
     warning: "Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.",
-    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | $600 floor",
+    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | contextual minimum",
   },
   talstar_p: {
     warning: "Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.",
-    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | $600 floor",
+    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | contextual minimum",
   },
 };
+
+function resolvePreSlabJobContextForForm(form) {
+  if (form?._preslabJobContextEdited) return form.preslabJobContext || "standalone";
+  const volume = String(form?.preslabVolume || "NONE").trim().toUpperCase();
+  return volume === "5" || volume === "10" || volume === "5PLUS" || volume === "10PLUS"
+    ? "builderBatch"
+    : "standalone";
+}
+
 const COMMERCIAL_WARNING_TEXT =
   "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
 const FLEA_EXTERIOR_SOURCE_OPTIONS = [
@@ -128,6 +144,30 @@ const FLEA_EXTERIOR_ZONES = [
   { value: "MULCH_LANDSCAPE_BEDS", label: "Mulch / landscape beds" },
   { value: "CRAWLSPACE_WILDLIFE_ACTIVITY", label: "Crawlspace / wildlife activity area" },
   { value: "OTHER", label: "Other" },
+];
+
+const PALM_TREATMENT_OPTIONS = [
+  { value: "nutrition", label: "Palm Nutrition Injection" },
+  { value: "insecticide", label: "Preventive Palm Insecticide" },
+  { value: "combo", label: "Nutrition + Insecticide" },
+  { value: "fungal", label: "Palm Fungal Treatment" },
+  { value: "lethalBronzing", label: "Lethal Bronzing Preventive" },
+  { value: "treeAge", label: "Tree-Age Specialty Injection" },
+];
+
+const PALM_SIZE_OPTIONS = [
+  { value: "small", label: "Small" },
+  { value: "medium", label: "Medium" },
+  { value: "large", label: "Large" },
+];
+
+const PALM_STATUS_OPTIONS = [
+  { value: "healthy_preventive", label: "Healthy preventive" },
+  { value: "near_infected", label: "Near infected" },
+  { value: "tested_negative_preventive", label: "Tested negative preventive" },
+  { value: "symptomatic", label: "Symptomatic" },
+  { value: "tested_positive", label: "Tested positive" },
+  { value: "infected", label: "Infected" },
 ];
 
 function fleaExteriorSourceLabel(source) {
@@ -223,6 +263,10 @@ function formatAiSources(sources) {
     .join(" + ");
 }
 
+function isExpectedAiTimeout(message) {
+  return /timed out after \d+ms/i.test(String(message || ""));
+}
+
 function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } = {}) {
   const normalizedSources = normalizeAiSources(sources);
   const warnings = [];
@@ -230,7 +274,9 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
     const openaiError = errors.find((error) => error?.source === "openai");
     const openaiStatus = providerStatus.openai;
     if (openaiError?.message) {
-      warnings.push(`ChatGPT skipped: ${openaiError.message}`);
+      if (!isExpectedAiTimeout(openaiError.message)) {
+        warnings.push(`ChatGPT skipped: ${openaiError.message}`);
+      }
     } else if (openaiStatus === false || openaiStatus?.configured === false) {
       warnings.push("ChatGPT skipped: OPENAI_API_KEY is not configured");
     } else if (openaiStatus?.available === false) {
@@ -357,6 +403,19 @@ const CONTACT_FIELDS = new Set([
 ]);
 const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
 const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
+const DETHATCHING_ESTIMATE_RESET_FIELDS = new Set([
+  "dethatchingCleanupLevel",
+  "dethatchingDebrisRemovalIncluded",
+  "dethatchingAccess",
+  "dethatchingManagerApproved",
+  "dethatchingManagerApprovalReason",
+  "grassType",
+  "thatchProbe1Inches",
+  "thatchProbe2Inches",
+  "thatchProbe3Inches",
+  "thatchDepthInches",
+  "thatchMeasurementSource",
+]);
 
 const MOSQUITO_PROTOCOL_STEPS = [
   "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
@@ -494,6 +553,16 @@ function parseNonNegativeInteger(value) {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+function parsePositiveInteger(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return undefined;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function hasInvalidPositiveInteger(value) {
+  return value !== undefined && value !== null && String(value).trim() !== "" && parsePositiveInteger(value) === undefined;
+}
+
 function parsePositiveNumber(value) {
   if (value === undefined || value === null || value === "") return undefined;
   const n = Number(value);
@@ -544,13 +613,16 @@ function formatSqFt(value) {
 }
 
 function serviceDetailText(item = {}) {
-  const parts = [
+  const baseParts = [
     item.detail || item.det || item.note || "",
     item.exteriorDetail || "",
     item.warning || "",
     ...(Array.isArray(item.warnings) ? item.warnings : []),
-    item.customQuoteReason || "",
   ].filter(Boolean);
+  const quoteDetail = item.quoteRequired || item.requiresCustomQuote
+    ? quoteRequiredReasonNote(item, baseParts.join(" · "))
+    : "";
+  const parts = [...baseParts, quoteDetail].filter(Boolean);
   const unique = [];
   for (const part of parts) {
     if (unique.includes(part)) continue;
@@ -882,7 +954,7 @@ function previewRecurringFrequencyLabel(name, R) {
     return previewVisitsLabel(selected?.v);
   }
   if (label.includes("mosquito") && Array.isArray(R?.mq)) {
-    const selected = R.mq.find((tier) => tier.recommended) || R.mq[R?.mqMeta?.ri] || R.mq[0];
+    const selected = selectedMosquitoTier(R);
     return previewVisitsLabel(selected?.v);
   }
   if (label.includes("tree") && Array.isArray(R?.ts)) {
@@ -891,6 +963,31 @@ function previewRecurringFrequencyLabel(name, R) {
   }
   if (label.includes("termite") && label.includes("bait")) return "Quarterly";
   return "";
+}
+
+function mosquitoTierSelectionFlags(R, tier, index) {
+  const tiers = Array.isArray(R?.mq) ? R.mq : [];
+  const hasSelectionFields = tiers.some((t) => t.selected !== undefined || t.isSelected !== undefined);
+  const ri = Number(R?.mqMeta?.ri);
+  const selected = hasSelectionFields
+    ? !!(tier.selected || tier.isSelected)
+    : Number.isInteger(ri)
+      ? index === ri
+      : !!tier.recommended;
+  const recommended = hasSelectionFields
+    ? !!(tier.recommended || tier.isRecommended || tier.pressureRecommended)
+    : false;
+  return { selected, recommended, dimmed: !selected };
+}
+
+function selectedMosquitoTier(R) {
+  const tiers = Array.isArray(R?.mq) ? R.mq : [];
+  const ri = Number(R?.mqMeta?.ri);
+  return tiers.find((tier) => tier.selected || tier.isSelected) ||
+    (Number.isInteger(ri) ? tiers[ri] : null) ||
+    tiers.find((tier) => tier.recommended || tier.isRecommended) ||
+    tiers[0] ||
+    null;
 }
 
 function previewRecurringDisplayName(service) {
@@ -1629,6 +1726,21 @@ export default function EstimateToolViewV2({
     isRecurringCustomer: "NO",
     bedArea: "",
     palmCount: "",
+    palmTreatmentCount: "",
+    palmTreatmentType: "combo",
+    palmSize: "medium",
+    palmAppsPerYear: "1",
+    palmIntervalMonths: "",
+    palmCustomPricePerPalm: "",
+    palmHighDose: false,
+    palmLargeDiameter: false,
+    palmNonstandardProduct: false,
+    palmDiagnosisConfirmed: false,
+    palmSelectedProduct: "PHOSPHO-Jet",
+    palmStatus: "healthy_preventive",
+    palmDbhInches: "",
+    palmProduct: "Tree-Age G-4",
+    palmLicensedApplicator: false,
     treeCount: "",
     roachModifier: "NONE",
     lawnFreq: "9",
@@ -1636,6 +1748,16 @@ export default function EstimateToolViewV2({
     pestFreq: "4",
     plugArea: "",
     plugSpacing: "12",
+    dethatchingCleanupLevel: "none",
+    dethatchingDebrisRemovalIncluded: false,
+    dethatchingAccess: "easy",
+    dethatchingManagerApproved: false,
+    dethatchingManagerApprovalReason: "",
+    thatchProbe1Inches: "",
+    thatchProbe2Inches: "",
+    thatchProbe3Inches: "",
+    thatchDepthInches: "",
+    thatchMeasurementSource: "manual",
     manualDiscountPreset: "",
     manualDiscountType: "NONE",
     manualDiscountValue: "",
@@ -1671,6 +1793,8 @@ export default function EstimateToolViewV2({
     preslabLabelConfirmed: false,
     preslabWarranty: "BASIC",
     preslabVolume: "NONE",
+    preslabJobContext: "standalone",
+    _preslabJobContextEdited: false,
     termiteFootprintSqFt: "",
     termitePerimeterLF: "",
     termiteBaitComplexity: "",
@@ -1801,10 +1925,17 @@ export default function EstimateToolViewV2({
         45,
         Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30),
       );
-    if (form.svcInjection)
-      approx.injection = Math.round(
-        (Math.max(Math.max(1, Math.round((Number(form.palmCount) || 3) * 0.30)) * 75, 75) * 2) / 12,
-      );
+    if (form.svcInjection) {
+      const treatmentCount = parsePositiveInteger(form.palmTreatmentCount)
+        ?? (String(form.palmTreatmentCount || "").trim() === "" ? parsePositiveInteger(form.palmCount) : undefined);
+      if (treatmentCount) {
+        const pricePerPalm = form.palmTreatmentType === "nutrition" ? 35 : 75;
+        const appsPerYear = form.palmTreatmentType === "nutrition" ? (parsePositiveInteger(form.palmAppsPerYear) || 1) : 2;
+        approx.injection = Math.round(
+          (Math.max(treatmentCount * pricePerPalm, 75) * appsPerYear) / 12,
+        );
+      }
+    }
     if (form.svcMosquito) {
       const programBase =
         form.mosquitoProgram === "seasonal9" ? 105 : 90;
@@ -1889,14 +2020,24 @@ export default function EstimateToolViewV2({
   };
 
   const set = useCallback((key, val) => {
-    setForm((f) => ({
-      ...f,
-      [key]: val,
-      ...(key === "address" ? { measuredTurfSf: "" } : {}),
-      ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
-      ...(key === "stories" ? { _storiesEdited: true } : {}),
-      ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
-    }));
+    setForm((f) => {
+      const next = {
+        ...f,
+        [key]: val,
+        ...(key === "preslabJobContext" ? { _preslabJobContextEdited: true } : {}),
+        ...(key === "preslabVolume" && !f._preslabJobContextEdited
+          ? { preslabJobContext: String(val || "NONE").toUpperCase() === "NONE" ? "standalone" : "builderBatch" }
+          : {}),
+        ...(key === "address" ? { measuredTurfSf: "" } : {}),
+        ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
+        ...(key === "stories" ? { _storiesEdited: true } : {}),
+        ...(key === "termiteFootprintSqFt" ? { _termiteFootprintAuto: false } : {}),
+      };
+      if (key === "palmCount" && String(f.palmTreatmentCount || "").trim() === "") {
+        next.palmTreatmentCount = val;
+      }
+      return next;
+    });
     if (SEND_FIELDS.has(key)) return;
     if (CONTACT_FIELDS.has(key) || DELIVERY_OPTION_FIELDS.has(key)) {
       setSavedId(null);
@@ -1912,6 +2053,9 @@ export default function EstimateToolViewV2({
       const next = { ...f, [key]: !f[key] };
       if (key === "svcFlea" && f.svcFlea) {
         next.svcFleaExterior = false;
+      }
+      if (key === "svcInjection" && !f.svcInjection && String(f.palmTreatmentCount || "").trim() === "") {
+        next.palmTreatmentCount = f.palmCount || "";
       }
       // Auto-enable "Offer one-time option" only when the bundle is pest-only
       // (svcPest + svcOnetimePest with no other recurring service selected) —
@@ -1941,7 +2085,7 @@ export default function EstimateToolViewV2({
       }
       return next;
     });
-    if (key.startsWith("svc")) {
+    if (key.startsWith("svc") || DETHATCHING_ESTIMATE_RESET_FIELDS.has(key)) {
       setEstimate(null);
       setSavedId(null);
       setSavedViewUrl(null);
@@ -2318,13 +2462,19 @@ export default function EstimateToolViewV2({
       const slabNumber = parsePositiveNumber(slabSqFt);
       if (slabNumber) upd.preslabSqft = String(Math.round(slabNumber));
 
-      setForm((f) => ({
-        ...f,
-        ...upd,
-        ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
-        _poolCageSizeEdited: false,
-        _storiesEdited: false,
-      }));
+      setForm((f) => {
+        const next = {
+          ...f,
+          ...upd,
+          ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
+          _poolCageSizeEdited: false,
+          _storiesEdited: false,
+        };
+        if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
+          next.palmTreatmentCount = upd.palmCount;
+        }
+        return next;
+      });
 
       try {
         const addrSearch = address.split(",")[0].trim();
@@ -2506,7 +2656,13 @@ export default function EstimateToolViewV2({
       if (slabNumber)
         upd.preslabSqft = String(Math.round(slabNumber));
 
-      setForm((f) => ({ ...f, ...upd }));
+      setForm((f) => {
+        const next = { ...f, ...upd };
+        if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
+          next.palmTreatmentCount = upd.palmCount;
+        }
+        return next;
+      });
 
       const verify = (data.fieldVerify || []).length;
       const conf =
@@ -2602,6 +2758,20 @@ export default function EstimateToolViewV2({
       const trenchingConcretePct = parseNonNegativeNumber(form.trenchingConcretePct);
       const boracareSqft = parsePositiveNumber(form.boracareSqft);
       const preslabSqft = parsePositiveNumber(form.preslabSqft);
+      const propertyPalmCount = parsePositiveInteger(form.palmCount);
+      const palmTreatmentCountBlank = String(form.palmTreatmentCount || "").trim() === "";
+      const palmTreatmentCount = parsePositiveInteger(form.palmTreatmentCount)
+        ?? (palmTreatmentCountBlank ? propertyPalmCount : undefined);
+      if (form.svcInjection) {
+        if (hasInvalidPositiveInteger(form.palmCount) || hasInvalidPositiveInteger(form.palmTreatmentCount)) {
+          alert("Palm count must be a positive whole number.");
+          return null;
+        }
+        if (!palmTreatmentCount) {
+          alert("Palm count is required for palm injection pricing.");
+          return null;
+        }
+      }
 
       const options = {
         grassType: form.grassType || "st_augustine",
@@ -2619,6 +2789,16 @@ export default function EstimateToolViewV2({
         recurringCustomer: form.isRecurringCustomer === "YES",
         plugArea: parseInt(form.plugArea, 10) || 0,
         plugSpacing: parseInt(form.plugSpacing, 10) || 12,
+        dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",
+        dethatchingDebrisRemovalIncluded: !!form.dethatchingDebrisRemovalIncluded,
+        dethatchingAccess: form.dethatchingAccess || "easy",
+        dethatchingManagerApproved: !!form.dethatchingManagerApproved,
+        dethatchingManagerApprovalReason: form.dethatchingManagerApprovalReason || "",
+        thatchProbe1Inches: form.thatchProbe1Inches,
+        thatchProbe2Inches: form.thatchProbe2Inches,
+        thatchProbe3Inches: form.thatchProbe3Inches,
+        thatchDepthInches: form.thatchDepthInches,
+        thatchMeasurementSource: form.thatchMeasurementSource || "manual",
         termiteBaitSystem: form.termiteBaitSystem || "advance",
         termiteMonitoringTier: form.termiteMonitoringTier || "basic",
         termiteBaitComplexity: form.termiteBaitComplexity || "",
@@ -2640,6 +2820,7 @@ export default function EstimateToolViewV2({
         preslabLabelConfirmed: !!form.preslabLabelConfirmed,
         preslabWarranty: form.preslabWarranty || "BASIC",
         preslabVolume: form.preslabVolume || "NONE",
+        preslabJobContext: resolvePreSlabJobContextForForm(form),
         includePreSlabWarrantyExtended: form.preslabWarranty === "EXTENDED",
         foamPoints: form.foamPoints === undefined ? undefined : form.foamPoints,
         bedbugRooms: parseInt(form.bedbugRooms, 10) || 1,
@@ -2669,6 +2850,37 @@ export default function EstimateToolViewV2({
         fleaExteriorAreaSource: form.fleaExteriorAreaSource || "UNKNOWN",
         fleaExteriorZones: Array.isArray(form.fleaExteriorZones) ? form.fleaExteriorZones : [],
       };
+      if (form.svcInjection) {
+        options.palmInjection = {
+          selected: true,
+          treatmentType: form.palmTreatmentType || "combo",
+          palmCount: palmTreatmentCount,
+          measurements: { palmCount: palmTreatmentCount },
+          palmSize: form.palmSize || "medium",
+          ...(form.palmTreatmentType === "nutrition" ? { appsPerYear: parsePositiveInteger(form.palmAppsPerYear) || 1 } : {}),
+          ...(form.palmTreatmentType === "fungal" ? {
+            diagnosisConfirmed: !!form.palmDiagnosisConfirmed,
+            selectedProduct: form.palmSelectedProduct || "PHOSPHO-Jet",
+            intervalMonths: parsePositiveNumber(form.palmIntervalMonths),
+          } : {}),
+          ...(form.palmTreatmentType === "lethalBronzing" ? {
+            palmStatus: form.palmStatus || "healthy_preventive",
+          } : {}),
+          ...(form.palmTreatmentType === "treeAge" ? {
+            dbhInches: parsePositiveNumber(form.palmDbhInches),
+            product: form.palmProduct || "Tree-Age G-4",
+            licensedApplicator: !!form.palmLicensedApplicator,
+          } : {}),
+          ...(form.palmTreatmentType === "insecticide" || form.palmTreatmentType === "combo" ? {
+            highDose: !!form.palmHighDose,
+            largeDiameter: !!form.palmLargeDiameter,
+            nonstandardProduct: !!form.palmNonstandardProduct,
+          } : {}),
+          ...(parsePositiveNumber(form.palmCustomPricePerPalm)
+            ? { customPricePerPalm: parsePositiveNumber(form.palmCustomPricePerPalm) }
+            : {}),
+        };
+      }
 
       const manualNumber = (value, fallback = 0) => {
         const n = parseInt(value, 10);
@@ -2696,22 +2908,21 @@ export default function EstimateToolViewV2({
           form.bedArea,
           Number(baseProfile.estimatedBedAreaSf) || 0,
         ),
-        // When admin types a palm count in the form, treat it as the
-        // injectable count and skip the 30% satellite-estimate gating in
-        // property-lookup-v2. Admin already knows which palms need
-        // treatment. Palm pricing requires a positive integer — drop
-        // non-integer or <=0 inputs (e.g. "2.5", "0", "-1") for BOTH
-        // estimatedPalmCount and injectablePalms so we fall back to the
-        // AI/base count instead of silently truncating to 2 and quoting
-        // the wrong palm count.
+        // Palm pricing requires an explicit positive integer. The property-level
+        // count is used only as a prefill/default; the palmInjection service
+        // payload below carries the number of palms treated for this line.
         ...(() => {
-          const raw = String(form.palmCount ?? "").trim();
-          const n = Number(raw);
-          const valid = raw !== "" && Number.isInteger(n) && n > 0;
-          const fallback = Number(baseProfile.estimatedPalmCount || baseProfile.palmCount) || 0;
-          return valid
-            ? { estimatedPalmCount: n, injectablePalms: n }
-            : { estimatedPalmCount: fallback };
+          const fallback = parsePositiveInteger(baseProfile.palmCount)
+            ?? parsePositiveInteger(baseProfile.palmInventory?.palmCount)
+            ?? parsePositiveInteger(baseProfile.estimatedPalmCount);
+          const value = propertyPalmCount ?? fallback;
+          return value
+            ? {
+                palmCount: value,
+                estimatedPalmCount: value,
+                palmInventory: { ...(baseProfile.palmInventory || {}), palmCount: value },
+              }
+            : {};
         })(),
         estimatedTreeCount: treeCount,
         treeCount,
@@ -2754,7 +2965,9 @@ export default function EstimateToolViewV2({
       if (!profile.lotSqFt) profile.lotSqFt = 0;
       const bedBugOnly =
         selectedServices.length === 1 && selectedServices[0] === "BEDBUG";
-      if (!bedBugOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
+      const preSlabOnly =
+        selectedServices.length === 1 && selectedServices[0] === "PRESLAB";
+      if (!bedBugOnly && !preSlabOnly && profile.homeSqFt <= 0 && profile.lotSqFt <= 0) {
         alert("Enter home sq ft or lot size.");
         return null;
       }
@@ -3058,6 +3271,21 @@ export default function EstimateToolViewV2({
       isRecurringCustomer: "NO",
       bedArea: "",
       palmCount: "",
+      palmTreatmentCount: "",
+      palmTreatmentType: "combo",
+      palmSize: "medium",
+      palmAppsPerYear: "1",
+      palmIntervalMonths: "",
+      palmCustomPricePerPalm: "",
+      palmHighDose: false,
+      palmLargeDiameter: false,
+      palmNonstandardProduct: false,
+      palmDiagnosisConfirmed: false,
+      palmSelectedProduct: "PHOSPHO-Jet",
+      palmStatus: "healthy_preventive",
+      palmDbhInches: "",
+      palmProduct: "Tree-Age G-4",
+      palmLicensedApplicator: false,
       treeCount: "",
       measuredTurfSf: "",
       svcFleaExterior: false,
@@ -3068,6 +3296,10 @@ export default function EstimateToolViewV2({
       preslabSqft: "",
       preslabProductKey: "termidor_sc",
       preslabLabelConfirmed: false,
+      preslabWarranty: "BASIC",
+      preslabVolume: "NONE",
+      preslabJobContext: "standalone",
+      _preslabJobContextEdited: false,
       termiteFootprintSqFt: "",
       termitePerimeterLF: "",
       termiteBaitComplexity: "",
@@ -3171,6 +3403,10 @@ export default function EstimateToolViewV2({
     null;
   const confirmedTurfSqFt = parseNonNegativeInteger(form.measuredTurfSf);
   const effectiveTurfSqFt = confirmedTurfSqFt ?? aiTurfSqFt ?? 0;
+  const isDethatchingStAugustine = String(form.grassType || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .includes("staugustine");
   const lotSqFtForTurf =
     parseNonNegativeInteger(form.lotSqFt) ??
     parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
@@ -3248,6 +3484,15 @@ export default function EstimateToolViewV2({
       ? "Pre-Slab Termiticide Treatment needs slab sqft."
       : null,
   ].filter(Boolean);
+  const palmTreatmentCountForDisplay = parsePositiveInteger(form.palmTreatmentCount)
+    ?? (String(form.palmTreatmentCount || "").trim() === "" ? parsePositiveInteger(form.palmCount) : undefined);
+  const palmMeasurementWarning = form.svcInjection && (
+    hasInvalidPositiveInteger(form.palmCount) ||
+    hasInvalidPositiveInteger(form.palmTreatmentCount) ||
+    !palmTreatmentCountForDisplay
+  )
+    ? "Palm count is required for palm injection pricing."
+    : null;
   const formCtx = { form, set, toggle };
   const sendBusy = generating || saving || sending;
   const generateBusy = generating || saving || sending;
@@ -3389,6 +3634,21 @@ export default function EstimateToolViewV2({
                       nearWater: "NO",
                       bedArea: "",
                       palmCount: "",
+                      palmTreatmentCount: "",
+                      palmTreatmentType: "combo",
+                      palmSize: "medium",
+                      palmAppsPerYear: "1",
+                      palmIntervalMonths: "",
+                      palmCustomPricePerPalm: "",
+                      palmHighDose: false,
+                      palmLargeDiameter: false,
+                      palmNonstandardProduct: false,
+                      palmDiagnosisConfirmed: false,
+                      palmSelectedProduct: "PHOSPHO-Jet",
+                      palmStatus: "healthy_preventive",
+                      palmDbhInches: "",
+                      palmProduct: "Tree-Age G-4",
+                      palmLicensedApplicator: false,
                       treeCount: "",
                       measuredTurfSf: "",
                     }));
@@ -3450,7 +3710,11 @@ export default function EstimateToolViewV2({
                         "propertyType",
                       ].map((field) => {
                         const item = enrichedProfile.fieldEvidence[field];
-                        if (!item) return null;
+                        const missing = (
+                          enrichedProfile.propertyDataQuality
+                            ?.missingCriticalFields || []
+                        ).includes(field);
+                        if (!item && !missing) return null;
                         return (
                           <div
                             key={field}
@@ -3459,15 +3723,19 @@ export default function EstimateToolViewV2({
                             {" "}
                             <span
                               className={
-                                item.fieldVerify
+                                missing || item?.fieldVerify
                                   ? "text-alert-fg font-medium"
                                   : "text-emerald-700 font-medium"
                               }
                             >
-                              {item.fieldVerify ? "Verify" : "Trusted"}
+                              {missing
+                                ? "Missing"
+                                : item.fieldVerify
+                                  ? "Verify"
+                                  : "Trusted"}
                             </span>{" "}
                             {field.replace(/([A-Z])/g, " $1").toLowerCase()}:{" "}
-                            {item.sourceLabel || item.sourceType || "source"}
+                            {item?.sourceLabel || item?.sourceType || "no source"}
                           </div>
                         );
                       })}
@@ -3698,8 +3966,8 @@ export default function EstimateToolViewV2({
                         />
                       </FieldV2>
                     )}{" "}
-                    <FieldV2 label="Palm Count">
-                      <InputV2 k="palmCount" type="number" placeholder="Auto" />
+                    <FieldV2 label="Palms on property">
+                      <InputV2 k="palmCount" type="number" placeholder="Manual override" />
                     </FieldV2>{" "}
                   </div>{" "}
                   {form.svcTs && (
@@ -3982,6 +4250,90 @@ export default function EstimateToolViewV2({
               )}
               <CheckboxV2 k="svcTs" label="Tree & Shrub" />{" "}
               <CheckboxV2 k="svcInjection" label="Palm Injection" />{" "}
+              {form.svcInjection && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Treatment Type">
+                      <SelectV2 k="palmTreatmentType" options={PALM_TREATMENT_OPTIONS} />
+                    </FieldV2>
+                    <FieldV2 label="Palms to treat">
+                      <InputV2 k="palmTreatmentCount" type="number" placeholder={form.palmCount || "Required"} />
+                    </FieldV2>
+                  </div>
+                  {(form.palmTreatmentType === "insecticide" || form.palmTreatmentType === "combo") && (
+                    <>
+                      <FieldV2 label="Palm size for this treatment">
+                        <SelectV2 k="palmSize" options={PALM_SIZE_OPTIONS} />
+                      </FieldV2>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <CheckboxV2 k="palmHighDose" label="High dose" />
+                        <CheckboxV2 k="palmLargeDiameter" label="Large diameter" />
+                        <CheckboxV2 k="palmNonstandardProduct" label="Nonstandard product" />
+                      </div>
+                    </>
+                  )}
+                  {form.palmTreatmentType === "nutrition" && (
+                    <FieldV2 label="Applications per year">
+                      <SelectV2
+                        k="palmAppsPerYear"
+                        options={[
+                          { value: "1", label: "1" },
+                          { value: "2", label: "2" },
+                        ]}
+                      />
+                    </FieldV2>
+                  )}
+                  {form.palmTreatmentType === "fungal" && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <FieldV2 label="Selected product">
+                        <SelectV2
+                          k="palmSelectedProduct"
+                          options={[
+                            { value: "PHOSPHO-Jet", label: "PHOSPHO-Jet" },
+                            { value: "Propizol", label: "Propizol" },
+                          ]}
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Interval months">
+                        <InputV2 k="palmIntervalMonths" type="number" placeholder="4" />
+                      </FieldV2>
+                      <CheckboxV2 k="palmDiagnosisConfirmed" label="Diagnosis confirmed" />
+                    </div>
+                  )}
+                  {form.palmTreatmentType === "lethalBronzing" && (
+                    <FieldV2 label="Palm status">
+                      <SelectV2 k="palmStatus" options={PALM_STATUS_OPTIONS} />
+                    </FieldV2>
+                  )}
+                  {form.palmTreatmentType === "treeAge" && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <FieldV2 label="DBH inches">
+                        <InputV2 k="palmDbhInches" type="number" placeholder="12" />
+                      </FieldV2>
+                      <FieldV2 label="Product">
+                        <SelectV2
+                          k="palmProduct"
+                          options={[
+                            { value: "Tree-Age G-4", label: "Tree-Age G-4" },
+                            { value: "Tree-Age R10", label: "Tree-Age R10" },
+                          ]}
+                        />
+                      </FieldV2>
+                      {form.palmProduct === "Tree-Age R10" && (
+                        <CheckboxV2 k="palmLicensedApplicator" label="Licensed applicator" />
+                      )}
+                    </div>
+                  )}
+                  <FieldV2 label="Custom $/palm">
+                    <InputV2 k="palmCustomPricePerPalm" type="number" placeholder="Optional" />
+                  </FieldV2>
+                  {palmMeasurementWarning && (
+                    <div className="px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                      {palmMeasurementWarning}
+                    </div>
+                  )}
+                </div>
+              )}
               <CheckboxV2 k="svcMosquito" label="Mosquito Program" />
               {(form.svcMosquito || form.svcOnetimeMosquito) && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
@@ -4228,7 +4580,107 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <CheckboxV2 k="svcTopdress" label="Top Dressing" />{" "}
-              <CheckboxV2 k="svcDethatch" label="Dethatching" />{" "}
+              <CheckboxV2
+                k="svcDethatch"
+                label={
+                  isDethatchingStAugustine
+                    ? "Dethatching - manager approval required for St. Augustine / Floratam"
+                    : "Dethatching"
+                }
+              />{" "}
+              {form.svcDethatch && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Lawn Sq Ft Used">
+                      <input
+                        type="text"
+                        readOnly
+                        value={`${Math.round(effectiveTurfSqFt || 0).toLocaleString()} sf`}
+                        className={cn(INPUT_CLS, "bg-white text-ink-secondary")}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Grass Type / Track">
+                      <SelectV2
+                        k="grassType"
+                        options={[
+                          { value: "st_augustine", label: "St. Augustine / Floratam" },
+                          { value: "bermuda", label: "Bermuda" },
+                          { value: "zoysia", label: "Zoysia" },
+                          { value: "bahia", label: "Bahia" },
+                          { value: "unknown", label: "Unknown - review" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Cleanup Level">
+                      <SelectV2
+                        k="dethatchingCleanupLevel"
+                        options={[
+                          { value: "none", label: "No debris removal" },
+                          { value: "light", label: "Light cleanup" },
+                          { value: "moderate", label: "Moderate cleanup" },
+                          { value: "heavy", label: "Heavy cleanup / bagging" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Access">
+                      <SelectV2
+                        k="dethatchingAccess"
+                        options={[
+                          { value: "easy", label: "Easy" },
+                          { value: "moderate", label: "Moderate" },
+                          { value: "difficult", label: "Difficult - review" },
+                        ]}
+                      />
+                    </FieldV2>
+                  </div>
+                  <CheckboxV2 k="dethatchingDebrisRemovalIncluded" label="Debris removal included" />
+                  <div className="grid grid-cols-3 gap-3">
+                    <FieldV2 label="Thatch Probe #1">
+                      <InputV2 k="thatchProbe1Inches" type="number" min="0" placeholder="inches" />
+                    </FieldV2>
+                    <FieldV2 label="Thatch Probe #2">
+                      <InputV2 k="thatchProbe2Inches" type="number" min="0" placeholder="inches" />
+                    </FieldV2>
+                    <FieldV2 label="Thatch Probe #3">
+                      <InputV2 k="thatchProbe3Inches" type="number" min="0" placeholder="inches" />
+                    </FieldV2>
+                  </div>
+                  {form.dethatchingCleanupLevel === "none" && !form.dethatchingDebrisRemovalIncluded && (
+                    <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                      Base price does not include bagging or debris hauling.
+                    </div>
+                  )}
+                  {(form.dethatchingCleanupLevel === "moderate" || form.dethatchingCleanupLevel === "heavy" || form.dethatchingDebrisRemovalIncluded) && (
+                    <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                      Cleanup/debris removal included.
+                    </div>
+                  )}
+                  {isDethatchingStAugustine && (
+                    <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                      Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.
+                    </div>
+                  )}
+                  {isDethatchingStAugustine && (
+                    <div className="grid grid-cols-2 gap-3 mt-3">
+                      <FieldV2 label="Manager Approval Reason">
+                        <SelectV2
+                          k="dethatchingManagerApprovalReason"
+                          options={[
+                            { value: "", label: "Select reason" },
+                            { value: "verified_thatch_probe", label: "Verified thatch probe" },
+                            { value: "customer_requested_after_warning", label: "Customer requested after warning" },
+                            { value: "bermuda_or_zoysia_confirmed", label: "Bermuda/Zoysia confirmed" },
+                            { value: "manager_override", label: "Manager override" },
+                          ]}
+                        />
+                      </FieldV2>
+                      <div className="pt-7">
+                        <CheckboxV2 k="dethatchingManagerApproved" label="Manager approval confirmed" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               <SubGroupLabel className="mt-3">Termite</SubGroupLabel>{" "}
               <CheckboxV2 k="svcWdo" label="WDO / Termite Inspection" />{" "}
               <CheckboxV2 k="svcTrenching" label="Termite Trenching" />{" "}
@@ -4418,6 +4870,7 @@ export default function EstimateToolViewV2({
                           <SelectV2
                             k="preslabWarranty"
                             options={[
+                              { value: "NONE", label: "No warranty" },
                               { value: "BASIC", label: "Basic 1-yr (included)" },
                               { value: "EXTENDED", label: "Extended 5-yr (+$200)" },
                             ]}
@@ -4432,6 +4885,12 @@ export default function EstimateToolViewV2({
                             { value: "5", label: "5+ homes (-10%)" },
                             { value: "10", label: "10+ homes (-15%)" },
                           ]}
+                        />
+                      </FieldV2>
+                      <FieldV2 label="Pre-Slab Job Context">
+                        <SelectV2
+                          k="preslabJobContext"
+                          options={PRE_SLAB_JOB_CONTEXT_OPTIONS}
                         />
                       </FieldV2>
                       <CheckboxV2
@@ -5697,16 +6156,20 @@ export default function EstimateToolViewV2({
                               Mosquito <Tag>Pressure {R.mqMeta?.pr}x</Tag>{" "}
                             </SectionTitle>{" "}
                             <TierGridV2>
-                              {R.mq.map((t, i) => (
-                                <TierRowV2
-                                  key={i}
-                                  name={t.n}
-                                  detail={`$${t.pv}/visit x ${t.v}`}
-                                  price={`${fmt(t.mo)}/mo`}
-                                  recommended={t.recommended}
-                                  dimmed={t.dimmed}
-                                />
-                              ))}
+                              {R.mq.map((t, i) => {
+                                const flags = mosquitoTierSelectionFlags(R, t, i);
+                                return (
+                                  <TierRowV2
+                                    key={i}
+                                    name={t.n}
+                                    detail={`$${t.pv}/visit x ${t.v}`}
+                                    price={`${fmt(t.mo)}/mo`}
+                                    recommended={flags.recommended}
+                                    dimmed={flags.dimmed}
+                                    selected={flags.selected}
+                                  />
+                                );
+                              })}
                             </TierGridV2>{" "}
                           </div>
                         )}
@@ -5932,10 +6395,14 @@ export default function EstimateToolViewV2({
                                     />
                                   )}
                                 </TierGridV2>
-                                {!item.warrAdd && (
+                                {!item.warrAdd && String(item.warrantyTier || "BASIC").toUpperCase() !== "NONE" && (
                                   <div className="text-11 text-ink-secondary mt-1">
-                                    Includes 1-yr builder warranty | $225/yr
-                                    renewal after
+                                    {item.warrantyStatus || "No extended warranty selected"}
+                                  </div>
+                                )}
+                                {!item.warrAdd && String(item.warrantyTier || "").toUpperCase() === "NONE" && (
+                                  <div className="text-11 text-ink-secondary mt-1">
+                                    No warranty selected
                                   </div>
                                 )}
                                 {item.warningText && (
@@ -5946,7 +6413,7 @@ export default function EstimateToolViewV2({
                                 <div className="text-11 text-ink-secondary mt-1">
                                   Certificate of Compliance required{item.labelConfirmed ? " | Label confirmed" : " | Label review required"}
                                   {item.productCost !== undefined && item.rawPrice !== undefined
-                                    ? ` | Material $${item.productCost.toFixed(2)} | Raw $${item.rawPrice} | Floor $${item.priceBeforeVolumeDiscount}`
+                                    ? ` | ${item.preSlabJobContextLabel || item.jobContext || "Standalone"} | ${item.productOz} oz | Allocated material $${item.productCost.toFixed(2)} | Raw $${item.rawPrice} | Floor $${item.contextualFloor || item.priceBeforeVolumeDiscount}`
                                     : ""}
                                 </div>
                               </div>
@@ -6101,6 +6568,11 @@ export default function EstimateToolViewV2({
                           {(E.pricingMetadata.warnings || []).map((warning, i) => (
                             <div key={`warning-${i}`} className="text-ink-secondary">
                               {warning}
+                            </div>
+                          ))}
+                          {(E.pricingMetadata.manualReviewReasons || []).map((reason, i) => (
+                            <div key={`manual-review-${i}`} className="text-ink-secondary">
+                              {humanizeQuoteReason(reason)}
                             </div>
                           ))}
                         </div>
@@ -6307,7 +6779,7 @@ export default function EstimateToolViewV2({
                               {E.oneTime.specItems.map((s, i) => (
                                 <div
                                   key={`sp-${i}`}
-                                  className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary"
+                                  className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary"
                                 >
                                   {" "}
                                   <span>

@@ -91,7 +91,12 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
       if (tierRank[waveGuardTier.tier] >= tierRank[PALM.flatCreditMinTier]) {
         const palmCount = Number.isInteger(options.palmCount) && options.palmCount > 0
           ? options.palmCount
-          : 1;
+          : null;
+        if (!palmCount) {
+          result.requiresMeasurement = true;
+          result.warnings = ['missing_palm_count'];
+          return result;
+        }
         const annualCredit = roundCurrency(palmCount * PALM.flatCreditPerPalm);
         const annualBeforeCredits = Number.isFinite(options.annualBeforeCredits)
           ? options.annualBeforeCredits

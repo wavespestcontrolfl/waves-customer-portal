@@ -242,6 +242,17 @@ function buildTimelineEvent({ id, type, label, customerDescription, occurredAt, 
   };
 }
 
+function collapseSameTimeTimelineEvents(events = []) {
+  const completed = events.find((event) => event.type === 'service_completed' && event.occurredAt);
+  const completedMs = Date.parse(completed?.occurredAt);
+  if (!Number.isFinite(completedMs)) return events;
+  return events.filter((event) => {
+    if (event.type !== 'technician_on_site' || !event.occurredAt) return true;
+    const eventMs = Date.parse(event.occurredAt);
+    return !Number.isFinite(eventMs) || eventMs !== completedMs;
+  });
+}
+
 function buildVisitTimeline({
   service = {},
   scheduledService = {},
@@ -399,7 +410,7 @@ function buildVisitTimeline({
     intro: "Here's a simple summary of today's service visit.",
     serviceLine: normalizedLine,
     status: completedReport ? 'completed' : 'in_progress',
-    events: events.sort((a, b) => a.sortOrder - b.sortOrder),
+    events: collapseSameTimeTimelineEvents(events.sort((a, b) => a.sortOrder - b.sortOrder)),
     details,
     timingNote: shouldShowTimingNote ? 'Exact on-site duration was not available for this visit.' : null,
     dataSourceNote: resolvedConfig.showDataSourceNote ? resolvedConfig.dataSourceNote : null,

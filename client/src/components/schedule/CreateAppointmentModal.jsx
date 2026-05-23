@@ -224,6 +224,46 @@ function shiftPastWeekendClient(d, skip, direction) {
   return out;
 }
 
+export function findScheduleEstimateById(estimates = [], estimateId) {
+  return estimates.find((estimate) => String(estimate?.id) === String(estimateId)) || null;
+}
+
+function formatMoney(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : '';
+}
+
+export function formatScheduleEstimateAmount(estimate) {
+  const onetime = Number(estimate?.onetimeTotal);
+  if (Number.isFinite(onetime) && onetime > 0) return `${formatMoney(onetime)} one-time`;
+  const monthly = Number(estimate?.monthlyTotal);
+  if (Number.isFinite(monthly) && monthly > 0) return `${formatMoney(monthly)}/mo`;
+  const annual = Number(estimate?.annualTotal);
+  if (Number.isFinite(annual) && annual > 0) return `${formatMoney(annual)}/yr`;
+  return '';
+}
+
+export const ESTIMATE_SOURCE_LABEL = 'Estimate source';
+export const MANUAL_SERVICE_ENTRY_LABEL = 'No estimate - choose services manually';
+
+export function pickAutoScheduleEstimate({
+  customerId,
+  estimates = [],
+  isLoading = false,
+  error = '',
+  linkedEstimate = null,
+  serviceCount = 0,
+  appliedKey = null,
+} = {}) {
+  if (!customerId || isLoading || error || linkedEstimate || serviceCount > 0) return null;
+  const unlinked = estimates.filter((estimate) => !estimate.linkedAppointment);
+  if (unlinked.length !== 1) return null;
+  const estimate = unlinked[0];
+  const key = `${customerId}:${estimate.id}`;
+  if (appliedKey === key) return null;
+  return { estimate, key };
+}
+
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, onClose, onCreated }) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
@@ -255,6 +295,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [scheduleEstimatesLoading, setScheduleEstimatesLoading] = useState(false);
   const [scheduleEstimateError, setScheduleEstimateError] = useState('');
   const [linkedEstimate, setLinkedEstimate] = useState(null);
+  const autoAppliedScheduleEstimateRef = useRef(null);
   const selectedService = services[0] || null;
 
   // Lock body scroll while the modal is open. The modal is portaled to
@@ -313,6 +354,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setLinkedEstimate(null);
     setScheduleEstimates([]);
     setScheduleEstimateError('');
+    autoAppliedScheduleEstimateRef.current = null;
     if (!customerId) {
       setScheduleEstimatesLoading(false);
       return undefined;
@@ -442,11 +484,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       ? new Date(accepted).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
       : 'Won estimate';
     const servicesLabel = estimate.serviceInterest || (estimate.lines || []).map((l) => l.estimateLabel || l.name).filter(Boolean).slice(0, 2).join(' + ') || 'Accepted estimate';
-    const amount = Number(estimate.onetimeTotal || 0) > 0
-      ? `$${Number(estimate.onetimeTotal).toFixed(0)} one-time`
-      : Number(estimate.monthlyTotal || 0) > 0
-        ? `$${Number(estimate.monthlyTotal).toFixed(0)}/mo`
-        : '';
+    const amount = formatScheduleEstimateAmount(estimate);
     return [servicesLabel, amount, date].filter(Boolean).join(' - ');
   };
   const applyScheduleEstimate = (estimateId) => {
@@ -454,7 +492,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       setLinkedEstimate(null);
       return;
     }
-    const estimate = scheduleEstimates.find((e) => e.id === estimateId);
+    const estimate = findScheduleEstimateById(scheduleEstimates, estimateId);
     if (!estimate) return;
     const nextLines = (estimate.lines || []).map((line) => {
       const inferred = inferServiceCadence({
@@ -494,6 +532,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }
     setLinkedEstimate(estimate);
   };
+  useEffect(() => {
+    const customerId = selectedCustomer?.id;
+    const auto = pickAutoScheduleEstimate({
+      customerId,
+      estimates: scheduleEstimates,
+      isLoading: scheduleEstimatesLoading,
+      error: scheduleEstimateError,
+      linkedEstimate,
+      serviceCount: services.length,
+      appliedKey: autoAppliedScheduleEstimateRef.current,
+    });
+    if (!auto) return;
+    autoAppliedScheduleEstimateRef.current = auto.key;
+    applyScheduleEstimate(auto.estimate.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
   const formatDiscountLabel = (d) => {
     if (!d) return '';
     if (d.discount_type === 'free_service') return 'Free';
@@ -1242,7 +1296,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
           {selectedCustomer && (
             <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${D.border}` }}>
-              <label style={labelStyle}>Won estimate</label>
+              <label style={labelStyle}>{ESTIMATE_SOURCE_LABEL}</label>
               {scheduleEstimatesLoading ? (
                 <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>Loading won estimates...</div>
               ) : scheduleEstimateError ? (
@@ -1250,13 +1304,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               ) : scheduleEstimates.length > 0 ? (
                 <>
                   <select
-                    value={linkedEstimate?.id || ''}
+                    value={linkedEstimate?.id != null ? String(linkedEstimate.id) : ''}
                     onChange={(e) => applyScheduleEstimate(e.target.value)}
                     style={inputStyle}
                   >
-                    <option value="">Manual service entry</option>
+                    <option value="">{MANUAL_SERVICE_ENTRY_LABEL}</option>
                     {scheduleEstimates.map((estimate) => (
-                      <option key={estimate.id} value={estimate.id}>
+                      <option key={estimate.id} value={String(estimate.id)}>
                         {formatScheduleEstimateLabel(estimate)}
                         {estimate.linkedAppointment ? ' (already linked)' : ''}
                       </option>
@@ -1279,7 +1333,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 </>
               ) : (
                 <div style={{ fontSize: 13, color: D.muted, minHeight: 36, display: 'flex', alignItems: 'center' }}>
-                  No accepted estimates found for this customer.
+                  No won estimates found. Choose services manually below.
                 </div>
               )}
             </div>

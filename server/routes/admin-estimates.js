@@ -10,6 +10,7 @@ const { wrapEmail, plainText } = require('../services/email-template');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const {
   estimateDataHasQuoteRequirement,
+  estimateDataHasUnresolvedManagerApproval,
   validateEstimateDeliveryOptions,
 } = require('../services/estimate-delivery-options');
 const EmailTemplateLibrary = require('../services/email-template-library');
@@ -124,6 +125,15 @@ function assertEstimateSendable(estimate) {
   }
   if (estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
+    err.statusCode = 400;
+    throw err;
+  }
+  assertEstimateManagerApprovalResolved(estimate);
+}
+
+function assertEstimateManagerApprovalResolved(estimate) {
+  if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
+    const err = new Error('Manager approval is required before this estimate can be sent to the customer.');
     err.statusCode = 400;
     throw err;
   }
@@ -754,6 +764,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
     if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
+    assertEstimateSendable(estimate);
 
     const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
     const viewUrl = await shortenOrPassthrough(longUrl, {
@@ -793,7 +804,10 @@ router.post('/:id/follow-up', async (req, res, next) => {
     });
 
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/estimates/:id/send-booking-link — manual override that
@@ -832,6 +846,7 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
         error: 'Invoice mode is on for this estimate — booking link not applicable. Disable Invoice mode first.',
       });
     }
+    assertEstimateManagerApprovalResolved(estimate);
 
     // Parse the same one-time line the auto-accept flow uses so we can
     // pre-select the service in /book. A missing one-time line on a
@@ -916,7 +931,10 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     });
     logger.info(`[estimates] Manual booking-link SMS sent for estimate ${estimate.id} → ${primarySvc.id}`);
     res.json({ success: true, bookingServiceId: primarySvc.id, bookingServiceLabel: primarySvc.label });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/estimates/:id/extend — push expires_at forward by N days
@@ -1092,7 +1110,12 @@ router.delete('/:id', async (req, res, next) => {
     if (estimate.status !== 'draft') {
       return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
     }
-    await db('estimates').where({ id: req.params.id }).del();
+    await db.transaction(async (trx) => {
+      await trx('leads')
+        .where({ estimate_id: req.params.id })
+        .update({ estimate_id: null, updated_at: new Date() });
+      await trx('estimates').where({ id: req.params.id }).del();
+    });
     logger.info(`[estimates] Deleted estimate ${req.params.id}`);
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -1114,6 +1137,7 @@ router.post('/cleanup-demo', async (req, res, next) => {
 
 router._internals = {
   assertEstimateSendable,
+  assertEstimateManagerApprovalResolved,
   estimateMatchesSentOnlyScope,
   sendEstimateEmail,
   estimateEmailIdempotencyKey,
