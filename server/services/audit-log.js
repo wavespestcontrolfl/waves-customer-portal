@@ -257,6 +257,113 @@ async function auditPestPressureScoreOverride({
   });
 }
 
+/**
+ * Data Hygiene Agent — proposal lifecycle events.
+ *
+ * Four typed helpers, one per proposal-lifecycle transition. Two are CRITICAL
+ * (apply / revert — they mutate live customer data; a missing audit row would
+ * make a wrong write untraceable later) and two are fire-and-forget (create /
+ * reject — the proposal row itself is the primary record).
+ *
+ * The CRITICAL helpers take a `trx` so the audit row commits in the same
+ * transaction as the underlying UPDATE. If the audit insert fails, the whole
+ * apply rolls back — no orphaned mutation.
+ *
+ * Metadata shape is consistent across all four so BI queries do not have to
+ * guess at field names: { proposal_id, rule_id, rule_version, field,
+ * resource_type, resource_id, scope_type, scope_id, before, after, source,
+ * confidence, ... }. Sensitive proposals (gate codes, lockbox codes, access
+ * notes) write only the redacted form into before/after — never raw codes;
+ * see P6. The full unredacted value lives in the live row only.
+ */
+async function auditHygieneProposalCreate({
+  proposal_id, rule_id, rule_version, source, tier, confidence, is_sensitive,
+  resource_type, resource_id, scope_type, scope_id, field,
+  evidence_summary = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'agent',
+    actor_id: 'data-hygiene-agent',
+    action: 'data_hygiene.proposal.create',
+    resource_type,
+    resource_id: resource_id || null,
+    metadata: {
+      proposal_id, rule_id, rule_version, source, tier, confidence,
+      is_sensitive: !!is_sensitive,
+      scope_type, scope_id, field,
+      evidence_summary,
+    },
+  });
+}
+
+async function auditHygieneProposalApply({
+  trx, proposal_id, rule_id, rule_version, source, field,
+  resource_type, resource_id, scope_type, scope_id,
+  before, after, reviewer_id, reviewed_via, is_sensitive,
+}) {
+  return recordAuditEvent({
+    actor_type: reviewed_via === 'auto' ? 'agent' : 'technician',
+    actor_id: reviewed_via === 'auto' ? 'data-hygiene-agent' : (reviewer_id || null),
+    action: 'data_hygiene.proposal.apply',
+    resource_type,
+    resource_id: resource_id || null,
+    metadata: {
+      proposal_id, rule_id, rule_version, source, field,
+      scope_type, scope_id,
+      before, after,
+      reviewer_id: reviewer_id || null,
+      reviewed_via,
+      is_sensitive: !!is_sensitive,
+    },
+    critical: true,
+    trx,
+  });
+}
+
+async function auditHygieneProposalReject({
+  proposal_id, rule_id, rule_version, source, field,
+  resource_type, resource_id, scope_type, scope_id,
+  reject_reason, reviewer_id, reviewed_via,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: reviewer_id || null,
+    action: 'data_hygiene.proposal.reject',
+    resource_type,
+    resource_id: resource_id || null,
+    metadata: {
+      proposal_id, rule_id, rule_version, source, field,
+      scope_type, scope_id,
+      reject_reason,
+      reviewer_id: reviewer_id || null,
+      reviewed_via,
+    },
+  });
+}
+
+async function auditHygieneProposalRevert({
+  trx, proposal_id, rule_id, field,
+  resource_type, resource_id, scope_type, scope_id,
+  before, after, original_audit_id, reverted_by,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: reverted_by || null,
+    action: 'data_hygiene.proposal.revert',
+    resource_type,
+    resource_id: resource_id || null,
+    metadata: {
+      proposal_id, rule_id, field,
+      scope_type, scope_id,
+      before, after,
+      original_audit_id: original_audit_id || null,
+      reverted_by: reverted_by || null,
+    },
+    critical: true,
+    trx,
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -274,6 +381,10 @@ module.exports = {
   auditServiceCatalogChange,
   auditPestPressureConfigChange,
   auditPestPressureScoreOverride,
+  auditHygieneProposalCreate,
+  auditHygieneProposalApply,
+  auditHygieneProposalReject,
+  auditHygieneProposalRevert,
   ipFromReq,
   uaFromReq,
 };

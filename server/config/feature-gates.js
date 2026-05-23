@@ -72,6 +72,20 @@ const gates = {
   //   field_content.publish_fanout  (phase 5)
   // All three cascade-require this master gate.
   fieldContentModule: isProd ? process.env.GATE_FIELD_CONTENT === 'true' : true,
+
+  // Data Hygiene Agent — split into sub-gates so each phase ships
+  // independently. All default OFF in prod, ON in dev — except auto-apply,
+  // which is opt-in in EVERY environment (P7). Dev/staging running against
+  // prod snapshots otherwise silently mutates shared data.
+  //   Scanner cron is double-gated: cronJobs AND dataHygieneScanner.
+  //   When dataHygieneAutoApply is OFF, would-be auto-tier proposals enqueue
+  //   as pending tier='high' for manual review instead.
+  dataHygieneScanner:           isProd ? process.env.GATE_DATA_HYGIENE_SCANNER    === 'true' : true,
+  dataHygieneReviewUi:          isProd ? process.env.GATE_DATA_HYGIENE_UI         === 'true' : true,
+  dataHygieneBootstrap:         isProd ? process.env.GATE_DATA_HYGIENE_BOOTSTRAP  === 'true' : true,
+  dataHygieneDedupeCandidates:  isProd ? process.env.GATE_DATA_HYGIENE_DEDUPE     === 'true' : true,
+  dataHygieneMessageExtraction: isProd ? process.env.GATE_DATA_HYGIENE_EXTRACTION === 'true' : true,
+  dataHygieneAutoApply:                  process.env.GATE_DATA_HYGIENE_AUTO_APPLY === 'true',
 };
 
 function isEnabled(gate) {
