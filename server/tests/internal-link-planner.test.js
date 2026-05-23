@@ -5,6 +5,10 @@
  * CLI smoke test, not jest.
  */
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -12,6 +16,7 @@ const planner = require('../services/content/internal-link-planner');
 const {
   anchorCandidates,
   maskExcludedRegions,
+  maskNonContentRegions,
   findFirstUnlinkedOccurrence,
   isInsideLink,
   snippetAround,
@@ -70,6 +75,13 @@ Bradenton pest control here.`;
     const masked = maskExcludedRegions(src);
     expect(masked.length).toBe(src.length);
     expect(masked.indexOf('const x')).toBe(-1);
+    expect(masked.lastIndexOf('pest control bradenton')).toBe(src.lastIndexOf('pest control bradenton'));
+  });
+  test('masks tilde fenced code blocks', () => {
+    const src = 'before\n~~~md\npest control bradenton\n~~~\nafter pest control bradenton';
+    const masked = maskExcludedRegions(src);
+    expect(masked.length).toBe(src.length);
+    expect(masked.indexOf('~~~')).toBe(-1);
     expect(masked.lastIndexOf('pest control bradenton')).toBe(src.lastIndexOf('pest control bradenton'));
   });
   test('masks HTML comments', () => {
@@ -237,6 +249,14 @@ describe('pageAlreadyLinksTo', () => {
       '[x](https://example.com/pest-control-bradenton-fl/)',
       '/pest-control-bradenton-fl/'
     )).toBe(false);
+    expect(pageAlreadyLinksTo(
+      '<a href="https://example.com/pest-control-bradenton-fl/">x</a>',
+      '/pest-control-bradenton-fl/'
+    )).toBe(false);
+    expect(pageAlreadyLinksTo(
+      '[x][pest-ref]\n\n[pest-ref]: https://example.com/pest-control-bradenton-fl/',
+      '/pest-control-bradenton-fl/'
+    )).toBe(false);
   });
   test('matches across trailing slash + hash + query (normalized)', () => {
     // Existing link with no trailing slash + hash, target with slash.
@@ -257,6 +277,26 @@ describe('pageAlreadyLinksTo', () => {
       '[x](/pest-control-bradenton-fl-area/)',
       '/pest-control-bradenton-fl/'
     )).toBe(false);
+  });
+  test('ignores markdown links inside fenced code and comments', () => {
+    expect(pageAlreadyLinksTo(
+      '```md\n[x](/pest-control-bradenton-fl/)\n```',
+      '/pest-control-bradenton-fl/'
+    )).toBe(false);
+    expect(pageAlreadyLinksTo(
+      '~~~md\n[x](/pest-control-bradenton-fl/)\n~~~',
+      '/pest-control-bradenton-fl/'
+    )).toBe(false);
+    expect(pageAlreadyLinksTo(
+      '<!-- [x](/pest-control-bradenton-fl/) -->',
+      '/pest-control-bradenton-fl/'
+    )).toBe(false);
+  });
+  test('keeps real links visible after non-content masking', () => {
+    const src = '```md\n[x](/other/)\n```\n[real](/pest-control-bradenton-fl/)';
+    const masked = maskNonContentRegions(src);
+    expect(masked).toContain('[real](/pest-control-bradenton-fl/)');
+    expect(pageAlreadyLinksTo(src, '/pest-control-bradenton-fl/')).toBe(true);
   });
 });
 
@@ -287,7 +327,8 @@ describe('stripHost / sameUrl / deriveUrlFromFile', () => {
     expect(canonicalInternalPath('/safe-path/')).toBe('/safe-path/');
   });
   test('deriveUrlFromFile', () => {
-    expect(deriveUrlFromFile('blog', 'foo.md')).toBe('/foo/');
+    expect(deriveUrlFromFile('blog', 'foo.md')).toBe('/blog/foo/');
+    expect(deriveUrlFromFile('blog', 'sub/foo.md')).toBe('/blog/sub/foo/');
     expect(deriveUrlFromFile('services', 'pest-control-bradenton-fl.md')).toBe('/pest-control-bradenton-fl/');
     expect(deriveUrlFromFile('locations', 'siesta-key.mdx')).toBe('/siesta-key/');
   });
@@ -299,6 +340,22 @@ slug: "/tree-shrub/get-rid-of-treehoppers/" # canonical Astro route
 Body`;
     expect(extractFrontmatterSlug(body)).toBe('/tree-shrub/get-rid-of-treehoppers/');
     expect(deriveUrlFromFile('blog', 'get-rid-of-treehoppers.md', body)).toBe('/tree-shrub/get-rid-of-treehoppers/');
+  });
+  test('loadAstroCorpus recurses through collection subdirectories', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'internal-link-corpus-'));
+    try {
+      const nested = path.join(root, 'src', 'content', 'blog', 'sub');
+      fs.mkdirSync(nested, { recursive: true });
+      fs.writeFileSync(path.join(nested, 'nested.md'), 'Nested pest control bradenton mention.');
+      const corpus = planner.loadAstroCorpus(root, { collections: ['blog'] });
+      expect(corpus).toEqual([expect.objectContaining({
+        file: 'src/content/blog/sub/nested.md',
+        url: '/blog/sub/nested/',
+        body: 'Nested pest control bradenton mention.',
+      })]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -75,25 +75,34 @@ function anchorCandidates(target) {
  * source — important for application of edits later.
  */
 function maskExcludedRegions(text) {
-  let s = String(text || '');
-  // Frontmatter at the very top.
-  s = s.replace(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/, (m) => ' '.repeat(m.length));
-  // Fenced code blocks.
-  s = s.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length));
-  // HTML comments.
-  s = s.replace(/<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  let s = maskNonContentRegions(text);
   // HTML anchor regions.
-  s = s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => ' '.repeat(m.length));
+  s = s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, blankRegion);
   // Markdown links and reference definitions. This masks both labels
   // and destinations; otherwise short anchors can match inside hrefs
   // like [details](/termite-control-sarasota/) and corrupt the URL.
-  s = s.replace(/\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|[^\n)]*)\)/g, (m) => ' '.repeat(m.length));
-  s = s.replace(/\[[^\]\n]+\]\[[^\]\n]*\]/g, (m) => ' '.repeat(m.length));
-  s = s.replace(/^\s{0,3}\[[^\]\n]+\]:\s*(?:<[^>\n]+>|[^\s]+)(?:\s+.*)?$/gm, (m) => ' '.repeat(m.length));
+  s = s.replace(/\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|[^\n)]*)\)/g, blankRegion);
+  s = s.replace(/\[[^\]\n]+\]\[[^\]\n]*\]/g, blankRegion);
+  s = s.replace(/^\s{0,3}\[[^\]\n]+\]:\s*(?:<[^>\n]+>|[^\s]+)(?:\s+.*)?$/gm, blankRegion);
   // Remaining MDX/HTML tags. Leave children visible, but prevent matches
   // inside component props or tag attributes.
-  s = s.replace(/<\/?[A-Za-z][A-Za-z0-9:._-]*(?:\s+[^<>]*?)?\/?>/g, (m) => ' '.repeat(m.length));
+  s = s.replace(/<\/?[A-Za-z][A-Za-z0-9:._-]*(?:\s+[^<>]*?)?\/?>/g, blankRegion);
   return s;
+}
+
+function maskNonContentRegions(text) {
+  let s = String(text || '');
+  // Frontmatter at the very top.
+  s = s.replace(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/, blankRegion);
+  // CommonMark fenced code blocks: backtick or tilde fences.
+  s = s.replace(/(^|\n)[ \t]{0,3}(`{3,}|~{3,})[^\n]*(?:\r?\n[\s\S]*?\r?\n[ \t]{0,3}\2[ \t]*(?=\r?\n|$))/g, blankRegion);
+  // HTML comments.
+  s = s.replace(/<!--[\s\S]*?-->/g, blankRegion);
+  return s;
+}
+
+function blankRegion(region) {
+  return String(region || '').replace(/[^\r\n]/g, ' ');
 }
 
 /**
@@ -165,17 +174,18 @@ function pageAlreadyLinksTo(text, targetUrl) {
   if (!text || !targetUrl) return false;
   const target = canonicalInternalPath(targetUrl);
   if (!target) return false;
+  const searchable = maskNonContentRegions(text);
   const mdLink = /\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
   let m;
-  while ((m = mdLink.exec(text)) !== null) {
+  while ((m = mdLink.exec(searchable)) !== null) {
     if (canonicalInternalPath(unwrapAngleHref(m[1])) === target) return true;
   }
   const refDef = /^\s{0,3}\[[^\]\n]+\]:\s*(<[^>]+>|[^\s]+)(?:\s+.*)?$/gm;
-  while ((m = refDef.exec(text)) !== null) {
+  while ((m = refDef.exec(searchable)) !== null) {
     if (canonicalInternalPath(unwrapAngleHref(m[1])) === target) return true;
   }
   const href = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
-  while ((m = href.exec(text)) !== null) {
+  while ((m = href.exec(searchable)) !== null) {
     if (canonicalInternalPath(m[1]) === target) return true;
   }
   return false;
@@ -280,12 +290,11 @@ class InternalLinkPlanner {
     for (const c of collections) {
       const dir = path.join(astroRoot, 'src', 'content', c);
       if (!fs.existsSync(dir)) continue;
-      for (const file of fs.readdirSync(dir)) {
-        if (!/\.mdx?$/.test(file)) continue;
-        const full = path.join(dir, file);
+      for (const full of walkMarkdownFiles(dir)) {
+        const file = path.relative(dir, full).split(path.sep).join('/');
         const body = fs.readFileSync(full, 'utf8');
         out.push({
-          file: path.relative(astroRoot, full),
+          file: path.relative(astroRoot, full).split(path.sep).join('/'),
           body,
           url: deriveUrlFromFile(c, file, body),
         });
@@ -336,7 +345,21 @@ function deriveUrlFromFile(collection, file, body = '') {
   const slug = extractFrontmatterSlug(body);
   if (slug) return slug;
   const base = file.replace(/\.mdx?$/, '');
+  if (collection === 'blog') return `/blog/${base}/`;
   return `/${base}/`;
+}
+
+function walkMarkdownFiles(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...walkMarkdownFiles(full));
+    } else if (entry.isFile() && /\.mdx?$/.test(entry.name)) {
+      out.push(full);
+    }
+  }
+  return out.sort();
 }
 
 function extractFrontmatterSlug(body) {
@@ -366,6 +389,8 @@ module.exports._internals = {
   ALLOWED_SITE_HOSTS,
   anchorCandidates,
   maskExcludedRegions,
+  maskNonContentRegions,
+  blankRegion,
   findFirstUnlinkedOccurrence,
   isInsideLink,
   snippetAround,
@@ -376,5 +401,6 @@ module.exports._internals = {
   stripHost,
   sameUrl,
   deriveUrlFromFile,
+  walkMarkdownFiles,
   extractFrontmatterSlug,
 };
