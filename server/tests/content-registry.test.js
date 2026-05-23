@@ -100,6 +100,8 @@ describe('content-registry url and hashing helpers', () => {
       astroRoot: '/tmp/astro-env',
       usingFallback: false,
     });
+    expect(syncCli.resolveSyncConfig({ source: 'github', 'github-ref': 'main' }, {}).astroSource).toBe('github');
+    expect(syncCli.resolveSyncConfig({ source: 'auto', 'astro-dir': '/tmp/astro' }, {}).astroSource).toBe('filesystem');
   });
 });
 
@@ -205,6 +207,107 @@ canonical: "https://www.wavespestcontrol.com/pest-control/get-rid-of-bed-bugs-la
 
   test('fails closed when Astro root is missing', () => {
     expect(() => registry.scanAstroContent('/tmp/not-a-real-astro-root')).toThrow(/ASTRO_REPO_DIR/);
+  });
+
+  test('scans Astro content from GitHub recursively', async () => {
+    const listings = {
+      'src/content/blog': [
+        { type: 'file', path: 'src/content/blog/a.md' },
+        { type: 'dir', path: 'src/content/blog/nested' },
+        { type: 'file', path: 'src/content/blog/ignore.txt' },
+      ],
+      'src/content/blog/nested': [
+        { type: 'file', path: 'src/content/blog/nested/b.mdx' },
+      ],
+    };
+    const files = {
+      'src/content/blog/a.md': `---
+title: GitHub A
+slug: /github-a/
+---
+# GitHub A
+`,
+      'src/content/blog/nested/b.mdx': `---
+title: GitHub B
+slug: /github-b/
+canonical: https://www.wavespestcontrol.com/github-canonical/
+---
+# GitHub B
+`,
+    };
+    const githubClient = {
+      getBranchSha: jest.fn(async () => 'abc123branchsha'),
+      listDir: jest.fn(async (dir) => listings[dir] || []),
+      getFile: jest.fn(async (filePath) => ({ path: filePath, content: files[filePath] })),
+    };
+
+    const rows = await registry.scanAstroContentFromGithub({
+      collections: ['blog'],
+      ref: 'main',
+      githubClient,
+    });
+
+    expect(rows.map((row) => row.astro_source_path)).toEqual([
+      'src/content/blog/a.md',
+      'src/content/blog/nested/b.mdx',
+    ]);
+    expect(rows[0]).toEqual(expect.objectContaining({
+      title: 'GitHub A',
+      live_url: '/github-a/',
+      astro_repo_sha: 'abc123branchsha',
+    }));
+    expect(rows[1]).toEqual(expect.objectContaining({
+      live_url: '/github-b/',
+      canonical_url_normalized: '/github-canonical/',
+      astro_repo_sha: 'abc123branchsha',
+    }));
+    expect(githubClient.listDir).toHaveBeenCalledWith('src/content/blog', 'abc123branchsha');
+    expect(githubClient.getFile).toHaveBeenCalledWith('src/content/blog/a.md', 'abc123branchsha');
+    expect(githubClient.getFile).toHaveBeenCalledWith('src/content/blog/nested/b.mdx', 'abc123branchsha');
+  });
+
+  test('fails closed when GitHub ref cannot be resolved', async () => {
+    const githubClient = {
+      getBranchSha: jest.fn(async () => null),
+      listDir: jest.fn(),
+      getFile: jest.fn(),
+    };
+
+    await expect(registry.scanAstroContentFromGithub({
+      collections: ['blog'],
+      ref: 'missing-branch',
+      githubClient,
+    })).rejects.toThrow(/GitHub Astro ref not found: missing-branch/);
+    expect(githubClient.listDir).not.toHaveBeenCalled();
+  });
+
+  test('fails closed when GitHub source directory is missing or empty', async () => {
+    const githubClient = {
+      getBranchSha: jest.fn(async () => 'abc123branchsha'),
+      listDir: jest.fn(async () => []),
+      getFile: jest.fn(),
+    };
+
+    await expect(registry.scanAstroContentFromGithub({
+      collections: ['blog'],
+      ref: 'main',
+      githubClient,
+    })).rejects.toThrow(/GitHub Astro directory could not be read or was empty: src\/content\/blog/);
+    expect(githubClient.getFile).not.toHaveBeenCalled();
+  });
+
+  test('fails closed when a listed GitHub markdown file cannot be read', async () => {
+    const githubClient = {
+      getBranchSha: jest.fn(async () => 'abc123branchsha'),
+      listDir: jest.fn(async () => [{ type: 'file', path: 'src/content/blog/missing.md' }]),
+      getFile: jest.fn(async () => null),
+    };
+
+    await expect(registry.scanAstroContentFromGithub({
+      collections: ['blog'],
+      ref: 'main',
+      githubClient,
+    })).rejects.toThrow(/GitHub Astro file could not be read: src\/content\/blog\/missing.md/);
   });
 });
 
@@ -895,6 +998,141 @@ slug: /termite-control/
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe('ASTRO_ROOT_MISSING');
+    expect(calls.some((call) => call.table === 'content_registry')).toBe(false);
+    expect(calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'content_registry_sync_runs', op: 'insert' }),
+      expect.objectContaining({
+        table: 'content_registry_sync_runs',
+        op: 'update',
+        payload: expect.objectContaining({ status: 'failed', error_count: 1 }),
+      }),
+    ]));
+  });
+
+  test('commit can sync from GitHub when Astro root is unavailable', async () => {
+    const calls = [];
+    const fakeDb = (table) => ({
+      insert(payload) {
+        calls.push({ table, op: 'insert', payload });
+        return {
+          returning: async () => (table === 'content_registry_sync_runs'
+            ? [{ id: 'sync-run-github' }]
+            : [{ id: 'registry-row-github' }]),
+        };
+      },
+      select: async () => {
+        if (table === 'blog_posts') return [];
+        if (table === 'content_registry') return [];
+        return [];
+      },
+      where() {
+        return {
+          orWhere() { return this; },
+          select: async () => [],
+          update: async (payload) => {
+            calls.push({ table, op: 'update', payload });
+            return 1;
+          },
+        };
+      },
+      whereIn() {
+        return { delete: async () => 0 };
+      },
+    });
+    fakeDb.transaction = async (callback) => callback(fakeDb);
+    const githubClient = {
+      env: () => ({ owner: 'wavespestcontrolfl', repo: 'wavespestcontrol-astro', defaultBranch: 'main' }),
+      getBranchSha: jest.fn(async () => 'github-commit-sha'),
+      listDir: jest.fn(async (dir) => (dir === 'src/content/blog'
+        ? [{ type: 'file', path: 'src/content/blog/github-post.md' }]
+        : [])),
+      getFile: jest.fn(async () => ({
+        path: 'src/content/blog/github-post.md',
+        content: `---
+title: GitHub Post
+slug: /github-post/
+---
+# GitHub Post
+`,
+      })),
+    };
+
+    const result = await registry.runContentRegistrySync({
+      astroRoot: null,
+      astroSource: 'github',
+      githubRef: 'main',
+      githubClient,
+      commit: true,
+      contentType: 'blog',
+      database: fakeDb,
+      now: new Date('2026-05-23T12:00:00Z'),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.source).toBe('github');
+    expect(result.summary.astro_files_scanned).toBe(1);
+    expect(calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'content_registry_sync_runs',
+        op: 'insert',
+        payload: expect.objectContaining({
+          astro_root: 'github:wavespestcontrolfl/wavespestcontrol-astro@main',
+        }),
+      }),
+    ]));
+    const completed = calls.find((call) => call.table === 'content_registry_sync_runs'
+      && call.op === 'update'
+      && call.payload.status === 'completed');
+    expect(completed.payload.astro_repo_sha).toBe('github-commit-sha');
+  });
+
+  test('commit GitHub sync fails closed without marking registry rows missing when source is unavailable', async () => {
+    const calls = [];
+    const fakeDb = (table) => ({
+      insert(payload) {
+        calls.push({ table, op: 'insert', payload });
+        return {
+          returning: async () => (table === 'content_registry_sync_runs'
+            ? [{ id: 'sync-run-github-failed' }]
+            : [{ id: 'registry-row-should-not-write' }]),
+        };
+      },
+      select: async () => [],
+      where() {
+        return {
+          orWhere() { return this; },
+          select: async () => [],
+          update: async (payload) => {
+            calls.push({ table, op: 'update', payload });
+            return 1;
+          },
+        };
+      },
+      whereIn() {
+        return { delete: async () => 0 };
+      },
+    });
+    fakeDb.transaction = async (callback) => callback(fakeDb);
+    const githubClient = {
+      env: () => ({ owner: 'wavespestcontrolfl', repo: 'wavespestcontrol-astro', defaultBranch: 'main' }),
+      getBranchSha: jest.fn(async () => 'github-commit-sha'),
+      listDir: jest.fn(async () => []),
+      getFile: jest.fn(),
+    };
+
+    const result = await registry.runContentRegistrySync({
+      astroRoot: null,
+      astroSource: 'github',
+      githubRef: 'main',
+      githubClient,
+      commit: true,
+      contentType: 'blog',
+      database: fakeDb,
+      now: new Date('2026-05-23T12:00:00Z'),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/GitHub Astro directory could not be read or was empty/);
     expect(calls.some((call) => call.table === 'content_registry')).toBe(false);
     expect(calls).toEqual(expect.arrayContaining([
       expect.objectContaining({ table: 'content_registry_sync_runs', op: 'insert' }),

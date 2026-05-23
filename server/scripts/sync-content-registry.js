@@ -8,6 +8,7 @@
 
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
 const db = require('../models/db');
 const registry = require('../services/content/content-registry');
 
@@ -49,11 +50,28 @@ function resolveAstroRoot(args = {}, env = process.env) {
   };
 }
 
+function resolveSyncConfig(args = {}, env = process.env) {
+  const { astroRoot, usingFallback } = resolveAstroRoot(args, env);
+  let source = String(args.source || env.CONTENT_REGISTRY_ASTRO_SOURCE || 'auto').trim().toLowerCase();
+  if (source === 'auto') {
+    source = (!usingFallback || fs.existsSync(astroRoot)) ? 'filesystem' : 'github';
+  }
+  return {
+    astroRoot,
+    usingFallback,
+    astroSource: source,
+    githubRef: args['github-ref'] || env.CONTENT_REGISTRY_GITHUB_REF || env.GITHUB_ASTRO_DEFAULT_BRANCH || null,
+  };
+}
+
 function printSummary(result) {
   const s = result.summary || {};
   console.log('');
   console.log(`Mode:                         ${result.mode}`);
   console.log(`Status:                       ${result.ok ? 'ok' : 'failed'}`);
+  if (result.source) console.log(`Astro source:                 ${result.source}`);
+  if (result.github_ref) console.log(`GitHub ref:                   ${result.github_ref}`);
+  if (result.astro_root) console.log(`Astro root/source:            ${result.astro_root}`);
   if (result.sync_run_id) console.log(`Sync run id:                  ${result.sync_run_id}`);
   if (!result.ok) {
     console.log(`Error:                        ${result.error || 'unknown'}`);
@@ -74,13 +92,14 @@ async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   const commit = boolFlag(args.commit);
   const json = boolFlag(args.json);
-  const { astroRoot, usingFallback } = resolveAstroRoot(args);
+  const { astroRoot, usingFallback, astroSource, githubRef } = resolveSyncConfig(args);
   const contentType = args['content-type'] || null;
 
-  if (commit && usingFallback) {
+  if (commit && astroSource === 'filesystem' && usingFallback) {
     const result = {
       ok: false,
       mode: 'commit',
+      source: astroSource,
       sync_run_id: null,
       summary: { error_count: 1 },
       error: 'ASTRO_REPO_DIR or --astro-dir is required when using --commit',
@@ -95,6 +114,8 @@ async function main(argv = process.argv.slice(2)) {
 
   const result = await registry.runContentRegistrySync({
     astroRoot,
+    astroSource,
+    githubRef,
     commit,
     contentType,
     database: db,
@@ -104,6 +125,9 @@ async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify({
       ok: result.ok,
       mode: result.mode,
+      source: result.source,
+      astro_root: result.astro_root,
+      github_ref: result.github_ref,
       sync_run_id: result.sync_run_id,
       summary: result.summary,
       error: result.error,
@@ -134,6 +158,7 @@ module.exports = {
   parseArgs,
   boolFlag,
   resolveAstroRoot,
+  resolveSyncConfig,
   printSummary,
   main,
 };
