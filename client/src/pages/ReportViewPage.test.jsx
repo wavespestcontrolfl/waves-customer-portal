@@ -2,18 +2,22 @@ import { describe, expect, it } from 'vitest';
 import {
   cleanVisitSummary,
   customerInteractionCopy,
+  customerActionItems,
   formatDate,
   formatDurationMinutes,
   formatTimelineTime,
   getMinutesBetween,
   getReportArrivalTime,
   getReportCompletionTime,
+  latestPendingReentryTarget,
   normalizeServiceCoverage,
   normalizeVisitTimeline,
   quickNavigationLinks,
+  reportAskPrompts,
   readinessStatusBadge,
   reviewRequestCopy,
   serviceReportDateTimeLabel,
+  smartStatusSummary,
   timelineEventsForDisplay,
   timelineEventsWithReportTiming,
 } from './ReportViewPage.jsx';
@@ -60,9 +64,9 @@ describe('ReportViewPage summary copy cleanup', () => {
 describe('ReportViewPage report chrome helpers', () => {
   it('omits product quick navigation when no products were applied', () => {
     const labels = quickNavigationLinks({ hasProducts: false }).map(([, label]) => label);
-    expect(labels).not.toContain('Products Applied');
-    expect(labels).toContain('Visit Timeline');
-    expect(labels).toContain('Service Coverage');
+    expect(labels).not.toContain('Products');
+    expect(labels).toContain('Timeline');
+    expect(labels).toContain('Map');
     expect(labels).not.toContain('Visit Progress');
     expect(labels).not.toContain('Areas Serviced');
     expect(labels).not.toContain('Coverage Map');
@@ -70,12 +74,140 @@ describe('ReportViewPage report chrome helpers', () => {
 
   it('omits visit timeline quick navigation when the timeline is hidden', () => {
     const labels = quickNavigationLinks({ hasVisitTimeline: false }).map(([, label]) => label);
-    expect(labels).not.toContain('Visit Timeline');
-    expect(labels).toContain('Service Coverage');
+    expect(labels).not.toContain('Timeline');
+    expect(labels).toContain('Map');
+  });
+
+  it('only includes the re-entry quick navigation when re-entry context exists', () => {
+    expect(quickNavigationLinks({ hasReentry: false }).map(([, label]) => label)).not.toContain('Re-entry');
+    expect(quickNavigationLinks({ hasReentry: true }).map(([, label]) => label)).toContain('Re-entry');
+  });
+
+  it('does not suggest Pest Pressure questions when the section is disabled', () => {
+    expect(reportAskPrompts({
+      pestPressure: { enabled: false, showOnCustomerReport: true },
+    })).not.toContain('What does Pest Pressure mean?');
+    expect(reportAskPrompts({
+      pestPressure: { enabled: true, showOnCustomerReport: true },
+    })).toContain('What does Pest Pressure mean?');
   });
 
   it('does not show a readiness status badge without re-entry context', () => {
     expect(readinessStatusBadge(null)).toBeNull();
+  });
+
+  it('uses the latest pending re-entry target for aggregate readiness messaging', () => {
+    const nowMs = Date.parse('2026-05-21T18:00:00.000Z');
+    const target = latestPendingReentryTarget([
+      { label: 'Exterior', readyAt: '2026-05-21T18:30:00.000Z' },
+      { label: 'Interior', readyAt: '2026-05-21T20:00:00.000Z' },
+      { label: 'Garage', readyAt: '2026-05-21T17:30:00.000Z' },
+    ], nowMs);
+
+    expect(target).toEqual(expect.objectContaining({
+      label: 'Interior',
+      readyAt: '2026-05-21T20:00:00.000Z',
+    }));
+  });
+
+  it('drops stale re-entry wait actions once all targets are ready', () => {
+    const data = {
+      dynamicContext: {
+        reentry: {
+          displayTimezone: 'America/New_York',
+          targets: [
+            { label: 'Exterior', readyAt: '2026-05-21T18:30:00.000Z' },
+            { label: 'Interior', readyAt: '2026-05-21T20:00:00.000Z' },
+          ],
+          petAdvisory: 'Keep pets away until dry.',
+        },
+      },
+      findings: [],
+    };
+
+    expect(customerActionItems({
+      data,
+      nowMs: Date.parse('2026-05-21T19:00:00.000Z'),
+    })[0].label).toContain('treated interior');
+
+    expect(customerActionItems({
+      data,
+      nowMs: Date.parse('2026-05-21T20:01:00.000Z'),
+    })).toEqual([]);
+  });
+
+  it('treats needs-follow-up coverage as action needed in status and next steps', () => {
+    const coverage = {
+      items: [{
+        areaName: 'Lanai',
+        status: 'needs_follow_up',
+        customerDescription: 'Technician recommended a follow-up check.',
+      }],
+    };
+    const data = {
+      serviceCoverage: {
+        enabled: true,
+        items: coverage.items,
+      },
+      findings: [],
+      applications: [],
+    };
+
+    expect(smartStatusSummary(data, 'static', Date.parse('2026-05-21T19:00:00.000Z'))).toEqual(expect.objectContaining({
+      heading: 'one area needs attention.',
+      status: 'Follow-up recommended',
+      result: 'Lanai was marked follow-up recommended.',
+    }));
+
+    expect(customerActionItems({ data, coverage })).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        label: 'Review Lanai marked follow-up recommended.',
+        detail: 'Technician recommended a follow-up check.',
+      }),
+    ]));
+  });
+
+  it('adds a fallback action for high-severity findings without recommendations', () => {
+    const actions = customerActionItems({
+      data: {
+        findings: [{
+          severity: 'high',
+          title: 'Ant activity near front entry',
+          detail: 'Activity was documented near the threshold.',
+        }],
+      },
+    });
+
+    expect(actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        label: 'Review the documented activity: Ant activity near front entry.',
+        detail: 'Activity was documented near the threshold.',
+      }),
+    ]));
+  });
+
+  it('keeps pending re-entry visible when high-severity findings exist', () => {
+    const status = smartStatusSummary({
+      dynamicContext: {
+        reentry: {
+          displayTimezone: 'America/New_York',
+          targets: [{ label: 'Interior', readyAt: '2026-05-21T20:00:00.000Z' }],
+        },
+      },
+      findings: [{
+        severity: 'high',
+        title: 'Ant activity near front entry',
+      }],
+      applications: [],
+    }, 'static', Date.parse('2026-05-21T19:00:00.000Z'));
+
+    expect(status).toEqual(expect.objectContaining({
+      heading: 'we found activity that needs attention.',
+      status: 'Ready after 4:00 PM',
+      statusTone: 'pending',
+    }));
+    expect(status.result).toContain('Interior areas are still drying.');
+    expect(status.result).toContain('Ant activity near front entry still needs attention.');
   });
 
   it('keeps untracked customer interaction out of the timeline display', () => {
@@ -152,7 +284,7 @@ describe('ReportViewPage service coverage helper', () => {
     });
 
     expect(coverage.enabled).toBe(true);
-    expect(coverage.title).toBe('Service Coverage');
+    expect(coverage.title).toBe('Service Area Map');
     expect(coverage.items.map((item) => item.markerLabel)).toEqual(['A', 'B']);
     expect(coverage.items[0].customerDescription).toBe('Exterior perimeter service completed.');
     expect(coverage.items[1].customerDescription).toBe('Entry points inspected and treated.');
@@ -218,7 +350,7 @@ describe('ReportViewPage visit timeline helpers', () => {
     });
   });
 
-  it('keeps same-time on-site and service-completed events without a zero-minute duration', () => {
+  it('collapses same-time on-site and service-completed events to the completion event', () => {
     const timestamp = '2026-05-17T18:35:00.000Z';
     const timeline = normalizeVisitTimeline({
       visitTiming: { arrivedAt: timestamp, exitedAt: timestamp },
@@ -234,7 +366,6 @@ describe('ReportViewPage visit timeline helpers', () => {
     });
 
     expect(timeline.events.map((event) => [event.type, event.displayTime])).toEqual([
-      ['technician_on_site', '2:35 PM'],
       ['service_completed', '2:35 PM'],
     ]);
     expect(timeline.durationMinutes).toBeNull();
@@ -257,7 +388,7 @@ describe('ReportViewPage visit timeline helpers', () => {
       },
     });
 
-    expect(timeline.events.map((event) => event.type)).toEqual(['technician_on_site', 'service_completed']);
+    expect(timeline.events.map((event) => event.type)).toEqual(['service_completed']);
     expect(timeline.details).toEqual([
       expect.objectContaining({
         type: 'customer_contact',

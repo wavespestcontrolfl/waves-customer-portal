@@ -261,9 +261,9 @@ class GscOpportunityMiner {
       ['decay_refresh', () => this.mineDecayRefresh(since, priorSince)],
       ['cannibalization', () => this.mineCannibalization(since)],
       ['page_type_mismatch', () => this.minePageTypeMismatch(since)],
-      ['local_gap', () => this.mineLocalGap(since)],
+      ['local_gap', () => this.mineLocalGap(since, ownPagesByServiceCity)],
       ['seasonal_rising', () => this.mineSeasonalRising(periodDays)],
-      ['no_content_yet', () => this.mineNoContentYet(since)],
+      ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
     ];
 
     for (const [name, fn] of runs) {
@@ -591,7 +591,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineLocalGap(since) {
+  async mineLocalGap(since, ownPagesByServiceCity = new Map()) {
     // {city, service} pairs with impression demand but no own page in
     // gsc_pages matching that pair.
     const queries = await db('gsc_queries')
@@ -611,13 +611,11 @@ class GscOpportunityMiner {
       const service = q.service_category;
       if (!city || !service) continue;
 
-      // Is there an existing page covering this?
-      const existing = await db('gsc_pages')
-        .where('date', '>=', since)
-        .where('city_target', q.city_target)
-        .where('service_category', q.service_category)
-        .first();
-      if (existing) continue;
+      // Use the normalized own-page map (same fix as mineNoContentYet).
+      // Earlier iteration queried gsc_pages with raw classifier values,
+      // missing pages where the classification was empty in gsc_pages
+      // but resolvable via inferServiceFromUrl/inferCityFromUrl.
+      if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
 
       const opp = {
         bucket: 'local_gap',
@@ -643,8 +641,14 @@ class GscOpportunityMiner {
   }
 
   async mineSeasonalRising(periodDays) {
-    const recentSince = sinceDate(14);
-    const priorSince = sinceDate(28);
+    // Honor the caller's lookback window. Earlier iteration hardcoded
+    // 14 / 28 days; when run-opportunity-miner.js was called with
+    // --period=7 the other buckets used 7d but seasonal-rising silently
+    // used a different dataset, producing inconsistent counts.
+    // Half the window = recent; full window = prior baseline.
+    const recentDays = Math.max(1, Math.round(periodDays / 2));
+    const recentSince = sinceDate(recentDays);
+    const priorSince = sinceDate(periodDays);
 
     const recent = await db('gsc_queries')
       .where('date', '>=', recentSince)
@@ -706,7 +710,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineNoContentYet(since) {
+  async mineNoContentYet(since, ownPagesByServiceCity = new Map()) {
     // Queries with impressions on the property but no own page even
     // appearing in gsc_pages for the matching service+city.
     const queries = await db('gsc_queries')
@@ -725,14 +729,13 @@ class GscOpportunityMiner {
       const service = q.service_category || inferServiceFromQuery(q.query);
       if (!service) continue;
 
-      const owned = await db('gsc_pages')
-        .where('date', '>=', since)
-        .where('service_category', q.service_category || '')
-        .modify((qb) => {
-          if (q.city_target) qb.where('city_target', q.city_target);
-        })
-        .first();
-      if (owned) continue;
+      // Use the normalized own-page map (built once in mineAll) so the
+      // ownership check matches our normalized service+city values.
+      // Earlier iteration queried gsc_pages with raw service_category =
+      // '' when only inferServiceFromQuery resolved a service, missing
+      // every page that needed URL inference — incorrectly enqueued
+      // no_content_yet rows for topics we already cover.
+      if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
 
       const opp = {
         bucket: 'no_content_yet',

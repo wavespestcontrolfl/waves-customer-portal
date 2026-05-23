@@ -715,7 +715,8 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   // on the PI (customer ticked "Save this card on file"), Stripe attaches
   // the pm to the Stripe customer automatically on success. We still need
   // to mirror it into our payment_methods table so the rest of the
-  // system (autopay, admin Card on File, portal card list) can see it.
+  // system (admin Card on File, portal card list, and later explicit
+  // autopay selection) can see it.
   //
   // Also back-fills the payment_method_id FK on any consent rows that
   // were recorded before this webhook landed.
@@ -732,7 +733,19 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       const ConsentService = require('../services/payment-method-consents');
       // Check if we already saved this pm (e.g. from a duplicate webhook)
       const existing = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
-      const saved = existing || await StripeService.savePaymentMethod(wavesCustomerId, stripePmId);
+      const currentAutopayMethod = await db('payment_methods')
+        .where({
+          customer_id: wavesCustomerId,
+          processor: 'stripe',
+          is_default: true,
+          autopay_enabled: true,
+        })
+        .whereNotNull('stripe_payment_method_id')
+        .first('id');
+      const saved = existing || await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
+        enableAutopay: false,
+        makeDefault: !currentAutopayMethod,
+      });
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       if (!existing) {
         PaymentLifecycleEmail.sendPaymentMethodUpdated({
@@ -868,6 +881,17 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   const piId = paymentIntent.id;
   const failureMessage = paymentIntent.last_payment_error?.message || 'Unknown failure';
   const failureCode = paymentIntent.last_payment_error?.code || null;
+  // Friendly version for human-facing surfaces (bell + push). Raw Stripe
+  // strings like "The provided PaymentMethod has failed authentication.
+  // You can provide payment_method_data or a new PaymentMethod to attempt
+  // to fulfill this PaymentIntent again." are developer messages and
+  // unreadable in a notification banner. We keep the raw text in
+  // payments.failure_reason / ach_failure_log.failure_reason for
+  // diagnostics; only the bell body uses the friendly version.
+  const { friendlyStripeError } = require('../services/stripe');
+  const friendlyFailure = paymentIntent.last_payment_error
+    ? friendlyStripeError(paymentIntent.last_payment_error)
+    : 'Payment could not be completed.';
 
   logger.warn(`[stripe-webhook] PaymentIntent failed: ${piId} — ${failureMessage}`);
 
@@ -916,12 +940,34 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // above. Emit even when no invoice is bound — payment_failed is
   // urgent enough that an orphan PI failure still warrants a bell
   // entry; link defaults to /admin/revenue in that case.
-  notifyPaymentFailed(paymentIntent, failureMessage, eventId).catch((err) => {
+  notifyPaymentFailed(paymentIntent, friendlyFailure, eventId).catch((err) => {
     logger.warn(`[stripe-webhook] payment_failed notify failed: ${err.message}`);
   });
+
+  // ── Customer email for interactive (non-autopay, non-ACH) failures ──
+  //
+  // Autopay failures are already covered by billing-cron, which sends the
+  // `payment.retry_notice` template once a retry has been scheduled —
+  // emailing here would duplicate. ACH failures have their own dedicated
+  // SMS + retry path in handleAchFailure. The remaining case — a card
+  // payment that fails interactively (Pay page, customer-initiated) —
+  // had no customer follow-up. We now send the `payment.failed` Waves
+  // template so the customer gets a branded "we couldn't process that"
+  // notice with a link back to retry or update their card. Idempotency
+  // is per (PI, attempt) so a re-emitted webhook doesn't double-send.
+  const isAutopay = paymentIntent.metadata?.type === 'monthly_autopay';
+  if (pmType !== 'us_bank_account' && !isAutopay) {
+    const attemptId = paymentIntent.latest_charge || eventId || 'no_charge';
+    PaymentLifecycleEmail.sendPaymentFailed({
+      paymentIntentId: piId,
+      attemptId,
+    }).catch((err) => {
+      logger.warn(`[stripe-webhook] payment_failed customer email failed: ${err.message}`);
+    });
+  }
 }
 
-async function notifyPaymentFailed(paymentIntent, failureMessage, eventId) {
+async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
   const piId = paymentIntent.id;
   // Failures are NOT one-shot per PI: /api/pay/:token/update-amount
   // mutates an existing PI's amount and the customer can fail again
@@ -966,7 +1012,7 @@ async function notifyPaymentFailed(paymentIntent, failureMessage, eventId) {
   await triggerNotification('payment_failed', {
     amount: (paymentIntent.amount || 0) / 100,
     customerName: customerLabel(customer),
-    reason: failureMessage,
+    reason: friendlyFailure,
     invoiceId: failedInvoice?.id || null,
   });
 }

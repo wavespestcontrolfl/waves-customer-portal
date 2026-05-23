@@ -153,9 +153,13 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       try {
         const filePath = urlToAstroPath(page_url);
         if (!filePath) return { error: `could not resolve page_url ${page_url} to Astro file` };
-        const raw = await gh.getFile(filePath);
-        if (!raw) return { error: `Astro file not found: ${filePath}` };
-        const parsed = fm.parse(raw);
+        const file = await gh.getFile(filePath);
+        if (!file) return { error: `Astro file not found: ${filePath}` };
+        // gh.getFile returns { sha, path, content, raw }. The frontmatter
+        // parser expects a markdown STRING, not the wrapper object —
+        // passing the wrapper yields empty frontmatter and a serialized
+        // object as body, which breaks refresh + meta rewrites.
+        const parsed = fm.parse(file.content);
         return { page_url, file_path: filePath, frontmatter: parsed.data, body: parsed.content };
       } catch (err) {
         return { error: `get_existing_page failed: ${err.message}` };
@@ -179,8 +183,11 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       const { topic } = input || {};
       if (!topic) return { error: 'topic required' };
       try {
-        const answer = await wikiQa.ask(topic);
-        return { topic, answer };
+        // WikiQA exposes query/lookup/search — there is no `ask`. Match
+        // the legacy content-agent + lead-agent shape: query(topic, ctx)
+        // returns { answer, articlesUsed }.
+        const result = await wikiQa.query(topic, { source: 'brief_driven_agent' });
+        return { topic, answer: result.answer, sources: result.articlesUsed || [] };
       } catch (err) {
         return { error: `wiki-qa failed: ${err.message}` };
       }
@@ -190,14 +197,19 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       const { keyword, city = null } = input || {};
       if (!keyword) return { error: 'keyword required' };
       try {
+        // Overlap must consider all non-terminal statuses, not just
+        // 'published'. The legacy content agent treats queued / draft /
+        // wp_draft as active content for dedupe — limiting this query
+        // to 'published' lets the autonomous writer ship a duplicate
+        // angle while a draft/queued version is already in flight.
         const matches = await db('blog_posts')
-          .where('status', 'published')
+          .whereIn('status', ['published', 'queued', 'draft', 'wp_draft'])
           .where((qb) => {
             qb.whereRaw('LOWER(keyword) LIKE ?', [`%${keyword.toLowerCase()}%`])
               .orWhereRaw('LOWER(title) LIKE ?', [`%${keyword.toLowerCase()}%`]);
           })
           .modify((qb) => { if (city) qb.where('city', city); })
-          .select('id', 'slug', 'title', 'tag', 'city', 'keyword')
+          .select('id', 'slug', 'title', 'tag', 'city', 'keyword', 'status')
           .limit(20);
         return { keyword, city, matches };
       } catch (err) {
@@ -224,6 +236,14 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
       const { title, meta_description, notes_for_reviewer } = input || {};
       if (!title || !meta_description) return { error: 'title + meta_description required' };
+      // Captured metadata is a delta, not a full draft. The Step 11
+      // runner is responsible for hydrating a gate-friendly draft by
+      // loading the live page (body + schema + canonical) and
+      // splicing in this title + meta_description before invoking
+      // content-quality-gate.evaluate(). The gate's hard checks
+      // (schema_valid, canonical_self_referencing, indexable, …)
+      // reference fields the metadata rewriter never produces, so
+      // running them against this object alone would always fail.
       sessionDrafts.set(sessionId, {
         type: 'metadata',
         title,
@@ -252,6 +272,36 @@ function parseJsonbColumns(row, keys) {
   return out;
 }
 
+// Bare service hub slugs (e.g. /lawn-care/, /mosquito-control/) live
+// in src/content/services/ alongside the city-service combos — same
+// Astro collection, no -fl suffix. The earlier heuristic sent them to
+// /locations/ and broke refresh/meta actions for canonical service URLs.
+const SERVICE_HUB_SLUGS = new Set([
+  'pest-control',
+  'lawn-care',
+  'mosquito-control',
+  'termite-control',
+  'rodent-control',
+  'bed-bug-control',
+  'commercial-pest-control',
+  'pest-control-services',
+  'pest-control-quote',
+  'termite-inspection',
+  'tree-shrub-care',
+  'tree-and-shrub-care',
+]);
+
+// Segment must be a slug: alnum start/end, hyphens allowed internally.
+// Path-traversal sequences (`..`, percent-encodings) are rejected before
+// reaching the GitHub Contents API — these agents enable web search, so
+// prompt-injected page_url values otherwise let the agent read arbitrary
+// files outside src/content/* from the Astro repo.
+const SLUG_SEGMENT = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+function isSafeSlugPath(s) {
+  if (!s || s.includes('..') || s.includes('%') || s.includes('\\')) return false;
+  return s.split('/').every((seg) => SLUG_SEGMENT.test(seg));
+}
+
 /**
  * Map a public URL ('/pest-control-bradenton-fl/') to an Astro
  * content collection file path. This is a heuristic — the Astro
@@ -262,9 +312,12 @@ function urlToAstroPath(url) {
   if (!url) return null;
   const cleaned = String(url).replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '').replace(/^\/+|\/+$/g, '');
   if (!cleaned) return null;
+  if (!isSafeSlugPath(cleaned)) return null;
   if (cleaned.startsWith('blog/')) return `src/content/blog/${cleaned.slice(5)}.md`;
   // city-service slugs live in services collection
   if (/-fl$/.test(cleaned)) return `src/content/services/${cleaned}.md`;
+  // pure-service hub pages also live in services collection
+  if (SERVICE_HUB_SLUGS.has(cleaned)) return `src/content/services/${cleaned}.md`;
   // generic location pages
   return `src/content/locations/${cleaned}.md`;
 }

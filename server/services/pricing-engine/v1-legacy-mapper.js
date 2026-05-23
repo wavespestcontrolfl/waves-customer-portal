@@ -11,7 +11,7 @@
 // when EstimatePage migrates off the legacy shape.
 // ============================================================
 
-const { priceTopDressing } = require('./service-pricing');
+const { priceTopDressing, priceTreeShrub } = require('./service-pricing');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -52,6 +52,70 @@ const effectiveOneTimePrice = (li = {}) => {
     ?? 0
   );
 };
+
+const TREE_SHRUB_LEGACY_TIERS = ['standard', 'enhanced'];
+
+function treeShrubTierLabel(tier) {
+  return tier === 'enhanced' ? 'Enhanced' : 'Standard';
+}
+
+function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {
+  const property = v1Result.property || {};
+  return {
+    ...property,
+    bedArea: tsLI.bedArea ?? property.bedArea ?? property.estimatedBedAreaSf,
+    estimatedBedAreaSf: tsLI.bedArea ?? property.estimatedBedAreaSf ?? property.bedArea,
+    features: {
+      ...(property.features || {}),
+      access: tsLI.access || property.features?.access || property.access || 'easy',
+      treeCount: tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount ?? 0,
+    },
+  };
+}
+
+function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') {
+  const quote = priceTreeShrub(treeShrubQuoteInput(v1Result, tsLI), {
+    tier,
+    access: tsLI.access || 'easy',
+    treeCount: tsLI.treeCount ?? 0,
+  });
+  const annual = Math.round(quote.annual);
+  const monthly = roundMoney(annual / 12);
+  const visits = Number(quote.frequency || 0) || null;
+  return {
+    pa: visits ? roundMoney(annual / visits) : quote.perApp,
+    v: visits,
+    ann: annual,
+    mo: monthly,
+  };
+}
+
+function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
+  const selectedTier = TREE_SHRUB_LEGACY_TIERS.includes(tsLI.tier) ? tsLI.tier : 'standard';
+  const recommendedTier = TREE_SHRUB_LEGACY_TIERS.includes(tsLI.recommendedTier)
+    ? tsLI.recommendedTier
+    : (tsLI.recommended ? selectedTier : selectedTier);
+
+  return TREE_SHRUB_LEGACY_TIERS.map((tier) => {
+    const values = tier === selectedTier
+      ? {
+          pa: tsLI.perApp,
+          v: tsLI.frequency,
+          ann: tsLI.annual,
+          mo: tsLI.monthly,
+        }
+      : roundedTreeShrubTierQuote(v1Result, tsLI, tier);
+    return {
+      ...values,
+      name: treeShrubTierLabel(tier),
+      tier,
+      selected: tier === selectedTier,
+      isSelected: tier === selectedTier,
+      recommended: tier === recommendedTier,
+      dimmed: tier !== recommendedTier,
+    };
+  });
+}
 
 const SERVICE_LABEL = {
   commercial_pest: 'Commercial Pest Control',
@@ -139,6 +203,38 @@ function measurementMetadataFields(li = {}) {
     'setupCharge',
     'total',
     'scaleKey',
+    'palmCountSource',
+    'palmCountWasManualOverride',
+    'palmCountWasDefaulted',
+    'servicePalmCountDiffersFromPropertyPalmCount',
+    'basePrice',
+    'estimatedPrice',
+    'baseEstimatePrice',
+    'rawCost',
+    'timeMin',
+    'laborCost',
+    'materialCost',
+    'cleanupLevel',
+    'requestedCleanupLevel',
+    'cleanupLabel',
+    'cleanupMin',
+    'cleanupPriceAdder',
+    'debrisRemovalIncluded',
+    'access',
+    'accessMin',
+    'grassType',
+    'requestedGrassType',
+    'thatchDepthInches',
+    'thatchMeasurementSource',
+    'probeMeasurements',
+    'dethatchingRecommended',
+    'recommendationReason',
+    'requiresManagerApproval',
+    'managerApproved',
+    'managerApprovalSatisfied',
+    'managerApprovalReason',
+    'managerApprovalOverrideReason',
+    'equipmentMetadata',
   ].forEach((field) => {
     if (li[field] !== undefined) fields[field] = li[field];
   });
@@ -165,6 +261,7 @@ const TERMITICIDE_METADATA_FIELDS = [
   'requestedWarrantyTier',
   'warrantyLabel',
   'warrantyAdder',
+  'warrantyAdd',
   'priceBeforeWarranty',
   'labelConfirmed',
   'requiresLabelConfirmation',
@@ -174,8 +271,18 @@ const TERMITICIDE_METADATA_FIELDS = [
   'productOzPer10SqFt',
   'productOz',
   'units',
+  'containersRequired',
   'containerOz',
+  'chemicalCostPerOz',
+  'allocatedProductCost',
+  'productCost',
+  'fullContainerProductCost',
   'rawPrice',
+  'jobContext',
+  'preSlabJobContext',
+  'requestedJobContext',
+  'contextualFloor',
+  'contextualMinimumBasis',
   'floorBeforeVolumeDiscount',
   'floorAfterVolumeDiscount',
   'priceBeforeVolumeDiscount',
@@ -184,6 +291,10 @@ const TERMITICIDE_METADATA_FIELDS = [
   'priceAfterVolumeDiscount',
   'warrantyExtendedSelected',
   'warrantyExtendedPrice',
+  'warrantyStatus',
+  'complianceAdminCost',
+  'driveCost',
+  'includeDriveCost',
   'certificateOfComplianceRequired',
   'addOns',
 ];
@@ -218,6 +329,7 @@ function termiticideDetail(li = {}, fallback = '') {
       li.productLabel,
       li.productOz ? `${li.productOz} oz` : null,
       li.units ? `${li.units} unit${li.units === 1 ? '' : 's'}` : null,
+      li.warrantyLabel || (li.warrantyExtendedSelected ? 'Extended 5-year warranty' : 'No extended warranty'),
     ].filter(Boolean).join(' | ');
     return [slabDetail, productDetail].filter(Boolean).join(' | ') || fallback;
   }
@@ -311,11 +423,7 @@ function mapV1ToLegacyShape(v1Result) {
 
   // Tree & Shrub → R.ts, R.tsMeta
   if (tsLI) {
-    R.ts = [{
-      pa: tsLI.perApp, v: tsLI.frequency, ann: tsLI.annual, mo: tsLI.monthly,
-      name: tsLI.tier === 'enhanced' ? 'Enhanced' : 'Standard',
-      recommended: true, dimmed: false,
-    }];
+    R.ts = treeShrubLegacyTierRows(v1Result, tsLI);
     R.tsMeta = {
       eb: tsLI.bedArea || 0,
       et: tsLI.treeCount || 0,
@@ -353,6 +461,15 @@ function mapV1ToLegacyShape(v1Result) {
       annualAfterCredits: palmAnnualAfterCredits,
       monthlyAfterCredits: palmMonthlyAfterCredits,
       treatmentLabel: palmLI.treatmentLabel,
+      measurements: palmLI.measurements,
+      palmCountSource: palmLI.palmCountSource,
+      palmCountWasManualOverride: palmLI.palmCountWasManualOverride,
+      palmCountWasDefaulted: palmLI.palmCountWasDefaulted,
+      servicePalmCountDiffersFromPropertyPalmCount: palmLI.servicePalmCountDiffersFromPropertyPalmCount,
+      measurementWarnings: palmLI.measurementWarnings || [],
+      requiresMeasurement: !!palmLI.requiresMeasurement,
+      requiresManualReview: !!palmLI.requiresManualReview,
+      manualReviewReasons: palmLI.manualReviewReasons || [],
       detail: parts.join(' · '),
     };
   }
@@ -362,10 +479,16 @@ function mapV1ToLegacyShape(v1Result) {
     const selectedIndex = (mqLI.tiers || []).findIndex(t => t.tier === mqLI.tier);
     let ri = selectedIndex >= 0 ? selectedIndex : 0;
     R.mq = (mqLI.tiers || []).map((t, i) => {
+      const selected = !!(t.isSelected ?? t.selected);
+      const recommended = !!(t.isRecommended ?? t.recommended);
       return {
         pv: t.perVisit, v: t.visits, ann: t.annual, mo: t.monthly,
         n: t.name,
-        recommended: !!t.recommended, dimmed: !t.recommended,
+        selected,
+        recommended,
+        isSelected: selected,
+        isRecommended: recommended,
+        dimmed: !selected,
         pressureRecommended: !!t.pressureRecommended,
       };
     });
@@ -373,7 +496,12 @@ function mapV1ToLegacyShape(v1Result) {
       pr: mqLI.pressureMultiplier || 1,
       sz: mqLI.lotCategory || 'SMALL',
       program: mqLI.tier || 'monthly',
+      selectedProgram: mqLI.selectedProgram || mqLI.tier || null,
+      selectedTier: mqLI.selectedTier || mqLI.tier || null,
       recommendedProgram: mqLI.recommendedProgram || null,
+      recommendedTier: mqLI.recommendedTier || mqLI.recommendedProgram || null,
+      tierWasForced: !!mqLI.tierWasForced,
+      recommendationReasons: Array.isArray(mqLI.recommendationReasons) ? mqLI.recommendationReasons : [],
       addOns: mqLI.addOns || null,
       ri,
     };
@@ -431,6 +559,7 @@ function mapV1ToLegacyShape(v1Result) {
   svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)
+      || (mqLI.tiers || []).find(t => t.selected || t.isSelected)
       || (mqLI.tiers || []).find(t => t.recommended)
       || null;
     const visits = selectedTier?.visits || mqLI.visits || 0;
@@ -717,6 +846,7 @@ function mapV1ToLegacyShape(v1Result) {
           serviceSpecificDiscounts: s.serviceSpecificDiscounts || [],
           warrantyExtendedSelected: s.warrantyExtendedSelected,
           warrantyExtendedPrice: s.warrantyExtendedPrice,
+          ...measurementMetadataFields(s),
           ...termiticideMetadataFields(s),
         })),
       total: oneTimeTotal,

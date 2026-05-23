@@ -184,7 +184,7 @@ async function fireStep(row) {
   const body = await resolveBody(step, {
     name: customer.first_name || 'there',
     invoiceTitle: row.title || 'your service',
-    amount: 'the balance',
+    amount,
     serviceDate,
     payUrl,
   });

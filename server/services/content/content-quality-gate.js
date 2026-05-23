@@ -30,7 +30,26 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 
-const MIN_TOTAL_SCORE = 75;
+// Compute the achievable maximum score from the weight map so the
+// pass threshold is always a reachable fraction of it. The v3.1 plan
+// wanted "min total ~75%" — apply that as a percentage of the real
+// ceiling rather than a hardcoded literal (a hardcoded 75 was
+// unreachable: common hard checks = 37, largest page-specific
+// bundle = city-service at 36, so absolute max = 73).
+const PASS_THRESHOLD_PCT = 0.75;
+
+function computeMaxAchievableScore(hardChecks, pageTypeChecks) {
+  const commonSum = hardChecks.reduce((s, c) => s + c.weight, 0);
+  let maxPageTypeSum = 0;
+  for (const checks of Object.values(pageTypeChecks)) {
+    const sum = checks.reduce((s, c) => s + c.weight, 0);
+    if (sum > maxPageTypeSum) maxPageTypeSum = sum;
+  }
+  return commonSum + maxPageTypeSum; // ceiling for any single page type
+}
+
+// Computed below after the check arrays are defined.
+let MIN_TOTAL_SCORE;
 
 // Each check carries (name, weight, isHard, evaluate(draft, brief)).
 // Hard checks are pass/fail and short-circuit publishing on failure.
@@ -80,6 +99,12 @@ const PAGE_TYPE_CHECKS = {
   gbp: [],
   none: [],
 };
+
+// Resolve MIN_TOTAL_SCORE now that check arrays are defined.
+// MAX_ACHIEVABLE = 37 common + 36 city-service = 73.
+// MIN_TOTAL_SCORE = floor(73 * 0.75) = 54.
+const MAX_ACHIEVABLE_SCORE = computeMaxAchievableScore(HARD_CHECKS, PAGE_TYPE_CHECKS);
+MIN_TOTAL_SCORE = Math.floor(MAX_ACHIEVABLE_SCORE * PASS_THRESHOLD_PCT);
 
 // ── main API ────────────────────────────────────────────────────────
 
@@ -156,7 +181,18 @@ function checkSchemaValid(draft) {
   catch { return { ok: false, reason: 'schema_not_valid_json' }; }
 }
 
+function isPageOnlyOpportunity(brief) {
+  // brief-builder intentionally skips SERP profiling when the
+  // opportunity has no keyword (e.g. decay_refresh on a known page
+  // URL). Page-only briefs cannot satisfy a serp_signal check by
+  // construction, so the SERP hard check must skip for them.
+  return !brief.target_keyword && Boolean(brief.target_url);
+}
+
 function checkSerpBriefAttached(_draft, brief) {
+  if (isPageOnlyOpportunity(brief)) {
+    return { ok: true, reason: 'serp_skip_page_only' };
+  }
   const s = brief.serp_signal;
   if (!s || !s.dominant_intent) return { ok: false, reason: 'no_serp_signal' };
   return { ok: true };
@@ -293,17 +329,32 @@ function checkSourceInternalLink(draft) {
   return { ok: true };
 }
 
+// Explicit allowlist of known Waves phone numbers (last 7 digits — all
+// in the 941 area code today). Per memory: 318-7612 LWR/Bradenton,
+// 297-2817 Parrish, 297-2606 Sarasota, 297-3337 Venice, 240-2066 NP,
+// 297-5749 main (PC + Palmetto). Anything not on the list is treated
+// as customer PII regardless of area code.
+const WAVES_PHONE_LAST_SEVEN = new Set([
+  '3187612', '2972817', '2972606', '2973337', '2402066', '2975749',
+]);
+
 function checkRedactionPassed(draft) {
   const body = String(draft.body || '');
-  // Look for unredacted patterns the pii-redactor would catch but
-  // didn't make it through. Phone, email, full address, [name] absence
-  // alongside name-shaped strings.
-  if (/\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/.test(body)) {
-    // Allow Waves' own published phone numbers.
-    const wavesPhones = /\b(941|863|863)[-.\s](.*?)\b/;
-    const allMatches = body.match(/\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/g) || [];
-    const allWaves = allMatches.every((p) => wavesPhones.test(p));
-    if (!allWaves) return { ok: false, reason: 'non_business_phone_number_in_body' };
+  // Broad phone regex covers both `941-555-1234` and `(941) 555-1234`
+  // (and a few common variants). Previous regex missed parenthesized
+  // formats, which let parenthesized customer numbers bypass the
+  // redaction hard check entirely.
+  const phoneRe = /\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
+  const phoneMatches = body.match(phoneRe) || [];
+  for (const raw of phoneMatches) {
+    const digits = raw.replace(/\D/g, '');
+    // Normalize to last 10 digits (drops a leading 1).
+    const last10 = digits.length >= 10 ? digits.slice(-10) : null;
+    if (!last10) return { ok: false, reason: 'malformed_phone_number_in_body' };
+    const last7 = last10.slice(-7);
+    if (!WAVES_PHONE_LAST_SEVEN.has(last7)) {
+      return { ok: false, reason: `non_business_phone_number_in_body:${last10}` };
+    }
   }
   if (/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/.test(body)) {
     return { ok: false, reason: 'email_in_body' };

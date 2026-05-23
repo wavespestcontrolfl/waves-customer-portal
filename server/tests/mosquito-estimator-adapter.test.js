@@ -38,7 +38,10 @@ describe('mosquito estimator adapter', () => {
 
     expect(result.results.mqMeta).toEqual(expect.objectContaining({
       program: 'monthly12',
+      selectedProgram: 'monthly12',
       recommendedProgram: 'seasonal9',
+      recommendedTier: 'seasonal9',
+      tierWasForced: true,
       ri: 1,
       addOns: expect.objectContaining({
         stationCount: 2,
@@ -54,8 +57,14 @@ describe('mosquito estimator adapter', () => {
     ]);
     expect(result.results.mq[1]).toEqual(expect.objectContaining({
       v: 12,
-      recommended: true,
+      selected: true,
+      recommended: false,
       pressureRecommended: false,
+    }));
+    expect(result.results.mq[0]).toEqual(expect.objectContaining({
+      selected: false,
+      recommended: true,
+      pressureRecommended: true,
     }));
   });
 

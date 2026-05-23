@@ -69,9 +69,16 @@ const secondaryButtonStyle = {
 const TYPE_LABELS = {
   wdo_inspection: 'WDO Inspection',
   termite_inspection: 'Termite Inspection',
+  termite_treatment: 'Termite Treatment',
   pest_inspection: 'Pest Inspection',
+  one_time_pest_treatment: 'One-Time Pest Treatment',
+  one_time_lawn_treatment: 'One-Time Lawn Treatment',
   flea: 'Flea Service',
   rodent_exclusion: 'Rodent Exclusion',
+  rodent_trapping: 'Rodent Trapping',
+  wildlife_trapping: 'Wildlife Trapping',
+  mosquito_event: 'Mosquito Event Spray',
+  palm_injection: 'Palm Injection',
   bed_bug: 'Bed Bug Treatment',
   pre_treatment_termite_certificate: 'Certificate of Compliance — Pre-Construction Termite Treatment',
 };
@@ -260,11 +267,12 @@ function includesAny(text, words) {
 
 function getProjectKind(projectType) {
   if (projectType === 'wdo_inspection') return 'wdo';
-  if (projectType === 'termite_inspection') return 'termite';
-  if (projectType === 'rodent_exclusion') return 'rodent';
+  if (projectType === 'termite_inspection' || projectType === 'termite_treatment') return 'termite';
+  if (projectType === 'rodent_exclusion' || projectType === 'rodent_trapping') return 'rodent';
+  if (projectType === 'wildlife_trapping') return 'wildlife';
   if (projectType === 'bed_bug') return 'bed_bug';
   if (projectType === 'flea') return 'flea';
-  if (projectType === 'pest_inspection') return 'pest';
+  if (projectType === 'pest_inspection' || projectType === 'one_time_pest_treatment') return 'pest';
   if (projectType === 'pre_treatment_termite_certificate') return 'pre_treat_cert';
   return 'general';
 }
@@ -281,6 +289,9 @@ function getRiskInsight(kind, allText) {
       return 'Mice can fit through very small openings and often use garage seals, pipe gaps, and stored materials as cover. A small opening can keep producing activity until the access route is corrected.';
     }
     return 'Rodents do more than create noise or droppings. They can contaminate stored items and insulation, chew wiring and soft building materials, and keep cycling through the same access points until exclusion work closes the routes.';
+  }
+  if (kind === 'wildlife') {
+    return 'Wildlife activity is usually driven by access, shelter, or food sources around the property. Trapping works best when the active animal, travel pattern, and follow-up check plan are documented together.';
   }
   if (kind === 'termite') {
     return 'Termites can damage wood framing and trim from concealed areas before the surface looks severe. Early treatment and moisture correction help limit repair costs and reduce the chance of activity spreading.';
@@ -336,6 +347,14 @@ function buildClientSnapshot({ projectType, findings, recommendations }) {
       meaning: 'Rodent activity usually continues until entry points, travel routes, and nesting conditions are corrected together.',
       insight: getRiskInsight('rodent', allText),
       next: hasAction ? 'Schedule the recommended exclusion, trapping, or follow-up plan.' : 'Review the mapped areas and contact Waves with any activity changes.',
+    };
+  }
+  if (kind === 'wildlife') {
+    return {
+      priority: hasAction ? 'Action recommended' : 'Review recommended',
+      meaning: 'Wildlife trapping depends on safe trap placement, documented activity, and timely follow-up checks.',
+      insight: getRiskInsight('wildlife', allText),
+      next: hasAction ? 'Follow the recommended trapping, access-control, or follow-up plan.' : 'Review the documented activity and contact Waves if animal movement changes.',
     };
   }
   if (kind === 'termite') {
@@ -458,7 +477,7 @@ export default function ProjectReportViewPage() {
     </div>
   );
 
-  const typeLabel = TYPE_LABELS[data.projectType] || 'Inspection';
+  const typeLabel = TYPE_LABELS[data.projectType] || 'Project';
   const reportTitle = String(data.title || '').trim() || typeLabel;
   const findings = data.findings || {};
   const findingsEntries = Object.entries(findings).filter(([, v]) => v !== null && v !== undefined && v !== '');

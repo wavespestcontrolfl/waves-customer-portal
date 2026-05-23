@@ -77,6 +77,10 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/social media tile/);
     expect(buildPrompt({ title: 'X', mode: 'blog-hero' })).toMatch(/blog hero image/);
   });
+  test('embeds mode-specific aspect/dimensions (needed for Gemini)', () => {
+    expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/1:1.*1024x1024/);
+    expect(buildPrompt({ title: 'X', mode: 'blog-hero' })).toMatch(/3:2.*1536x1024/);
+  });
 });
 
 // ── ImageGenerator chain behavior ───────────────────────────────────
@@ -137,16 +141,30 @@ describe('ImageGenerator: skipped when key missing', () => {
   });
 });
 
-describe('ImageGenerator: retryable error stops the chain', () => {
-  // Retryable errors aren't transparent fallbacks — they bubble up so
-  // the caller can decide to retry the whole call later.
-  test('500 on gpt-image-2 stops chain (does NOT fall to gemini)', async () => {
+describe('ImageGenerator: retryable errors fall through to next provider', () => {
+  // The whole point of the chain is resilience — a 408/429/5xx on one
+  // provider should try the next one. Admin and social callers do not
+  // retry, so bailing on retryable used to defeat the fallback.
+  test('500 on gpt-image-2 falls through to gemini', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     process.env.GEMINI_API_KEY = 'gem-test';
-    const mockFetch = jest.fn().mockReturnValue(err(500, 'server error'));
+    const mockFetch = jest.fn()
+      .mockReturnValueOnce(err(500, 'server error'))
+      .mockReturnValueOnce(ok(GEMINI_OK_BODY));
     const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch });
-    await expect(gen.generate({ title: 'Test' })).rejects.toThrow();
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const r = await gen.generate({ title: 'Test' });
+    expect(r.model).toBe('gemini');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+  test('429 on gpt-image-2 + 503 on gemini → throws after exhausting chain', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.GEMINI_API_KEY = 'gem-test';
+    const mockFetch = jest.fn()
+      .mockReturnValueOnce(err(429, 'rate limited'))
+      .mockReturnValueOnce(err(503, 'unavailable'));
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini', fetchFn: mockFetch });
+    await expect(gen.generate({ title: 'Test' })).rejects.toThrow(/all providers failed/);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });
 

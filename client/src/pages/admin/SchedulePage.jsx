@@ -661,7 +661,7 @@ const EDIT_FALLBACK_SERVICES = [
   },
 ];
 
-export function EditServiceModal({ service, technicians, onClose, onSaved }) {
+export function EditServiceModal({ service, technicians, onClose, onSaved, onMarkPrepaid }) {
   const serviceHasSeries = !!(
     service.isRecurring ||
     service.recurringParentId ||
@@ -969,7 +969,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
     setWeekendShift(value === "back" ? "back" : "forward");
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -993,21 +993,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
       >
         {" "}
         <div
+          className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-4"
           style={{
             position: "sticky",
             top: 0,
             zIndex: 3,
             background: "#fff",
             borderBottom: `1px solid ${D.border}`,
-            padding: "14px 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 16,
+            padding: "14px 20px",
           }}
         >
           {" "}
-          <div>
+          <div className="min-w-0 flex-1">
             {" "}
             <div style={{ fontSize: 22, fontWeight: 800, color: "#111827" }}>
               Edit appointment
@@ -1016,6 +1013,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
               style={{
                 display: "flex",
                 alignItems: "center",
+                flexWrap: "wrap",
                 gap: 8,
                 marginTop: 5,
               }}
@@ -1036,16 +1034,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
               >
                 {service.status || "Accepted"}
               </span>{" "}
-              <span style={{ color: D.muted, fontSize: 13 }}>
+              <span
+                style={{
+                  color: D.muted,
+                  fontSize: 13,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  minWidth: 0,
+                }}
+              >
                 {customerName}
               </span>{" "}
             </div>{" "}
           </div>{" "}
           <div
+            className="w-full md:w-auto"
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 10,
+              gap: 8,
               flexWrap: "wrap",
               justifyContent: "flex-end",
             }}
@@ -1054,9 +1062,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
             <button
               onClick={() => handleSave({ takePayment: true })}
               disabled={saving}
-              className="font-bold"
+              className="font-bold flex-1 md:flex-initial"
               style={{
-                padding: "11px 16px",
+                padding: "11px 14px",
                 borderRadius: 4,
                 background: "#111827",
                 color: "#fff",
@@ -1064,16 +1072,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 fontSize: 13,
                 cursor: saving ? "wait" : "pointer",
                 opacity: saving ? 0.6 : 1,
+                whiteSpace: "nowrap",
               }}
             >
-              {saving ? "Saving..." : "Save and take payment"}
+              {saving ? "Saving..." : "Save & take payment"}
             </button>{" "}
             <button
               onClick={() => handleSave()}
               disabled={saving}
-              className="font-bold"
+              className="font-bold flex-1 md:flex-initial"
               style={{
-                padding: "11px 16px",
+                padding: "11px 14px",
                 borderRadius: 4,
                 background: "#fff",
                 color: "#111827",
@@ -1081,6 +1090,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 fontSize: 13,
                 cursor: saving ? "wait" : "pointer",
                 opacity: saving ? 0.6 : 1,
+                whiteSpace: "nowrap",
               }}
             >
               {saving ? "Saving..." : "Save"}
@@ -1107,24 +1117,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
           </div>{" "}
         </div>{" "}
         <div
+          className="grid grid-cols-1 md:[grid-template-columns:340px_1fr]"
           style={{
             width: "100%",
             maxWidth: 1180,
             margin: "0 auto",
-            padding: "22px 20px 36px",
-            display: "grid",
-            gridTemplateColumns:
-              "repeat(auto-fit, minmax(min(100%, 340px), 1fr))",
+            padding: "18px 16px 36px",
             gap: 20,
           }}
         >
           {" "}
           <aside
+            className="order-2 md:order-1 md:sticky md:top-[88px]"
             style={{
               ...sectionStyle,
               alignSelf: "start",
-              position: "sticky",
-              top: 88,
             }}
           >
             {" "}
@@ -1339,9 +1346,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
               </div>{" "}
             </div>{" "}
           </aside>{" "}
-          <main>
+          <main className="order-1 md:order-2 min-w-0 flex flex-col">
             {" "}
-            <section style={sectionStyle}>
+            <section style={{ ...sectionStyle, order: 2 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Location</h2>{" "}
               <label style={labelStyle}>Appointment location</label>{" "}
@@ -1405,7 +1412,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 </div>{" "}
               </div>{" "}
             </section>{" "}
-            <section style={sectionStyle}>
+            <section style={{ ...sectionStyle, order: 1 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Services and items</h2>{" "}
               <div
@@ -1640,6 +1647,53 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                   </div>{" "}
                 </div>{" "}
               </div>{" "}
+              {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    padding: "10px 12px",
+                    marginBottom: 12,
+                    background: "#DCFCE7",
+                    border: "1px solid #86EFAC",
+                    borderRadius: 6,
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: "#166534" }}>
+                      Prepaid ${Number(service.prepaidAmount).toFixed(2)}
+                      {service.prepaidMethod ? ` · ${String(service.prepaidMethod).replace(/_/g, " ")}` : ""}
+                    </div>
+                    {service.prepaidSeriesContext?.totalCoveredVisits > 1 && (
+                      <div style={{ fontSize: 12, color: "#15803D", marginTop: 2 }}>
+                        Visit {service.prepaidSeriesContext.visitNumber || "?"} of {service.prepaidSeriesContext.totalVisitsInSeries}
+                        {service.prepaidSeriesContext.futureCoveredVisits > 0
+                          ? ` · ${service.prepaidSeriesContext.futureCoveredVisits} more covered`
+                          : ""}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onMarkPrepaid?.(service)}
+                    className="font-bold"
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 4,
+                      background: "#fff",
+                      color: "#166534",
+                      border: "1px solid #86EFAC",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Edit
+                  </button>
+                </div>
+              )}
               <div
                 style={{
                   display: "flex",
@@ -1649,37 +1703,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 }}
               >
                 {" "}
-                <button
-                  type="button"
-                  style={{
-                    padding: "9px 12px",
-                    borderRadius: 4,
-                    border: `1px solid ${D.inputBorder}`,
-                    background: "#fff",
-                    fontSize: 13,
-                    fontWeight: 800,
-                  }}
-                >
-                  Add services
-                </button>{" "}
-                <button
-                  type="button"
-                  style={{
-                    padding: "9px 12px",
-                    borderRadius: 4,
-                    border: `1px solid ${D.inputBorder}`,
-                    background: "#fff",
-                    fontSize: 13,
-                    fontWeight: 800,
-                  }}
-                >
-                  Add item
-                </button>{" "}
+                {onMarkPrepaid && !(service.prepaidAmount != null && Number(service.prepaidAmount) > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => onMarkPrepaid(service)}
+                    className="font-bold"
+                    style={{
+                      padding: "9px 12px",
+                      borderRadius: 4,
+                      border: `1px solid ${D.inputBorder}`,
+                      background: "#fff",
+                      fontSize: 13,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Mark prepaid
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() =>
                     setDiscountPresetId(discountPresetId || "custom")
                   }
+                  className="font-bold"
                   style={{
                     padding: "9px 12px",
                     borderRadius: 4,
@@ -1687,6 +1734,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                     background: "#fff",
                     fontSize: 13,
                     fontWeight: 800,
+                    cursor: "pointer",
                   }}
                 >
                   Add discount
@@ -1819,7 +1867,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 </div>{" "}
               </div>{" "}
             </section>{" "}
-            <section style={sectionStyle}>
+            <section style={{ ...sectionStyle, order: 3 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Date and time</h2>{" "}
               <div
@@ -2111,7 +2159,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
                 </div>
               )}
             </section>{" "}
-            <section style={sectionStyle}>
+            <section style={{ ...sectionStyle, order: 4 }}>
               {" "}
               <h2 style={sectionTitleStyle}>Notes</h2>{" "}
               <label style={labelStyle}>Appointment notes</label>{" "}
@@ -2157,7 +2205,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
           </main>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2167,6 +2216,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved }) {
 // PROTOCOL PANEL — shows all 5 protocol layers for a service
 // =========================================================================
 export function ProtocolPanel({ service, onClose }) {
+  // Monochrome admin V2 palette — shadows the module-level D inside this panel
+  // so the Service Protocol flyout matches the zinc admin shell instead of the
+  // warmer legacy slate/teal/amber accents.
+  const D = {
+    bg: "#F4F4F5",
+    card: "#FFFFFF",
+    border: "#E4E4E7",
+    input: "#FFFFFF",
+    teal: "#18181B",
+    green: "#52525B",
+    amber: "#52525B",
+    red: "#C8312F",
+    blue: "#18181B",
+    purple: "#52525B",
+    gray: "#A1A1AA",
+    text: "#3F3F46",
+    muted: "#71717A",
+    white: "#FFFFFF",
+    heading: "#18181B",
+    inputBorder: "#D4D4D8",
+  };
   const [photos, setPhotos] = useState([]);
   const [seasonal, setSeasonal] = useState([]);
   const [scripts, setScripts] = useState([]);
@@ -2310,12 +2380,14 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "equipment", label: " Equipment", count: equipment.length },
   ];
 
+  // Pest pressure stays ordinal but monochrome — peak gets alert-fg because
+  // it's a genuine "act now" signal; the rest step down a zinc ramp.
   const pressureColors = {
-    peak: D.red,
-    high: D.amber,
-    moderate: D.teal,
-    low: D.green,
-    dormant: D.gray,
+    peak: "#C8312F",
+    high: "#18181B",
+    moderate: "#52525B",
+    low: "#71717A",
+    dormant: "#A1A1AA",
   };
 
   return (
@@ -2373,36 +2445,42 @@ export function ProtocolPanel({ service, onClose }) {
       <div
         style={{
           display: "flex",
-          gap: 4,
-          padding: "8px 12px",
+          gap: 16,
+          padding: "0 16px",
           borderBottom: `1px solid ${D.border}`,
           overflowX: "auto",
           WebkitOverflowScrolling: "touch",
           flexWrap: "nowrap",
         }}
       >
-        {SECTIONS.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => setActiveSection(s.id)}
-            style={{
-              padding: "6px 12px",
-              borderRadius: 8,
-              border: "none",
-              cursor: "pointer",
-              whiteSpace: "nowrap",
-              fontSize: 11,
-              fontWeight: 600,
-              flexShrink: 0,
-              minHeight: 44,
-              background: activeSection === s.id ? D.teal : "transparent",
-              color: activeSection === s.id ? D.bg : D.muted,
-            }}
-          >
-            {s.label}
-            {s.count !== null ? ` (${s.count})` : ""}
-          </button>
-        ))}
+        {SECTIONS.map((s) => {
+          const active = activeSection === s.id;
+          return (
+            <button
+              key={s.id}
+              onClick={() => setActiveSection(s.id)}
+              style={{
+                padding: "12px 2px",
+                marginBottom: -1,
+                background: "transparent",
+                border: "none",
+                borderBottom: `2px solid ${active ? D.heading : "transparent"}`,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                fontSize: 11,
+                fontWeight: 500,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+                flexShrink: 0,
+                minHeight: 44,
+                color: active ? D.heading : D.muted,
+              }}
+            >
+              {s.label.trim()}
+              {s.count !== null ? ` (${s.count})` : ""}
+            </button>
+          );
+        })}
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
@@ -2493,11 +2571,11 @@ export function ProtocolPanel({ service, onClose }) {
                     {!lawnContext.lawnSqft && (
                       <div
                         style={{
-                          background: "#FEF3C7",
+                          background: D.bg,
                           borderRadius: 10,
                           padding: 12,
-                          border: "1px solid #F59E0B55",
-                          color: D.amber,
+                          border: `1px solid ${D.border}`,
+                          color: D.text,
                           fontSize: 12,
                           lineHeight: 1.45,
                           marginBottom: 12,
@@ -3139,7 +3217,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.amber }}
+                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
                     >
                       {seasonal.length}
                     </div>{" "}
@@ -3166,7 +3244,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.teal }}
+                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
                     >
                       {photos.length}
                     </div>{" "}
@@ -3193,7 +3271,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.green }}
+                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
                     >
                       {scripts.length}
                     </div>{" "}
@@ -3217,7 +3295,7 @@ export function ProtocolPanel({ service, onClose }) {
                       style={{
                         fontSize: 12,
                         fontWeight: 700,
-                        color: D.amber,
+                        color: D.heading,
                         marginBottom: 6,
                       }}
                     >
@@ -3228,10 +3306,10 @@ export function ProtocolPanel({ service, onClose }) {
                         key={i}
                         style={{
                           fontSize: 12,
-                          color: a.type === "chemical" ? D.red : D.amber,
+                          color: a.type === "chemical" ? D.red : D.text,
                           marginBottom: 3,
                           paddingLeft: 8,
-                          borderLeft: `2px solid ${a.type === "chemical" ? D.red : D.amber}`,
+                          borderLeft: `2px solid ${a.type === "chemical" ? D.red : D.heading}`,
                         }}
                       >
                         {a.text}

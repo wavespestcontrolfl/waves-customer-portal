@@ -71,8 +71,14 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
   const local = city
     ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
     : `Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon.`;
+  // Aspect/dimension lives in the prompt because Gemini's generateContent
+  // doesn't accept a size parameter — without this, Gemini-only deploys
+  // return arbitrary aspect ratios for both blog heroes and social tiles.
+  const composition = mode === 'social-square'
+    ? `Composition: square 1:1 aspect ratio, 1024x1024.`
+    : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
   const style = `Style: bright, clean, professional. Teal/ocean-blue accent (#0ea5e9). No text, words, watermarks, or logos in the image.`;
-  return [base, focus, local, style].join(' ');
+  return [base, focus, local, composition, style].join(' ');
 }
 
 // ── providers ────────────────────────────────────────────────────────
@@ -187,16 +193,17 @@ class ImageGenerator {
         logger.info(`[image-generator] generated via ${slug} (${result.mimeType}, ${result.dataUrl.length} chars)`);
         return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts };
       }
-      // Skipped / fatal → next provider. Retryable → bail; we don't
-      // do internal retry loops to keep latency predictable.
+      // Skipped / fatal / retryable → next provider. The whole point
+      // of the chain is resilience: a 408/429/5xx on OpenAI should fall
+      // through to Gemini, not abort the chain. Admin and social
+      // callers do not retry, so bailing here used to defeat the
+      // fallback entirely.
       if (result.skipped) {
         logger.info(`[image-generator] ${slug} skipped: ${result.reason}`);
       } else if (result.fatal) {
         logger.warn(`[image-generator] ${slug} fatal: ${result.status} ${result.body || ''}`);
       } else if (result.retryable) {
-        logger.warn(`[image-generator] ${slug} retryable: ${result.status || result.error}`);
-        // Stop on retryable too — let caller retry the whole thing.
-        break;
+        logger.warn(`[image-generator] ${slug} retryable: ${result.status || result.error} — trying next provider`);
       }
     }
 

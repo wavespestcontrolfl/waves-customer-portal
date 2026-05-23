@@ -45,4 +45,22 @@ describe('admin estimate roach UI copy', () => {
     expect(source).not.toContain("name: 'German Roach (3-visit)'");
     expect(source).not.toContain("name: 'Regular Roach'");
   });
+
+  test('admin estimator exposes separate palm property and treatment counts', () => {
+    const v2 = readRepoFile('client/src/pages/admin/EstimateToolViewV2.jsx');
+    const legacy = readRepoFile('client/src/pages/admin/EstimatePage.jsx');
+    const fallback = readRepoFile('client/src/lib/estimateEngine.js');
+
+    for (const source of [v2, legacy]) {
+      expect(source).toContain('Palms on property');
+      expect(source).toContain('Palms to treat');
+      expect(source).toContain('palmTreatmentCount');
+      expect(source).toContain('Palm count is required for palm injection pricing.');
+    }
+
+    expect(v2).toContain('palmInjection');
+    expect(v2).toContain('measurements: { palmCount: palmTreatmentCount }');
+    expect(fallback).toContain('never fall back to one palm or a');
+    expect(fallback).toContain('30% satellite estimate');
+  });
 });

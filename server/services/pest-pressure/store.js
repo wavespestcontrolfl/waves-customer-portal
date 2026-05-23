@@ -389,12 +389,17 @@ async function listAuditEvents(knex, { limit = 50 } = {}) {
     .select('id', 'actor_type', 'actor_id', 'action', 'resource_type', 'resource_id', 'metadata', 'created_at');
 }
 
-async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12 } = {}) {
+async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null } = {}) {
   const q = knex('pest_pressure_scores')
     .where('customer_id', customerId)
     .orderBy('service_date', 'desc')
     .limit(limit);
   if (serviceLine) q.where('service_line', serviceLine);
+  // Token-scoped callers (customer-facing report views) must pass
+  // beforeOrOnServiceDate set to the report's own service_date so a
+  // long-lived `/api/reports/:token` bearer can't reveal later visits
+  // recorded after the report was generated.
+  if (beforeOrOnServiceDate) q.where('service_date', '<=', beforeOrOnServiceDate);
   return q.select(
     'id', 'service_record_id', 'service_date', 'service_line',
     'displayed_score', 'calculated_score', 'label_key', 'label_name',

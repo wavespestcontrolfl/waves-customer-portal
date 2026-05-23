@@ -25,7 +25,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { WEIGHTS, CITIES } = require('../content/scoring-config');
 
 // ── normalization (pure, test-friendly) ──────────────────────────────
@@ -101,8 +101,36 @@ function revenueRealizationScore({ estimated_revenue, leads_total }) {
 
 class ConversionFeedbackMiner {
   async mineWindow({ windowDays = 90, persist = true } = {}) {
-    const since = etDateString(addETDays(new Date(), -windowDays));
     const windowEndDate = etDateString(new Date());
+    // ET-pinned cutoff for timestamptz WHERE clauses against
+    // leads.first_contact_at + call_log.created_at. We build the cutoff
+    // server-side via Postgres's `AT TIME ZONE 'America/New_York'` so
+    // it's unambiguous to the database — the cutoff = midnight ET N
+    // days ago, not midnight UTC.
+    // windowDays is internal (not user input) so we safely interpolate
+    // it into the INTERVAL literal.
+    //
+    // ET anchor: NOW() AT TIME ZONE 'America/New_York' returns the
+    // wall-clock instant in ET. Casting ::date strips to the ET
+    // calendar day regardless of the session timezone (Railway runs
+    // UTC). Using CURRENT_DATE here would resolve to the UTC calendar
+    // day, which between 00:00–03:59 UTC = 8pm–11:59pm ET prior day
+    // would advance the cutoff by one full ET day and drop valid
+    // late-evening ET records.
+    const days = Math.max(0, parseInt(windowDays, 10) || 0);
+    // Two AT TIME ZONE hops on purpose:
+    //   1. NOW() AT TIME ZONE 'America/New_York' → current wall-clock
+    //      in ET, then ::date strips to the ET calendar day. This
+    //      avoids the UTC-vs-ET date drift CURRENT_DATE would cause
+    //      between 00:00–03:59 UTC.
+    //   2. (... ::timestamp) AT TIME ZONE 'America/New_York' anchors
+    //      the resulting "naive" midnight to ET, producing the
+    //      timestamptz for ACTUAL midnight ET (e.g. 05:00 UTC in EST,
+    //      04:00 UTC in EDT). Without the second hop the cutoff would
+    //      be midnight UTC, shifted 4–5 hours earlier than intended.
+    const sinceCutoff = db.raw(
+      `(((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '${days} days')::timestamp AT TIME ZONE 'America/New_York')`
+    );
 
     const rolls = new Map(); // key: city||_global :: service||_global → row
 
@@ -142,7 +170,7 @@ class ConversionFeedbackMiner {
     // sent/accepted counts and revenue.
     try {
       const leads = await db('leads')
-        .where('leads.first_contact_at', '>=', since)
+        .where('leads.first_contact_at', '>=', sinceCutoff)
         .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
         .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
         .select(
@@ -164,11 +192,24 @@ class ConversionFeedbackMiner {
         const service = normalizeService(r.service_interest);
 
         const isForm = (r.source_type === 'form' || r.first_contact_channel === 'form' || r.first_contact_channel === 'web');
-        const estSent = r.estimate_status && ['sent', 'viewed', 'accepted', 'declined'].includes(r.estimate_status) ? 1 : 0;
+        // Include 'expired' — it's a post-send terminal state. Earlier
+        // iteration excluded it, which inflated close_rate by shrinking
+        // the denominator (expired = sent but customer never decided).
+        const estSent = r.estimate_status && ['sent', 'viewed', 'accepted', 'declined', 'expired'].includes(r.estimate_status) ? 1 : 0;
         const estAccepted = r.estimate_status === 'accepted' ? 1 : 0;
-        const revenue = estAccepted
-          ? (parseFloat(r.estimate_monthly || 0) * 12) + parseFloat(r.estimate_annual || 0) + parseFloat(r.estimate_onetime || 0)
-          : 0;
+        // Annualized accepted-estimate revenue. Per the existing dashboard
+        // pattern (server/routes/admin-dashboard.js + admin-customers.js):
+        // estimates.annual_total is the annual EQUIVALENT of any
+        // recurring portion of the estimate (the customer-facing
+        // "annual" view of a monthly plan), NOT additive to monthly *
+        // 12. Summing monthly*12 + annual double-counts the recurring
+        // line. Use monthly*12 when monthly is set; else annual; then
+        // add the one-time portion.
+        const monthlyTotal = parseFloat(r.estimate_monthly || 0);
+        const annualTotal = parseFloat(r.estimate_annual || 0);
+        const onetimeTotal = parseFloat(r.estimate_onetime || 0);
+        const recurringAnnualized = monthlyTotal > 0 ? monthlyTotal * 12 : annualTotal;
+        const revenue = estAccepted ? recurringAnnualized + onetimeTotal : 0;
 
         const patch = {
           leads_total: 1,
@@ -188,26 +229,42 @@ class ConversionFeedbackMiner {
 
     // ── inbound calls ──────────────────────────────────────────────
     // Calls don't carry a city/service classification themselves; we
-    // attribute via the linked lead when present, otherwise roll into
-    // the global bucket. Service inference from lead_synopsis is left
-    // to a future iteration (would need to load synopsis text per row).
+    // attribute via the lead matching the caller's phone.
+    //
+    // We can NOT join `leads.twilio_call_sid = call_log.twilio_call_sid`:
+    // lead-attribution.js overwrites leads.twilio_call_sid on every
+    // follow-up call for the same lead, so older call_log rows for
+    // repeat callers stop matching and would get rolled into _global,
+    // skewing per-(city, service) call counts. Instead build a
+    // phone → most-recent-lead map (matching lead-attribution's
+    // "orderBy created_at desc → first()" rule) and attribute via the
+    // map in application code.
     try {
+      const phoneToLead = new Map();
+      try {
+        const leadRows = await db('leads')
+          .whereNotNull('phone')
+          .orderBy('created_at', 'desc')
+          .select('phone', 'city', 'service_interest');
+        for (const l of leadRows) {
+          if (!phoneToLead.has(l.phone)) {
+            phoneToLead.set(l.phone, { city: l.city, service_interest: l.service_interest });
+          }
+        }
+      } catch (err) {
+        logger.warn(`[conversion-miner] phoneToLead build failed: ${err.message}`);
+      }
+
       const calls = await db('call_log')
-        .where('call_log.direction', 'inbound')
-        .where('call_log.created_at', '>=', since)
-        .leftJoin('leads', function () {
-          this.on('leads.twilio_call_sid', '=', 'call_log.twilio_call_sid');
-        })
-        .select(
-          'call_log.call_outcome as call_outcome',
-          'leads.city as lead_city',
-          'leads.service_interest as lead_service'
-        );
+        .where('direction', 'inbound')
+        .where('created_at', '>=', sinceCutoff)
+        .select('from_phone', 'call_outcome');
 
       for (const r of calls) {
         if (['spam', 'wrong_number'].includes(r.call_outcome)) continue;
-        const city = normalizeCity(r.lead_city);
-        const service = normalizeService(r.lead_service);
+        const lead = r.from_phone ? phoneToLead.get(r.from_phone) || null : null;
+        const city = normalizeCity(lead?.city);
+        const service = normalizeService(lead?.service_interest);
         bump(city, service, {
           calls_handled: 1,
           calls_booked: r.call_outcome === 'booked' ? 1 : 0,

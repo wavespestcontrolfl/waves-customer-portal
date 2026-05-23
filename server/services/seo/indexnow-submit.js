@@ -113,8 +113,13 @@ class IndexNowSubmitter {
 
   async _record(url, result) {
     try {
+      // Only stamp submitted_at on success — _wasRecentlySubmitted
+      // dedupes on this timestamp, so recording it for rate_limited /
+      // rejected / error responses would silently block retries for
+      // 24h on transient 429/5xx and stall indexing recovery. Status,
+      // error, and attempt count still record the failed try for ops.
       const updates = {
-        indexnow_submitted_at: new Date(),
+        ...(result.ok ? { indexnow_submitted_at: new Date() } : {}),
         indexnow_status: result.status,
         indexnow_last_error: result.error || null,
         updated_at: new Date(),

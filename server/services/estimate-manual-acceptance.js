@@ -3,6 +3,9 @@ const logger = require('./logger');
 const EstimateConverter = require('./estimate-converter');
 const AccountMembershipEmail = require('./account-membership-email');
 const { markLinkedLeadEstimateAccepted } = require('./lead-estimate-link');
+const {
+  estimateDataHasUnresolvedManagerApproval,
+} = require('./estimate-delivery-options');
 
 const MANUAL_ACCEPTABLE_STATUSES = new Set(['sent', 'viewed']);
 
@@ -68,6 +71,10 @@ async function markEstimateManuallyAccepted({
 
     if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
       throw httpError('Estimate is no longer active.', 409);
+    }
+
+    if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
+      throw httpError('Manager approval is required before this estimate can be manually accepted.', 400);
     }
 
     if (estimate.bill_by_invoice) {

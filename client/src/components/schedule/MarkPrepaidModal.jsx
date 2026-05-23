@@ -35,18 +35,86 @@ function serviceDisplayName(service) {
   return service?.serviceTypeDisplay || service?.serviceType || 'Service';
 }
 
+// True when this appointment is part of a recurring family — either it's a
+// template parent (`isRecurring`) or a spawned child (`recurringParentId`).
+// The "Apply to entire series" toggle only shows up in those cases; one-off
+// visits don't have anything to fan out to.
+function serviceIsPartOfSeries(service) {
+  return !!(service?.isRecurring || service?.recurringParentId || service?.recurring_parent_id);
+}
+
+function patternLabel(pattern) {
+  if (!pattern) return 'recurring plan';
+  const p = String(pattern).toLowerCase();
+  if (p === 'monthly') return 'monthly plan';
+  if (p === 'quarterly') return 'quarterly plan';
+  if (p === 'biweekly' || p === 'bi-weekly') return 'bi-weekly plan';
+  if (p === 'weekly') return 'weekly plan';
+  if (p === 'annual' || p === 'yearly') return 'annual plan';
+  return `${p} plan`;
+}
+
+// Default visit count used to seed the plan-total field when the operator
+// opens the modal on a recurring child. The server fans the input across the
+// ACTUAL sibling count when it saves — this is just a best-guess pre-fill.
+const DEFAULT_SERIES_VISIT_GUESS = 4;
+
 export default function MarkPrepaidModal({ service, onClose, onSaved }) {
+  const isSeries = serviceIsPartOfSeries(service);
+  // True when we're editing an existing prepayment (operator tapped "Edit" on
+  // the green banner) rather than recording a fresh one. The modal becomes a
+  // round-trip view of the saved state instead of overwriting it with
+  // estimatedPrice/cash defaults on first save.
+  const existingPerVisit = service?.prepaidAmount != null && Number(service.prepaidAmount) > 0
+    ? Number(service.prepaidAmount)
+    : null;
+  const existingSeriesTotal = service?.prepaidSeriesContext?.seriesTotal != null
+    && service?.prepaidSeriesContext?.totalCoveredVisits > 1
+    ? Number(service.prepaidSeriesContext.seriesTotal)
+    : null;
+  const isExistingSeries = existingSeriesTotal != null;
+  const isExistingPrepayment = existingPerVisit != null;
+
+  // applyToSeries default: keep an existing series prepayment in series mode;
+  // an existing single-visit prepayment stays single-visit; otherwise fall
+  // back to the recurring-family heuristic from #1059.
+  const [applyToSeries, setApplyToSeries] = useState(
+    isExistingSeries ? true : isExistingPrepayment ? false : isSeries,
+  );
+
+  // Amount default: editing a recorded prepayment prefills the saved figure
+  // (series total when applicable so the operator sees the dollars they
+  // actually collected, not a recomputed per-visit slice).
   const [amount, setAmount] = useState(() => {
-    const p = service?.estimatedPrice;
-    return p != null ? String(p) : '';
+    if (isExistingSeries) return String(existingSeriesTotal);
+    if (isExistingPrepayment) return String(existingPerVisit);
+    const p = Number(service?.estimatedPrice);
+    if (!Number.isFinite(p) || p <= 0) return '';
+    return String(isSeries ? p * DEFAULT_SERIES_VISIT_GUESS : p);
   });
-  const [method, setMethod] = useState('cash');
-  const [note, setNote] = useState('');
+  const [method, setMethod] = useState(() => service?.prepaidMethod || 'cash');
+  const [note, setNote] = useState(() => service?.prepaidNote || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
+  // When the operator flips between "this visit" and "the whole plan" we
+  // re-seed the amount field so they don't have to clear it manually — single
+  // visit pre-fills the per-visit price, series pre-fills the same default
+  // best-guess as the initial render. They can always override.
+  function toggleApplyToSeries(next) {
+    setApplyToSeries(next);
+    const perVisit = Number(service?.estimatedPrice || 0);
+    if (!Number.isFinite(perVisit) || perVisit <= 0) return;
+    setAmount(next ? String(perVisit * DEFAULT_SERIES_VISIT_GUESS) : String(perVisit));
+  }
+
+  const amt = parseFloat(amount);
+  const previewVisits = applyToSeries ? DEFAULT_SERIES_VISIT_GUESS : 1; // best-guess; server fans to actual count
+  const previewPerVisit = Number.isFinite(amt) && previewVisits > 0
+    ? Math.round((amt / previewVisits) * 100) / 100
+    : 0;
+
   async function handleSave() {
-    const amt = parseFloat(amount);
     if (!Number.isFinite(amt) || amt < 0) {
       setError('Enter a valid amount');
       return;
@@ -56,7 +124,12 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
     try {
       await adminFetch(`/admin/schedule/${service.id}/prepaid`, {
         method: 'POST',
-        body: JSON.stringify({ amount: amt, method, note: note.trim() || null }),
+        body: JSON.stringify({
+          amount: amt,
+          method,
+          note: note.trim() || null,
+          applyToSeries: applyToSeries || undefined,
+        }),
       });
       onSaved?.();
     } catch (e) {
@@ -68,7 +141,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
   return (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-[110] flex items-end md:items-center justify-center"
+      className="fixed inset-0 z-[1200] flex items-end md:items-center justify-center"
       style={{ background: 'rgba(15,23,42,0.55)', padding: 16 }}
     >
       <div
@@ -85,7 +158,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
               className="font-medium text-zinc-900"
               style={{ fontSize: 18 }}
             >
-              Mark prepaid
+              {isExistingPrepayment ? 'Edit prepayment' : 'Mark prepaid'}
             </div>
             <div
               className="text-ink-secondary"
@@ -105,11 +178,36 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           </button>
         </div>
 
+        {isSeries && (
+          <label
+            className="flex items-start gap-3 border border-hairline border-zinc-200 rounded-lg bg-zinc-50 cursor-pointer"
+            style={{ padding: 12, marginBottom: 14 }}
+          >
+            <input
+              type="checkbox"
+              checked={applyToSeries}
+              onChange={(e) => toggleApplyToSeries(e.target.checked)}
+              className="mt-1"
+              style={{ width: 16, height: 16, accentColor: '#18181B' }}
+            />
+            <div className="flex-1 min-w-0">
+              <div className="text-zinc-900 font-medium" style={{ fontSize: 14 }}>
+                Apply to entire {patternLabel(service?.recurringPattern || service?.recurring_pattern)}
+              </div>
+              <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 2 }}>
+                {applyToSeries
+                  ? `Splits the total evenly across every upcoming visit in this series so future appointments show "paid in full."`
+                  : `Only marks this visit as prepaid.`}
+              </div>
+            </div>
+          </label>
+        )}
+
         <label
           className="block uppercase tracking-label text-ink-secondary font-medium"
           style={{ fontSize: 11, marginBottom: 6 }}
         >
-          Amount received
+          {applyToSeries ? 'Total received for the plan' : 'Amount received'}
         </label>
         <div
           className="flex items-center border border-hairline border-zinc-200 rounded-lg"
@@ -128,6 +226,15 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
             placeholder="0.00"
           />
         </div>
+        {applyToSeries && previewPerVisit > 0 && (
+          <div
+            className="text-ink-secondary"
+            style={{ fontSize: 12, marginTop: -6, marginBottom: 14 }}
+          >
+            Splits to about ${previewPerVisit.toFixed(2)} per visit. Actual visit
+            count is read from the recurring series when you save.
+          </div>
+        )}
 
         <label
           className="block uppercase tracking-label text-ink-secondary font-medium"
@@ -188,7 +295,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           className="w-full rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
           style={{ padding: '14px 20px', fontSize: 15, opacity: saving ? 0.6 : 1 }}
         >
-          {saving ? 'Saving…' : 'Save prepayment'}
+          {saving ? 'Saving…' : isExistingPrepayment ? 'Save changes' : 'Save prepayment'}
         </button>
       </div>
     </div>
