@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { evaluate, MIN_TOTAL_SCORE } = require('../services/content/content-quality-gate');
 const {
-  checkSchemaValid, checkSerpBriefAttached, checkGscSignalAttached,
+  checkSchemaValid, checkTitleMetaSpamFree, checkSerpBriefAttached, checkGscSignalAttached,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkPreviewSuccess, checkSitemapUpdated,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
@@ -58,6 +58,14 @@ describe('hard checks: schema/canonical/indexable', () => {
   });
   test('schema_valid fails without schema', () => {
     expect(checkSchemaValid({}).ok).toBe(false);
+  });
+  test('title_meta_spam_free hard-fails stuffed title patterns', () => {
+    const result = checkTitleMetaSpamFree({
+      title: 'Pest Control Near Me in Anna Maria, FL | THE BEST Pest Control Anna Maria, FL | Top-Rated Exterminator Near Me',
+      meta_description: 'Same-day help.',
+    }, { city: 'Anna Maria', service: 'pest', target_keyword: 'pest control anna maria' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/title_contains_the_best/);
   });
   test('serp_brief_attached requires dominant_intent', () => {
     expect(checkSerpBriefAttached({}, { serp_signal: { dominant_intent: 'x' } }).ok).toBe(true);
@@ -241,6 +249,14 @@ describe('evaluate (full gate)', () => {
     const draft = fullDraft({ schema: undefined });
     const r = evaluate(draft, brief({ page_type: 'supporting-blog' }));
     expect(r.hard_failures.some((f) => f.name === 'schema_valid')).toBe(true);
+    expect(r.ok).toBe(false);
+  });
+  test('spammy title → hard fail → not ok', () => {
+    const draft = fullDraft({
+      title: 'Pest Control Near Me in Anna Maria, FL | THE BEST Pest Control Anna Maria, FL | Top-Rated Exterminator Near Me',
+    });
+    const r = evaluate(draft, brief({ city: 'Anna Maria', service: 'pest' }));
+    expect(r.hard_failures.some((f) => f.name === 'title_meta_spam_free')).toBe(true);
     expect(r.ok).toBe(false);
   });
   test('city-service draft missing LocalBusiness schema → hard fail', () => {
