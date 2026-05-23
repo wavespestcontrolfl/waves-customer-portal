@@ -133,11 +133,12 @@ class AutonomousRunner {
 
     // 2a. Router blocked the action — record + skip.
     if (brief.action_type === 'do_not_publish') {
-      await this._skipClaimOrThrow(queue, opp.id, brief.human_review_reason || 'router_do_not_publish', { claimToken });
-      return finalize(run, t0, {
+      const finalized = await finalize(run, t0, {
         outcome: 'skipped_gate_fail',
         skip_reason: brief.human_review_reason || 'router_do_not_publish',
       });
+      await this._skipClaimOrThrow(queue, opp.id, brief.human_review_reason || 'router_do_not_publish', { claimToken });
+      return finalized;
     }
 
     if (dryRun) {
@@ -157,7 +158,7 @@ class AutonomousRunner {
         return finalize(run, t0, { outcome: 'failed', failure_message: `internal_links:${err.message}` });
       }
       const finalized = await finalize(run, t0, result.patch);
-      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken });
       return finalized;
     }
 
@@ -167,7 +168,7 @@ class AutonomousRunner {
         skip_reason: 'gbp_post_not_implemented',
         reviewer_notes: 'GBP post distribution handler is not wired yet; route this opportunity manually.',
       });
-      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'gbp_post_not_implemented', { claimToken });
       return finalized;
     }
 
@@ -214,7 +215,7 @@ class AutonomousRunner {
         skip_reason: 'metadata_requires_existing_page_hydration',
         reviewer_notes: 'Metadata-only agent output must be hydrated with the existing page before gates/publish; route manually until that adapter is wired.',
       });
-      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'metadata_requires_existing_page_hydration', { claimToken });
       return finalized;
     }
 
@@ -268,11 +269,12 @@ class AutonomousRunner {
     if (dryRun || run.shadow_mode) {
       // Shadow / dry: never publish. Record what would have happened.
       const wouldPublish = gatesPass && trustBuildSatisfied && !brief.human_review_required;
-      await this._completeClaimOrThrow(queue, opp.id, { notes: `shadow_${wouldPublish ? 'would_publish' : 'would_gate'}`, claimToken });
-      return finalize(run, t0, {
+      const finalized = await finalize(run, t0, {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
       });
+      await this._completeClaimOrThrow(queue, opp.id, { notes: `shadow_${wouldPublish ? 'would_publish' : 'would_gate'}`, claimToken });
+      return finalized;
     }
 
     if (!gatesPass || !trustBuildSatisfied || brief.human_review_required) {
@@ -284,7 +286,7 @@ class AutonomousRunner {
         skip_reason: reason,
         reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, brief),
       });
-      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
       return finalized;
     }
 
@@ -294,7 +296,7 @@ class AutonomousRunner {
         skip_reason: 'publisher_adapter_unavailable',
         reviewer_notes: 'Astro draft/brief publisher adapter is not wired yet; route this approved draft manually.',
       });
-      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'publisher_adapter_unavailable', { claimToken });
       return finalized;
     }
 
@@ -302,8 +304,9 @@ class AutonomousRunner {
     try {
       const publishOutcome = await this._publishAndDistribute(draft, brief, run);
       Object.assign(run, publishOutcome);
+      const finalized = await finalize(run, t0, { outcome: 'completed_published' });
       await this._completeClaimOrThrow(queue, opp.id, { notes: `published:${publishOutcome.published_url || 'unknown'}`, claimToken });
-      return finalize(run, t0, { outcome: 'completed_published' });
+      return finalized;
     } catch (err) {
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken }); // let next run retry
       return finalize(run, t0, {
@@ -400,6 +403,11 @@ class AutonomousRunner {
   async _skipClaimOrThrow(queue, opportunityId, reason, payload) {
     const ok = await queue.skip(opportunityId, reason, payload);
     if (!ok) throw new Error('queue_skip_failed_or_stale_claim');
+  }
+
+  async _pendingReviewClaimOrThrow(queue, opportunityId, reason, payload) {
+    const ok = await queue.pendingReview(opportunityId, reason, payload);
+    if (!ok) throw new Error('queue_pending_review_failed_or_stale_claim');
   }
 
   async _releaseClaimOrThrow(queue, opportunityId, payload) {

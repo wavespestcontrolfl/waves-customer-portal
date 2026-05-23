@@ -8,6 +8,7 @@
  * State machine (matches the migration):
  *   pending → claimed → done
  *                    \→ skipped
+ *                    \→ pending_review
  *   pending → expired (via expireStale)
  *
  * Claim takes a stale-claim timeout — if a runner crashes mid-work,
@@ -139,6 +140,30 @@ class OpportunityQueue {
       .where('claimed_at', claimToken)
       .update({
         status: 'skipped',
+        skip_reason: reason,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+    return updated > 0;
+  }
+
+  /**
+   * Move a claimed opportunity into an explicit review queue. Unlike
+   * release(), this does not make the row eligible for claimNext()
+   * again, so trust-build/gate-fail cases cannot starve lower-score
+   * opportunities by re-running every cron tick.
+   */
+  async pendingReview(opportunityId, reason, { claimToken } = {}) {
+    if (!reason) throw new Error('opportunity-queue: pendingReview requires a reason');
+    if (!claimToken) {
+      throw new Error('opportunity-queue.pendingReview: claimToken required (pass the claimed_at value returned by claimNext)');
+    }
+    const updated = await db('opportunity_queue')
+      .where('id', opportunityId)
+      .where('status', 'claimed')
+      .where('claimed_at', claimToken)
+      .update({
+        status: 'pending_review',
         skip_reason: reason,
         completed_at: new Date(),
         updated_at: new Date(),
