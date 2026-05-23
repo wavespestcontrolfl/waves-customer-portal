@@ -66,7 +66,9 @@ function anchorCandidates(target) {
  *   - YAML frontmatter at top of file (--- … ---)
  *   - fenced code blocks (``` … ```)
  *   - HTML comments (<!-- … -->)
+ *   - HTML anchor regions (<a …>…</a>)
  *   - existing markdown links/reference definitions
+ *   - MDX/HTML tags and attributes
  *
  * Returns the body with those regions replaced by spaces of the same
  * length, so character offsets in the result line up 1:1 with the
@@ -80,12 +82,17 @@ function maskExcludedRegions(text) {
   s = s.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length));
   // HTML comments.
   s = s.replace(/<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  // HTML anchor regions.
+  s = s.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => ' '.repeat(m.length));
   // Markdown links and reference definitions. This masks both labels
   // and destinations; otherwise short anchors can match inside hrefs
   // like [details](/termite-control-sarasota/) and corrupt the URL.
   s = s.replace(/\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|[^\n)]*)\)/g, (m) => ' '.repeat(m.length));
   s = s.replace(/\[[^\]\n]+\]\[[^\]\n]*\]/g, (m) => ' '.repeat(m.length));
   s = s.replace(/^\s{0,3}\[[^\]\n]+\]:\s*(?:<[^>\n]+>|[^\s]+)(?:\s+.*)?$/gm, (m) => ' '.repeat(m.length));
+  // Remaining MDX/HTML tags. Leave children visible, but prevent matches
+  // inside component props or tag attributes.
+  s = s.replace(/<\/?[A-Za-z][A-Za-z0-9:._-]*(?:\s+[^<>]*?)?\/?>/g, (m) => ' '.repeat(m.length));
   return s;
 }
 
@@ -167,7 +174,7 @@ function pageAlreadyLinksTo(text, targetUrl) {
   while ((m = refDef.exec(text)) !== null) {
     if (canonicalInternalPath(unwrapAngleHref(m[1])) === target) return true;
   }
-  const href = /href=["']([^"']+)["']/g;
+  const href = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
   while ((m = href.exec(text)) !== null) {
     if (canonicalInternalPath(m[1]) === target) return true;
   }
@@ -321,6 +328,7 @@ function canonicalInternalPath(url) {
 
   const p = pathname.replace(/\/+$/, '').toLowerCase();
   if (!p || !p.startsWith('/') || p.startsWith('//')) return '';
+  if (!/^\/[a-z0-9/_~.%+-]+$/.test(p)) return '';
   return `${p}/`;
 }
 

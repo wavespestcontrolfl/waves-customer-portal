@@ -78,6 +78,20 @@ Bradenton pest control here.`;
     expect(masked.indexOf('<!--')).toBe(-1);
     expect(masked.indexOf('real')).toBe(src.indexOf('real'));
   });
+  test('masks HTML anchor regions', () => {
+    const src = '<a href="/pest-control-bradenton-fl/">pest control bradenton</a> real pest control bradenton';
+    const masked = maskExcludedRegions(src);
+    expect(masked.indexOf('<a')).toBe(-1);
+    expect(masked.indexOf('real')).toBe(src.indexOf('real'));
+    expect(masked.indexOf('pest control bradenton')).toBe(src.lastIndexOf('pest control bradenton'));
+  });
+  test('masks MDX/HTML tag attributes but leaves surrounding text offsets intact', () => {
+    const src = '<ServiceCard title="pest control bradenton" href="/pest-control-bradenton-fl/" />\nreal pest control bradenton';
+    const masked = maskExcludedRegions(src);
+    expect(masked.indexOf('ServiceCard')).toBe(-1);
+    expect(masked.indexOf('title=')).toBe(-1);
+    expect(masked.indexOf('real')).toBe(src.indexOf('real'));
+  });
   test('does not mask later markdown thematic blocks as frontmatter', () => {
     const src = `Intro
 ---
@@ -137,6 +151,16 @@ describe('findFirstUnlinkedOccurrence', () => {
     const r = findFirstUnlinkedOccurrence(t, 'pest control bradenton');
     expect(r.index).toBe(t.indexOf('later pest control bradenton') + 'later '.length);
   });
+  test('skips HTML anchor text, finds next plain occurrence', () => {
+    const t = '<a href="/pest-control-bradenton-fl/">pest control bradenton</a> and later pest control bradenton';
+    const r = findFirstUnlinkedOccurrence(t, 'pest control bradenton');
+    expect(r.index).toBe(t.indexOf('later pest control bradenton') + 'later '.length);
+  });
+  test('skips matches inside MDX component props', () => {
+    const t = '<ServiceCard title="pest control bradenton" /> and later pest control bradenton';
+    const r = findFirstUnlinkedOccurrence(t, 'pest control bradenton');
+    expect(r.index).toBe(t.indexOf('later pest control bradenton') + 'later '.length);
+  });
   test('skips matches inside existing markdown href destinations', () => {
     const t = '[details](/termite-control-sarasota/) and termite service details';
     const r = findFirstUnlinkedOccurrence(t, 'termite');
@@ -188,6 +212,12 @@ describe('pageAlreadyLinksTo', () => {
   });
   test('detects href= to target', () => {
     expect(pageAlreadyLinksTo('<a href="/pest-control-bradenton-fl/">x</a>', '/pest-control-bradenton-fl/')).toBe(true);
+  });
+  test('does not count non-anchor component href props as existing links', () => {
+    expect(pageAlreadyLinksTo(
+      '<ServiceCard href="/pest-control-bradenton-fl/" title="Pest Control Bradenton" />',
+      '/pest-control-bradenton-fl/'
+    )).toBe(false);
   });
   test('returns false when no link to target', () => {
     expect(pageAlreadyLinksTo('[other](/lawn-care/)', '/pest-control-bradenton-fl/')).toBe(false);
@@ -252,6 +282,8 @@ describe('stripHost / sameUrl / deriveUrlFromFile', () => {
     expect(canonicalInternalPath('javascript:alert(1)')).toBe('');
     expect(canonicalInternalPath('//evil.example/path')).toBe('');
     expect(canonicalInternalPath('https://evil.example/pest-control/')).toBe('');
+    expect(canonicalInternalPath('/bad path/')).toBe('');
+    expect(canonicalInternalPath('/bad)path/')).toBe('');
     expect(canonicalInternalPath('/safe-path/')).toBe('/safe-path/');
   });
   test('deriveUrlFromFile', () => {
@@ -377,6 +409,17 @@ describe('applyTaskToBody', () => {
     const body = 'I need pest control bradenton next week.';
     const task = { anchor_text: 'pest control bradenton', target_url: 'javascript:alert(1)' };
     expect(planner.applyTaskToBody(body, task)).toBe(body);
+  });
+  test('no-op for markdown-unsafe internal task target URL', () => {
+    const body = 'I need pest control bradenton next week.';
+    const task = { anchor_text: 'pest control bradenton', target_url: '/pest-control)bradenton/' };
+    expect(planner.applyTaskToBody(body, task)).toBe(body);
+  });
+  test('does not write markdown into MDX component props', () => {
+    const body = '<ServiceCard title="pest control bradenton" />\nI need pest control bradenton next week.';
+    const task = { anchor_text: 'pest control bradenton', target_url: '/pest-control-bradenton-fl/' };
+    const out = planner.applyTaskToBody(body, task);
+    expect(out).toBe('<ServiceCard title="pest control bradenton" />\nI need [pest control bradenton](/pest-control-bradenton-fl/) next week.');
   });
   test('re-checks existing target links before applying stale tasks', () => {
     const body = 'I need pest control bradenton next week. [Already linked](/pest-control-bradenton-fl/#faq)';
