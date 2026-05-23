@@ -28,6 +28,7 @@ describe('SEO Command Center guards', () => {
         <h2>Service Area</h2>
         <a href="/pest-control/">Pest control</a>
         <a href="https://www.bradentonflpestcontrol.com/contact/">Contact</a>
+        <a href="https://bradentonflpestcontrol.com?utm_source=nav">Home</a>
         <a href="https://wavespestcontrol.com/pest-control-bradenton-fl/">Hub page</a>
       `,
       200,
@@ -38,11 +39,12 @@ describe('SEO Command Center guards', () => {
       'https://bradentonflpestcontrol.com/',
     );
 
-    expect(audit.internal_links_count).toBe(2);
+    expect(audit.internal_links_count).toBe(3);
     expect(audit.external_links_count).toBe(1);
     expect(JSON.parse(audit.internal_link_targets)).toEqual([
       '/pest-control/',
       'https://www.bradentonflpestcontrol.com/contact/',
+      'https://bradentonflpestcontrol.com',
     ]);
   });
 

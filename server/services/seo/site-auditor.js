@@ -389,8 +389,10 @@ class SiteAuditor {
     const siteHost = new URL(siteUrl).hostname.replace(/^www\./, '');
     const hostPattern = escapeRegExp(siteHost);
     const absoluteInternalHref = `https?:\\/\\/(?:www\\.)?${hostPattern}(?::\\d+)?`;
+    const sameHostBoundary = `(?:[/?#"'\\s]|$)`;
+    const sameHostHref = `(?:www\\.)?${hostPattern}(?::\\d+)?${sameHostBoundary}`;
     const internalHrefPattern = new RegExp(`href=["'](?:${absoluteInternalHref}|\\/(?!\\/))`, 'gi');
-    const externalHrefPattern = new RegExp(`href=["']https?:\\/\\/(?!(?:www\\.)?${hostPattern}(?::\\d+)?(?:\\/|$))`, 'gi');
+    const externalHrefPattern = new RegExp(`href=["']https?:\\/\\/(?!${sameHostHref})`, 'gi');
     const hrefTargetPattern = new RegExp(`href=["']((?:${absoluteInternalHref}|\\/(?!\\/))[^"'#?]*)`, 'gi');
     const internalLinks = (html.match(internalHrefPattern) || []);
     const externalLinks = (html.match(externalHrefPattern) || []);

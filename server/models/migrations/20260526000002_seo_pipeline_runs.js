@@ -3,7 +3,7 @@ exports.up = async function (knex) {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.string('idempotency_key', 120).notNullable().unique();
     t.string('domain', 200).notNullable();
-    t.string('status', 40).notNullable().defaultTo('running');
+    t.string('status', 20).notNullable().defaultTo('running');
     t.string('requested_by', 120);
     t.timestamp('started_at').notNullable().defaultTo(knex.fn.now());
     t.timestamp('completed_at');
