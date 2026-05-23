@@ -3,68 +3,74 @@ const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 class CannibalizationDetector {
-  async detect() {
+  async detect(domain) {
     logger.info('Cannibalization detection running...');
-    const since = etDateString(addETDays(new Date(), -30));
+    const since = etDateString(addETDays(new Date(), -28));
 
-    // Find queries where multiple URLs got impressions
-    const queryPages = await db('gsc_pages')
-      .where('date', '>=', since)
-      .select('page_url')
-      .sum('impressions as impressions')
-      .sum('clicks as clicks')
-      .groupBy('page_url');
+    // Use gsc_query_page_map for real query→page relationships
+    let baseQuery = db('gsc_query_page_map')
+      .where('date_from', '>=', since);
+    if (domain) baseQuery = baseQuery.where('domain', domain);
 
-    // Cross-reference: find queries appearing for multiple Waves URLs
-    const queries = await db('gsc_queries')
-      .where('date', '>=', since)
-      .select('query')
-      .sum('impressions as impressions')
-      .sum('clicks as clicks')
-      .groupBy('query')
-      .having(db.raw('count(distinct date) > 5'));
+    // Find queries with multiple pages getting impressions
+    const queries = await baseQuery.clone()
+      .select('query', 'domain')
+      .count('distinct page_url as page_count')
+      .sum('impressions as total_impressions')
+      .groupBy('query', 'domain')
+      .having(db.raw('count(distinct page_url) >= 2'))
+      .having(db.raw('sum(impressions) > 20'));
 
-    // For each query, check if multiple pages compete
     let flagged = 0;
     for (const q of queries) {
-      const pages = await db('gsc_pages')
-        .leftJoin('gsc_queries', function () {
-          this.on(db.raw('1=1')); // simplified — in practice would need query-page mapping
-        })
-        .where('gsc_pages.date', '>=', since)
-        .select('gsc_pages.page_url')
-        .sum('gsc_pages.impressions as impressions')
-        .sum('gsc_pages.clicks as clicks')
-        .groupBy('gsc_pages.page_url')
-        .having(db.raw('sum(gsc_pages.impressions) > 10'))
+      // Get all pages for this query
+      const pages = await db('gsc_query_page_map')
+        .where('query', q.query)
+        .where('domain', q.domain)
+        .where('date_from', '>=', since)
+        .select('page_url')
+        .sum('impressions as impressions')
+        .sum('clicks as clicks')
+        .groupBy('page_url')
+        .having(db.raw('sum(impressions) > 10'))
+        .orderBy('impressions', 'desc')
         .limit(5);
 
-      if (pages.length >= 2) {
-        const urls = pages.map(p => p.page_url);
-        const impressionsSplit = {};
-        const clicksSplit = {};
-        pages.forEach(p => {
-          impressionsSplit[p.page_url] = parseInt(p.impressions);
-          clicksSplit[p.page_url] = parseInt(p.clicks);
-        });
+      if (pages.length < 2) continue;
 
-        // Check if it's genuine cannibalization (no single URL dominates > 70%)
-        const totalImpr = Object.values(impressionsSplit).reduce((s, v) => s + v, 0);
-        const maxShare = Math.max(...Object.values(impressionsSplit)) / totalImpr;
+      const impressionsSplit = {};
+      const clicksSplit = {};
+      pages.forEach((p) => {
+        impressionsSplit[p.page_url] = parseInt(p.impressions);
+        clicksSplit[p.page_url] = parseInt(p.clicks);
+      });
 
-        if (maxShare < 0.7) {
-          const existing = await db('seo_cannibalization_flags').where('query', q.query).where('status', 'open').first();
-          if (!existing) {
-            await db('seo_cannibalization_flags').insert({
-              query: q.query,
-              urls: JSON.stringify(urls),
-              impressions_split: JSON.stringify(impressionsSplit),
-              clicks_split: JSON.stringify(clicksSplit),
-              recommendation: `Consolidate content — ${urls.length} URLs splitting impressions for "${q.query}"`,
-            });
-            flagged++;
-          }
-        }
+      const totalImpr = Object.values(impressionsSplit).reduce((s, v) => s + v, 0);
+      const maxShare = Math.max(...Object.values(impressionsSplit)) / totalImpr;
+
+      if (maxShare < 0.7) {
+        // Winner = page with most clicks
+        const winner = pages.reduce((best, p) => parseInt(p.clicks) > parseInt(best.clicks) ? p : best, pages[0]);
+        const wasteImpressions = totalImpr - parseInt(winner.impressions);
+        const urls = pages.map((p) => p.page_url);
+
+        await db('seo_cannibalization_flags')
+          .insert({
+            query: q.query,
+            urls: JSON.stringify(urls),
+            impressions_split: JSON.stringify(impressionsSplit),
+            clicks_split: JSON.stringify(clicksSplit),
+            recommendation: `Consolidate content — ${urls.length} URLs splitting impressions for "${q.query}". Winner: ${winner.page_url}`,
+            winner_url: winner.page_url,
+            winner_clicks: parseInt(winner.clicks),
+            winner_impressions: parseInt(winner.impressions),
+            total_waste_impressions: wasteImpressions,
+            domain: q.domain,
+            status: 'open',
+          })
+          .onConflict(db.raw('(query) WHERE status = \'open\''))
+          .merge();
+        flagged++;
       }
     }
 

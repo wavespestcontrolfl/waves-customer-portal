@@ -3,8 +3,11 @@ import {
   Activity,
   BarChart3,
   Bot,
+  CheckSquare,
+  Database,
   FileCheck2,
   Filter,
+  Globe,
   LayoutDashboard,
   Link,
   Search,
@@ -163,6 +166,9 @@ const TABS = [
   { key: "ai-overview", label: "AI Overview", Icon: Bot },
   { key: "funnel", label: "Funnel", Icon: Filter },
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
+  { key: "url-intel", label: "URL Intel", Icon: Database },
+  { key: "actions", label: "Actions", Icon: CheckSquare },
+  { key: "indexation", label: "Indexation", Icon: Globe },
   { key: "site-audit", label: "Site Health", Icon: Activity },
 ];
 
@@ -3387,6 +3393,1086 @@ function SiteAuditTab() {
   );
 }
 
+// ── URL Intelligence Tab ──
+function UrlIntelTab({ domain }) {
+  const [data, setData] = useState(null);
+  const [scanData, setScanData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [subTab, setSubTab] = useState("overview");
+  const [diagnosisFilter, setDiagnosisFilter] = useState("");
+  const [scanPage, setScanPage] = useState(0);
+  const canRefresh = isAdminUser();
+
+  useEffect(() => {
+    adminFetch(`/admin/seo/url-intelligence/dashboard?domain=${domain}`)
+      .then(setData)
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, [domain]);
+
+  useEffect(() => {
+    if (subTab === "diagnosis" || subTab === "priority") {
+      const diag = subTab === "priority" ? "" : diagnosisFilter;
+      const qs = `diagnosis=${diag}&domain=${domain}&limit=25&offset=${scanPage * 25}`;
+      adminFetch(`/admin/seo/url-intelligence/scan?${qs}`)
+        .then(setScanData)
+        .catch(() => setScanData(null));
+    }
+  }, [subTab, diagnosisFilter, scanPage, domain]);
+
+  function handleRefresh() {
+    adminPost("/admin/seo/url-intelligence/refresh", { domain })
+      .then(() => {
+        adminFetch(`/admin/seo/url-intelligence/dashboard?domain=${domain}`).then(setData);
+      })
+      .catch(() => {});
+  }
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading URL Intelligence...</div>;
+  if (!data) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>No data — run a refresh to populate.</div>;
+
+  const subTabs = [
+    { key: "overview", label: "Overview" },
+    { key: "diagnosis", label: "By Diagnosis" },
+    { key: "priority", label: "Priority Queue" },
+    { key: "duplicates", label: "Duplicates" },
+    { key: "intent", label: "Intent Routing" },
+  ];
+
+  const diagnosisLabels = {
+    indexation_problem: "Indexation",
+    canonical_problem: "Canonical",
+    duplicate_content: "Duplicate",
+    technical_performance: "Technical",
+    cannibalization: "Cannibalization",
+    ranking_decay: "Decay",
+    ctr_problem: "CTR",
+    thin_local_proof: "Thin Local",
+    structured_data: "Schema",
+    internal_linking: "Internal Links",
+    freshness: "Freshness",
+    low_value: "Low Value",
+    healthy: "Healthy",
+    unknown: "Unknown",
+  };
+
+  const statusColors = {
+    healthy: D.green,
+    needs_technical_fix: D.red,
+    needs_canonical_fix: D.amber,
+    needs_content_refresh: D.amber,
+    needs_indexation_fix: D.red,
+    low_priority: D.muted,
+    review_required: D.amber,
+    unknown: D.muted,
+  };
+
+  return (
+    <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }} className="seo-sub-tabs">
+        {subTabs.map((st) => (
+          <button
+            key={st.key}
+            onClick={() => { setSubTab(st.key); setScanPage(0); }}
+            style={{
+              padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
+              background: subTab === st.key ? D.heading : "transparent",
+              color: subTab === st.key ? D.white : D.muted,
+              border: `1px solid ${subTab === st.key ? D.heading : D.border}`,
+            }}
+          >{st.label}</button>
+        ))}
+        {canRefresh && (
+          <button
+            onClick={handleRefresh}
+            style={{
+              marginLeft: "auto", padding: "6px 14px", borderRadius: 8, fontSize: 12,
+              background: D.heading, color: D.white, border: "none", cursor: "pointer",
+            }}
+          >Refresh Domain</button>
+        )}
+      </div>
+
+      {subTab === "overview" && (
+        <>
+          <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+            <KpiCard label="Total URLs" value={fmt(data.total_urls)} />
+            <KpiCard
+              label="Healthy"
+              value={`${data.by_status.find((s) => s.status === "healthy")?.count || 0}`}
+              color={D.green}
+            />
+            <KpiCard
+              label="Needs Fix"
+              value={`${data.total_urls - (data.by_status.find((s) => s.status === "healthy")?.count || 0) - (data.by_status.find((s) => s.status === "unknown")?.count || 0)}`}
+              color={D.red}
+            />
+            <KpiCard label="Indexation Gap" value={`${data.indexation_gap?.gap_pct || 0}%`} color={data.indexation_gap?.gap_pct > 20 ? D.red : D.green} />
+          </div>
+
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Diagnosis Breakdown</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
+              {data.by_diagnosis.filter((d) => d.count > 0).map((d) => (
+                <div
+                  key={d.diagnosis}
+                  onClick={() => { setSubTab("diagnosis"); setDiagnosisFilter(d.diagnosis); setScanPage(0); }}
+                  style={{
+                    padding: 12, borderRadius: 8, border: `1px solid ${D.border}`, cursor: "pointer",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                  }}
+                >
+                  <span style={{ fontSize: 12, color: D.text }}>{diagnosisLabels[d.diagnosis] || d.diagnosis}</span>
+                  <span style={{ fontSize: 16, fontWeight: 700, fontFamily: MONO, color: D.heading }}>{d.count}</span>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          {data.top_issues?.length > 0 && (
+            <Card>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Top Priority Issues</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={thStyle}>URL</th>
+                    <th style={thStyle}>Diagnosis</th>
+                    <th style={thR}>Priority</th>
+                    <th style={thStyle}>Action</th>
+                  </tr></thead>
+                  <tbody>
+                    {data.top_issues.map((row) => (
+                      <tr key={row.id}>
+                        <td style={{ ...tdStyle, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {row.url}
+                        </td>
+                        <td style={tdStyle}>
+                          <span style={{
+                            padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 500,
+                            background: statusColors[row.primary_status] ? `${statusColors[row.primary_status]}18` : `${D.muted}18`,
+                            color: statusColors[row.primary_status] || D.muted,
+                          }}>{diagnosisLabels[row.primary_diagnosis] || row.primary_diagnosis}</span>
+                        </td>
+                        <td style={tdR}>{row.priority_score}</td>
+                        <td style={{ ...tdStyle, fontSize: 12, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {row.recommended_action}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
+          {data.canonical_conflicts > 0 && (
+            <Card style={{ borderLeft: `3px solid ${D.amber}` }}>
+              <div style={{ fontSize: 13, color: D.amber, fontWeight: 600 }}>
+                {data.canonical_conflicts} canonical conflict{data.canonical_conflicts > 1 ? "s" : ""} detected
+              </div>
+              <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
+                Switch to the Indexation tab → Canonical Conflicts to review.
+              </div>
+            </Card>
+          )}
+        </>
+      )}
+
+      {(subTab === "diagnosis" || subTab === "priority") && (
+        <Card>
+          {subTab === "diagnosis" && (
+            <div style={{ marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 12, color: D.muted }}>Filter:</span>
+              <select
+                value={diagnosisFilter}
+                onChange={(e) => { setDiagnosisFilter(e.target.value); setScanPage(0); }}
+                style={{
+                  padding: "6px 10px", borderRadius: 6, fontSize: 13, border: `1px solid ${D.border}`,
+                  background: D.card, color: D.text,
+                }}
+              >
+                <option value="">All</option>
+                {Object.entries(diagnosisLabels).map(([k, v]) => (
+                  <option key={k} value={k}>{v}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {subTab === "priority" && (
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>
+              Priority Queue — highest impact first
+            </div>
+          )}
+
+          {scanData?.urls?.length > 0 ? (
+            <>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={thStyle}>URL</th>
+                    <th style={thStyle}>Status</th>
+                    <th style={thStyle}>Diagnosis</th>
+                    <th style={thR}>Priority</th>
+                    <th style={thR}>Clicks 28d</th>
+                    <th style={thR}>Position</th>
+                    {subTab === "priority" && <th style={thStyle}>Recommended Action</th>}
+                  </tr></thead>
+                  <tbody>
+                    {scanData.urls.map((row) => (
+                      <tr key={row.id}>
+                        <td style={{ ...tdStyle, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {row.url}
+                        </td>
+                        <td style={tdStyle}>
+                          <span style={{
+                            padding: "2px 8px", borderRadius: 4, fontSize: 11,
+                            background: statusColors[row.primary_status] ? `${statusColors[row.primary_status]}18` : `${D.muted}18`,
+                            color: statusColors[row.primary_status] || D.muted,
+                          }}>{row.primary_status}</span>
+                        </td>
+                        <td style={tdStyle}>{diagnosisLabels[row.primary_diagnosis] || row.primary_diagnosis}</td>
+                        <td style={tdR}>{row.priority_score}</td>
+                        <td style={tdR}>{fmt(row.gsc_clicks_28d)}</td>
+                        <td style={tdR}>{row.gsc_avg_position_28d ? parseFloat(row.gsc_avg_position_28d).toFixed(1) : "—"}</td>
+                        {subTab === "priority" && (
+                          <td style={{ ...tdStyle, fontSize: 12, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {row.recommended_action}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 16, alignItems: "center" }}>
+                <button
+                  disabled={scanPage === 0}
+                  onClick={() => setScanPage((p) => Math.max(0, p - 1))}
+                  style={{ padding: "4px 12px", borderRadius: 6, fontSize: 12, border: `1px solid ${D.border}`, background: D.card, color: D.text, cursor: scanPage === 0 ? "default" : "pointer", opacity: scanPage === 0 ? 0.4 : 1 }}
+                >Prev</button>
+                <span style={{ fontSize: 12, color: D.muted }}>
+                  {scanPage * 25 + 1}–{Math.min((scanPage + 1) * 25, scanData.total)} of {scanData.total}
+                </span>
+                <button
+                  disabled={(scanPage + 1) * 25 >= scanData.total}
+                  onClick={() => setScanPage((p) => p + 1)}
+                  style={{ padding: "4px 12px", borderRadius: 6, fontSize: 12, border: `1px solid ${D.border}`, background: D.card, color: D.text, cursor: (scanPage + 1) * 25 >= scanData.total ? "default" : "pointer", opacity: (scanPage + 1) * 25 >= scanData.total ? 0.4 : 1 }}
+                >Next</button>
+              </div>
+            </>
+          ) : (
+            <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+              {scanData ? "No URLs match the current filter." : "Loading..."}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {subTab === "duplicates" && (
+        <DuplicatesSubTab domain={domain} />
+      )}
+
+      {subTab === "intent" && (
+        <IntentSubTab domain={domain} />
+      )}
+    </div>
+  );
+}
+
+function DuplicatesSubTab({ domain }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    adminFetch(`/admin/seo/url-intelligence/duplicate-clusters?domain=${domain}`)
+      .then(setData)
+      .catch(() => setData([]))
+      .finally(() => setLoading(false));
+  }, [domain]);
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
+  return (
+    <Card>
+      <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>
+        Duplicate Content Clusters — body similarity &gt; 80%
+      </div>
+      {data && data.length > 0 ? (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={thStyle}>URL</th>
+              <th style={thStyle}>Domain</th>
+              <th style={thR}>Similarity</th>
+              <th style={thStyle}>City</th>
+              <th style={thStyle}>Service</th>
+              <th style={thStyle}>Page Type</th>
+            </tr></thead>
+            <tbody>
+              {data.map((row) => (
+                <tr key={row.id}>
+                  <td style={{ ...tdStyle, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.url}</td>
+                  <td style={tdStyle}>{row.domain}</td>
+                  <td style={tdR}>{row.body_similarity_max != null ? `${row.body_similarity_max}%` : "—"}</td>
+                  <td style={tdStyle}>{row.city || "—"}</td>
+                  <td style={tdStyle}>{row.service || "—"}</td>
+                  <td style={tdStyle}>{row.page_type || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+          No duplicate clusters detected. Run duplicate detection to populate.
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function IntentSubTab({ domain }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [severityFilter, setSeverityFilter] = useState("");
+  useEffect(() => {
+    const qs = severityFilter ? `&severity=${severityFilter}` : "";
+    adminFetch(`/admin/seo/url-intelligence/intent-routes?domain=${domain}${qs}&limit=50`)
+      .then(setData)
+      .catch(() => setData([]))
+      .finally(() => setLoading(false));
+  }, [domain, severityFilter]);
+
+  const severityColors = { severe: D.red, moderate: D.amber, mild: D.muted, none: D.green };
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>Intent Routing — Query → Page Alignment</div>
+        <select
+          value={severityFilter}
+          onChange={(e) => setSeverityFilter(e.target.value)}
+          style={{ padding: "6px 10px", borderRadius: 6, fontSize: 13, border: `1px solid ${D.border}`, background: D.card, color: D.text }}
+        >
+          <option value="">All</option>
+          <option value="severe">Severe</option>
+          <option value="moderate">Moderate</option>
+          <option value="mild">Mild</option>
+        </select>
+      </div>
+      {data && data.length > 0 ? (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={thStyle}>Query Cluster</th>
+              <th style={thStyle}>Intent</th>
+              <th style={thStyle}>Expected</th>
+              <th style={thStyle}>Actual Winner</th>
+              <th style={thStyle}>Misroute</th>
+              <th style={thStyle}>Severity</th>
+              <th style={thR}>Impressions</th>
+            </tr></thead>
+            <tbody>
+              {data.map((row) => (
+                <tr key={row.id}>
+                  <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.query_cluster}</td>
+                  <td style={tdStyle}>{row.intent_type}</td>
+                  <td style={tdStyle}>{row.expected_page_type}</td>
+                  <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.actual_winner_url}</td>
+                  <td style={tdStyle}>{row.misroute_type}</td>
+                  <td style={tdStyle}>
+                    {row.misroute_severity && row.misroute_severity !== "none" && (
+                      <span style={{
+                        padding: "2px 8px", borderRadius: 4, fontSize: 11,
+                        background: `${severityColors[row.misroute_severity] || D.muted}18`,
+                        color: severityColors[row.misroute_severity] || D.muted,
+                      }}>{row.misroute_severity}</span>
+                    )}
+                  </td>
+                  <td style={tdR}>{fmt(row.impressions_total)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+          No intent routes found. Run intent map builder to populate.
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Actions Tab ──
+function ActionsTab({ domain }) {
+  const [subTab, setSubTab] = useState("queue");
+  const [summary, setSummary] = useState(null);
+  const [actions, setActions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const canAdmin = isAdminUser();
+
+  const loadData = () => {
+    setLoading(true);
+    Promise.all([
+      adminFetch(`/admin/seo/actions/summary?domain=${domain}`),
+      subTab === "drafts"
+        ? adminFetch(`/admin/seo/actions?domain=${domain}&type=rewrite_title_meta&limit=50`)
+        : subTab === "progress"
+        ? adminFetch(`/admin/seo/actions?domain=${domain}&execution_status=in_progress&limit=50`)
+          .then((d) => d.length > 0 ? d : adminFetch(`/admin/seo/actions?domain=${domain}&execution_status=done&limit=25`))
+        : subTab === "experiments"
+        ? adminFetch(`/admin/seo/url-intelligence/experiments?limit=50`)
+        : adminFetch(`/admin/seo/actions?domain=${domain}&approval_status=pending&limit=50`),
+    ])
+      .then(([s, a]) => { setSummary(s); setActions(Array.isArray(a) ? a : []); })
+      .catch(() => { setSummary(null); setActions([]); })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(loadData, [domain, subTab]);
+
+  function handleAction(id, verb) {
+    adminPost(`/admin/seo/actions/${id}/${verb}`, {})
+      .then(loadData)
+      .catch(() => {});
+  }
+
+  const subTabs = [
+    { key: "queue", label: "Queue" },
+    { key: "drafts", label: "AI Drafts" },
+    { key: "progress", label: "In Progress" },
+    { key: "experiments", label: "Experiments" },
+  ];
+
+  const tierColors = { auto: D.green, editor: D.muted, seo: D.amber, owner: D.red };
+
+  return (
+    <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }} className="seo-sub-tabs">
+        {subTabs.map((st) => (
+          <button
+            key={st.key}
+            onClick={() => setSubTab(st.key)}
+            style={{
+              padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
+              background: subTab === st.key ? D.heading : "transparent",
+              color: subTab === st.key ? D.white : D.muted,
+              border: `1px solid ${subTab === st.key ? D.heading : D.border}`,
+            }}
+          >{st.label}</button>
+        ))}
+        {canAdmin && subTab === "queue" && (
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button onClick={() => adminPost("/admin/seo/actions/generate", { domain }).then(loadData)} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, background: D.heading, color: D.white, border: "none", cursor: "pointer" }}>Generate Actions</button>
+            <button onClick={() => adminPost("/admin/seo/actions/auto-approve", {}).then(loadData)} style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, background: "transparent", color: D.text, border: `1px solid ${D.border}`, cursor: "pointer" }}>Auto-Approve</button>
+          </div>
+        )}
+        {canAdmin && subTab === "drafts" && (
+          <button onClick={() => adminPost("/admin/seo/actions/generate-drafts", {}).then(loadData)} style={{ marginLeft: "auto", padding: "6px 14px", borderRadius: 8, fontSize: 12, background: D.heading, color: D.white, border: "none", cursor: "pointer" }}>Generate Drafts</button>
+        )}
+      </div>
+
+      {summary && (
+        <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+          <KpiCard label="Pending Auto" value={fmt(summary.pending_by_tier?.auto || 0)} color={D.green} />
+          <KpiCard label="Pending Editor" value={fmt(summary.pending_by_tier?.editor || 0)} />
+          <KpiCard label="Pending SEO" value={fmt(summary.pending_by_tier?.seo || 0)} color={D.amber} />
+          <KpiCard label="Done" value={fmt(summary.done)} color={D.green} />
+        </div>
+      )}
+
+      {loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
+        <Card>
+          {subTab === "queue" && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Pending Actions — by priority</div>
+              {actions.length > 0 ? (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead><tr>
+                      <th style={thStyle}>URL</th>
+                      <th style={thStyle}>Issue</th>
+                      <th style={thStyle}>Action</th>
+                      <th style={thR}>Priority</th>
+                      <th style={thStyle}>Tier</th>
+                      {canAdmin && <th style={thStyle}>Actions</th>}
+                    </tr></thead>
+                    <tbody>
+                      {actions.map((a) => (
+                        <tr key={a.id}>
+                          <td style={{ ...tdStyle, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.url}</td>
+                          <td style={tdStyle}>{a.issue_type}</td>
+                          <td style={tdStyle}>{a.action_type.replace(/_/g, " ")}</td>
+                          <td style={tdR}>{a.priority_score}</td>
+                          <td style={tdStyle}>
+                            <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, background: `${tierColors[a.approval_tier] || D.muted}18`, color: tierColors[a.approval_tier] || D.muted }}>{a.approval_tier}</span>
+                          </td>
+                          {canAdmin && (
+                            <td style={tdStyle}>
+                              <div style={{ display: "flex", gap: 4 }}>
+                                <button onClick={() => handleAction(a.id, "approve")} style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, background: `${D.green}18`, color: D.green, border: "none", cursor: "pointer" }}>Approve</button>
+                                <button onClick={() => handleAction(a.id, "reject")} style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, background: `${D.red}18`, color: D.red, border: "none", cursor: "pointer" }}>Reject</button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>No pending actions. Run the pipeline to generate.</div>
+              )}
+            </>
+          )}
+
+          {subTab === "drafts" && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>AI Title/Meta Drafts</div>
+              {actions.filter((a) => a.ai_draft).length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                  {actions.filter((a) => a.ai_draft).map((a) => {
+                    let draft = {};
+                    try { draft = typeof a.ai_draft === "string" ? JSON.parse(a.ai_draft) : (a.ai_draft || {}); } catch {}
+                    let detail = {};
+                    try { detail = typeof a.detail === "string" ? JSON.parse(a.detail) : (a.detail || {}); } catch {}
+                    return (
+                      <div key={a.id} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 16 }}>
+                        <div style={{ fontSize: 13, color: D.muted, marginBottom: 8 }}>{a.url}</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                          <div>
+                            <div style={{ fontSize: 11, color: D.muted, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Current</div>
+                            <div style={{ fontSize: 13, color: D.text }}>{detail.current_title || "—"}</div>
+                            <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{detail.current_meta || "—"}</div>
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 11, color: D.green, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Proposed</div>
+                            <div style={{ fontSize: 13, color: D.text, fontWeight: 500 }}>{draft.title || "—"}</div>
+                            <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{draft.meta_description || "—"}</div>
+                          </div>
+                        </div>
+                        {draft.reasoning && <div style={{ fontSize: 12, color: D.muted, marginTop: 8, fontStyle: "italic" }}>{draft.reasoning}</div>}
+                        {canAdmin && (
+                          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                            <button onClick={() => handleAction(a.id, "approve")} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 12, background: D.green, color: D.white, border: "none", cursor: "pointer" }}>Approve</button>
+                            <button onClick={() => handleAction(a.id, "reject")} style={{ padding: "4px 12px", borderRadius: 6, fontSize: 12, background: "transparent", color: D.red, border: `1px solid ${D.red}`, cursor: "pointer" }}>Reject</button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>No AI drafts yet. Click "Generate Drafts" to create title/meta suggestions.</div>
+              )}
+            </>
+          )}
+
+          {subTab === "progress" && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Execution Status</div>
+              {actions.length > 0 ? (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead><tr>
+                      <th style={thStyle}>URL</th>
+                      <th style={thStyle}>Action</th>
+                      <th style={thStyle}>Status</th>
+                      <th style={thStyle}>Executor</th>
+                      <th style={thStyle}>Completed</th>
+                      <th style={thStyle}>Notes</th>
+                    </tr></thead>
+                    <tbody>
+                      {actions.map((a) => (
+                        <tr key={a.id}>
+                          <td style={{ ...tdStyle, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.url}</td>
+                          <td style={tdStyle}>{a.action_type.replace(/_/g, " ")}</td>
+                          <td style={tdStyle}>
+                            <span style={{ padding: "2px 8px", borderRadius: 4, fontSize: 11, background: a.execution_status === "done" ? `${D.green}18` : `${D.amber}18`, color: a.execution_status === "done" ? D.green : D.amber }}>{a.execution_status}</span>
+                          </td>
+                          <td style={tdStyle}>{a.executor || "—"}</td>
+                          <td style={tdStyle}>{a.completed_at ? new Date(a.completed_at).toLocaleDateString() : "—"}</td>
+                          <td style={{ ...tdStyle, fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.execution_notes || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>No actions in progress.</div>
+              )}
+            </>
+          )}
+
+          {subTab === "experiments" && (
+            <>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>SEO Experiments</div>
+              {actions.length > 0 ? (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead><tr>
+                      <th style={thStyle}>URL</th>
+                      <th style={thStyle}>Action</th>
+                      <th style={thStyle}>Published</th>
+                      <th style={thR}>Pre Clicks</th>
+                      <th style={thR}>Post Clicks</th>
+                      <th style={thR}>Pre Pos</th>
+                      <th style={thR}>Post Pos</th>
+                      <th style={thStyle}>Status</th>
+                    </tr></thead>
+                    <tbody>
+                      {actions.map((e) => (
+                        <tr key={e.id}>
+                          <td style={{ ...tdStyle, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.url}</td>
+                          <td style={tdStyle}>{e.action_type.replace(/_/g, " ")}</td>
+                          <td style={tdStyle}>{e.publish_date || "—"}</td>
+                          <td style={tdR}>{fmt(e.pre_28d_clicks)}</td>
+                          <td style={tdR}>{e.post_28d_clicks != null ? fmt(e.post_28d_clicks) : "—"}</td>
+                          <td style={tdR}>{e.pre_28d_position ? parseFloat(e.pre_28d_position).toFixed(1) : "—"}</td>
+                          <td style={tdR}>{e.post_28d_position ? parseFloat(e.post_28d_position).toFixed(1) : "—"}</td>
+                          <td style={tdStyle}>
+                            <span style={{
+                              padding: "2px 8px", borderRadius: 4, fontSize: 11,
+                              background: e.status === "accepted" ? `${D.green}18` : e.status === "rejected" ? `${D.red}18` : `${D.amber}18`,
+                              color: e.status === "accepted" ? D.green : e.status === "rejected" ? D.red : D.amber,
+                            }}>{e.status}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>No experiments yet. Complete actions to create experiments.</div>
+              )}
+            </>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ── Indexation Tab ──
+function IndexationTab({ domain }) {
+  const [subTab, setSubTab] = useState("gap");
+  const [gapData, setGapData] = useState(null);
+  const [conflictsData, setConflictsData] = useState(null);
+  const [crawledNotIndexed, setCrawledNotIndexed] = useState(null);
+  const [inspectUrl, setInspectUrl] = useState("");
+  const [inspectData, setInspectData] = useState(null);
+  const [inspectLoading, setInspectLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (subTab === "gap") {
+      setLoading(true);
+      adminFetch(`/admin/seo/url-intelligence/indexation-gap?domain=${domain}`)
+        .then(setGapData)
+        .catch(() => setGapData(null))
+        .finally(() => setLoading(false));
+    } else if (subTab === "conflicts") {
+      setLoading(true);
+      adminFetch(`/admin/seo/url-intelligence/canonical-conflicts?domain=${domain}`)
+        .then(setConflictsData)
+        .catch(() => setConflictsData(null))
+        .finally(() => setLoading(false));
+    } else if (subTab === "crawled") {
+      setLoading(true);
+      adminFetch(`/admin/seo/url-intelligence/scan?diagnosis=indexation_problem&domain=${domain}&limit=50`)
+        .then(setCrawledNotIndexed)
+        .catch(() => setCrawledNotIndexed(null))
+        .finally(() => setLoading(false));
+    }
+  }, [subTab, domain]);
+
+  function handleInspect() {
+    if (!inspectUrl.trim()) return;
+    setInspectLoading(true);
+    setInspectData(null);
+    adminFetch(`/admin/seo/url-intelligence/inspect?url=${encodeURIComponent(inspectUrl.trim())}`)
+      .then(setInspectData)
+      .catch(() => setInspectData({ _error: true }))
+      .finally(() => setInspectLoading(false));
+  }
+
+  const subTabs = [
+    { key: "gap", label: "Indexation Gap" },
+    { key: "conflicts", label: "Canonical Conflicts" },
+    { key: "crawled", label: "Not Indexed" },
+    { key: "sitemap", label: "Sitemap Issues" },
+    { key: "inspector", label: "URL Inspector" },
+  ];
+
+  return (
+    <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} className="seo-sub-tabs">
+        {subTabs.map((st) => (
+          <button
+            key={st.key}
+            onClick={() => setSubTab(st.key)}
+            style={{
+              padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer",
+              background: subTab === st.key ? D.heading : "transparent",
+              color: subTab === st.key ? D.white : D.muted,
+              border: `1px solid ${subTab === st.key ? D.heading : D.border}`,
+            }}
+          >{st.label}</button>
+        ))}
+      </div>
+
+      {subTab === "gap" && (
+        loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
+          gapData && (
+            <Card>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 20 }}>
+                Indexation Gap — {gapData.domain}
+              </div>
+              <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
+                <KpiCard label="Submitted" value={fmt(gapData.submitted)} />
+                <KpiCard label="Indexed" value={fmt(gapData.indexed)} color={D.green} />
+                <KpiCard label="Gap" value={fmt(gapData.gap)} color={gapData.gap > 0 ? D.red : D.green} />
+                <KpiCard label="Gap %" value={`${gapData.gap_pct}%`} color={gapData.gap_pct > 20 ? D.red : gapData.gap_pct > 10 ? D.amber : D.green} />
+              </div>
+
+              {gapData.gap_pct > 20 && (
+                <div style={{ padding: 12, borderRadius: 8, background: `${D.red}0A`, border: `1px solid ${D.red}30`, marginBottom: 16 }}>
+                  <span style={{ fontSize: 12, color: D.red, fontWeight: 500 }}>
+                    Indexation gap above 20% — indicates quality, duplication, or crawl-budget issues.
+                  </span>
+                </div>
+              )}
+
+              {gapData.by_coverage_state?.length > 0 && (
+                <>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: D.heading, marginBottom: 12 }}>By Coverage State</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead><tr>
+                      <th style={thStyle}>Coverage State</th>
+                      <th style={thR}>Count</th>
+                    </tr></thead>
+                    <tbody>
+                      {gapData.by_coverage_state.map((row) => (
+                        <tr key={row.coverage_state}>
+                          <td style={tdStyle}>{row.coverage_state}</td>
+                          <td style={tdR}>{row.count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+            </Card>
+          )
+        )
+      )}
+
+      {subTab === "conflicts" && (
+        loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>
+              Canonical Conflicts — Hub / Spoke
+            </div>
+            {conflictsData?.length > 0 ? (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={thStyle}>Spoke URL</th>
+                    <th style={thStyle}>Hub URL</th>
+                    <th style={thR}>Body Sim %</th>
+                    <th style={thStyle}>Google Canonical</th>
+                    <th style={thStyle}>Status</th>
+                    <th style={thStyle}>Fix</th>
+                  </tr></thead>
+                  <tbody>
+                    {conflictsData.map((row) => (
+                      <tr key={row.id}>
+                        <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.spoke_url}</td>
+                        <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.hub_url}</td>
+                        <td style={tdR}>{row.body_similarity_pct != null ? `${row.body_similarity_pct}%` : "—"}</td>
+                        <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.google_selected_canonical || "—"}</td>
+                        <td style={tdStyle}>
+                          <span style={{
+                            padding: "2px 8px", borderRadius: 4, fontSize: 11,
+                            background: row.status === "open" ? `${D.amber}18` : `${D.green}18`,
+                            color: row.status === "open" ? D.amber : D.green,
+                          }}>{row.status}</span>
+                        </td>
+                        <td style={{ ...tdStyle, fontSize: 12, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.recommended_fix}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+                No canonical conflicts detected. Run a refresh + conflict detection to populate.
+              </div>
+            )}
+          </Card>
+        )
+      )}
+
+      {subTab === "crawled" && (
+        loading ? <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div> : (
+          <Card>
+            <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>
+              Not Indexed — Priority URLs
+            </div>
+            {crawledNotIndexed?.urls?.length > 0 ? (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={thStyle}>URL</th>
+                    <th style={thStyle}>Coverage State</th>
+                    <th style={thR}>Priority</th>
+                    <th style={thStyle}>In Sitemap</th>
+                    <th style={thStyle}>Action</th>
+                  </tr></thead>
+                  <tbody>
+                    {crawledNotIndexed.urls.map((row) => (
+                      <tr key={row.id}>
+                        <td style={{ ...tdStyle, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.url}</td>
+                        <td style={tdStyle}>{row.coverage_state || "—"}</td>
+                        <td style={tdR}>{row.priority_score}</td>
+                        <td style={tdStyle}>{row.in_sitemap ? "Yes" : "No"}</td>
+                        <td style={{ ...tdStyle, fontSize: 12, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.recommended_action}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+                No indexation problems found — or data not yet populated.
+              </div>
+            )}
+          </Card>
+        )
+      )}
+
+      {subTab === "sitemap" && (
+        <SitemapIssuesSubTab domain={domain} />
+      )}
+
+      {subTab === "inspector" && (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>URL Inspector</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+            <input
+              type="text"
+              value={inspectUrl}
+              onChange={(e) => setInspectUrl(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleInspect()}
+              placeholder="Enter URL to inspect..."
+              style={{
+                flex: 1, padding: "8px 12px", borderRadius: 8, fontSize: 13,
+                border: `1px solid ${D.inputBorder}`, background: D.card, color: D.text,
+              }}
+            />
+            <button
+              onClick={handleInspect}
+              disabled={inspectLoading}
+              style={{
+                padding: "8px 20px", borderRadius: 8, fontSize: 13, fontWeight: 500,
+                background: D.heading, color: D.white, border: "none", cursor: "pointer",
+                opacity: inspectLoading ? 0.6 : 1,
+              }}
+            >{inspectLoading ? "Inspecting..." : "Inspect"}</button>
+          </div>
+
+          {inspectData && !inspectData._error && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* Status banner */}
+              <div style={{
+                padding: 16, borderRadius: 8,
+                background: inspectData.primary_status === "healthy" ? `${D.green}0A` : `${D.amber}0A`,
+                border: `1px solid ${inspectData.primary_status === "healthy" ? `${D.green}30` : `${D.amber}30`}`,
+              }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>{inspectData.url}</div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
+                  Status: <strong>{inspectData.primary_status}</strong> · Diagnosis: <strong>{inspectData.primary_diagnosis}</strong> · Priority: <strong>{inspectData.priority_score}</strong>
+                </div>
+              </div>
+
+              {/* Detail sections */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }} className="seo-audit-expanded-grid">
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Identity</div>
+                  {[
+                    ["Domain", inspectData.domain],
+                    ["Type", inspectData.hub_or_spoke],
+                    ["Page Type", inspectData.page_type],
+                    ["City", inspectData.city || "—"],
+                    ["Service", inspectData.service || "—"],
+                  ].map(([k, v]) => (
+                    <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                      <span style={{ color: D.muted }}>{k}</span>
+                      <span style={{ color: D.text, fontFamily: MONO }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Indexation</div>
+                  {[
+                    ["Coverage", inspectData.coverage_state || "—"],
+                    ["Indexing State", inspectData.indexing_state || "—"],
+                    ["In Sitemap", inspectData.in_sitemap ? "Yes" : "No"],
+                    ["Canonical Match", inspectData.canonical_match === true ? "Yes" : inspectData.canonical_match === false ? "No" : "—"],
+                    ["Status Code", inspectData.status_code || "—"],
+                  ].map(([k, v]) => (
+                    <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                      <span style={{ color: D.muted }}>{k}</span>
+                      <span style={{ color: D.text, fontFamily: MONO }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Performance (28d)</div>
+                  {[
+                    ["Clicks", fmt(inspectData.gsc_clicks_28d)],
+                    ["Impressions", fmt(inspectData.gsc_impressions_28d)],
+                    ["CTR", inspectData.gsc_ctr_28d != null ? `${(parseFloat(inspectData.gsc_ctr_28d) * 100).toFixed(1)}%` : "—"],
+                    ["Avg Position", inspectData.gsc_avg_position_28d ? parseFloat(inspectData.gsc_avg_position_28d).toFixed(1) : "—"],
+                    ["Backlinks", fmt(inspectData.backlinks_count)],
+                  ].map(([k, v]) => (
+                    <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                      <span style={{ color: D.muted }}>{k}</span>
+                      <span style={{ color: D.text, fontFamily: MONO }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, textTransform: "uppercase", letterSpacing: "0.5px" }}>Scores</div>
+                  {[
+                    ["Technical QA", inspectData.technical_qa_score ?? "—"],
+                    ["Content QA", inspectData.content_qa_score ?? "—"],
+                    ["Local QA", inspectData.local_qa_score ?? "—"],
+                    ["Word Count", inspectData.word_count ? fmt(inspectData.word_count) : "—"],
+                    ["Approval", inspectData.approval_level || "—"],
+                  ].map(([k, v]) => (
+                    <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                      <span style={{ color: D.muted }}>{k}</span>
+                      <span style={{ color: D.text, fontFamily: MONO }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Recommended action */}
+              {inspectData.recommended_action && (
+                <div style={{ padding: 16, borderRadius: 8, background: `${D.heading}08`, border: `1px solid ${D.border}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 6 }}>RECOMMENDED ACTION</div>
+                  <div style={{ fontSize: 13, color: D.text }}>{inspectData.recommended_action}</div>
+                  {inspectData.alternative_action && (
+                    <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>Alt: {inspectData.alternative_action}</div>
+                  )}
+                </div>
+              )}
+
+              {/* Canonical detail */}
+              {(inspectData.user_declared_canonical || inspectData.google_selected_canonical) && (
+                <div style={{ padding: 16, borderRadius: 8, border: `1px solid ${D.border}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>CANONICAL</div>
+                  <div style={{ fontSize: 12, color: D.muted }}>
+                    User declared: <span style={{ color: D.text, fontFamily: MONO }}>{inspectData.user_declared_canonical || "—"}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
+                    Google selected: <span style={{ color: D.text, fontFamily: MONO }}>{inspectData.google_selected_canonical || "—"}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Title / Meta */}
+              <div style={{ padding: 16, borderRadius: 8, border: `1px solid ${D.border}` }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: D.heading, marginBottom: 8 }}>CONTENT</div>
+                <div style={{ fontSize: 12, color: D.muted }}>Title: <span style={{ color: D.text }}>{inspectData.title || "—"}</span></div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>H1: <span style={{ color: D.text }}>{inspectData.h1 || "—"}</span></div>
+                <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>Meta: <span style={{ color: D.text }}>{inspectData.meta_description || "—"}</span></div>
+              </div>
+            </div>
+          )}
+
+          {inspectData?._error && (
+            <div style={{ color: D.red, fontSize: 13, padding: 20, textAlign: "center" }}>
+              URL not found in intelligence layer. Run a domain refresh first.
+            </div>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function SitemapIssuesSubTab({ domain }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    adminFetch(`/admin/seo/url-intelligence/sitemap-issues?domain=${domain}`)
+      .then(setData)
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, [domain]);
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
+  if (!data) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>No sitemap issues data. Run validation first.</div>;
+
+  const severityColor = { critical: D.red, warning: D.amber };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+        <KpiCard label="Total Issues" value={fmt(data.total_issues)} color={data.total_issues > 0 ? D.red : D.green} />
+        <KpiCard label="Critical" value={fmt(data.by_severity?.find((s) => s.severity === "critical")?.count || 0)} color={D.red} />
+        <KpiCard label="Warning" value={fmt(data.by_severity?.find((s) => s.severity === "warning")?.count || 0)} color={D.amber} />
+        <KpiCard label="Issue Types" value={fmt(data.by_type?.length || 0)} />
+      </div>
+
+      {data.issues?.length > 0 ? (
+        <Card>
+          <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 16 }}>Sitemap Issues — {data.domain}</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={thStyle}>URL</th>
+                <th style={thStyle}>Issue</th>
+                <th style={thStyle}>Severity</th>
+                <th style={thStyle}>Detail</th>
+              </tr></thead>
+              <tbody>
+                {data.issues.map((row) => (
+                  <tr key={row.id}>
+                    <td style={{ ...tdStyle, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.page_url}</td>
+                    <td style={tdStyle}>{row.issue_type.replace(/_/g, " ")}</td>
+                    <td style={tdStyle}>
+                      <span style={{
+                        padding: "2px 8px", borderRadius: 4, fontSize: 11,
+                        background: `${severityColor[row.severity] || D.muted}18`,
+                        color: severityColor[row.severity] || D.muted,
+                      }}>{row.severity}</span>
+                    </td>
+                    <td style={{ ...tdStyle, fontSize: 12, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      ) : (
+        <Card>
+          <div style={{ color: D.muted, fontSize: 13, padding: 20, textAlign: "center" }}>
+            No sitemap issues found.
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ──
 export default function SEOPage() {
   const [tab, setTab] = useState("dashboard");
@@ -3423,7 +4509,7 @@ export default function SEOPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="SEO section"
-        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
+        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
       />
       {tab === "dashboard" && (
         <Suspense
@@ -3443,6 +4529,9 @@ export default function SEOPage() {
       {tab === "ai-overview" && <AIOverviewTab />}
       {tab === "funnel" && <FunnelTab />}
       {tab === "analytics" && <AnalyticsTab />}
+      {tab === "url-intel" && <UrlIntelTab domain={PRIMARY_DOMAIN} />}
+      {tab === "actions" && <ActionsTab domain={PRIMARY_DOMAIN} />}
+      {tab === "indexation" && <IndexationTab domain={PRIMARY_DOMAIN} />}
       {tab === "site-audit" && <SiteAuditTab />}
     </div>
   );

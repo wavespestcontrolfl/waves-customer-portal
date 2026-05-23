@@ -162,6 +162,9 @@ class SearchConsoleService {
       // 4. Sitewide totals
       await this.syncSitewideTotals(startStr, endStr, siteUrl);
 
+      // 5. Query→page mapping (which queries rank on which pages)
+      await this.syncQueryPageMap(startStr, endStr, siteUrl);
+
       logger.info(`GSC sync complete for ${siteUrl}`);
       return { synced: true, period: { start: startStr, end: endStr }, domain: normalizedDomain, siteUrl };
     } catch (err) {
@@ -371,6 +374,47 @@ class SearchConsoleService {
         .insert({ date, device: 'all', domain, ...record })
         .onConflict(['date', 'device', 'domain'])
         .merge({ ...record, updated_at: new Date() });
+    }
+  }
+
+  async syncQueryPageMap(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
+    const domain = normalizeDomain(siteUrl);
+    try {
+      const response = await this.webmasters.searchanalytics.query({
+        siteUrl,
+        requestBody: {
+          startDate,
+          endDate,
+          dimensions: ['query', 'page'],
+          rowLimit: 5000,
+          type: 'web',
+        },
+      });
+
+      const rows = response.data.rows || [];
+      for (const row of rows) {
+        const query = row.keys[0];
+        const pageUrl = row.keys[1];
+
+        await db('gsc_query_page_map')
+          .insert({
+            query,
+            page_url: pageUrl,
+            domain,
+            clicks: row.clicks || 0,
+            impressions: row.impressions || 0,
+            ctr: row.ctr || 0,
+            position: row.position || 0,
+            date_from: startDate,
+            date_to: endDate,
+          })
+          .onConflict(['query', 'page_url', 'domain', 'date_from'])
+          .merge({ clicks: row.clicks || 0, impressions: row.impressions || 0, ctr: row.ctr || 0, position: row.position || 0, updated_at: new Date() });
+      }
+
+      logger.info(`GSC query-page map synced: ${rows.length} rows for ${domain}`);
+    } catch (err) {
+      logger.warn(`GSC query-page map sync failed for ${domain}: ${err.message}`);
     }
   }
 

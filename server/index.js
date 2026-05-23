@@ -327,6 +327,8 @@ app.use('/api/admin/inventory', adminInventoryRoutes);
 app.use('/api/admin/compliance', adminComplianceRoutes);
 app.use('/api/admin/workflows', adminWorkflowRoutes);
 app.use('/api/admin/ads', adminAdsRoutes);
+app.use('/api/admin/seo/actions', require('./routes/admin-seo-actions'));
+app.use('/api/admin/seo/url-intelligence', require('./routes/admin-seo-url-intelligence'));
 app.use('/api/admin/seo', adminSeoRoutes);
 app.use('/api/admin/content', adminContentRoutes);
 app.use('/api/admin/knowledge', adminKnowledgeRoutes);
