@@ -1394,18 +1394,19 @@ function ServiceStatusCard({ data, mode }) {
 
 function ReportActionBar({ pdfUrl, token, onShare }) {
   return (
-    <div className="report-action-bar" aria-label="Report actions">
-      <div>
-        <div className="section-eyebrow">Report tools</div>
-        <div className="report-action-copy">Download, share, or print this report for your records.</div>
-      </div>
+    <section className="report-action-bar" aria-label="Report tools">
+      <div className="section-eyebrow">Report Tools</div>
+      <h2 className="report-action-title">Download, share, or print</h2>
+      <p className="report-action-copy">For your records.</p>
       <div className="report-action-buttons">
-        <a href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> View my account</a>
-        {pdfUrl && <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('plain')}><Download size={16} /> Download PDF</a>}
-        <button type="button" onClick={onShare} style={actionButtonStyle('plain')}><Share2 size={16} /> Share</button>
-        <button type="button" onClick={() => window.print()} style={actionButtonStyle('plain')}><Printer size={16} /> Print</button>
+        {pdfUrl
+          ? <a href={pdfUrl} download onClick={() => trackReportEvent(token, 'pdf_downloaded')} style={actionButtonStyle('primary')}><Download size={16} /> Download PDF</a>
+          : <span style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
+        <button type="button" onClick={onShare} style={actionButtonStyle('primary')}><Share2 size={16} /> Share</button>
+        <button type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>
+        <a href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -4487,28 +4488,40 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
-          margin-top: 16px;
-          padding: 20px;
+          display: block;
+          margin: 0 0 18px;
+          padding: 20px 22px;
           background: var(--paper);
           border: 1px solid var(--line);
           border-radius: 16px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 16px;
+        }
+        .report-action-bar .section-eyebrow {
+          margin-bottom: 6px;
+        }
+        .report-action-title {
+          margin: 6px 0 4px;
+          font-family: ${FONTS.serif};
+          font-weight: 500;
+          font-size: 24px;
+          line-height: 1.2;
+          color: var(--text);
         }
         .report-action-copy {
-          margin-top: 4px;
+          margin: 2px 0 0;
           color: ${ESTIMATE_BODY};
           font-size: 14px;
           line-height: 1.45;
         }
         .report-action-buttons {
-          display: flex;
-          align-items: center;
-          justify-content: flex-end;
-          flex-wrap: wrap;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
           gap: 10px;
+          margin-top: 16px;
+        }
+        .report-action-buttons > a,
+        .report-action-buttons > button,
+        .report-action-buttons > span {
+          width: 100%;
         }
         .service-report-hero {
           padding: 8px 0 0;
@@ -5135,7 +5148,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-area.status-green,
         .coverage-marker.status-green .coverage-marker-inner {
-          fill: #16a34a;
+          fill: #15803D;
           stroke: #14532d;
         }
         .coverage-area.status-light-green,
@@ -5178,7 +5191,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-linejoin: round;
           opacity: .92;
         }
-        .coverage-line.status-green { stroke: #16a34a; }
+        .coverage-line.status-green { stroke: #15803D; }
         .coverage-line.status-light-green { stroke: #65a30d; stroke-dasharray: 12 8; }
         .coverage-line.status-blue { stroke: #2563eb; stroke-dasharray: 7 7; }
         .coverage-line.status-orange { stroke: #f59e0b; stroke-dasharray: 10 8; }
@@ -5211,7 +5224,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-marker-text {
           fill: #fff;
           font-family: Inter, Arial, sans-serif;
-          font-size: 7px;
+          font-size: 10px;
           font-weight: 850;
           letter-spacing: 0;
         }
@@ -6823,9 +6836,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
           .sr-shell { padding: 14px 14px 36px; }
-          .report-action-bar { align-items: stretch; flex-direction: column; }
-          .report-action-buttons { justify-content: stretch; }
-          .report-action-buttons a, .report-action-buttons button { flex: 1 1 140px; }
+          .report-action-bar { padding: 18px 16px; }
+          .report-action-buttons { grid-template-columns: 1fr; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
           .sr-pressure { justify-self: stretch; }
@@ -6899,6 +6911,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       <main className="sr-shell">
         <ServiceStatusCard data={data} mode={mode} />
 
+        {mode === 'live' && <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />}
+
         <ReentryReadinessCard context={dynamicContext.reentry} mode={mode} token={token} />
 
         <section className="sr-section visit-summary-section" id="visit-summary">
@@ -6913,6 +6927,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         </section>
+
+        {/* Only pass token in live mode so the interactive rating picker
+            doesn't render into generated/cached PDFs (mode === 'pdf' /
+            'static') where the controls would be non-functional anyway. */}
+        <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />
 
         <QuickNavigationAndAsk
           mode={mode}
@@ -6946,30 +6965,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           mode={mode}
         />
 
-        {/* Only pass token in live mode so the interactive rating picker
-            doesn't render into generated/cached PDFs (mode === 'pdf' /
-            'static') where the controls would be non-functional anyway. */}
-        <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />
-
-        <CustomerActionItemsSection
-          data={data}
-          coverage={serviceCoverage}
-          aiSummary={dynamicContext.aiSummary}
-          primaryMove={premium.primaryMove}
-          mode={mode}
-        />
-
-        <WhatToExpectNextSection
-          context={premium.whyActivity}
-          serviceLine={data.serviceLine}
-          data={data}
-          coverage={serviceCoverage}
-        />
-
-        <WhenToContactUsSection data={data} coverage={serviceCoverage} />
-
-        <PropertyMemoryBlock data={data} coverage={serviceCoverage} timeline={normalizedVisitTimeline} />
-
         {(data.photos || []).length > 0 && (
           <section className="sr-section" id="photos">
             <h2>Field photos</h2>
@@ -6985,19 +6980,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         )}
 
         <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />
-
-        {mode === 'live' && <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />}
-
-        <SupportingDetailsSection
-          data={data}
-          token={token}
-          mode={mode}
-          showDetails={showDetails}
-          serviceNotes={serviceNotes}
-          findings={findings}
-          recommendations={recommendations}
-          advisoryRows={advisoryRows}
-        />
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
