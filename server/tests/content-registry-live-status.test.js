@@ -149,6 +149,25 @@ describe('content registry live status helpers', () => {
     }));
   });
 
+  test('fetch errors keep sitemap signal from loaded sitemap paths', async () => {
+    const result = await liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-fetch-error', canonical_url_normalized: '/known-in-sitemap/' },
+      {
+        sitemapPaths: new Set(['/known-in-sitemap/']),
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/known-in-sitemap/': new Error('timeout'),
+        }),
+      },
+    );
+
+    expect(result).toEqual(expect.objectContaining({
+      http_status: 'error',
+      live_status: 'error',
+      sitemap_present: true,
+      sitemap_status: 'present',
+    }));
+  });
+
   test('commit mode updates only changed registry mirror fields', async () => {
     const database = fakeDatabase([{
       id: 'row-5',
@@ -185,8 +204,8 @@ describe('content registry live status helpers', () => {
       http_status: '301',
       live_status: 'redirected',
       redirect_target_url: 'https://www.wavespestcontrol.com/new/',
-      registry_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
+    expect(database.updates[0].payload).not.toHaveProperty('registry_hash');
   });
 
   test('fetchSitemapPaths recurses sitemap indexes instead of treating child sitemaps as pages', async () => {

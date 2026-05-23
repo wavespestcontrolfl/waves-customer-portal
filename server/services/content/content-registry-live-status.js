@@ -206,6 +206,12 @@ async function checkRegistryRowLiveStatus(row, {
       error: null,
     };
   } catch (err) {
+    const sitemap = sitemapSignal({
+      sitemapPaths,
+      requestedUrl,
+      redirectTargetUrl: null,
+      canonicalTargetUrl: null,
+    });
     return {
       id: row.id,
       title: row.title || null,
@@ -215,8 +221,8 @@ async function checkRegistryRowLiveStatus(row, {
       redirect_target_url: null,
       canonical_target_url: null,
       noindex_detected: Boolean(row.noindex_detected),
-      sitemap_present: sitemapPaths ? false : null,
-      sitemap_status: sitemapPaths ? 'missing' : 'unknown',
+      sitemap_present: sitemap.present,
+      sitemap_status: sitemap.status,
       error: err.message,
     };
   }
@@ -316,7 +322,6 @@ function liveUpdatePayload(row, result, now = new Date()) {
     sitemap_status: result.sitemap_status || 'unknown',
     updated_at: now,
   };
-  updates.registry_hash = registry.stableHash({ ...row, ...updates, registry_hash: undefined });
   return updates;
 }
 
