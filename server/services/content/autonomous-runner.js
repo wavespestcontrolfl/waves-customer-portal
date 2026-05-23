@@ -158,7 +158,11 @@ class AutonomousRunner {
         return finalize(run, t0, { outcome: 'failed', failure_message: `internal_links:${err.message}` });
       }
       const finalized = await finalize(run, t0, result.patch);
-      await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken });
+      if (result.patch.outcome === 'skipped_shadow_mode') {
+        await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes || 'shadow_internal_links', claimToken });
+      } else {
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken });
+      }
       return finalized;
     }
 
@@ -424,7 +428,7 @@ class AutonomousRunner {
         .where('action_type', actionType)
         .where('shadow_mode', false)
         .whereIn('outcome', ['completed_published', 'completed_pending_review'])
-        .select('outcome', 'trust_build_approved_at');
+        .select('outcome', 'skip_reason', 'trust_build_approved_at');
       return (rows || []).filter(countsTowardTrustBuild).length;
     } catch { return 0; }
   }
@@ -609,7 +613,9 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
 
 function countsTowardTrustBuild(row) {
   if (row?.outcome === 'completed_published') return true;
-  return row?.outcome === 'completed_pending_review' && !!row.trust_build_approved_at;
+  return row?.outcome === 'completed_pending_review'
+    && /^trust_build_\d+_of_\d+$/.test(String(row.skip_reason || ''))
+    && !!row.trust_build_approved_at;
 }
 
 module.exports = new AutonomousRunner();

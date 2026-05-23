@@ -34,6 +34,8 @@ if (!RUN_ID) {
     const updated = await db('autonomous_runs')
       .where('id', RUN_ID)
       .where('outcome', 'completed_pending_review')
+      .where('shadow_mode', false)
+      .where('skip_reason', 'like', 'trust_build_%')
       .update({
         trust_build_approved_at: new Date(),
         trust_build_approved_by: APPROVED_BY,
@@ -41,7 +43,7 @@ if (!RUN_ID) {
       });
 
     if (!updated) {
-      console.error(`No completed_pending_review autonomous run found for id=${RUN_ID}`);
+      console.error(`No live trust_build completed_pending_review autonomous run found for id=${RUN_ID}`);
       process.exitCode = 1;
       return;
     }

@@ -72,10 +72,11 @@ describe('countsTowardTrustBuild', () => {
     expect(countsTowardTrustBuild({ outcome: 'completed_published' })).toBe(true);
     expect(countsTowardTrustBuild({
       outcome: 'completed_pending_review',
+      skip_reason: 'trust_build_2_of_3',
       trust_build_approved_at: new Date(),
     })).toBe(true);
   });
-  test('does not count unapproved pending-review rows or failures', () => {
+  test('does not count unapproved or non-trust pending-review rows or failures', () => {
     expect(countsTowardTrustBuild({
       outcome: 'completed_pending_review',
       skip_reason: 'trust_build_2_of_3',
@@ -83,7 +84,13 @@ describe('countsTowardTrustBuild', () => {
     })).toBe(false);
     expect(countsTowardTrustBuild({
       outcome: 'completed_pending_review',
+      skip_reason: 'gate_fail',
+      trust_build_approved_at: new Date(),
+    })).toBe(false);
+    expect(countsTowardTrustBuild({
+      outcome: 'completed_pending_review',
       skip_reason: 'brief_requires_human_review',
+      trust_build_approved_at: new Date(),
     })).toBe(false);
     expect(countsTowardTrustBuild({ outcome: 'failed_agent' })).toBe(false);
   });
@@ -205,5 +212,39 @@ describe('runNext claim failures', () => {
 
     expect(result.outcome).toBe('failed');
     expect(result.failure_message).toBe('claim:database down');
+  });
+});
+
+describe('runNext internal-link shadow behavior', () => {
+  test('completes shadow internal-link claims instead of parking them in pending review', async () => {
+    const claimedAt = new Date('2026-05-23T05:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_links_1',
+        action_type: 'add_internal_links',
+        claimed_at: claimedAt,
+      }),
+      complete: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_links_1',
+        action_type: 'add_internal_links',
+        page_type: 'internal-link',
+      }),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('skipped_shadow_mode');
+    expect(result.skip_reason).toBe('shadow_internal_links');
+    expect(queue.complete).toHaveBeenCalledWith('opp_links_1', {
+      notes: 'shadow_internal_links',
+      claimToken: claimedAt,
+    });
+    expect(queue.pendingReview).not.toHaveBeenCalled();
   });
 });
