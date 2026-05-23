@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const {
   estimateDataHasQuoteRequirement,
+  estimateDataHasUnresolvedManagerApproval,
+  normalizeEstimateDethatchingManagerApproval,
   validateEstimateDeliveryOptions,
 } = require('./estimate-delivery-options');
 const {
@@ -31,26 +33,194 @@ function estimateExpiresAt(now = () => new Date()) {
   return expiresAt;
 }
 
-function buildEstimatePersistenceFields(body) {
-  const quoteRequired = estimateDataHasQuoteRequirement(body.estimateData);
+function roundMoney(value) {
+  return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function positiveMoney(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? roundMoney(n) : null;
+}
+
+function moneyValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? roundMoney(n) : null;
+}
+
+function nonNegativeMoney(value) {
+  const amount = moneyValue(value);
+  return amount !== null && amount >= 0 ? amount : null;
+}
+
+function fallbackMoney(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? roundMoney(n) : 0;
+}
+
+function estimateResultRoot(estimateData) {
+  if (!estimateData || typeof estimateData !== 'object') return {};
+  return estimateData.result && typeof estimateData.result === 'object'
+    ? estimateData.result
+    : estimateData;
+}
+
+function sumPositiveAmounts(rows = [], fields = ['price']) {
+  return roundMoney((rows || []).reduce((sum, row) => {
+    if (!row || typeof row !== 'object') return sum;
+    for (const field of fields) {
+      const amount = positiveMoney(row[field]);
+      if (amount !== null) return sum + amount;
+    }
+    return sum;
+  }, 0));
+}
+
+function sumSignedAmounts(rows = [], fields = ['price']) {
+  return roundMoney((rows || []).reduce((sum, row) => {
+    if (!row || typeof row !== 'object') return sum;
+    for (const field of fields) {
+      const amount = moneyValue(row[field]);
+      if (amount !== null) return sum + amount;
+    }
+    return sum;
+  }, 0));
+}
+
+function isApprovedDethatchingManagerRow(row = {}) {
+  if (!row || typeof row !== 'object') return false;
+  const service = String(row.service || row.key || '').toLowerCase();
+  const label = String(row.name || row.label || row.displayName || '').toLowerCase();
+  return (service.includes('dethatch') || label.includes('dethatch')) &&
+    row.managerApproved === true &&
+    row.managerApprovalSatisfied === true &&
+    !!row.managerApprovalOverrideReason &&
+    moneyValue(row.price) !== null;
+}
+
+function deriveTotalsFromEstimateData(estimateData) {
+  const result = estimateResultRoot(estimateData);
+  const recurring = result.recurring && typeof result.recurring === 'object'
+    ? result.recurring
+    : {};
+  const nestedRecurring = result.results?.recurring && typeof result.results.recurring === 'object'
+    ? result.results.recurring
+    : {};
+  const recurringRows = [
+    ...(Array.isArray(recurring.services) ? recurring.services : []),
+    ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
+  ];
+  const recurringRowsMonthly = sumPositiveAmounts(recurringRows, ['mo', 'monthly']);
+  const monthlyTotal = positiveMoney(recurring.grandTotal) ??
+    positiveMoney(recurring.monthlyTotal) ??
+    positiveMoney(recurring.monthly) ??
+    positiveMoney(nestedRecurring.grandTotal) ??
+    positiveMoney(nestedRecurring.monthlyTotal) ??
+    positiveMoney(result.totals?.year2mo) ??
+    positiveMoney(recurringRowsMonthly);
+
+  const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+  const oneTimeRows = [
+    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
+    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
+  ];
+  const oneTimeRowsTotal = roundMoney(
+    sumSignedAmounts(oneTimeRows, ['price', 'estimatedPrice', 'baseEstimatePrice']) +
+    (positiveMoney(oneTime.membershipFee) ?? 0)
+  );
+  const topLevelSpecRowsTotal = sumSignedAmounts(
+    Array.isArray(result.specItems) ? result.specItems : [],
+    ['price', 'estimatedPrice', 'baseEstimatePrice']
+  );
+  const explicitOneTimeTotal = nonNegativeMoney(oneTime.total);
+  const derivedOneTimeTotal = nonNegativeMoney(oneTimeRowsTotal) ?? nonNegativeMoney(topLevelSpecRowsTotal);
+  const hasApprovedDethatchingManagerRow = oneTimeRows.some((row) => isApprovedDethatchingManagerRow(row));
+  const oneTimeTotal = explicitOneTimeTotal !== null
+    ? (
+        hasApprovedDethatchingManagerRow && derivedOneTimeTotal !== null && derivedOneTimeTotal > explicitOneTimeTotal
+          ? derivedOneTimeTotal
+          : explicitOneTimeTotal
+      )
+    : derivedOneTimeTotal;
+
+  const annualTotal = positiveMoney(result.totals?.year2) ??
+    positiveMoney(recurring.annualTotal) ??
+    positiveMoney(nestedRecurring.annualTotal) ??
+    (monthlyTotal !== null ? roundMoney(monthlyTotal * 12) : null) ??
+    positiveMoney(recurring.annualAfterDiscount) ??
+    positiveMoney(nestedRecurring.annualAfterDiscount);
+
+  return {
+    monthlyTotal,
+    annualTotal,
+    onetimeTotal: oneTimeTotal,
+  };
+}
+
+function resolveBillableTotals(body, estimateData, quoteRequired) {
+  if (quoteRequired) {
+    return { monthlyTotal: 0, annualTotal: 0, onetimeTotal: 0 };
+  }
+  const derived = deriveTotalsFromEstimateData(estimateData);
+  const monthlyTotal = derived.monthlyTotal ?? fallbackMoney(body.monthlyTotal);
+  const onetimeTotal = derived.onetimeTotal ?? fallbackMoney(body.onetimeTotal);
+  const annualTotal = derived.annualTotal ??
+    (monthlyTotal > 0 ? roundMoney(monthlyTotal * 12) : fallbackMoney(body.annualTotal));
+  return { monthlyTotal, annualTotal, onetimeTotal };
+}
+
+function applyResolvedTotalsToEstimateData(estimateData, totals, quoteRequired) {
+  if (!estimateData || typeof estimateData !== 'object' || quoteRequired) return;
+  const result = estimateResultRoot(estimateData);
+  if (!result || typeof result !== 'object') return;
+
+  if (result.oneTime && typeof result.oneTime === 'object' && totals.onetimeTotal > 0) {
+    result.oneTime.total = totals.onetimeTotal;
+    if (Object.prototype.hasOwnProperty.call(result.oneTime, 'otSubtotal')) {
+      result.oneTime.otSubtotal = roundMoney(totals.onetimeTotal - fallbackMoney(result.oneTime.tmInstall));
+    }
+  }
+
+  if (result.recurring && typeof result.recurring === 'object' && totals.monthlyTotal > 0) {
+    result.recurring.grandTotal = totals.monthlyTotal;
+    result.recurring.monthlyTotal = totals.monthlyTotal;
+    if (totals.annualTotal > 0 && Object.prototype.hasOwnProperty.call(result.recurring, 'annualTotal')) {
+      result.recurring.annualTotal = totals.annualTotal;
+    }
+  }
+
+  if (result.totals && typeof result.totals === 'object') {
+    if (totals.monthlyTotal > 0) result.totals.year2mo = totals.monthlyTotal;
+    if (totals.annualTotal > 0) result.totals.year2 = totals.annualTotal;
+    const year1 = roundMoney(fallbackMoney(totals.annualTotal) + fallbackMoney(totals.onetimeTotal));
+    if (year1 > 0) result.totals.year1 = year1;
+  }
+}
+
+function buildEstimatePersistenceFields(body, context = {}) {
+  const estimateData = normalizeEstimateDethatchingManagerApproval(body.estimateData, context);
+  const quoteRequired = estimateDataHasQuoteRequirement(estimateData) ||
+    estimateDataHasUnresolvedManagerApproval(estimateData);
+  const totals = resolveBillableTotals(body, estimateData, quoteRequired);
+  applyResolvedTotalsToEstimateData(estimateData, totals, quoteRequired);
   const serviceInterest = inferEstimateServiceInterest({
     serviceInterest: body.serviceInterest,
-    estimateData: body.estimateData,
-    monthlyTotal: quoteRequired ? 0 : body.monthlyTotal,
-    onetimeTotal: quoteRequired ? 0 : body.onetimeTotal,
+    estimateData,
+    monthlyTotal: totals.monthlyTotal,
+    onetimeTotal: totals.onetimeTotal,
     notes: body.notes,
   });
 
   return {
     customer_id: body.customerId || null,
-    estimate_data: body.estimateData ? JSON.stringify(body.estimateData) : null,
+    estimate_data: estimateData ? JSON.stringify(estimateData) : null,
     address: body.address,
     customer_name: body.customerName,
     customer_phone: body.customerPhone,
     customer_email: body.customerEmail,
-    monthly_total: quoteRequired ? 0 : body.monthlyTotal,
-    annual_total: quoteRequired ? 0 : body.annualTotal,
-    onetime_total: quoteRequired ? 0 : body.onetimeTotal,
+    monthly_total: totals.monthlyTotal,
+    annual_total: totals.annualTotal,
+    onetime_total: totals.onetimeTotal,
     waveguard_tier: body.waveguardTier,
     service_interest: serviceInterest,
     notes: body.notes,
@@ -77,25 +247,33 @@ async function createOrReuseAdminEstimate({
     leadId,
     showOneTimeOption,
     billByInvoice,
-    onetimeTotal,
-    monthlyTotal,
-    annualTotal,
     estimateData,
   } = body;
-  const quoteRequired = estimateDataHasQuoteRequirement(estimateData);
+  const trustedEstimateData = normalizeEstimateDethatchingManagerApproval(estimateData, {
+    technician,
+    technicianId,
+    now,
+  });
+  const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
+    estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
+  const totals = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
+  applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
   const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
     showOneTimeOption: !!showOneTimeOption,
     billByInvoice: !!billByInvoice,
-    onetimeTotal: quoteRequired ? 0 : onetimeTotal,
-    monthlyTotal: quoteRequired ? 0 : monthlyTotal,
-    annualTotal: quoteRequired ? 0 : annualTotal,
-    estimateData,
+    onetimeTotal: totals.onetimeTotal,
+    monthlyTotal: totals.monthlyTotal,
+    annualTotal: totals.annualTotal,
+    estimateData: trustedEstimateData,
   });
   if (deliveryError) throw errorWithStatus(deliveryError, 400);
 
   const expiresAt = estimateExpiresAt(now);
-  const writeFields = buildEstimatePersistenceFields(body);
+  const writeFields = buildEstimatePersistenceFields(
+    { ...body, estimateData: trustedEstimateData },
+    { technician, technicianId, now },
+  );
 
   return database.transaction(async (trx) => {
     let canReplaceLinkedEstimate = false;
