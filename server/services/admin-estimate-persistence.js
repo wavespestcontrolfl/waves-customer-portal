@@ -48,6 +48,11 @@ function moneyValue(value) {
   return Number.isFinite(n) ? roundMoney(n) : null;
 }
 
+function nonNegativeMoney(value) {
+  const amount = moneyValue(value);
+  return amount !== null && amount >= 0 ? amount : null;
+}
+
 function fallbackMoney(value) {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? roundMoney(n) : 0;
@@ -80,6 +85,17 @@ function sumSignedAmounts(rows = [], fields = ['price']) {
     }
     return sum;
   }, 0));
+}
+
+function isApprovedDethatchingManagerRow(row = {}) {
+  if (!row || typeof row !== 'object') return false;
+  const service = String(row.service || row.key || '').toLowerCase();
+  const label = String(row.name || row.label || row.displayName || '').toLowerCase();
+  return (service.includes('dethatch') || label.includes('dethatch')) &&
+    row.managerApproved === true &&
+    row.managerApprovalSatisfied === true &&
+    !!row.managerApprovalOverrideReason &&
+    moneyValue(row.price) !== null;
 }
 
 function deriveTotalsFromEstimateData(estimateData) {
@@ -116,11 +132,16 @@ function deriveTotalsFromEstimateData(estimateData) {
     Array.isArray(result.specItems) ? result.specItems : [],
     ['price', 'estimatedPrice', 'baseEstimatePrice']
   );
-  const explicitOneTimeTotal = positiveMoney(oneTime.total);
-  const derivedOneTimeTotal = positiveMoney(oneTimeRowsTotal) ?? positiveMoney(topLevelSpecRowsTotal);
-  const oneTimeTotal = explicitOneTimeTotal !== null && derivedOneTimeTotal !== null
-    ? Math.max(explicitOneTimeTotal, derivedOneTimeTotal)
-    : (explicitOneTimeTotal ?? derivedOneTimeTotal);
+  const explicitOneTimeTotal = nonNegativeMoney(oneTime.total);
+  const derivedOneTimeTotal = nonNegativeMoney(oneTimeRowsTotal) ?? nonNegativeMoney(topLevelSpecRowsTotal);
+  const hasApprovedDethatchingManagerRow = oneTimeRows.some((row) => isApprovedDethatchingManagerRow(row));
+  const oneTimeTotal = explicitOneTimeTotal !== null
+    ? (
+        hasApprovedDethatchingManagerRow && derivedOneTimeTotal !== null && derivedOneTimeTotal > explicitOneTimeTotal
+          ? derivedOneTimeTotal
+          : explicitOneTimeTotal
+      )
+    : derivedOneTimeTotal;
 
   const annualTotal = positiveMoney(result.totals?.year2) ??
     positiveMoney(recurring.annualTotal) ??

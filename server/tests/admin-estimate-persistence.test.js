@@ -183,6 +183,52 @@ describe('admin estimate persistence', () => {
     expect(data.result.oneTime.total).toBe(275);
   });
 
+  test('preserves explicit discounted one-time totals below row sum', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: {
+            total: 250,
+            items: [
+              { service: 'one_time_pest', name: 'One-Time Pest', price: 300 },
+            ],
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.onetime_total).toBe(250);
+    expect(data.result.oneTime.total).toBe(250);
+  });
+
+  test('preserves explicit free one-time totals below row sum', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: {
+            total: 0,
+            items: [
+              { service: 'one_time_pest', name: 'One-Time Pest', price: 300 },
+            ],
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.onetime_total).toBe(0);
+    expect(data.result.oneTime.total).toBe(0);
+  });
+
   test('zeros persisted totals when estimate data contains quote-required lines', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
