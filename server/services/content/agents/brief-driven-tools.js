@@ -194,14 +194,19 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       const { keyword, city = null } = input || {};
       if (!keyword) return { error: 'keyword required' };
       try {
+        // Overlap must consider all non-terminal statuses, not just
+        // 'published'. The legacy content agent treats queued / draft /
+        // wp_draft as active content for dedupe — limiting this query
+        // to 'published' lets the autonomous writer ship a duplicate
+        // angle while a draft/queued version is already in flight.
         const matches = await db('blog_posts')
-          .where('status', 'published')
+          .whereIn('status', ['published', 'queued', 'draft', 'wp_draft'])
           .where((qb) => {
             qb.whereRaw('LOWER(keyword) LIKE ?', [`%${keyword.toLowerCase()}%`])
               .orWhereRaw('LOWER(title) LIKE ?', [`%${keyword.toLowerCase()}%`]);
           })
           .modify((qb) => { if (city) qb.where('city', city); })
-          .select('id', 'slug', 'title', 'tag', 'city', 'keyword')
+          .select('id', 'slug', 'title', 'tag', 'city', 'keyword', 'status')
           .limit(20);
         return { keyword, city, matches };
       } catch (err) {
