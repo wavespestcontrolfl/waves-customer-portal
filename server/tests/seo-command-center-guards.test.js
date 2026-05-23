@@ -5,7 +5,8 @@ jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 const SiteAuditor = require('../services/seo/site-auditor');
 const SeoActionGenerator = require('../services/seo/seo-action-generator');
 const UrlIntelligence = require('../services/seo/url-intelligence');
-const pageAuditDomainRepair = require('../models/migrations/20260526000004_repair_seo_page_audit_domains');
+const pageAuditDomainRepair004 = require('../models/migrations/20260526000004_repair_seo_page_audit_domains');
+const pageAuditDomainRepair005 = require('../models/migrations/20260526000005_repair_seo_page_audit_domains_without_knex_placeholders');
 const db = require('../models/db');
 
 const ORIGINAL_ENV = { ...process.env };
@@ -91,25 +92,33 @@ describe('SEO Command Center guards', () => {
     expect(buildLegacyActionDedupeKey('refresh_content', longUrl)).toBe(`refresh_content:${longUrl}`);
   });
 
-  test('page audit domain repair migration recomputes protocol-only domains from URL', async () => {
-    const raw = jest.fn().mockResolvedValue();
-    const alterTable = jest.fn().mockResolvedValue();
-    const knex = {
-      schema: {
-        hasTable: jest.fn().mockResolvedValue(true),
-        hasColumn: jest.fn().mockResolvedValue(true),
-        alterTable,
-      },
-      raw,
-    };
+  test('page audit domain repair migrations recompute protocol-only domains from URL', async () => {
+    for (const migration of [pageAuditDomainRepair004, pageAuditDomainRepair005]) {
+      const raw = jest.fn().mockResolvedValue();
+      const alterTable = jest.fn().mockResolvedValue();
+      const knex = {
+        schema: {
+          hasTable: jest.fn().mockResolvedValue(true),
+          hasColumn: jest.fn().mockResolvedValue(true),
+          alterTable,
+        },
+        raw,
+      };
 
-    await pageAuditDomainRepair.up(knex);
+      await migration.up(knex);
 
-    expect(alterTable).not.toHaveBeenCalled();
-    const repairSql = raw.mock.calls[0][0];
-    expect(repairSql).toContain("lower(trim(domain)) IN ('http:', 'https:')");
-    expect(repairSql).toContain("regexp_replace(lower(trim(url)), '^https?://(www\\.)?', '')");
-    expect(repairSql).toContain("lower(trim(domain)) LIKE 'https:%'");
-    expect(raw.mock.calls.at(-1)[0]).toContain('CREATE INDEX IF NOT EXISTS seo_page_audits_domain_index');
+      expect(alterTable).not.toHaveBeenCalled();
+      const repairSql = raw.mock.calls[0][0];
+      expect(repairSql).toContain("lower(trim(domain)) IN ('http:', 'https:')");
+      expect(repairSql).toContain("regexp_replace(lower(trim(url)), '^https://', '')");
+      expect(repairSql).toContain("'^http://'");
+      expect(repairSql).toContain("'^www[.]'");
+      expect(repairSql).toContain('split_part(');
+      expect(repairSql).not.toContain('?');
+      expect(repairSql).toContain("lower(trim(domain)) LIKE 'https:%'");
+      expect(raw.mock.calls[1][0]).toContain("regexp_replace(lower(trim(domain)), '^www[.]', '')");
+      expect(raw.mock.calls[1][0]).not.toContain('?');
+      expect(raw.mock.calls.at(-1)[0]).toContain('CREATE INDEX IF NOT EXISTS seo_page_audits_domain_index');
+    }
   });
 });
