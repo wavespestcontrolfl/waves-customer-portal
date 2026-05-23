@@ -23,9 +23,40 @@ const MODELS = require('../../config/models');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
+const DEFAULT_COUNTY_TIMEOUT_MS = 8000;
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_PROPERTY_MODEL = process.env.OPENAI_PROPERTY_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
 const GEMINI_PROPERTY_MODEL = process.env.GEMINI_PROPERTY_MODEL || 'gemini-2.5-flash';
+const MANATEE_PAO_BASE = 'https://www.manateepao.gov';
+const MANATEE_PAO_SEARCH_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-parcel-search-results.php`;
+const MANATEE_PAO_LAND_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-land.php`;
+const MANATEE_PAO_BUILDINGS_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-buildings.php`;
+const COUNTY_LOOKUP_MIN_REMAINING_MS = 750;
+const MANATEE_CITY_NAMES = new Set([
+  'ANNA MARIA',
+  'BRADENTON',
+  'BRADENTON BEACH',
+  'CORTEZ',
+  'DUETTE',
+  'ELLENTON',
+  'HOLMES BEACH',
+  'LAKEWOOD RANCH',
+  'LONGBOAT KEY',
+  'MYAKKA CITY',
+  'ONECO',
+  'PALMETTO',
+  'PARRISH',
+  'RUBONIA',
+  'TERRA CEIA',
+  'UNIVERSITY PARK',
+  'WHITFIELD',
+]);
+const MANATEE_ZIPS = new Set([
+  '34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209',
+  '34210', '34211', '34212', '34215', '34216', '34217', '34218', '34219', '34220',
+  '34221', '34222', '34228', '34243', '34250', '34251', '34264', '34270', '34280',
+  '34281', '34282',
+]);
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
   'stories', 'constructionMaterial', 'foundationType', 'roofType',
@@ -216,6 +247,68 @@ function parseStoriesJSON(text) {
 // Pulls every public fact the pricing engine cares about (sqft, lot, year
 // built, beds, baths, stories, property type, construction material).
 // Returns the same normalized property-record shape used by the estimator.
+async function lookupPropertyFromManateePAO(address, options = {}) {
+  if (!address || typeof address !== 'string' || address.trim().length < 5) return null;
+  if (!shouldQueryManateePAO(address)) return null;
+
+  const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const t0 = Date.now();
+
+  try {
+    const search = await searchManateeParcel(address, timeoutMs, t0);
+    if (!search?.parcelId) return null;
+
+    const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
+    if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+    const [land, buildings] = await Promise.all([
+      fetchManateePaoJson(`${MANATEE_PAO_LAND_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
+      fetchManateePaoJson(`${MANATEE_PAO_BUILDINGS_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
+    ]);
+
+    const parsed = parseManateePaoRecord({ address, search, land, buildings });
+    if (!hasAnyPropertyFact(parsed)) {
+      logger.info('[county-property] Manatee PAO found parcel but no usable facts', {
+        elapsedMs: Date.now() - t0,
+        parcelId: search.parcelId,
+      });
+      return null;
+    }
+
+    const record = shapeAsPropertyRecord(parsed, address, 'manatee_pao');
+    record._source = 'county';
+    record._raw = {
+      ...(record._raw || {}),
+      _source: 'county',
+      _provider: 'manatee_pao',
+      parcelId: search.parcelId,
+      situsAddress: search.situsAddress,
+      postalCity: search.city,
+      land,
+      buildings,
+    };
+    record.addressLine1 = search.situsAddress || '';
+    record.city = search.city || '';
+    record.state = 'FL';
+    record.county = 'Manatee';
+    record._provider = 'manatee_pao';
+    record._aiProviders = ['manatee_pao'];
+
+    logger.info('[county-property] got Manatee PAO facts', {
+      elapsedMs: Date.now() - t0,
+      parcelId: search.parcelId,
+      fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
+    });
+    return record;
+  } catch (err) {
+    logger.warn('[county-property] Manatee PAO errored', {
+      elapsedMs: Date.now() - t0,
+      error: summarizeProviderError(err),
+    });
+    return null;
+  }
+}
+
 async function lookupPropertyFromAI(address) {
   if (!process.env.ANTHROPIC_API_KEY) {
     logger.info('[ai-property] skipped — ANTHROPIC_API_KEY not set');
@@ -460,17 +553,297 @@ async function lookupPropertyFromGemini(address) {
 }
 
 async function lookupPropertyFromAITrio(address) {
+  const countyRecord = await lookupPropertyFromManateePAO(address).catch((err) => {
+    logger.warn('[county-property] lookup failed before AI fallback', {
+      error: summarizeProviderError(err),
+    });
+    return null;
+  });
+  if (countyRecord && hasCountyPricingCore(countyRecord)) {
+    return mergePropertyRecords([countyRecord], address);
+  }
+
   const results = await Promise.allSettled([
     lookupPropertyFromAI(address),
     lookupPropertyFromOpenAI(address),
     lookupPropertyFromGemini(address),
   ]);
-  const records = results
-    .filter((r) => r.status === 'fulfilled' && r.value)
-    .map((r) => r.value);
+  const records = [
+    countyRecord,
+    ...results
+      .filter((r) => r.status === 'fulfilled' && r.value)
+      .map((r) => r.value),
+  ].filter(Boolean);
 
   if (!records.length) return null;
   return mergePropertyRecords(records, address);
+}
+
+async function searchManateeParcel(address, timeoutMs, startedAt = Date.now()) {
+  const candidates = manateeAddressSearchCandidates(address);
+  for (const candidate of candidates) {
+    const requestTimeoutMs = remainingCountyLookupMs(startedAt, timeoutMs);
+    if (requestTimeoutMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+    const searchQ = JSON.stringify([
+      { name: 'Address', value: candidate },
+      { name: 'RollType', value: 'REAL PROPERTY' },
+    ]);
+    const body = new URLSearchParams();
+    body.set('SearchQ', searchQ);
+    body.set('VisitorIP', '127.0.0.1');
+
+    const data = await fetchManateePaoJson(MANATEE_PAO_SEARCH_URL, requestTimeoutMs, {
+      method: 'POST',
+      body,
+    });
+    const match = pickManateeSearchResult(data, address);
+    if (match) return match;
+  }
+  return null;
+}
+
+function remainingCountyLookupMs(startedAt, timeoutMs) {
+  return Math.max(0, timeoutMs - (Date.now() - startedAt));
+}
+
+async function fetchManateePaoJson(url, timeoutMs, init = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        Origin: MANATEE_PAO_BASE,
+        Referer: `${MANATEE_PAO_BASE}/search/`,
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent': 'Mozilla/5.0 (compatible; WavesPropertyLookup/1.0)',
+        ...(init.headers || {}),
+      },
+    });
+    if (!resp.ok) throw new Error(`Manatee PAO ${resp.status}`);
+    return resp.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function manateeAddressSearchCandidates(address) {
+  const street = normalizeCountyStreetLine(address);
+  if (!street) return [];
+
+  const candidates = [street];
+  const withoutSuffix = removeStreetSuffix(street);
+  if (withoutSuffix && withoutSuffix !== street) candidates.push(withoutSuffix);
+
+  const parts = withoutSuffix.split(/\s+/).filter(Boolean);
+  if (parts.length >= 4) candidates.push(parts.slice(0, 4).join(' '));
+  if (parts.length >= 3) candidates.push(parts.slice(0, 3).join(' '));
+
+  return [...new Set(candidates.filter((candidate) => candidate.length >= 5))];
+}
+
+function shouldQueryManateePAO(address) {
+  const zip = extractAddressZip(address);
+  if (zip) return MANATEE_ZIPS.has(zip);
+
+  const city = extractCommaCity(address);
+  if (!city) return true;
+  return MANATEE_CITY_NAMES.has(city);
+}
+
+function extractAddressZip(address) {
+  return String(address || '').match(/\b(\d{5})(?:-\d{4})?\b/)?.[1] || null;
+}
+
+function extractCommaCity(address) {
+  const parts = String(address || '').split(',').map((part) => normalizeCountyCityName(part)).filter(Boolean);
+  if (parts.length < 2) return null;
+  return parts[1].replace(/\bFL(?:ORIDA)?\b.*$/i, '').replace(/\s+\d{5}(?:-\d{4})?$/, '').trim();
+}
+
+function normalizeCountyCityName(value) {
+  return String(value || '')
+    .toUpperCase()
+    .replace(/[^A-Z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeCountyStreetLine(address) {
+  const firstLine = String(address || '').split(',')[0] || '';
+  return firstLine
+    .toUpperCase()
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .replace(/\bNORTH\b/g, 'N')
+    .replace(/\bSOUTH\b/g, 'S')
+    .replace(/\bEAST\b/g, 'E')
+    .replace(/\bWEST\b/g, 'W')
+    .replace(/\bAVENUE\b/g, 'AVE')
+    .replace(/\bBOULEVARD\b/g, 'BLVD')
+    .replace(/\bCIRCLE\b/g, 'CIR')
+    .replace(/\bCOURT\b/g, 'CT')
+    .replace(/\bDRIVE\b/g, 'DR')
+    .replace(/\bLANE\b/g, 'LN')
+    .replace(/\bPARKWAY\b/g, 'PKWY')
+    .replace(/\bPLACE\b/g, 'PL')
+    .replace(/\bROAD\b/g, 'RD')
+    .replace(/\bSTREET\b/g, 'ST')
+    .replace(/\bTERRACE\b/g, 'TER')
+    .replace(/\bTRAIL\b/g, 'TRL')
+    .replace(/\bWAY\b/g, 'WAY')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function removeStreetSuffix(street) {
+  return String(street || '')
+    .replace(/\s+(AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)\b.*$/i, '')
+    .trim();
+}
+
+function pickManateeSearchResult(data, address) {
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+  if (!rows.length) return null;
+
+  const cols = Array.isArray(data?.cols) ? data.cols : [];
+  const parcelIdx = findPaoColumnIndex(cols, ['Parcel ID', 'Parcel']);
+  const addressIdx = findPaoColumnIndex(cols, ['Situs Address', 'Address']);
+  const cityIdx = findPaoColumnIndex(cols, ['Postal City', 'City']);
+
+  const target = normalizeCountyStreetLine(address);
+  const targetNoSuffix = removeStreetSuffix(target);
+  const targetNumber = target.match(/^\d+/)?.[0] || null;
+  const matches = rows
+    .map((row) => ({
+      parcelId: cleanPaoCell(row[parcelIdx >= 0 ? parcelIdx : 0]),
+      situsAddress: cleanPaoCell(row[addressIdx >= 0 ? addressIdx : 3]),
+      city: cleanPaoCell(row[cityIdx >= 0 ? cityIdx : 4]),
+    }))
+    .filter((row) => row.parcelId && row.situsAddress)
+    .filter((row) => {
+      const normalized = normalizeCountyStreetLine(row.situsAddress);
+      if (targetNumber && !normalized.startsWith(`${targetNumber} `)) return false;
+      return normalized === target || removeStreetSuffix(normalized) === targetNoSuffix || normalized.includes(targetNoSuffix);
+    });
+
+  return matches[0] || null;
+}
+
+function parseManateePaoRecord({ address, search, land, buildings }) {
+  const buildingRows = parsePaoRows(buildings);
+  const landRows = parsePaoRows(land);
+  const primaryBuilding = buildingRows
+    .filter((row) => String(row.Type || row.Classification || '').toUpperCase().includes('RES'))
+    .sort((a, b) => coerceInt(b.LivBus, 0, 100000) - coerceInt(a.LivBus, 0, 100000))[0]
+    || buildingRows.sort((a, b) => coerceInt(b.LivBus, 0, 100000) - coerceInt(a.LivBus, 0, 100000))[0]
+    || {};
+
+  const lotSize = landRows.reduce((sum, row) => sum + (coerceLotSize(row.SqFootage) || 0), 0) || null;
+  const rooms = parseManateeRooms(primaryBuilding.Rooms);
+  const propertyType = normalizeManateePropertyType(primaryBuilding.Type, primaryBuilding.Classification);
+  const source = `${MANATEE_PAO_BASE}/parcel/?parid=${encodeURIComponent(search.parcelId)}`;
+
+  return {
+    squareFootage: coerceInt(primaryBuilding.LivBus, 500, 15000),
+    lotSize,
+    yearBuilt: coerceInt(primaryBuilding.Yrblt, 1900, new Date().getFullYear() + 1),
+    bedrooms: rooms.bedrooms,
+    bathrooms: rooms.bathrooms,
+    stories: coerceInt(primaryBuilding.Stories, 1, 4),
+    propertyType,
+    constructionMaterial: normalizeManateeConstruction(primaryBuilding['Const/ExtWall']),
+    roofType: normalizeManateeRoof(primaryBuilding.RoofMaterial, primaryBuilding.RoofType),
+    source,
+    confidence: 'high',
+    county: 'Manatee',
+    formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
+  };
+}
+
+function parsePaoRows(table) {
+  const cols = Array.isArray(table?.cols) ? table.cols : [];
+  const rows = Array.isArray(table?.rows) ? table.rows : [];
+  const names = cols.map((col) => normalizePaoColumnTitle(col?.title));
+  return rows.map((row) => names.reduce((out, name, index) => {
+    if (name) out[name] = cleanPaoCell(row[index]);
+    return out;
+  }, {}));
+}
+
+function normalizePaoColumnTitle(title) {
+  const compact = String(title || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+  const aliases = {
+    parcelid: 'ParcelId',
+    situsaddress: 'SitusAddress',
+    postalcity: 'PostalCity',
+    sqftlivingarea: 'SqFtLivingArea',
+    sqfootage: 'SqFootage',
+    yrblt: 'Yrblt',
+    livbus: 'LivBus',
+    constextwall: 'Const/ExtWall',
+    roofmaterial: 'RoofMaterial',
+    rooftype: 'RoofType',
+  };
+  return aliases[compact] || String(title || '').trim();
+}
+
+function findPaoColumnIndex(cols, titles) {
+  const normalizedTitles = titles.map((title) => normalizePaoColumnTitle(title).toLowerCase());
+  return cols.findIndex((col) => normalizedTitles.includes(normalizePaoColumnTitle(col?.title).toLowerCase()));
+}
+
+function cleanPaoCell(value) {
+  if (value == null) return '';
+  return String(value).replace(/^;+|;+$/g, '').replace(/;/g, '; ').replace(/\s+/g, ' ').trim();
+}
+
+function parseManateeRooms(value) {
+  const parts = String(value || '').split('/').map((part) => Number(part));
+  const bedrooms = Number.isFinite(parts[0]) && parts[0] > 0 ? Math.round(parts[0]) : null;
+  const fullBaths = Number.isFinite(parts[1]) ? parts[1] : null;
+  const halfBaths = Number.isFinite(parts[2]) ? parts[2] : 0;
+  return {
+    bedrooms,
+    bathrooms: fullBaths == null ? null : fullBaths + (halfBaths * 0.5),
+  };
+}
+
+function normalizeManateePropertyType(type, classification) {
+  const text = `${type || ''} ${classification || ''}`.toUpperCase();
+  if (/APT|APARTMENT/.test(text)) return 'Apartment';
+  if (/CONDO/.test(text)) return 'Condo';
+  if (/MULTI|DUPLEX/.test(text)) return 'Multifamily';
+  if (/COM|COMMERCIAL|OFFICE|RETAIL|WAREHOUSE|INDUSTRIAL/.test(text)) return 'Commercial';
+  if (/RES|RESIDENTIAL/.test(text)) return 'Single Family';
+  return null;
+}
+
+function normalizeManateeConstruction(value) {
+  const text = String(value || '').toUpperCase();
+  if (/MASONRY|CONCRETE|BLOCK|CBS|STUCCO/.test(text)) return 'CBS';
+  if (/WOOD|FRAME/.test(text)) return 'WOOD_FRAME';
+  if (/BRICK/.test(text)) return 'BRICK';
+  if (/METAL|STEEL/.test(text)) return 'METAL';
+  return null;
+}
+
+function normalizeManateeRoof(material, type) {
+  const text = `${material || ''} ${type || ''}`.toUpperCase();
+  if (/TILE|CLAY|BARREL/.test(text)) return 'TILE';
+  if (/SHINGLE|SHINGLES|COMP|ASPHALT/.test(text)) return 'SHINGLE';
+  if (/METAL|STEEL|TIN/.test(text)) return 'METAL';
+  if (/FLAT|BUILT|TPO|MEMBRANE/.test(text)) return 'FLAT';
+  return String(material || type || '').trim() || null;
+}
+
+function countCriticalPropertyFields(record) {
+  return [record?.squareFootage, record?.lotSize, record?.stories, record?.propertyType].filter(Boolean).length;
+}
+
+function hasCountyPricingCore(record) {
+  return !!(record?.squareFootage && record?.lotSize && record?.propertyType);
 }
 
 function buildPropertyPrompt(address) {
@@ -846,13 +1219,14 @@ function hasAnyPropertyFact(parsed) {
 function shapeAsPropertyRecord(p, address, provider = 'ai') {
   const sourceMeta = classifyPropertySource(p.source);
   const evidence = buildRecordEvidence(p, provider, sourceMeta);
+  const sourceKind = sourceMeta.type === 'county' ? 'county' : 'ai';
   return {
-    formattedAddress: address,
+    formattedAddress: p.formattedAddress || address,
     addressLine1: '',
     city: '',
     state: '',
     zipCode: '',
-    county: '',
+    county: p.county || '',
     latitude: null,
     longitude: null,
     propertyType: p.propertyType || '',
@@ -863,8 +1237,8 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     bathrooms: p.bathrooms || 0,
     stories: p.stories || null,
     constructionMaterial: p.constructionMaterial || 'UNKNOWN',
-    foundationType: 'UNKNOWN',
-    roofType: 'UNKNOWN',
+    foundationType: p.foundationType || 'UNKNOWN',
+    roofType: p.roofType || 'UNKNOWN',
     garageType: '',
     garageSpaces: 0,
     coolingType: '',
@@ -882,14 +1256,14 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     zoning: '',
     _rawFeatures: {},
     _raw: {
-      _source: 'ai',
+      _source: sourceKind,
       _provider: provider,
       _confidence: p.confidence,
       _sourceUrl: p.source,
       _sourceType: sourceMeta.type,
       _sourceQuality: sourceMeta.weight,
     },
-    _source: 'ai',
+    _source: sourceKind,
     _provider: provider,
     _aiConfidence: p.confidence,
     _aiSourceUrl: p.source,
@@ -935,7 +1309,10 @@ function mergePropertyRecords(records, address) {
   const providers = [...new Set(sorted.map((r) => r._provider).filter(Boolean))];
   const sources = sorted.flatMap((r) => r._aiSources || (r._aiSourceUrl ? [{ provider: r._provider, url: r._aiSourceUrl }] : []));
   const sourceTypes = [...new Set(sources.map((s) => s.sourceType).filter(Boolean))];
-  merged._source = 'ai';
+  const sourceKinds = [...new Set(sorted.map((r) => r._source).filter(Boolean))];
+  const hasCountySource = sorted.some((r) => r._source === 'county' || r._aiSourceType === 'county');
+  const hasAiSource = sorted.some((r) => r._source === 'ai');
+  merged._source = hasCountySource && !hasAiSource ? 'county' : hasCountySource ? 'hybrid' : 'ai';
   merged._provider = providers.join('+') || 'ai';
   merged._aiProviders = providers;
   merged._aiSources = sources;
@@ -946,11 +1323,12 @@ function mergePropertyRecords(records, address) {
   merged._dataQuality = buildPropertyDataQuality(mergedFieldEvidence, providers);
   merged._raw = {
     ...(merged._raw || {}),
-    _source: 'ai_trio',
+    _source: merged._source === 'county' ? 'county' : merged._source === 'hybrid' ? 'county_ai' : 'ai_trio',
     _provider: merged._provider,
     _providers: providers,
     _sources: sources,
     _sourceTypes: sourceTypes,
+    _sourceKinds: sourceKinds,
     _fieldEvidence: mergedFieldEvidence,
     _dataQuality: merged._dataQuality,
   };
@@ -1179,11 +1557,19 @@ module.exports = {
   lookupPropertyFromAI,
   lookupPropertyFromOpenAI,
   lookupPropertyFromGemini,
+  lookupPropertyFromManateePAO,
   lookupPropertyFromAITrio,
   _private: {
     buildPropertyDataQuality,
+    hasCountyPricingCore,
     hasAnyPropertyFact,
+    lookupPropertyFromManateePAO,
+    manateeAddressSearchCandidates,
+    mergePropertyRecords,
     normalizeLookupPropertyType,
+    parseManateePaoRecord,
     parsePropertyJSON,
+    shapeAsPropertyRecord,
+    shouldQueryManateePAO,
   },
 };

@@ -134,3 +134,123 @@ describe('AI property lookup commercial facts', () => {
     expect(quality.verifiedCriticalFields).toBe(2);
   });
 });
+
+describe('Manatee PAO property lookup facts', () => {
+  const manateeSearch = {
+    parcelId: '647302459',
+    situsAddress: '8920 49TH AVE E',
+    city: 'PALMETTO',
+  };
+  const manateeLand = {
+    cols: [
+      { title: 'Area' },
+      { title: 'Type' },
+      { title: 'ActFrontage' },
+      { title: 'EffFrontage' },
+      { title: 'Depth' },
+      { title: 'Acreage' },
+      { title: 'SqFootage' },
+      { title: 'Units' },
+      { title: 'Influences' },
+    ],
+    rows: [
+      ['1', 'UNIT', '70', '70', '120', '0.1928', '8,400', '1.00', ''],
+    ],
+  };
+  const manateeBuildings = {
+    cols: [
+      { title: 'Type' },
+      { title: 'Bldg' },
+      { title: 'Classification' },
+      { title: 'Yrblt' },
+      { title: 'Effyr' },
+      { title: 'Stories' },
+      { title: 'UnRoof' },
+      { title: 'LivBus' },
+      { title: 'Rooms' },
+      { title: 'Const/ExtWall' },
+      { title: 'RoofMaterial' },
+      { title: 'RoofType' },
+    ],
+    rows: [
+      ['RES', '1', 'RESIDENTIAL', '2017', '2017', 1, '2943', '2310', '4/2/0', 'MASONRY/STUCCO', 'SHINGLES COMP', 'HIP AND/OR GABLE'],
+    ],
+  };
+
+  test('limits Manatee county lookup to likely Manatee addresses', () => {
+    expect(_private.shouldQueryManateePAO('8920 49th Ave E, Bradenton, FL 34211')).toBe(true);
+    expect(_private.shouldQueryManateePAO('123 Main St, Sarasota, FL 34243')).toBe(true);
+    expect(_private.shouldQueryManateePAO('123 Main St, Sarasota, FL 34231')).toBe(false);
+    expect(_private.shouldQueryManateePAO('123 Main St, Venice, FL')).toBe(false);
+  });
+
+  test('builds PAO address candidates with normalized suffixes and directions', () => {
+    expect(_private.manateeAddressSearchCandidates('8920 49th Avenue East, Bradenton, FL 34211')).toEqual([
+      '8920 49TH AVE E',
+      '8920 49TH',
+    ]);
+  });
+
+  test('parses Manatee land and building tables into estimator facts', () => {
+    const parsed = _private.parseManateePaoRecord({
+      address: '8920 49th Ave E, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: manateeBuildings,
+    });
+
+    expect(parsed).toMatchObject({
+      squareFootage: 2310,
+      lotSize: 8400,
+      yearBuilt: 2017,
+      bedrooms: 4,
+      bathrooms: 2,
+      stories: 1,
+      propertyType: 'Single Family',
+      constructionMaterial: 'CBS',
+      roofType: 'SHINGLE',
+      county: 'Manatee',
+      formattedAddress: '8920 49TH AVE E, PALMETTO, FL',
+    });
+    expect(parsed.source).toBe('https://www.manateepao.gov/parcel/?parid=647302459');
+  });
+
+  test('merged county records remain authoritative and high quality', () => {
+    const parsed = _private.parseManateePaoRecord({
+      address: '8920 49th Ave E, Bradenton, FL 34211',
+      search: manateeSearch,
+      land: manateeLand,
+      buildings: manateeBuildings,
+    });
+    const record = _private.shapeAsPropertyRecord(parsed, '8920 49th Ave E, Bradenton, FL 34211', 'manatee_pao');
+    const merged = _private.mergePropertyRecords([record], '8920 49th Ave E, Bradenton, FL 34211');
+
+    expect(merged._source).toBe('county');
+    expect(merged._provider).toBe('manatee_pao');
+    expect(merged._raw._source).toBe('county');
+    expect(merged._dataQuality).toMatchObject({
+      level: 'high',
+      score: 100,
+      verifiedCriticalFields: 4,
+      fieldVerifyCount: 0,
+    });
+    expect(merged._fieldEvidence.lotSize).toMatchObject({
+      sourceType: 'county',
+      fieldVerify: false,
+      winningProvider: 'manatee_pao',
+    });
+  });
+
+  test('county early-return core requires lot size for pricing', () => {
+    expect(_private.hasCountyPricingCore({
+      squareFootage: 2310,
+      lotSize: 8400,
+      propertyType: 'Single Family',
+    })).toBe(true);
+    expect(_private.hasCountyPricingCore({
+      squareFootage: 2310,
+      stories: 1,
+      propertyType: 'Single Family',
+    })).toBe(false);
+  });
+});
