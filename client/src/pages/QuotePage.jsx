@@ -246,7 +246,14 @@ function selectedServiceInterest(intake) {
   if (intake.interest === 'other') {
     return OTHER_OPTIONS.find(o => o.value === intake.otherService)?.label || intake.otherService || '';
   }
-  return primaryLabels[intake.interest] || '';
+  const base = primaryLabels[intake.interest] || '';
+  if (!base) return '';
+  const parts = base.split(/\s+\+\s+/).filter(Boolean);
+  const formatParts = (formatter) => parts.map(formatter).join(' + ');
+  if (intake.frequency === 'one-time') return formatParts(part => `One-Time ${part}`);
+  if (intake.frequency === 'not-sure') return formatParts(part => `${part} Consultation`);
+  if (intake.frequency === 'ongoing') return formatParts(part => `Recurring ${part}`);
+  return base;
 }
 
 function addressPartsFromGoogleResult(result, fallback = '') {
@@ -574,10 +581,6 @@ export default function QuotePage({ serviceSlug = '' }) {
       const { firstName, lastName } = splitName(intake.name);
       const phoneDigits = intake.phone.replace(/\D/g, '');
       const resolvedAddress = await resolveAddressForSubmit();
-      const interestLabel = intake.interest === 'pest' ? 'Pest Control'
-        : intake.interest === 'lawn' ? 'Lawn Care'
-        : 'Pest Control & Lawn Care';
-      const freqSuffix = intake.frequency === 'one-time' ? 'One-Time' : 'Consult';
       const res = await fetch(`${API_BASE}/leads`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -590,7 +593,7 @@ export default function QuotePage({ serviceSlug = '' }) {
           address: resolvedAddress.formatted || intake.address,
           interest: intake.interest,
           frequency: intake.frequency,
-          service_interest: `${interestLabel} (${freqSuffix})`,
+          service_interest: selectedServiceInterest(intake),
           source: `quote-page-${intake.frequency}`,
           attribution: attribution || undefined,
         }),

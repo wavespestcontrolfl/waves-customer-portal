@@ -511,7 +511,9 @@ router.post('/', async (req, res) => {
           if (!triageResult) return;
           try {
             const updates = {};
-            if (triageResult.serviceInterest) updates.service_interest = triageResult.serviceInterest;
+            if (shouldApplyTriageServiceInterest(leadRecord.service_interest, triageResult.serviceInterest)) {
+              updates.service_interest = triageResult.serviceInterest;
+            }
             if (triageResult.urgency) updates.urgency = triageResult.urgency;
             if (triageResult.extractedData) updates.extracted_data = JSON.stringify(triageResult.extractedData);
             if (Object.keys(updates).length > 0) {
@@ -672,11 +674,13 @@ const SERVICE_INTEREST_LABELS = {
 };
 
 const FREQUENCY_LABELS = {
-  ongoing: '',
+  ongoing: 'Recurring',
+  recurring: 'Recurring',
   'one-time': 'One-Time',
   one_time: 'One-Time',
-  'not-sure': 'Consult',
-  not_sure: 'Consult',
+  'not-sure': 'Consultation',
+  not_sure: 'Consultation',
+  consult: 'Consultation',
 };
 
 function titleizeServiceValue(value) {
@@ -695,6 +699,35 @@ function serviceLabelFor(value) {
   return /^[a-z0-9_-]+$/i.test(raw) ? titleizeServiceValue(raw) : raw;
 }
 
+function normalizeFrequencyKey(value) {
+  return firstNonEmpty(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function formatServiceInterestForFrequency(serviceLabel, frequency) {
+  const label = serviceLabelFor(serviceLabel);
+  if (!label) return '';
+  const frequencyKey = normalizeFrequencyKey(frequency);
+  const frequencyLabel = FREQUENCY_LABELS[frequencyKey] ?? titleizeServiceValue(frequency);
+  if (!frequencyLabel) return label;
+  return label.split(/\s+\+\s+/)
+    .filter(Boolean)
+    .map(part => (frequencyLabel === 'Consultation' ? `${part} Consultation` : `${frequencyLabel} ${part}`))
+    .join(' + ');
+}
+
+function normalizeExplicitServiceInterest(value) {
+  const raw = firstNonEmpty(value);
+  if (!raw) return '';
+  const parenthetical = raw.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+  if (parenthetical) {
+    const frequencyKey = normalizeFrequencyKey(parenthetical[2]);
+    if (FREQUENCY_LABELS[frequencyKey]) {
+      return formatServiceInterestForFrequency(parenthetical[1], frequencyKey);
+    }
+  }
+  return serviceLabelFor(raw);
+}
+
 function normalizeLeadServiceInterest(body = {}) {
   const explicit = firstNonEmpty(
     body.service_interest,
@@ -706,7 +739,7 @@ function normalizeLeadServiceInterest(body = {}) {
     body['Selected Service'],
     body['Service']
   );
-  if (explicit) return serviceLabelFor(explicit);
+  if (explicit) return normalizeExplicitServiceInterest(explicit);
 
   const interest = firstNonEmpty(body.interest, body.Interest);
   const otherService = firstNonEmpty(body.otherService, body.other_service, body['Other Service']);
@@ -721,9 +754,18 @@ function normalizeLeadServiceInterest(body = {}) {
   if (!serviceLabel) return '';
 
   const frequency = firstNonEmpty(body.frequency, body.Frequency);
-  const frequencyKey = frequency.toLowerCase().replace(/\s+/g, '-');
-  const frequencyLabel = FREQUENCY_LABELS[frequencyKey] ?? titleizeServiceValue(frequency);
-  return frequencyLabel ? `${serviceLabel} (${frequencyLabel})` : serviceLabel;
+  return frequency ? formatServiceInterestForFrequency(serviceLabel, frequency) : serviceLabel;
+}
+
+function isWorkflowSpecificServiceInterest(value) {
+  const text = firstNonEmpty(value).toLowerCase();
+  return /\b(one[- ]?time|recurring|consultation|quarterly|bi[- ]?monthly|monthly|semiannual|semi[- ]annual)\b/.test(text);
+}
+
+function shouldApplyTriageServiceInterest(currentServiceInterest, triageServiceInterest) {
+  if (!firstNonEmpty(triageServiceInterest)) return false;
+  if (!firstNonEmpty(currentServiceInterest)) return true;
+  return !isWorkflowSpecificServiceInterest(currentServiceInterest);
 }
 
 function cleanPhone(value) {
@@ -821,3 +863,8 @@ function inferServiceBucket(interest) {
 }
 
 module.exports = router;
+module.exports._test = {
+  normalizeLeadServiceInterest,
+  formatServiceInterestForFrequency,
+  shouldApplyTriageServiceInterest,
+};
