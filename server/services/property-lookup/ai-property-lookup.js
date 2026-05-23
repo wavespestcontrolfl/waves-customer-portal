@@ -740,8 +740,14 @@ function pickManateeSearchResult(data, address) {
       return true;
     });
 
-  const exactMatches = candidates.filter((row) => row.normalizedAddress === target || row.normalizedAddress.startsWith(`${target} `));
-  if (exactMatches.length) return cleanManateeSearchMatch(exactMatches[0]);
+  const exactMatches = candidates.filter((row) => row.normalizedAddress === target);
+  const exactMatch = pickUniqueManateeMatch(exactMatches, address);
+  if (exactMatch) return exactMatch;
+  if (exactMatches.length > 1) return null;
+
+  const prefixMatches = candidates.filter((row) => row.normalizedAddress.startsWith(`${target} `));
+  const prefixMatch = pickUniqueManateeMatch(prefixMatches, address);
+  if (prefixMatch) return prefixMatch;
 
   const relaxedMatches = candidates.filter((row) => isRelaxedManateeStreetMatch(row.normalizedAddress, target, targetNoSuffix));
   if (relaxedMatches.length === 1 && shouldQueryManateePAO(address)) {
@@ -768,6 +774,17 @@ function isRelaxedManateeStreetMatch(normalizedAddress, target, targetNoSuffix) 
   if (targetDirection && resultDirection !== targetDirection) return false;
 
   return removeStreetSuffix(normalizedAddress) === targetNoSuffix;
+}
+
+function pickUniqueManateeMatch(matches, address) {
+  if (matches.length === 1) return cleanManateeSearchMatch(matches[0]);
+  if (matches.length < 2) return null;
+
+  const targetCity = extractCommaCity(address);
+  if (!targetCity) return null;
+
+  const cityMatches = matches.filter((row) => normalizeCountyCityName(row.city) === targetCity);
+  return cityMatches.length === 1 ? cleanManateeSearchMatch(cityMatches[0]) : null;
 }
 
 function cleanManateeSearchMatch(row) {
