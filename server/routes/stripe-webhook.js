@@ -347,7 +347,7 @@ router.post(
           break;
 
         case 'payment_intent.processing':
-          await handlePaymentIntentProcessing(event.data.object);
+          await handlePaymentIntentProcessing(event.data.object, event.created);
           break;
 
         case 'payment_intent.requires_action':
@@ -1314,8 +1314,14 @@ async function handleAchFailure(paymentIntent, failureReason) {
  * payment_intent.processing — ACH money in flight (3–5 business days to clear).
  * Mark payment/invoice as processing so admin sees "pending bank transfer"
  * instead of "unpaid". Do NOT mark invoice paid until succeeded fires.
+ *
+ * `eventCreated` is the Stripe event's unix-seconds timestamp — i.e. the
+ * moment Stripe recorded the processing transition, which is the closest
+ * proxy we have for "customer authorized the ACH transfer". Don't use
+ * paymentIntent.created: the PI is minted at /pay/:token/setup and reused
+ * via /update-amount, so it can predate authorization by hours or days.
  */
-async function handlePaymentIntentProcessing(paymentIntent) {
+async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent processing (ACH in flight): ${piId}`);
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
@@ -1450,11 +1456,16 @@ async function handlePaymentIntentProcessing(paymentIntent) {
   // Sent → Processing in the portal and the customer hears nothing
   // until the receipt fires days later (or worse, a failure SMS).
   //
-  // Idempotency: invoices.ach_processing_notified_at is stamped after
-  // the SMS+email pair dispatches. Stripe retries (5xx, slow ack) and
-  // any duplicate processing event after a transient downgrade won't
-  // double-send. Channels run independently — missing phone skips SMS
-  // but email still fires, and vice versa.
+  // At-most-once dispatch via a claim-style UPDATE on
+  // invoices.ach_processing_notified_at: the worker whose update flips
+  // the column from NULL to a timestamp wins the one-shot lock and
+  // proceeds to send. Concurrent duplicates and Stripe replays lose
+  // the race (affected rows == 0) and bail. A failure to deliver after
+  // the claim is deliberately not retried here — see the prior threads
+  // on this PR for the trade-off rationale; the per-attempt clear in
+  // handlePaymentIntentFailed handles the realistic re-attempt case.
+  // Channels run independently: missing phone skips SMS but email
+  // still fires, and vice versa.
   //
   // Fire-and-forget via setImmediate so a Twilio/SendGrid hiccup
   // doesn't make Stripe retry the entire webhook (which would re-run
@@ -1512,13 +1523,14 @@ async function handlePaymentIntentProcessing(paymentIntent) {
         }
       }
 
-      // Anchor the initiated + expected-clear dates on the PaymentIntent's
-      // own creation timestamp (Stripe's unix seconds). Webhook delivery can
-      // lag hours or days behind initiation; basing copy on `new Date()`
-      // would overstate the remaining clearing window and misreport when
-      // the customer actually authorized the transfer.
-      const initiatedAt = paymentIntent.created
-        ? new Date(paymentIntent.created * 1000)
+      // Anchor on the Stripe event's recorded transition time — that's
+      // the closest proxy for "customer authorized the transfer." Never
+      // use paymentIntent.created: the PI is minted upstream at
+      // /pay/:token/setup and reused via /update-amount, so its created
+      // timestamp can predate authorization by hours or days. Fall back
+      // to now() only when the event timestamp wasn't threaded through.
+      const initiatedAt = eventCreated
+        ? new Date(eventCreated * 1000)
         : new Date();
       const expectedClearDate = addBusinessDays(initiatedAt, 5);
       const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
@@ -1591,18 +1603,6 @@ async function handlePaymentIntentCanceled(paymentIntent) {
     .where({ stripe_payment_intent_id: piId })
     .whereNotIn('status', ['paid', 'refunded'])
     .update({ status: 'canceled' })
-    .catch(() => {});
-
-  // Match the failed-payment path: clear the ACH ack dedupe lock so a new
-  // ACH attempt on the same invoice can send a fresh "we got it" notice.
-  // Stripe allows canceling a processing ACH inside its cancellation
-  // window, after which the customer may re-initiate against the same
-  // invoice — without this, the per-invoice lock would silently suppress
-  // the next acknowledgment.
-  await db('invoices')
-    .where({ stripe_payment_intent_id: piId })
-    .whereNotNull('ach_processing_notified_at')
-    .update({ ach_processing_notified_at: null })
     .catch(() => {});
 }
 
