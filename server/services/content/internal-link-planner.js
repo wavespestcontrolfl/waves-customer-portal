@@ -213,7 +213,8 @@ class InternalLinkPlanner {
     const candidates = anchorCandidates(target);
     if (!candidates.length) return [];
 
-    const targetPath = stripHost(target.url);
+    const targetPath = canonicalInternalPath(target.url);
+    if (!targetPath) return [];
     const tasks = [];
     const perFileCount = new Map();
 
@@ -292,9 +293,13 @@ function stripHost(url) {
 
 function sameUrl(a, b) {
   if (!a || !b) return false;
-  const ax = stripHost(a).replace(/\/+$/, '').toLowerCase();
-  const bx = stripHost(b).replace(/\/+$/, '').toLowerCase();
-  return ax === bx;
+  return normalizePath(a) === normalizePath(b);
+}
+
+function canonicalInternalPath(url) {
+  const p = normalizePath(url);
+  if (!p) return '';
+  return `${p}/`;
 }
 
 function deriveUrlFromFile(collection, file, body = '') {
@@ -337,6 +342,7 @@ module.exports._internals = {
   pageAlreadyLinksTo,
   unwrapAngleHref,
   normalizePath,
+  canonicalInternalPath,
   stripHost,
   sameUrl,
   deriveUrlFromFile,

@@ -18,6 +18,7 @@ const {
   pageAlreadyLinksTo,
   stripHost,
   sameUrl,
+  canonicalInternalPath,
   deriveUrlFromFile,
   extractFrontmatterSlug,
 } = planner._internals;
@@ -230,6 +231,13 @@ describe('stripHost / sameUrl / deriveUrlFromFile', () => {
     expect(sameUrl('https://www.wavespestcontrol.com/A/', '/a')).toBe(true);
     expect(sameUrl('/a/', '/b/')).toBe(false);
   });
+  test('sameUrl normalizes query and hash variants', () => {
+    expect(sameUrl('/pest-control-bradenton-fl/#faq', '/pest-control-bradenton-fl/')).toBe(true);
+    expect(sameUrl('/pest-control-bradenton-fl?utm_source=gbp', '/pest-control-bradenton-fl/')).toBe(true);
+  });
+  test('canonicalInternalPath strips query/hash and keeps a trailing slash', () => {
+    expect(canonicalInternalPath('https://www.wavespestcontrol.com/Pest-Control-Bradenton-FL/?utm=x#faq')).toBe('/pest-control-bradenton-fl/');
+  });
   test('deriveUrlFromFile', () => {
     expect(deriveUrlFromFile('blog', 'foo.md')).toBe('/blog/foo/');
     expect(deriveUrlFromFile('services', 'pest-control-bradenton-fl.md')).toBe('/pest-control-bradenton-fl/');
@@ -303,6 +311,11 @@ describe('planForTarget', () => {
   test('never links page to itself', () => {
     const c = [{ file: 'src/content/services/pest-control-bradenton-fl.md', body: 'pest control bradenton here', url: '/pest-control-bradenton-fl/' }];
     expect(planner.planForTarget(target, { corpus: c })).toEqual([]);
+  });
+  test('never links page to itself when target has query/hash variant', () => {
+    const variantTarget = { ...target, url: '/pest-control-bradenton-fl/?utm_source=gbp#faq' };
+    const c = [{ file: 'src/content/services/pest-control-bradenton-fl.md', body: 'pest control bradenton here', url: '/pest-control-bradenton-fl/' }];
+    expect(planner.planForTarget(variantTarget, { corpus: c })).toEqual([]);
   });
   test('never links blog target to itself when corpus URL came from frontmatter slug', () => {
     const blogTarget = {
