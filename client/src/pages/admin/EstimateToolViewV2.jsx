@@ -55,6 +55,7 @@ import {
   isServiceSpecificCredit,
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
+import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -262,6 +263,10 @@ function formatAiSources(sources) {
     .join(" + ");
 }
 
+function isExpectedAiTimeout(message) {
+  return /timed out after \d+ms/i.test(String(message || ""));
+}
+
 function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } = {}) {
   const normalizedSources = normalizeAiSources(sources);
   const warnings = [];
@@ -269,7 +274,9 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
     const openaiError = errors.find((error) => error?.source === "openai");
     const openaiStatus = providerStatus.openai;
     if (openaiError?.message) {
-      warnings.push(`ChatGPT skipped: ${openaiError.message}`);
+      if (!isExpectedAiTimeout(openaiError.message)) {
+        warnings.push(`ChatGPT skipped: ${openaiError.message}`);
+      }
     } else if (openaiStatus === false || openaiStatus?.configured === false) {
       warnings.push("ChatGPT skipped: OPENAI_API_KEY is not configured");
     } else if (openaiStatus?.available === false) {
@@ -606,13 +613,16 @@ function formatSqFt(value) {
 }
 
 function serviceDetailText(item = {}) {
-  const parts = [
+  const baseParts = [
     item.detail || item.det || item.note || "",
     item.exteriorDetail || "",
     item.warning || "",
     ...(Array.isArray(item.warnings) ? item.warnings : []),
-    item.customQuoteReason || "",
   ].filter(Boolean);
+  const quoteDetail = item.quoteRequired || item.requiresCustomQuote
+    ? quoteRequiredReasonNote(item, baseParts.join(" · "))
+    : "";
+  const parts = [...baseParts, quoteDetail].filter(Boolean);
   const unique = [];
   for (const part of parts) {
     if (unique.includes(part)) continue;
@@ -3700,7 +3710,11 @@ export default function EstimateToolViewV2({
                         "propertyType",
                       ].map((field) => {
                         const item = enrichedProfile.fieldEvidence[field];
-                        if (!item) return null;
+                        const missing = (
+                          enrichedProfile.propertyDataQuality
+                            ?.missingCriticalFields || []
+                        ).includes(field);
+                        if (!item && !missing) return null;
                         return (
                           <div
                             key={field}
@@ -3709,15 +3723,19 @@ export default function EstimateToolViewV2({
                             {" "}
                             <span
                               className={
-                                item.fieldVerify
+                                missing || item?.fieldVerify
                                   ? "text-alert-fg font-medium"
                                   : "text-emerald-700 font-medium"
                               }
                             >
-                              {item.fieldVerify ? "Verify" : "Trusted"}
+                              {missing
+                                ? "Missing"
+                                : item.fieldVerify
+                                  ? "Verify"
+                                  : "Trusted"}
                             </span>{" "}
                             {field.replace(/([A-Z])/g, " $1").toLowerCase()}:{" "}
-                            {item.sourceLabel || item.sourceType || "source"}
+                            {item?.sourceLabel || item?.sourceType || "no source"}
                           </div>
                         );
                       })}
@@ -6552,6 +6570,11 @@ export default function EstimateToolViewV2({
                               {warning}
                             </div>
                           ))}
+                          {(E.pricingMetadata.manualReviewReasons || []).map((reason, i) => (
+                            <div key={`manual-review-${i}`} className="text-ink-secondary">
+                              {humanizeQuoteReason(reason)}
+                            </div>
+                          ))}
                         </div>
                       )
                     )}
@@ -6756,7 +6779,7 @@ export default function EstimateToolViewV2({
                               {E.oneTime.specItems.map((s, i) => (
                                 <div
                                   key={`sp-${i}`}
-                                  className="flex justify-between items-center py-0.5 pl-4 text-13 text-ink-secondary"
+                                  className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary"
                                 >
                                   {" "}
                                   <span>

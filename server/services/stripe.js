@@ -156,7 +156,7 @@ const StripeService = {
    * @param {string} customerId — Waves customer UUID
    * @param {string} paymentMethodId — Stripe pm_xxx ID
    * @param {object} [options]
-   * @param {boolean} [options.enableAutopay=true] — mark this method chargeable by the monthly autopay cron
+   * @param {boolean} [options.enableAutopay=false] — mark this method chargeable by the monthly autopay cron
    * @param {boolean} [options.makeDefault=true] — make this the customer's default saved method
    * @returns {object} payment_methods row
    */
@@ -165,7 +165,7 @@ const StripeService = {
     if (!stripe) throw new Error('Stripe not configured');
 
     const stripeCustomerId = await this.ensureStripeCustomer(customerId);
-    const enableAutopay = options.enableAutopay !== false;
+    const enableAutopay = options.enableAutopay === true;
     const makeDefault = options.makeDefault !== false;
 
     try {
@@ -1430,6 +1430,9 @@ const StripeService = {
 
 // Map Stripe error codes/decline_codes to friendly customer-facing messages.
 // Raw Stripe error messages are logged server-side, never returned to the customer.
+// Accepts either a thrown Stripe error (`err.code` / `err.raw.code`) or a
+// PaymentIntent `last_payment_error` object (`code` / `decline_code` at top
+// level) — same shape for our purposes.
 function friendlyStripeError(err) {
   const declineCode = err?.decline_code || err?.raw?.decline_code;
   const code = err?.code || err?.raw?.code;
@@ -1441,8 +1444,10 @@ function friendlyStripeError(err) {
     processing_error: 'A processing error occurred. Please try again.',
     incorrect_number: 'The card number is incorrect.',
     authentication_required: 'Your bank requires additional authentication. Please retry.',
+    payment_intent_authentication_failure: 'Card authentication failed. Please retry or use a different card.',
   };
   return map[declineCode] || map[code] || 'We could not process your payment. Please try again or use a different payment method.';
 }
 
 module.exports = StripeService;
+module.exports.friendlyStripeError = friendlyStripeError;

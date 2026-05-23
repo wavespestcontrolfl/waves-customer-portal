@@ -214,6 +214,30 @@ describe('payment lifecycle email sender', () => {
     }));
   });
 
+  test('sends payment failure notice keyed on payment intent + attempt', async () => {
+    setDbQueues({
+      invoices: [chain({ first: invoice() })],
+      payments: [chain({ first: payment() })],
+      ...lifecycleQueues(),
+    });
+
+    await PaymentLifecycleEmail.sendPaymentFailed({
+      customerId: 'cust-1',
+      paymentIntentId: 'pi_test',
+      attemptId: 'ch_attempt1',
+      invoiceId: 'inv-1',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.failed',
+      idempotencyKey: 'payment.failed:pi_test:ch_attempt1',
+      payload: expect.objectContaining({
+        invoice_number: 'INV-1001',
+        payment_url: expect.stringContaining('/pay/pay-token'),
+      }),
+    }));
+  });
+
   test('sends payment plan confirmation through the shared lifecycle sender', async () => {
     setDbQueues({
       payment_methods: [chain({ first: paymentMethod() })],

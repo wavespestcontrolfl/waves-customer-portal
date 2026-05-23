@@ -1002,6 +1002,66 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+function isPresent(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function humanizeQuoteReason(value) {
+  if (!isPresent(value)) return '';
+  const raw = String(value).trim();
+  const looksLikeToken = raw.includes('_') || /^[A-Z0-9-]+$/.test(raw);
+  if (!looksLikeToken) return raw;
+  const sentence = raw
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return sentence ? sentence.charAt(0).toUpperCase() + sentence.slice(1) : '';
+}
+
+function quoteRequiredReasonCandidates(item = {}) {
+  if (!item || typeof item !== 'object') return [];
+  const candidates = [
+    item.customQuoteReason,
+    item.quoteRequiredReason,
+    item.reason,
+    item.warning,
+    item.warningText,
+    ...(Array.isArray(item.warnings) ? item.warnings : []),
+    ...(Array.isArray(item.manualReviewReasons) ? item.manualReviewReasons : []),
+    ...(Array.isArray(item.measurementWarnings) ? item.measurementWarnings : []),
+  ];
+  const seen = new Set();
+  return candidates
+    .map(humanizeQuoteReason)
+    .filter(Boolean)
+    .filter((reason) => {
+      const key = reason.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function quoteRequiredReasonText(item = {}, fallback = 'Inspection required before final pricing.') {
+  return quoteRequiredReasonCandidates(item)[0] || fallback;
+}
+
+function rawQuoteRequiredReason(item = {}) {
+  if (!item || typeof item !== 'object') return null;
+  const candidates = [
+    item.reason,
+    item.customQuoteReason,
+    item.quoteRequiredReason,
+    item.warning,
+    item.warningText,
+    ...(Array.isArray(item.warnings) ? item.warnings : []),
+    ...(Array.isArray(item.manualReviewReasons) ? item.manualReviewReasons : []),
+    ...(Array.isArray(item.measurementWarnings) ? item.measurementWarnings : []),
+  ];
+  return candidates.find(isPresent) || null;
+}
+
 function fmtMoney(n) {
   const v = Math.round(Number(n || 0) * 100) / 100;
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
@@ -2179,6 +2239,10 @@ function renderPage(token, estimate, estData) {
   const annualTotal = Math.max(0, Math.round(monthlyTotal * 12 * 100) / 100);
   const onetimeTotal = Math.max(0, Number(est.onetimeTotal || 0) - prefOneTimeOff);
   const quoteRequired = est.quoteRequired === true || est.status === 'quote_required';
+  const quoteRequirementForDisplay = quoteRequired ? resolveEstimateQuoteRequirement(null, estData) : { reason: null };
+  const quoteDisplayReason = quoteRequired
+    ? quoteRequiredReasonText({ reason: est.quoteRequiredReason || quoteRequirementForDisplay.reason })
+    : '';
   const locked = est.status === 'accepted' || quoteRequired;
 
   const savingsPerMo = Math.max(0, Math.round((baseMonthly - recurringMonthlyBeforeDiscounts) * 100) / 100);
@@ -2496,7 +2560,7 @@ function renderPage(token, estimate, estData) {
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
-      <div class="day-price" data-mode-only="recurring">Inspection required before final pricing.</div>
+      <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
     ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
       ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
     ` : `
@@ -2946,7 +3010,7 @@ ${shellTopBar()}
 <div class="wrap">
 
   ${est.status === 'accepted' ? `<div class="accepted-banner">✓ You\u2019ve accepted this estimate — we\u2019ll be in touch shortly.</div>` : ''}
-  ${quoteRequired ? `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.</div>` : ''}
+  ${quoteRequired ? `<div class="quote-required-banner">This treatment needs an inspection before it can be accepted online. Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a> and we\u2019ll finish the quote.${quoteDisplayReason ? `<div style="margin-top:8px;font-weight:700">${escapeHtml(quoteDisplayReason)}</div>` : ''}</div>` : ''}
 
   <div class="hero">
     <div class="eyebrow">Your estimate · ${escapeHtml(quotedServicesLabel)}</div>
@@ -3055,7 +3119,7 @@ ${shellTopBar()}
   ${quoteRequired ? `
   <div class="final">
     <h2>Inspection required to finish this quote</h2>
-    <p>This treatment needs a field review before we can finalize pricing or book it online.</p>
+    <p>${escapeHtml(quoteDisplayReason || 'This treatment needs a field review before we can finalize pricing or book it online.')}</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -5436,7 +5500,7 @@ function normalizeOneTimeBreakdown(estData) {
       if (!item || typeof item !== 'object') continue;
       if (item.onProg === true || item.includedOnProgram === true) continue;
 
-      const quoteRequired = item.quoteRequired === true;
+      const quoteRequired = item.quoteRequired === true || item.requiresCustomQuote === true;
       const rawPrice = Number(item.price ?? item.amount ?? item.total);
       const discounted = Number(item.priceAfterDiscount ?? item.totalAfterDiscount);
       const amount = Number.isFinite(rawPrice) && rawPrice < 0
@@ -5462,7 +5526,13 @@ function normalizeOneTimeBreakdown(estData) {
         detail,
         kind: quoteRequired ? 'quote_required' : (includedByServiceCredit ? 'included' : (amount < 0 ? 'discount' : 'charge')),
         quoteRequired,
-        reason: item.reason || null,
+        reason: rawQuoteRequiredReason(item),
+        customQuoteReason: item.customQuoteReason || null,
+        requiresCustomQuote: item.requiresCustomQuote === true,
+        warning: item.warning || item.warningText || null,
+        warnings: Array.isArray(item.warnings) ? item.warnings : [],
+        manualReviewReasons: Array.isArray(item.manualReviewReasons) ? item.manualReviewReasons : [],
+        measurementWarnings: Array.isArray(item.measurementWarnings) ? item.measurementWarnings : [],
         warrantyStatus: item.warrantyStatus || null,
         warrantyExtendedSelected: item.warrantyExtendedSelected === true,
       });
