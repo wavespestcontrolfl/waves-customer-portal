@@ -2686,6 +2686,16 @@ function CoverageMapGeometry({ location, projection, active = false, onActivate 
   return null;
 }
 
+// Zone identity key for both list and map dedupe. markerLabel alone isn't
+// stable — manual labels can collide and auto-labels wrap A-Z past 26
+// zones — so we compose with areaName. Falls back to row id when no
+// markerLabel exists (single-status zones don't need to merge).
+function coverageZoneKey(item) {
+  if (!item) return null;
+  if (item.markerLabel) return `marker:${item.markerLabel}|${item.areaName || ''}`;
+  return `id:${item.id}`;
+}
+
 function ServiceCoverageMap({
   coverage,
   evidenceLevel,
@@ -2693,6 +2703,7 @@ function ServiceCoverageMap({
   mapAttribution,
   activeItemId,
   onActivate,
+  hasStatusText = true,
 }) {
   const normalizedServiceType = normalizeCoverageServiceType(coverage?.serviceLine);
   const locations = Array.isArray(coverage?.items) ? coverage.items : [];
@@ -2710,7 +2721,21 @@ function ServiceCoverageMap({
     [locations, canUseImageGeometry],
   );
   const renderableLocations = displayLocations.filter(hasRenderableCoverageGeometry);
-  const projection = useMemo(() => buildCoverageProjection(renderableLocations), [renderableLocations]);
+  // Dedupe by zone identity so multi-status zones don't paint stacked
+  // geometries on top of each other (the underlying one is unclickable
+  // and `activeItemId` may target the hidden marker). First entry per
+  // zone wins for color/marker letter; the list card below this map
+  // surfaces every status for the zone in its detail.
+  const mapLocations = useMemo(() => {
+    const seen = new Set();
+    return renderableLocations.filter((loc) => {
+      const key = coverageZoneKey(loc);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [renderableLocations]);
+  const projection = useMemo(() => buildCoverageProjection(mapLocations), [mapLocations]);
   const legend = Array.isArray(coverage?.legend) && coverage.legend.length
     ? coverage.legend.map((entry) => {
       const config = coverageStatusConfig(entry.key);
@@ -2757,7 +2782,7 @@ function ServiceCoverageMap({
                 <path d="M456 217L512 310" className="coverage-map-drive" />
               </>
             )}
-            {renderableLocations.map((location) => (
+            {mapLocations.map((location) => (
               <CoverageMapGeometry
                 key={location.id || `${location.areaName || location.name}-${location.status}`}
                 location={location}
@@ -2772,6 +2797,22 @@ function ServiceCoverageMap({
         )}
         {activeMapBackgroundUrl && mapAttribution && <div className="map-attribution coverage-map-attribution">{mapAttribution}</div>}
       </div>
+
+      {/* Legend kept ONLY when neither stat counts nor the per-zone list
+          provide status-to-color mapping (e.g. settings.showList=false +
+          settings.showSummaryCounts=false). When either is rendered, the
+          colored markers already have textual context above/beside the
+          map and the legend chips are redundant. */}
+      {!hasStatusText && legend.length > 0 && (
+        <div className="coverage-legend" aria-label="Service coverage legend">
+          {legend.map(({ key, label, tone, Icon }) => (
+            <div className={`coverage-legend-item status-${tone}`} key={key}>
+              <span className="coverage-legend-swatch" aria-hidden="true"><Icon size={14} strokeWidth={2} /></span>
+              <span>{label}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {evidenceNote && <p className="coverage-evidence-note">{evidenceNote}</p>}
     </div>
@@ -2814,7 +2855,7 @@ function mergeCoverageItemsByMarker(items, applications) {
   const order = [];
   const byKey = new Map();
   for (const item of items) {
-    const key = item.markerLabel ? `marker-${item.markerLabel}` : `id-${item.id}`;
+    const key = coverageZoneKey(item);
     const config = coverageStatusConfig(item.status);
     const entry = {
       id: item.id,
@@ -2969,6 +3010,7 @@ function ServiceCoverageCard({
               mapAttribution={mapAttribution}
               activeItemId={activeId}
               onActivate={setActiveItemId}
+              hasStatusText={showList || showSummary}
             />
           ) : (
             <p className="coverage-map-unavailable">Coverage map was not recorded for this visit.</p>
