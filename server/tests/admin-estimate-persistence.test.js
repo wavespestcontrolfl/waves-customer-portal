@@ -229,6 +229,62 @@ describe('admin estimate persistence', () => {
     expect(data.result.oneTime.total).toBe(0);
   });
 
+  test('falls back to top-level spec rows when one-time rows are absent', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 425,
+      estimateData: {
+        result: {
+          specItems: [
+            { service: 'rodent_trapping', name: 'Rodent Trapping', price: 425 },
+          ],
+        },
+      },
+    });
+
+    expect(fields.onetime_total).toBe(425);
+  });
+
+  test('excludes recurring-program spec rows from top-level one-time fallback', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 425,
+      estimateData: {
+        result: {
+          specItems: [
+            { service: 'general_pest', name: 'General Pest', price: 99, onProg: true },
+            { service: 'mosquito', name: 'Mosquito', price: 75, includedOnProgram: true },
+            { service: 'rodent_trapping', name: 'Rodent Trapping', price: 425 },
+          ],
+        },
+      },
+    });
+
+    expect(fields.onetime_total).toBe(425);
+  });
+
+  test('derives one-time total from membership fee without one-time rows', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: {
+            membershipFee: 49,
+          },
+        },
+      },
+    });
+
+    expect(fields.onetime_total).toBe(49);
+  });
+
   test('zeros persisted totals when estimate data contains quote-required lines', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
