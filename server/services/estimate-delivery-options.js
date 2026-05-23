@@ -327,6 +327,26 @@ function normalizeEstimateDethatchingManagerApproval(estimateData, {
   const isAdmin = String(technician?.role || '').toLowerCase() === 'admin';
   const trustedApproval = requestedApproved && reason.length > 0 && isAdmin;
 
+  function applyApprovalToEngineInputs(engineInputs) {
+    if (!engineInputs || typeof engineInputs !== 'object') return;
+    engineInputs.dethatchingManagerApprovalTrusted = trustedApproval;
+    engineInputs.dethatchingManagerApproved = trustedApproval;
+    engineInputs.dethatchingManagerApprovalReason = trustedApproval ? reason : '';
+    delete engineInputs.managerApproved;
+    delete engineInputs.managerApprovalReason;
+
+    const selected = inputRequestsDethatching(engineInputs.services?.dethatching);
+    if (!selected) return;
+    if (!engineInputs.services || typeof engineInputs.services !== 'object') {
+      engineInputs.services = {};
+    }
+    if (!engineInputs.services.dethatching || typeof engineInputs.services.dethatching !== 'object') {
+      engineInputs.services.dethatching = { selected: true };
+    }
+    engineInputs.services.dethatching.managerApproved = trustedApproval;
+    engineInputs.services.dethatching.managerApprovalReason = trustedApproval ? reason : '';
+  }
+
   inputs.dethatchingManagerApprovalTrusted = trustedApproval;
   inputs.dethatchingManagerApproved = trustedApproval;
   inputs.dethatchingManagerApprovalReason = trustedApproval ? reason : '';
@@ -341,6 +361,9 @@ function normalizeEstimateDethatchingManagerApproval(estimateData, {
     delete inputs.dethatchingManagerApprovedByRole;
     delete inputs.dethatchingManagerApprovedAt;
   }
+  applyApprovalToEngineInputs(inputs);
+  applyApprovalToEngineInputs(data.engineInputs);
+  applyApprovalToEngineInputs(data.result?.engineInputs);
 
   function applyTrustedApproval(value, depth = 0) {
     if (!value || depth > 12) return;
