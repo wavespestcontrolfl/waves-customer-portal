@@ -296,17 +296,25 @@ class AgentDispatcher {
       }
       // Terminal session/turn events — always exit the stream. If a
       // draft was captured runWithBrief returns it; if not it returns
-      // agent_did_not_emit_draft. The earlier code only returned when
-      // a draft existed, which made an agent that finished without
-      // calling emit_draft / emit_metadata_only stall here until the
-      // 5-minute deadline before reporting streaming_failed instead
-      // of the more accurate did-not-emit reason.
+      // agent_did_not_emit_draft.
+      //
+      // session.status_idle is intentionally NOT terminal on its own:
+      // Managed Agents emit it with stop_reason: requires_action while
+      // the agent waits for the tool_result we just sent. Treating it
+      // as terminal makes multi-tool runs (e.g. get_content_brief then
+      // emit_draft) exit after the first tool and report
+      // agent_did_not_emit_draft even though the agent was about to
+      // continue. Only end_turn (handled below) is the real terminal.
       const stopReason = typeof data?.stop_reason === 'string' ? data.stop_reason : data?.stop_reason?.type;
-      if (event === 'done' || event === 'session_complete' || event === 'session.status_idle' || event === 'turn_end' || event === 'session_end') return;
+      if (event === 'done' || event === 'session_complete' || event === 'turn_end' || event === 'session_end') return;
       if (stopReason === 'end_turn') return;
       if (event === 'error' || event === 'session.error') {
-        logger.error(`[agent-dispatcher] session ${sessionId} error: ${JSON.stringify(data)}`);
-        return;
+        // Don't mask infrastructure failures as a content-quality
+        // outcome — throw so runWithBrief surfaces streaming_failed
+        // instead of agent_did_not_emit_draft.
+        const detail = typeof data === 'string' ? data : JSON.stringify(data).slice(0, 200);
+        logger.error(`[agent-dispatcher] session ${sessionId} error: ${detail}`);
+        throw new Error(`session_error: ${detail}`);
       }
     }
     throw new Error(`session ${sessionId} timed out after ${timeoutMs}ms`);
