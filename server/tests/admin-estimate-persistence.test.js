@@ -159,6 +159,30 @@ describe('admin estimate persistence', () => {
     expect(data.result.recurring.annualAfterDiscount).toBe(1320);
   });
 
+  test('preserves signed one-time discounts when deriving persisted totals', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 0,
+      estimateData: {
+        result: {
+          oneTime: {
+            total: 275,
+            items: [
+              { service: 'one_time_pest', name: 'One-Time Pest', price: 300 },
+              { service: 'bundle_discount', name: 'Bundle Discount', price: -25 },
+            ],
+          },
+        },
+      },
+    });
+
+    const data = JSON.parse(fields.estimate_data);
+    expect(fields.onetime_total).toBe(275);
+    expect(data.result.oneTime.total).toBe(275);
+  });
+
   test('zeros persisted totals when estimate data contains quote-required lines', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,

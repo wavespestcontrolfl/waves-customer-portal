@@ -42,6 +42,12 @@ function positiveMoney(value) {
   return Number.isFinite(n) && n > 0 ? roundMoney(n) : null;
 }
 
+function moneyValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? roundMoney(n) : null;
+}
+
 function fallbackMoney(value) {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? roundMoney(n) : 0;
@@ -59,6 +65,17 @@ function sumPositiveAmounts(rows = [], fields = ['price']) {
     if (!row || typeof row !== 'object') return sum;
     for (const field of fields) {
       const amount = positiveMoney(row[field]);
+      if (amount !== null) return sum + amount;
+    }
+    return sum;
+  }, 0));
+}
+
+function sumSignedAmounts(rows = [], fields = ['price']) {
+  return roundMoney((rows || []).reduce((sum, row) => {
+    if (!row || typeof row !== 'object') return sum;
+    for (const field of fields) {
+      const amount = moneyValue(row[field]);
       if (amount !== null) return sum + amount;
     }
     return sum;
@@ -92,10 +109,10 @@ function deriveTotalsFromEstimateData(estimateData) {
     ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
   ];
   const oneTimeRowsTotal = roundMoney(
-    sumPositiveAmounts(oneTimeRows, ['price', 'estimatedPrice', 'baseEstimatePrice']) +
+    sumSignedAmounts(oneTimeRows, ['price', 'estimatedPrice', 'baseEstimatePrice']) +
     (positiveMoney(oneTime.membershipFee) ?? 0)
   );
-  const topLevelSpecRowsTotal = sumPositiveAmounts(
+  const topLevelSpecRowsTotal = sumSignedAmounts(
     Array.isArray(result.specItems) ? result.specItems : [],
     ['price', 'estimatedPrice', 'baseEstimatePrice']
   );
