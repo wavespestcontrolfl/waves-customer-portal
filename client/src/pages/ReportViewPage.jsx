@@ -6964,6 +6964,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           mode={mode}
         />
 
+        {/*
+          Intentionally NOT rendered as of the report-view-rewrite PR
+          (approved by Adam, see PR #1078):
+            - CustomerActionItemsSection ("Recommended Next Step")
+            - WhatToExpectNextSection
+            - WhenToContactUsSection
+            - PropertyMemoryBlock
+            - SupportingDetailsSection
+          Function definitions kept in this file so any test imports
+          continue to resolve; remove in a follow-up once we confirm
+          no surface consumes them. PDF/static modes also lose
+          SupportingDetails on purpose — the approved template has
+          no equivalent section.
+        */}
+
         {(data.photos || []).length > 0 && (
           <section className="sr-section" id="photos">
             <h2>Field photos</h2>

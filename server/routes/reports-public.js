@@ -10,6 +10,7 @@ const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { buildReportV1Data } = require('../services/service-report/report-data');
+const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const {
   runAndSwallowErrors: runPestPressureForServiceRecord,
   calculateAndPersistForServiceRecord,
@@ -427,10 +428,14 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
     // Pull history with the same token-scoped service_date ceiling
     // buildReportV1Data uses, so the rating-submit response preserves
     // the chart + cadence the customer was just looking at instead of
-    // dropping them.
+    // dropping them. Resolve service_line the same way buildReportV1Data
+    // does — for legacy rows where the column is null, falling back to
+    // detectServiceLine(service_type) keeps history scoped to one line
+    // instead of pulling mixed lawn+pest visits.
+    const resolvedServiceLine = service.service_line || detectServiceLine(service.service_type);
     const historyRows = service.customer_id
       ? await loadHistoryForCustomer(db, service.customer_id, {
-          serviceLine: service.service_line || null,
+          serviceLine: resolvedServiceLine || null,
           limit: 8,
           beforeOrOnServiceDate: service.service_date || null,
         }).catch(() => [])
