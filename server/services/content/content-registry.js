@@ -128,6 +128,7 @@ function astroFileToItem(astroRoot, contentRoot, fullPath, repoSha = null) {
   const fallbackUrl = deriveUrlFromAstroPath(collection, contentRelative, frontmatter);
   const canonicalUrl = frontmatter.canonical || frontmatter.canonical_url || fallbackUrl;
   const normalized = normalizeContentUrl(canonicalUrl);
+  const routeUrl = fallbackUrl || canonicalUrl;
   const frontmatterHash = stableHash(normalizeFrontmatterForHash(frontmatter));
   const bodyHash = stableHash(body);
 
@@ -135,8 +136,8 @@ function astroFileToItem(astroRoot, contentRoot, fullPath, repoSha = null) {
     kind: 'astro',
     canonical_url: canonicalUrl || null,
     canonical_url_normalized: normalized || null,
-    live_url: canonicalUrl || fallbackUrl || null,
-    slug: slugFromUrl(frontmatter.slug || canonicalUrl || fallbackUrl),
+    live_url: routeUrl || null,
+    slug: slugFromUrl(frontmatter.slug || routeUrl || canonicalUrl),
     astro_source_path: relativePath,
     content_type: contentTypeFromCollection(collection, frontmatter),
     source: normalizeSource(frontmatter.source || frontmatter.content_source || 'unknown'),
@@ -213,6 +214,7 @@ function dbBlogRowToItem(row) {
 function reconcileContent({ astroItems = [], dbItems = [], previousRows = [] } = {}) {
   const previous = previousLookup(previousRows);
   const astroCanonicalCounts = countsBy(astroItems, 'canonical_url_normalized');
+  const astroCanonicalOwnerCounts = canonicalOwnerCounts(astroItems);
   const astroSlugCounts = countsBy(astroItems, 'slug');
   const activeDbItems = dbItems.filter((item) => !isArchivedWorkflow(item));
   const dbCanonicalCounts = countsBy(activeDbItems, 'canonical_url_normalized');
@@ -222,13 +224,14 @@ function reconcileContent({ astroItems = [], dbItems = [], previousRows = [] } =
   const rows = [];
 
   for (const astro of astroItems) {
-    const duplicateAstroCanonical = astro.canonical_url_normalized && astroCanonicalCounts.get(astro.canonical_url_normalized) > 1;
+    const canonicalizedAstro = isCanonicalizedAstro(astro);
+    const duplicateAstroCanonical = isDuplicateAstroCanonicalConflict(astro, astroCanonicalCounts, astroCanonicalOwnerCounts);
     const duplicateAstroSlug = astro.slug && astroSlugCounts.get(astro.slug) > 1;
     const duplicateDbCanonical = astro.canonical_url_normalized && dbCanonicalCounts.get(astro.canonical_url_normalized) > 1;
     let dbMatch = null;
     let matchConfidence = null;
 
-    if (!duplicateAstroCanonical && !duplicateAstroSlug && !duplicateDbCanonical && astro.canonical_url_normalized) {
+    if (!canonicalizedAstro && !duplicateAstroCanonical && !duplicateAstroSlug && !duplicateDbCanonical && astro.canonical_url_normalized) {
       dbMatch = dbByCanonical.get(astro.canonical_url_normalized) || null;
       if (dbMatch) matchConfidence = 'canonical_url';
     }
@@ -282,6 +285,28 @@ function reconcileContent({ astroItems = [], dbItems = [], previousRows = [] } =
 
   const summary = summarizeRows(rows, astroItems.length, dbItems.length);
   return { rows, summary };
+}
+
+function canonicalOwnerCounts(astroItems = []) {
+  const counts = new Map();
+  for (const item of astroItems) {
+    const key = item.canonical_url_normalized;
+    if (!key || isCanonicalizedAstro(item)) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return counts;
+}
+
+function isCanonicalizedAstro(item = {}) {
+  const live = normalizeContentUrl(item.live_url);
+  const canonical = item.canonical_url_normalized || normalizeContentUrl(item.canonical_url);
+  return Boolean(live && canonical && live !== canonical);
+}
+
+function isDuplicateAstroCanonicalConflict(item = {}, canonicalCounts = new Map(), ownerCounts = new Map()) {
+  const key = item.canonical_url_normalized;
+  if (!key || (canonicalCounts.get(key) || 0) <= 1) return false;
+  return (ownerCounts.get(key) || 0) !== 1;
 }
 
 function mergeAstroDb(astro, dbItem) {
@@ -800,6 +825,9 @@ module.exports = {
   astroFileToItem,
   dbBlogRowToItem,
   reconcileContent,
+  canonicalOwnerCounts,
+  isCanonicalizedAstro,
+  isDuplicateAstroCanonicalConflict,
   isArchivedWorkflow,
   preserveLiveMirrorFields,
   liveTargetChanged,
