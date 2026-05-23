@@ -224,6 +224,14 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
       const { title, meta_description, notes_for_reviewer } = input || {};
       if (!title || !meta_description) return { error: 'title + meta_description required' };
+      // Captured metadata is a delta, not a full draft. The Step 11
+      // runner is responsible for hydrating a gate-friendly draft by
+      // loading the live page (body + schema + canonical) and
+      // splicing in this title + meta_description before invoking
+      // content-quality-gate.evaluate(). The gate's hard checks
+      // (schema_valid, canonical_self_referencing, indexable, …)
+      // reference fields the metadata rewriter never produces, so
+      // running them against this object alone would always fail.
       sessionDrafts.set(sessionId, {
         type: 'metadata',
         title,

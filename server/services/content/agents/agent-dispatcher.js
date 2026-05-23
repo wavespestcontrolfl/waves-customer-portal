@@ -233,21 +233,39 @@ class AgentDispatcher {
   async _streamAndExecute(sessionId, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     for await (const { event, data } of streamSessionEvents(sessionId, deadline)) {
-      // Tool use can surface as either `event: tool_use` or as a
-      // payload field; both are accepted (mirrors the legacy agent).
-      if (event === 'tool_use' || data?.type === 'tool_use') {
+      // Tool use surfaces in three shapes depending on the agent
+      // config: the legacy SDK tools emit `event: tool_use`, custom
+      // `type:'custom'` tools (which is what all three new agents
+      // declare) emit `event: agent.custom_tool_use`, and some
+      // server builds put the discriminator on the data payload
+      // instead of the event name. All three are accepted.
+      const isCustomToolUse =
+        event === 'agent.custom_tool_use' || data?.type === 'agent.custom_tool_use';
+      const isLegacyToolUse =
+        event === 'tool_use' || data?.type === 'tool_use';
+      if (isCustomToolUse || isLegacyToolUse) {
         const toolName = data?.name;
         const toolInput = data?.input || {};
         const toolUseId = data?.id;
         const result = await executeBriefTool(toolName, toolInput, { sessionId });
-        // Reply with tool_result. content is an array of text blocks
-        // (matches the Managed Agents reply contract used by the
-        // production content-agent).
-        await apiCall('POST', `/sessions/${sessionId}/events`, {
-          type: 'tool_result',
-          tool_use_id: toolUseId,
-          content: [{ type: 'text', text: JSON.stringify(result) }],
-        });
+        // Reply schema differs by tool kind:
+        //   - custom tools → user.custom_tool_result with custom_tool_use_id
+        //   - legacy tools → tool_result with tool_use_id, content blocks
+        // Mirrors managed-agents-2026-04-01 contract used by
+        // server/services/lead-response-agent.js.
+        if (isCustomToolUse) {
+          await apiCall('POST', `/sessions/${sessionId}/events`, {
+            type: 'user.custom_tool_result',
+            custom_tool_use_id: toolUseId,
+            content: JSON.stringify(result),
+          });
+        } else {
+          await apiCall('POST', `/sessions/${sessionId}/events`, {
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: [{ type: 'text', text: JSON.stringify(result) }],
+          });
+        }
         if (getDraft(sessionId)) return; // sink fired; agent finished
         continue;
       }
