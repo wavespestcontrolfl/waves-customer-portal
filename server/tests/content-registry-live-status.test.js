@@ -107,6 +107,22 @@ describe('content registry live status helpers', () => {
     }));
   });
 
+  test('classifies redirects by final target health', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-redirect-missing', canonical_url_normalized: '/legacy-missing/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-missing/': response(301, '', { location: '/gone/' }),
+          'https://www.wavespestcontrol.com/gone/': response(404, '', {}, 'https://www.wavespestcontrol.com/gone/'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '301',
+      live_status: 'missing',
+      redirect_target_url: 'https://www.wavespestcontrol.com/gone/',
+    }));
+  });
+
   test('classifies missing and noindex pages', async () => {
     await expect(liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-3', canonical_url_normalized: '/missing/' },
@@ -171,6 +187,26 @@ describe('content registry live status helpers', () => {
       redirect_target_url: 'https://www.wavespestcontrol.com/new/',
       registry_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
+  });
+
+  test('fetchSitemapPaths recurses sitemap indexes instead of treating child sitemaps as pages', async () => {
+    const paths = await liveStatus.fetchSitemapPaths({
+      fetchImpl: fetchMap({
+        'https://www.wavespestcontrol.com/sitemap.xml': response(200, `
+          <sitemapindex>
+            <sitemap><loc>https://www.wavespestcontrol.com/blog-sitemap.xml</loc></sitemap>
+          </sitemapindex>
+        `),
+        'https://www.wavespestcontrol.com/blog-sitemap.xml': response(200, `
+          <urlset>
+            <url><loc>https://www.wavespestcontrol.com/blog/live-post/</loc></url>
+          </urlset>
+        `),
+      }),
+    });
+
+    expect(paths.has('/blog/live-post/')).toBe(true);
+    expect(paths.has('/blog-sitemap.xml/')).toBe(false);
   });
 
   test('CLI args preserve values and parse boolean flags', () => {

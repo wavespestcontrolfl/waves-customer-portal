@@ -102,6 +102,18 @@ function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, req
   return 'unknown';
 }
 
+function classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex }) {
+  const code = Number(finalStatus);
+  if (!code) return redirectTargetUrl ? 'redirected' : 'unknown';
+  if (code === 404 || code === 410) return 'missing';
+  if (code >= 500) return 'error';
+  if (code === 401 || code === 403) return 'blocked';
+  if (code >= 400) return 'error';
+  if (noindex) return 'noindex';
+  if (code >= 200 && code < 300 && redirectTargetUrl) return 'redirected';
+  return classifyLiveStatus({ status: finalStatus, redirectTargetUrl, noindex });
+}
+
 async function fetchText(fetchImpl, url, { redirect = 'manual', timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -150,10 +162,12 @@ async function checkRegistryRowLiveStatus(row, {
     const redirectTargetUrl = absoluteFromLocation(first.res.headers.get('location'), requestedUrl);
     let canonicalTargetUrl = extractCanonical(first.text, requestedUrl);
     let noindex = isNoindex(first.text);
+    let finalStatus = null;
 
     if (redirectTargetUrl && first.res.status >= 300 && first.res.status < 400) {
       try {
         const follow = await fetchText(fetchImpl, redirectTargetUrl, { redirect: 'follow', timeoutMs });
+        finalStatus = String(follow.res.status);
         canonicalTargetUrl = extractCanonical(follow.text, follow.res.url || redirectTargetUrl) || canonicalTargetUrl;
         noindex = noindex || isNoindex(follow.text);
       } catch {
@@ -167,13 +181,15 @@ async function checkRegistryRowLiveStatus(row, {
       redirectTargetUrl,
       canonicalTargetUrl,
     });
-    const liveStatus = classifyLiveStatus({
-      status,
-      redirectTargetUrl,
-      canonicalTargetUrl,
-      requestedUrl,
-      noindex,
-    });
+    const liveStatus = redirectTargetUrl
+      ? classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex })
+      : classifyLiveStatus({
+        status,
+        redirectTargetUrl,
+        canonicalTargetUrl,
+        requestedUrl,
+        noindex,
+      });
 
     return {
       id: row.id,
@@ -219,16 +235,57 @@ async function fetchSitemapPaths({
   sitemapUrl = null,
   fetchImpl = global.fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  maxSitemapFiles = 50,
 } = {}) {
   const url = sitemapUrl || `${String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/sitemap.xml`;
+  return fetchSitemapPathsFromUrl(url, {
+    fetchImpl,
+    timeoutMs,
+    visited: new Set(),
+    maxSitemapFiles,
+  });
+}
+
+async function fetchSitemapPathsFromUrl(url, {
+  fetchImpl = global.fetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  visited = new Set(),
+  maxSitemapFiles = 50,
+} = {}) {
+  if (!url || visited.has(url)) return null;
+  if (visited.size >= maxSitemapFiles) return null;
+  visited.add(url);
   const { res, text } = await fetchText(fetchImpl, url, { redirect: 'follow', timeoutMs });
   if (res.status < 200 || res.status >= 300) return null;
+  if (/<sitemapindex\b/i.test(text)) {
+    const childUrls = extractSitemapLocs(text)
+      .map((loc) => absoluteFromLocation(loc, url))
+      .filter(Boolean);
+    if (!childUrls.length || childUrls.length + visited.size > maxSitemapFiles) return null;
+    const paths = new Set();
+    for (const childUrl of childUrls) {
+      const childPaths = await fetchSitemapPathsFromUrl(childUrl, {
+        fetchImpl,
+        timeoutMs,
+        visited,
+        maxSitemapFiles,
+      });
+      if (!childPaths) return null;
+      for (const item of childPaths) paths.add(item);
+    }
+    return paths;
+  }
+  if (!/<urlset\b/i.test(text)) return null;
   const paths = new Set();
-  for (const match of text.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)) {
-    const normalized = normalizeInternalTarget(match[1]);
+  for (const loc of extractSitemapLocs(text)) {
+    const normalized = normalizeInternalTarget(loc);
     if (normalized) paths.add(normalized);
   }
   return paths;
+}
+
+function extractSitemapLocs(xml) {
+  return Array.from(String(xml || '').matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi), (match) => match[1]);
 }
 
 async function loadRegistryRows(database, { statuses, limit }) {
@@ -383,8 +440,11 @@ module.exports = {
   extractRobots,
   isNoindex,
   classifyLiveStatus,
+  classifyRedirectLiveStatus,
   checkRegistryRowLiveStatus,
   fetchSitemapPaths,
+  fetchSitemapPathsFromUrl,
+  extractSitemapLocs,
   loadRegistryRows,
   liveUpdatePayload,
   liveFieldsChanged,
