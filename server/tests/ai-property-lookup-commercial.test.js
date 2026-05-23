@@ -182,6 +182,8 @@ describe('Manatee PAO property lookup facts', () => {
     expect(_private.shouldQueryManateePAO('123 Main St, Bradenton, FL')).toBe(true);
     expect(_private.shouldQueryManateePAO('8920 49th Ave E')).toBe(false);
     expect(_private.shouldQueryManateePAO('123 Main St, Sarasota, FL 34243')).toBe(true);
+    expect(_private.shouldQueryManateePAO('123 Main St, Lakewood Ranch, FL 34240')).toBe(true);
+    expect(_private.shouldQueryManateePAO('123 Main St, Tallevast, FL')).toBe(true);
     expect(_private.shouldQueryManateePAO('123 Main St, Sarasota, FL 34231')).toBe(false);
     expect(_private.shouldQueryManateePAO('123 Main St, Venice, FL')).toBe(false);
   });
@@ -190,6 +192,10 @@ describe('Manatee PAO property lookup facts', () => {
     expect(_private.manateeAddressSearchCandidates('8920 49th Avenue East, Bradenton, FL 34211')).toEqual([
       '8920 49TH AVE E',
       '8920 49TH',
+    ]);
+    expect(_private.manateeAddressSearchCandidates('123 St George Drive, Bradenton, FL 34211')).toEqual([
+      '123 ST GEORGE DR',
+      '123 ST GEORGE',
     ]);
   });
 
@@ -217,6 +223,10 @@ describe('Manatee PAO property lookup facts', () => {
       rows: [searchResults.rows[0]],
     }, '123 Main St, Sarasota, FL 34243')).toBeNull();
     expect(_private.pickManateeSearchResult(searchResults, '123 Main St, Apt 2, Sarasota, FL 34243')).toMatchObject({
+      parcelId: '222',
+      city: 'SARASOTA',
+    });
+    expect(_private.pickManateeSearchResult(searchResults, '123 Main St, Sarasota FL 34243')).toMatchObject({
       parcelId: '222',
       city: 'SARASOTA',
     });

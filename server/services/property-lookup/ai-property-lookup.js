@@ -34,21 +34,30 @@ const MANATEE_PAO_BUILDINGS_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontie
 const COUNTY_LOOKUP_MIN_REMAINING_MS = 750;
 const MANATEE_CITY_NAMES = new Set([
   'ANNA MARIA',
+  'BAYSHORE GARDENS',
   'BRADENTON',
   'BRADENTON BEACH',
+  'CEDAR HAMMOCK',
   'CORTEZ',
   'DUETTE',
   'ELLENTON',
+  'GILLETTE',
   'HOLMES BEACH',
   'LAKEWOOD RANCH',
   'LONGBOAT KEY',
+  'MEMPHIS',
   'MYAKKA CITY',
   'ONECO',
   'PALMETTO',
   'PARRISH',
   'RUBONIA',
+  'SAMOSET',
+  'SOUTH BRADENTON',
+  'TALLEVAST',
   'TERRA CEIA',
   'UNIVERSITY PARK',
+  'WEST BRADENTON',
+  'WEST SAMOSET',
   'WHITFIELD',
 ]);
 const MANATEE_ZIPS = new Set([
@@ -648,7 +657,7 @@ function manateeAddressSearchCandidates(address) {
 
 function shouldQueryManateePAO(address) {
   const zip = extractAddressZip(address);
-  if (zip) return MANATEE_ZIPS.has(zip);
+  if (zip && MANATEE_ZIPS.has(zip)) return true;
 
   const city = extractCommaCity(address);
   if (!city) return false;
@@ -665,7 +674,7 @@ function extractCommaCity(address) {
 
   for (let index = parts.length - 1; index > 0; index -= 1) {
     if (/\bFL(?:ORIDA)?\b/i.test(parts[index]) || /\b\d{5}(?:-\d{4})?\b/.test(parts[index])) {
-      return normalizeCitySegment(parts[index - 1]);
+      return normalizeCitySegment(parts[index]) || normalizeCitySegment(parts[index - 1]);
     }
   }
 
@@ -714,7 +723,7 @@ function normalizeCountyStreetLine(address) {
 
 function removeStreetSuffix(street) {
   return String(street || '')
-    .replace(/\s+(AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)\b.*$/i, '')
+    .replace(/\s+(AVE|BLVD|CIR|CT|DR|LN|PKWY|PL|RD|ST|TER|TRL|WAY)(?:\s+[NSEW])?$/i, '')
     .trim();
 }
 
