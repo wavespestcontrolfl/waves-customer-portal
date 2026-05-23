@@ -191,6 +191,51 @@ describe('Manatee PAO property lookup facts', () => {
     ]);
   });
 
+  test('filters ambiguous PAO search rows by requested city', () => {
+    const searchResults = {
+      cols: [
+        { title: 'Parcel ID' },
+        { title: 'Property Type' },
+        { title: 'Owner(s)' },
+        { title: 'Situs Address' },
+        { title: 'Postal City' },
+      ],
+      rows: [
+        ['111', 'REAL PROPERTY', '', ';123 MAIN ST;', 'BRADENTON'],
+        ['222', 'REAL PROPERTY', '', ';123 MAIN ST;', 'SARASOTA'],
+      ],
+    };
+
+    expect(_private.pickManateeSearchResult(searchResults, '123 Main St, Sarasota, FL 34243')).toMatchObject({
+      parcelId: '222',
+      city: 'SARASOTA',
+    });
+    expect(_private.pickManateeSearchResult({
+      ...searchResults,
+      rows: [searchResults.rows[0]],
+    }, '123 Main St, Sarasota, FL 34243')).toBeNull();
+  });
+
+  test('allows PAO postal-city aliases when a non-shared Manatee ZIP is present', () => {
+    const searchResults = {
+      cols: [
+        { title: 'Parcel ID' },
+        { title: 'Property Type' },
+        { title: 'Owner(s)' },
+        { title: 'Situs Address' },
+        { title: 'Postal City' },
+      ],
+      rows: [
+        ['647302459', 'REAL PROPERTY', '', ';8920 49TH AVE E;', 'PALMETTO'],
+      ],
+    };
+
+    expect(_private.pickManateeSearchResult(searchResults, '8920 49th Ave E, Bradenton, FL 34211')).toMatchObject({
+      parcelId: '647302459',
+      city: 'PALMETTO',
+    });
+  });
+
   test('parses Manatee land and building tables into estimator facts', () => {
     const parsed = _private.parseManateePaoRecord({
       address: '8920 49th Ave E, Bradenton, FL 34211',
@@ -239,6 +284,30 @@ describe('Manatee PAO property lookup facts', () => {
       fieldVerify: false,
       winningProvider: 'manatee_pao',
     });
+  });
+
+  test('AI records citing county URLs remain AI provenance', () => {
+    const record = _private.shapeAsPropertyRecord({
+      squareFootage: 2310,
+      lotSize: 8400,
+      yearBuilt: 2017,
+      bedrooms: 4,
+      bathrooms: 2,
+      stories: 1,
+      propertyType: 'Single Family',
+      constructionMaterial: 'CBS',
+      roofType: 'SHINGLE',
+      source: 'https://www.manateepao.gov/parcel/?parid=647302459',
+      confidence: 'high',
+      county: 'Manatee',
+    }, '8920 49th Ave E, Bradenton, FL 34211', 'openai');
+    const merged = _private.mergePropertyRecords([record], '8920 49th Ave E, Bradenton, FL 34211');
+
+    expect(record._source).toBe('ai');
+    expect(record._raw._source).toBe('ai');
+    expect(record._aiSourceType).toBe('county');
+    expect(merged._source).toBe('ai');
+    expect(merged._raw._source).toBe('ai_trio');
   });
 
   test('county early-return core requires lot size for pricing', () => {

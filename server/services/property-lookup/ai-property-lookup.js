@@ -57,6 +57,8 @@ const MANATEE_ZIPS = new Set([
   '34221', '34222', '34228', '34243', '34250', '34251', '34264', '34270', '34280',
   '34281', '34282',
 ]);
+const MANATEE_SHARED_ZIPS = new Set(['34228', '34243']);
+const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao']);
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
   'stories', 'constructionMaterial', 'foundationType', 'roofType',
@@ -715,6 +717,7 @@ function pickManateeSearchResult(data, address) {
   const target = normalizeCountyStreetLine(address);
   const targetNoSuffix = removeStreetSuffix(target);
   const targetNumber = target.match(/^\d+/)?.[0] || null;
+  const targetCity = shouldRequireManateeResultCityMatch(address) ? extractCommaCity(address) : null;
   const matches = rows
     .map((row) => ({
       parcelId: cleanPaoCell(row[parcelIdx >= 0 ? parcelIdx : 0]),
@@ -725,10 +728,19 @@ function pickManateeSearchResult(data, address) {
     .filter((row) => {
       const normalized = normalizeCountyStreetLine(row.situsAddress);
       if (targetNumber && !normalized.startsWith(`${targetNumber} `)) return false;
+      if (targetCity && normalizeCountyCityName(row.city) !== targetCity) return false;
       return normalized === target || removeStreetSuffix(normalized) === targetNoSuffix || normalized.includes(targetNoSuffix);
     });
 
   return matches[0] || null;
+}
+
+function shouldRequireManateeResultCityMatch(address) {
+  if (!extractCommaCity(address)) return false;
+  const zip = extractAddressZip(address);
+  // PAO postal city can differ from the entered municipality; require it when
+  // the ZIP cannot disambiguate the Manatee parcel search by itself.
+  return !zip || MANATEE_SHARED_ZIPS.has(zip);
 }
 
 function parseManateePaoRecord({ address, search, land, buildings }) {
@@ -1219,7 +1231,7 @@ function hasAnyPropertyFact(parsed) {
 function shapeAsPropertyRecord(p, address, provider = 'ai') {
   const sourceMeta = classifyPropertySource(p.source);
   const evidence = buildRecordEvidence(p, provider, sourceMeta);
-  const sourceKind = sourceMeta.type === 'county' ? 'county' : 'ai';
+  const sourceKind = DIRECT_PROPERTY_RECORD_PROVIDERS.has(provider) ? 'county' : 'ai';
   return {
     formattedAddress: p.formattedAddress || address,
     addressLine1: '',
@@ -1310,7 +1322,7 @@ function mergePropertyRecords(records, address) {
   const sources = sorted.flatMap((r) => r._aiSources || (r._aiSourceUrl ? [{ provider: r._provider, url: r._aiSourceUrl }] : []));
   const sourceTypes = [...new Set(sources.map((s) => s.sourceType).filter(Boolean))];
   const sourceKinds = [...new Set(sorted.map((r) => r._source).filter(Boolean))];
-  const hasCountySource = sorted.some((r) => r._source === 'county' || r._aiSourceType === 'county');
+  const hasCountySource = sorted.some((r) => r._source === 'county');
   const hasAiSource = sorted.some((r) => r._source === 'ai');
   merged._source = hasCountySource && !hasAiSource ? 'county' : hasCountySource ? 'hybrid' : 'ai';
   merged._provider = providers.join('+') || 'ai';
@@ -1569,6 +1581,7 @@ module.exports = {
     normalizeLookupPropertyType,
     parseManateePaoRecord,
     parsePropertyJSON,
+    pickManateeSearchResult,
     shapeAsPropertyRecord,
     shouldQueryManateePAO,
   },
