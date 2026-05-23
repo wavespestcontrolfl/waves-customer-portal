@@ -181,6 +181,28 @@ canonical: "https://www.wavespestcontrol.com/pest-control/tvoc-levels-after-pest
     }
   });
 
+  test('keeps Astro route URL separate from canonical target', () => {
+    const root = makeAstroRoot();
+    try {
+      writeFile(root, 'src/content/blog/cure-for-bed-bugs-lakewood-ranch.md', `---
+title: Cure for Bed Bugs
+slug: "/pest-control/cure-for-bed-bugs-lakewood-ranch/"
+canonical: "https://www.wavespestcontrol.com/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/"
+---
+# Cure for Bed Bugs
+`);
+
+      const [row] = registry.scanAstroContent(root);
+      expect(row.canonical_url_normalized).toBe('/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/');
+      expect(row.live_url).toBe('/pest-control/cure-for-bed-bugs-lakewood-ranch/');
+      expect(row.slug).toBe('cure-for-bed-bugs-lakewood-ranch');
+      expect(row.canonical_target_url).toBe('/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/');
+      expect(registry.isCanonicalizedAstro(row)).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('fails closed when Astro root is missing', () => {
     expect(() => registry.scanAstroContent('/tmp/not-a-real-astro-root')).toThrow(/ASTRO_REPO_DIR/);
   });
@@ -247,6 +269,63 @@ describe('content-registry reconciliation', () => {
     expect(rows.map((row) => row.reconciliation_status)).toEqual(['conflict', 'conflict']);
     expect(rows[0].mismatch_reasons).toContain('duplicate_astro_canonical');
     expect(summary.conflict_count).toBe(2);
+  });
+
+  test('allows intentional canonicalized Astro siblings to match DB rows by slug', () => {
+    const astroItems = [
+      {
+        canonical_url_normalized: '/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/',
+        canonical_url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/',
+        live_url: '/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/',
+        slug: 'get-rid-of-bed-bugs-lakewood-ranch-fl',
+        astro_source_path: 'src/content/blog/get-rid-of-bed-bugs-lakewood-ranch-fl.md',
+        content_type: 'blog',
+        astro_status: 'present',
+      },
+      {
+        canonical_url_normalized: '/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/',
+        canonical_url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/',
+        live_url: '/pest-control/cure-for-bed-bugs-lakewood-ranch/',
+        slug: 'cure-for-bed-bugs-lakewood-ranch',
+        astro_source_path: 'src/content/blog/cure-for-bed-bugs-lakewood-ranch.md',
+        content_type: 'blog',
+        astro_status: 'present',
+      },
+    ];
+    const dbItems = [
+      registry.dbBlogRowToItem({
+        id: '00000000-0000-0000-0000-000000000020',
+        title: 'Get Rid of Bed Bugs',
+        slug: 'get-rid-of-bed-bugs-lakewood-ranch-fl',
+        status: 'published',
+      }),
+      registry.dbBlogRowToItem({
+        id: '00000000-0000-0000-0000-000000000021',
+        title: 'Cure for Bed Bugs',
+        slug: 'cure-for-bed-bugs-lakewood-ranch',
+        status: 'published',
+      }),
+    ];
+
+    const { rows, summary } = registry.reconcileContent({ astroItems, dbItems });
+    const bySource = Object.fromEntries(rows.map((row) => [row.astro_source_path, row]));
+
+    expect(rows).toHaveLength(2);
+    expect(summary.conflict_count).toBe(0);
+    expect(summary.matched_count).toBe(2);
+    expect(bySource['src/content/blog/get-rid-of-bed-bugs-lakewood-ranch-fl.md']).toEqual(expect.objectContaining({
+      db_blog_id: '00000000-0000-0000-0000-000000000020',
+      reconciliation_status: 'matched',
+      match_confidence: 'slug',
+      live_url: '/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/',
+    }));
+    expect(bySource['src/content/blog/cure-for-bed-bugs-lakewood-ranch.md']).toEqual(expect.objectContaining({
+      db_blog_id: '00000000-0000-0000-0000-000000000021',
+      reconciliation_status: 'matched',
+      match_confidence: 'slug',
+      live_url: '/pest-control/cure-for-bed-bugs-lakewood-ranch/',
+      canonical_url_normalized: '/pest-control/get-rid-of-bed-bugs-lakewood-ranch-fl/',
+    }));
   });
 
   test('does not bind one DB row to multiple duplicate-Astro conflicts', () => {
