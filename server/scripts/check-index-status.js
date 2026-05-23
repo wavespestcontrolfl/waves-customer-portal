@@ -25,8 +25,13 @@ const sitemap = require('../services/seo/sitemap-manager');
 const ARGS = Object.fromEntries(
   process.argv.slice(2).map((a) => {
     if (!a.startsWith('--')) return [a, true];
-    const [k, v] = a.slice(2).split('=');
-    return [k, v === undefined ? true : v];
+    const stripped = a.slice(2);
+    // Split on FIRST '=' only — values can legitimately contain '='
+    // (signed URLs, query params like ?sig=a=b). The previous split('=')
+    // truncated those silently.
+    const eq = stripped.indexOf('=');
+    if (eq === -1) return [stripped, true];
+    return [stripped.slice(0, eq), stripped.slice(eq + 1)];
   })
 );
 
@@ -39,17 +44,11 @@ const FROM_GSC = !!ARGS['from-gsc-pages'];
 async function loadUrls() {
   if (URL) return [URL];
   if (FROM_SITEMAP) {
-    // Pull the first LIMIT URLs from the live sitemap. Uses sitemap-manager's
-    // cache transparently.
-    const r = await sitemap.hasUrl('https://www.wavespestcontrol.com/'); // primes cache
-    if (r.error) throw new Error(`sitemap fetch failed: ${r.error}`);
-    // Re-fetch via internal — there's no public "list all URLs" call,
-    // so we walk the cache directly.
-    const cached = sitemap._cache.get('https://www.wavespestcontrol.com/sitemap.xml');
-    if (!cached) return [];
-    const urls = Array.from(cached.urls).slice(0, LIMIT)
-      .map((u) => `https://${u}`); // re-add scheme stripped by normalize
-    return urls;
+    // listUrls returns raw <loc> values (host + scheme preserved), so
+    // www-verified GSC properties stay in-property. Honors SITEMAP_URL
+    // env override too — the previous hardcoded cache key returned [] on
+    // any non-default sitemap.
+    return sitemap.listUrls({ limit: LIMIT });
   }
   if (FROM_GSC) {
     const rows = await db('gsc_pages')
@@ -70,9 +69,15 @@ async function loadUrls() {
 
     console.log(`\nChecking ${urls.length} URL(s) via Google URL Inspection…\n`);
 
-    const fn = PERSIST ? monitor.inspectMany.bind(monitor) : async (us) => {
+    const fn = PERSIST ? monitor.inspectMany.bind(monitor) : async (us, { delayMs = 0 } = {}) => {
+      // Mirror inspectMany's pacing — Google's URL Inspection quota is
+      // ~600 QPM/property. The previous tight loop ignored delayMs and
+      // could burst large batches into 429s on --no-persist.
       const out = [];
-      for (const u of us) out.push({ url: u, result: await monitor.inspect(u) });
+      for (const u of us) {
+        out.push({ url: u, result: await monitor.inspect(u) });
+        if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+      }
       return out;
     };
 

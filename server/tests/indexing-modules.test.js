@@ -162,6 +162,20 @@ describe('parseInspection', () => {
     const r = parseInspection('https://www.wavespestcontrol.com/pest-control-bradenton-fl/', fixture);
     expect(r.canonical_matches).toBe(false);
   });
+  test('userCanonical from inspection wins over requested URL', () => {
+    // Requested URL is a slash variant; the page's declared canonical
+    // matches Google's. Should NOT flag mismatch.
+    const fixture = {
+      inspectionResult: {
+        indexStatusResult: {
+          userCanonical: 'https://www.wavespestcontrol.com/pest-control-bradenton-fl/',
+          googleCanonical: 'https://www.wavespestcontrol.com/pest-control-bradenton-fl/',
+        },
+      },
+    };
+    const r = parseInspection('https://www.wavespestcontrol.com/pest-control-bradenton-fl', fixture);
+    expect(r.canonical_matches).toBe(true);
+  });
   test('returns ok=false when no inspectionResult', () => {
     const r = parseInspection('https://x.com/', {});
     expect(r.ok).toBe(false);
@@ -298,5 +312,22 @@ describe('SitemapManager.hasUrl', () => {
     m.invalidate();
     await m.hasUrl('https://x.com/a/', { fetchFn });
     expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('SitemapManager.listUrls', () => {
+  test('returns raw <loc> values with www preserved', async () => {
+    const m = new SitemapManager();
+    const fetchFn = jest.fn().mockReturnValue(ok(SAMPLE_SITEMAP, 'application/xml'));
+    const list = await m.listUrls({ fetchFn });
+    expect(list).toContain('https://www.wavespestcontrol.com/pest-control-bradenton-fl/');
+    // www-stripped form should NOT appear — that was the original bug
+    expect(list).not.toContain('wavespestcontrol.com/pest-control-bradenton-fl');
+  });
+  test('limit option caps the result length', async () => {
+    const m = new SitemapManager();
+    const fetchFn = jest.fn().mockReturnValue(ok(SAMPLE_SITEMAP, 'application/xml'));
+    const list = await m.listUrls({ limit: 2, fetchFn });
+    expect(list).toHaveLength(2);
   });
 });

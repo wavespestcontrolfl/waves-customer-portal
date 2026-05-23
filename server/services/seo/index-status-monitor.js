@@ -26,7 +26,11 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 
-const SITE_URL = process.env.GSC_SITE_URL || 'https://wavespestcontrol.com';
+// URL Inspection requires siteUrl to match the verified GSC property
+// EXACTLY — URL-prefix properties must keep the trailing slash, and
+// the property is verified for the www host (apex is redirect-only).
+// The previous default failed inspection out of the box.
+const SITE_URL = process.env.GSC_SITE_URL || 'https://www.wavespestcontrol.com/';
 const INSPECTION_ENDPOINT = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
 
 // googleapis is heavy (~71MB) — lazy load only when first needed.
@@ -183,7 +187,10 @@ class IndexStatusMonitor {
 function parseInspection(url, data) {
   const inspection = data?.inspectionResult?.indexStatusResult;
   if (!inspection) return { ok: false, error: 'no_inspection_result', raw: data };
-  const declaredCanonical = url;
+  // Compare Google's canonical to the PAGE's declared canonical, not
+  // the requested URL. Otherwise inspecting a slash/no-slash variant
+  // or an alternate entry URL false-alarms as canonical-mismatch.
+  const declaredCanonical = inspection.userCanonical || url;
   const googleCanonical = inspection.googleCanonical || null;
   return {
     ok: true,
