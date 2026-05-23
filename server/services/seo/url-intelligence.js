@@ -693,15 +693,18 @@ class UrlIntelligence {
       .whereNotNull('city')
       .select('url', 'city', 'service', 'page_type', 'content_hash');
 
-    // Also check hub URLs that share city/service with spoke URLs
-    const hubUrls = d !== 'wavespestcontrol.com'
+    // Compare spokes against the hub, and hub runs against all spokes.
+    const comparisonUrls = d === 'wavespestcontrol.com'
       ? await db('seo_url_intelligence')
-          .where('domain', 'wavespestcontrol.com')
+          .whereIn('domain', NETWORK_DOMAINS.filter((networkDomain) => networkDomain !== d))
           .whereIn('city', urls.map((u) => u.city).filter(Boolean))
           .select('url', 'city', 'service', 'page_type', 'content_hash')
-      : [];
+      : await db('seo_url_intelligence')
+          .where('domain', 'wavespestcontrol.com')
+          .whereIn('city', urls.map((u) => u.city).filter(Boolean))
+          .select('url', 'city', 'service', 'page_type', 'content_hash');
 
-    const allUrls = [...urls, ...hubUrls];
+    const allUrls = [...urls, ...comparisonUrls];
     let clustersFound = 0;
     const clusterMap = new Map(); // url → cluster_id
     const similarityMap = new Map(); // url → max similarity

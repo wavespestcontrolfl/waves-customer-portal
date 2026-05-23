@@ -1540,6 +1540,14 @@ async function runSeoPipeline(input, context = {}) {
       logger.warn(`[IB pipeline] GSC sync: ${e.message}`);
     }
     try {
+      const SiteAuditor = require('../seo/site-auditor');
+      const result = await SiteAuditor.runSiteAudit();
+      steps.push({ step: 'site_audit', status: 'ok', pages: result?.pages?.length || 0 });
+    } catch (e) {
+      steps.push({ step: 'site_audit', status: 'failed', error: e.message });
+      logger.warn(`[IB pipeline] site audit: ${e.message}`);
+    }
+    try {
       const result = await UrlIntelligence.refreshDomain(domain);
       steps.push({ step: 'url_intelligence_refresh', status: 'ok', result });
     } catch (e) {
