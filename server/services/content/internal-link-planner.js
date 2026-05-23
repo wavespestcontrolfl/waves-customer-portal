@@ -65,6 +65,7 @@ function anchorCandidates(target) {
  *   - YAML frontmatter at top of file (--- … ---)
  *   - fenced code blocks (``` … ```)
  *   - HTML comments (<!-- … -->)
+ *   - existing markdown links/reference definitions
  *
  * Returns the body with those regions replaced by spaces of the same
  * length, so character offsets in the result line up 1:1 with the
@@ -78,6 +79,12 @@ function maskExcludedRegions(text) {
   s = s.replace(/```[\s\S]*?```/g, (m) => ' '.repeat(m.length));
   // HTML comments.
   s = s.replace(/<!--[\s\S]*?-->/g, (m) => ' '.repeat(m.length));
+  // Markdown links and reference definitions. This masks both labels
+  // and destinations; otherwise short anchors can match inside hrefs
+  // like [details](/termite-control-sarasota/) and corrupt the URL.
+  s = s.replace(/\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|[^\n)]*)\)/g, (m) => ' '.repeat(m.length));
+  s = s.replace(/\[[^\]\n]+\]\[[^\]\n]*\]/g, (m) => ' '.repeat(m.length));
+  s = s.replace(/^\s{0,3}\[[^\]\n]+\]:\s*(?:<[^>\n]+>|[^\s]+)(?:\s+.*)?$/gm, (m) => ' '.repeat(m.length));
   return s;
 }
 

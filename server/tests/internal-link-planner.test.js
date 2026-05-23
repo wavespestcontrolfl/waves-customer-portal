@@ -136,6 +136,15 @@ describe('findFirstUnlinkedOccurrence', () => {
     const r = findFirstUnlinkedOccurrence(t, 'pest control bradenton');
     expect(r.index).toBe(t.indexOf('later pest control bradenton') + 'later '.length);
   });
+  test('skips matches inside existing markdown href destinations', () => {
+    const t = '[details](/termite-control-sarasota/) and termite service details';
+    const r = findFirstUnlinkedOccurrence(t, 'termite');
+    expect(r.index).toBe(t.indexOf('termite service'));
+  });
+  test('skips matches inside reference definition destinations', () => {
+    const t = '[details][termite-ref]\n\n[termite-ref]: /termite-control-sarasota/';
+    expect(findFirstUnlinkedOccurrence(t, 'termite')).toBeNull();
+  });
   test('case-insensitive match, preserves source casing in snippet', () => {
     const t = 'Pest Control Bradenton service area.';
     const r = findFirstUnlinkedOccurrence(t, 'pest control bradenton');
