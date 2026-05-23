@@ -51,8 +51,43 @@ function resolveClientRatingQuestion(config, serviceTypeText) {
   return questions[key] || questions.custom || DEFAULT_CONFIG.clientQuestionText.custom;
 }
 
+// Median gap-in-days between consecutive service dates → cadence label.
+// Quarterly ≈ 90d, bi-monthly ≈ 60d, monthly ≈ 30d. We classify on the
+// midpoints (45 / 75) so noisy data doesn't bounce between buckets.
+function detectCadenceFromHistory(history) {
+  if (!Array.isArray(history) || history.length < 2) return null;
+  const dates = history
+    .map((row) => row && row.serviceDate)
+    .filter(Boolean)
+    .map((d) => new Date(`${d}T12:00:00`).getTime())
+    .filter((t) => Number.isFinite(t))
+    .sort((a, b) => a - b);
+  if (dates.length < 2) return null;
+  const gaps = [];
+  for (let i = 1; i < dates.length; i += 1) {
+    gaps.push((dates[i] - dates[i - 1]) / (1000 * 60 * 60 * 24));
+  }
+  gaps.sort((a, b) => a - b);
+  const median = gaps[Math.floor(gaps.length / 2)];
+  if (median <= 45) return 'monthly';
+  if (median <= 75) return 'bimonthly';
+  return 'quarterly';
+}
 
-function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null }) {
+function shapeHistory(historyRows) {
+  if (!Array.isArray(historyRows) || historyRows.length === 0) return [];
+  return historyRows
+    .filter((row) => row && row.displayed_score !== null && row.displayed_score !== undefined && row.service_date)
+    .map((row) => ({
+      serviceDate: formatDate(row.service_date),
+      score: Number(row.displayed_score),
+      label: row.label_name || null,
+    }))
+    // store ships DESC; chart wants oldest → newest left-to-right.
+    .reverse();
+}
+
+function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null, historyRows = null }) {
   const effectiveConfig = config || DEFAULT_CONFIG;
   if (!effectiveConfig.enabled || !effectiveConfig.showOnCustomerReport) {
     return null;
@@ -81,6 +116,9 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null 
     : null;
   const submittedClientRating = hasClientRating ? Number(serviceRecord.client_pest_rating) : null;
 
+  const history = shapeHistory(historyRows);
+  const cadence = detectCadenceFromHistory(history);
+
   if (!scoreRow || scoreRow.data_completeness === 'insufficient' || scoreRow.displayed_score === null || scoreRow.displayed_score === undefined) {
     return {
       enabled: true,
@@ -100,6 +138,8 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null 
       canCaptureClientRating,
       clientRatingQuestion,
       submittedClientRating,
+      history,
+      cadence,
     };
   }
 
@@ -123,6 +163,8 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null 
     canCaptureClientRating,
     clientRatingQuestion,
     submittedClientRating,
+    history,
+    cadence,
   };
 }
 
