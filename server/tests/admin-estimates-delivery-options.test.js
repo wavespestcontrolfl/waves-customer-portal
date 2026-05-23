@@ -171,6 +171,31 @@ describe('admin estimate delivery option validation', () => {
     })).toBe(true);
   });
 
+  test('detects object-shaped St. Augustine dethatching selections without line metadata', () => {
+    expect(estimateDataHasUnresolvedManagerApproval({
+      engineInputs: {
+        grassType: 'St. Augustine',
+        services: {
+          dethatching: {
+            thatchDepthInches: 0.8,
+          },
+        },
+      },
+    })).toBe(true);
+
+    expect(estimateDataHasUnresolvedManagerApproval({
+      engineInputs: {
+        grassType: 'St. Augustine',
+        services: {
+          dethatching: {
+            selected: false,
+            thatchDepthInches: 0.8,
+          },
+        },
+      },
+    })).toBe(false);
+  });
+
   test('allows legacy V2 St. Augustine dethatching inputs after trusted approval', () => {
     expect(estimateDataHasUnresolvedManagerApproval({
       inputs: {
@@ -249,6 +274,54 @@ describe('admin estimate delivery option validation', () => {
     }));
     expect(normalizedSpec.manualReviewReasons).toEqual([]);
     expect(normalized.result.quoteRequired).toBe(false);
+    expect(normalized.result.quoteRequiredItems).toEqual([]);
+    expect(estimateDataHasQuoteRequirement(normalized)).toBe(false);
+    expect(estimateDataHasUnresolvedManagerApproval(normalized)).toBe(false);
+  });
+
+  test('normalizes St. Augustine dethatching rows that only carry review-reason tokens', () => {
+    const normalized = normalizeEstimateDethatchingManagerApproval({
+      inputs: {
+        dethatchingManagerApproved: true,
+        dethatchingManagerApprovalReason: 'verified_thatch_probe',
+      },
+      result: {
+        quoteRequired: true,
+        quoteRequiredItems: [{
+          service: 'dethatching',
+          estimatedPrice: 180,
+          manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+          quoteRequired: true,
+        }],
+        oneTime: {
+          specItems: [{
+            service: 'dethatching',
+            name: 'Dethatching',
+            price: null,
+            estimatedPrice: 180,
+            manualReviewReasons: ['st_augustine_dethatching_manager_approval_required'],
+            quoteRequired: true,
+            requiresCustomQuote: true,
+          }],
+        },
+      },
+    }, {
+      technician: { id: 'admin-1', role: 'admin' },
+      technicianId: 'admin-1',
+      now: () => new Date('2026-05-22T12:00:00.000Z'),
+    });
+
+    const normalizedSpec = normalized.result.oneTime.specItems.find((item) => item.service === 'dethatching');
+    expect(normalizedSpec).toEqual(expect.objectContaining({
+      price: 180,
+      estimatedPrice: 180,
+      quoteRequired: false,
+      requiresCustomQuote: false,
+      managerApproved: true,
+      managerApprovalSatisfied: true,
+      managerApprovalOverrideReason: 'verified_thatch_probe',
+    }));
+    expect(normalizedSpec.manualReviewReasons).toEqual([]);
     expect(normalized.result.quoteRequiredItems).toEqual([]);
     expect(estimateDataHasQuoteRequirement(normalized)).toBe(false);
     expect(estimateDataHasUnresolvedManagerApproval(normalized)).toBe(false);

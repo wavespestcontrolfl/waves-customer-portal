@@ -74,8 +74,10 @@ function looksLikeDethatchingApprovalItem(value = {}) {
 
 function itemHasStAugustineApprovalReason(value = {}) {
   const reasons = Array.isArray(value.manualReviewReasons) ? value.manualReviewReasons : [];
-  return value.managerApprovalReason === 'st_augustine_dethatching' ||
-    (reasons.includes('st_augustine_dethatching') && looksLikeDethatchingApprovalItem(value));
+  const hasManagerReason = isDethatchingManagerApprovalReviewReason(value.managerApprovalReason);
+  const hasManualReviewReason = reasons.some((reason) => isDethatchingManagerApprovalReviewReason(reason));
+  return hasManagerReason ||
+    (hasManualReviewReason && looksLikeDethatchingApprovalItem(value));
 }
 
 function itemManagerApprovalSatisfied(value = {}, root = {}) {
@@ -84,6 +86,10 @@ function itemManagerApprovalSatisfied(value = {}, root = {}) {
 
 function booleanInputTrue(value) {
   return value === true || value === 'true' || value === 'TRUE' || value === 'YES' || value === 'yes' || value === 1 || value === '1';
+}
+
+function booleanInputFalse(value) {
+  return value === false || value === 'false' || value === 'FALSE' || value === 'NO' || value === 'no' || value === 0 || value === '0';
 }
 
 function normalizeApprovalToken(value) {
@@ -107,12 +113,27 @@ function rootInputObjects(root = {}) {
   ].filter((item) => item && typeof item === 'object');
 }
 
+function inputRequestsDethatching(value) {
+  if (booleanInputTrue(value)) return true;
+  if (booleanInputFalse(value)) return false;
+  if (!value || typeof value !== 'object') return false;
+
+  const explicitState = [
+    value.selected,
+    value.enabled,
+    value.active,
+    value.requested,
+  ].filter((item) => item !== undefined);
+  if (explicitState.some((item) => booleanInputTrue(item))) return true;
+  if (explicitState.some((item) => booleanInputFalse(item))) return false;
+  return true;
+}
+
 function rootRequestsDethatching(root = {}) {
   return rootInputObjects(root).some((inputs) => (
-    booleanInputTrue(inputs.svcDethatch) ||
-    booleanInputTrue(inputs.dethatching) ||
-    booleanInputTrue(inputs.services?.dethatching) ||
-    booleanInputTrue(inputs.services?.dethatching?.selected)
+    inputRequestsDethatching(inputs.svcDethatch) ||
+    inputRequestsDethatching(inputs.dethatching) ||
+    inputRequestsDethatching(inputs.services?.dethatching)
   ));
 }
 
@@ -160,6 +181,10 @@ const DETHATCHING_MANAGER_APPROVAL_REVIEW_REASONS = new Set([
   'st_augustine_dethatching_manager_approval_reason_missing',
 ]);
 
+function isDethatchingManagerApprovalReviewReason(value) {
+  return DETHATCHING_MANAGER_APPROVAL_REVIEW_REASONS.has(normalizeApprovalToken(value));
+}
+
 const DETHATCHING_MANAGER_APPROVAL_REASONS = new Set([
   'verified_thatch_probe',
   'customer_requested_after_warning',
@@ -200,7 +225,7 @@ function normalizeDethatchingApprovalDerivedFields(value, {
   }
 
   const reviewReasons = uniqueStringList(value.manualReviewReasons)
-    .filter((item) => !DETHATCHING_MANAGER_APPROVAL_REVIEW_REASONS.has(item));
+    .filter((item) => !isDethatchingManagerApprovalReviewReason(item));
   if (!trustedApproval) {
     reviewReasons.push('st_augustine_dethatching_manager_approval_required');
   }
