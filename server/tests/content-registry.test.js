@@ -57,6 +57,15 @@ describe('content-registry url and hashing helpers', () => {
     expect(columns).not.toHaveProperty('by_status');
   });
 
+  test('registry write payload encodes jsonb fields explicitly', () => {
+    const payload = registry.registryWritePayload({
+      mismatch_reasons: ['duplicate_astro_canonical'],
+      metadata: { source: 'fixture' },
+    });
+    expect(payload.mismatch_reasons).toBe(JSON.stringify(['duplicate_astro_canonical']));
+    expect(payload.metadata).toBe(JSON.stringify({ source: 'fixture' }));
+  });
+
   test('DB row hash includes registry-output workflow and date fields', () => {
     const base = {
       id: '00000000-0000-0000-0000-000000000099',
@@ -481,11 +490,11 @@ slug: /how-to-stop-ants/
       expect(staleUpdates.map((call) => call.payload)).toEqual(expect.arrayContaining([
         expect.objectContaining({ astro_status: 'unknown', db_status: 'missing' }),
       ]));
-      expect(staleUpdates[0].payload.mismatch_reasons).toContain('not_seen_in_latest_sync');
+      expect(JSON.parse(staleUpdates[0].payload.mismatch_reasons)).toContain('not_seen_in_latest_sync');
       const completed = calls.find((call) => call.table === 'content_registry_sync_runs'
         && call.op === 'update'
         && call.payload.status === 'completed');
-      expect(completed.payload.summary.by_status.source_missing_since_sync).toBe(2);
+      expect(JSON.parse(completed.payload.summary).by_status.source_missing_since_sync).toBe(2);
       expect(completed.payload.changed_count).toBe(2);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });

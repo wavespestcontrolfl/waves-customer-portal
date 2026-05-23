@@ -412,7 +412,7 @@ async function runContentRegistrySync({
             last_synced_at: now,
             updated_at: now,
           };
-          await upsertRegistryRow(trx, payload);
+          await upsertRegistryRow(trx, registryWritePayload(payload));
         }
         for (const row of staleRows) {
           await markRegistryRowMissing(trx, row, syncRun.id, now);
@@ -422,7 +422,7 @@ async function runContentRegistrySync({
           completed_at: now,
           astro_repo_sha: result.rows.find((row) => row.astro_repo_sha)?.astro_repo_sha || null,
           ...syncRunCountColumns(summary),
-          summary,
+          summary: jsonbValue(summary),
           updated_at: now,
         });
       });
@@ -442,7 +442,7 @@ async function runContentRegistrySync({
         completed_at: now,
         failure_message: err.message,
         error_count: 1,
-        summary: { error: err.message, code: err.code || null },
+        summary: jsonbValue({ error: err.message, code: err.code || null }),
         updated_at: now,
       }).catch(() => {});
     }
@@ -513,6 +513,18 @@ async function upsertRegistryRow(database, row) {
   await database('content_registry').where('id', existing.id).update(updates);
 }
 
+function registryWritePayload(row) {
+  return {
+    ...row,
+    mismatch_reasons: jsonbValue(row.mismatch_reasons || []),
+    metadata: jsonbValue(row.metadata || {}),
+  };
+}
+
+function jsonbValue(value) {
+  return JSON.stringify(value == null ? null : value);
+}
+
 async function markRegistryRowMissing(database, row, syncRunId, now) {
   if (!row.id) return;
   const mismatchReasons = Array.from(new Set([
@@ -530,7 +542,7 @@ async function markRegistryRowMissing(database, row, syncRunId, now) {
     live_status: row.live_status || 'unknown',
     reconciliation_status: 'source_missing_since_sync',
     match_confidence: 'none',
-    mismatch_reasons: mismatchReasons,
+    mismatch_reasons: jsonbValue(mismatchReasons),
     sync_run_id: syncRunId,
     last_synced_at: now,
     updated_at: now,
@@ -759,6 +771,8 @@ module.exports = {
   runContentRegistrySync,
   syncRunCountColumns,
   summaryWithStaleRows,
+  registryWritePayload,
+  jsonbValue,
   deriveUrlFromAstroPath,
   contentTypeFromCollection,
   collectionsForContentType,
