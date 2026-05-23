@@ -25,11 +25,18 @@ const TRIGGER_REGISTRY = {
     category: 'new_lead',
     priority: 'high',
     group: 'Leads & Sales',
-    build: (p) => ({
-      title: 'New lead',
-      body: `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.zip ? ' (' + p.zip + ')' : ''}`,
-      link: p.leadId ? `/admin/leads/${p.leadId}` : '/admin/leads',
-    }),
+    build: (p) => {
+      const bodyParts = [
+        `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
+      ];
+      if (p.phone) bodyParts.push(p.phone);
+      if (p.message) bodyParts.push(`"${String(p.message).slice(0, 140)}"`);
+      return {
+        title: p.title || 'New lead',
+        body: bodyParts.join(' - '),
+        link: p.leadId ? `/admin/leads/${p.leadId}` : '/admin/leads',
+      };
+    },
   },
   sms_reply: {
     label: 'SMS reply received',
@@ -211,6 +218,38 @@ const TRIGGER_REGISTRY = {
       body: p.body || null,
       link: p.link || '/admin/dashboard',
     }),
+  },
+  internal_admin_alert: {
+    label: 'Internal admin alert',
+    category: 'alert',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => ({
+      title: p.title || 'Internal admin alert',
+      body: p.body || null,
+      link: p.link || '/admin/dashboard',
+    }),
+  },
+  kb_audit_flagged: {
+    label: 'Knowledge base audit flagged entries',
+    category: 'knowledge',
+    priority: 'high',
+    group: 'Knowledge Base',
+    build: (p) => {
+      const count = Number(p.count || p.flagged || 0);
+      const entries = Array.isArray(p.entries) ? p.entries : [];
+      const visible = entries.slice(0, 4).map((entry) => {
+        const title = entry.title || 'Untitled entry';
+        const summary = entry.summary || 'Needs review';
+        return `${title}: ${String(summary).slice(0, 180)}`;
+      });
+      if (count > visible.length) visible.push(`${count - visible.length} more flagged entr${count - visible.length === 1 ? 'y' : 'ies'}`);
+      return {
+        title: count === 1 ? 'KB audit flagged 1 entry' : `KB audit flagged ${count} entries`,
+        body: visible.join('\n') || 'Review flagged knowledge base entries.',
+        link: '/admin/kb',
+      };
+    },
   },
 };
 

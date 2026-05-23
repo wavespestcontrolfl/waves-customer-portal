@@ -329,7 +329,8 @@ router.put('/:token/confirm-service', loadSession, async (req, res, next) => {
         .update({ status: 'rescheduled', notes: notes || `Preferred date: ${preferredDate}` });
       try {
         await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
-          `📅 Reschedule request from ${req.customer.first_name} ${req.customer.last_name}: prefers ${preferredDate || 'TBD'}. Notes: ${notes || 'None'}`);
+          `📅 Reschedule request from ${req.customer.first_name} ${req.customer.last_name}: prefers ${preferredDate || 'TBD'}. Notes: ${notes || 'None'}`,
+          { messageType: 'internal_alert', link: '/admin/schedule' });
       } catch (e) { logger.error(`Reschedule SMS failed: ${e.message}`); }
     }
 
@@ -580,7 +581,8 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
         `✅ New customer onboarded: ${c.first_name} ${c.last_name} at ${c.address_line1}, ${c.city}.\n` +
         `${s.waveguard_tier || ''} WaveGuard, ${billingLine}. Card ✅.\n` +
         `First service: ${svcDate}. Gate: ${hasGate ? 'yes' : 'no'}. Pets: ${hasPets ? `yes (${prefs.pet_count})` : 'no'}.\n` +
-        `Referral: ${c.referral_source || 'N/A'}.`
+        `Referral: ${c.referral_source || 'N/A'}.`,
+        { messageType: 'internal_alert', link: '/admin/customers' },
       );
     } catch (e) { logger.error(`Internal onboarding SMS failed: ${e.message}`); }
 

@@ -1,4 +1,4 @@
-const { __private } = require('../services/notification-triggers');
+const { TRIGGER_REGISTRY, __private } = require('../services/notification-triggers');
 
 describe('notification trigger push tags', () => {
   test('SMS replies get unique tags so iOS does not silently replace prior alerts', () => {
@@ -16,5 +16,52 @@ describe('notification trigger push tags', () => {
 
   test('non-SMS triggers keep collapsing by trigger key', () => {
     expect(__private.pushTagFor('payment_failed', {})).toBe('waves-payment_failed');
+  });
+
+  test('new lead trigger can carry tracking number context', () => {
+    const built = TRIGGER_REGISTRY.new_lead.build({
+      title: 'New lead from palmettoexterminator.com',
+      name: 'Unknown prospect',
+      source: 'palmettoexterminator.com',
+      area: 'Palmetto',
+      phone: '+18182079399',
+      message: 'Cynthia Sparagna 1000 Riverside Drive',
+      leadId: 'lead-123',
+    });
+
+    expect(built.title).toBe('New lead from palmettoexterminator.com');
+    expect(built.body).toContain('Unknown prospect via palmettoexterminator.com (Palmetto)');
+    expect(built.body).toContain('+18182079399');
+    expect(built.body).toContain('"Cynthia Sparagna 1000 Riverside Drive"');
+    expect(built.link).toBe('/admin/leads/lead-123');
+  });
+
+  test('KB audit trigger summarizes flagged entries for the admin bell', () => {
+    const built = TRIGGER_REGISTRY.kb_audit_flagged.build({
+      count: 2,
+      entries: [
+        { title: 'Rodent Service Phases', summary: 'Correct the RUP claim.' },
+        { title: 'SEO Strategy', summary: 'Address the doorway-page risk.' },
+      ],
+    });
+
+    expect(built.title).toBe('KB audit flagged 2 entries');
+    expect(built.body).toContain('Rodent Service Phases: Correct the RUP claim.');
+    expect(built.body).toContain('SEO Strategy: Address the doorway-page risk.');
+    expect(built.link).toBe('/admin/kb');
+  });
+
+  test('legacy internal admin SMS redirects have a generic notification trigger', () => {
+    const built = TRIGGER_REGISTRY.internal_admin_alert.build({
+      title: 'Tax Deadline Alert',
+      body: 'Two filings need review.',
+      link: '/admin/tax',
+    });
+
+    expect(built).toEqual({
+      title: 'Tax Deadline Alert',
+      body: 'Two filings need review.',
+      link: '/admin/tax',
+    });
   });
 });

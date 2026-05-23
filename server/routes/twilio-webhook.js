@@ -236,11 +236,18 @@ router.post('/sms', async (req, res) => {
         await db('notification_prefs').insert({ customer_id: newCust.id });
 
         try {
-          await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-            `🔔 New lead from ${numberConfig.domain || 'van wrap'}!\n📞 ${From}\n💬 "${Body || 'Phone call'}"\nArea: ${numberConfig.area || 'Unknown'}`,
-            { messageType: 'internal_alert' }
-          );
-        } catch (e) { logger.error(`Domain lead alert failed: ${e.message}`); }
+          const { triggerNotification } = require('../services/notification-triggers');
+          const source = numberConfig.domain || 'van wrap';
+          await triggerNotification('new_lead', {
+            title: `New lead from ${source}`,
+            name: 'Unknown prospect',
+            phone: From,
+            message: Body || 'Phone call',
+            source,
+            area: numberConfig.area || 'Unknown',
+            leadId: newCust.id,
+          });
+        } catch (e) { logger.error(`Domain lead notification failed: ${e.message}`); }
 
         await db('activity_log').insert({
           customer_id: newCust.id, action: 'customer_created',
@@ -277,8 +284,11 @@ router.post('/sms', async (req, res) => {
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
+    const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
+    const shouldNotifyKnownInbound = numberConfig.type === 'location' || isTrackingLeadInbound;
+
     // In-app + push notification for inbound SMS from known customers
-    if (customer && (Body || inboundMedia.length) && numberConfig.type === 'location' && !smsReaction) {
+    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         await triggerNotification('sms_reply', {
@@ -290,8 +300,9 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[notifications] sms_reply trigger failed: ${e.message}`); }
     }
 
-    // Notify Adam of every inbound SMS (skip only if it would create a loop — same from AND to)
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    // Notify Adam of regular inbound SMS. Domain/van tracking leads use the
+    // admin notification dispatcher above instead of owner SMS.
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length
@@ -306,13 +317,16 @@ router.post('/sms', async (req, res) => {
 
     // Van wrap tracking — new lead flow
     if (numberConfig.type === 'tracking') {
-      // Notify Adam
       try {
-        await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-          `📱 New lead from van wrap number:\nFrom: ${From}\nMessage: "${Body || '(no text)'}"\n\nReply from the portal.`,
-          { fromNumber: TWILIO_NUMBERS.locations['lakewood-ranch'].number, messageType: 'internal_alert' }
-        );
-      } catch (e) { logger.error(`Van wrap admin alert failed: ${e.message}`); }
+        const { triggerNotification } = require('../services/notification-triggers');
+        await triggerNotification('new_lead', {
+          title: 'New lead from van wrap number',
+          name: 'Unknown prospect',
+          phone: From,
+          message: Body || '(no text)',
+          source: 'van wrap',
+        });
+      } catch (e) { logger.error(`Van wrap admin notification failed: ${e.message}`); }
     }
 
     // WAVES AI ASSISTANT — route through conversational AI engine

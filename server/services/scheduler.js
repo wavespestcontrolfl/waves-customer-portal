@@ -679,7 +679,7 @@ function initScheduledJobs() {
 
   // =========================================================================
   // Dashboard alerts — every 5 minutes, detect transitions in operational
-  // alerts and fan out Web Push (always) + SMS to owner (critical only).
+  // alerts and fan out Waves admin notifications.
   // See server/services/dashboard-alerts-cron.js for the diff logic.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
@@ -1144,19 +1144,21 @@ function initScheduledJobs() {
       const result = await KBService.runAIAudit({ maxEntries: 15 });
       logger.info(`KB AI audit done: ${result.audited} reviewed, ${result.flagged} flagged`);
 
-      // SMS summary if anything was flagged
+      // Admin notification summary if anything was flagged.
       if (result.flagged > 0) {
         try {
-          const ownerPhone = process.env.OWNER_PHONE || '+19413187612';
-          const flaggedTitles = result.results
+          const flaggedEntries = result.results
             .filter(r => r.status === 'flag' || r.status === 'update-needed')
-            .map(r => `- ${r.title}: ${r.summary}`)
-            .join('\n');
-          await TwilioService.sendSMS(ownerPhone,
-            `KB Audit: ${result.flagged} entries flagged for review:\n${flaggedTitles}`,
-            { messageType: 'internal_alert' }
-          );
-        } catch { /* Twilio not available */ }
+            .map(r => ({ id: r.id, title: r.title, summary: r.summary, status: r.status }));
+          const { triggerNotification } = require('./notification-triggers');
+          await triggerNotification('kb_audit_flagged', {
+            count: result.flagged,
+            audited: result.audited,
+            entries: flaggedEntries,
+          });
+        } catch (err) {
+          logger.error(`KB AI audit notification failed: ${err.message}`);
+        }
       }
     } catch (err) {
       logger.error(`KB AI audit failed: ${err.message}`);

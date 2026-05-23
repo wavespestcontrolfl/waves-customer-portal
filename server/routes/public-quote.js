@@ -505,19 +505,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);
     }
 
-    // Post-quote orchestration — customer self-serves with price + booking link,
-    // admin gets SMS notification (no call — they already saw the price on screen).
+    // Post-quote orchestration — customer self-serves with price + booking link.
     // The outbound-admin-call pattern is reserved for the no-price divert flow
     // via /api/leads (lead-webhook.js), where admin follow-up is actually needed.
-    try {
-      await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-        quoteRequired
-          ? `\u{1F514} Manual quote needed!\n${firstName} ${lastName}\n\u{1F4DE} ${normalizedPhone || phone}\n\u{1F4CD} ${quoteFullAddress || 'No address'}\n${serviceInterest} · commercial property`
-          : `\u{1F514} Quote-wizard lead!\n${firstName} ${lastName}\n\u{1F4DE} ${normalizedPhone || phone}\n\u{1F4CD} ${quoteFullAddress || 'No address'}\n\u{1F4B0} ${serviceInterest} · $${Math.round(monthly)}/mo`,
-        { messageType: 'internal_alert' }
-      );
-    } catch (e) { logger.error(`[public-quote] Admin SMS failed: ${e.message}`); }
-
     // Customer SMS: estimate_accepted_onetime template (DB-editable).
     if (normalizedPhone && !quoteRequired) {
       try {
@@ -738,11 +728,14 @@ router.post('/upsell', quoteLimiter, async (req, res) => {
     const firstName = lead.first_name || '';
     const lastName = lead.last_name || '';
     try {
-      await TwilioService.sendSMS(WAVES_ADMIN_PHONE,
-        `\u{2728} Upsell added\n${firstName} ${lastName}\n+ ${addLabels.join(', ')}`,
-        { messageType: 'internal_alert' }
+      const NotificationService = require('../services/notification-service');
+      await NotificationService.notifyAdmin(
+        'estimate',
+        `Upsell added: ${firstName} ${lastName}`.trim(),
+        `+ ${addLabels.join(', ')}`,
+        { icon: '\u{2728}', link: '/admin/leads', metadata: { leadId: lead.id } }
       );
-    } catch (e) { logger.error(`[public-quote] Upsell admin SMS failed: ${e.message}`); }
+    } catch (e) { logger.error(`[public-quote] Upsell admin notification failed: ${e.message}`); }
 
     res.json({ ok: true, service_interest: mergedInterest });
   } catch (err) {

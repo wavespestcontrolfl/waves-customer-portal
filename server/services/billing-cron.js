@@ -226,6 +226,7 @@ const BillingCron = {
           try {
             await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
               `🚨 Stripe orphan charge: customer id=${customer.id} — $${err.amount} charged via PI ${err.stripePaymentIntentId} but not in our DB. Reconcile via stripe_orphan_charges. DO NOT retry.`,
+              { messageType: 'internal_alert', link: '/admin/revenue' },
             );
           } catch (smsErr) {
             logger.error(`[billing-cron] Office orphan SMS failed: ${smsErr.message}`);
@@ -468,7 +469,8 @@ const BillingCron = {
           // sat on a dashboard — push-style SMS makes sure it lands).
           try {
             await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
-              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. Service paused until card is updated. Last error: ${err.message}`
+              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. Service paused until card is updated. Last error: ${err.message}`,
+              { messageType: 'internal_alert', link: '/admin/revenue' },
             );
           } catch (officeErr) {
             logger.error(`[billing-cron] Office alert SMS failed: ${officeErr.message}`);
