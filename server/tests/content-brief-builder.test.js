@@ -16,6 +16,7 @@ const {
   SERVICE_HUB_LINKS,
   nextWeekday9amET,
 } = require('../services/content/content-brief-builder')._internals;
+const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
 
 describe('REQUIRED_SECTIONS map', () => {
   test('each page type produces a non-empty list (except metadata-only)', () => {
@@ -63,6 +64,46 @@ describe('SERVICE_HUB_LINKS', () => {
   });
   test('pest hub includes waveguard-memberships', () => {
     expect(SERVICE_HUB_LINKS.pest).toEqual(expect.arrayContaining(['/waveguard-memberships/']));
+  });
+});
+
+describe('_composeBrief customer signal context', () => {
+  test('carries city/service into customer_signal for uniqueness gate', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-1',
+        page_url: null,
+        query: 'pest control bradenton',
+        city: 'Bradenton',
+        service: 'pest',
+        bucket: 'customer_need',
+        signal_metadata: {},
+      },
+      signals: {
+        customer_signal: {
+          topic: 'ants in kitchen',
+          normalized_question: 'How do I stop ants?',
+          total_count: 12,
+          source_counts: { calls: 7, sms: 5 },
+        },
+        serp_profile: null,
+        conversion_feedback: null,
+      },
+      decision: {
+        page_type: 'city-service',
+        action_type: 'create_or_refresh_city_service_page',
+        final_score: 80,
+        score_breakdown: {},
+        human_review_required: false,
+        human_review_reason: null,
+        router_notes: null,
+      },
+      existingBriefVersions: 0,
+    });
+
+    expect(brief.customer_signal.city).toBe('Bradenton');
+    expect(brief.customer_signal.service).toBe('pest');
   });
 });
 
