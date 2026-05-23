@@ -214,9 +214,10 @@ function reconcileContent({ astroItems = [], dbItems = [], previousRows = [] } =
   const previous = previousLookup(previousRows);
   const astroCanonicalCounts = countsBy(astroItems, 'canonical_url_normalized');
   const astroSlugCounts = countsBy(astroItems, 'slug');
-  const dbCanonicalCounts = countsBy(dbItems, 'canonical_url_normalized');
-  const dbByCanonical = uniqueMap(dbItems, 'canonical_url_normalized');
-  const dbBySlug = uniqueMap(dbItems, 'slug');
+  const activeDbItems = dbItems.filter((item) => !isArchivedWorkflow(item));
+  const dbCanonicalCounts = countsBy(activeDbItems, 'canonical_url_normalized');
+  const dbByCanonical = uniqueMap(activeDbItems, 'canonical_url_normalized');
+  const dbBySlug = uniqueMap(activeDbItems, 'slug');
   const usedDb = new Set();
   const rows = [];
 
@@ -261,9 +262,10 @@ function reconcileContent({ astroItems = [], dbItems = [], previousRows = [] } =
 
   for (const item of dbItems) {
     if (usedDb.has(item.db_blog_id)) continue;
-    const duplicateDbCanonical = item.canonical_url_normalized && dbCanonicalCounts.get(item.canonical_url_normalized) > 1;
-    const duplicateAstroCanonical = item.canonical_url_normalized && astroCanonicalCounts.get(item.canonical_url_normalized) > 1;
-    const duplicateAstroSlug = item.slug && astroSlugCounts.get(item.slug) > 1;
+    const isArchived = isArchivedWorkflow(item);
+    const duplicateDbCanonical = !isArchived && item.canonical_url_normalized && dbCanonicalCounts.get(item.canonical_url_normalized) > 1;
+    const duplicateAstroCanonical = !isArchived && item.canonical_url_normalized && astroCanonicalCounts.get(item.canonical_url_normalized) > 1;
+    const duplicateAstroSlug = !isArchived && item.slug && astroSlugCounts.get(item.slug) > 1;
     const row = { ...item, mismatch_reasons: [] };
     if (duplicateAstroCanonical || duplicateAstroSlug || duplicateDbCanonical) {
       row.reconciliation_status = 'conflict';
@@ -271,7 +273,8 @@ function reconcileContent({ astroItems = [], dbItems = [], previousRows = [] } =
       if (duplicateAstroSlug) row.mismatch_reasons.push('duplicate_astro_slug');
       if (duplicateDbCanonical) row.mismatch_reasons.push('duplicate_db_canonical');
     } else {
-      row.reconciliation_status = changeStatus(row, previous)
+      const changedStatus = isArchived ? null : changeStatus(row, previous);
+      row.reconciliation_status = changedStatus
         || (row.workflow_status === 'published' ? 'db_published_missing_astro' : 'db_only');
     }
     rows.push(finalizeRegistryRow(preserveLiveMirrorFields(row, previous)));
@@ -312,6 +315,10 @@ function changeStatus(row, previous) {
   if (row.astro_file_hash && prev.astro_file_hash && row.astro_file_hash !== prev.astro_file_hash) return 'astro_changed_since_sync';
   if (row.db_row_hash && prev.db_row_hash && row.db_row_hash !== prev.db_row_hash) return 'db_changed_since_sync';
   return null;
+}
+
+function isArchivedWorkflow(row = {}) {
+  return String(row.workflow_status || '').trim().toLowerCase() === 'archived';
 }
 
 function preserveLiveMirrorFields(row, previous) {
@@ -690,10 +697,10 @@ function normalizeWorkflowStatus(row = {}) {
   const status = String(row.status || '').toLowerCase().replace(/_/g, '-');
   const astroStatus = String(row.astro_status || '').toLowerCase().replace(/_/g, '-');
   const publishStatus = String(row.publish_status || '').toLowerCase().replace(/_/g, '-');
+  if (status === 'archived') return 'archived';
   if (astroStatus === 'live' || status === 'published') return 'published';
   if (publishStatus === 'pending-review') return 'pending-review';
   if (status === 'scheduled' || publishStatus === 'scheduled') return 'scheduled';
-  if (status === 'archived') return 'archived';
   if (status === 'idea' || status === 'queued' || status === 'draft' || status === 'wp-draft') return 'draft';
   return status || publishStatus || astroStatus || 'unknown';
 }
@@ -793,6 +800,7 @@ module.exports = {
   astroFileToItem,
   dbBlogRowToItem,
   reconcileContent,
+  isArchivedWorkflow,
   preserveLiveMirrorFields,
   liveTargetChanged,
   summarizeRows,
