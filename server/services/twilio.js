@@ -7,15 +7,15 @@ const { shortenOrPassthrough } = require("./short-url");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
 const { publicPortalUrl } = require("../utils/portal-url");
 
-// Owner-SMS kill switch.
+// Owner/admin SMS controls.
 //
 // 25+ places in the codebase send SMS to the operator's personal phone
 // — new-lead alerts, billing crons, BI briefings, SEO digests, missed
 // appointments, etc. — and most of them have hardcoded phone fallbacks
-// like '+19413187612' / '+19415993489' so simply unsetting env vars
-// doesn't silence them. When OWNER_SMS_DISABLED='true', sendSMS()
-// suppresses any send whose recipient matches a known owner phone.
-// Push notifications + bell entries continue normally.
+// like '+19413187612' / '+19415993489'. Legacy internal/admin alert SMS
+// to those phones is redirected to Waves admin notifications before Twilio.
+// When OWNER_SMS_DISABLED='true', sendSMS() also suppresses any remaining
+// non-alert send whose recipient matches a known owner phone.
 //
 // Toggleable via env var so the kill switch is reversible without a
 // deploy: set OWNER_SMS_DISABLED=true on Railway → silence; unset
@@ -47,6 +47,7 @@ function getOwnerPhoneSet() {
     process.env.OWNER_PHONE,
     process.env.ADAM_PHONE,
     process.env.ADAM_CELL,
+    process.env.ADMIN_PHONE,
     process.env.WAVES_OFFICE_PHONE,
     process.env.WAVES_ADMIN_PHONE,
     ...HARDCODED_OWNER_FALLBACKS,
@@ -54,9 +55,63 @@ function getOwnerPhoneSet() {
   return new Set(candidates.map(normalizePhone).filter(Boolean));
 }
 
+function isKnownOwnerPhone(to) {
+  return getOwnerPhoneSet().has(normalizePhone(to));
+}
+
 function isOwnerSmsSilenced(to) {
   if (process.env.OWNER_SMS_DISABLED !== "true") return false;
-  return getOwnerPhoneSet().has(normalizePhone(to));
+  return isKnownOwnerPhone(to);
+}
+
+function isInternalAdminAlertType(messageType) {
+  const type = String(messageType || "").toLowerCase();
+  return type === "internal_alert" || type === "admin_alert";
+}
+
+function buildInternalAlertPayload(body, options = {}) {
+  const text = String(body || "").trim();
+  const lines = text.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  const title = String(options.notificationTitle || lines[0] || "Internal admin alert").slice(0, 180);
+  const notificationBody = options.notificationBody || (lines.length > 1 ? lines.slice(1).join("\n") : text);
+  return {
+    title,
+    body: notificationBody ? String(notificationBody).slice(0, 1500) : null,
+    link: options.link || "/admin/dashboard",
+    originalMessageType: options.messageType || null,
+  };
+}
+
+async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
+  if (options.allowOwnerSms === true) return null;
+  if (!isKnownOwnerPhone(to) || !isInternalAdminAlertType(options.messageType)) return null;
+
+  const payload = buildInternalAlertPayload(body, options);
+  try {
+    const { triggerNotification } = require("./notification-triggers");
+    await triggerNotification("internal_admin_alert", {
+      ...payload,
+      originalToMasked: maskPhone(to),
+    });
+    logger.info(
+      `[twilio] redirected owner/admin SMS to Waves notification (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
+    );
+    return {
+      success: true,
+      sid: "internal-admin-notification",
+      suppressed: true,
+      notificationRedirected: true,
+    };
+  } catch (err) {
+    logger.error(`[twilio] internal alert notification redirect failed: ${err.message}`);
+    return {
+      success: false,
+      sid: null,
+      suppressed: true,
+      notificationRedirected: false,
+      error: err.message,
+    };
+  }
 }
 
 // Lazy-initialize Twilio client — don't crash if creds are missing
@@ -133,6 +188,9 @@ const TwilioService = {
   async sendSMS(to, body, options = {}) {
     let attemptedFrom = options.fromNumber || null;
     try {
+      const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
+      if (internalRedirect) return internalRedirect;
+
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.
       // Push and bell still fire normally — only Twilio is silenced.

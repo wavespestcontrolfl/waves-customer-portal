@@ -86,7 +86,8 @@ function initTimeTrackingCrons() {
         const link = `${portalBase}/admin/timetracking?tab=approvals&weekStart=${weekStartStr}`;
         try {
           await TwilioService.sendSMS(WAVES_OFFICE_PHONE,
-            `📋 ${pendingCount} tech timesheet${pendingCount === 1 ? '' : 's'} ready to approve for week of ${weekStartStr}. Review: ${link}`
+            `📋 ${pendingCount} tech timesheet${pendingCount === 1 ? '' : 's'} ready to approve for week of ${weekStartStr}. Review: ${link}`,
+            { messageType: 'internal_alert', link: '/admin/timetracking' },
           );
           logger.info(`[time-tracking-cron] Approval SMS sent to Virginia (${pendingCount} pending)`);
         } catch (smsErr) {
