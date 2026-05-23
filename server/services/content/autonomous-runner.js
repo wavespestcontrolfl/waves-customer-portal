@@ -159,7 +159,7 @@ class AutonomousRunner {
       }
       const finalized = await finalize(run, t0, result.patch);
       if (result.patch.outcome === 'skipped_shadow_mode') {
-        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'shadow_internal_links', { claimToken });
       } else {
         await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken });
       }
@@ -277,7 +277,7 @@ class AutonomousRunner {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
       });
-      await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, finalized.skip_reason, { claimToken });
       return finalized;
     }
 
@@ -312,6 +312,16 @@ class AutonomousRunner {
     try {
       publishOutcome = await this._publishAndDistribute(draft, brief, run);
     } catch (err) {
+      if (isDeterministicPublishError(err)) {
+        const finalized = await finalize(run, t0, {
+          outcome: 'completed_pending_review',
+          skip_reason: 'publish_validation_failed',
+          failure_message: err.message,
+          reviewer_notes: `Astro publish validation failed before publishing: ${err.message}`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'publish_validation_failed', { claimToken });
+        return finalized;
+      }
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken }); // let next run retry
       return finalize(run, t0, {
         outcome: 'failed_publish',
@@ -675,6 +685,17 @@ function countsTowardTrustBuild(row) {
     && !!row.trust_build_approved_at;
 }
 
+function isDeterministicPublishError(err) {
+  if (err?.code === 'BLOG_FRONTMATTER_INVALID') return true;
+  const message = String(err?.message || '');
+  return [
+    /^unsupported autonomous draft for Astro publish:/,
+    /^autonomous draft missing safe frontmatter slug$/,
+    /^autonomous draft canonical is not a valid URL$/,
+    /^autonomous draft canonical must match slug /,
+  ].some((pattern) => pattern.test(message));
+}
+
 module.exports = new AutonomousRunner();
 module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
@@ -682,4 +703,5 @@ module.exports._internals = {
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,
   countsTowardTrustBuild,
+  isDeterministicPublishError,
 };
