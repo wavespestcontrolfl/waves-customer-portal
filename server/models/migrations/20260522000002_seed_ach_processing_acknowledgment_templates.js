@@ -139,11 +139,32 @@ async function upsertSmsTemplate(knex) {
   });
 }
 
+async function ensureTransactionalGroup(knex) {
+  if (!(await knex.schema.hasTable('email_preference_groups'))) return;
+  const row = {
+    key: 'transactional_required',
+    name: 'Required account notices',
+    description: 'Security, payment, legal, and account notices that must reach the customer.',
+    send_stream: 'transactional_required',
+    user_can_unsubscribe: false,
+    sort_order: 10,
+    updated_at: new Date(),
+  };
+  const existing = await knex('email_preference_groups').where({ key: row.key }).first();
+  if (existing) {
+    await knex('email_preference_groups').where({ key: row.key }).update(row);
+  } else {
+    await knex('email_preference_groups').insert({ ...row, created_at: new Date() });
+  }
+}
+
 async function upsertEmailTemplate(knex) {
   const hasTables = (await knex.schema.hasTable('email_templates'))
     && (await knex.schema.hasTable('email_template_versions'))
     && (await knex.schema.hasTable('email_template_fixtures'));
   if (!hasTables) return;
+
+  await ensureTransactionalGroup(knex);
 
   const row = emailTemplateRow(EMAIL_TEMPLATE);
   const existing = await knex('email_templates').where({ template_key: EMAIL_TEMPLATE.key }).first();

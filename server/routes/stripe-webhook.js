@@ -1445,10 +1445,20 @@ async function handlePaymentIntentProcessing(paymentIntent) {
         : null;
       if (!customer) return;
 
-      await db('invoices')
+      // Atomic claim: the UPDATE doubles as the dedupe lock. Two concurrent
+      // workers (Stripe duplicate delivery, processing-after-downgrade
+      // replay) both reach the pre-read with notified_at NULL; only the one
+      // whose UPDATE flips rows from 0 to 1 proceeds to dispatch. The
+      // status filter also closes a race with payment_intent.succeeded —
+      // if .succeeded flipped the invoice to 'paid' between the pre-read
+      // and this UPDATE, affectedRows is 0 and we bail rather than send a
+      // contradictory "processing" message after the receipt fired.
+      const claimed = await db('invoices')
         .where({ id: freshInvoice.id })
+        .where({ status: 'processing' })
         .whereNull('ach_processing_notified_at')
         .update({ ach_processing_notified_at: new Date() });
+      if (!claimed) return;
 
       if (customer.phone) {
         try {
