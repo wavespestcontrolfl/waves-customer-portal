@@ -6,9 +6,13 @@ const {
 const {
   buildIdempotencyKey,
   isSensitiveProposal,
+  stalePendingNormalizationForResource,
   stableJson,
   upsertProposal,
 } = require('../services/data-hygiene/proposal-store');
+const {
+  buildScanOutcome,
+} = require('../services/data-hygiene');
 
 describe('data hygiene deterministic normalizers', () => {
   const id = '00000000-0000-0000-0000-000000000001';
@@ -163,5 +167,71 @@ describe('data hygiene proposal idempotency', () => {
 
     expect(isSensitiveProposal(proposal)).toBe(true);
     await expect(upsertProposal(proposal)).rejects.toThrow(/vault-backed redaction/);
+  });
+
+  test('parking_notes is sensitive even outside extract rule ids', () => {
+    expect(isSensitiveProposal({
+      resource_type: 'property_preferences',
+      resource_id: null,
+      scope_type: 'customer',
+      scope_id: '00000000-0000-0000-0000-000000000001',
+      field: 'parking_notes',
+      current_value: null,
+      proposed_value: 'park behind the gate',
+      source: 'cross-record-backfill',
+      rule_id: 'backfill.parking_notes_from_message',
+      rule_version: '1',
+      confidence: 0.8,
+      tier: 'medium',
+      evidence: {},
+    })).toBe(true);
+  });
+
+  test('stale updates only mutate rows still pending', async () => {
+    const rows = [{
+      id: 'proposal-1',
+      field: 'first_name',
+      current_value: 'JOHN',
+      proposed_value: 'John',
+    }];
+    const selectBuilder = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+    };
+    const updateBuilder = {
+      whereIn: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      update: jest.fn().mockResolvedValue(1),
+    };
+    const trx = jest.fn()
+      .mockReturnValueOnce(selectBuilder)
+      .mockReturnValueOnce(updateBuilder);
+
+    const count = await stalePendingNormalizationForResource({
+      resource_type: 'customer',
+      resource_id: '00000000-0000-0000-0000-000000000001',
+      currentValues: { first_name: 'JANE' },
+      trx,
+    });
+
+    expect(count).toBe(1);
+    expect(updateBuilder.whereIn).toHaveBeenCalledWith('id', ['proposal-1']);
+    expect(updateBuilder.where).toHaveBeenCalledWith({ status: 'pending' });
+  });
+});
+
+describe('data hygiene run status', () => {
+  test('row-level errors fail the run outcome', () => {
+    expect(buildScanOutcome({ errors: 1 })).toEqual({
+      status: 'failed',
+      verb: 'failed with row-level errors',
+      errorMessage: '1 row-level data hygiene scan error encountered',
+    });
+    expect(buildScanOutcome({ errors: 0 })).toEqual({
+      status: 'ok',
+      verb: 'completed',
+      errorMessage: null,
+    });
   });
 });

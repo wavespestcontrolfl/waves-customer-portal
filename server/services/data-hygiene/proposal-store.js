@@ -40,7 +40,7 @@ function isSensitiveProposal(proposal) {
   const rule = String(proposal.rule_id || '');
   const field = String(proposal.field || '');
   return /extract\.(gate_code|lockbox_code|garage_code|access_notes|parking_notes)/.test(rule)
-    || /(^|_)gate_code$|lockbox_code|garage_code|access_notes/.test(field);
+    || /(^|_)(gate_code|lockbox_code|garage_code|access_notes|parking_notes)$/.test(field);
 }
 
 async function upsertProposal(proposal, { trx = null, run_id = null } = {}) {
@@ -114,12 +114,14 @@ async function stalePendingNormalizationForResource({
   }
 
   if (staleIds.length) {
-    await client('data_hygiene_proposals')
+    const updated = await client('data_hygiene_proposals')
       .whereIn('id', staleIds)
+      .where({ status: 'pending' })
       .update({ status: 'stale', updated_at: db.fn.now() });
+    return Number(updated) || 0;
   }
 
-  return staleIds.length;
+  return 0;
 }
 
 module.exports = {

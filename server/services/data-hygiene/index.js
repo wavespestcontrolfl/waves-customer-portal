@@ -11,7 +11,8 @@
  *      raises a unique-violation; catch it, write a status='lock_busy' row,
  *      and surface a structured result the caller (route or cron) can
  *      translate into a 409.
- *   4. Mark the run 'ok' (or 'failed' on uncaught error) in a finally block.
+ *   4. Mark the run 'ok' (or 'failed' on uncaught/row-level errors) in a
+ *      finally block.
  *
  * Phase 1 executes deterministic normalizers only. Phase 1.5 plugs in the
  * call_log.ai_extraction bootstrap; Phase 3 plugs in cross-record backfill +
@@ -123,11 +124,17 @@ async function runScan({ mode, phases = [], triggeredBy = null } = {}) {
       }
     }
 
-    logger.info(
-      `[data-hygiene] scan ${mode} (run_id=${runId}) completed: ` +
+    const outcome = buildScanOutcome(counts);
+    finalStatus = outcome.status;
+    errorMessage = outcome.errorMessage;
+    const summary = `[data-hygiene] scan ${mode} (run_id=${runId}) ${outcome.verb}: ` +
       `${counts.created} created, ${counts.would_create} dry-run candidates, ` +
-      `${counts.duplicates} duplicates, ${counts.staled} staled, ${counts.errors} errors`
-    );
+      `${counts.duplicates} duplicates, ${counts.staled} staled, ${counts.errors} errors`;
+    if (finalStatus === 'failed') {
+      logger.error(summary);
+    } else {
+      logger.info(summary);
+    }
   } catch (err) {
     finalStatus = 'failed';
     errorMessage = err.message || String(err);
@@ -323,9 +330,22 @@ function increment(target, key) {
   target[key] = (target[key] || 0) + 1;
 }
 
+function buildScanOutcome(counts) {
+  const errors = Number(counts?.errors || 0);
+  if (errors > 0) {
+    return {
+      status: 'failed',
+      verb: 'failed with row-level errors',
+      errorMessage: `${errors} row-level data hygiene scan error${errors === 1 ? '' : 's'} encountered`,
+    };
+  }
+  return { status: 'ok', verb: 'completed', errorMessage: null };
+}
+
 module.exports = {
   runScan,
   reapStuckRuns,
   SCANNER_VERSION,
   runNormalizationPhase,
+  buildScanOutcome,
 };
