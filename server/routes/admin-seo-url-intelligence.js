@@ -2,10 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const UrlIntelligence = require('../services/seo/url-intelligence');
-const {
-  claimPipelineRun,
-} = require('../services/seo/seo-pipeline-runs');
-const { runClaimedSeoPipeline } = require('../services/seo/seo-pipeline-runner');
+const { dispatchSeoPipeline } = require('../services/seo/seo-pipeline-dispatcher');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -219,8 +216,8 @@ router.get('/orphan-pages', async (req, res) => {
   }
 });
 
-// POST /run-pipeline — run the full SEO pipeline end-to-end (admin only)
-// Chains: GSC sync → site audit → URL Intelligence refresh → detection engines
+// POST /run-pipeline — dispatch the full SEO pipeline (admin only).
+// With SEO_PIPELINE_QUEUE_ONLY enabled, a dedicated worker claims queued rows.
 router.post('/run-pipeline', requireAdmin, async (req, res) => {
   const domain = req.body.domain || 'wavespestcontrol.com';
   const requestedDaysBack = parseInt(req.body.daysBack || 7, 10);
@@ -228,47 +225,21 @@ router.post('/run-pipeline', requireAdmin, async (req, res) => {
   const idempotencyKey = req.body.idempotencyKey
     || req.body.idempotency_key
     || `seo-pipeline:${domain}:${daysBack}:${Math.floor(Date.now() / 60000)}`;
-  let pipelineRun = null;
 
   try {
-    const claim = await claimPipelineRun({
+    const result = await dispatchSeoPipeline({
       domain,
       idempotencyKey,
       requestedBy: req.technicianId || null,
+      daysBack,
+      logPrefix: 'pipeline',
     });
-    if (claim.error) return res.status(400).json({ error: claim.error });
-    if (!claim.claimed) {
-      return res.status(claim.run.status === 'running' ? 202 : 200).json({
-        status: claim.run.status,
-        domain: claim.run.domain,
-        idempotencyKey,
-        deduped: true,
-        started_at: claim.run.started_at,
-        completed_at: claim.run.completed_at,
-        result: claim.run.result || null,
-      });
-    }
-    pipelineRun = claim.run;
+    if (result.error) return res.status(result.statusCode || 400).json({ error: result.error });
+    return res.status(result.statusCode).json(result.payload);
   } catch (err) {
-    logger.error('[pipeline] claim failed', err);
-    return res.status(500).json({ error: 'Pipeline claim failed' });
+    logger.error('[pipeline] dispatch failed', err);
+    return res.status(500).json({ error: 'Pipeline dispatch failed' });
   }
-
-  // Return immediately with 202, run pipeline in background
-  res.status(202).json({
-    status: 'started',
-    domain: pipelineRun.domain,
-    idempotencyKey,
-    run_id: pipelineRun.id,
-    message: 'Pipeline running in background. Check /dashboard for results.',
-  });
-
-  runClaimedSeoPipeline({
-    pipelineRun,
-    domain: pipelineRun.domain,
-    daysBack,
-    logPrefix: 'pipeline',
-  }).catch((err) => logger.error(`[pipeline] background runner failed: ${err.message}`, err));
 });
 
 module.exports = router;

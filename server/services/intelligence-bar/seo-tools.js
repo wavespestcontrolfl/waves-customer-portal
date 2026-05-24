@@ -10,10 +10,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { extractDomain } = require('../../utils/normalize-url');
-const {
-  claimPipelineRun,
-} = require('../seo/seo-pipeline-runs');
-const { runClaimedSeoPipeline } = require('../seo/seo-pipeline-runner');
+const { dispatchSeoPipeline } = require('../seo/seo-pipeline-dispatcher');
 
 const SEO_TOOLS = [
   {
@@ -1509,39 +1506,18 @@ async function runSeoPipeline(input, context = {}) {
   if (context?.confirmed !== true) return { error: 'Explicit confirmation is required to run SEO pipeline' };
   const domain = extractDomain(input.domain) || 'wavespestcontrol.com';
   const idempotencyKey = input.idempotencyKey || input.idempotency_key;
-  const claim = await claimPipelineRun({
+  const requestedDaysBack = parseInt(input.daysBack || input.days_back || 7, 10);
+  const daysBack = Number.isFinite(requestedDaysBack) && requestedDaysBack > 0 ? requestedDaysBack : 7;
+  const result = await dispatchSeoPipeline({
     domain,
     idempotencyKey,
     requestedBy: input.requestedBy || context.technicianId || null,
-  });
-  if (claim.error) return { error: claim.error };
-  if (!claim.claimed) {
-    return {
-      status: claim.run.status,
-      domain: claim.run.domain,
-      idempotencyKey,
-      deduped: true,
-      started_at: claim.run.started_at,
-      completed_at: claim.run.completed_at,
-      result: claim.run.result || null,
-    };
-  }
-
-  const requestedDaysBack = parseInt(input.daysBack || input.days_back || 7, 10);
-  const daysBack = Number.isFinite(requestedDaysBack) && requestedDaysBack > 0 ? requestedDaysBack : 7;
-  runClaimedSeoPipeline({
-    pipelineRun: claim.run,
-    domain: claim.run.domain,
     daysBack,
     logPrefix: 'IB pipeline',
-  }).catch((e) => logger.error(`[IB pipeline] background runner failed: ${e.message}`, e));
-  return {
-    status: 'started',
-    domain,
-    idempotencyKey,
-    run_id: claim.run.id,
-    message: `Full SEO pipeline started for ${domain}. Steps: GSC sync → URL Intelligence refresh → sitemap validation → duplicate detection → intent routing → link graph → action generation. Check the URL Intel dashboard in a few minutes for results.`,
-  };
+  });
+  if (result.error) return { error: result.error };
+
+  return result.payload;
 }
 
 module.exports = { SEO_TOOLS, executeSeoTool };
