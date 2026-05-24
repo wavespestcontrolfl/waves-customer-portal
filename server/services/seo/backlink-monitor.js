@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const TOXIC_DOMAINS = /casino|poker|pharma|pills|crypto|bitcoin|adult|xxx|gambling|cheap-/i;
 const SPAM_TLDS = /\.xyz$|\.top$|\.buzz$|\.click$|\.site$|\.online$/i;
@@ -381,10 +381,10 @@ class BacklinkMonitor {
       .orderBy('updated_at', 'desc')
       .limit(10);
 
-    // Velocity — use date-only boundaries (snapshot_date is DATE, no time)
+    // Velocity — ET-aware day boundaries
     const todayStr = etDateString();
-    const sevenDaysAgoStr = etDateString(new Date(Date.now() - 7 * 86400000));
-    const twentyEightDaysAgoStr = etDateString(new Date(Date.now() - 28 * 86400000));
+    const sevenDaysAgoStr = etDateString(addETDays(new Date(), -7));
+    const twentyEightDaysAgoStr = etDateString(addETDays(new Date(), -28));
     const toDateStr = (d) => d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10);
     const s7 = snapshots.filter(s => toDateStr(s.snapshot_date) > sevenDaysAgoStr);
     const s28 = snapshots.filter(s => toDateStr(s.snapshot_date) > twentyEightDaysAgoStr);
@@ -400,8 +400,8 @@ class BacklinkMonitor {
       trend: net7 > 0 ? 'growing' : net7 < 0 ? 'shrinking' : 'flat',
     };
 
-    // New competitor gaps in last 7 days — use timestamp for created_at comparison
-    const sevenDaysAgoTs = new Date(Date.now() - 7 * 86400000);
+    // New competitor gaps in last 7 days — ET-aware timestamp
+    const sevenDaysAgoTs = addETDays(new Date(), -7);
     const newGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
