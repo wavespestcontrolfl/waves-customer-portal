@@ -270,6 +270,7 @@ app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/feature-flags', require('./routes/admin-feature-flags'));
 app.use('/api/admin/estimates', adminEstimateRoutes);
 app.use('/api/admin/estimates', require('./routes/admin-estimate-slots'));
+app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
 // Customer-facing estimate URL. Service slugs render the SPA quote wizard;
