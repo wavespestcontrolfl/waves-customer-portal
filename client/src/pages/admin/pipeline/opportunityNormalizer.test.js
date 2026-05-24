@@ -147,4 +147,16 @@ describe("search and filters", () => {
     expect(opportunity.nextAction).toBe("follow_up");
     expect(opportunityMatchesFilter(opportunity, "follow_up")).toBe(true);
   });
+
+  it("duplicate risk filter surfaces uncertain matches", () => {
+    const opportunities = normalizeOpportunities({
+      leads: [lead({ phone: "(555) 123-4567" })],
+      estimates: [estimate({ id: "est-2", customerPhone: "5551234567" })],
+      now: NOW,
+    });
+    const duplicate = opportunities.find((opportunity) => opportunity.opportunityId === "estimate:est-2");
+
+    expect(duplicate.isDuplicateRisk).toBe(true);
+    expect(opportunityMatchesFilter(duplicate, "duplicate_risk")).toBe(true);
+  });
 });

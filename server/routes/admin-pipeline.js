@@ -8,12 +8,190 @@ const MAX_CANDIDATES = 5000;
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+function performedBy(req) {
+  return [req.technician?.first_name, req.technician?.last_name].filter(Boolean).join(' ') || 'Admin';
+}
+
 function searchDigits(search) {
   return String(search || '').replace(/\D/g, '');
 }
 
 function searchRef(search) {
   return String(search || '').trim().replace(/^#/, '');
+}
+
+function cleanId(value) {
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+function leadDisplayName(lead) {
+  return [lead?.first_name, lead?.last_name].filter(Boolean).join(' ').trim() || lead?.name || 'Unknown Lead';
+}
+
+function estimateDisplayName(estimate) {
+  return estimate?.customer_name || estimate?.name || 'Unknown Customer';
+}
+
+function matchCandidateLead(lead) {
+  return {
+    leadId: lead.id,
+    name: leadDisplayName(lead),
+    phone: lead.phone || null,
+    email: lead.email || null,
+    address: lead.address || null,
+    serviceInterest: lead.service_interest || lead.serviceInterest || lead.service || null,
+    source: lead.source_name || lead.source || lead.lead_source || null,
+    status: lead.status || null,
+    estimateId: lead.estimate_id || null,
+    createdAt: lead.created_at || null,
+    updatedAt: lead.updated_at || null,
+  };
+}
+
+async function getLinkCandidateLeads({ database = db, estimateId }) {
+  const id = cleanId(estimateId);
+  if (!id) {
+    const err = new Error('estimateId is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const estimate = await database('estimates').where('id', id).first();
+  if (!estimate || estimate.archived_at) {
+    const err = new Error('Estimate not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const phoneDigits = searchDigits(estimate.customer_phone || estimate.phone).slice(-10);
+  const email = String(estimate.customer_email || estimate.email || '').trim().toLowerCase();
+  const address = String(estimate.address || estimate.service_address || '').trim();
+  const nameParts = String(estimate.customer_name || estimate.name || '').trim().split(/\s+/).filter(Boolean);
+  const hasMatchSignal = phoneDigits.length >= 7 || email || address || nameParts.length;
+  if (!hasMatchSignal) {
+    return {
+      estimate: {
+        estimateId: estimate.id,
+        name: estimateDisplayName(estimate),
+        phone: estimate.customer_phone || null,
+        email: estimate.customer_email || null,
+        address: estimate.address || null,
+        serviceInterest: estimate.service_interest || null,
+        status: estimate.status || null,
+        createdAt: estimate.created_at || null,
+        updatedAt: estimate.updated_at || null,
+      },
+      candidates: [],
+    };
+  }
+
+  let query = database('leads')
+    .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
+    .select('leads.*', 'lead_sources.name as source_name')
+    .limit(10);
+
+  query = query.where(function () {
+    if (phoneDigits.length >= 7) {
+      this.orWhereRaw("RIGHT(regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits]);
+    }
+    if (email) {
+      this.orWhereRaw('LOWER(COALESCE(leads.email, \'\')) = ?', [email]);
+    }
+    if (address) {
+      this.orWhereILike('leads.address', `%${address}%`);
+    }
+    if (nameParts.length) {
+      this.orWhere(function () {
+        for (const part of nameParts.slice(0, 2)) {
+          this.orWhereILike('leads.first_name', `%${part}%`)
+            .orWhereILike('leads.last_name', `%${part}%`);
+        }
+      });
+    }
+  });
+
+  const rows = await query.orderBy('leads.updated_at', 'desc');
+  return {
+    estimate: {
+      estimateId: estimate.id,
+      name: estimateDisplayName(estimate),
+      phone: estimate.customer_phone || null,
+      email: estimate.customer_email || null,
+      address: estimate.address || null,
+      serviceInterest: estimate.service_interest || null,
+      status: estimate.status || null,
+      createdAt: estimate.created_at || null,
+      updatedAt: estimate.updated_at || null,
+    },
+    candidates: rows.map(matchCandidateLead),
+  };
+}
+
+async function linkOpportunityRecords({
+  database = db,
+  leadId,
+  estimateId,
+  force = false,
+  actor = 'Admin',
+}) {
+  const cleanLeadId = cleanId(leadId);
+  const cleanEstimateId = cleanId(estimateId);
+  if (!cleanLeadId || !cleanEstimateId) {
+    const err = new Error('leadId and estimateId are required');
+    err.status = 400;
+    throw err;
+  }
+
+  return database.transaction(async (trx) => {
+    const lead = await trx('leads').where('id', cleanLeadId).first();
+    if (!lead) {
+      const err = new Error('Lead not found');
+      err.status = 404;
+      throw err;
+    }
+
+    const estimate = await trx('estimates').where('id', cleanEstimateId).first();
+    if (!estimate || estimate.archived_at) {
+      const err = new Error('Estimate not found');
+      err.status = 404;
+      throw err;
+    }
+
+    if (lead.estimate_id && String(lead.estimate_id) !== String(cleanEstimateId) && !force) {
+      const err = new Error('Lead is already linked to a different estimate');
+      err.status = 409;
+      err.code = 'lead_already_linked';
+      err.currentEstimateId = lead.estimate_id;
+      throw err;
+    }
+
+    const [updatedLead] = await trx('leads')
+      .where('id', cleanLeadId)
+      .update({
+        estimate_id: cleanEstimateId,
+        updated_at: new Date(),
+      })
+      .returning('*');
+
+    await trx('lead_activities').insert({
+      lead_id: cleanLeadId,
+      activity_type: 'linked_estimate',
+      description: `Linked estimate ${cleanEstimateId}`,
+      performed_by: actor,
+      metadata: JSON.stringify({
+        estimateId: cleanEstimateId,
+        previousEstimateId: lead.estimate_id || null,
+        source: 'admin_pipeline',
+        forced: Boolean(force),
+      }),
+    });
+
+    return {
+      lead: updatedLead,
+      estimate,
+      linked: true,
+    };
+  });
 }
 
 function applyLeadSearch(query, search) {
@@ -145,10 +323,43 @@ router.get('/opportunities', async (req, res, next) => {
   }
 });
 
+// GET /api/admin/pipeline/opportunities/:estimateId/link-candidates
+router.get('/opportunities/:estimateId/link-candidates', async (req, res, next) => {
+  try {
+    res.json(await getLinkCandidateLeads({ estimateId: req.params.estimateId }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/pipeline/opportunities/link
+router.post('/opportunities/link', async (req, res, next) => {
+  try {
+    const result = await linkOpportunityRecords({
+      leadId: req.body.leadId || req.body.lead_id,
+      estimateId: req.body.estimateId || req.body.estimate_id,
+      force: req.body.force === true,
+      actor: performedBy(req),
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({
+        error: err.message,
+        code: err.code,
+        currentEstimateId: err.currentEstimateId,
+      });
+    }
+    next(err);
+  }
+});
+
 module.exports = router;
 module.exports.__private = {
   applyEstimateSearch,
   applyLeadSearch,
+  getLinkCandidateLeads,
+  linkOpportunityRecords,
   searchDigits,
   searchRef,
 };

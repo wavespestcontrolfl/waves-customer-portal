@@ -134,4 +134,20 @@ describe('pipeline opportunities read model', () => {
       status: 'lost',
     });
   });
+
+  test('duplicate risk is a derived cleanup filter', () => {
+    const response = buildPipelineResponse({
+      leads: [lead()],
+      estimates: [estimate({ id: 'est-2' })],
+      query: { stage: 'duplicate_risk', page: 1, pageSize: 50 },
+      now: NOW,
+    });
+
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0]).toMatchObject({
+      opportunityId: 'estimate:est-2',
+      isDuplicateRisk: true,
+    });
+    expect(response.counts.duplicate_risk).toBe(1);
+  });
 });
