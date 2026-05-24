@@ -17,6 +17,7 @@ import {
   cn,
 } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
+import DuplicateCleanupQueue from "./DuplicateCleanupQueue";
 import OpportunityActions from "./OpportunityActions";
 import OpportunityStageBadge from "./OpportunityStageBadge";
 import UnifiedPipelineFilters from "./UnifiedPipelineFilters";
@@ -105,7 +106,7 @@ export default function UnifiedPipelineView() {
     const params = new URLSearchParams();
     params.set("stage", filter);
     params.set("page", String(page));
-    params.set("pageSize", "100");
+    params.set("pageSize", filter === "duplicate_risk" ? "25" : "100");
     if (search.trim()) params.set("search", search.trim());
 
     try {
@@ -157,6 +158,7 @@ export default function UnifiedPipelineView() {
   }, [loadPipeline]);
 
   const visibleOpportunities = useMemo(() => opportunities, [opportunities]);
+  const showingDuplicateCleanup = filter === "duplicate_risk" && !search.trim();
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / (pagination.pageSize || 100)));
   const truncatedWarning = meta?.truncated
     ? "Pipeline results were truncated by the server candidate cap. Narrow the search/filter for a complete result set."
@@ -278,6 +280,12 @@ export default function UnifiedPipelineView() {
             <div className="p-10 text-center text-13 text-ink-secondary">
               No opportunities match the current filter.
             </div>
+          ) : showingDuplicateCleanup ? (
+            <DuplicateCleanupQueue
+              opportunities={visibleOpportunities}
+              adminFetch={adminFetch}
+              onRefresh={loadPipeline}
+            />
           ) : (
             <>
               <Table>
