@@ -400,11 +400,11 @@ class BacklinkMonitor {
     // New competitor gaps in last 7 days
     const newGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
-      .where('created_at', '>=', sevenDaysAgo)
+      .where('created_at', '>=', sevenDaysAgoStr)
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
     const newHighValueGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
-      .where('created_at', '>=', sevenDaysAgo)
+      .where('created_at', '>=', sevenDaysAgoStr)
       .where('source_domain_rating', '>', 40)
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
 
