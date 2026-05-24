@@ -39,7 +39,11 @@ const {
 const { runClaimedSeoPipeline, _internals } = require('../services/seo/seo-pipeline-runner');
 
 afterEach(() => {
+  delete process.env.SEO_PIPELINE_GSC_SYNC_TIMEOUT_MS;
+  jest.useRealTimers();
   jest.clearAllMocks();
+  SearchConsole.syncDailyData.mockResolvedValue({ synced: true });
+  SiteAuditor.runSiteAudit.mockResolvedValue({ pages: 250 });
 });
 
 describe('SEO pipeline runner', () => {
@@ -47,6 +51,9 @@ describe('SEO pipeline runner', () => {
     expect(_internals.heartbeatIntervalMs('15000')).toBe(15000);
     expect(_internals.heartbeatIntervalMs('bad')).toBe(60000);
     expect(_internals.heartbeatIntervalMs('0')).toBe(60000);
+    expect(_internals.gscSyncTimeoutMs('5000')).toBe(5000);
+    expect(_internals.gscSyncTimeoutMs('bad')).toBe(600000);
+    expect(_internals.gscSyncTimeoutMs('0')).toBe(600000);
   });
 
   test('runs the claimed pipeline and heartbeats site-audit progress', async () => {
@@ -67,7 +74,11 @@ describe('SEO pipeline runner', () => {
       logPrefix: 'test-pipeline',
     });
 
-    expect(SearchConsole.syncDailyData).toHaveBeenCalledWith(8, 'wavespestcontrol.com');
+    expect(SearchConsole.syncDailyData).toHaveBeenCalledWith(
+      8,
+      'wavespestcontrol.com',
+      expect.objectContaining({ signal: expect.any(Object) }),
+    );
     expect(SiteAuditor.runSiteAudit).toHaveBeenCalledWith(expect.objectContaining({
       domain: 'wavespestcontrol.com',
       onProgress: expect.any(Function),
@@ -100,5 +111,45 @@ describe('SEO pipeline runner', () => {
     );
     expect(failPipelineRun).not.toHaveBeenCalled();
     expect(result.status).toBe('completed');
+  });
+
+  test('continues the pipeline when GSC sync times out', async () => {
+    process.env.SEO_PIPELINE_GSC_SYNC_TIMEOUT_MS = '5';
+    SearchConsole.syncDailyData.mockImplementation(() => new Promise(() => {}));
+
+    const result = await runClaimedSeoPipeline({
+      pipelineRun: { id: 'pipeline-timeout' },
+      domain: 'wavespestcontrol.com',
+      daysBack: 7,
+      logPrefix: 'test-timeout',
+    });
+
+    expect(SearchConsole.syncDailyData).toHaveBeenCalledWith(
+      7,
+      'wavespestcontrol.com',
+      expect.objectContaining({ signal: expect.any(Object) }),
+    );
+    const timeoutSignal = SearchConsole.syncDailyData.mock.calls[0][2].signal;
+    expect(timeoutSignal.aborted).toBe(true);
+    expect(timeoutSignal.reason.message).toBe('GSC sync timed out after 5ms');
+    expect(SiteAuditor.runSiteAudit).toHaveBeenCalledWith(expect.objectContaining({
+      domain: 'wavespestcontrol.com',
+    }));
+    expect(completePipelineRun).toHaveBeenCalledWith(
+      'pipeline-timeout',
+      expect.objectContaining({
+        failed: 1,
+        steps: expect.arrayContaining([
+          expect.objectContaining({
+            step: 'gsc_sync',
+            status: 'failed',
+            error: 'GSC sync timed out after 5ms',
+          }),
+          expect.objectContaining({ step: 'site_audit', status: 'ok', pages: 250 }),
+        ]),
+      }),
+      'completed_with_errors',
+    );
+    expect(result.status).toBe('completed_with_errors');
   });
 });
