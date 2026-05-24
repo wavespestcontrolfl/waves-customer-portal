@@ -1,7 +1,15 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ExternalLink, MoreHorizontal } from "lucide-react";
-import { Button, cn } from "../../../components/ui";
+import {
+  Button,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  cn,
+} from "../../../components/ui";
 import { PIPELINE_STAGES } from "./pipelineStages";
 
 function appendParam(params, key, value) {
@@ -31,6 +39,57 @@ function communicationUrl(opportunity) {
 
 function estimateSendIdempotencyKey() {
   return globalThis.crypto?.randomUUID?.() || `estimate-send-${Date.now()}-${Math.random()}`;
+}
+
+function actionConfig(kind, opportunity) {
+  const name = opportunity.name || "this customer";
+  switch (kind) {
+    case "send_estimate":
+      return {
+        title: "Send estimate",
+        description: `Send this estimate to ${name} by email and SMS now.`,
+        confirmLabel: "Send Estimate",
+        tone: "primary",
+      };
+    case "mark_accepted":
+      return {
+        title: "Mark accepted",
+        description: `Mark ${name} as accepted from a verbal yes.`,
+        confirmLabel: "Mark Accepted",
+        tone: "primary",
+      };
+    case "decline_estimate":
+      return {
+        title: "Mark estimate declined",
+        description: "Record why this estimate was declined.",
+        confirmLabel: "Mark Declined",
+        reasonLabel: "Decline reason",
+        reasonPlaceholder: "Price, timing, chose another provider...",
+        reasonRequired: true,
+        tone: "danger",
+      };
+    case "extend_estimate":
+      return {
+        title: "Extend expiration",
+        description: "Choose how many days to extend this estimate.",
+        confirmLabel: "Extend",
+        daysLabel: "Days",
+        defaultDays: "7",
+        tone: "primary",
+      };
+    case "mark_lead_lost":
+      return {
+        title: "Mark lead lost",
+        description: "Record why this lead was lost.",
+        confirmLabel: "Mark Lost",
+        reasonLabel: "Lost reason",
+        reasonPlaceholder: "Not serviceable, no response, price, timing...",
+        reasonRequired: true,
+        tone: "danger",
+      };
+    default:
+      return null;
+  }
 }
 
 function primaryAction(opportunity) {
@@ -92,11 +151,82 @@ function menuActions(opportunity) {
 export default function OpportunityActions({ opportunity, onRefresh, adminFetch }) {
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState(null);
+  const [reason, setReason] = useState("");
+  const [days, setDays] = useState("7");
+  const [feedback, setFeedback] = useState(null);
   const action = primaryAction(opportunity);
   const missingEstimateReadyFields = !opportunity.address || !opportunity.serviceInterest || (!opportunity.phone && !opportunity.email);
+  const pendingConfig = pendingAction ? actionConfig(pendingAction.kind, opportunity) : null;
 
   async function runPrimary() {
     await runAction(action);
+  }
+
+  function openDialog(item) {
+    const config = actionConfig(item.kind, opportunity);
+    if (!config) return false;
+    setReason("");
+    setDays(config.defaultDays || "7");
+    setFeedback(null);
+    setPendingAction(item);
+    return true;
+  }
+
+  function showFeedback(type, message) {
+    setFeedback({ type, message });
+  }
+
+  function closePendingAction() {
+    if (busy) return;
+    setPendingAction(null);
+    if (feedback?.type === "error") setFeedback(null);
+  }
+
+  async function performAction(item, payload = {}) {
+    if (item.kind === "follow_up") {
+      await adminFetch(`/admin/estimates/${opportunity.estimateId}/follow-up`, { method: "POST" });
+      return "Follow-up logged.";
+    }
+    if (item.kind === "send_estimate") {
+      await adminFetch(`/admin/estimates/${opportunity.estimateId}/send`, {
+        method: "POST",
+        body: JSON.stringify({
+          sendMethod: "both",
+          idempotencyKey: estimateSendIdempotencyKey(),
+        }),
+      });
+      return "Estimate sent.";
+    }
+    if (item.kind === "mark_accepted") {
+      await adminFetch(`/admin/estimates/${opportunity.estimateId}/mark-accepted`, {
+        method: "POST",
+        body: JSON.stringify({ source: "pipeline_verbal_yes" }),
+      });
+      return "Estimate marked accepted.";
+    }
+    if (item.kind === "decline_estimate") {
+      await adminFetch(`/admin/estimates/${opportunity.estimateId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "declined", declineReason: payload.reason }),
+      });
+      return "Estimate marked declined.";
+    }
+    if (item.kind === "extend_estimate") {
+      await adminFetch(`/admin/estimates/${opportunity.estimateId}/extend`, {
+        method: "POST",
+        body: JSON.stringify({ days: payload.days }),
+      });
+      return "Estimate expiration extended.";
+    }
+    if (item.kind === "mark_lead_lost") {
+      await adminFetch(`/admin/leads/${opportunity.leadId}/lost`, {
+        method: "POST",
+        body: JSON.stringify({ reason: payload.reason }),
+      });
+      return "Lead marked lost.";
+    }
+    return "Action completed.";
   }
 
   async function runAction(item) {
@@ -112,145 +242,160 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       }
       setBusy(true);
       try {
-        await adminFetch(`/admin/estimates/${opportunity.estimateId}/follow-up`, { method: "POST" });
+        const message = await performAction(item);
+        showFeedback("success", message);
         onRefresh?.();
       } catch (err) {
-        window.alert(`Follow-up failed: ${err.message}`);
+        showFeedback("error", `Follow-up failed: ${err.message}`);
       } finally {
         setBusy(false);
       }
       return;
     }
-    if (item.kind === "send_estimate") {
-      if (!opportunity.estimateId) return;
-      if (!window.confirm(`Send this estimate to ${opportunity.name || "the customer"} now?`)) return;
-      setBusy(true);
-      try {
-        await adminFetch(`/admin/estimates/${opportunity.estimateId}/send`, {
-          method: "POST",
-          body: JSON.stringify({
-            sendMethod: "both",
-            idempotencyKey: estimateSendIdempotencyKey(),
-          }),
-        });
-        onRefresh?.();
-      } catch (err) {
-        window.alert(`Send failed: ${err.message}`);
-      } finally {
-        setBusy(false);
-      }
+    if (openDialog(item)) {
       return;
     }
-    if (item.kind === "mark_accepted") {
-      if (!opportunity.estimateId) return;
-      if (!window.confirm(`Mark ${opportunity.name || "this customer"} as accepted from a verbal yes?`)) return;
-      setBusy(true);
-      try {
-        await adminFetch(`/admin/estimates/${opportunity.estimateId}/mark-accepted`, {
-          method: "POST",
-          body: JSON.stringify({ source: "pipeline_verbal_yes" }),
-        });
-        onRefresh?.();
-      } catch (err) {
-        window.alert(`Mark accepted failed: ${err.message}`);
-      } finally {
-        setBusy(false);
-      }
+  }
+
+  async function confirmPendingAction() {
+    if (!pendingAction || !pendingConfig || busy) return;
+    const trimmedReason = reason.trim();
+    if (pendingConfig.reasonRequired && !trimmedReason) {
+      showFeedback("error", `${pendingConfig.reasonLabel} is required.`);
       return;
     }
-    if (item.kind === "decline_estimate") {
-      if (!opportunity.estimateId) return;
-      const reason = window.prompt("Reason for declining this estimate?");
-      if (!reason || !reason.trim()) return;
-      setBusy(true);
-      try {
-        await adminFetch(`/admin/estimates/${opportunity.estimateId}`, {
-          method: "PATCH",
-          body: JSON.stringify({ status: "declined", declineReason: reason.trim() }),
-        });
-        onRefresh?.();
-      } catch (err) {
-        window.alert(`Mark declined failed: ${err.message}`);
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    if (item.kind === "extend_estimate") {
-      if (!opportunity.estimateId) return;
-      const rawDays = window.prompt("Extend expiration by how many days?", "7");
-      if (!rawDays) return;
-      const days = Number.parseInt(rawDays, 10);
-      if (!Number.isInteger(days) || days < 1 || days > 180) {
-        window.alert("Enter a whole number of days between 1 and 180.");
+    let parsedDays = null;
+    if (pendingAction.kind === "extend_estimate") {
+      parsedDays = Number.parseInt(days, 10);
+      if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > 180) {
+        showFeedback("error", "Enter a whole number of days between 1 and 180.");
         return;
       }
-      setBusy(true);
-      try {
-        await adminFetch(`/admin/estimates/${opportunity.estimateId}/extend`, {
-          method: "POST",
-          body: JSON.stringify({ days }),
-        });
-        onRefresh?.();
-      } catch (err) {
-        window.alert(`Extend failed: ${err.message}`);
-      } finally {
-        setBusy(false);
-      }
-      return;
     }
-    if (item.kind === "mark_lead_lost") {
-      if (!opportunity.leadId) return;
-      const reason = window.prompt("Reason this lead was lost?");
-      if (!reason || !reason.trim()) return;
-      setBusy(true);
-      try {
-        await adminFetch(`/admin/leads/${opportunity.leadId}/lost`, {
-          method: "POST",
-          body: JSON.stringify({ reason: reason.trim() }),
-        });
-        onRefresh?.();
-      } catch (err) {
-        window.alert(`Mark lead lost failed: ${err.message}`);
-      } finally {
-        setBusy(false);
-      }
+    setBusy(true);
+    try {
+      const message = await performAction(pendingAction, {
+        reason: trimmedReason,
+        days: parsedDays,
+      });
+      setPendingAction(null);
+      showFeedback("success", message);
+      onRefresh?.();
+    } catch (err) {
+      showFeedback("error", `${pendingConfig.title} failed: ${err.message}`);
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
-    <div className="flex items-center justify-end gap-2">
-      <Button
-        size="sm"
-        variant="secondary"
-        onClick={runPrimary}
-        disabled={busy}
-        title={action.label === "Create Estimate" && missingEstimateReadyFields
-          ? "Missing address, service, or contact info. The estimate form will still open with available fields."
-          : undefined}
-        className={cn("whitespace-nowrap", missingEstimateReadyFields && action.label === "Create Estimate" && "border-alert-fg text-alert-fg")}
-      >
-        {busy ? "Working" : action.label}
-      </Button>
-      <details className="relative">
-        <summary className="list-none inline-flex h-11 sm:h-7 w-9 sm:w-7 items-center justify-center rounded-xs border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring cursor-pointer">
-          <MoreHorizontal size={16} strokeWidth={1.8} aria-hidden />
-          <span className="sr-only">More actions</span>
-        </summary>
-        <div className="absolute right-0 z-30 mt-2 w-56 rounded-sm border-hairline border-zinc-200 bg-white shadow-lg p-1">
-          {menuActions(opportunity).map((item) => (
-            <button
-              key={`${item.label}-${item.kind}-${item.to || ""}`}
-              type="button"
-              onClick={() => runAction(item)}
-              className="w-full flex items-center justify-between gap-2 rounded-xs px-3 py-2 text-left text-12 text-zinc-700 hover:bg-zinc-50 u-focus-ring"
-            >
-              <span>{item.label}</span>
-              {item.kind === "navigate" && <ExternalLink size={13} strokeWidth={1.8} aria-hidden />}
-            </button>
-          ))}
+    <>
+      <div className="flex flex-col items-end gap-2">
+        <div className="flex items-center justify-end gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={runPrimary}
+            disabled={busy}
+            title={action.label === "Create Estimate" && missingEstimateReadyFields
+              ? "Missing address, service, or contact info. The estimate form will still open with available fields."
+              : undefined}
+            className={cn("whitespace-nowrap", missingEstimateReadyFields && action.label === "Create Estimate" && "border-alert-fg text-alert-fg")}
+          >
+            {busy ? "Working" : action.label}
+          </Button>
+          <details className="relative">
+            <summary className="list-none inline-flex h-11 sm:h-7 w-9 sm:w-7 items-center justify-center rounded-xs border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring cursor-pointer">
+              <MoreHorizontal size={16} strokeWidth={1.8} aria-hidden />
+              <span className="sr-only">More actions</span>
+            </summary>
+            <div className="absolute right-0 z-30 mt-2 w-56 rounded-sm border-hairline border-zinc-200 bg-white shadow-lg p-1">
+              {menuActions(opportunity).map((item) => (
+                <button
+                  key={`${item.label}-${item.kind}-${item.to || ""}`}
+                  type="button"
+                  onClick={() => runAction(item)}
+                  className="w-full flex items-center justify-between gap-2 rounded-xs px-3 py-2 text-left text-12 text-zinc-700 hover:bg-zinc-50 u-focus-ring"
+                >
+                  <span>{item.label}</span>
+                  {item.kind === "navigate" && <ExternalLink size={13} strokeWidth={1.8} aria-hidden />}
+                </button>
+              ))}
+            </div>
+          </details>
         </div>
-      </details>
-    </div>
+        {feedback && (
+          <div
+            className={cn(
+              "max-w-[260px] rounded-xs border-hairline px-2 py-1 text-left text-11",
+              feedback.type === "error"
+                ? "border-alert-fg/30 bg-red-50 text-alert-fg"
+                : "border-emerald-300 bg-emerald-50 text-emerald-800",
+            )}
+            role="status"
+          >
+            {feedback.message}
+          </div>
+        )}
+      </div>
+
+      <Dialog open={!!pendingAction} onClose={closePendingAction} size="sm">
+        <DialogHeader>
+          <DialogTitle>{pendingConfig?.title}</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-4">
+          <p className="m-0 text-13 leading-5 text-ink-secondary">{pendingConfig?.description}</p>
+          {pendingConfig?.reasonLabel && (
+            <label className="block">
+              <span className="mb-1 block text-12 font-medium text-zinc-800">{pendingConfig.reasonLabel}</span>
+              <textarea
+                value={reason}
+                onChange={(event) => {
+                  setReason(event.target.value);
+                  if (feedback?.type === "error") setFeedback(null);
+                }}
+                placeholder={pendingConfig.reasonPlaceholder}
+                rows={4}
+                className="w-full rounded-sm border-hairline border-zinc-300 px-3 py-2 text-13 text-zinc-900 placeholder:text-ink-tertiary u-focus-ring"
+              />
+            </label>
+          )}
+          {pendingConfig?.daysLabel && (
+            <label className="block">
+              <span className="mb-1 block text-12 font-medium text-zinc-800">{pendingConfig.daysLabel}</span>
+              <input
+                type="number"
+                min="1"
+                max="180"
+                step="1"
+                value={days}
+                onChange={(event) => {
+                  setDays(event.target.value);
+                  if (feedback?.type === "error") setFeedback(null);
+                }}
+                className="w-full rounded-sm border-hairline border-zinc-300 px-3 py-2 text-13 text-zinc-900 u-focus-ring"
+              />
+            </label>
+          )}
+          {feedback?.type === "error" && (
+            <div className="rounded-xs border-hairline border-alert-fg/30 bg-red-50 px-3 py-2 text-12 text-alert-fg">
+              {feedback.message}
+            </div>
+          )}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" onClick={closePendingAction} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            variant={pendingConfig?.tone === "danger" ? "danger" : "primary"}
+            onClick={confirmPendingAction}
+            disabled={busy}
+          >
+            {busy ? "Working" : pendingConfig?.confirmLabel}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+    </>
   );
 }
