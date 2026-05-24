@@ -87,6 +87,13 @@ function actionConfig(kind, opportunity) {
         reasonRequired: true,
         tone: "danger",
       };
+    case "link_lead":
+      return {
+        title: "Link matching lead",
+        description: "Confirm which lead should be attached to this estimate. The two rows will collapse into one opportunity after linking.",
+        confirmLabel: "Link Lead",
+        tone: "primary",
+      };
     default:
       return null;
   }
@@ -127,6 +134,9 @@ function menuActions(opportunity) {
     actions.push({ label: "Create Estimate", kind: "navigate", to: createEstimateUrl(opportunity) });
   }
   if (opportunity.estimateId) {
+    if (opportunity.isDuplicateRisk && !opportunity.leadId) {
+      actions.push({ label: "Link Matching Lead", kind: "link_lead" });
+    }
     if (opportunity.stage === PIPELINE_STAGES.ESTIMATE_DRAFT) {
       actions.push({ label: "Edit Estimate", kind: "navigate", to: "/admin/estimates?tab=estimates" });
     }
@@ -155,6 +165,10 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
   const [reason, setReason] = useState("");
   const [days, setDays] = useState("7");
   const [feedback, setFeedback] = useState(null);
+  const [linkCandidates, setLinkCandidates] = useState([]);
+  const [linkEstimate, setLinkEstimate] = useState(null);
+  const [selectedLeadId, setSelectedLeadId] = useState("");
+  const [loadingCandidates, setLoadingCandidates] = useState(false);
   const action = primaryAction(opportunity);
   const missingEstimateReadyFields = !opportunity.address || !opportunity.serviceInterest || (!opportunity.phone && !opportunity.email);
   const pendingConfig = pendingAction ? actionConfig(pendingAction.kind, opportunity) : null;
@@ -163,13 +177,29 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
     await runAction(action);
   }
 
-  function openDialog(item) {
+  async function openDialog(item) {
     const config = actionConfig(item.kind, opportunity);
     if (!config) return false;
     setReason("");
     setDays(config.defaultDays || "7");
     setFeedback(null);
+    setLinkCandidates([]);
+    setLinkEstimate(null);
+    setSelectedLeadId("");
     setPendingAction(item);
+    if (item.kind === "link_lead") {
+      setLoadingCandidates(true);
+      try {
+        const data = await adminFetch(`/admin/pipeline/opportunities/${opportunity.estimateId}/link-candidates`);
+        setLinkEstimate(data.estimate || null);
+        setLinkCandidates(data.candidates || []);
+        setSelectedLeadId(data.candidates?.[0]?.leadId || "");
+      } catch (err) {
+        showFeedback("error", `Candidate lookup failed: ${err.message}`);
+      } finally {
+        setLoadingCandidates(false);
+      }
+    }
     return true;
   }
 
@@ -226,6 +256,16 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       });
       return "Lead marked lost.";
     }
+    if (item.kind === "link_lead") {
+      await adminFetch("/admin/pipeline/opportunities/link", {
+        method: "POST",
+        body: JSON.stringify({
+          leadId: payload.leadId,
+          estimateId: opportunity.estimateId,
+        }),
+      });
+      return "Lead linked to estimate.";
+    }
     return "Action completed.";
   }
 
@@ -252,7 +292,7 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       }
       return;
     }
-    if (openDialog(item)) {
+    if (await openDialog(item)) {
       return;
     }
   }
@@ -272,11 +312,16 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
         return;
       }
     }
+    if (pendingAction.kind === "link_lead" && !selectedLeadId) {
+      showFeedback("error", "Choose a lead to link.");
+      return;
+    }
     setBusy(true);
     try {
       const message = await performAction(pendingAction, {
         reason: trimmedReason,
         days: parsedDays,
+        leadId: selectedLeadId,
       });
       setPendingAction(null);
       showFeedback("success", message);
@@ -377,6 +422,65 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
               />
             </label>
           )}
+          {pendingAction?.kind === "link_lead" && (
+            <div className="space-y-3">
+              {linkEstimate && (
+                <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-zinc-700">
+                  <div className="font-medium text-zinc-900">{linkEstimate.name}</div>
+                  <div className="mt-1 text-ink-secondary">
+                    {[linkEstimate.phone, linkEstimate.email].filter(Boolean).join(" / ") || "No contact info"}
+                  </div>
+                  <div className="mt-1 text-ink-tertiary">{linkEstimate.address || "No address"}</div>
+                </div>
+              )}
+              {loadingCandidates ? (
+                <div className="text-12 text-ink-secondary">Loading matching leads...</div>
+              ) : linkCandidates.length === 0 ? (
+                <div className="rounded-xs border-hairline border-amber-300 bg-amber-50 px-3 py-2 text-12 text-amber-900">
+                  No likely lead matches were found. Open the legacy lead and estimate views to link manually.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {linkCandidates.map((candidate) => (
+                    <label
+                      key={candidate.leadId}
+                      className={cn(
+                        "block cursor-pointer rounded-sm border-hairline p-3 text-12",
+                        selectedLeadId === candidate.leadId ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white hover:bg-zinc-50",
+                      )}
+                    >
+                      <div className="flex items-start gap-2">
+                        <input
+                          type="radio"
+                          name={`link-lead-${opportunity.estimateId}`}
+                          value={candidate.leadId}
+                          checked={selectedLeadId === candidate.leadId}
+                          onChange={() => {
+                            setSelectedLeadId(candidate.leadId);
+                            if (feedback?.type === "error") setFeedback(null);
+                          }}
+                          className="mt-1"
+                        />
+                        <div className="min-w-0">
+                          <div className="font-medium text-zinc-900">{candidate.name}</div>
+                          <div className="mt-1 text-ink-secondary">
+                            {[candidate.phone, candidate.email].filter(Boolean).join(" / ") || "No contact info"}
+                          </div>
+                          <div className="mt-1 text-ink-tertiary">{candidate.address || "No address"}</div>
+                          <div className="mt-1 text-ink-tertiary">
+                            {[candidate.serviceInterest, candidate.source, candidate.status].filter(Boolean).join(" / ")}
+                          </div>
+                          {candidate.estimateId && (
+                            <div className="mt-2 text-alert-fg">Already linked to another estimate.</div>
+                          )}
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {feedback?.type === "error" && (
             <div className="rounded-xs border-hairline border-alert-fg/30 bg-red-50 px-3 py-2 text-12 text-alert-fg">
               {feedback.message}
@@ -390,7 +494,7 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
           <Button
             variant={pendingConfig?.tone === "danger" ? "danger" : "primary"}
             onClick={confirmPendingAction}
-            disabled={busy}
+            disabled={busy || loadingCandidates || (pendingAction?.kind === "link_lead" && linkCandidates.length === 0)}
           >
             {busy ? "Working" : pendingConfig?.confirmLabel}
           </Button>

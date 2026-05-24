@@ -31,6 +31,7 @@ export const PIPELINE_FILTERS = [
   { key: "sent", label: "Sent" },
   { key: "viewed", label: "Viewed" },
   { key: "follow_up", label: "Follow Up" },
+  { key: "duplicate_risk", label: "Duplicate Risk" },
   { key: "won", label: "Won" },
   { key: "lost", label: "Lost" },
 ];

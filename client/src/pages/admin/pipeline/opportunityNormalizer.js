@@ -425,6 +425,8 @@ export function opportunityMatchesFilter(opportunity, filter) {
         opportunity.needsAction === true &&
         [PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.CONTACTED].includes(opportunity.stage)
       );
+    case "duplicate_risk":
+      return opportunity.isDuplicateRisk === true;
     case "won":
       return opportunity.status === "won";
     case "lost":
