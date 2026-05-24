@@ -5,6 +5,6 @@ builder = "nixpacks"
 buildCmd = "npm run build"
 
 [deploy]
-startCommand = "npm run seo:pipeline:worker"
+startCommand = "node server/scripts/run-seo-pipeline-worker.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
