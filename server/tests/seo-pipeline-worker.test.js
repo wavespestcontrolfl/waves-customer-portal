@@ -28,14 +28,27 @@ describe('SEO pipeline worker', () => {
         result: { options: { days_back: 12 } },
       },
     });
-    runClaimedSeoPipeline.mockResolvedValue({
-      status: 'completed',
-      succeeded: 12,
-      failed: 0,
-      duration_ms: 1000,
+    let claimedResolved = false;
+    const onClaimed = jest.fn(async () => {
+      await Promise.resolve();
+      claimedResolved = true;
+    });
+    const onSettled = jest.fn();
+    runClaimedSeoPipeline.mockImplementation(async () => {
+      expect(claimedResolved).toBe(true);
+      return {
+        status: 'completed',
+        succeeded: 12,
+        failed: 0,
+        duration_ms: 1000,
+      };
     });
 
-    const result = await processNextQueuedPipelineRun({ logPrefix: 'test-worker' });
+    const result = await processNextQueuedPipelineRun({
+      logPrefix: 'test-worker',
+      onClaimed,
+      onSettled,
+    });
 
     expect(runClaimedSeoPipeline).toHaveBeenCalledWith({
       pipelineRun: expect.objectContaining({ id: 'run-1' }),
@@ -43,6 +56,8 @@ describe('SEO pipeline worker', () => {
       daysBack: 12,
       logPrefix: 'test-worker',
     });
+    expect(onClaimed).toHaveBeenCalledWith(expect.objectContaining({ id: 'run-1' }));
+    expect(onSettled).toHaveBeenCalledWith(expect.objectContaining({ id: 'run-1' }));
     expect(result).toEqual(expect.objectContaining({
       status: 'completed',
       run_id: 'run-1',

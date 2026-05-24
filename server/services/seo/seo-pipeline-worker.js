@@ -27,7 +27,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function processNextQueuedPipelineRun({ logPrefix = 'seo-pipeline-worker' } = {}) {
+async function processNextQueuedPipelineRun({
+  logPrefix = 'seo-pipeline-worker',
+  onClaimed = null,
+  onSettled = null,
+} = {}) {
   const claim = await claimQueuedPipelineRun();
   if (!claim.claimed || !claim.run) {
     return { status: 'idle' };
@@ -35,24 +39,29 @@ async function processNextQueuedPipelineRun({ logPrefix = 'seo-pipeline-worker' 
 
   const run = claim.run;
   const daysBack = runDaysBack(run);
+  if (onClaimed) await onClaimed(run);
   logger.info(`[${logPrefix}] claimed SEO pipeline run ${run.id} for ${run.domain}`);
 
-  const result = await runClaimedSeoPipeline({
-    pipelineRun: run,
-    domain: run.domain,
-    daysBack,
-    logPrefix,
-  });
+  try {
+    const result = await runClaimedSeoPipeline({
+      pipelineRun: run,
+      domain: run.domain,
+      daysBack,
+      logPrefix,
+    });
 
-  return {
-    status: result.status,
-    run_id: run.id,
-    domain: run.domain,
-    daysBack,
-    succeeded: result.succeeded,
-    failed: result.failed,
-    duration_ms: result.duration_ms,
-  };
+    return {
+      status: result.status,
+      run_id: run.id,
+      domain: run.domain,
+      daysBack,
+      succeeded: result.succeeded,
+      failed: result.failed,
+      duration_ms: result.duration_ms,
+    };
+  } finally {
+    if (onSettled) onSettled(run);
+  }
 }
 
 async function runSeoPipelineWorker({
@@ -60,10 +69,12 @@ async function runSeoPipelineWorker({
   pollMs = workerPollMs(),
   logPrefix = 'seo-pipeline-worker',
   shouldStop = () => false,
+  onClaimed = null,
+  onSettled = null,
 } = {}) {
   while (!shouldStop()) {
     try {
-      const result = await processNextQueuedPipelineRun({ logPrefix });
+      const result = await processNextQueuedPipelineRun({ logPrefix, onClaimed, onSettled });
       if (once) return result;
       if (result.status !== 'idle') continue;
     } catch (err) {

@@ -17,11 +17,12 @@ function heartbeatIntervalMs(value = process.env.SEO_PIPELINE_HEARTBEAT_INTERVAL
   return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_HEARTBEAT_INTERVAL_MS;
 }
 
-function progressPayload({ steps, start, currentStep, extra = {} }) {
+function progressPayload({ steps, start, currentStep, options = null, extra = {} }) {
   return {
     current_step: currentStep,
     steps,
     duration_ms: Date.now() - start,
+    ...(options ? { options } : {}),
     ...extra,
   };
 }
@@ -34,6 +35,7 @@ async function heartbeat(pipelineRun, state, currentStep, extra = {}) {
       steps: state.steps,
       start: state.start,
       currentStep,
+      options: state.options,
       extra,
     }),
   );
@@ -85,6 +87,7 @@ async function runClaimedSeoPipeline({ pipelineRun, domain, daysBack = 7, logPre
     steps: [],
     start: Date.now(),
     currentStep: null,
+    options: { days_back: daysBack },
   };
 
   try {

@@ -76,6 +76,7 @@ describe('SEO pipeline runner', () => {
       'pipeline-1',
       expect.objectContaining({
         current_step: 'site_audit',
+        options: { days_back: 8 },
         site_audit: expect.objectContaining({
           audit_run_id: 'audit-1',
           pages_attempted: 25,
