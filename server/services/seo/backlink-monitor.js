@@ -398,16 +398,17 @@ class BacklinkMonitor {
       trend: net7 > 0 ? 'growing' : net7 < 0 ? 'shrinking' : 'flat',
     };
 
-    // New competitor gaps in last 7 days — match prospect_status filter used for competitorGaps list
+    // New competitor gaps in last 7 days — use timestamp for created_at comparison
+    const sevenDaysAgoTs = new Date(Date.now() - 7 * 86400000);
     const newGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
-      .where('created_at', '>', sevenDaysAgoStr)
+      .where('created_at', '>', sevenDaysAgoTs)
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
     const newHighValueGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
-      .where('created_at', '>', sevenDaysAgoStr)
+      .where('created_at', '>', sevenDaysAgoTs)
       .where('source_domain_rating', '>', 40)
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
 
