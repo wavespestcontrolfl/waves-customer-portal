@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Link2, RefreshCw, SearchX, XCircle } from "lucide-react";
+import { CheckCircle2, History, Link2, RefreshCw, SearchX, XCircle } from "lucide-react";
 import { Badge, Button, cn } from "../../../components/ui";
 import { defaultCandidateId, rankCandidateMatches } from "./duplicateCleanup";
 
@@ -30,6 +30,123 @@ const DISMISS_REASONS = [
   { value: "already_handled", label: "Already handled" },
   { value: "other", label: "Other" },
 ];
+
+const DISMISS_REASON_LABELS = {
+  not_same_customer: "Not same customer",
+  bad_match: "Bad match",
+  already_handled: "Already handled",
+  other: "Other",
+};
+
+function formatHistoryTime(value) {
+  if (!value) return "Unknown time";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function ReviewedHistoryPanel({ adminFetch, refreshKey }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  async function loadHistory({ silent = false } = {}) {
+    if (!silent) setLoading(true);
+    setError(null);
+    try {
+      const data = await adminFetch("/admin/pipeline/opportunities/reviewed-history?limit=8");
+      setItems(data.data || []);
+    } catch (err) {
+      setError(err);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await adminFetch("/admin/pipeline/opportunities/reviewed-history?limit=8");
+        if (!ignore) setItems(data.data || []);
+      } catch (err) {
+        if (!ignore) setError(err);
+      } finally {
+        if (!ignore) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      ignore = true;
+    };
+  }, [adminFetch, refreshKey]);
+
+  return (
+    <div className="border-b border-hairline border-zinc-200 bg-zinc-50 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-13 font-medium text-zinc-900">
+          <History size={15} strokeWidth={1.8} aria-hidden />
+          Reviewed History
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="gap-2"
+          onClick={() => loadHistory({ silent: true })}
+          disabled={loading}
+        >
+          <RefreshCw size={13} strokeWidth={1.8} aria-hidden />
+          Refresh
+        </Button>
+      </div>
+
+      {loading ? (
+        <div className="mt-3 flex items-center gap-2 text-12 text-ink-secondary">
+          <RefreshCw size={13} strokeWidth={1.8} className="animate-spin" aria-hidden />
+          Loading reviewed decisions
+        </div>
+      ) : error ? (
+        <div className="mt-3 rounded-sm border-hairline border-alert-fg/30 bg-red-50 p-2 text-12 text-alert-fg">
+          Reviewed history failed: {error.message}
+        </div>
+      ) : items.length === 0 ? (
+        <div className="mt-3 text-12 text-ink-secondary">No reviewed decisions yet.</div>
+      ) : (
+        <div className="mt-3 grid gap-2 lg:grid-cols-2">
+          {items.map((item) => (
+            <div key={`${item.action}-${item.id}`} className="rounded-sm border-hairline border-zinc-200 bg-white p-3 text-12">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={item.action === "linked" ? "strong" : "neutral"}>
+                  {item.action === "linked" ? "Linked" : "Dismissed"}
+                </Badge>
+                {item.estimateId && <span className="text-ink-secondary">Est {compactId(item.estimateId)}</span>}
+                {item.leadId && <span className="text-ink-secondary">Lead {compactId(item.leadId)}</span>}
+              </div>
+              <div className="mt-2 text-ink-secondary">
+                {item.action === "dismissed"
+                  ? DISMISS_REASON_LABELS[item.reason] || "Dismissed"
+                  : "Lead and estimate linked"}
+                {item.hasNote ? " with note" : ""}
+              </div>
+              <div className="mt-1 text-11 text-ink-tertiary">
+                {[item.actor, formatHistoryTime(item.createdAt)].filter(Boolean).join(" / ")}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function QueueRow({ opportunity, adminFetch, onDismissed, onLinked }) {
   const [loading, setLoading] = useState(true);
@@ -244,7 +361,12 @@ function QueueRow({ opportunity, adminFetch, onDismissed, onLinked }) {
 
 export default function DuplicateCleanupQueue({ opportunities, adminFetch, onRefresh }) {
   const [resolvedEstimateIds, setResolvedEstimateIds] = useState(() => new Set());
+  const [historyVersion, setHistoryVersion] = useState(0);
   const visibleOpportunities = opportunities.filter((opportunity) => !resolvedEstimateIds.has(opportunity.estimateId));
+
+  function refreshHistory() {
+    setHistoryVersion((version) => version + 1);
+  }
 
   function handleResolved(estimateId) {
     setResolvedEstimateIds((current) => {
@@ -252,6 +374,12 @@ export default function DuplicateCleanupQueue({ opportunities, adminFetch, onRef
       next.add(estimateId);
       return next;
     });
+    refreshHistory();
+    onRefresh?.();
+  }
+
+  function handleDismissed() {
+    refreshHistory();
     onRefresh?.();
   }
 
@@ -267,6 +395,8 @@ export default function DuplicateCleanupQueue({ opportunities, adminFetch, onRef
         <Badge tone="neutral">{visibleOpportunities.length} visible</Badge>
       </div>
 
+      <ReviewedHistoryPanel adminFetch={adminFetch} refreshKey={historyVersion} />
+
       {visibleOpportunities.length === 0 ? (
         <div className="p-10 text-center text-13 text-ink-secondary">
           No duplicate-risk opportunities remain on this page.
@@ -277,7 +407,7 @@ export default function DuplicateCleanupQueue({ opportunities, adminFetch, onRef
             key={opportunity.opportunityId}
             opportunity={opportunity}
             adminFetch={adminFetch}
-            onDismissed={onRefresh}
+            onDismissed={handleDismissed}
             onLinked={handleResolved}
           />
         ))

@@ -5,6 +5,8 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { buildPipelineResponse } = require('../services/pipeline-opportunities');
 
 const MAX_CANDIDATES = 5000;
+const DEFAULT_REVIEWED_HISTORY_LIMIT = 20;
+const MAX_REVIEWED_HISTORY_LIMIT = 100;
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -74,6 +76,84 @@ async function fetchDismissedLeadIdsForEstimate({ database = db, estimateId }) {
     .where('estimate_id', estimateId)
     .select('lead_id');
   return rows.map((row) => row.lead_id).filter(Boolean);
+}
+
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_err) {
+    return {};
+  }
+}
+
+function historyLimit(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_REVIEWED_HISTORY_LIMIT;
+  return Math.min(Math.max(parsed, 1), MAX_REVIEWED_HISTORY_LIMIT);
+}
+
+function mapDismissalHistory(row) {
+  return {
+    id: row.id,
+    action: 'dismissed',
+    estimateId: row.estimate_id || null,
+    leadId: row.lead_id || null,
+    reason: row.reason || null,
+    actor: row.dismissed_by_name || null,
+    hasNote: Boolean(row.note),
+    createdAt: row.updated_at || row.created_at || null,
+  };
+}
+
+function mapLinkedHistory(row) {
+  const metadata = parseJsonObject(row.metadata);
+  return {
+    id: row.id,
+    action: 'linked',
+    estimateId: metadata.estimateId || metadata.estimate_id || null,
+    leadId: row.lead_id || null,
+    reason: null,
+    actor: row.performed_by || null,
+    hasNote: false,
+    createdAt: row.created_at || null,
+  };
+}
+
+function compareHistoryCreatedAt(left, right) {
+  const leftTime = left.createdAt ? new Date(left.createdAt).getTime() : 0;
+  const rightTime = right.createdAt ? new Date(right.createdAt).getTime() : 0;
+  return rightTime - leftTime;
+}
+
+async function getReviewedHistory({ database = db, limit = DEFAULT_REVIEWED_HISTORY_LIMIT } = {}) {
+  const safeLimit = historyLimit(limit);
+  const dismissalTableExists = await database.schema.hasTable('pipeline_duplicate_risk_dismissals');
+  const dismissalRows = dismissalTableExists
+    ? await database('pipeline_duplicate_risk_dismissals')
+      .leftJoin('technicians', 'pipeline_duplicate_risk_dismissals.dismissed_by', 'technicians.id')
+      .select(
+        'pipeline_duplicate_risk_dismissals.*',
+        database.raw('technicians.name as dismissed_by_name'),
+      )
+      .orderBy('pipeline_duplicate_risk_dismissals.updated_at', 'desc')
+      .limit(safeLimit)
+    : [];
+
+  const linkedRows = await database('lead_activities')
+    .where('activity_type', 'linked_estimate')
+    .select('id', 'lead_id', 'performed_by', 'metadata', 'created_at')
+    .orderBy('created_at', 'desc')
+    .limit(safeLimit);
+
+  const data = [
+    ...dismissalRows.map(mapDismissalHistory),
+    ...linkedRows.map(mapLinkedHistory),
+  ].sort(compareHistoryCreatedAt).slice(0, safeLimit);
+
+  return { data };
 }
 
 async function getLinkCandidateLeads({ database = db, estimateId }) {
@@ -448,6 +528,15 @@ router.get('/opportunities', async (req, res, next) => {
   }
 });
 
+// GET /api/admin/pipeline/opportunities/reviewed-history
+router.get('/opportunities/reviewed-history', async (req, res, next) => {
+  try {
+    res.json(await getReviewedHistory({ limit: req.query.limit }));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/admin/pipeline/opportunities/:estimateId/link-candidates
 router.get('/opportunities/:estimateId/link-candidates', async (req, res, next) => {
   try {
@@ -507,8 +596,13 @@ module.exports.__private = {
   fetchDismissedLeadIdsForEstimate,
   filterDismissedCandidates,
   getLinkCandidateLeads,
+  getReviewedHistory,
+  historyLimit,
   linkOpportunityRecords,
+  mapDismissalHistory,
+  mapLinkedHistory,
   normalizeDismissReason,
+  parseJsonObject,
   searchDigits,
   searchRef,
 };
