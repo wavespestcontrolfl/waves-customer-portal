@@ -102,4 +102,36 @@ describe('pipeline opportunities read model', () => {
     expect(response.data).toHaveLength(1);
     expect(response.data[0].leadId).toBe('lead-1');
   });
+
+  test('accepted linked estimate wins over stale lost lead status', () => {
+    const [opportunity] = normalizeOpportunities({
+      leads: [lead({ status: 'lost', estimate_id: 'est-1' })],
+      estimates: [estimate({ id: 'est-1', status: 'accepted' })],
+      now: NOW,
+    });
+
+    expect(opportunity).toMatchObject({
+      stage: PIPELINE_STAGES.WON,
+      status: 'won',
+      stageReason: 'Estimate accepted or lead marked won',
+    });
+  });
+
+  test('declined unlinked estimate does not collapse a separate active lead', () => {
+    const opportunities = normalizeOpportunities({
+      leads: [lead({ id: 'lead-1', status: 'contacted' })],
+      estimates: [estimate({ id: 'est-2', status: 'declined' })],
+      now: NOW,
+    });
+
+    expect(opportunities).toHaveLength(2);
+    expect(opportunities.find((o) => o.opportunityId === 'lead:lead-1')).toMatchObject({
+      stage: PIPELINE_STAGES.CONTACTED,
+      status: 'active',
+    });
+    expect(opportunities.find((o) => o.opportunityId === 'estimate:est-2')).toMatchObject({
+      stage: PIPELINE_STAGES.LOST,
+      status: 'lost',
+    });
+  });
 });
