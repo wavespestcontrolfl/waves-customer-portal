@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth,
@@ -152,10 +153,11 @@ class SmartRebooker {
 
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
+    const windowEnd = win.end || service.window_end;
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
-      window_end: win.end || service.window_end,
+      window_end: windowEnd,
       status: 'confirmed',
     };
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
@@ -166,7 +168,10 @@ class SmartRebooker {
       const updated = await trx('scheduled_services')
         .where({ id: serviceId, status: service.status })
         .whereIn('status', Array.from(RESCHEDULABLE_STATUSES))
-        .update(updates);
+        .update({
+          ...updates,
+          track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
+        });
       if (updated === 0) {
         throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
           statusCode: 409,
@@ -305,6 +310,11 @@ class SmartRebooker {
           status: 'confirmed',
           updated_at: trx.fn.now(),
         };
+        updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(
+          trx,
+          date,
+          updateData.window_end,
+        );
         if (isMonthBasedPattern) {
           updateData.recurring_nth = opts.nth;
           updateData.recurring_weekday = opts.weekday;

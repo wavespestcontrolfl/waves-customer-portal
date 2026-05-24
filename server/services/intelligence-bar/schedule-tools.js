@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const SCHEDULE_TOOLS = [
@@ -420,6 +421,7 @@ async function moveStopsToDay(input) {
     await db('scheduled_services').where('id', s.id).update({
       scheduled_date: newDate,
       notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
+      track_token_expires_at: scheduledServiceTrackTokenExpiry(db, newDate, s.window_end),
       updated_at: new Date(),
     });
   }
