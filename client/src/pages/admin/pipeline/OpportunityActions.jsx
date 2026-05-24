@@ -29,6 +29,10 @@ function communicationUrl(opportunity) {
   return `/admin/communications${params.toString() ? `?${params.toString()}` : ""}`;
 }
 
+function estimateSendIdempotencyKey() {
+  return globalThis.crypto?.randomUUID?.() || `estimate-send-${Date.now()}-${Math.random()}`;
+}
+
 function primaryAction(opportunity) {
   switch (opportunity.stage) {
     case PIPELINE_STAGES.NEW_LEAD:
@@ -124,7 +128,10 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       try {
         await adminFetch(`/admin/estimates/${opportunity.estimateId}/send`, {
           method: "POST",
-          body: JSON.stringify({ sendMethod: "both" }),
+          body: JSON.stringify({
+            sendMethod: "both",
+            idempotencyKey: estimateSendIdempotencyKey(),
+          }),
         });
         onRefresh?.();
       } catch (err) {
