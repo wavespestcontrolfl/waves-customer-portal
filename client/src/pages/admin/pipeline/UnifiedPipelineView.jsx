@@ -26,7 +26,6 @@ import {
   opportunityMatchesFilter,
   sortOpportunities,
 } from "./opportunityNormalizer";
-import { PIPELINE_FILTERS } from "./pipelineStages";
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
 const LEAD_LIMIT = 200;
@@ -65,16 +64,6 @@ function sourceLabel(opportunity) {
   return opportunity.source || "Unknown";
 }
 
-function buildCounts(opportunities) {
-  const counts = Object.fromEntries(PIPELINE_FILTERS.map((filter) => [filter.key, 0]));
-  for (const opportunity of opportunities) {
-    for (const filter of PIPELINE_FILTERS) {
-      if (opportunityMatchesFilter(opportunity, filter.key)) counts[filter.key] += 1;
-    }
-  }
-  return counts;
-}
-
 function WarningBanner({ children }) {
   return (
     <div className="mb-4 flex items-start gap-2 rounded-sm border-hairline border-amber-300 bg-amber-50 px-3 py-2 text-13 text-amber-900">
@@ -98,70 +87,79 @@ function LoadError({ error, onRetry }) {
 
 export default function UnifiedPipelineView() {
   const navigate = useNavigate();
-  const [leads, setLeads] = useState([]);
-  const [leadsTotal, setLeadsTotal] = useState(0);
-  const [estimates, setEstimates] = useState([]);
+  const [opportunities, setOpportunities] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 100, total: 0 });
+  const [meta, setMeta] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [leadError, setLeadError] = useState(null);
-  const [estimateError, setEstimateError] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [fallbackWarning, setFallbackWarning] = useState(null);
   const [filter, setFilter] = useState("needs_action");
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
 
   const loadPipeline = useCallback(async () => {
     setLoading(true);
-    setLeadError(null);
-    setEstimateError(null);
-    const [leadResult, estimateResult] = await Promise.allSettled([
-      adminFetch(`/admin/leads?sort=first_contact_at&order=desc&page=1&limit=${LEAD_LIMIT}`),
-      adminFetch(`/admin/estimates?limit=${ESTIMATE_LIMIT}&pricingRisk=1`),
-    ]);
+    setLoadError(null);
+    setFallbackWarning(null);
+    const params = new URLSearchParams();
+    params.set("stage", filter);
+    params.set("page", String(page));
+    params.set("pageSize", "100");
+    if (search.trim()) params.set("search", search.trim());
 
-    if (leadResult.status === "fulfilled") {
-      setLeads(leadResult.value?.leads || []);
-      setLeadsTotal(leadResult.value?.total || 0);
-    } else {
-      setLeads([]);
-      setLeadsTotal(0);
-      setLeadError(leadResult.reason);
+    try {
+      const data = await adminFetch(`/admin/pipeline/opportunities?${params.toString()}`);
+      setOpportunities(data.data || []);
+      setCounts(data.counts || {});
+      setPagination(data.pagination || { page: 1, pageSize: 100, total: 0 });
+      setMeta(data.meta || null);
+      setLoading(false);
+      return;
+    } catch (err) {
+      setFallbackWarning(`Server pipeline endpoint failed, showing local fallback: ${err.message}`);
     }
 
-    if (estimateResult.status === "fulfilled") {
-      setEstimates(estimateResult.value?.estimates || []);
-    } else {
-      setEstimates([]);
-      setEstimateError(estimateResult.reason);
+    try {
+      const [leadResult, estimateResult] = await Promise.allSettled([
+        adminFetch(`/admin/leads?sort=first_contact_at&order=desc&page=1&limit=${LEAD_LIMIT}`),
+        adminFetch(`/admin/estimates?limit=${ESTIMATE_LIMIT}&pricingRisk=1`),
+      ]);
+      if (leadResult.status === "rejected" && estimateResult.status === "rejected") {
+        throw leadResult.reason || estimateResult.reason;
+      }
+      const leads = leadResult.status === "fulfilled" ? leadResult.value?.leads || [] : [];
+      const estimates = estimateResult.status === "fulfilled" ? estimateResult.value?.estimates || [] : [];
+      const q = search.trim().toLowerCase();
+      const normalized = sortOpportunities(normalizeOpportunities({ leads, estimates }))
+        .filter((opportunity) => opportunityMatchesFilter(opportunity, filter))
+        .filter((opportunity) => {
+          if (!q) return true;
+          const phoneQ = q.replace(/\D/g, "");
+          return buildOpportunitySearchText(opportunity).includes(phoneQ.length >= 7 ? phoneQ : q);
+        });
+      setOpportunities(normalized);
+      setCounts({ total: normalized.length, [filter]: normalized.length });
+      setPagination({ page: 1, pageSize: normalized.length, total: normalized.length });
+      setMeta({ source: "client_fallback", truncated: leadResult.value?.total > leads.length });
+    } catch (err) {
+      setLoadError(err);
+      setOpportunities([]);
+      setCounts({});
+      setPagination({ page: 1, pageSize: 100, total: 0 });
+      setMeta(null);
     }
-
     setLoading(false);
-  }, []);
+  }, [filter, page, search]);
 
   useEffect(() => {
     loadPipeline();
   }, [loadPipeline]);
 
-  const opportunities = useMemo(
-    () => sortOpportunities(normalizeOpportunities({ leads, estimates })),
-    [leads, estimates],
-  );
-  const counts = useMemo(() => buildCounts(opportunities), [opportunities]);
-  const visibleOpportunities = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return opportunities
-      .filter((opportunity) => opportunityMatchesFilter(opportunity, filter))
-      .filter((opportunity) => {
-        if (!q) return true;
-        return buildOpportunitySearchText(opportunity).includes(q.replace(/\D/g, "").length >= 7 ? q.replace(/\D/g, "") : q);
-      });
-  }, [filter, opportunities, search]);
-
-  const bothFailed = leadError && estimateError;
-  const partialWarning = leadError
-    ? "Showing estimates only. Leads could not be loaded."
-    : estimateError
-      ? "Showing leads only. Estimates could not be loaded."
-      : null;
-  const truncatedWarning = !leadError && leadsTotal > leads.length
-    ? `Showing the first ${leads.length} of ${leadsTotal} leads. Use legacy Leads for older records.`
+  const visibleOpportunities = useMemo(() => opportunities, [opportunities]);
+  const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / (pagination.pageSize || 100)));
+  const truncatedWarning = meta?.truncated
+    ? "Pipeline results were truncated by the server candidate cap. Narrow the search/filter for a complete result set."
     : null;
 
   return (
@@ -214,7 +212,7 @@ export default function UnifiedPipelineView() {
         </div>
       </div>
 
-      {partialWarning && <WarningBanner>{partialWarning}</WarningBanner>}
+      {fallbackWarning && <WarningBanner>{fallbackWarning}</WarningBanner>}
       {truncatedWarning && <WarningBanner>{truncatedWarning}</WarningBanner>}
 
       <Card className="mb-4">
@@ -224,14 +222,27 @@ export default function UnifiedPipelineView() {
             <div className="flex flex-wrap items-center gap-2 text-12 text-ink-tertiary">
               <Badge tone="neutral">{opportunities.length} opportunities</Badge>
               <Badge tone="neutral">{counts.needs_action || 0} need action</Badge>
+              {pagination.total > opportunities.length && (
+                <Badge tone="neutral">{pagination.total} matched</Badge>
+              )}
             </div>
           </div>
-          <UnifiedPipelineFilters activeFilter={filter} counts={counts} onChange={setFilter} />
+          <UnifiedPipelineFilters
+            activeFilter={filter}
+            counts={counts}
+            onChange={(nextFilter) => {
+              setPage(1);
+              setFilter(nextFilter);
+            }}
+          />
           <div className="relative">
             <input
               type="search"
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                setPage(1);
+                setSearch(event.target.value);
+              }}
               placeholder="Search name, phone, email, address, source, service, or ref"
               aria-label="Search opportunities"
               className={cn(
@@ -261,92 +272,119 @@ export default function UnifiedPipelineView() {
         <CardBody className="p-0">
           {loading ? (
             <div className="p-10 text-center text-13 text-ink-secondary">Loading pipeline...</div>
-          ) : bothFailed ? (
-            <LoadError error={leadError || estimateError} onRetry={loadPipeline} />
+          ) : loadError ? (
+            <LoadError error={loadError} onRetry={loadPipeline} />
           ) : visibleOpportunities.length === 0 ? (
             <div className="p-10 text-center text-13 text-ink-secondary">
               No opportunities match the current filter.
             </div>
           ) : (
-            <Table>
-              <THead>
-                <TR className="hover:bg-transparent">
-                  <TH>Customer</TH>
-                  <TH>Stage</TH>
-                  <TH>Service</TH>
-                  <TH>Source</TH>
-                  <TH align="right">Value</TH>
-                  <TH>Last Activity</TH>
-                  <TH>Next Action</TH>
-                  <TH>Owner</TH>
-                  <TH align="right">Actions</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {visibleOpportunities.map((opportunity) => (
-                  <TR key={opportunity.opportunityId}>
-                    <TD className="min-w-[230px] align-top">
-                      <div className="font-medium text-zinc-900">{opportunity.name || "Unknown Customer"}</div>
-                      <div className="mt-1 text-12 text-ink-secondary">
-                        {[opportunity.phone, opportunity.email].filter(Boolean).join(" / ") || "No contact info"}
-                      </div>
-                      <div className="mt-1 text-12 text-ink-tertiary truncate max-w-[280px]">
-                        {opportunity.address || "No address"}
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {opportunity.leadId && <Badge tone="neutral">Lead {shortId(opportunity.leadId)}</Badge>}
-                        {opportunity.estimateId && <Badge tone="neutral">Est {shortId(opportunity.estimateId)}</Badge>}
-                        {opportunity.isDuplicateRisk && <Badge tone="alert">Duplicate Risk</Badge>}
-                      </div>
-                    </TD>
-                    <TD className="align-top min-w-[150px]">
-                      <OpportunityStageBadge stage={opportunity.stage} />
-                      <div className="mt-2 text-11 leading-4 text-ink-tertiary max-w-[180px]">
-                        {opportunity.stageReason}
-                      </div>
-                    </TD>
-                    <TD className="align-top min-w-[160px]">
-                      {opportunity.serviceInterest || "Unknown service"}
-                    </TD>
-                    <TD className="align-top min-w-[150px]">
-                      {sourceLabel(opportunity)}
-                    </TD>
-                    <TD className="align-top" align="right" nums>
-                      <div>{money(opportunity.valueCents)}</div>
-                      {opportunity.valueConfidence !== "unknown" && (
-                        <div className="mt-1 text-10 text-ink-tertiary uppercase tracking-label">
-                          {opportunity.valueConfidence.replace(/_/g, " ")}
-                        </div>
-                      )}
-                    </TD>
-                    <TD className="align-top min-w-[140px]">
-                      {formatDate(opportunity.lastActivityAt)}
-                    </TD>
-                    <TD className="align-top min-w-[140px]">
-                      <div className={cn("font-medium", opportunity.needsAction ? "text-zinc-900" : "text-ink-secondary")}>
-                        {opportunity.nextActionLabel || "None"}
-                      </div>
-                      {opportunity.nextFollowUpAt && (
-                        <div className="mt-1 text-11 text-ink-tertiary">
-                          Due {formatDate(opportunity.nextFollowUpAt)}
-                        </div>
-                      )}
-                      {opportunity.isStale && <Badge tone="alert" className="mt-2">Stale</Badge>}
-                    </TD>
-                    <TD className="align-top min-w-[120px]">
-                      {opportunity.owner || "Unassigned"}
-                    </TD>
-                    <TD className="align-top min-w-[190px]" align="right">
-                      <OpportunityActions
-                        opportunity={opportunity}
-                        adminFetch={adminFetch}
-                        onRefresh={loadPipeline}
-                      />
-                    </TD>
+            <>
+              <Table>
+                <THead>
+                  <TR className="hover:bg-transparent">
+                    <TH>Customer</TH>
+                    <TH>Stage</TH>
+                    <TH>Service</TH>
+                    <TH>Source</TH>
+                    <TH align="right">Value</TH>
+                    <TH>Last Activity</TH>
+                    <TH>Next Action</TH>
+                    <TH>Owner</TH>
+                    <TH align="right">Actions</TH>
                   </TR>
-                ))}
-              </TBody>
-            </Table>
+                </THead>
+                <TBody>
+                  {visibleOpportunities.map((opportunity) => (
+                    <TR key={opportunity.opportunityId}>
+                      <TD className="min-w-[230px] align-top">
+                        <div className="font-medium text-zinc-900">{opportunity.name || "Unknown Customer"}</div>
+                        <div className="mt-1 text-12 text-ink-secondary">
+                          {[opportunity.phone, opportunity.email].filter(Boolean).join(" / ") || "No contact info"}
+                        </div>
+                        <div className="mt-1 text-12 text-ink-tertiary truncate max-w-[280px]">
+                          {opportunity.address || "No address"}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {opportunity.leadId && <Badge tone="neutral">Lead {shortId(opportunity.leadId)}</Badge>}
+                          {opportunity.estimateId && <Badge tone="neutral">Est {shortId(opportunity.estimateId)}</Badge>}
+                          {opportunity.isDuplicateRisk && <Badge tone="alert">Duplicate Risk</Badge>}
+                        </div>
+                      </TD>
+                      <TD className="align-top min-w-[150px]">
+                        <OpportunityStageBadge stage={opportunity.stage} />
+                        <div className="mt-2 text-11 leading-4 text-ink-tertiary max-w-[180px]">
+                          {opportunity.stageReason}
+                        </div>
+                      </TD>
+                      <TD className="align-top min-w-[160px]">
+                        {opportunity.serviceInterest || "Unknown service"}
+                      </TD>
+                      <TD className="align-top min-w-[150px]">
+                        {sourceLabel(opportunity)}
+                      </TD>
+                      <TD className="align-top" align="right" nums>
+                        <div>{money(opportunity.valueCents)}</div>
+                        {opportunity.valueConfidence !== "unknown" && (
+                          <div className="mt-1 text-10 text-ink-tertiary uppercase tracking-label">
+                            {opportunity.valueConfidence.replace(/_/g, " ")}
+                          </div>
+                        )}
+                      </TD>
+                      <TD className="align-top min-w-[140px]">
+                        {formatDate(opportunity.lastActivityAt)}
+                      </TD>
+                      <TD className="align-top min-w-[140px]">
+                        <div className={cn("font-medium", opportunity.needsAction ? "text-zinc-900" : "text-ink-secondary")}>
+                          {opportunity.nextActionLabel || "None"}
+                        </div>
+                        {opportunity.nextFollowUpAt && (
+                          <div className="mt-1 text-11 text-ink-tertiary">
+                            Due {formatDate(opportunity.nextFollowUpAt)}
+                          </div>
+                        )}
+                        {opportunity.isStale && <Badge tone="alert" className="mt-2">Stale</Badge>}
+                      </TD>
+                      <TD className="align-top min-w-[120px]">
+                        {opportunity.owner || "Unassigned"}
+                      </TD>
+                      <TD className="align-top min-w-[190px]" align="right">
+                        <OpportunityActions
+                          opportunity={opportunity}
+                          adminFetch={adminFetch}
+                          onRefresh={loadPipeline}
+                        />
+                      </TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+              {pagination.total > pagination.pageSize && (
+                <div className="flex items-center justify-between gap-3 border-t border-hairline border-zinc-200 px-4 py-3">
+                  <div className="text-12 text-ink-tertiary">
+                    Page {pagination.page} of {totalPages}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={pagination.page <= 1 || loading}
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={pagination.page >= totalPages || loading}
+                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </CardBody>
       </Card>
