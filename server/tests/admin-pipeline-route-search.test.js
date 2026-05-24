@@ -269,3 +269,70 @@ describe('admin pipeline duplicate-risk dismissal', () => {
     })).rejects.toMatchObject({ status: 400, message: 'leadId is required' });
   });
 });
+
+describe('admin pipeline reviewed history helpers', () => {
+  test('history limit defaults and clamps values', () => {
+    expect(__private.historyLimit(undefined)).toBe(20);
+    expect(__private.historyLimit('0')).toBe(1);
+    expect(__private.historyLimit('-5')).toBe(1);
+    expect(__private.historyLimit('250')).toBe(100);
+    expect(__private.historyLimit('8')).toBe(8);
+  });
+
+  test('dismissal history maps note presence without exposing raw notes', () => {
+    const history = __private.mapDismissalHistory({
+      id: 'dismissal-1',
+      estimate_id: 'est-1',
+      lead_id: 'lead-1',
+      dismissed_by_name: 'Ada Admin',
+      reason: 'bad_match',
+      note: 'Private note',
+      updated_at: '2026-05-24T12:00:00.000Z',
+    });
+
+    expect(history).toEqual({
+      id: 'dismissal-1',
+      action: 'dismissed',
+      estimateId: 'est-1',
+      leadId: 'lead-1',
+      reason: 'bad_match',
+      actor: 'Ada Admin',
+      hasNote: true,
+      createdAt: '2026-05-24T12:00:00.000Z',
+    });
+    expect(history).not.toHaveProperty('note');
+  });
+
+  test('linked history parses estimate id from activity metadata', () => {
+    expect(__private.mapLinkedHistory({
+      id: 'activity-1',
+      lead_id: 'lead-1',
+      performed_by: 'Ada Admin',
+      metadata: JSON.stringify({ estimateId: 'est-1' }),
+      created_at: '2026-05-24T13:00:00.000Z',
+    })).toEqual({
+      id: 'activity-1',
+      action: 'linked',
+      estimateId: 'est-1',
+      leadId: 'lead-1',
+      reason: null,
+      actor: 'Ada Admin',
+      hasNote: false,
+      createdAt: '2026-05-24T13:00:00.000Z',
+    });
+  });
+
+  test('linked history tolerates malformed metadata', () => {
+    expect(__private.mapLinkedHistory({
+      id: 'activity-2',
+      lead_id: 'lead-2',
+      performed_by: null,
+      metadata: '{',
+      created_at: null,
+    })).toMatchObject({
+      estimateId: null,
+      leadId: 'lead-2',
+      actor: null,
+    });
+  });
+});
