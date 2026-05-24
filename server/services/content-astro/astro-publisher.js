@@ -328,6 +328,11 @@ async function publishAstro(postId) {
       title: `Blog: ${post.title}`.slice(0, 72),
       body: prBody,
     });
+    await requestCodexReview({
+      pr,
+      headSha: pr.head?.sha || fileCommit?.commit?.sha,
+      context: `Blog publish for \`${slug}\``,
+    });
 
     const previewUrl = cloudflarePreviewUrl(branch);
     await db('blog_posts').where({ id: postId }).update({
@@ -390,6 +395,11 @@ async function publishOrUpdatePage(draft, brief = {}) {
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
     body: buildDraftPrBody({ frontmatter, slug, branch, content: body, brief }),
   });
+  await requestCodexReview({
+    pr,
+    headSha: pr.head?.sha || fileCommit?.commit?.sha,
+    context: `Autonomous blog publish for \`${slug}\``,
+  });
 
   return {
     url: canonical,
@@ -432,6 +442,7 @@ async function mergeAstro(postId) {
     if (pr.state !== 'open') {
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
     }
+    await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
 
     const result = await gh.mergePr(post.astro_pr_number, {
       method: 'squash',
@@ -538,6 +549,11 @@ async function unpublishAstro(postId) {
       head: branch,
       title: `Unpublish: ${post.title}`.slice(0, 72),
       body: prBody,
+    });
+    await requestCodexReview({
+      pr,
+      headSha: pr.head?.sha || null,
+      context: `Blog unpublish for \`${slug}\``,
     });
 
     await db('blog_posts').where({ id: postId }).update({
@@ -666,6 +682,113 @@ function formatList(v) {
   return arr.length ? arr.join(', ') : '—';
 }
 
+async function requestCodexReview({ pr, headSha, context }) {
+  if (!pr?.number || typeof gh.createIssueComment !== 'function') return { requested: false, skipped: true };
+  const reviewHead = headSha ? String(headSha) : 'unknown';
+  const body = [
+    '@codex review',
+    '',
+    `${context || 'Astro content PR'} is ready for review on head \`${reviewHead}\`.`,
+    '',
+    'Please review before merge.',
+  ].join('\n');
+  try {
+    await gh.createIssueComment(pr.number, body);
+    logger.info(`[astro-publisher] requested Codex review for PR #${pr.number}`);
+    return { requested: true };
+  } catch (err) {
+    logger.warn(`[astro-publisher] failed to request Codex review for PR #${pr.number}: ${err.message}`);
+    return { requested: false, error: err.message };
+  }
+}
+
+async function assertCodexReviewClear(prNumber, { headSha = null } = {}) {
+  if (process.env.ASTRO_REQUIRE_CODEX_REVIEW === 'false') return true;
+  if (typeof gh.listIssueComments !== 'function' || typeof gh.listPrReviews !== 'function') {
+    throw new Error('Codex review is required before merge, but GitHub review lookup is unavailable');
+  }
+
+  const [comments, reviews] = await Promise.all([
+    gh.listIssueComments(prNumber),
+    gh.listPrReviews(prNumber),
+  ]);
+  const status = codexReviewStatus({ comments, reviews, headSha });
+  if (status.clean) return true;
+
+  const err = new Error(status.reason || `Codex review is required before merging PR #${prNumber}`);
+  err.code = 'CODEX_REVIEW_REQUIRED';
+  throw err;
+}
+
+function codexReviewStatus({ comments = [], reviews = [], headSha = null } = {}) {
+  const requestedAt = latestReviewRequestAt(comments, headSha);
+  const codexComments = comments
+    .filter((comment) => isCodexAuthor(comment?.user?.login || comment?.author?.login))
+    .filter((comment) => commentEligibleForHead(comment, { headSha, requestedAt }))
+    .sort((a, b) => Date.parse(a.created_at || a.createdAt || 0) - Date.parse(b.created_at || b.createdAt || 0));
+  const codexReviews = reviews
+    .filter((review) => isCodexAuthor(review?.user?.login || review?.author?.login))
+    .filter((review) => reviewEligibleForHead(review, { headSha, requestedAt }))
+    .sort((a, b) => Date.parse(a.submitted_at || a.submittedAt || 0) - Date.parse(b.submitted_at || b.submittedAt || 0));
+  const latestBody = [
+    codexComments.at(-1)?.body,
+    codexReviews.at(-1)?.body,
+  ].filter(Boolean).join('\n\n');
+
+  if (/usage limits|reached your Codex usage limits/i.test(latestBody)) {
+    return { clean: false, reason: 'Codex review did not complete because usage limits were reached' };
+  }
+  if (/Codex Review:\s*Didn'?t find any major issues/i.test(latestBody)) return { clean: true };
+  if (/approved/i.test(String(codexReviews.at(-1)?.state || ''))) return { clean: true };
+  if (headSha && !requestedAt) return { clean: false, reason: 'Codex review has not been requested for the current PR head' };
+  return { clean: false, reason: 'Codex review is required before merging this Astro PR' };
+}
+
+function latestReviewRequestAt(comments = [], headSha = null) {
+  const head = String(headSha || '').trim();
+  const shortHead = head.slice(0, 12);
+  const candidates = comments
+    .filter((comment) => /@codex\s+review/i.test(String(comment?.body || '')))
+    .filter((comment) => !head || String(comment.body || '').includes(head) || (shortHead && String(comment.body || '').includes(shortHead)))
+    .map((comment) => Date.parse(comment.created_at || comment.createdAt || 0))
+    .filter(Number.isFinite)
+    .sort((a, b) => b - a);
+  return candidates[0] || null;
+}
+
+function codexReviewMatchesHead(review, headSha) {
+  const head = String(headSha || '').trim();
+  if (!head) return false;
+  const commit = String(review?.commit_id || review?.commit?.oid || '').trim();
+  return commit && commit === head;
+}
+
+function reviewEligibleForHead(review, { headSha = null, requestedAt = null } = {}) {
+  const commit = String(review?.commit_id || review?.commit?.oid || '').trim();
+  if (headSha && commit) return codexReviewMatchesHead(review, headSha);
+  if (headSha) return false;
+  if (!requestedAt) return true;
+  return Date.parse(review.submitted_at || review.submittedAt || 0) >= requestedAt;
+}
+
+function commentEligibleForHead(comment, { headSha = null, requestedAt = null } = {}) {
+  const head = String(headSha || '').trim();
+  if (head) {
+    const body = String(comment?.body || '');
+    const shortHead = head.slice(0, 12);
+    if (!requestedAt) return false;
+    if (!body.includes(head) && !(shortHead && body.includes(shortHead))) return false;
+  }
+  if (headSha && !requestedAt) return false;
+  if (!requestedAt) return true;
+  return Date.parse(comment.created_at || comment.createdAt || 0) >= requestedAt;
+}
+
+function isCodexAuthor(login) {
+  const value = String(login || '').toLowerCase();
+  return value === 'chatgpt-codex-connector' || value === 'chatgpt-codex-connector[bot]';
+}
+
 module.exports = {
   publishAstro,
   publishOrUpdatePage,
@@ -679,5 +802,11 @@ module.exports = {
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,
     buildDraftPrBody,
+    codexReviewStatus,
+    latestReviewRequestAt,
+    codexReviewMatchesHead,
+    reviewEligibleForHead,
+    commentEligibleForHead,
+    isCodexAuthor,
   },
 };

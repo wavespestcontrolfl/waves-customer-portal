@@ -9,6 +9,7 @@ const logger = require('../logger');
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const ALLOWED_STATUSES = new Set(['pending_review', 'pending', 'claimed', 'done', 'skipped', 'expired']);
+const ALLOWED_DECISIONS = new Set(['requeue', 'dismiss', 'approve_trust_build']);
 
 async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMIT } = {}) {
   const normalizedStatus = normalizeStatus(status);
@@ -75,6 +76,102 @@ async function getReviewItem(opportunityId) {
   ]);
 
   return buildReviewItem({ opportunity, brief, run, includeDraftBody: true });
+}
+
+async function decideReviewItem(opportunityId, { decision, note, reviewer } = {}) {
+  const normalizedDecision = normalizeDecision(decision);
+  const reviewerName = normalizeReviewer(reviewer);
+  const cleanNote = normalizeNote(note);
+  const opportunity = await db('opportunity_queue').where('id', opportunityId).first();
+  if (!opportunity) return null;
+  if (opportunity.status !== 'pending_review') {
+    const err = new Error(`Opportunity is ${opportunity.status}, expected pending_review`);
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
+
+  const run = await db('autonomous_runs')
+    .where('opportunity_id', opportunityId)
+    .orderBy('claimed_at', 'desc')
+    .first();
+
+  if (normalizedDecision === 'approve_trust_build') {
+    assertTrustBuildRun(run);
+    await db.transaction(async (trx) => {
+      await updatePendingReviewOpportunity(trx, opportunityId, {
+        status: 'done',
+        skip_reason: 'trust_build_approved',
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+      await trx('autonomous_runs').where('id', run.id).update({
+        trust_build_approved_at: new Date(),
+        trust_build_approved_by: reviewerName,
+        reviewer_notes: appendReviewerNote(run.reviewer_notes, {
+          decision: normalizedDecision,
+          reviewer: reviewerName,
+          note: cleanNote,
+        }),
+        updated_at: new Date(),
+      });
+    });
+  } else if (normalizedDecision === 'requeue') {
+    await db.transaction(async (trx) => {
+      await updatePendingReviewOpportunity(trx, opportunityId, {
+        status: 'pending',
+        claimed_at: null,
+        completed_at: null,
+        skip_reason: null,
+        updated_at: new Date(),
+      });
+      if (run?.id) {
+        await trx('autonomous_runs').where('id', run.id).update({
+          reviewer_notes: appendReviewerNote(run.reviewer_notes, {
+            decision: normalizedDecision,
+            reviewer: reviewerName,
+            note: cleanNote,
+          }),
+          updated_at: new Date(),
+        });
+      }
+    });
+  } else if (normalizedDecision === 'dismiss') {
+    await db.transaction(async (trx) => {
+      await updatePendingReviewOpportunity(trx, opportunityId, {
+        status: 'skipped',
+        skip_reason: boundedReason(cleanNote ? `manual_dismiss:${cleanNote}` : 'manual_dismiss'),
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+      if (run?.id) {
+        await trx('autonomous_runs').where('id', run.id).update({
+          reviewer_notes: appendReviewerNote(run.reviewer_notes, {
+            decision: normalizedDecision,
+            reviewer: reviewerName,
+            note: cleanNote,
+          }),
+          updated_at: new Date(),
+        });
+      }
+    });
+  }
+
+  logger.info(`[autonomous-review-queue] ${normalizedDecision} ${opportunityId}`);
+  return getReviewItem(opportunityId);
+}
+
+async function updatePendingReviewOpportunity(trx, opportunityId, updates) {
+  const updated = await trx('opportunity_queue')
+    .where({ id: opportunityId, status: 'pending_review' })
+    .update(updates);
+  if (!updated) {
+    const err = new Error('Opportunity review state changed; refresh before applying a decision');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
+  return updated;
 }
 
 async function countsByStatus() {
@@ -151,8 +248,36 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
       uniqueness_gate_result: uniquenessGate,
       gate_summary: summarizeGates(qualityGate, uniquenessGate),
     } : null,
+    review_actions: reviewActions({ opportunity, run }),
     draft,
   };
+}
+
+function reviewActions({ opportunity, run }) {
+  const pendingReview = opportunity?.status === 'pending_review';
+  return {
+    can_requeue: pendingReview,
+    can_dismiss: pendingReview,
+    can_approve_trust_build: pendingReview && isTrustBuildRun(run),
+  };
+}
+
+function isTrustBuildRun(run) {
+  return !!(
+    run
+    && run.outcome === 'completed_pending_review'
+    && run.shadow_mode === false
+    && /^trust_build_\d+_of_\d+$/.test(String(run.skip_reason || ''))
+  );
+}
+
+function assertTrustBuildRun(run) {
+  if (!isTrustBuildRun(run)) {
+    const err = new Error('Only live trust-build pending-review runs can be approved');
+    err.statusCode = 400;
+    err.isOperational = true;
+    throw err;
+  }
 }
 
 function summarizeDraft(draft, { includeBody = false } = {}) {
@@ -189,6 +314,34 @@ function normalizeStatus(status) {
   return value;
 }
 
+function normalizeDecision(decision) {
+  const value = String(decision || '').trim();
+  if (!ALLOWED_DECISIONS.has(value)) {
+    const err = new Error(`decision must be one of: ${Array.from(ALLOWED_DECISIONS).join(', ')}`);
+    err.statusCode = 400;
+    err.isOperational = true;
+    throw err;
+  }
+  return value;
+}
+
+function normalizeReviewer(reviewer) {
+  return String(reviewer || 'admin').trim().slice(0, 100) || 'admin';
+}
+
+function normalizeNote(note) {
+  return String(note || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+}
+
+function boundedReason(reason) {
+  return String(reason || '').slice(0, 100);
+}
+
+function appendReviewerNote(existing, { decision, reviewer, note, now = new Date() }) {
+  const stamp = `[${now.toISOString()}] ${reviewer}: ${decision}${note ? ` — ${note}` : ''}`;
+  return [String(existing || '').trim(), stamp].filter(Boolean).join('\n').slice(-5000);
+}
+
 function normalizeLimit(limit) {
   const parsed = Number.parseInt(limit, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LIMIT;
@@ -204,10 +357,16 @@ function parseJsonMaybe(value, fallback) {
 module.exports = {
   listReviewItems,
   getReviewItem,
+  decideReviewItem,
   countsByStatus,
   buildReviewItem,
+  updatePendingReviewOpportunity,
+  reviewActions,
+  isTrustBuildRun,
   summarizeDraft,
   summarizeGates,
+  appendReviewerNote,
+  normalizeDecision,
   parseJsonMaybe,
   normalizeLimit,
   normalizeStatus,

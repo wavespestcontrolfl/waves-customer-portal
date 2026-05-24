@@ -13,6 +13,8 @@ const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
 const SCHEDULED_ESTIMATE_RETRY_DELAY_MS = 5 * 60 * 1000;
+const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
+const CONTENT_REGISTRY_LIVE_LIMIT = 300;
 
 function purposeForScheduledMessageType(messageType) {
   const type = String(messageType || '').toLowerCase();
@@ -155,6 +157,54 @@ async function markScheduledEstimateSendFailure(est, errorMessage, { retry = fal
       last_send_error: String(errorMessage || 'Scheduled estimate send failed').slice(0, 1000),
       updated_at: db.fn.now(),
     });
+}
+
+function parseListEnv(value, fallback) {
+  const items = String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length ? items : fallback;
+}
+
+function parsePositiveEnvInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function runContentRegistryMaintenance({
+  registry = require('./content/content-registry'),
+  liveStatus = require('./content/content-registry-live-status'),
+} = {}) {
+  const contentType = String(process.env.CONTENT_REGISTRY_MAINTENANCE_CONTENT_TYPE || '').trim() || null;
+  const syncResult = await registry.runContentRegistrySync({
+    astroSource: 'github',
+    githubRef: process.env.CONTENT_REGISTRY_GITHUB_REF || process.env.GITHUB_ASTRO_DEFAULT_BRANCH || null,
+    contentType,
+    commit: true,
+  });
+  if (!syncResult.ok) {
+    throw new Error(`sync failed: ${syncResult.error || 'unknown error'}`);
+  }
+
+  const statuses = parseListEnv(process.env.CONTENT_REGISTRY_LIVE_STATUS_STATUSES, CONTENT_REGISTRY_LIVE_STATUSES);
+  const limit = parsePositiveEnvInt(process.env.CONTENT_REGISTRY_LIVE_STATUS_LIMIT, CONTENT_REGISTRY_LIVE_LIMIT);
+  const liveResult = await liveStatus.runContentRegistryLiveStatusCheck({
+    statuses,
+    limit,
+    commit: true,
+  });
+  if (!liveResult.ok) {
+    throw new Error(`live status failed: ${liveResult.error || 'unknown error'}`);
+  }
+
+  return {
+    sync: syncResult.summary,
+    live: liveResult.summary,
+    sync_run_id: syncResult.sync_run_id,
+    statuses,
+    limit,
+  };
 }
 
 function initScheduledJobs() {
@@ -845,6 +895,20 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Content scheduler failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 1:20AM ET — Content registry maintenance.
+  // Syncs the registry from the pinned GitHub Astro source, then refreshes
+  // live HTTP/sitemap status for published/reconciled rows.
+  // =========================================================================
+  cron.schedule('20 1 * * *', async () => {
+    try {
+      const result = await runContentRegistryMaintenance();
+      logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)}`);
+    } catch (err) {
+      logger.error(`[content-registry] maintenance failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1595,6 +1659,9 @@ module.exports = {
   initScheduledJobs,
   initBankingSync,
   purposeForScheduledMessageType,
+  runContentRegistryMaintenance,
+  parseListEnv,
+  parsePositiveEnvInt,
   claimDueScheduledEstimates,
   recoverStaleScheduledEstimateClaims,
   markScheduledEstimateSendFailure,

@@ -180,6 +180,20 @@ router.get('/autonomous/review/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/content/autonomous/review/:id/decision
+// Body: { decision: "requeue" | "dismiss" | "approve_trust_build", note?: string }
+router.post('/autonomous/review/:id/decision', async (req, res, next) => {
+  try {
+    const item = await autonomousReviewQueue.decideReviewItem(req.params.id, {
+      decision: req.body?.decision,
+      note: req.body?.note,
+      reviewer: req.technicianId || 'admin',
+    });
+    if (!item) return res.status(404).json({ error: 'Review item not found' });
+    res.json({ success: true, item });
+  } catch (err) { next(err); }
+});
+
 // =========================================================================
 // BLOG POSTS — CRUD + FILTERING
 // =========================================================================
