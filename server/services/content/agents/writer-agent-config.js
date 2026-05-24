@@ -69,7 +69,8 @@ PAGE-TYPE OUTPUT STANDARDS:
 - supporting-blog:
     Article + BreadcrumbList. Link to hub in intro. 2+ city mentions
     (the brief's city + one more SWFL city for breadth). 2+ H2 sections,
-    1+ pro-tip callout, FAQ section (2–3 questions). Target 900–1500.
+    1+ pro-tip callout, visible "Frequently Asked Questions" section with
+    2–3 question-style H3s and direct answers. Target 900–1500.
 
 TOOL USE:
 - Always call get_content_brief(opportunity_id) first to load the full brief

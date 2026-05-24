@@ -169,6 +169,30 @@ describe('blog Astro frontmatter validation', () => {
     expect(data.category).toBe('pest-control');
   });
 
+  test('adds FAQPage schema when published markdown contains a visible FAQ section', async () => {
+    const data = await AstroPublisher.buildFrontmatter({
+      title: 'Yellow Lawn in Sarasota',
+      slug: 'yellow-lawn-sarasota',
+      meta_description: 'A short guide to yellow St. Augustine lawns around Sarasota.',
+      keyword: 'yellow lawn Sarasota',
+      tag: 'Lawn Care',
+      city: 'Sarasota',
+      featured_image_url: '/images/blog/yellow-lawn-sarasota/hero.png',
+      hero_image_alt: 'Yellow St. Augustine lawn in Sarasota',
+      content: [
+        'Sarasota lawns yellow for a few common reasons.',
+        '',
+        '## Frequently Asked Questions',
+        '',
+        '### Why is my lawn yellow after fertilizer?',
+        '',
+        'The problem may be micronutrients, pH, irrigation, or root stress.',
+      ].join('\n'),
+    });
+
+    expect(data.schema_types).toEqual(['Article', 'FAQPage']);
+  });
+
   test('does not build live URLs from unsupported target_sites hosts', () => {
     expect(AstroPublisher.liveUrlForPost({
       title: 'Bad host',
@@ -307,6 +331,45 @@ describe('blog Astro frontmatter validation', () => {
       pr_number: 123,
       pr_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123',
       commit_sha: 'file-sha',
+    });
+  });
+
+  test('adds FAQPage schema to autonomous draft frontmatter when body has FAQs', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 124, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/124' });
+    gh.createIssueComment.mockResolvedValue({});
+
+    const result = await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({
+          slug: '/yellow-lawn-sarasota/',
+          title: 'Yellow Lawn in Sarasota',
+          canonical: 'https://www.wavespestcontrol.com/yellow-lawn-sarasota/',
+          schema_types: ['Article', 'BreadcrumbList'],
+        }),
+        body: [
+          'Sarasota lawns yellow for a few common reasons.',
+          '',
+          '## Frequently Asked Questions',
+          '',
+          '### Why is my lawn yellow after fertilizer?',
+          '',
+          'The problem may be micronutrients, pH, irrigation, or root stress.',
+        ].join('\n'),
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+
+    expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('FAQPage'),
+    }));
+    expect(result).toMatchObject({
+      url: 'https://www.wavespestcontrol.com/yellow-lawn-sarasota/',
+      status: 'pr_open',
     });
   });
 

@@ -79,6 +79,7 @@ FORMAT:
 - H2 subheadings every 200-300 words (casual, not keyword-stuffed)
 - Short paragraphs (2-4 sentences max)
 - Include 1-2 "pro tip" callouts
+- Include a final "Frequently Asked Questions" section with 2-3 question-style H3s and direct answers
 - Include the target keyword naturally 3-5 times
 - End with a practical takeaway + soft Waves mention`;
 
