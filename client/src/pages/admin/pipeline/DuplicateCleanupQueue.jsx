@@ -129,9 +129,21 @@ function ReviewedHistoryPanel({ adminFetch, refreshKey }) {
                 <Badge tone={item.action === "linked" ? "strong" : "neutral"}>
                   {item.action === "linked" ? "Linked" : "Dismissed"}
                 </Badge>
-                {item.estimateId && <span className="text-ink-secondary">Est {compactId(item.estimateId)}</span>}
-                {item.leadId && <span className="text-ink-secondary">Lead {compactId(item.leadId)}</span>}
+                {item.estimateId && <span className="text-ink-secondary">{item.estimateRef || `Est ${compactId(item.estimateId)}`}</span>}
+                {item.leadId && <span className="text-ink-secondary">{item.leadRef || `Lead ${compactId(item.leadId)}`}</span>}
               </div>
+              {(item.customerName || item.estimateLabel || item.leadLabel) && (
+                <div className="mt-2 font-medium text-zinc-900">
+                  {item.customerName || item.estimateLabel || item.leadLabel}
+                </div>
+              )}
+              {(item.estimateLabel || item.leadLabel) && (
+                <div className="mt-1 text-11 text-ink-tertiary">
+                  {[item.estimateLabel && `Estimate: ${item.estimateLabel}`, item.leadLabel && `Lead: ${item.leadLabel}`]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </div>
+              )}
               <div className="mt-2 text-ink-secondary">
                 {item.action === "dismissed"
                   ? DISMISS_REASON_LABELS[item.reason] || "Dismissed"
