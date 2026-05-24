@@ -124,7 +124,7 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       try {
         await adminFetch(`/admin/estimates/${opportunity.estimateId}/send`, {
           method: "POST",
-          body: { sendMethod: "both" },
+          body: JSON.stringify({ sendMethod: "both" }),
         });
         onRefresh?.();
       } catch (err) {
@@ -141,7 +141,7 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       try {
         await adminFetch(`/admin/estimates/${opportunity.estimateId}/mark-accepted`, {
           method: "POST",
-          body: { source: "pipeline_verbal_yes" },
+          body: JSON.stringify({ source: "pipeline_verbal_yes" }),
         });
         onRefresh?.();
       } catch (err) {
@@ -159,7 +159,7 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       try {
         await adminFetch(`/admin/estimates/${opportunity.estimateId}`, {
           method: "PATCH",
-          body: { status: "declined", declineReason: reason.trim() },
+          body: JSON.stringify({ status: "declined", declineReason: reason.trim() }),
         });
         onRefresh?.();
       } catch (err) {
@@ -182,7 +182,7 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       try {
         await adminFetch(`/admin/estimates/${opportunity.estimateId}/extend`, {
           method: "POST",
-          body: { days },
+          body: JSON.stringify({ days }),
         });
         onRefresh?.();
       } catch (err) {
@@ -200,7 +200,7 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
       try {
         await adminFetch(`/admin/leads/${opportunity.leadId}/lost`, {
           method: "POST",
-          body: { reason: reason.trim() },
+          body: JSON.stringify({ reason: reason.trim() }),
         });
         onRefresh?.();
       } catch (err) {
