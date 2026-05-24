@@ -31,9 +31,9 @@ const SECTIONS = [
     section: "Operations",
     items: [
       {
-        path: "/admin/estimates",
+        path: "/admin/pipeline",
         icon: FileText,
-        label: "Pipeline & Estimates",
+        label: "Pipeline",
       },
       { path: "/admin/timetracking", icon: Clock, label: "Staff" },
       { path: "/admin/service-library", icon: BookOpen, label: "Services" },
