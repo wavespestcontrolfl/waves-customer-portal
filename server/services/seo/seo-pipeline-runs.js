@@ -120,7 +120,7 @@ async function claimQueuedPipelineRun({ id = null, now = new Date() } = {}) {
   const params = [];
   const idClause = id ? 'AND id = CAST(? AS uuid)' : '';
   if (id) params.push(id);
-  params.push(now, now, now);
+  params.push(now, now, now, now);
 
   const result = await db.raw(`
     WITH next_run AS (
@@ -128,6 +128,10 @@ async function claimQueuedPipelineRun({ id = null, now = new Date() } = {}) {
       FROM seo_pipeline_runs
       WHERE status = 'queued'
         ${idClause}
+        AND (
+          result->>'requeue_claim_after' IS NULL
+          OR CAST(result->>'requeue_claim_after' AS timestamptz) <= CAST(? AS timestamptz)
+        )
       ORDER BY created_at ASC, id ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
@@ -154,6 +158,31 @@ async function heartbeatPipelineRun(id, result = null) {
   return db('seo_pipeline_runs')
     .where({ id, status: 'running' })
     .update(update);
+}
+
+async function releasePipelineRun(id, reason, now = new Date(), claimAfter = now, daysBack = DEFAULT_PIPELINE_DAYS_BACK) {
+  if (!isUuid(id)) return 0;
+  const safeDaysBack = pipelineDaysBack(daysBack);
+
+  return db('seo_pipeline_runs')
+    .where({ id, status: 'running' })
+    .update({
+      status: 'queued',
+      completed_at: null,
+      error: null,
+      updated_at: now,
+      result: db.raw(`
+        COALESCE(result, '{}'::jsonb)
+          || jsonb_build_object(
+            'queued', true,
+            'requeued_at', CAST(? AS timestamptz),
+            'requeue_claim_after', CAST(? AS timestamptz),
+            'options', COALESCE(result->'options', '{}'::jsonb)
+              || jsonb_build_object('days_back', CAST(? AS int)),
+            'requeue_reason', ?
+          )
+      `, [now, claimAfter, safeDaysBack, reason || 'Worker stopped before pipeline completed']),
+    });
 }
 
 async function completePipelineRun(id, result, status = 'completed') {
@@ -187,6 +216,7 @@ module.exports = {
   enqueuePipelineRun,
   failPipelineRun,
   heartbeatPipelineRun,
+  releasePipelineRun,
   reapStaleSeoRuns,
   _internals: {
     isUuid,

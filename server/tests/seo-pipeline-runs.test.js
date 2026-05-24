@@ -6,6 +6,7 @@ const {
   claimQueuedPipelineRun,
   enqueuePipelineRun,
   heartbeatPipelineRun,
+  releasePipelineRun,
   reapStaleSeoRuns,
   _internals,
 } = require('../services/seo/seo-pipeline-runs');
@@ -101,6 +102,43 @@ describe('SEO pipeline run state', () => {
     }));
   });
 
+  test('releasePipelineRun returns an interrupted running run to the queue', async () => {
+    const now = new Date('2026-05-24T12:00:00.000Z');
+    const claimAfter = new Date('2026-05-24T12:02:00.000Z');
+    const builder = updateBuilder(1);
+    const rawResult = { raw: 'jsonb-merge' };
+    db.mockReturnValue(builder);
+    db.raw = jest.fn(() => rawResult);
+
+    const result = await releasePipelineRun(
+      '11111111-1111-4111-8111-111111111111',
+      'worker received SIGTERM',
+      now,
+      claimAfter,
+      14,
+    );
+
+    expect(result).toBe(1);
+    expect(db).toHaveBeenCalledWith('seo_pipeline_runs');
+    expect(builder.where).toHaveBeenCalledWith({
+      id: '11111111-1111-4111-8111-111111111111',
+      status: 'running',
+    });
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('jsonb_build_object'), [
+      now,
+      claimAfter,
+      14,
+      'worker received SIGTERM',
+    ]);
+    expect(builder.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued',
+      completed_at: null,
+      error: null,
+      updated_at: now,
+      result: rawResult,
+    }));
+  });
+
   test('enqueues new pipeline runs instead of starting them in the web process', async () => {
     const pipelineReaper = updateReturningBuilder([]);
     const auditReaper = updateReturningBuilder([]);
@@ -182,10 +220,12 @@ describe('SEO pipeline run state', () => {
     expect(result.claimed).toBe(true);
     expect(result.run.status).toBe('running');
     expect(db.raw.mock.calls[0][0]).toContain("WHERE status = 'queued'");
+    expect(db.raw.mock.calls[0][0]).toContain("result->>'requeue_claim_after' IS NULL");
     expect(db.raw.mock.calls[0][0]).toContain('FOR UPDATE SKIP LOCKED');
     expect(db.raw.mock.calls[0][0]).toContain("SET status = 'running'");
     expect(db.raw.mock.calls[0][1]).toEqual([
       '11111111-1111-4111-8111-111111111111',
+      now,
       now,
       now,
       now,
