@@ -83,27 +83,36 @@ function createFakeDb(seed = {}) {
   };
 
   function table(name) {
-    let whereId = null;
+    const wheres = [];
     let updatePayload = null;
     let insertPayload = null;
     let conflictKey = null;
+    let lastUpdatedRows = [];
+    const rowMatches = (row) => wheres.every(([key, value]) => row[key] === value);
     return {
       where(key, value) {
-        if (typeof key === 'object') whereId = key.id;
-        else if (key === 'id') whereId = value;
+        if (typeof key === 'object') {
+          for (const [objectKey, objectValue] of Object.entries(key)) wheres.push([objectKey, objectValue]);
+        } else {
+          wheres.push([key, value]);
+        }
         return this;
       },
       first() {
-        return state[name].find((row) => row.id === whereId) || null;
+        return state[name].find(rowMatches) || null;
       },
       update(payload) {
         updatePayload = payload;
-        const index = state[name].findIndex((row) => row.id === whereId);
-        if (index >= 0) state[name][index] = { ...state[name][index], ...payload };
+        lastUpdatedRows = [];
+        const index = state[name].findIndex(rowMatches);
+        if (index >= 0) {
+          state[name][index] = { ...state[name][index], ...payload };
+          lastUpdatedRows = [state[name][index]];
+        }
         return this;
       },
       returning() {
-        return [state[name].find((row) => row.id === whereId)].filter(Boolean);
+        return lastUpdatedRows.length ? lastUpdatedRows : [state[name].find(rowMatches)].filter(Boolean);
       },
       insert(payload) {
         insertPayload = payload;
@@ -124,6 +133,11 @@ function createFakeDb(seed = {}) {
         const index = state[name].findIndex((row) => keys.every((key) => row[key] === insertPayload[key]));
         if (index >= 0) state[name][index] = { ...state[name][index], ...payload };
         return this;
+      },
+      del() {
+        const before = state[name].length;
+        state[name] = state[name].filter((row) => !rowMatches(row));
+        return before - state[name].length;
       },
       _updatePayload() {
         return updatePayload;
@@ -268,6 +282,80 @@ describe('admin pipeline duplicate-risk dismissal', () => {
       estimateId: 'est-1',
     })).rejects.toMatchObject({ status: 400, message: 'leadId is required' });
   });
+
+  test('reopens a dismissed duplicate pair and records audit log', async () => {
+    const database = createFakeDb({
+      estimates: [{ id: 'est-1' }],
+    });
+    database.state.pipeline_duplicate_risk_dismissals.push({
+      id: 'dismissal-1',
+      estimate_id: 'est-1',
+      lead_id: 'lead-1',
+      reason: 'bad_match',
+    });
+
+    const result = await __private.reopenReviewedDuplicate({
+      database,
+      action: 'dismissed',
+      estimateId: 'est-1',
+      leadId: 'lead-1',
+      actorId: 'tech-1',
+    });
+
+    expect(result).toMatchObject({ reopened: true, action: 'dismissed' });
+    expect(database.state.pipeline_duplicate_risk_dismissals).toEqual([]);
+    expect(database.state.audit_log[0]).toMatchObject({
+      actor_type: 'technician',
+      actor_id: 'tech-1',
+      action: 'pipeline.duplicate_risk.reopen_dismissal',
+      resource_type: 'estimate',
+      resource_id: 'est-1',
+    });
+  });
+
+  test('undoes a linked duplicate pair only when the lead still points to that estimate', async () => {
+    const database = createFakeDb({
+      leads: [{ id: 'lead-1', estimate_id: 'est-1' }],
+      estimates: [{ id: 'est-1' }],
+    });
+
+    const result = await __private.reopenReviewedDuplicate({
+      database,
+      action: 'linked',
+      estimateId: 'est-1',
+      leadId: 'lead-1',
+      actor: 'Ada Admin',
+    });
+
+    expect(result).toMatchObject({ reopened: true, action: 'linked' });
+    expect(database.state.leads[0].estimate_id).toBeNull();
+    expect(database.state.lead_activities[0]).toMatchObject({
+      lead_id: 'lead-1',
+      activity_type: 'unlinked_estimate',
+      performed_by: 'Ada Admin',
+    });
+    expect(database.state.audit_log[0]).toMatchObject({
+      action: 'pipeline.duplicate_risk.reopen_link',
+      resource_id: 'est-1',
+    });
+  });
+
+  test('rejects linked reopen when the lead link has changed', async () => {
+    const database = createFakeDb({
+      leads: [{ id: 'lead-1', estimate_id: 'est-new' }],
+    });
+
+    await expect(__private.reopenReviewedDuplicate({
+      database,
+      action: 'linked',
+      estimateId: 'est-old',
+      leadId: 'lead-1',
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'link_changed',
+      currentEstimateId: 'est-new',
+    });
+  });
 });
 
 describe('admin pipeline reviewed history helpers', () => {
@@ -390,5 +478,28 @@ describe('admin pipeline reviewed history helpers', () => {
     ].sort(__private.compareHistoryCreatedAt);
 
     expect(items.map((item) => item.id)).toEqual(['dismissal-new', 'activity-old']);
+  });
+
+  test('reviewed history hides linked entries that were later reopened', () => {
+    const linked = __private.mapLinkedHistory({
+      id: 'activity-linked',
+      lead_id: 'lead-1',
+      metadata: JSON.stringify({ estimateId: 'est-1' }),
+      created_at: '2026-05-24T12:00:00.000Z',
+    });
+
+    expect(__private.filterReopenedLinkedHistory([linked], [{
+      id: 'activity-unlinked',
+      lead_id: 'lead-1',
+      metadata: JSON.stringify({ estimateId: 'est-1' }),
+      created_at: '2026-05-24T13:00:00.000Z',
+    }])).toEqual([]);
+
+    expect(__private.filterReopenedLinkedHistory([linked], [{
+      id: 'activity-unlinked-old',
+      lead_id: 'lead-1',
+      metadata: JSON.stringify({ estimateId: 'est-1' }),
+      created_at: '2026-05-24T11:00:00.000Z',
+    }])).toEqual([linked]);
   });
 });
