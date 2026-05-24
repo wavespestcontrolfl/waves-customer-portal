@@ -36,6 +36,7 @@ function QueueRow({ opportunity, adminFetch, onDismissed, onLinked }) {
   const [error, setError] = useState(null);
   const [estimate, setEstimate] = useState(null);
   const [candidates, setCandidates] = useState([]);
+  const [dismissedCount, setDismissedCount] = useState(0);
   const [selectedLeadId, setSelectedLeadId] = useState("");
   const [dismissReason, setDismissReason] = useState("not_same_customer");
   const [busy, setBusy] = useState(false);
@@ -54,6 +55,7 @@ function QueueRow({ opportunity, adminFetch, onDismissed, onLinked }) {
         const ranked = rankCandidateMatches(data.estimate, data.candidates || []);
         setEstimate(data.estimate || null);
         setCandidates(ranked);
+        setDismissedCount(data.dismissedCount || 0);
         setSelectedLeadId(defaultCandidateId(data.estimate, ranked));
       } catch (err) {
         if (!ignore) setError(err);
@@ -131,6 +133,11 @@ function QueueRow({ opportunity, adminFetch, onDismissed, onLinked }) {
           <div className="mt-3 text-11 leading-4 text-ink-tertiary">
             Pick the matching lead before linking. Name-only matches are shown for review but are not preselected.
           </div>
+          {dismissedCount > 0 && (
+            <div className="mt-2 text-11 leading-4 text-ink-tertiary">
+              {dismissedCount} dismissed match{dismissedCount === 1 ? "" : "es"} hidden.
+            </div>
+          )}
         </div>
 
         <div>

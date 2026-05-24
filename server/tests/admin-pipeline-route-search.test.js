@@ -206,6 +206,18 @@ describe('admin pipeline opportunity linking', () => {
 });
 
 describe('admin pipeline duplicate-risk dismissal', () => {
+  test('filters dismissed lead pairs from candidate lists without hiding other candidates', () => {
+    const result = __private.filterDismissedCandidates([
+      { leadId: 'lead-1', name: 'Dismissed Lead' },
+      { leadId: 'lead-2', name: 'Still Visible' },
+    ], ['lead-1']);
+
+    expect(result).toEqual({
+      dismissedCount: 1,
+      candidates: [{ leadId: 'lead-2', name: 'Still Visible' }],
+    });
+  });
+
   test('dismisses an existing estimate and records audit log', async () => {
     const database = createFakeDb({
       leads: [{ id: 'lead-1' }],
