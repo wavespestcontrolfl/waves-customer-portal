@@ -48,6 +48,18 @@ function matchCandidateLead(lead) {
   };
 }
 
+const DUPLICATE_DISMISS_REASONS = new Set([
+  'not_same_customer',
+  'bad_match',
+  'already_handled',
+  'other',
+]);
+
+function normalizeDismissReason(reason) {
+  const normalized = String(reason || '').trim().toLowerCase();
+  return DUPLICATE_DISMISS_REASONS.has(normalized) ? normalized : 'not_same_customer';
+}
+
 async function getLinkCandidateLeads({ database = db, estimateId }) {
   const id = cleanId(estimateId);
   if (!id) {
@@ -194,6 +206,90 @@ async function linkOpportunityRecords({
   });
 }
 
+async function dismissDuplicateRisk({
+  database = db,
+  estimateId,
+  leadId = null,
+  reason = 'not_same_customer',
+  note = '',
+  actorId = null,
+}) {
+  const cleanEstimateId = cleanId(estimateId);
+  if (!cleanEstimateId) {
+    const err = new Error('estimateId is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const cleanLeadId = cleanId(leadId);
+  if (!cleanLeadId) {
+    const err = new Error('leadId is required');
+    err.status = 400;
+    throw err;
+  }
+  const cleanReason = normalizeDismissReason(reason);
+  const cleanNote = String(note || '').trim() || null;
+
+  return database.transaction(async (trx) => {
+    const estimate = await trx('estimates').where('id', cleanEstimateId).first();
+    if (!estimate || estimate.archived_at) {
+      const err = new Error('Estimate not found');
+      err.status = 404;
+      throw err;
+    }
+
+    if (cleanLeadId) {
+      const lead = await trx('leads').where('id', cleanLeadId).first();
+      if (!lead) {
+        const err = new Error('Lead not found');
+        err.status = 404;
+        throw err;
+      }
+    }
+
+    const now = new Date();
+    const [dismissal] = await trx('pipeline_duplicate_risk_dismissals')
+      .insert({
+        estimate_id: cleanEstimateId,
+        lead_id: cleanLeadId,
+        dismissed_by: actorId || null,
+        reason: cleanReason,
+        note: cleanNote,
+        updated_at: now,
+      })
+      .onConflict(['estimate_id', 'lead_id'])
+      .merge({
+        lead_id: cleanLeadId,
+        dismissed_by: actorId || null,
+        reason: cleanReason,
+        note: cleanNote,
+        updated_at: now,
+      })
+      .returning('*');
+
+    await trx('audit_log').insert({
+      actor_type: actorId ? 'technician' : 'system',
+      actor_id: actorId || null,
+      action: 'pipeline.duplicate_risk.dismiss',
+      resource_type: 'estimate',
+      resource_id: cleanEstimateId,
+      metadata: {
+        estimateId: cleanEstimateId,
+        leadId: cleanLeadId,
+        reason: cleanReason,
+        hasNote: Boolean(cleanNote),
+        source: 'admin_pipeline',
+      },
+    });
+
+    return {
+      dismissed: true,
+      dismissal,
+      estimate,
+    };
+  });
+}
+
 function applyLeadSearch(query, search) {
   const term = String(search || '').trim();
   if (!term) return query;
@@ -287,6 +383,12 @@ async function fetchEstimates({ search, source, ownerId }) {
   return query;
 }
 
+async function fetchDismissedDuplicatePairs() {
+  const exists = await db.schema.hasTable('pipeline_duplicate_risk_dismissals');
+  if (!exists) return [];
+  return db('pipeline_duplicate_risk_dismissals').select('estimate_id', 'lead_id');
+}
+
 // GET /api/admin/pipeline/opportunities
 router.get('/opportunities', async (req, res, next) => {
   try {
@@ -304,9 +406,10 @@ router.get('/opportunities', async (req, res, next) => {
       pageSize: req.query.pageSize || req.query.page_size || 50,
     };
 
-    const [leadsRaw, estimatesRaw] = await Promise.all([
+    const [leadsRaw, estimatesRaw, dismissedDuplicatePairs] = await Promise.all([
       fetchLeads(query),
       fetchEstimates(query),
+      fetchDismissedDuplicatePairs(),
     ]);
     const truncated = leadsRaw.length > MAX_CANDIDATES || estimatesRaw.length > MAX_CANDIDATES;
     const leads = leadsRaw.slice(0, MAX_CANDIDATES);
@@ -317,6 +420,7 @@ router.get('/opportunities', async (req, res, next) => {
       estimates,
       query,
       truncated,
+      dismissedDuplicatePairs,
     }));
   } catch (err) {
     next(err);
@@ -354,12 +458,34 @@ router.post('/opportunities/link', async (req, res, next) => {
   }
 });
 
+// POST /api/admin/pipeline/opportunities/:estimateId/dismiss-duplicate-risk
+router.post('/opportunities/:estimateId/dismiss-duplicate-risk', async (req, res, next) => {
+  try {
+    const result = await dismissDuplicateRisk({
+      estimateId: req.params.estimateId,
+      leadId: req.body.leadId || req.body.lead_id || null,
+      reason: req.body.reason,
+      note: req.body.note,
+      actorId: req.technicianId || req.technician?.id || null,
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message });
+    }
+    next(err);
+  }
+});
+
 module.exports = router;
 module.exports.__private = {
   applyEstimateSearch,
   applyLeadSearch,
+  dismissDuplicateRisk,
+  fetchDismissedDuplicatePairs,
   getLinkCandidateLeads,
   linkOpportunityRecords,
+  normalizeDismissReason,
   searchDigits,
   searchRef,
 };

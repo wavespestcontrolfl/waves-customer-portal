@@ -150,4 +150,48 @@ describe('pipeline opportunities read model', () => {
     });
     expect(response.counts.duplicate_risk).toBe(1);
   });
+
+  test('dismissed duplicate pair leaves normal pipeline but exits cleanup filter', () => {
+    const response = buildPipelineResponse({
+      leads: [lead()],
+      estimates: [estimate({ id: 'est-2' })],
+      query: { stage: 'duplicate_risk', page: 1, pageSize: 50 },
+      dismissedDuplicatePairs: [{ estimate_id: 'est-2', lead_id: 'lead-1' }],
+      now: NOW,
+    });
+
+    expect(response.data).toHaveLength(0);
+    expect(response.counts.duplicate_risk).toBe(0);
+
+    const allResponse = buildPipelineResponse({
+      leads: [lead()],
+      estimates: [estimate({ id: 'est-2' })],
+      query: { stage: 'all', page: 1, pageSize: 50 },
+      dismissedDuplicatePairs: [{ estimate_id: 'est-2', lead_id: 'lead-1' }],
+      now: NOW,
+    });
+
+    expect(allResponse.data.find((o) => o.opportunityId === 'estimate:est-2')).toMatchObject({
+      isDuplicateRisk: false,
+    });
+  });
+
+  test('dismissed duplicate pair does not hide other matching leads', () => {
+    const response = buildPipelineResponse({
+      leads: [
+        lead({ id: 'lead-1', phone: '(555) 123-4567', email: 'jane@example.com' }),
+        lead({ id: 'lead-2', phone: '(555) 123-4567', email: 'other@example.com' }),
+      ],
+      estimates: [estimate({ id: 'est-2' })],
+      query: { stage: 'duplicate_risk', page: 1, pageSize: 50 },
+      dismissedDuplicatePairs: [{ estimate_id: 'est-2', lead_id: 'lead-1' }],
+      now: NOW,
+    });
+
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0]).toMatchObject({
+      opportunityId: 'estimate:est-2',
+      isDuplicateRisk: true,
+    });
+  });
 });

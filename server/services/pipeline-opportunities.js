@@ -266,6 +266,10 @@ function possibleDuplicateRisk({ lead, estimate }) {
   return !!leadEmail && !!estimateEmail && leadEmail === estimateEmail;
 }
 
+function duplicateDismissalKey(estimateId, leadId) {
+  return `${String(estimateId)}:${String(leadId)}`;
+}
+
 function buildOpportunity({ lead = null, estimate = null, now = new Date() }) {
   const leadId = firstPresent(lead?.id, lead?.leadId, lead?.lead_id);
   const estimateId = firstPresent(estimate?.id, estimate?.estimateId, estimate?.estimate_id);
@@ -366,9 +370,18 @@ function buildOpportunity({ lead = null, estimate = null, now = new Date() }) {
   };
 }
 
-function normalizeOpportunities({ leads = [], estimates = [], now = new Date() }) {
+function normalizeOpportunities({
+  leads = [],
+  estimates = [],
+  now = new Date(),
+  dismissedDuplicatePairs = [],
+}) {
   const leadList = Array.isArray(leads) ? leads : [];
   const estimateList = Array.isArray(estimates) ? estimates : [];
+  const dismissedPairKeys = new Set((dismissedDuplicatePairs || []).map((pair) => {
+    if (typeof pair === 'string') return pair;
+    return duplicateDismissalKey(pair.estimateId ?? pair.estimate_id, pair.leadId ?? pair.lead_id);
+  }));
   const opportunitiesByKey = new Map();
 
   for (const lead of leadList) {
@@ -400,7 +413,11 @@ function normalizeOpportunities({ leads = [], estimates = [], now = new Date() }
     }
 
     const opportunity = buildOpportunity({ lead: null, estimate, now });
-    opportunity.isDuplicateRisk = leadList.some((lead) => possibleDuplicateRisk({ lead, estimate }));
+    opportunity.isDuplicateRisk = leadList.some((lead) => {
+      const leadId = firstPresent(lead?.id, lead?.leadId, lead?.lead_id);
+      return possibleDuplicateRisk({ lead, estimate })
+        && !dismissedPairKeys.has(duplicateDismissalKey(estimateId, leadId));
+    });
     opportunitiesByKey.set(`estimate:${estimateId}`, opportunity);
   }
 
@@ -537,8 +554,20 @@ function paginateOpportunities(opportunities, { page = 1, pageSize = 50 } = {}) 
   };
 }
 
-function buildPipelineResponse({ leads = [], estimates = [], query = {}, now = new Date(), truncated = false }) {
-  const normalized = normalizeOpportunities({ leads, estimates, now });
+function buildPipelineResponse({
+  leads = [],
+  estimates = [],
+  query = {},
+  now = new Date(),
+  truncated = false,
+  dismissedDuplicatePairs = [],
+}) {
+  const normalized = normalizeOpportunities({
+    leads,
+    estimates,
+    now,
+    dismissedDuplicatePairs,
+  });
   const countScope = filterOpportunities(normalized, { ...query, stage: '' });
   const filtered = filterOpportunities(countScope, query);
   const sorted = sortOpportunities(filtered, query.sort);

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Link2, RefreshCw, SearchX } from "lucide-react";
+import { CheckCircle2, Link2, RefreshCw, SearchX, XCircle } from "lucide-react";
 import { Badge, Button, cn } from "../../../components/ui";
 import { defaultCandidateId, rankCandidateMatches } from "./duplicateCleanup";
 
@@ -24,12 +24,20 @@ function MatchBadges({ match }) {
   );
 }
 
-function QueueRow({ opportunity, adminFetch, onLinked }) {
+const DISMISS_REASONS = [
+  { value: "not_same_customer", label: "Not same customer" },
+  { value: "bad_match", label: "Bad match" },
+  { value: "already_handled", label: "Already handled" },
+  { value: "other", label: "Other" },
+];
+
+function QueueRow({ opportunity, adminFetch, onDismissed, onLinked }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [estimate, setEstimate] = useState(null);
   const [candidates, setCandidates] = useState([]);
   const [selectedLeadId, setSelectedLeadId] = useState("");
+  const [dismissReason, setDismissReason] = useState("not_same_customer");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState(null);
 
@@ -81,6 +89,27 @@ function QueueRow({ opportunity, adminFetch, onLinked }) {
       });
       setFeedback({ type: "success", message: "Linked. This row will leave the cleanup queue." });
       onLinked?.(opportunity.estimateId);
+    } catch (err) {
+      setFeedback({ type: "error", message: err.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function dismissDuplicateRisk() {
+    if (!selectedLeadId || busy) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      await adminFetch(`/admin/pipeline/opportunities/${opportunity.estimateId}/dismiss-duplicate-risk`, {
+        method: "POST",
+        body: JSON.stringify({
+          leadId: selectedLeadId || null,
+          reason: dismissReason,
+        }),
+      });
+      setFeedback({ type: "success", message: "Dismissed. Refreshing the remaining candidates." });
+      onDismissed?.();
     } catch (err) {
       setFeedback({ type: "error", message: err.message });
     } finally {
@@ -164,6 +193,23 @@ function QueueRow({ opportunity, adminFetch, onLinked }) {
             <Link2 size={14} strokeWidth={1.9} aria-hidden />
             {busy ? "Linking" : "Link Selected"}
           </Button>
+          <label className="block">
+            <span className="sr-only">Dismiss reason</span>
+            <select
+              value={dismissReason}
+              onChange={(event) => setDismissReason(event.target.value)}
+              disabled={busy}
+              className="h-9 w-full rounded-sm border-hairline border-zinc-300 bg-white px-2 text-12 text-zinc-900 u-focus-ring"
+            >
+              {DISMISS_REASONS.map((reason) => (
+                <option key={reason.value} value={reason.value}>{reason.label}</option>
+              ))}
+            </select>
+          </label>
+          <Button variant="secondary" className="gap-2" onClick={dismissDuplicateRisk} disabled={!selectedLeadId || busy || loading}>
+            <XCircle size={14} strokeWidth={1.9} aria-hidden />
+            Not a Duplicate
+          </Button>
           {selectedCandidate?.match.highConfidence && (
             <div className="flex items-start gap-1 text-11 leading-4 text-emerald-800">
               <CheckCircle2 size={13} strokeWidth={1.8} className="mt-0.5 flex-shrink-0" aria-hidden />
@@ -190,11 +236,11 @@ function QueueRow({ opportunity, adminFetch, onLinked }) {
 }
 
 export default function DuplicateCleanupQueue({ opportunities, adminFetch, onRefresh }) {
-  const [linkedEstimateIds, setLinkedEstimateIds] = useState(() => new Set());
-  const visibleOpportunities = opportunities.filter((opportunity) => !linkedEstimateIds.has(opportunity.estimateId));
+  const [resolvedEstimateIds, setResolvedEstimateIds] = useState(() => new Set());
+  const visibleOpportunities = opportunities.filter((opportunity) => !resolvedEstimateIds.has(opportunity.estimateId));
 
-  function handleLinked(estimateId) {
-    setLinkedEstimateIds((current) => {
+  function handleResolved(estimateId) {
+    setResolvedEstimateIds((current) => {
       const next = new Set(current);
       next.add(estimateId);
       return next;
@@ -224,7 +270,8 @@ export default function DuplicateCleanupQueue({ opportunities, adminFetch, onRef
             key={opportunity.opportunityId}
             opportunity={opportunity}
             adminFetch={adminFetch}
-            onLinked={handleLinked}
+            onDismissed={onRefresh}
+            onLinked={handleResolved}
           />
         ))
       )}

@@ -78,11 +78,15 @@ function createFakeDb(seed = {}) {
     leads: [...(seed.leads || [])],
     estimates: [...(seed.estimates || [])],
     lead_activities: [],
+    pipeline_duplicate_risk_dismissals: [],
+    audit_log: [],
   };
 
   function table(name) {
     let whereId = null;
     let updatePayload = null;
+    let insertPayload = null;
+    let conflictKey = null;
     return {
       where(key, value) {
         if (typeof key === 'object') whereId = key.id;
@@ -102,7 +106,23 @@ function createFakeDb(seed = {}) {
         return [state[name].find((row) => row.id === whereId)].filter(Boolean);
       },
       insert(payload) {
-        state[name].push(payload);
+        insertPayload = payload;
+        if (!conflictKey) state[name].push(payload);
+        else {
+          const index = state[name].findIndex((row) => row[conflictKey] === payload[conflictKey]);
+          if (index >= 0) state[name][index] = { ...state[name][index], ...payload };
+          else state[name].push(payload);
+        }
+        return this;
+      },
+      onConflict(key) {
+        conflictKey = key;
+        return this;
+      },
+      merge(payload) {
+        const keys = Array.isArray(conflictKey) ? conflictKey : [conflictKey];
+        const index = state[name].findIndex((row) => keys.every((key) => row[key] === insertPayload[key]));
+        if (index >= 0) state[name][index] = { ...state[name][index], ...payload };
         return this;
       },
       _updatePayload() {
@@ -182,5 +202,58 @@ describe('admin pipeline opportunity linking', () => {
       force: true,
     })).resolves.toMatchObject({ linked: true });
     expect(database.state.leads[0].estimate_id).toBe('est-new');
+  });
+});
+
+describe('admin pipeline duplicate-risk dismissal', () => {
+  test('dismisses an existing estimate and records audit log', async () => {
+    const database = createFakeDb({
+      leads: [{ id: 'lead-1' }],
+      estimates: [{ id: 'est-1', status: 'draft' }],
+    });
+
+    const result = await __private.dismissDuplicateRisk({
+      database,
+      estimateId: 'est-1',
+      leadId: 'lead-1',
+      reason: 'bad_match',
+      note: 'Different address',
+      actorId: 'tech-1',
+    });
+
+    expect(result.dismissed).toBe(true);
+    expect(database.state.pipeline_duplicate_risk_dismissals[0]).toMatchObject({
+      estimate_id: 'est-1',
+      lead_id: 'lead-1',
+      dismissed_by: 'tech-1',
+      reason: 'bad_match',
+      note: 'Different address',
+    });
+    expect(database.state.audit_log[0]).toMatchObject({
+      actor_type: 'technician',
+      actor_id: 'tech-1',
+      action: 'pipeline.duplicate_risk.dismiss',
+      resource_type: 'estimate',
+      resource_id: 'est-1',
+    });
+  });
+
+  test('normalizes unknown dismissal reasons and rejects missing estimates', async () => {
+    expect(__private.normalizeDismissReason('not-a-real-reason')).toBe('not_same_customer');
+
+    const database = createFakeDb({ estimates: [] });
+    await expect(__private.dismissDuplicateRisk({
+      database,
+      estimateId: 'missing',
+      leadId: 'lead-1',
+    })).rejects.toMatchObject({ status: 404, message: 'Estimate not found' });
+  });
+
+  test('requires a lead id for duplicate-risk dismissal', async () => {
+    const database = createFakeDb({ estimates: [{ id: 'est-1' }] });
+    await expect(__private.dismissDuplicateRisk({
+      database,
+      estimateId: 'est-1',
+    })).rejects.toMatchObject({ status: 400, message: 'leadId is required' });
   });
 });
