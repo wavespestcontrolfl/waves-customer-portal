@@ -527,7 +527,7 @@ class SiteAuditor {
     if (!latestRun) return { hasData: false };
 
     const pages = await db('seo_page_audits')
-      .where('audit_date', latestRun.run_date.toISOString?.().split('T')[0] || etDateString())
+      .where('audit_date', etDateString(latestRun.run_date))
       .where('domain', domain)
       .orderBy('technical_health_score', 'asc');
 

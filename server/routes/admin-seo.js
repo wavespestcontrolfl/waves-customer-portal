@@ -551,7 +551,7 @@ router.get('/audit/pages', async (req, res, next) => {
     const domain = extractDomain(req.query.domain) || 'wavespestcontrol.com';
     const latest = await db('seo_site_audit_runs').where('status', 'completed').where('domain', domain).orderBy('run_date', 'desc').first();
     if (!latest) return res.json({ pages: [] });
-    const date = latest.run_date.toISOString?.().split('T')[0] || etDateString();
+    const date = etDateString(latest.run_date);
     const pages = await db('seo_page_audits').where('audit_date', date).where('domain', domain).orderBy('technical_health_score', 'asc');
     res.json({ pages, auditDate: date });
   } catch (err) { next(err); }
