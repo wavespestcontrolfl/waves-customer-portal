@@ -166,6 +166,19 @@ function initScheduledJobs() {
     return;
   }
 
+  // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { reapStaleSeoRuns } = require('./seo/seo-pipeline-runs');
+      const result = await reapStaleSeoRuns();
+      if (result.reaped > 0) {
+        logger.warn(`[seo-pipeline] reaped ${result.reaped} stale running run(s) older than ${result.staleMinutes} minutes`);
+      }
+    } catch (err) {
+      logger.error(`[seo-pipeline] stale-run reaper failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 3:15AM — Data Hygiene deterministic normalization scan
   // =========================================================================

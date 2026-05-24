@@ -222,6 +222,32 @@ class SiteAuditor {
       const allPages = Array.from(pageMap.values()).slice(0, maxPages);
 
       const auditResults = [];
+      let pagesAttempted = 0;
+      const progressEvery = Math.max(1, parseInt(options.progressEvery || process.env.SEO_SITE_AUDIT_PROGRESS_EVERY || '5', 10));
+      const reportProgress = async (force = false) => {
+        if (!force && pagesAttempted % progressEvery !== 0) return;
+        const progress = {
+          audit_run_id: auditRun.id,
+          domain,
+          pages_attempted: pagesAttempted,
+          pages_crawled: auditResults.length,
+          total_pages: allPages.length,
+        };
+        await db('seo_site_audit_runs')
+          .where({ id: auditRun.id, status: 'running' })
+          .update({
+            pages_crawled: auditResults.length,
+            updated_at: new Date(),
+          });
+        if (typeof options.onProgress === 'function') {
+          try {
+            await options.onProgress(progress);
+          } catch (err) {
+            logger.warn(`[site-audit] progress callback failed for ${domain}: ${err.message}`);
+          }
+        }
+      };
+      await reportProgress(true);
 
       for (const page of allPages) {
         try {
@@ -250,6 +276,9 @@ class SiteAuditor {
         } catch (err) {
           logger.error(`Audit failed for ${page.url}: ${err.message}`);
         }
+
+        pagesAttempted++;
+        await reportProgress(pagesAttempted === allPages.length);
 
         // Rate limit
         await new Promise(r => setTimeout(r, 300));
@@ -293,6 +322,7 @@ class SiteAuditor {
         score_delta: scoreDelta,
         status: 'completed',
         duration_seconds: Math.round((Date.now() - startTime) / 1000),
+        updated_at: new Date(),
       });
 
       // Store issue trends
@@ -322,7 +352,7 @@ class SiteAuditor {
       return { pages: auditResults.length, avgScore, healthy, warning, critical, duration: Math.round((Date.now() - startTime) / 1000) };
 
     } catch (err) {
-      await db('seo_site_audit_runs').where('id', auditRun.id).update({ status: 'failed' });
+      await db('seo_site_audit_runs').where('id', auditRun.id).update({ status: 'failed', updated_at: new Date() });
       logger.error(`Site audit failed: ${err.message}`);
       throw err;
     }

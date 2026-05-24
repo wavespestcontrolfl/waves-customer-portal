@@ -4,9 +4,8 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const UrlIntelligence = require('../services/seo/url-intelligence');
 const {
   claimPipelineRun,
-  completePipelineRun,
-  failPipelineRun,
 } = require('../services/seo/seo-pipeline-runs');
+const { runClaimedSeoPipeline } = require('../services/seo/seo-pipeline-runner');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -224,13 +223,12 @@ router.get('/orphan-pages', async (req, res) => {
 // Chains: GSC sync → site audit → URL Intelligence refresh → detection engines
 router.post('/run-pipeline', requireAdmin, async (req, res) => {
   const domain = req.body.domain || 'wavespestcontrol.com';
-  const daysBack = req.body.daysBack || 7;
+  const requestedDaysBack = parseInt(req.body.daysBack || 7, 10);
+  const daysBack = Number.isFinite(requestedDaysBack) && requestedDaysBack > 0 ? requestedDaysBack : 7;
   const idempotencyKey = req.body.idempotencyKey
     || req.body.idempotency_key
     || `seo-pipeline:${domain}:${daysBack}:${Math.floor(Date.now() / 60000)}`;
   let pipelineRun = null;
-  const steps = [];
-  const start = Date.now();
 
   try {
     const claim = await claimPipelineRun({
@@ -259,141 +257,18 @@ router.post('/run-pipeline', requireAdmin, async (req, res) => {
   // Return immediately with 202, run pipeline in background
   res.status(202).json({
     status: 'started',
-    domain,
+    domain: pipelineRun.domain,
     idempotencyKey,
     run_id: pipelineRun.id,
     message: 'Pipeline running in background. Check /dashboard for results.',
   });
 
-  try {
-    // Step 1: GSC sync (query + page + query-page map)
-    logger.info(`[pipeline] Step 1/8: GSC sync for ${domain}`);
-    try {
-      const SearchConsole = require('../services/seo/search-console-v2');
-      const gscResult = await SearchConsole.syncDailyData(daysBack, domain);
-      steps.push({ step: 'gsc_sync', status: 'ok', detail: gscResult });
-    } catch (err) {
-      steps.push({ step: 'gsc_sync', status: 'failed', error: err.message });
-      logger.warn(`[pipeline] GSC sync failed: ${err.message}`);
-    }
-
-    // Step 2: Site audit (fetches pages, computes body_text_5k + internal_link_targets)
-    logger.info(`[pipeline] Step 2/8: Site audit for ${domain}`);
-    try {
-      const SiteAuditor = require('../services/seo/site-auditor');
-      const auditResult = await SiteAuditor.runSiteAudit({ domain });
-      steps.push({ step: 'site_audit', status: 'ok', pages: Number(auditResult?.pages || 0) });
-    } catch (err) {
-      steps.push({ step: 'site_audit', status: 'failed', error: err.message });
-      logger.warn(`[pipeline] Site audit failed: ${err.message}`);
-    }
-
-    // Step 3: URL Intelligence refresh
-    logger.info(`[pipeline] Step 3/8: URL Intelligence refresh for ${domain}`);
-    try {
-      const refreshResult = await UrlIntelligence.refreshDomain(domain);
-      steps.push({ step: 'url_intelligence_refresh', status: 'ok', ...refreshResult });
-    } catch (err) {
-      steps.push({ step: 'url_intelligence_refresh', status: 'failed', error: err.message });
-      logger.warn(`[pipeline] URL Intelligence refresh failed: ${err.message}`);
-    }
-
-    // Step 4: Sitemap validation
-    logger.info(`[pipeline] Step 4/8: Sitemap validation for ${domain}`);
-    try {
-      const SitemapValidator = require('../services/seo/sitemap-validator');
-      const sitemapResult = await SitemapValidator.validateDomain(domain);
-      steps.push({ step: 'sitemap_validation', status: 'ok', ...sitemapResult });
-    } catch (err) {
-      steps.push({ step: 'sitemap_validation', status: 'failed', error: err.message });
-      logger.warn(`[pipeline] Sitemap validation failed: ${err.message}`);
-    }
-
-    // Step 5: Duplicate cluster detection
-    logger.info(`[pipeline] Step 5/8: Duplicate detection for ${domain}`);
-    try {
-      const dupResult = await UrlIntelligence.buildDuplicateClusters(domain);
-      steps.push({ step: 'duplicate_detection', status: 'ok', ...dupResult });
-    } catch (err) {
-      steps.push({ step: 'duplicate_detection', status: 'failed', error: err.message });
-      logger.warn(`[pipeline] Duplicate detection failed: ${err.message}`);
-    }
-
-    // Step 6: Intent routing map + internal link graph
-    logger.info(`[pipeline] Step 6/8: Intent map + link graph for ${domain}`);
-    try {
-      const [intentResult, linkResult] = await Promise.allSettled([
-        UrlIntelligence.buildIntentMap(domain),
-        UrlIntelligence.buildInternalLinkGraph(domain),
-      ]);
-      steps.push({
-        step: 'intent_map',
-        status: intentResult.status === 'fulfilled' ? 'ok' : 'failed',
-        ...(intentResult.status === 'fulfilled' ? intentResult.value : { error: intentResult.reason?.message }),
-      });
-      steps.push({
-        step: 'link_graph',
-        status: linkResult.status === 'fulfilled' ? 'ok' : 'failed',
-        ...(linkResult.status === 'fulfilled' ? linkResult.value : { error: linkResult.reason?.message }),
-      });
-    } catch (err) {
-      steps.push({ step: 'intent_map_and_link_graph', status: 'failed', error: err.message });
-    }
-
-    // Step 7: Cannibalization detection + canonical conflict detection
-    logger.info(`[pipeline] Step 7/8: Cannibalization + canonical conflicts`);
-    try {
-      const Cannibalization = require('../services/seo/cannibalization');
-      const [cannibalResult, conflictResult] = await Promise.allSettled([
-        Cannibalization.detect(domain),
-        UrlIntelligence.detectCanonicalConflicts(),
-      ]);
-      steps.push({
-        step: 'cannibalization',
-        status: cannibalResult.status === 'fulfilled' ? 'ok' : 'failed',
-        ...(cannibalResult.status === 'fulfilled' ? cannibalResult.value : { error: cannibalResult.reason?.message }),
-      });
-      steps.push({
-        step: 'canonical_conflicts',
-        status: conflictResult.status === 'fulfilled' ? 'ok' : 'failed',
-        ...(conflictResult.status === 'fulfilled' ? conflictResult.value : { error: conflictResult.reason?.message }),
-      });
-    } catch (err) {
-      steps.push({ step: 'cannibalization_and_conflicts', status: 'failed', error: err.message });
-    }
-
-    // Step 8: Generate SEO actions from diagnoses + auto-approve
-    logger.info(`[pipeline] Step 8/8: Generate actions for ${domain}`);
-    try {
-      const SeoActionGenerator = require('../services/seo/seo-action-generator');
-      const diagnosisResult = await UrlIntelligence.refreshDiagnoses(domain);
-      steps.push({ step: 'diagnosis_refresh', status: 'ok', ...diagnosisResult });
-      const actionResult = await SeoActionGenerator.generateActionsFromDiagnosis(domain);
-      steps.push({ step: 'action_generation', status: 'ok', ...actionResult });
-      const autoResult = await SeoActionGenerator.autoApprove(domain);
-      steps.push({ step: 'auto_approve', status: 'ok', ...autoResult });
-    } catch (err) {
-      steps.push({ step: 'action_generation', status: 'failed', error: err.message });
-      logger.warn(`[pipeline] Action generation failed: ${err.message}`);
-    }
-
-    const duration = Date.now() - start;
-    const succeeded = steps.filter((s) => s.status === 'ok').length;
-    const failed = steps.filter((s) => s.status === 'failed').length;
-
-    logger.info(`[pipeline] Complete: ${succeeded} succeeded, ${failed} failed, ${duration}ms`, { steps });
-    await completePipelineRun(
-      pipelineRun.id,
-      { steps, duration_ms: duration, succeeded, failed },
-      failed > 0 ? 'completed_with_errors' : 'completed',
-    );
-  } catch (err) {
-    logger.error(`[pipeline] Fatal error: ${err.message}`, err);
-    if (pipelineRun?.id) {
-      await failPipelineRun(pipelineRun.id, err)
-        .catch((persistErr) => logger.warn(`[pipeline] failed to persist fatal status: ${persistErr.message}`));
-    }
-  }
+  runClaimedSeoPipeline({
+    pipelineRun,
+    domain: pipelineRun.domain,
+    daysBack,
+    logPrefix: 'pipeline',
+  }).catch((err) => logger.error(`[pipeline] background runner failed: ${err.message}`, err));
 });
 
 module.exports = router;
