@@ -8,9 +8,20 @@ const MAX_CANDIDATES = 5000;
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+function searchDigits(search) {
+  return String(search || '').replace(/\D/g, '');
+}
+
+function searchRef(search) {
+  return String(search || '').trim().replace(/^#/, '');
+}
+
 function applyLeadSearch(query, search) {
-  if (!search) return query;
-  const s = `%${search}%`;
+  const term = String(search || '').trim();
+  if (!term) return query;
+  const s = `%${term}%`;
+  const ref = searchRef(term);
+  const digits = searchDigits(search);
   return query.where(function () {
     this.whereILike('leads.first_name', s)
       .orWhereILike('leads.last_name', s)
@@ -19,12 +30,22 @@ function applyLeadSearch(query, search) {
       .orWhereILike('leads.address', s)
       .orWhereILike('leads.service_interest', s)
       .orWhereILike('lead_sources.name', s);
+    if (ref) {
+      this.orWhereRaw('leads.id::text ILIKE ?', [`%${ref}%`])
+        .orWhereRaw('leads.estimate_id::text ILIKE ?', [`%${ref}%`]);
+    }
+    if (digits.length >= 7) {
+      this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
+    }
   });
 }
 
 function applyEstimateSearch(query, search) {
-  if (!search) return query;
-  const s = `%${search}%`;
+  const term = String(search || '').trim();
+  if (!term) return query;
+  const s = `%${term}%`;
+  const ref = searchRef(term);
+  const digits = searchDigits(search);
   return query.where(function () {
     this.whereILike('estimates.customer_name', s)
       .orWhereILike('estimates.customer_phone', s)
@@ -33,6 +54,13 @@ function applyEstimateSearch(query, search) {
       .orWhereILike('estimates.service_interest', s)
       .orWhereILike('estimates.lead_source', s)
       .orWhereILike('estimates.source', s);
+    if (ref) {
+      this.orWhereRaw('estimates.id::text ILIKE ?', [`%${ref}%`])
+        .orWhereRaw('estimates.customer_id::text ILIKE ?', [`%${ref}%`]);
+    }
+    if (digits.length >= 7) {
+      this.orWhereRaw("regexp_replace(COALESCE(estimates.customer_phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
+    }
   });
 }
 
@@ -118,3 +146,9 @@ router.get('/opportunities', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.__private = {
+  applyEstimateSearch,
+  applyLeadSearch,
+  searchDigits,
+  searchRef,
+};
