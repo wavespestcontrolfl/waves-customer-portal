@@ -29,6 +29,10 @@ function communicationUrl(opportunity) {
   return `/admin/communications${params.toString() ? `?${params.toString()}` : ""}`;
 }
 
+function estimateSendIdempotencyKey() {
+  return globalThis.crypto?.randomUUID?.() || `estimate-send-${Date.now()}-${Math.random()}`;
+}
+
 function primaryAction(opportunity) {
   switch (opportunity.stage) {
     case PIPELINE_STAGES.NEW_LEAD:
@@ -38,7 +42,9 @@ function primaryAction(opportunity) {
     case PIPELINE_STAGES.ESTIMATE_NEEDED:
       return { label: "Create Estimate", kind: "navigate", to: createEstimateUrl(opportunity) };
     case PIPELINE_STAGES.ESTIMATE_DRAFT:
-      return { label: "Edit Estimate", kind: "navigate", to: "/admin/estimates?tab=estimates" };
+      return opportunity.estimateId
+        ? { label: "Send Estimate", kind: "send_estimate" }
+        : { label: "Create Estimate", kind: "navigate", to: createEstimateUrl(opportunity) };
     case PIPELINE_STAGES.ESTIMATE_SENT:
     case PIPELINE_STAGES.ESTIMATE_VIEWED:
       return opportunity.estimateId
@@ -55,13 +61,31 @@ function primaryAction(opportunity) {
 
 function menuActions(opportunity) {
   const actions = [];
-  if (opportunity.leadId) actions.push({ label: "Open Legacy Leads", to: "/admin/leads" });
-  if (opportunity.estimateId) actions.push({ label: "Open Legacy Estimates", to: "/admin/estimates?tab=estimates" });
-  if (opportunity.customerId) actions.push({ label: "Open Customer", to: `/admin/customers?customerId=${encodeURIComponent(opportunity.customerId)}` });
+  if (opportunity.leadId) actions.push({ label: "Open Legacy Leads", kind: "navigate", to: "/admin/leads" });
+  if (opportunity.estimateId) actions.push({ label: "Open Legacy Estimates", kind: "navigate", to: "/admin/estimates?tab=estimates" });
+  if (opportunity.customerId) actions.push({ label: "Open Customer", kind: "navigate", to: `/admin/customers?customerId=${encodeURIComponent(opportunity.customerId)}` });
   if (opportunity.stage !== PIPELINE_STAGES.ESTIMATE_NEEDED && opportunity.leadId) {
-    actions.push({ label: "Create Estimate", to: createEstimateUrl(opportunity) });
+    actions.push({ label: "Create Estimate", kind: "navigate", to: createEstimateUrl(opportunity) });
   }
-  if (opportunity.phone) actions.push({ label: "Message", to: communicationUrl(opportunity) });
+  if (opportunity.estimateId) {
+    if (opportunity.stage === PIPELINE_STAGES.ESTIMATE_DRAFT) {
+      actions.push({ label: "Edit Estimate", kind: "navigate", to: "/admin/estimates?tab=estimates" });
+    }
+    if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)) {
+      actions.push({ label: "Follow Up", kind: "follow_up" });
+    }
+    if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED].includes(opportunity.stage)) {
+      actions.push({ label: "Mark Accepted", kind: "mark_accepted" });
+      actions.push({ label: "Mark Declined", kind: "decline_estimate" });
+    }
+    if ([PIPELINE_STAGES.ESTIMATE_SENT, PIPELINE_STAGES.ESTIMATE_VIEWED, PIPELINE_STAGES.LOST].includes(opportunity.stage)) {
+      actions.push({ label: "Extend Expiration", kind: "extend_estimate" });
+    }
+  }
+  if (opportunity.leadId && opportunity.status !== "lost" && opportunity.status !== "won") {
+    actions.push({ label: "Mark Lead Lost", kind: "mark_lead_lost" });
+  }
+  if (opportunity.phone) actions.push({ label: "Message", kind: "navigate", to: communicationUrl(opportunity) });
   return actions;
 }
 
@@ -72,11 +96,16 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
   const missingEstimateReadyFields = !opportunity.address || !opportunity.serviceInterest || (!opportunity.phone && !opportunity.email);
 
   async function runPrimary() {
-    if (action.kind === "navigate") {
-      navigate(action.to);
+    await runAction(action);
+  }
+
+  async function runAction(item) {
+    if (busy) return;
+    if (item.kind === "navigate") {
+      navigate(item.to);
       return;
     }
-    if (action.kind === "follow_up") {
+    if (item.kind === "follow_up") {
       if (!opportunity.estimateId) {
         navigate(communicationUrl(opportunity));
         return;
@@ -87,6 +116,102 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
         onRefresh?.();
       } catch (err) {
         window.alert(`Follow-up failed: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (item.kind === "send_estimate") {
+      if (!opportunity.estimateId) return;
+      if (!window.confirm(`Send this estimate to ${opportunity.name || "the customer"} now?`)) return;
+      setBusy(true);
+      try {
+        await adminFetch(`/admin/estimates/${opportunity.estimateId}/send`, {
+          method: "POST",
+          body: JSON.stringify({
+            sendMethod: "both",
+            idempotencyKey: estimateSendIdempotencyKey(),
+          }),
+        });
+        onRefresh?.();
+      } catch (err) {
+        window.alert(`Send failed: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (item.kind === "mark_accepted") {
+      if (!opportunity.estimateId) return;
+      if (!window.confirm(`Mark ${opportunity.name || "this customer"} as accepted from a verbal yes?`)) return;
+      setBusy(true);
+      try {
+        await adminFetch(`/admin/estimates/${opportunity.estimateId}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({ source: "pipeline_verbal_yes" }),
+        });
+        onRefresh?.();
+      } catch (err) {
+        window.alert(`Mark accepted failed: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (item.kind === "decline_estimate") {
+      if (!opportunity.estimateId) return;
+      const reason = window.prompt("Reason for declining this estimate?");
+      if (!reason || !reason.trim()) return;
+      setBusy(true);
+      try {
+        await adminFetch(`/admin/estimates/${opportunity.estimateId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "declined", declineReason: reason.trim() }),
+        });
+        onRefresh?.();
+      } catch (err) {
+        window.alert(`Mark declined failed: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (item.kind === "extend_estimate") {
+      if (!opportunity.estimateId) return;
+      const rawDays = window.prompt("Extend expiration by how many days?", "7");
+      if (!rawDays) return;
+      const days = Number.parseInt(rawDays, 10);
+      if (!Number.isInteger(days) || days < 1 || days > 180) {
+        window.alert("Enter a whole number of days between 1 and 180.");
+        return;
+      }
+      setBusy(true);
+      try {
+        await adminFetch(`/admin/estimates/${opportunity.estimateId}/extend`, {
+          method: "POST",
+          body: JSON.stringify({ days }),
+        });
+        onRefresh?.();
+      } catch (err) {
+        window.alert(`Extend failed: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (item.kind === "mark_lead_lost") {
+      if (!opportunity.leadId) return;
+      const reason = window.prompt("Reason this lead was lost?");
+      if (!reason || !reason.trim()) return;
+      setBusy(true);
+      try {
+        await adminFetch(`/admin/leads/${opportunity.leadId}/lost`, {
+          method: "POST",
+          body: JSON.stringify({ reason: reason.trim() }),
+        });
+        onRefresh?.();
+      } catch (err) {
+        window.alert(`Mark lead lost failed: ${err.message}`);
       } finally {
         setBusy(false);
       }
@@ -115,13 +240,13 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
         <div className="absolute right-0 z-30 mt-2 w-56 rounded-sm border-hairline border-zinc-200 bg-white shadow-lg p-1">
           {menuActions(opportunity).map((item) => (
             <button
-              key={`${item.label}-${item.to}`}
+              key={`${item.label}-${item.kind}-${item.to || ""}`}
               type="button"
-              onClick={() => navigate(item.to)}
+              onClick={() => runAction(item)}
               className="w-full flex items-center justify-between gap-2 rounded-xs px-3 py-2 text-left text-12 text-zinc-700 hover:bg-zinc-50 u-focus-ring"
             >
               <span>{item.label}</span>
-              <ExternalLink size={13} strokeWidth={1.8} aria-hidden />
+              {item.kind === "navigate" && <ExternalLink size={13} strokeWidth={1.8} aria-hidden />}
             </button>
           ))}
         </div>
