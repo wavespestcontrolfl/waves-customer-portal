@@ -1,0 +1,10 @@
+[build]
+builder = "nixpacks"
+
+[build.nixpacks]
+buildCmd = "npm run build"
+
+[deploy]
+startCommand = "npm run seo:pipeline:worker"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
