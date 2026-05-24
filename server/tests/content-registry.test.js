@@ -205,6 +205,48 @@ canonical: "https://www.wavespestcontrol.com/pest-control/get-rid-of-bed-bugs-la
     }
   });
 
+  test('derives author detail routes from the authors collection', () => {
+    const root = makeAstroRoot();
+    try {
+      writeFile(root, 'src/content/authors/adam-benetti.md', `---
+name: Adam Benetti
+slug: "adam-benetti"
+canonical: "https://www.wavespestcontrol.com/about/authors/adam-benetti/"
+---
+# Adam Benetti
+`);
+
+      const [row] = registry.scanAstroContent(root);
+      expect(row.content_type).toBe('authors');
+      expect(row.canonical_url_normalized).toBe('/about/authors/adam-benetti/');
+      expect(row.live_url).toBe('/about/authors/adam-benetti/');
+      expect(row.slug).toBe('adam-benetti');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('uses the homepage route for the Astro homepage service entry', () => {
+    const root = makeAstroRoot();
+    try {
+      writeFile(root, 'src/content/services/ellenton-pest-control.md', `---
+title: Waves Pest Control
+slug: "ellenton-pest-control"
+canonical: "https://www.wavespestcontrol.com/"
+---
+# Waves Pest Control
+`);
+
+      const [row] = registry.scanAstroContent(root);
+      expect(row.content_type).toBe('service');
+      expect(row.canonical_url_normalized).toBe('/');
+      expect(row.live_url).toBe('/');
+      expect(row.slug).toBe('ellenton-pest-control');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('fails closed when Astro root is missing', () => {
     expect(() => registry.scanAstroContent('/tmp/not-a-real-astro-root')).toThrow(/ASTRO_REPO_DIR/);
   });

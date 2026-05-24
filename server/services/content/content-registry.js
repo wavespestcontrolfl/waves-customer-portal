@@ -821,8 +821,15 @@ function countsBy(items, key) {
 
 function deriveUrlFromAstroPath(collection, contentRelative, frontmatter = {}) {
   const slug = normalizeContentUrl(frontmatter.slug || '');
-  if (slug) return slug;
+  const canonical = normalizeContentUrl(frontmatter.canonical || frontmatter.canonical_url || '');
   const withoutCollection = contentRelative.split('/').slice(1).join('/').replace(/\.mdx?$/, '');
+  if (collection === 'authors') {
+    const authorSlug = slugFromUrl(slug || withoutCollection);
+    return authorSlug ? `/about/authors/${authorSlug}/` : '';
+  }
+  // This Astro service entry supplies homepage metadata and is not rendered at its slug.
+  if (collection === 'services' && slugFromUrl(slug) === 'ellenton-pest-control' && canonical === '/') return '/';
+  if (slug) return slug;
   if (collection === 'blog') return `/blog/${withoutCollection}/`;
   return `/${withoutCollection}/`;
 }
