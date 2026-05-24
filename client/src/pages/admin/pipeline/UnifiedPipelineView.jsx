@@ -120,7 +120,7 @@ export default function UnifiedPipelineView() {
     if (urlPage !== page) setPage(urlPage);
   }, [filter, page, searchParams]);
 
-  const updatePipelineUrl = useCallback((nextFilter, nextPage = 1) => {
+  const updatePipelineUrl = useCallback((nextFilter, nextPage = 1, { replace = false } = {}) => {
     setSearchParams((current) => {
       const nextParams = new URLSearchParams(current);
       nextParams.set("stage", nextFilter);
@@ -128,7 +128,7 @@ export default function UnifiedPipelineView() {
       if (nextPage > 1) nextParams.set("page", String(nextPage));
       else nextParams.delete("page");
       return nextParams;
-    });
+    }, { replace });
   }, [setSearchParams]);
 
   const changeFilter = useCallback((nextFilter) => {
@@ -284,7 +284,7 @@ export default function UnifiedPipelineView() {
               onChange={(event) => {
                 setPage(1);
                 setSearch(event.target.value);
-                updatePipelineUrl(filter, 1);
+                if (page !== 1) updatePipelineUrl(filter, 1, { replace: true });
               }}
               placeholder="Search name, phone, email, address, source, service, or ref"
               aria-label="Search opportunities"
@@ -306,7 +306,7 @@ export default function UnifiedPipelineView() {
                 onClick={() => {
                   setPage(1);
                   setSearch("");
-                  updatePipelineUrl(filter, 1);
+                  if (page !== 1) updatePipelineUrl(filter, 1, { replace: true });
                 }}
                 aria-label="Clear search"
                 className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center h-7 w-7 rounded-full text-ink-tertiary hover:bg-zinc-100 u-focus-ring"
