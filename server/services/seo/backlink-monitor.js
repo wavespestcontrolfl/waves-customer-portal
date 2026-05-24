@@ -186,7 +186,7 @@ class BacklinkMonitor {
       new_backlinks_since_last: prev ? all.filter(b => b.first_seen && b.first_seen >= (prev.snapshot_date || today)).length : all.length,
       lost_backlinks_since_last: prev
         ? await db('seo_backlinks').where('status', 'lost')
-            .where('updated_at', '>=', prev.snapshot_date)
+            .where('updated_at', '>=', prev.created_at || prev.snapshot_date)
             .count('id as count').first().then(r => parseInt(r?.count) || 0)
         : 0,
       avg_domain_rating: all.length > 0 ? Math.round(all.reduce((s, b) => s + (b.domain_rating || 0), 0) / all.length) : 0,
