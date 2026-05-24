@@ -10,6 +10,9 @@ jest.mock('../services/content-astro/github-client', () => ({
   putBinary: jest.fn(),
   putFile: jest.fn(),
   createPr: jest.fn(),
+  createIssueComment: jest.fn(),
+  listIssueComments: jest.fn(),
+  listPrReviews: jest.fn(),
   getPr: jest.fn(),
   mergePr: jest.fn(),
   deleteFile: jest.fn(),
@@ -187,12 +190,93 @@ describe('blog Astro frontmatter validation', () => {
     expect(AstroPublisher.canPublishDraftBrief({ ...draft, body: '   ' }, { action_type: 'new_supporting_blog' })).toBe(false);
   });
 
+  test('recognizes clean Codex review comments and usage-limit failures', () => {
+    const { codexReviewStatus } = AstroPublisher._internals;
+    expect(codexReviewStatus({
+      comments: [{
+        user: { login: 'chatgpt-codex-connector' },
+        body: "Codex Review: Didn't find any major issues.",
+        created_at: '2026-05-24T12:00:00Z',
+      }],
+    })).toEqual({ clean: true });
+    expect(codexReviewStatus({
+      comments: [{
+        user: { login: 'chatgpt-codex-connector' },
+        body: 'You have reached your Codex usage limits for code reviews.',
+        created_at: '2026-05-24T12:00:00Z',
+      }],
+    })).toMatchObject({ clean: false, reason: expect.stringMatching(/usage limits/) });
+  });
+
+  test('requires Codex review evidence for the current PR head', () => {
+    const { codexReviewStatus } = AstroPublisher._internals;
+    const head = 'abcdef1234567890abcdef1234567890abcdef12';
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [
+        {
+          user: { login: 'wavespestcontrolfl' },
+          body: '@codex review\n\nReady on head `oldsha`.',
+          created_at: '2026-05-24T12:00:00Z',
+        },
+        {
+          user: { login: 'chatgpt-codex-connector' },
+          body: "Codex Review: Didn't find any major issues.",
+          created_at: '2026-05-24T12:05:00Z',
+        },
+      ],
+    })).toMatchObject({ clean: false, reason: expect.stringMatching(/current PR head/) });
+
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [
+        {
+          user: { login: 'wavespestcontrolfl' },
+          body: `@codex review\n\nReady on head \`${head}\`.`,
+          created_at: '2026-05-24T12:00:00Z',
+        },
+        {
+          user: { login: 'chatgpt-codex-connector' },
+          body: "Codex Review: Didn't find any major issues.",
+          created_at: '2026-05-24T12:05:00Z',
+        },
+      ],
+    })).toMatchObject({ clean: false, reason: expect.stringMatching(/required/) });
+
+    expect(codexReviewStatus({
+      headSha: head,
+      comments: [
+        {
+          user: { login: 'wavespestcontrolfl' },
+          body: `@codex review\n\nReady on head \`${head}\`.`,
+          created_at: '2026-05-24T12:00:00Z',
+        },
+      ],
+      reviews: [{
+        user: { login: 'chatgpt-codex-connector' },
+        body: "Codex Review: Didn't find any major issues.",
+        state: 'COMMENTED',
+        commit_id: head,
+        submitted_at: '2026-05-24T12:05:00Z',
+      }],
+    })).toEqual({ clean: true });
+  });
+
+  test('only trusts the Codex connector bot as reviewer', () => {
+    const { isCodexAuthor } = AstroPublisher._internals;
+    expect(isCodexAuthor('chatgpt-codex-connector')).toBe(true);
+    expect(isCodexAuthor('chatgpt-codex-connector[bot]')).toBe(true);
+    expect(isCodexAuthor('my-codex-test')).toBe(false);
+    expect(isCodexAuthor('codex')).toBe(false);
+  });
+
   test('opens an Astro PR for supported autonomous draft briefs', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
     gh.getFile.mockResolvedValue(null);
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.createPr.mockResolvedValue({ number: 123, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123' });
+    gh.createIssueComment.mockResolvedValue({});
 
     const frontmatter = validFrontmatter({ slug: '/ant-trails-bradenton/' });
     const result = await AstroPublisher.publishOrUpdatePage(
@@ -215,6 +299,7 @@ describe('blog Astro frontmatter validation', () => {
       title: 'Blog: Ant Trails in Bradenton',
       body: expect.stringContaining('**Autonomous content publish**'),
     }));
+    expect(gh.createIssueComment).toHaveBeenCalledWith(123, expect.stringContaining('@codex review'));
     expect(result).toMatchObject({
       url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
       status: 'pr_open',
@@ -254,6 +339,7 @@ describe('Astro publisher autonomous draft adapter', () => {
     gh.getFile.mockResolvedValue(null);
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.createPr.mockResolvedValue({ number: 42, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/42' });
+    gh.createIssueComment.mockResolvedValue({});
 
     const frontmatter = validFrontmatter({
       title: 'Autonomous Ant Control in Bradenton',
@@ -281,6 +367,7 @@ describe('Astro publisher autonomous draft adapter', () => {
     expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Blog: Autonomous Ant Control in Bradenton',
     }));
+    expect(gh.createIssueComment).toHaveBeenCalledWith(42, expect.stringContaining('@codex review'));
   });
 
   test('declines unsupported autonomous action types', () => {
@@ -458,6 +545,7 @@ describe('Astro publisher hero image republish', () => {
     gh.putBinary.mockResolvedValue({});
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-commit-sha' } });
     gh.createPr.mockResolvedValue({ number: 123, html_url: 'https://github.example/pr/123' });
+    gh.createIssueComment.mockResolvedValue({});
   });
 
   test('passes the existing hero SHA when updating an already-published hero asset', async () => {

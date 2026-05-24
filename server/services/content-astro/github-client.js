@@ -143,6 +143,36 @@ async function createPr({ head, base, title, body }) {
   });
 }
 
+async function createIssueComment(number, body) {
+  const { owner, repo } = env();
+  return ghFetch(`/repos/${owner}/${repo}/issues/${number}/comments`, {
+    method: 'POST',
+    body: { body },
+  });
+}
+
+async function ghFetchPaginated(path, { perPage = 100, maxPages = 20 } = {}) {
+  const rows = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const sep = path.includes('?') ? '&' : '?';
+    const batch = await ghFetch(`${path}${sep}per_page=${perPage}&page=${page}`);
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    rows.push(...batch);
+    if (batch.length < perPage) break;
+  }
+  return rows;
+}
+
+async function listIssueComments(number) {
+  const { owner, repo } = env();
+  return ghFetchPaginated(`/repos/${owner}/${repo}/issues/${number}/comments`);
+}
+
+async function listPrReviews(number) {
+  const { owner, repo } = env();
+  return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/reviews`);
+}
+
 async function mergePr(number, { method = 'squash', title, message } = {}) {
   const { owner, repo } = env();
   return ghFetch(`/repos/${owner}/${repo}/pulls/${number}/merge`, {
@@ -173,6 +203,10 @@ module.exports = {
   getBranchSha,
   createBranch,
   createPr,
+  createIssueComment,
+  ghFetchPaginated,
+  listIssueComments,
+  listPrReviews,
   mergePr,
   getPr,
   verifyAccess,

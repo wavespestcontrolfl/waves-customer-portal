@@ -2,7 +2,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
+  appendReviewerNote,
   buildReviewItem,
+  isTrustBuildRun,
+  normalizeDecision,
   normalizeLimit,
   normalizeStatus,
   parseJsonMaybe,
@@ -13,6 +16,8 @@ describe('autonomous-review-queue read model helpers', () => {
   test('normalizes public query controls', () => {
     expect(normalizeStatus('pending_review')).toBe('pending_review');
     expect(normalizeStatus('not-real')).toBe('pending_review');
+    expect(normalizeDecision('requeue')).toBe('requeue');
+    expect(() => normalizeDecision('publish_now')).toThrow(/decision must be one of/);
     expect(normalizeLimit('25')).toBe(25);
     expect(normalizeLimit('500')).toBe(100);
     expect(normalizeLimit('bad')).toBe(50);
@@ -85,5 +90,40 @@ describe('autonomous-review-queue read model helpers', () => {
     expect(item.brief.serp_signal.dominant_intent).toBe('informational');
     expect(item.run.gate_summary.hard_failures).toEqual(['title_meta_spam_free']);
     expect(item.draft.title).toBe('Draft');
+    expect(item.review_actions).toMatchObject({
+      can_requeue: true,
+      can_dismiss: true,
+      can_approve_trust_build: false,
+    });
+  });
+
+  test('recognizes live trust-build runs as approvable', () => {
+    expect(isTrustBuildRun({
+      outcome: 'completed_pending_review',
+      shadow_mode: false,
+      skip_reason: 'trust_build_2_of_3',
+    })).toBe(true);
+    expect(isTrustBuildRun({
+      outcome: 'completed_pending_review',
+      shadow_mode: true,
+      skip_reason: 'trust_build_2_of_3',
+    })).toBe(false);
+    expect(isTrustBuildRun({
+      outcome: 'completed_pending_review',
+      shadow_mode: false,
+      skip_reason: 'gate_fail',
+    })).toBe(false);
+  });
+
+  test('appends bounded reviewer trail notes', () => {
+    const note = appendReviewerNote('Existing note', {
+      decision: 'dismiss',
+      reviewer: 'adam',
+      note: 'not worth doing',
+      now: new Date('2026-05-24T12:00:00Z'),
+    });
+    expect(note).toContain('Existing note');
+    expect(note).toContain('[2026-05-24T12:00:00.000Z] adam: dismiss');
+    expect(note).toContain('not worth doing');
   });
 });

@@ -5,7 +5,9 @@ import {
   CheckCircle2,
   FileText,
   RefreshCw,
+  RotateCcw,
   Search,
+  XCircle,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
@@ -25,12 +27,15 @@ const D = {
 };
 const MONO = "'JetBrains Mono', monospace";
 
-function adminFetch(path) {
+function adminFetch(path, options = {}) {
+  const body = options.body === undefined ? undefined : JSON.stringify(options.body);
   return fetch(`${API_BASE}${path}`, {
+    method: options.method || "GET",
     headers: {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
     },
+    body,
   }).then(async (r) => {
     if (!r.ok) {
       let message = `${r.status} ${r.statusText}`;
@@ -112,6 +117,8 @@ export default function AutonomousContentReviewPage() {
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
+  const [actionPending, setActionPending] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -139,10 +146,32 @@ export default function AutonomousContentReviewPage() {
     setDetail(null);
     setDetailLoading(true);
     adminFetch(`/admin/content/autonomous/review/${selectedId}`)
-      .then((next) => setDetail(next.item))
+      .then((next) => {
+        setDetail(next.item);
+        setReviewNote("");
+      })
       .catch((err) => setError(err.message))
       .finally(() => setDetailLoading(false));
   }, [selectedId]);
+
+  const submitDecision = async (decision) => {
+    if (!selectedId || actionPending) return;
+    setActionPending(decision);
+    setError("");
+    try {
+      const next = await adminFetch(`/admin/content/autonomous/review/${selectedId}/decision`, {
+        method: "POST",
+        body: { decision, note: reviewNote },
+      });
+      setDetail(next.item);
+      setReviewNote("");
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setActionPending("");
+    }
+  };
 
   const items = data?.items || [];
   const selected = detail || items.find((item) => item.id === selectedId) || null;
@@ -153,6 +182,7 @@ export default function AutonomousContentReviewPage() {
   const uniquenessFailures = gateSummary?.uniqueness_failures || [];
   const pendingCount = counts.pending_review || 0;
   const shadowCount = useMemo(() => items.filter((item) => item.run?.shadow_mode).length, [items]);
+  const reviewActions = selected?.review_actions || {};
 
   return (
     <div style={{ minHeight: "100%", background: D.bg, padding: 24 }}>
@@ -251,6 +281,54 @@ export default function AutonomousContentReviewPage() {
                 <Row label="Run" value={selected.run?.outcome || "—"} />
               </div>
 
+              {selected.status === "pending_review" && (
+                <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12, display: "grid", gap: 10 }}>
+                  <textarea
+                    value={reviewNote}
+                    onChange={(e) => setReviewNote(e.target.value)}
+                    placeholder="Reviewer note"
+                    rows={3}
+                    style={{
+                      width: "100%",
+                      resize: "vertical",
+                      border: `1px solid ${D.border}`,
+                      borderRadius: 8,
+                      padding: 10,
+                      fontSize: 13,
+                      color: D.text,
+                      boxSizing: "border-box",
+                    }}
+                  />
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    <ActionButton
+                      icon={RotateCcw}
+                      label="Requeue"
+                      disabled={!reviewActions.can_requeue || !!actionPending}
+                      pending={actionPending === "requeue"}
+                      onClick={() => submitDecision("requeue")}
+                    />
+                    {reviewActions.can_approve_trust_build && (
+                      <ActionButton
+                        icon={CheckCircle2}
+                        label="Approve"
+                        tone="green"
+                        disabled={!!actionPending}
+                        pending={actionPending === "approve_trust_build"}
+                        onClick={() => submitDecision("approve_trust_build")}
+                      />
+                    )}
+                    <ActionButton
+                      icon={XCircle}
+                      label="Dismiss"
+                      tone="red"
+                      disabled={!reviewActions.can_dismiss || !!actionPending}
+                      pending={actionPending === "dismiss"}
+                      onClick={() => submitDecision("dismiss")}
+                    />
+                  </div>
+                </div>
+              )}
+
               <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 800, color: D.heading, marginBottom: 8 }}>
                   {hardFailures.length === 0 && uniquenessFailures.length === 0 ? <CheckCircle2 size={16} color={D.green} /> : <AlertTriangle size={16} color={D.red} />}
@@ -287,6 +365,34 @@ export default function AutonomousContentReviewPage() {
         </aside>
       </div>
     </div>
+  );
+}
+
+function ActionButton({ icon: Icon, label, tone = "neutral", disabled, pending, onClick }) {
+  const color = tone === "green" ? D.green : tone === "red" ? D.red : D.text;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        minHeight: 36,
+        border: `1px solid ${D.border}`,
+        borderRadius: 8,
+        background: disabled ? "#FAFAFA" : D.card,
+        color: disabled ? D.muted : color,
+        padding: "0 10px",
+        fontSize: 13,
+        fontWeight: 750,
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      <Icon size={15} strokeWidth={2} />
+      {pending ? "Working..." : label}
+    </button>
   );
 }
 
