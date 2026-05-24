@@ -745,9 +745,29 @@ async function getBacklinkOverview(input) {
   const statusMap = {};
   byStatus.forEach(s => { statusMap[s.status] = parseInt(s.count); });
 
+  // Velocity + recently lost + competitor gaps from full dashboard
+  let velocity = null;
+  let recentlyLost = [];
+  let newGaps7d = 0;
+  let newHighValueGaps7d = 0;
+  try {
+    const BacklinkMonitor = require('../seo/backlink-monitor');
+    const dashboard = await BacklinkMonitor.getFullDashboard();
+    velocity = dashboard.velocity;
+    recentlyLost = (dashboard.recentlyLost || []).slice(0, 5).map(l => ({
+      domain: l.source_domain, dr: l.domain_rating, anchor: l.anchor_text, target: l.target_url,
+    }));
+    newGaps7d = dashboard.newGapsSince7d || 0;
+    newHighValueGaps7d = dashboard.newHighValueGapsSince7d || 0;
+  } catch { /* best effort */ }
+
   return {
     total_backlinks: parseInt(total?.c || 0),
     by_status: statusMap,
+    velocity,
+    recently_lost: recentlyLost,
+    new_competitor_gaps_7d: newGaps7d,
+    new_high_value_gaps_7d: newHighValueGaps7d,
     recent_reports: reports.map(r => ({
       id: r.id, type: r.report_type, status: r.status, summary: r.summary, date: r.created_at,
     })),

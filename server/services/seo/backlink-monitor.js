@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const TOXIC_DOMAINS = /casino|poker|pharma|pills|crypto|bitcoin|adult|xxx|gambling|cheap-/i;
 const SPAM_TLDS = /\.xyz$|\.top$|\.buzz$|\.click$|\.site$|\.online$/i;
@@ -9,18 +9,31 @@ const SPAM_TLDS = /\.xyz$|\.top$|\.buzz$|\.click$|\.site$|\.online$/i;
 class BacklinkMonitor {
   async scan() {
     logger.info('Backlink scan starting...');
-    const data = await dataforseo.getBacklinks('wavespestcontrol.com', 2000);
+    const FETCH_LIMIT = 1000;
+    const data = await dataforseo.getBacklinks('wavespestcontrol.com', FETCH_LIMIT);
 
     if (!data?.tasks?.[0]?.result?.[0]?.items) {
       logger.warn('No backlink data returned');
-      return { scanned: 0 };
+      return { scanned: 0, scanComplete: false };
     }
 
-    const links = data.tasks[0].result[0].items;
+    const result = data.tasks[0].result[0];
+    const links = result.items;
+    const totalCount = result.total_count || links.length;
+    const scanComplete = links.length >= totalCount;
+
+    // Build active link map with composite keys BEFORE processing
+    const activeLinks = await db('seo_backlinks')
+      .where('status', 'active')
+      .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text');
+    const activeMap = new Map(activeLinks.map(l => [`${l.source_url}::${l.target_url}`, l]));
+    const seenKeys = new Set();
+
     let newCritical = 0, scanned = 0;
 
     for (const link of links) {
       const toxicity = this.scoreToxicity(link);
+      seenKeys.add(`${link.url_from}::${link.url_to}`);
 
       const existing = await db('seo_backlinks').where('source_url', link.url_from).where('target_url', link.url_to).first();
       const record = {
@@ -31,7 +44,8 @@ class BacklinkMonitor {
       };
 
       if (existing) {
-        await db('seo_backlinks').where('id', existing.id).update({ ...record, updated_at: new Date() });
+        const newStatus = existing.status === 'disavowed' ? 'disavowed' : 'active';
+        await db('seo_backlinks').where('id', existing.id).update({ ...record, status: newStatus, updated_at: new Date() });
       } else {
         record.first_seen = etDateString();
         record.status = 'active';
@@ -41,21 +55,55 @@ class BacklinkMonitor {
       scanned++;
     }
 
-    // Alert on new critical links
-    if (newCritical > 0) {
+    // Loss detection — ONLY when scan is complete (fetched < limit)
+    let lostLinks = [];
+    let highValueLost = 0;
+
+    if (scanComplete) {
+      const lostKeys = [...activeMap.keys()].filter(k => !seenKeys.has(k));
+      lostLinks = lostKeys.map(k => activeMap.get(k)).filter(Boolean);
+      const lostIds = lostLinks.map(l => l.id);
+
+      if (lostIds.length > 0) {
+        await db('seo_backlinks').whereIn('id', lostIds).update({
+          status: 'lost', updated_at: new Date(),
+        });
+      }
+      highValueLost = lostLinks.filter(l => (l.domain_rating || 0) >= 30).length;
+    } else {
+      logger.info(`Backlink scan partial (${links.length}/${FETCH_LIMIT}) — loss detection skipped`);
+    }
+
+    // Alert on new critical toxic links
+    if (newCritical > 0 && process.env.NODE_ENV === 'production') {
       try {
         const TwilioService = require('../twilio');
         if (process.env.ADAM_PHONE) {
           await TwilioService.sendSMS(process.env.ADAM_PHONE,
-            `🔗 ${newCritical} new toxic backlink(s) detected for wavespestcontrol.com. Review in /admin/ads → SEO → Backlinks`,
+            `🔗 ${newCritical} new toxic backlink(s) detected for wavespestcontrol.com. Review in /admin/seo → Backlinks`,
             { messageType: 'internal_alert' }
           );
         }
       } catch { /* best effort */ }
     }
 
-    logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical`);
-    return { scanned, newCritical };
+    // Alert on high-value lost links (separate from toxic alert)
+    if (scanComplete && highValueLost > 0 && process.env.NODE_ENV === 'production') {
+      try {
+        const TwilioService = require('../twilio');
+        if (process.env.ADAM_PHONE) {
+          const topLost = lostLinks.filter(l => (l.domain_rating || 0) >= 30).slice(0, 3);
+          const names = topLost.map(l => `${l.source_domain} DR${l.domain_rating}`).join(', ');
+          await TwilioService.sendSMS(process.env.ADAM_PHONE,
+            `⚠️ ${highValueLost} high-value backlink(s) lost: ${names}. Review in /admin/seo → Backlinks`,
+            { messageType: 'internal_alert' }
+          );
+        }
+      } catch { /* best effort */ }
+    }
+
+    logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical, ${lostLinks.length} lost (scanComplete: ${scanComplete})`);
+    return { scanned, newCritical, scanComplete, lostCount: lostLinks.length, highValueLost };
   }
 
   scoreToxicity(link) {
@@ -138,7 +186,11 @@ class BacklinkMonitor {
       total_backlinks: all.length,
       total_referring_domains: domains.size,
       new_backlinks_since_last: prev ? all.filter(b => b.first_seen && b.first_seen >= (prev.snapshot_date || today)).length : all.length,
-      lost_backlinks_since_last: 0,
+      lost_backlinks_since_last: prev
+        ? await db('seo_backlinks').where('status', 'lost')
+            .where('updated_at', '>=', prev.created_at || prev.snapshot_date)
+            .count('id as count').first().then(r => parseInt(r?.count) || 0)
+        : 0,
       avg_domain_rating: all.length > 0 ? Math.round(all.reduce((s, b) => s + (b.domain_rating || 0), 0) / all.length) : 0,
       dofollow_count: all.filter(b => b.is_dofollow !== false).length,
       nofollow_count: all.filter(b => b.is_dofollow === false).length,
@@ -200,6 +252,7 @@ class BacklinkMonitor {
     const wavesLinks = await db('seo_backlinks').where('status', 'active').select('source_domain');
     const wavesDomains = new Set(wavesLinks.map(l => l.source_domain));
     let gaps = 0;
+    const newHighValueGaps = [];
 
     for (const link of links) {
       const existing = await db('seo_competitor_backlinks')
@@ -229,12 +282,36 @@ class BacklinkMonitor {
           waves_has_link: hasWavesLink,
           prospect_priority: !hasWavesLink && (link.domain_from_rank || 0) > 30 ? 'high' : 'medium',
         });
-        if (!hasWavesLink) gaps++;
+        if (!hasWavesLink) {
+          gaps++;
+          if ((link.domain_from_rank || 0) >= 40) {
+            newHighValueGaps.push({
+              source_domain: link.domain_from,
+              domain_rating: link.domain_from_rank,
+              competitor: competitorDomain,
+              anchor: link.anchor,
+            });
+          }
+        }
       }
     }
 
-    logger.info(`Competitor gap scan ${competitorDomain}: ${links.length} links, ${gaps} new gap opportunities`);
-    return { scanned: links.length, gaps };
+    if (newHighValueGaps.length > 0 && process.env.NODE_ENV === 'production') {
+      try {
+        const TwilioService = require('../twilio');
+        if (process.env.ADAM_PHONE) {
+          const top = newHighValueGaps.slice(0, 3);
+          const names = top.map(g => `${g.source_domain} DR${g.domain_rating} (${g.competitor})`).join(', ');
+          await TwilioService.sendSMS(process.env.ADAM_PHONE,
+            `🔗 ${newHighValueGaps.length} new competitor gap(s): ${names}. Review in /admin/seo → Backlinks`,
+            { messageType: 'internal_alert' }
+          );
+        }
+      } catch { /* best effort */ }
+    }
+
+    logger.info(`Competitor gap scan ${competitorDomain}: ${links.length} links, ${gaps} new gaps, ${newHighValueGaps.length} high-value`);
+    return { scanned: links.length, gaps, newHighValueGaps: newHighValueGaps.length };
   }
 
   /**
@@ -290,7 +367,7 @@ class BacklinkMonitor {
    */
   async getFullDashboard() {
     const basic = await this.getDashboard();
-    const snapshots = await db('seo_backlink_snapshots').orderBy('snapshot_date', 'desc').limit(12);
+    const snapshots = await db('seo_backlink_snapshots').orderBy('snapshot_date', 'desc').limit(60);
     const competitorGaps = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
@@ -299,12 +376,53 @@ class BacklinkMonitor {
     const llmMentions = await db('seo_llm_mentions').orderBy('check_date', 'desc').limit(20);
     const citations = await db('seo_citations').orderBy('priority', 'asc');
 
+    const recentlyLost = await db('seo_backlinks')
+      .where('status', 'lost')
+      .orderBy('updated_at', 'desc')
+      .limit(10);
+
+    // Velocity — ET-aware day boundaries
+    const todayStr = etDateString();
+    const sevenDaysAgoStr = etDateString(addETDays(new Date(), -7));
+    const twentyEightDaysAgoStr = etDateString(addETDays(new Date(), -28));
+    const toDateStr = (d) => d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10);
+    const s7 = snapshots.filter(s => toDateStr(s.snapshot_date) > sevenDaysAgoStr);
+    const s28 = snapshots.filter(s => toDateStr(s.snapshot_date) > twentyEightDaysAgoStr);
+    const sum = (arr, key) => arr.reduce((t, s) => t + Number(s[key] || 0), 0);
+    const new7 = sum(s7, 'new_backlinks_since_last');
+    const lost7 = sum(s7, 'lost_backlinks_since_last');
+    const new28 = sum(s28, 'new_backlinks_since_last');
+    const lost28 = sum(s28, 'lost_backlinks_since_last');
+    const net7 = new7 - lost7;
+    const velocity = {
+      new_7d: new7, lost_7d: lost7, net_7d: net7,
+      new_28d: new28, lost_28d: lost28, net_28d: new28 - lost28,
+      trend: net7 > 0 ? 'growing' : net7 < 0 ? 'shrinking' : 'flat',
+    };
+
+    // New competitor gaps in last 7 days — use Postgres interval for timestamptz comparison
+    const newGapsSince7d = await db('seo_competitor_backlinks')
+      .where('waves_has_link', false)
+      .where('prospect_status', 'unreviewed')
+      .whereRaw("created_at > now() - interval '7 days'")
+      .count('id as count').first().then(r => parseInt(r?.count) || 0);
+    const newHighValueGapsSince7d = await db('seo_competitor_backlinks')
+      .where('waves_has_link', false)
+      .where('prospect_status', 'unreviewed')
+      .whereRaw("created_at > now() - interval '7 days'")
+      .where('source_domain_rating', '>=', 40)
+      .count('id as count').first().then(r => parseInt(r?.count) || 0);
+
     return {
       ...basic,
-      snapshots,
+      snapshots: snapshots.slice(0, 12),
       competitorGaps,
       llmMentions,
       citations,
+      recentlyLost,
+      velocity,
+      newGapsSince7d,
+      newHighValueGapsSince7d,
       llmStats: {
         total: llmMentions.length,
         wavesMentioned: llmMentions.filter(m => m.waves_mentioned).length,

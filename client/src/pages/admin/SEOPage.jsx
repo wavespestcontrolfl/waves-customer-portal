@@ -1029,6 +1029,15 @@ function BacklinksTab() {
           sub={{ text: `${data.citationStats?.active || 0} active` }}
         />{" "}
       </div>
+      {/* Velocity KPIs */}
+      {data.velocity && (
+        <div className="seo-kpi-grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 10 }}>
+          <KpiCard label="New 7d" value={`+${data.velocity.new_7d}`} color={D.green} />
+          <KpiCard label="Lost 7d" value={data.velocity.lost_7d > 0 ? `-${data.velocity.lost_7d}` : "0"} color={data.velocity.lost_7d > 0 ? D.red : D.muted} />
+          <KpiCard label="Net 7d" value={data.velocity.net_7d >= 0 ? `+${data.velocity.net_7d}` : `${data.velocity.net_7d}`} color={data.velocity.net_7d > 0 ? D.green : data.velocity.net_7d < 0 ? D.red : D.muted} />
+          <KpiCard label="Trend" value={data.velocity.trend === "growing" ? "Growing" : data.velocity.trend === "shrinking" ? "Shrinking" : "Flat"} color={data.velocity.net_7d > 0 ? D.green : data.velocity.net_7d < 0 ? D.red : D.muted} />
+        </div>
+      )}
       {/* Overview sub-tab */}
       {subTab === "overview" && (
         <>
@@ -1188,6 +1197,35 @@ function BacklinksTab() {
               </div>{" "}
             </Card>
           )}
+
+          {/* Recently Lost Links */}
+          {(data.recentlyLost || []).length > 0 && (
+            <Card>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, marginBottom: 12 }}>Recently Lost Links</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={thStyle}>Source Domain</th>
+                    <th style={thR}>DR</th>
+                    <th style={thStyle}>Anchor</th>
+                    <th style={thStyle}>Target</th>
+                    <th style={thStyle}>Lost</th>
+                  </tr></thead>
+                  <tbody>
+                    {data.recentlyLost.map((l) => (
+                      <tr key={l.id}>
+                        <td style={tdStyle}>{l.source_domain}</td>
+                        <td style={tdR}>{l.domain_rating || "—"}</td>
+                        <td style={{ ...tdStyle, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.anchor_text || "—"}</td>
+                        <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.target_url || "—"}</td>
+                        <td style={tdStyle}>{l.updated_at ? new Date(l.updated_at).toLocaleDateString() : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
         </>
       )}
 
@@ -1274,6 +1312,11 @@ function BacklinksTab() {
             }}
           >
             Competitor Gap Opportunities ({(data.competitorGaps || []).length})
+            {data.newGapsSince7d > 0 && (
+              <span style={{ marginLeft: 8, padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 500, background: `${D.green}18`, color: D.green }}>
+                {data.newGapsSince7d} new this week{data.newHighValueGapsSince7d > 0 ? ` (${data.newHighValueGapsSince7d} high-value)` : ""}
+              </span>
+            )}
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
             Domains linking to competitors but not to Waves
@@ -1309,10 +1352,11 @@ function BacklinksTab() {
                   }}
                 >
                   {" "}
-                  <div
-                    style={{ fontSize: 12, color: D.heading, fontWeight: 500 }}
-                  >
-                    {g.source_domain}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 12, color: D.heading, fontWeight: 500 }}>{g.source_domain}</span>
+                    {g.created_at && new Date(g.created_at) >= new Date(Date.now() - 7 * 86400000) && (
+                      <span style={{ padding: "1px 6px", borderRadius: 3, fontSize: 9, fontWeight: 600, background: `${D.green}18`, color: D.green }}>New</span>
+                    )}
                   </div>{" "}
                   <span style={{ fontSize: 10, color: D.muted }}>
                     DR: {g.source_domain_rating || "?"}
