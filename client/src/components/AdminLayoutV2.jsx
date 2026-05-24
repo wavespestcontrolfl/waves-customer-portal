@@ -80,7 +80,7 @@ const NAV_SECTIONS = [
     items: [
       { path: "/admin/dashboard", icon: LayoutDashboard, label: "Dashboard" },
       { path: "/admin/customers", icon: Users, label: "Customers" },
-      { path: "/admin/estimates", icon: ClipboardList, label: "Pipeline" },
+      { path: "/admin/pipeline", icon: ClipboardList, label: "Pipeline" },
       { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
       { path: "/admin/timetracking", icon: Clock, label: "Staff" },
       { path: "/admin/service-library", icon: BookOpen, label: "Services" },

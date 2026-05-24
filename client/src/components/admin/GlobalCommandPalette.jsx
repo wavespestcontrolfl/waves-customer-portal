@@ -59,6 +59,7 @@ const ROUTE_CONTEXT_MAP = {
   "/admin/dashboard": "dashboard",
   "/admin": "dashboard",
   "/admin/customers": "customers",
+  "/admin/pipeline": "leads",
   "/admin/estimates": "estimates",
   "/admin/seo": "seo",
   "/admin/blog": "seo",
