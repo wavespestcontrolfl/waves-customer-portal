@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { AlertTriangle, ClipboardList, Plus, RefreshCw, Search, X } from "lucide-react";
 import {
   Badge,
@@ -20,6 +20,7 @@ import { adminFetch } from "../../../utils/admin-fetch";
 import DuplicateCleanupQueue from "./DuplicateCleanupQueue";
 import OpportunityActions from "./OpportunityActions";
 import OpportunityStageBadge from "./OpportunityStageBadge";
+import { PIPELINE_FILTERS } from "./pipelineStages";
 import UnifiedPipelineFilters from "./UnifiedPipelineFilters";
 import {
   buildOpportunitySearchText,
@@ -31,6 +32,18 @@ import {
 const ROBOTO = "'Roboto', Arial, sans-serif";
 const LEAD_LIMIT = 200;
 const ESTIMATE_LIMIT = 500;
+const DEFAULT_FILTER = "needs_action";
+const VALID_FILTERS = new Set(PIPELINE_FILTERS.map((filter) => filter.key));
+
+function filterFromSearchParams(searchParams) {
+  const value = searchParams.get("stage") || searchParams.get("filter") || DEFAULT_FILTER;
+  return VALID_FILTERS.has(value) ? value : DEFAULT_FILTER;
+}
+
+function pageFromSearchParams(searchParams) {
+  const value = Number.parseInt(searchParams.get("page") || "1", 10);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
 
 function money(valueCents) {
   if (valueCents === null || valueCents === undefined) return "-";
@@ -88,6 +101,7 @@ function LoadError({ error, onRetry }) {
 
 export default function UnifiedPipelineView() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [opportunities, setOpportunities] = useState([]);
   const [counts, setCounts] = useState({});
   const [pagination, setPagination] = useState({ page: 1, pageSize: 100, total: 0 });
@@ -95,9 +109,38 @@ export default function UnifiedPipelineView() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [fallbackWarning, setFallbackWarning] = useState(null);
-  const [filter, setFilter] = useState("needs_action");
+  const [filter, setFilter] = useState(() => filterFromSearchParams(searchParams));
   const [search, setSearch] = useState("");
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(() => pageFromSearchParams(searchParams));
+
+  useEffect(() => {
+    const urlFilter = filterFromSearchParams(searchParams);
+    const urlPage = pageFromSearchParams(searchParams);
+    if (urlFilter !== filter) setFilter(urlFilter);
+    if (urlPage !== page) setPage(urlPage);
+  }, [filter, page, searchParams]);
+
+  const updatePipelineUrl = useCallback((nextFilter, nextPage = 1) => {
+    setSearchParams((current) => {
+      const nextParams = new URLSearchParams(current);
+      nextParams.set("stage", nextFilter);
+      nextParams.delete("filter");
+      if (nextPage > 1) nextParams.set("page", String(nextPage));
+      else nextParams.delete("page");
+      return nextParams;
+    });
+  }, [setSearchParams]);
+
+  const changeFilter = useCallback((nextFilter) => {
+    setPage(1);
+    setFilter(nextFilter);
+    updatePipelineUrl(nextFilter, 1);
+  }, [updatePipelineUrl]);
+
+  const changePage = useCallback((nextPage) => {
+    setPage(nextPage);
+    updatePipelineUrl(filter, nextPage);
+  }, [filter, updatePipelineUrl]);
 
   const loadPipeline = useCallback(async () => {
     setLoading(true);
@@ -232,10 +275,7 @@ export default function UnifiedPipelineView() {
           <UnifiedPipelineFilters
             activeFilter={filter}
             counts={counts}
-            onChange={(nextFilter) => {
-              setPage(1);
-              setFilter(nextFilter);
-            }}
+            onChange={changeFilter}
           />
           <div className="relative">
             <input
@@ -244,6 +284,7 @@ export default function UnifiedPipelineView() {
               onChange={(event) => {
                 setPage(1);
                 setSearch(event.target.value);
+                updatePipelineUrl(filter, 1);
               }}
               placeholder="Search name, phone, email, address, source, service, or ref"
               aria-label="Search opportunities"
@@ -262,7 +303,11 @@ export default function UnifiedPipelineView() {
             {search && (
               <button
                 type="button"
-                onClick={() => setSearch("")}
+                onClick={() => {
+                  setPage(1);
+                  setSearch("");
+                  updatePipelineUrl(filter, 1);
+                }}
                 aria-label="Clear search"
                 className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center h-7 w-7 rounded-full text-ink-tertiary hover:bg-zinc-100 u-focus-ring"
               >
@@ -377,7 +422,7 @@ export default function UnifiedPipelineView() {
                       size="sm"
                       variant="secondary"
                       disabled={pagination.page <= 1 || loading}
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      onClick={() => changePage(Math.max(1, page - 1))}
                     >
                       Previous
                     </Button>
@@ -385,7 +430,7 @@ export default function UnifiedPipelineView() {
                       size="sm"
                       variant="secondary"
                       disabled={pagination.page >= totalPages || loading}
-                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                      onClick={() => changePage(Math.min(totalPages, page + 1))}
                     >
                       Next
                     </Button>
