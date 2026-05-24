@@ -22,6 +22,7 @@ const EXTRA_AUDIT_DOMAINS = String(process.env.SEO_AUDIT_ALLOWED_DOMAINS || '')
   .map((d) => extractDomain(d))
   .filter(Boolean);
 const AUDIT_ALLOWED_DOMAINS = new Set([...NETWORK_DOMAINS, extractDomain(SITE_URL), ...EXTRA_AUDIT_DOMAINS].filter(Boolean));
+const DEFAULT_PAGESPEED_TIMEOUT_MS = 15000;
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -41,6 +42,21 @@ function siteUrlForAudit(target) {
     siteUrl: base.endsWith('/') ? base : `${base}/`,
     isDefaultDomain: domain === defaultDomain,
   };
+}
+
+function positiveInt(value, fallback) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function pageSpeedTimeoutMs(value = process.env.SEO_PAGESPEED_TIMEOUT_MS) {
+  return positiveInt(value, DEFAULT_PAGESPEED_TIMEOUT_MS);
+}
+
+function timeoutSignal(ms) {
+  return typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(ms)
+    : undefined;
 }
 
 class SiteAuditor {
@@ -518,7 +534,11 @@ class SiteAuditor {
     const defaults = { pagespeed_mobile_score: null, lcp_ms: null, inp_ms: null, cls_numeric: null, cwv_pass: null };
     if (!apiKey) return defaults;
     try {
-      const res = await fetch(`https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=mobile&category=performance&key=${apiKey}`);
+      const signal = timeoutSignal(pageSpeedTimeoutMs());
+      const res = await fetch(
+        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=mobile&category=performance&key=${apiKey}`,
+        signal ? { signal } : undefined,
+      );
       if (!res.ok) return defaults;
       const data = await res.json();
       const lhr = data.lighthouseResult;
@@ -587,4 +607,7 @@ class SiteAuditor {
   }
 }
 
-module.exports = new SiteAuditor();
+const siteAuditor = new SiteAuditor();
+siteAuditor._internals = { pageSpeedTimeoutMs, timeoutSignal };
+
+module.exports = siteAuditor;

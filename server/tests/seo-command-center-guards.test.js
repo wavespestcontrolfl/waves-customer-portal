@@ -127,6 +127,36 @@ describe('SEO Command Center guards', () => {
     ]);
   });
 
+  test('site audit PageSpeed fetch uses a timeout signal', async () => {
+    process.env.GOOGLE_API_KEY = 'test-key';
+    process.env.SEO_PAGESPEED_TIMEOUT_MS = '1234';
+    const originalFetch = global.fetch;
+    const originalTimeout = AbortSignal.timeout;
+    const signal = new AbortController().signal;
+    global.fetch = jest.fn().mockResolvedValue({ ok: false });
+    AbortSignal.timeout = jest.fn(() => signal);
+
+    try {
+      const result = await SiteAuditor.getPageSpeedScores('https://www.wavespestcontrol.com/');
+
+      expect(result).toEqual({
+        pagespeed_mobile_score: null,
+        lcp_ms: null,
+        inp_ms: null,
+        cls_numeric: null,
+        cwv_pass: null,
+      });
+      expect(AbortSignal.timeout).toHaveBeenCalledWith(1234);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('pagespeedonline/v5/runPagespeed'),
+        { signal },
+      );
+    } finally {
+      global.fetch = originalFetch;
+      AbortSignal.timeout = originalTimeout;
+    }
+  });
+
   test('canonical conflict helper rejects spoke-spoke and hub-hub pairs', () => {
     const { hubSpokeConflictPair } = UrlIntelligence._internals;
 
