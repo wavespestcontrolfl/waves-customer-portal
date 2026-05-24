@@ -1,6 +1,15 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, History, Link2, RefreshCw, SearchX, XCircle } from "lucide-react";
-import { Badge, Button, cn } from "../../../components/ui";
+import {
+  Badge,
+  Button,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  cn,
+} from "../../../components/ui";
 import { defaultCandidateId, rankCandidateMatches } from "./duplicateCleanup";
 
 function compactId(id) {
@@ -51,12 +60,28 @@ function formatHistoryTime(value) {
   }).format(date);
 }
 
+function reviewedActionLabel(action) {
+  return action === "linked" ? "Undo Link" : "Reopen";
+}
+
+function reviewedConfirmTitle(item) {
+  return item?.action === "linked" ? "Undo reviewed link" : "Reopen dismissed match";
+}
+
+function reviewedConfirmDescription(item) {
+  if (item?.action === "linked") {
+    return "This removes the lead-estimate link if the lead is still linked to this estimate, then returns the pair to the duplicate cleanup workflow.";
+  }
+  return "This removes the dismissed decision so this lead can appear again as a possible match for the estimate.";
+}
+
 function ReviewedHistoryPanel({ adminFetch, refreshKey, onReopened }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [busyKey, setBusyKey] = useState(null);
   const [feedback, setFeedback] = useState(null);
+  const [pendingReopen, setPendingReopen] = useState(null);
 
   async function loadHistory({ silent = false } = {}) {
     if (!silent) setLoading(true);
@@ -94,7 +119,11 @@ function ReviewedHistoryPanel({ adminFetch, refreshKey, onReopened }) {
     };
   }, [adminFetch, refreshKey]);
 
-  async function reopenItem(item) {
+  function closePendingReopen() {
+    if (!busyKey) setPendingReopen(null);
+  }
+
+  async function reopenItem(item = pendingReopen) {
     if (!item?.estimateId || !item?.leadId || busyKey) return;
     const key = `${item.action}-${item.id}`;
     setBusyKey(key);
@@ -112,6 +141,7 @@ function ReviewedHistoryPanel({ adminFetch, refreshKey, onReopened }) {
         type: "success",
         message: item.action === "linked" ? "Link reopened." : "Dismissal reopened.",
       });
+      setPendingReopen(null);
       await loadHistory({ silent: true });
       onReopened?.();
     } catch (err) {
@@ -205,9 +235,9 @@ function ReviewedHistoryPanel({ adminFetch, refreshKey, onReopened }) {
                     size="sm"
                     className="mt-3"
                     disabled={!canReopen || Boolean(busyKey)}
-                    onClick={() => reopenItem(item)}
+                    onClick={() => setPendingReopen(item)}
                   >
-                    {busyKey === key ? "Reopening" : item.action === "linked" ? "Undo Link" : "Reopen"}
+                    {busyKey === key ? "Reopening" : reviewedActionLabel(item.action)}
                   </Button>
                 </div>
               );
@@ -215,6 +245,39 @@ function ReviewedHistoryPanel({ adminFetch, refreshKey, onReopened }) {
           </div>
         </>
       )}
+      <Dialog open={Boolean(pendingReopen)} onClose={closePendingReopen} size="sm">
+        <DialogHeader>
+          <DialogTitle>{reviewedConfirmTitle(pendingReopen)}</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-3 text-13 text-ink-secondary">
+          <p>{reviewedConfirmDescription(pendingReopen)}</p>
+          {pendingReopen && (
+            <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
+              <div className="font-medium text-zinc-900">
+                {pendingReopen.customerName || pendingReopen.estimateLabel || pendingReopen.leadLabel || "Reviewed decision"}
+              </div>
+              <div className="mt-1 text-12">
+                {[pendingReopen.estimateRef, pendingReopen.leadRef].filter(Boolean).join(" / ")}
+              </div>
+              {(pendingReopen.estimateLabel || pendingReopen.leadLabel) && (
+                <div className="mt-1 text-11 text-ink-tertiary">
+                  {[pendingReopen.estimateLabel && `Estimate: ${pendingReopen.estimateLabel}`, pendingReopen.leadLabel && `Lead: ${pendingReopen.leadLabel}`]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </div>
+              )}
+            </div>
+          )}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" onClick={closePendingReopen} disabled={Boolean(busyKey)}>
+            Cancel
+          </Button>
+          <Button onClick={() => reopenItem()} disabled={Boolean(busyKey)}>
+            {busyKey ? "Working" : reviewedActionLabel(pendingReopen?.action)}
+          </Button>
+        </DialogFooter>
+      </Dialog>
     </div>
   );
 }
