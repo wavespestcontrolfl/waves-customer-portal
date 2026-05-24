@@ -400,17 +400,16 @@ class BacklinkMonitor {
       trend: net7 > 0 ? 'growing' : net7 < 0 ? 'shrinking' : 'flat',
     };
 
-    // New competitor gaps in last 7 days — ET-aware timestamp
-    const sevenDaysAgoTs = addETDays(new Date(), -7);
+    // New competitor gaps in last 7 days — use Postgres interval for timestamptz comparison
     const newGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
-      .where('created_at', '>', sevenDaysAgoTs)
+      .whereRaw("created_at > now() - interval '7 days'")
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
     const newHighValueGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
-      .where('created_at', '>', sevenDaysAgoTs)
+      .whereRaw("created_at > now() - interval '7 days'")
       .where('source_domain_rating', '>=', 40)
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
 
