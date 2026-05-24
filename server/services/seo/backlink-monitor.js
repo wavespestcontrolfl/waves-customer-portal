@@ -42,7 +42,8 @@ class BacklinkMonitor {
       };
 
       if (existing) {
-        await db('seo_backlinks').where('id', existing.id).update({ ...record, status: 'active', updated_at: new Date() });
+        const newStatus = existing.status === 'disavowed' ? 'disavowed' : 'active';
+        await db('seo_backlinks').where('id', existing.id).update({ ...record, status: newStatus, updated_at: new Date() });
       } else {
         record.first_seen = etDateString();
         record.status = 'active';
