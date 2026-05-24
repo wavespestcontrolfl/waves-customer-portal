@@ -174,6 +174,8 @@ export default function ContentRegistryPage() {
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [syncNotice, setSyncNotice] = useState("");
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
@@ -191,6 +193,25 @@ export default function ContentRegistryPage() {
       setLoading(false);
     }
   }, [status, contentType, source, liveStatus, search]);
+
+  const runSync = useCallback(async () => {
+    setSyncing(true);
+    setError("");
+    setSyncNotice("");
+    try {
+      const result = await adminFetch("/admin/content-registry/sync", {
+        method: "POST",
+        body: JSON.stringify({ source: "auto", commit: true }),
+      });
+      const summary = result.summary || {};
+      setSyncNotice(`Sync complete: ${Number(summary.astro_files_scanned || 0).toLocaleString()} Astro files, ${Number(summary.matched_count || 0).toLocaleString()} matched, ${Number(summary.conflict_count || 0).toLocaleString()} conflicts.`);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSyncing(false);
+    }
+  }, [load]);
 
   useEffect(() => {
     const timer = setTimeout(load, 250);
@@ -215,13 +236,23 @@ export default function ContentRegistryPage() {
       <AdminCommandHeader
         title="Content Registry"
         icon={Database}
-        actions={[{ key: "refresh", label: "Refresh", icon: RefreshCw, onClick: load, disabled: loading, variant: "secondary" }]}
+        actions={[
+          { key: "sync", label: "Sync", icon: RefreshCw, onClick: runSync, disabled: loading || syncing, variant: "primary" },
+          { key: "refresh", label: "Refresh", icon: RefreshCw, onClick: load, disabled: loading || syncing, variant: "secondary" },
+        ]}
       />
 
       {error && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.red, background: "#FEE2E2", border: `1px solid ${D.red}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
           <AlertTriangle size={16} strokeWidth={2} />
           <span style={{ fontSize: 13, fontWeight: 700 }}>{error}</span>
+        </div>
+      )}
+
+      {syncNotice && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, color: D.green, background: "#DCFCE7", border: `1px solid ${D.green}33`, borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          <CheckCircle2 size={16} strokeWidth={2} />
+          <span style={{ fontSize: 13, fontWeight: 700 }}>{syncNotice}</span>
         </div>
       )}
 

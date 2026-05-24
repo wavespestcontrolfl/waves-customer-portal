@@ -119,11 +119,103 @@ function scanAstroContent(astroRoot, { collections = null, repoSha = null } = {}
 
 function astroFileToItem(astroRoot, contentRoot, fullPath, repoSha = null) {
   const source = fs.readFileSync(fullPath, 'utf8');
+  const relativePath = toPosixPath(path.relative(astroRoot, fullPath));
+  const contentRelative = toPosixPath(path.relative(contentRoot, fullPath));
+  return astroSourceToItem({
+    source,
+    relativePath,
+    contentRelative,
+    repoSha,
+  });
+}
+
+async function scanAstroContentFromGithub({
+  collections = null,
+  repoSha = null,
+  ref = null,
+  githubClient = null,
+} = {}) {
+  const gh = githubClient || require('../content-astro/github-client');
+  const effectiveRef = ref || process.env.CONTENT_REGISTRY_GITHUB_REF || process.env.GITHUB_ASTRO_DEFAULT_BRANCH || null;
+  const sha = repoSha || await resolveGithubRepoSha(gh, effectiveRef);
+  const scanRef = sha || effectiveRef;
+  const roots = collections?.length
+    ? collections.map((collection) => posixJoin(DEFAULT_COLLECTION_ROOT, collection))
+    : [toPosixPath(DEFAULT_COLLECTION_ROOT)];
+  const paths = new Set();
+
+  for (const root of roots) {
+    for (const filePath of await walkGithubMarkdownFiles(gh, root, scanRef)) {
+      paths.add(filePath);
+    }
+  }
+  if (!paths.size) {
+    throw new Error(`GitHub Astro source returned no markdown files for ${roots.join(', ')}`);
+  }
+
+  const rows = [];
+  for (const filePath of Array.from(paths).sort()) {
+    const file = await gh.getFile(filePath, scanRef);
+    if (!file || typeof file.content !== 'string') {
+      throw new Error(`GitHub Astro file could not be read: ${filePath}`);
+    }
+    const relativePath = toPosixPath(file.path || filePath);
+    const contentRelative = contentRelativeFromSourcePath(relativePath);
+    if (!contentRelative) {
+      throw new Error(`GitHub Astro file is outside src/content: ${relativePath}`);
+    }
+    rows.push(astroSourceToItem({
+      source: file.content,
+      relativePath,
+      contentRelative,
+      repoSha: sha,
+    }));
+  }
+  return rows;
+}
+
+async function resolveGithubRepoSha(githubClient, ref = null) {
+  if (ref && /^[a-f0-9]{40}$/i.test(String(ref))) return String(ref);
+  if (typeof githubClient.getBranchSha === 'function') {
+    const branch = ref || safeGithubDefaultBranch(githubClient);
+    const sha = await githubClient.getBranchSha(branch);
+    if (!sha) throw new Error(`GitHub Astro ref not found: ${branch}`);
+    return sha;
+  }
+  if (ref) return ref;
+  throw new Error('GitHub client cannot resolve Astro repository ref');
+}
+
+function safeGithubDefaultBranch(githubClient) {
+  try {
+    return githubClient.env?.().defaultBranch || process.env.GITHUB_ASTRO_DEFAULT_BRANCH || 'main';
+  } catch {
+    return process.env.GITHUB_ASTRO_DEFAULT_BRANCH || 'main';
+  }
+}
+
+async function walkGithubMarkdownFiles(githubClient, dir, ref = null) {
+  const entries = await githubClient.listDir(dir, ref);
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error(`GitHub Astro directory could not be read or was empty: ${dir}`);
+  }
+  const out = [];
+  for (const entry of entries) {
+    const entryPath = toPosixPath(entry.path || posixJoin(dir, entry.name || ''));
+    if (!entryPath) continue;
+    if (entry.type === 'dir') {
+      out.push(...await walkGithubMarkdownFiles(githubClient, entryPath, ref));
+    } else if (entry.type === 'file' && /\.mdx?$/i.test(entryPath)) {
+      out.push(entryPath);
+    }
+  }
+  return out.sort();
+}
+
+function astroSourceToItem({ source, relativePath, contentRelative, repoSha = null }) {
   const parsed = fm.parse(source);
   const frontmatter = parsed.data || {};
   const body = parsed.content || '';
-  const relativePath = path.relative(astroRoot, fullPath).split(path.sep).join('/');
-  const contentRelative = path.relative(contentRoot, fullPath).split(path.sep).join('/');
   const collection = contentRelative.split('/')[0] || 'unknown';
   const fallbackUrl = deriveUrlFromAstroPath(collection, contentRelative, frontmatter);
   const canonicalUrl = frontmatter.canonical || frontmatter.canonical_url || fallbackUrl;
@@ -430,12 +522,19 @@ function summarizeRows(rows, astroCount, dbCount) {
 
 async function runContentRegistrySync({
   astroRoot = process.env.ASTRO_REPO_DIR,
+  astroSource = process.env.CONTENT_REGISTRY_ASTRO_SOURCE || 'filesystem',
+  githubRef = process.env.CONTENT_REGISTRY_GITHUB_REF || process.env.GITHUB_ASTRO_DEFAULT_BRANCH || null,
+  githubClient = null,
   commit = false,
   contentType = null,
   database = db,
   now = new Date(),
 } = {}) {
   const mode = commit ? 'commit' : 'dry_run';
+  const source = resolveAstroSource(astroSource, astroRoot);
+  const astroRootLabel = source === 'github'
+    ? githubSourceDescriptor(githubClient, githubRef)
+    : astroRoot || null;
   let syncRun = null;
   try {
     if (commit) {
@@ -443,16 +542,21 @@ async function runContentRegistrySync({
         .insert({
           mode,
           status: 'running',
-          astro_root: astroRoot || null,
+          astro_root: astroRootLabel,
           started_at: now,
         })
         .returning('*');
       syncRun = Array.isArray(inserted) ? inserted[0] : inserted;
     }
 
-    const astroItems = scanAstroContent(astroRoot, {
-      collections: collectionsForContentType(contentType),
-    });
+    const collections = collectionsForContentType(contentType);
+    const astroItems = source === 'github'
+      ? await scanAstroContentFromGithub({
+        collections,
+        ref: githubRef,
+        githubClient,
+      })
+      : scanAstroContent(astroRoot, { collections });
     const dbRows = shouldScanDbBlogs(contentType) ? await database('blog_posts').select('*') : [];
     const dbItems = dbRows.map(dbBlogRowToItem);
     const previousRows = await database('content_registry').select('*');
@@ -488,6 +592,9 @@ async function runContentRegistrySync({
     return {
       ok: true,
       mode,
+      source,
+      astro_root: astroRootLabel,
+      github_ref: source === 'github' ? githubRef || null : null,
       sync_run_id: syncRun?.id || null,
       rows: result.rows,
       summary,
@@ -506,6 +613,9 @@ async function runContentRegistrySync({
     return {
       ok: false,
       mode,
+      source,
+      astro_root: astroRootLabel,
+      github_ref: source === 'github' ? githubRef || null : null,
       sync_run_id: syncRun?.id || null,
       error: err.message,
       code: err.code || null,
@@ -513,6 +623,31 @@ async function runContentRegistrySync({
       summary: { error_count: 1 },
     };
   }
+}
+
+function resolveAstroSource(value = 'filesystem', astroRoot = null) {
+  const source = String(value || 'filesystem').trim().toLowerCase();
+  if (source === 'auto') {
+    return astroRoot && fs.existsSync(astroRoot) ? 'filesystem' : 'github';
+  }
+  if (source === 'filesystem' || source === 'fs' || source === 'local') return 'filesystem';
+  if (source === 'github' || source === 'gh') return 'github';
+  const err = new Error(`Unsupported content registry Astro source: ${value}`);
+  err.code = 'INVALID_ASTRO_SOURCE';
+  throw err;
+}
+
+function githubSourceDescriptor(githubClient = null, ref = null) {
+  try {
+    const gh = githubClient || require('../content-astro/github-client');
+    const info = gh.env?.();
+    if (info?.owner && info?.repo) {
+      return `github:${info.owner}/${info.repo}@${ref || info.defaultBranch || 'main'}`;
+    }
+  } catch {
+    // Keep failed sync runs recordable even when GitHub env is incomplete.
+  }
+  return `github:${ref || process.env.GITHUB_ASTRO_DEFAULT_BRANCH || 'main'}`;
 }
 
 function syncRunCountColumns(summary = {}) {
@@ -805,6 +940,20 @@ function walkMarkdownFiles(dir) {
   return out.sort();
 }
 
+function toPosixPath(value) {
+  return String(value || '').split(path.sep).join('/');
+}
+
+function posixJoin(...parts) {
+  return parts.filter(Boolean).join('/').replace(/\/+/g, '/');
+}
+
+function contentRelativeFromSourcePath(relativePath) {
+  const normalized = toPosixPath(relativePath);
+  const prefix = `${toPosixPath(DEFAULT_COLLECTION_ROOT)}/`;
+  return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : '';
+}
+
 function readGitSha(root) {
   try {
     return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -823,6 +972,8 @@ module.exports = {
   normalizeHashValue,
   scanAstroContent,
   astroFileToItem,
+  scanAstroContentFromGithub,
+  astroSourceToItem,
   dbBlogRowToItem,
   reconcileContent,
   canonicalOwnerCounts,
@@ -833,6 +984,10 @@ module.exports = {
   liveTargetChanged,
   summarizeRows,
   runContentRegistrySync,
+  resolveAstroSource,
+  githubSourceDescriptor,
+  walkGithubMarkdownFiles,
+  contentRelativeFromSourcePath,
   syncRunCountColumns,
   summaryWithStaleRows,
   registryWritePayload,
