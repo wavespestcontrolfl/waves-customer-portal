@@ -284,7 +284,7 @@ class BacklinkMonitor {
         });
         if (!hasWavesLink) {
           gaps++;
-          if ((link.domain_from_rank || 0) > 40) {
+          if ((link.domain_from_rank || 0) >= 40) {
             newHighValueGaps.push({
               source_domain: link.domain_from,
               domain_rating: link.domain_from_rank,
@@ -411,7 +411,7 @@ class BacklinkMonitor {
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
       .where('created_at', '>', sevenDaysAgoTs)
-      .where('source_domain_rating', '>', 40)
+      .where('source_domain_rating', '>=', 40)
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
 
     return {
