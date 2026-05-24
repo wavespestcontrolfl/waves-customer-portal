@@ -152,6 +152,32 @@ function mapLinkedHistory(row) {
   };
 }
 
+function linkedHistoryKey(item) {
+  if (!item?.leadId || !item?.estimateId) return null;
+  return `${item.leadId}:${item.estimateId}`;
+}
+
+function filterReopenedLinkedHistory(items, unlinkRows = []) {
+  const reopenedByPair = new Map();
+  for (const row of unlinkRows) {
+    const metadata = parseJsonObject(row.metadata);
+    const estimateId = metadata.estimateId || metadata.estimate_id || null;
+    const leadId = row.lead_id || metadata.leadId || metadata.lead_id || null;
+    if (!estimateId || !leadId) continue;
+    const createdAt = row.created_at ? new Date(row.created_at).getTime() : 0;
+    const key = `${leadId}:${estimateId}`;
+    reopenedByPair.set(key, Math.max(reopenedByPair.get(key) || 0, createdAt));
+  }
+
+  return items.filter((item) => {
+    if (item.action !== 'linked') return true;
+    const key = linkedHistoryKey(item);
+    if (!key || !reopenedByPair.has(key)) return true;
+    const linkedAt = item.createdAt ? new Date(item.createdAt).getTime() : 0;
+    return linkedAt > reopenedByPair.get(key);
+  });
+}
+
 function compareHistoryCreatedAt(left, right) {
   const leftTime = left.createdAt ? new Date(left.createdAt).getTime() : 0;
   const rightTime = right.createdAt ? new Date(right.createdAt).getTime() : 0;
@@ -207,6 +233,12 @@ async function getReviewedHistory({ database = db, limit = DEFAULT_REVIEWED_HIST
     .orderBy('lead_activities.created_at', 'desc')
     .limit(safeLimit);
 
+  const unlinkRows = await database('lead_activities')
+    .where('activity_type', 'unlinked_estimate')
+    .select('id', 'lead_id', 'metadata', 'created_at')
+    .orderBy('created_at', 'desc')
+    .limit(MAX_REVIEWED_HISTORY_LIMIT);
+
   const mappedItems = [
     ...dismissalRows.map(mapDismissalHistory),
     ...linkedRows.map(mapLinkedHistory),
@@ -215,7 +247,7 @@ async function getReviewedHistory({ database = db, limit = DEFAULT_REVIEWED_HIST
   const estimateRows = estimateIds.length
     ? await database('estimates').whereIn('id', estimateIds).select('id', 'customer_name')
     : [];
-  const data = applyEstimateHistoryContext(mappedItems, estimateRows)
+  const data = applyEstimateHistoryContext(filterReopenedLinkedHistory(mappedItems, unlinkRows), estimateRows)
     .sort(compareHistoryCreatedAt)
     .slice(0, safeLimit);
 
@@ -457,6 +489,117 @@ async function dismissDuplicateRisk({
   });
 }
 
+async function reopenReviewedDuplicate({
+  database = db,
+  action,
+  estimateId,
+  leadId,
+  actorId = null,
+  actor = 'Admin',
+}) {
+  const cleanAction = String(action || '').trim().toLowerCase();
+  const cleanEstimateId = cleanId(estimateId);
+  const cleanLeadId = cleanId(leadId);
+  if (!cleanEstimateId || !cleanLeadId) {
+    const err = new Error('estimateId and leadId are required');
+    err.status = 400;
+    throw err;
+  }
+
+  if (cleanAction === 'dismissed') {
+    return database.transaction(async (trx) => {
+      const deleted = await trx('pipeline_duplicate_risk_dismissals')
+        .where({ estimate_id: cleanEstimateId, lead_id: cleanLeadId })
+        .del();
+      if (!deleted) {
+        const err = new Error('Reviewed dismissal not found');
+        err.status = 404;
+        throw err;
+      }
+
+      await trx('audit_log').insert({
+        actor_type: actorId ? 'technician' : 'system',
+        actor_id: actorId || null,
+        action: 'pipeline.duplicate_risk.reopen_dismissal',
+        resource_type: 'estimate',
+        resource_id: cleanEstimateId,
+        metadata: {
+          estimateId: cleanEstimateId,
+          leadId: cleanLeadId,
+          source: 'admin_pipeline',
+        },
+      });
+
+      return { reopened: true, action: 'dismissed', estimateId: cleanEstimateId, leadId: cleanLeadId };
+    });
+  }
+
+  if (cleanAction === 'linked') {
+    return database.transaction(async (trx) => {
+      const lead = await trx('leads').where('id', cleanLeadId).first();
+      if (!lead) {
+        const err = new Error('Lead not found');
+        err.status = 404;
+        throw err;
+      }
+      if (String(lead.estimate_id || '') !== String(cleanEstimateId)) {
+        const err = new Error('Lead is no longer linked to this estimate');
+        err.status = 409;
+        err.code = 'link_changed';
+        err.currentEstimateId = lead.estimate_id || null;
+        throw err;
+      }
+
+      const [updatedLead] = await trx('leads')
+        .where('id', cleanLeadId)
+        .where('estimate_id', cleanEstimateId)
+        .update({
+          estimate_id: null,
+          updated_at: new Date(),
+        })
+        .returning('*');
+      if (!updatedLead) {
+        const err = new Error('Lead is no longer linked to this estimate');
+        err.status = 409;
+        err.code = 'link_changed';
+        err.currentEstimateId = null;
+        throw err;
+      }
+
+      await trx('lead_activities').insert({
+        lead_id: cleanLeadId,
+        activity_type: 'unlinked_estimate',
+        description: `Unlinked estimate ${cleanEstimateId}`,
+        performed_by: actor,
+        metadata: JSON.stringify({
+          estimateId: cleanEstimateId,
+          previousEstimateId: cleanEstimateId,
+          source: 'admin_pipeline',
+        }),
+      });
+
+      await trx('audit_log').insert({
+        actor_type: actorId ? 'technician' : 'system',
+        actor_id: actorId || null,
+        action: 'pipeline.duplicate_risk.reopen_link',
+        resource_type: 'estimate',
+        resource_id: cleanEstimateId,
+        metadata: {
+          estimateId: cleanEstimateId,
+          leadId: cleanLeadId,
+          source: 'admin_pipeline',
+        },
+      });
+
+      return { reopened: true, action: 'linked', estimateId: cleanEstimateId, leadId: cleanLeadId };
+    });
+  }
+
+  const err = new Error('action must be dismissed or linked');
+  err.status = 400;
+  throw err;
+}
+
 function applyLeadSearch(query, search) {
   const term = String(search || '').trim();
   if (!term) return query;
@@ -653,6 +796,29 @@ router.post('/opportunities/:estimateId/dismiss-duplicate-risk', async (req, res
   }
 });
 
+// POST /api/admin/pipeline/opportunities/reviewed-history/reopen
+router.post('/opportunities/reviewed-history/reopen', async (req, res, next) => {
+  try {
+    const result = await reopenReviewedDuplicate({
+      action: req.body.action,
+      estimateId: req.body.estimateId || req.body.estimate_id,
+      leadId: req.body.leadId || req.body.lead_id,
+      actorId: req.technicianId || req.technician?.id || null,
+      actor: performedBy(req),
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({
+        error: err.message,
+        code: err.code,
+        currentEstimateId: err.currentEstimateId,
+      });
+    }
+    next(err);
+  }
+});
+
 module.exports = router;
 module.exports.__private = {
   applyEstimateSearch,
@@ -663,6 +829,7 @@ module.exports.__private = {
   fetchDismissedDuplicatePairs,
   fetchDismissedLeadIdsForEstimate,
   filterDismissedCandidates,
+  filterReopenedLinkedHistory,
   getLinkCandidateLeads,
   getReviewedHistory,
   historyLimit,
@@ -671,6 +838,7 @@ module.exports.__private = {
   mapLinkedHistory,
   normalizeDismissReason,
   parseJsonObject,
+  reopenReviewedDuplicate,
   searchDigits,
   searchRef,
 };
