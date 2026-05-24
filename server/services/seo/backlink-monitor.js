@@ -9,7 +9,7 @@ const SPAM_TLDS = /\.xyz$|\.top$|\.buzz$|\.click$|\.site$|\.online$/i;
 class BacklinkMonitor {
   async scan() {
     logger.info('Backlink scan starting...');
-    const FETCH_LIMIT = 2000;
+    const FETCH_LIMIT = 1000;
     const data = await dataforseo.getBacklinks('wavespestcontrol.com', FETCH_LIMIT);
 
     if (!data?.tasks?.[0]?.result?.[0]?.items) {
@@ -17,8 +17,10 @@ class BacklinkMonitor {
       return { scanned: 0, scanComplete: false };
     }
 
-    const links = data.tasks[0].result[0].items;
-    const scanComplete = links.length < FETCH_LIMIT;
+    const result = data.tasks[0].result[0];
+    const links = result.items;
+    const totalCount = result.total_count || links.length;
+    const scanComplete = links.length >= totalCount;
 
     // Build active link map with composite keys BEFORE processing
     const activeLinks = await db('seo_backlinks')
