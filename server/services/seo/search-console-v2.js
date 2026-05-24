@@ -23,6 +23,7 @@ function getGoogle() {
 }
 
 const DEFAULT_SITE_URL = process.env.GSC_SITE_URL || 'https://www.wavespestcontrol.com/';
+const DEFAULT_GSC_REQUEST_TIMEOUT_MS = 30000;
 
 // All 15 Waves network domains — GSC properties to query
 const NETWORK_DOMAINS = [
@@ -52,6 +53,19 @@ function siteUrlForDomain(domain) {
 
 function applyDomainFilter(query, domain) {
   return domain ? query.where('domain', normalizeDomain(domain)) : query;
+}
+
+function positiveInt(value, fallback) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function gscRequestTimeoutMs(value = process.env.GSC_REQUEST_TIMEOUT_MS) {
+  return positiveInt(value, DEFAULT_GSC_REQUEST_TIMEOUT_MS);
+}
+
+function gscRequestOptions() {
+  return { timeout: gscRequestTimeoutMs() };
 }
 
 // Branded query patterns for Waves
@@ -200,7 +214,7 @@ class SearchConsoleService {
         rowLimit: 5000,
         type: 'web',
       },
-    });
+    }, gscRequestOptions());
 
     const rows = response.data.rows || [];
     for (const row of rows) {
@@ -240,7 +254,7 @@ class SearchConsoleService {
         rowLimit: 2000,
         type: 'web',
       },
-    });
+    }, gscRequestOptions());
 
     const rows = response.data.rows || [];
     for (const row of rows) {
@@ -277,7 +291,7 @@ class SearchConsoleService {
         dimensions: ['device', 'date'],
         type: 'web',
       },
-    });
+    }, gscRequestOptions());
 
     const rows = response.data.rows || [];
     for (const row of rows) {
@@ -315,7 +329,7 @@ class SearchConsoleService {
         dimensions: ['date'],
         type: 'web',
       },
-    });
+    }, gscRequestOptions());
 
     const totalRows = response.data.rows || [];
 
@@ -389,7 +403,7 @@ class SearchConsoleService {
           rowLimit: 25000,
           type: 'web',
         },
-      });
+      }, gscRequestOptions());
 
       const rows = response.data.rows || [];
       await db.transaction(async (trx) => {

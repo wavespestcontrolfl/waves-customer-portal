@@ -6,6 +6,7 @@ const SiteAuditor = require('../services/seo/site-auditor');
 const CannibalizationDetector = require('../services/seo/cannibalization');
 const SeoActionGenerator = require('../services/seo/seo-action-generator');
 const UrlIntelligence = require('../services/seo/url-intelligence');
+const SearchConsole = require('../services/seo/search-console-v2');
 const pageAuditDomainRepair004 = require('../models/migrations/20260526000004_repair_seo_page_audit_domains');
 const pageAuditDomainRepair005 = require('../models/migrations/20260526000005_repair_seo_page_audit_domains_without_knex_placeholders');
 const db = require('../models/db');
@@ -154,6 +155,34 @@ describe('SEO Command Center guards', () => {
     } finally {
       global.fetch = originalFetch;
       AbortSignal.timeout = originalTimeout;
+    }
+  });
+
+  test('GSC searchanalytics requests use a timeout option', async () => {
+    process.env.GSC_REQUEST_TIMEOUT_MS = '4321';
+    const originalWebmasters = SearchConsole.webmasters;
+    const query = jest.fn().mockResolvedValue({ data: { rows: [] } });
+    SearchConsole.webmasters = { searchanalytics: { query } };
+
+    try {
+      await SearchConsole.syncQueries(
+        '2026-05-15',
+        '2026-05-22',
+        'https://www.wavespestcontrol.com/',
+      );
+
+      expect(query).toHaveBeenCalledWith(
+        expect.objectContaining({
+          siteUrl: 'https://www.wavespestcontrol.com/',
+          requestBody: expect.objectContaining({
+            dimensions: ['query', 'date'],
+            rowLimit: 5000,
+          }),
+        }),
+        { timeout: 4321 },
+      );
+    } finally {
+      SearchConsole.webmasters = originalWebmasters;
     }
   });
 
