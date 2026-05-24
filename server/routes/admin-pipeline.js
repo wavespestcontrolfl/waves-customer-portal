@@ -60,6 +60,22 @@ function normalizeDismissReason(reason) {
   return DUPLICATE_DISMISS_REASONS.has(normalized) ? normalized : 'not_same_customer';
 }
 
+function filterDismissedCandidates(candidates, dismissedLeadIds = []) {
+  const dismissedSet = new Set(dismissedLeadIds.map((leadId) => String(leadId)));
+  const visibleCandidates = candidates.filter((candidate) => !dismissedSet.has(String(candidate.leadId)));
+  return {
+    candidates: visibleCandidates,
+    dismissedCount: candidates.length - visibleCandidates.length,
+  };
+}
+
+async function fetchDismissedLeadIdsForEstimate({ database = db, estimateId }) {
+  const rows = await database('pipeline_duplicate_risk_dismissals')
+    .where('estimate_id', estimateId)
+    .select('lead_id');
+  return rows.map((row) => row.lead_id).filter(Boolean);
+}
+
 async function getLinkCandidateLeads({ database = db, estimateId }) {
   const id = cleanId(estimateId);
   if (!id) {
@@ -94,6 +110,7 @@ async function getLinkCandidateLeads({ database = db, estimateId }) {
         updatedAt: estimate.updated_at || null,
       },
       candidates: [],
+      dismissedCount: 0,
     };
   }
 
@@ -123,6 +140,9 @@ async function getLinkCandidateLeads({ database = db, estimateId }) {
   });
 
   const rows = await query.orderBy('leads.updated_at', 'desc');
+  const dismissedLeadIds = await fetchDismissedLeadIdsForEstimate({ database, estimateId: id });
+  const filtered = filterDismissedCandidates(rows.map(matchCandidateLead), dismissedLeadIds);
+
   return {
     estimate: {
       estimateId: estimate.id,
@@ -135,7 +155,8 @@ async function getLinkCandidateLeads({ database = db, estimateId }) {
       createdAt: estimate.created_at || null,
       updatedAt: estimate.updated_at || null,
     },
-    candidates: rows.map(matchCandidateLead),
+    candidates: filtered.candidates,
+    dismissedCount: filtered.dismissedCount,
   };
 }
 
@@ -483,6 +504,8 @@ module.exports.__private = {
   applyLeadSearch,
   dismissDuplicateRisk,
   fetchDismissedDuplicatePairs,
+  fetchDismissedLeadIdsForEstimate,
+  filterDismissedCandidates,
   getLinkCandidateLeads,
   linkOpportunityRecords,
   normalizeDismissReason,
