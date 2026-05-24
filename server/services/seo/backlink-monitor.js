@@ -383,8 +383,8 @@ class BacklinkMonitor {
     const todayStr = etDateString();
     const sevenDaysAgoStr = etDateString(new Date(Date.now() - 7 * 86400000));
     const twentyEightDaysAgoStr = etDateString(new Date(Date.now() - 28 * 86400000));
-    const s7 = snapshots.filter(s => String(s.snapshot_date).slice(0, 10) >= sevenDaysAgoStr);
-    const s28 = snapshots.filter(s => String(s.snapshot_date).slice(0, 10) >= twentyEightDaysAgoStr);
+    const s7 = snapshots.filter(s => String(s.snapshot_date).slice(0, 10) > sevenDaysAgoStr);
+    const s28 = snapshots.filter(s => String(s.snapshot_date).slice(0, 10) > twentyEightDaysAgoStr);
     const sum = (arr, key) => arr.reduce((t, s) => t + Number(s[key] || 0), 0);
     const new7 = sum(s7, 'new_backlinks_since_last');
     const lost7 = sum(s7, 'lost_backlinks_since_last');
@@ -401,12 +401,12 @@ class BacklinkMonitor {
     const newGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
-      .where('created_at', '>=', sevenDaysAgoStr)
+      .where('created_at', '>', sevenDaysAgoStr)
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
     const newHighValueGapsSince7d = await db('seo_competitor_backlinks')
       .where('waves_has_link', false)
       .where('prospect_status', 'unreviewed')
-      .where('created_at', '>=', sevenDaysAgoStr)
+      .where('created_at', '>', sevenDaysAgoStr)
       .where('source_domain_rating', '>', 40)
       .count('id as count').first().then(r => parseInt(r?.count) || 0);
 
