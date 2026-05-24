@@ -12,9 +12,8 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { extractDomain } = require('../../utils/normalize-url');
 const {
   claimPipelineRun,
-  completePipelineRun,
-  failPipelineRun,
 } = require('../seo/seo-pipeline-runs');
+const { runClaimedSeoPipeline } = require('../seo/seo-pipeline-runner');
 
 const SEO_TOOLS = [
   {
@@ -1528,114 +1527,14 @@ async function runSeoPipeline(input, context = {}) {
     };
   }
 
-  // Call services directly instead of hitting the authenticated HTTP endpoint
-  const runPipeline = async () => {
-    const steps = [];
-    try {
-      const SearchConsole = require('../seo/search-console-v2');
-      const result = await SearchConsole.syncDailyData(7, domain);
-      steps.push({ step: 'gsc_sync', status: 'ok', result });
-    } catch (e) {
-      steps.push({ step: 'gsc_sync', status: 'failed', error: e.message });
-      logger.warn(`[IB pipeline] GSC sync: ${e.message}`);
-    }
-    try {
-      const SiteAuditor = require('../seo/site-auditor');
-      const result = await SiteAuditor.runSiteAudit({ domain });
-      steps.push({ step: 'site_audit', status: 'ok', pages: Number(result?.pages || 0) });
-    } catch (e) {
-      steps.push({ step: 'site_audit', status: 'failed', error: e.message });
-      logger.warn(`[IB pipeline] site audit: ${e.message}`);
-    }
-    try {
-      const result = await UrlIntelligence.refreshDomain(domain);
-      steps.push({ step: 'url_intelligence_refresh', status: 'ok', result });
-    } catch (e) {
-      steps.push({ step: 'url_intelligence_refresh', status: 'failed', error: e.message });
-      logger.warn(`[IB pipeline] refresh: ${e.message}`);
-    }
-    try {
-      const SitemapValidator = require('../seo/sitemap-validator');
-      const result = await SitemapValidator.validateDomain(domain);
-      steps.push({ step: 'sitemap_validation', status: 'ok', result });
-    } catch (e) {
-      steps.push({ step: 'sitemap_validation', status: 'failed', error: e.message });
-      logger.warn(`[IB pipeline] sitemap: ${e.message}`);
-    }
-    try {
-      const result = await UrlIntelligence.buildDuplicateClusters(domain);
-      steps.push({ step: 'duplicate_detection', status: 'ok', result });
-    } catch (e) {
-      steps.push({ step: 'duplicate_detection', status: 'failed', error: e.message });
-      logger.warn(`[IB pipeline] duplicates: ${e.message}`);
-    }
-    try {
-      const [intentResult, linkResult] = await Promise.allSettled([
-        UrlIntelligence.buildIntentMap(domain),
-        UrlIntelligence.buildInternalLinkGraph(domain),
-      ]);
-      steps.push({
-        step: 'intent_map',
-        status: intentResult.status === 'fulfilled' ? 'ok' : 'failed',
-        result: intentResult.value,
-        error: intentResult.reason?.message,
-      });
-      steps.push({
-        step: 'internal_link_graph',
-        status: linkResult.status === 'fulfilled' ? 'ok' : 'failed',
-        result: linkResult.value,
-        error: linkResult.reason?.message,
-      });
-    } catch (e) {
-      steps.push({ step: 'intent_map_and_link_graph', status: 'failed', error: e.message });
-      logger.warn(`[IB pipeline] intent/links: ${e.message}`);
-    }
-    try {
-      const Cannibalization = require('../seo/cannibalization');
-      const [cannibalResult, conflictResult] = await Promise.allSettled([
-        Cannibalization.detect(domain),
-        UrlIntelligence.detectCanonicalConflicts(),
-      ]);
-      steps.push({
-        step: 'cannibalization',
-        status: cannibalResult.status === 'fulfilled' ? 'ok' : 'failed',
-        result: cannibalResult.value,
-        error: cannibalResult.reason?.message,
-      });
-      steps.push({
-        step: 'canonical_conflicts',
-        status: conflictResult.status === 'fulfilled' ? 'ok' : 'failed',
-        result: conflictResult.value,
-        error: conflictResult.reason?.message,
-      });
-    } catch (e) {
-      steps.push({ step: 'cannibalization_and_conflicts', status: 'failed', error: e.message });
-      logger.warn(`[IB pipeline] cannibal/conflicts: ${e.message}`);
-    }
-    try {
-      const SeoActionGenerator = require('../seo/seo-action-generator');
-      const diagnosisResult = await UrlIntelligence.refreshDiagnoses(domain);
-      steps.push({ step: 'diagnosis_refresh', status: 'ok', result: diagnosisResult });
-      const actionResult = await SeoActionGenerator.generateActionsFromDiagnosis(domain);
-      steps.push({ step: 'action_generation', status: 'ok', result: actionResult });
-      const approveResult = await SeoActionGenerator.autoApprove(domain);
-      steps.push({ step: 'auto_approve', status: 'ok', result: approveResult });
-    } catch (e) {
-      steps.push({ step: 'action_generation', status: 'failed', error: e.message });
-      logger.warn(`[IB pipeline] actions: ${e.message}`);
-    }
-
-    await completePipelineRun(
-      claim.run.id,
-      { steps },
-      steps.some((s) => s.status === 'failed') ? 'completed_with_errors' : 'completed',
-    );
-  };
-  runPipeline().catch(async (e) => {
-    logger.error(`[IB pipeline] fatal: ${e.message}`);
-    await failPipelineRun(claim.run.id, e)
-      .catch((err) => logger.warn(`[IB pipeline] failed to persist fatal status: ${err.message}`));
-  });
+  const requestedDaysBack = parseInt(input.daysBack || input.days_back || 7, 10);
+  const daysBack = Number.isFinite(requestedDaysBack) && requestedDaysBack > 0 ? requestedDaysBack : 7;
+  runClaimedSeoPipeline({
+    pipelineRun: claim.run,
+    domain: claim.run.domain,
+    daysBack,
+    logPrefix: 'IB pipeline',
+  }).catch((e) => logger.error(`[IB pipeline] background runner failed: ${e.message}`, e));
   return {
     status: 'started',
     domain,
