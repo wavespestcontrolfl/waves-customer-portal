@@ -34,6 +34,25 @@ function estimateDisplayName(estimate) {
   return estimate?.customer_name || estimate?.name || 'Unknown Customer';
 }
 
+function compactHistoryRef(prefix, id) {
+  if (!id) return null;
+  return `${prefix} ${String(id).slice(0, 8)}`;
+}
+
+function historyLeadName(row) {
+  return [row.lead_first_name, row.lead_last_name].filter(Boolean).join(' ').trim()
+    || row.lead_name
+    || null;
+}
+
+function historyEstimateName(row) {
+  return row.estimate_customer_name || row.estimate_name || null;
+}
+
+function historyCustomerName(row) {
+  return historyEstimateName(row) || historyLeadName(row);
+}
+
 function matchCandidateLead(lead) {
   return {
     leadId: lead.id,
@@ -101,6 +120,11 @@ function mapDismissalHistory(row) {
     action: 'dismissed',
     estimateId: row.estimate_id || null,
     leadId: row.lead_id || null,
+    estimateRef: compactHistoryRef('Est', row.estimate_id),
+    leadRef: compactHistoryRef('Lead', row.lead_id),
+    estimateLabel: historyEstimateName(row),
+    leadLabel: historyLeadName(row),
+    customerName: historyCustomerName(row),
     reason: row.reason || null,
     actor: row.dismissed_by_name || null,
     hasNote: Boolean(row.note),
@@ -110,11 +134,17 @@ function mapDismissalHistory(row) {
 
 function mapLinkedHistory(row) {
   const metadata = parseJsonObject(row.metadata);
+  const estimateId = metadata.estimateId || metadata.estimate_id || null;
   return {
     id: row.id,
     action: 'linked',
-    estimateId: metadata.estimateId || metadata.estimate_id || null,
+    estimateId,
     leadId: row.lead_id || null,
+    estimateRef: compactHistoryRef('Est', estimateId),
+    leadRef: compactHistoryRef('Lead', row.lead_id),
+    estimateLabel: historyEstimateName(row),
+    leadLabel: historyLeadName(row),
+    customerName: historyCustomerName(row),
     reason: null,
     actor: row.performed_by || null,
     hasNote: false,
@@ -128,30 +158,66 @@ function compareHistoryCreatedAt(left, right) {
   return rightTime - leftTime;
 }
 
+function applyEstimateHistoryContext(items, estimates = []) {
+  const estimatesById = new Map(estimates.map((estimate) => [String(estimate.id), estimate]));
+  return items.map((item) => {
+    if (!item.estimateId) return item;
+    const estimate = estimatesById.get(String(item.estimateId));
+    if (!estimate) return item;
+    const estimateLabel = item.estimateLabel || estimate.customer_name || null;
+    return {
+      ...item,
+      estimateLabel,
+      customerName: item.customerName || estimateLabel,
+    };
+  });
+}
+
 async function getReviewedHistory({ database = db, limit = DEFAULT_REVIEWED_HISTORY_LIMIT } = {}) {
   const safeLimit = historyLimit(limit);
   const dismissalTableExists = await database.schema.hasTable('pipeline_duplicate_risk_dismissals');
   const dismissalRows = dismissalTableExists
     ? await database('pipeline_duplicate_risk_dismissals')
       .leftJoin('technicians', 'pipeline_duplicate_risk_dismissals.dismissed_by', 'technicians.id')
+      .leftJoin('estimates', 'pipeline_duplicate_risk_dismissals.estimate_id', 'estimates.id')
+      .leftJoin('leads', 'pipeline_duplicate_risk_dismissals.lead_id', 'leads.id')
       .select(
         'pipeline_duplicate_risk_dismissals.*',
         database.raw('technicians.name as dismissed_by_name'),
+        database.raw('estimates.customer_name as estimate_customer_name'),
+        database.raw('leads.first_name as lead_first_name'),
+        database.raw('leads.last_name as lead_last_name'),
       )
       .orderBy('pipeline_duplicate_risk_dismissals.updated_at', 'desc')
       .limit(safeLimit)
     : [];
 
   const linkedRows = await database('lead_activities')
-    .where('activity_type', 'linked_estimate')
-    .select('id', 'lead_id', 'performed_by', 'metadata', 'created_at')
-    .orderBy('created_at', 'desc')
+    .leftJoin('leads', 'lead_activities.lead_id', 'leads.id')
+    .where('lead_activities.activity_type', 'linked_estimate')
+    .select(
+      'lead_activities.id',
+      'lead_activities.lead_id',
+      'lead_activities.performed_by',
+      'lead_activities.metadata',
+      'lead_activities.created_at',
+      database.raw('leads.first_name as lead_first_name'),
+      database.raw('leads.last_name as lead_last_name'),
+    )
+    .orderBy('lead_activities.created_at', 'desc')
     .limit(safeLimit);
 
-  const data = [
+  const mappedItems = [
     ...dismissalRows.map(mapDismissalHistory),
     ...linkedRows.map(mapLinkedHistory),
-  ].sort(compareHistoryCreatedAt).slice(0, safeLimit);
+  ];
+  const estimateIds = [...new Set(mappedItems.map((item) => item.estimateId).filter(Boolean))];
+  const estimateRows = estimateIds.length
+    ? await database('estimates').whereIn('id', estimateIds).select('id', 'customer_name')
+    : [];
+  const data = applyEstimateHistoryContext(mappedItems, estimateRows)
+    .sort(compareHistoryCreatedAt)
+    .slice(0, safeLimit);
 
   return { data };
 }
@@ -591,6 +657,8 @@ module.exports = router;
 module.exports.__private = {
   applyEstimateSearch,
   applyLeadSearch,
+  applyEstimateHistoryContext,
+  compareHistoryCreatedAt,
   dismissDuplicateRisk,
   fetchDismissedDuplicatePairs,
   fetchDismissedLeadIdsForEstimate,

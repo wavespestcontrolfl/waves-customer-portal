@@ -284,6 +284,9 @@ describe('admin pipeline reviewed history helpers', () => {
       id: 'dismissal-1',
       estimate_id: 'est-1',
       lead_id: 'lead-1',
+      estimate_customer_name: 'Jane Smith',
+      lead_first_name: 'Jane',
+      lead_last_name: 'Smith',
       dismissed_by_name: 'Ada Admin',
       reason: 'bad_match',
       note: 'Private note',
@@ -295,6 +298,11 @@ describe('admin pipeline reviewed history helpers', () => {
       action: 'dismissed',
       estimateId: 'est-1',
       leadId: 'lead-1',
+      estimateRef: 'Est est-1',
+      leadRef: 'Lead lead-1',
+      estimateLabel: 'Jane Smith',
+      leadLabel: 'Jane Smith',
+      customerName: 'Jane Smith',
       reason: 'bad_match',
       actor: 'Ada Admin',
       hasNote: true,
@@ -307,6 +315,8 @@ describe('admin pipeline reviewed history helpers', () => {
     expect(__private.mapLinkedHistory({
       id: 'activity-1',
       lead_id: 'lead-1',
+      lead_first_name: 'Ada',
+      lead_last_name: 'Lovelace',
       performed_by: 'Ada Admin',
       metadata: JSON.stringify({ estimateId: 'est-1' }),
       created_at: '2026-05-24T13:00:00.000Z',
@@ -315,6 +325,11 @@ describe('admin pipeline reviewed history helpers', () => {
       action: 'linked',
       estimateId: 'est-1',
       leadId: 'lead-1',
+      estimateRef: 'Est est-1',
+      leadRef: 'Lead lead-1',
+      estimateLabel: null,
+      leadLabel: 'Ada Lovelace',
+      customerName: 'Ada Lovelace',
       reason: null,
       actor: 'Ada Admin',
       hasNote: false,
@@ -334,5 +349,46 @@ describe('admin pipeline reviewed history helpers', () => {
       leadId: 'lead-2',
       actor: null,
     });
+  });
+
+  test('estimate context enriches linked history customer labels without mutating note privacy', () => {
+    const [history] = __private.applyEstimateHistoryContext([
+      {
+        id: 'activity-1',
+        action: 'linked',
+        estimateId: 'est-1',
+        leadId: 'lead-1',
+        estimateLabel: null,
+        leadLabel: null,
+        customerName: null,
+        hasNote: false,
+      },
+    ], [{ id: 'est-1', customer_name: 'Jane Smith' }]);
+
+    expect(history).toMatchObject({
+      estimateLabel: 'Jane Smith',
+      customerName: 'Jane Smith',
+      hasNote: false,
+    });
+    expect(history).not.toHaveProperty('note');
+  });
+
+  test('reviewed history sort uses newest linked and dismissed decisions first', () => {
+    const items = [
+      __private.mapLinkedHistory({
+        id: 'activity-old',
+        lead_id: 'lead-1',
+        metadata: JSON.stringify({ estimateId: 'est-1' }),
+        created_at: '2026-05-24T12:00:00.000Z',
+      }),
+      __private.mapDismissalHistory({
+        id: 'dismissal-new',
+        estimate_id: 'est-2',
+        lead_id: 'lead-2',
+        updated_at: '2026-05-24T13:00:00.000Z',
+      }),
+    ].sort(__private.compareHistoryCreatedAt);
+
+    expect(items.map((item) => item.id)).toEqual(['dismissal-new', 'activity-old']);
   });
 });
