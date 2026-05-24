@@ -181,6 +181,25 @@ describe('SEO Command Center guards', () => {
         }),
         { timeout: 4321 },
       );
+
+      query.mockClear();
+      const controller = new AbortController();
+      await SearchConsole.syncQueries(
+        '2026-05-15',
+        '2026-05-22',
+        'https://www.wavespestcontrol.com/',
+        { signal: controller.signal },
+      );
+
+      expect(query).toHaveBeenCalledWith(
+        expect.objectContaining({
+          siteUrl: 'https://www.wavespestcontrol.com/',
+          requestBody: expect.objectContaining({
+            dimensions: ['query', 'date'],
+          }),
+        }),
+        { timeout: 4321, signal: controller.signal },
+      );
     } finally {
       SearchConsole.webmasters = originalWebmasters;
     }

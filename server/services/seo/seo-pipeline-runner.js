@@ -7,14 +7,23 @@ const {
 } = require('./seo-pipeline-runs');
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60000;
+const DEFAULT_GSC_SYNC_TIMEOUT_MS = 10 * 60 * 1000;
 
 function errorMessage(err) {
   return err?.message || String(err || 'Unknown error');
 }
 
-function heartbeatIntervalMs(value = process.env.SEO_PIPELINE_HEARTBEAT_INTERVAL_MS) {
+function positiveInt(value, fallback) {
   const ms = parseInt(value, 10);
-  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_HEARTBEAT_INTERVAL_MS;
+  return Number.isFinite(ms) && ms > 0 ? ms : fallback;
+}
+
+function heartbeatIntervalMs(value = process.env.SEO_PIPELINE_HEARTBEAT_INTERVAL_MS) {
+  return positiveInt(value, DEFAULT_HEARTBEAT_INTERVAL_MS);
+}
+
+function gscSyncTimeoutMs(value = process.env.SEO_PIPELINE_GSC_SYNC_TIMEOUT_MS) {
+  return positiveInt(value, DEFAULT_GSC_SYNC_TIMEOUT_MS);
 }
 
 function progressPayload({ steps, start, currentStep, options = null, extra = {} }) {
@@ -59,6 +68,25 @@ async function withHeartbeatInterval({ work, beat, logPrefix, step }) {
   }
 }
 
+async function withTimeout({ work, timeoutMs, message }) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let timer = null;
+  try {
+    return await Promise.race([
+      work(controller?.signal || null),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const err = new Error(message);
+          if (controller) controller.abort(err);
+          reject(err);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function runStep({ pipelineRun, state, step, label, logPrefix, fn }) {
   logger.info(`[${logPrefix}] ${label}`);
   await heartbeat(pipelineRun, state, step);
@@ -99,7 +127,12 @@ async function runClaimedSeoPipeline({ pipelineRun, domain, daysBack = 7, logPre
       logPrefix,
       fn: async () => {
         const SearchConsole = require('./search-console-v2');
-        const detail = await SearchConsole.syncDailyData(daysBack, domain);
+        const timeoutMs = gscSyncTimeoutMs();
+        const detail = await withTimeout({
+          work: (signal) => SearchConsole.syncDailyData(daysBack, domain, { signal }),
+          timeoutMs,
+          message: `GSC sync timed out after ${timeoutMs}ms`,
+        });
         return { detail };
       },
     });
@@ -253,8 +286,10 @@ module.exports = {
   runClaimedSeoPipeline,
   _internals: {
     errorMessage,
+    gscSyncTimeoutMs,
     heartbeatIntervalMs,
     progressPayload,
     withHeartbeatInterval,
+    withTimeout,
   },
 };

@@ -64,8 +64,20 @@ function gscRequestTimeoutMs(value = process.env.GSC_REQUEST_TIMEOUT_MS) {
   return positiveInt(value, DEFAULT_GSC_REQUEST_TIMEOUT_MS);
 }
 
-function gscRequestOptions() {
-  return { timeout: gscRequestTimeoutMs() };
+function gscRequestOptions(signal = null) {
+  const options = { timeout: gscRequestTimeoutMs() };
+  if (signal) options.signal = signal;
+  return options;
+}
+
+function abortReason(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error(signal?.reason ? String(signal.reason) : 'GSC sync aborted');
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortReason(signal);
 }
 
 // Branded query patterns for Waves
@@ -146,8 +158,12 @@ class SearchConsoleService {
    * Sync daily performance data from GSC.
    * Pulls query-level and page-level data for the given date range.
    */
-  async syncDailyData(daysBack = 3, domain = null) {
+  async syncDailyData(daysBack = 3, domain = null, options = {}) {
+    const { signal = null } = options || {};
+    throwIfAborted(signal);
+
     const ready = await this.init();
+    throwIfAborted(signal);
     if (!ready) {
       logger.info('GSC not configured — skipping sync');
       return { synced: false };
@@ -165,23 +181,24 @@ class SearchConsoleService {
 
     try {
       // 1. Query-level data (all devices)
-      await this.syncQueries(startStr, endStr, siteUrl);
+      await this.syncQueries(startStr, endStr, siteUrl, { signal });
 
       // 2. Page-level data
-      await this.syncPages(startStr, endStr, siteUrl);
+      await this.syncPages(startStr, endStr, siteUrl, { signal });
 
       // 3. Device breakdown (sitewide)
-      await this.syncDeviceBreakdown(startStr, endStr, siteUrl);
+      await this.syncDeviceBreakdown(startStr, endStr, siteUrl, { signal });
 
       // 4. Sitewide totals
-      await this.syncSitewideTotals(startStr, endStr, siteUrl);
+      await this.syncSitewideTotals(startStr, endStr, siteUrl, { signal });
 
       // 5. Query→page mapping (which queries rank on which pages)
-      await this.syncQueryPageMap(startStr, endStr, siteUrl);
+      await this.syncQueryPageMap(startStr, endStr, siteUrl, { signal });
 
       logger.info(`GSC sync complete for ${siteUrl}`);
       return { synced: true, period: { start: startStr, end: endStr }, domain: normalizedDomain, siteUrl };
     } catch (err) {
+      if (signal?.aborted || err?.name === 'AbortError') throw err;
       logger.error(`GSC sync failed for ${siteUrl}: ${err.message}`);
       return { synced: false, error: err.message };
     }
@@ -203,7 +220,9 @@ class SearchConsoleService {
     return results;
   }
 
-  async syncQueries(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
+  async syncQueries(startDate, endDate, siteUrl = DEFAULT_SITE_URL, options = {}) {
+    const { signal = null } = options || {};
+    throwIfAborted(signal);
     const domain = normalizeDomain(siteUrl);
     const response = await this.webmasters.searchanalytics.query({
       siteUrl,
@@ -214,10 +233,11 @@ class SearchConsoleService {
         rowLimit: 5000,
         type: 'web',
       },
-    }, gscRequestOptions());
+    }, gscRequestOptions(signal));
 
     const rows = response.data.rows || [];
     for (const row of rows) {
+      throwIfAborted(signal);
       const query = row.keys[0];
       const date = row.keys[1];
       const isBranded = BRANDED_PATTERNS.some(p => p.test(query));
@@ -243,7 +263,9 @@ class SearchConsoleService {
     logger.info(`GSC queries synced: ${rows.length} rows for ${domain}`);
   }
 
-  async syncPages(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
+  async syncPages(startDate, endDate, siteUrl = DEFAULT_SITE_URL, options = {}) {
+    const { signal = null } = options || {};
+    throwIfAborted(signal);
     const domain = normalizeDomain(siteUrl);
     const response = await this.webmasters.searchanalytics.query({
       siteUrl,
@@ -254,10 +276,11 @@ class SearchConsoleService {
         rowLimit: 2000,
         type: 'web',
       },
-    }, gscRequestOptions());
+    }, gscRequestOptions(signal));
 
     const rows = response.data.rows || [];
     for (const row of rows) {
+      throwIfAborted(signal);
       const pageUrl = row.keys[0];
       const date = row.keys[1];
 
@@ -281,7 +304,9 @@ class SearchConsoleService {
     logger.info(`GSC pages synced: ${rows.length} rows for ${domain}`);
   }
 
-  async syncDeviceBreakdown(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
+  async syncDeviceBreakdown(startDate, endDate, siteUrl = DEFAULT_SITE_URL, options = {}) {
+    const { signal = null } = options || {};
+    throwIfAborted(signal);
     const domain = normalizeDomain(siteUrl);
     const response = await this.webmasters.searchanalytics.query({
       siteUrl,
@@ -291,10 +316,11 @@ class SearchConsoleService {
         dimensions: ['device', 'date'],
         type: 'web',
       },
-    }, gscRequestOptions());
+    }, gscRequestOptions(signal));
 
     const rows = response.data.rows || [];
     for (const row of rows) {
+      throwIfAborted(signal);
       const device = row.keys[0].toLowerCase(); // MOBILE, DESKTOP, TABLET
       const date = row.keys[1];
 
@@ -319,7 +345,9 @@ class SearchConsoleService {
     }
   }
 
-  async syncSitewideTotals(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
+  async syncSitewideTotals(startDate, endDate, siteUrl = DEFAULT_SITE_URL, options = {}) {
+    const { signal = null } = options || {};
+    throwIfAborted(signal);
     const domain = normalizeDomain(siteUrl);
     const response = await this.webmasters.searchanalytics.query({
       siteUrl,
@@ -329,9 +357,10 @@ class SearchConsoleService {
         dimensions: ['date'],
         type: 'web',
       },
-    }, gscRequestOptions());
+    }, gscRequestOptions(signal));
 
     const totalRows = response.data.rows || [];
+    throwIfAborted(signal);
 
     // Query rows are incomplete because GSC anonymizes some query data. Keep the
     // branded/non-brand split as a labeled-query breakdown, but use the true
@@ -340,10 +369,12 @@ class SearchConsoleService {
       .where('date', '>=', startDate)
       .where('date', '<=', endDate)
       .where('domain', domain);
+    throwIfAborted(signal);
 
     // Group by date
     const byDate = {};
     for (const q of queries) {
+      throwIfAborted(signal);
       const d = typeof q.date === 'string' ? q.date.split('T')[0] : new Date(q.date).toISOString().split('T')[0];
       if (!byDate[d]) byDate[d] = { branded_clicks: 0, branded_impressions: 0, nonbrand_clicks: 0, nonbrand_impressions: 0 };
       if (q.is_branded) {
@@ -356,6 +387,7 @@ class SearchConsoleService {
     }
 
     for (const row of totalRows) {
+      throwIfAborted(signal);
       const date = row.keys[0];
       const data = byDate[date] || {
         branded_clicks: 0,
@@ -391,7 +423,9 @@ class SearchConsoleService {
     }
   }
 
-  async syncQueryPageMap(startDate, endDate, siteUrl = DEFAULT_SITE_URL) {
+  async syncQueryPageMap(startDate, endDate, siteUrl = DEFAULT_SITE_URL, options = {}) {
+    const { signal = null } = options || {};
+    throwIfAborted(signal);
     const domain = normalizeDomain(siteUrl);
     try {
       const response = await this.webmasters.searchanalytics.query({
@@ -403,10 +437,12 @@ class SearchConsoleService {
           rowLimit: 25000,
           type: 'web',
         },
-      }, gscRequestOptions());
+      }, gscRequestOptions(signal));
 
       const rows = response.data.rows || [];
+      throwIfAborted(signal);
       await db.transaction(async (trx) => {
+        throwIfAborted(signal);
         await trx('gsc_query_page_map')
           .where('domain', domain)
           .where('date_from', '<=', endDate)
@@ -414,6 +450,7 @@ class SearchConsoleService {
           .del();
 
         for (const row of rows) {
+          throwIfAborted(signal);
           const date = row.keys[0];
           const query = row.keys[1];
           const pageUrl = row.keys[2];
@@ -437,6 +474,7 @@ class SearchConsoleService {
 
       logger.info(`GSC query-page map synced: ${rows.length} daily rows for ${domain}`);
     } catch (err) {
+      if (signal?.aborted || err?.name === 'AbortError') throw err;
       logger.warn(`GSC query-page map sync failed for ${domain}: ${err.message}`);
     }
   }
