@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 const db = require('../models/db');
-const { claimPipelineRun } = require('../services/seo/seo-pipeline-runs');
+const {
+  claimQueuedPipelineRun,
+  enqueuePipelineRun,
+} = require('../services/seo/seo-pipeline-runs');
 const { runClaimedSeoPipeline } = require('../services/seo/seo-pipeline-runner');
 const { extractDomain } = require('../utils/normalize-url');
 
@@ -12,20 +15,33 @@ async function main() {
   const idempotencyKey = process.env.SEO_PIPELINE_IDEMPOTENCY_KEY
     || `seo-pipeline-worker:${domain}:${new Date().toISOString().slice(0, 10)}`;
 
-  const claim = await claimPipelineRun({
+  const queued = await enqueuePipelineRun({
     domain,
     idempotencyKey,
     requestedBy: process.env.SEO_PIPELINE_REQUESTED_BY || null,
+    daysBack,
   });
 
-  if (claim.error) throw new Error(claim.error);
-  if (!claim.claimed) {
+  if (queued.error) throw new Error(queued.error);
+  if (!['queued'].includes(queued.run.status)) {
     console.log(JSON.stringify({
-      status: claim.run.status,
-      run_id: claim.run.id,
-      domain: claim.run.domain,
+      status: queued.run.status,
+      run_id: queued.run.id,
+      domain: queued.run.domain,
       idempotencyKey,
       deduped: true,
+    }));
+    return;
+  }
+
+  const claim = await claimQueuedPipelineRun({ id: queued.run.id });
+  if (!claim.claimed) {
+    console.log(JSON.stringify({
+      status: queued.run.status,
+      run_id: queued.run.id,
+      domain: queued.run.domain,
+      idempotencyKey,
+      queued: true,
     }));
     return;
   }

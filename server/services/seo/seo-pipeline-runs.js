@@ -2,6 +2,8 @@ const db = require('../../models/db');
 const { extractDomain } = require('../../utils/normalize-url');
 
 const DEFAULT_STALE_AFTER_MINUTES = 30;
+const DEFAULT_PIPELINE_DAYS_BACK = 7;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function staleAfterMinutes(value = process.env.SEO_PIPELINE_STALE_AFTER_MINUTES) {
   const minutes = parseInt(value, 10);
@@ -10,6 +12,25 @@ function staleAfterMinutes(value = process.env.SEO_PIPELINE_STALE_AFTER_MINUTES)
 
 function staleCutoff(now = new Date(), minutes = staleAfterMinutes()) {
   return new Date(now.getTime() - minutes * 60 * 1000);
+}
+
+function pipelineDaysBack(value, fallback = DEFAULT_PIPELINE_DAYS_BACK) {
+  const days = parseInt(value, 10);
+  return Number.isFinite(days) && days > 0 ? days : fallback;
+}
+
+function queuedResult({ daysBack, queuedAt }) {
+  return {
+    queued: true,
+    queued_at: queuedAt.toISOString(),
+    options: {
+      days_back: pipelineDaysBack(daysBack),
+    },
+  };
+}
+
+function isUuid(value) {
+  return UUID_RE.test(String(value || ''));
 }
 
 async function reapStaleSeoRuns({ now = new Date(), staleMinutes = staleAfterMinutes() } = {}) {
@@ -45,34 +66,86 @@ async function reapStaleSeoRuns({ now = new Date(), staleMinutes = staleAfterMin
   };
 }
 
-async function claimPipelineRun({ domain, idempotencyKey, requestedBy }) {
+async function enqueuePipelineRun({ domain, idempotencyKey, requestedBy, daysBack } = {}) {
   const key = String(idempotencyKey || '').trim();
   if (!key) return { error: 'idempotencyKey is required to run SEO pipeline' };
   const d = extractDomain(domain) || 'wavespestcontrol.com';
+  const now = new Date();
 
   await reapStaleSeoRuns();
 
   const existing = await db('seo_pipeline_runs').where({ idempotency_key: key }).first();
-  if (existing) return { claimed: false, run: existing };
+  if (existing) return { enqueued: false, run: existing };
 
   try {
     const [created] = await db('seo_pipeline_runs')
       .insert({
         idempotency_key: key,
         domain: d,
-        status: 'running',
+        status: 'queued',
         requested_by: requestedBy || null,
-        started_at: new Date(),
+        started_at: now,
+        result: queuedResult({ daysBack, queuedAt: now }),
       })
       .returning('*');
-    return { claimed: true, run: created };
+    return { enqueued: true, run: created };
   } catch (err) {
     if (err.code === '23505') {
       const replayed = await db('seo_pipeline_runs').where({ idempotency_key: key }).first();
-      if (replayed) return { claimed: false, run: replayed };
+      if (replayed) return { enqueued: false, run: replayed };
     }
     throw err;
   }
+}
+
+async function claimPipelineRun(args) {
+  const queued = await enqueuePipelineRun(args);
+  if (queued.error || !queued.enqueued || queued.run?.status !== 'queued') {
+    return { ...queued, claimed: false };
+  }
+
+  const claim = await claimQueuedPipelineRun({ id: queued.run.id });
+  return {
+    ...queued,
+    claimed: claim.claimed,
+    run: claim.run || queued.run,
+  };
+}
+
+async function claimQueuedPipelineRun({ id = null, now = new Date() } = {}) {
+  if (id && !isUuid(id)) return { claimed: false, run: null };
+
+  await reapStaleSeoRuns({ now });
+
+  const params = [];
+  const idClause = id ? 'AND id = CAST(? AS uuid)' : '';
+  if (id) params.push(id);
+  params.push(now, now, now);
+
+  const result = await db.raw(`
+    WITH next_run AS (
+      SELECT id
+      FROM seo_pipeline_runs
+      WHERE status = 'queued'
+        ${idClause}
+      ORDER BY created_at ASC, id ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    UPDATE seo_pipeline_runs AS run
+    SET status = 'running',
+        started_at = ?,
+        updated_at = ?,
+        error = NULL,
+        result = COALESCE(run.result, '{}'::jsonb)
+          || jsonb_build_object('claimed_at', CAST(? AS timestamptz))
+    FROM next_run
+    WHERE run.id = next_run.id
+    RETURNING run.*
+  `, params);
+
+  const run = result.rows?.[0] || null;
+  return { claimed: Boolean(run), run };
 }
 
 async function heartbeatPipelineRun(id, result = null) {
@@ -106,13 +179,19 @@ async function failPipelineRun(id, error) {
 }
 
 module.exports = {
+  DEFAULT_PIPELINE_DAYS_BACK,
   DEFAULT_STALE_AFTER_MINUTES,
+  claimQueuedPipelineRun,
   claimPipelineRun,
   completePipelineRun,
+  enqueuePipelineRun,
   failPipelineRun,
   heartbeatPipelineRun,
   reapStaleSeoRuns,
   _internals: {
+    isUuid,
+    pipelineDaysBack,
+    queuedResult,
     staleAfterMinutes,
     staleCutoff,
   },
