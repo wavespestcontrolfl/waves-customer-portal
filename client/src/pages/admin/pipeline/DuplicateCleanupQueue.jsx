@@ -47,6 +47,7 @@ function formatHistoryTime(value) {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    timeZone: "America/New_York",
   }).format(date);
 }
 
