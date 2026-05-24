@@ -100,8 +100,10 @@ describe('content-registry url and hashing helpers', () => {
       astroRoot: '/tmp/astro-env',
       usingFallback: false,
     });
+    const missingExplicitRoot = path.join(os.tmpdir(), `missing-astro-${Date.now()}`);
     expect(syncCli.resolveSyncConfig({ source: 'github', 'github-ref': 'main' }, {}).astroSource).toBe('github');
-    expect(syncCli.resolveSyncConfig({ source: 'auto', 'astro-dir': '/tmp/astro' }, {}).astroSource).toBe('filesystem');
+    expect(syncCli.resolveSyncConfig({ source: 'auto', 'astro-dir': missingExplicitRoot }, {}).astroSource).toBe('github');
+    expect(syncCli.resolveSyncConfig({ source: 'auto', 'astro-dir': os.tmpdir() }, {}).astroSource).toBe('filesystem');
   });
 });
 

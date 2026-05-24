@@ -54,7 +54,7 @@ function resolveSyncConfig(args = {}, env = process.env) {
   const { astroRoot, usingFallback } = resolveAstroRoot(args, env);
   let source = String(args.source || env.CONTENT_REGISTRY_ASTRO_SOURCE || 'auto').trim().toLowerCase();
   if (source === 'auto') {
-    source = (!usingFallback || fs.existsSync(astroRoot)) ? 'filesystem' : 'github';
+    source = fs.existsSync(astroRoot) ? 'filesystem' : 'github';
   }
   return {
     astroRoot,
