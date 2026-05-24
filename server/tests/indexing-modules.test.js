@@ -12,7 +12,7 @@ const { SitemapManager, _internals: sitemapInternals } = require('../services/se
 
 const { classifyResponse } = indexNowInternals;
 const { parseInspection, canonicalsMatch, normalizeCanonical } = monitorInternals;
-const { extractUrls, normalize } = sitemapInternals;
+const { extractUrls, normalize, MAX_SITEMAPS } = sitemapInternals;
 
 function ok(body, contentType = 'application/json') {
   return Promise.resolve({
@@ -329,5 +329,92 @@ describe('SitemapManager.listUrls', () => {
     const fetchFn = jest.fn().mockReturnValue(ok(SAMPLE_SITEMAP, 'application/xml'));
     const list = await m.listUrls({ limit: 2, fetchFn });
     expect(list).toHaveLength(2);
+  });
+  test('recurses sitemap indexes and returns leaf page URLs', async () => {
+    const m = new SitemapManager();
+    const responses = {
+      'https://www.wavespestcontrol.com/sitemap.xml': `<?xml version="1.0"?>
+        <sitemapindex>
+          <sitemap><loc>https://www.wavespestcontrol.com/sitemap-0.xml</loc></sitemap>
+        </sitemapindex>`,
+      'https://www.wavespestcontrol.com/sitemap-0.xml': `<?xml version="1.0"?>
+        <urlset>
+          <url><loc>https://www.wavespestcontrol.com/</loc></url>
+          <url><loc>https://www.wavespestcontrol.com/pest-control-bradenton-fl/</loc></url>
+        </urlset>`,
+    };
+    const fetchFn = jest.fn((url) => ok(responses[url] || '<urlset></urlset>', 'application/xml'));
+
+    const list = await m.listUrls({
+      sitemapUrl: 'https://www.wavespestcontrol.com/sitemap.xml',
+      fetchFn,
+    });
+
+    expect(list).toEqual([
+      'https://www.wavespestcontrol.com/',
+      'https://www.wavespestcontrol.com/pest-control-bradenton-fl/',
+    ]);
+    expect(list).not.toContain('https://www.wavespestcontrol.com/sitemap-0.xml');
+    expect(fetchFn).toHaveBeenCalledWith('https://www.wavespestcontrol.com/sitemap.xml');
+    expect(fetchFn).toHaveBeenCalledWith('https://www.wavespestcontrol.com/sitemap-0.xml');
+  });
+  test('does not recurse sitemap index children on other hosts', async () => {
+    const m = new SitemapManager();
+    const responses = {
+      'https://wavespestcontrol.com/sitemap.xml': `<?xml version="1.0"?>
+        <sitemapindex>
+          <sitemap><loc>https://www.wavespestcontrol.com/sitemap-0.xml</loc></sitemap>
+          <sitemap><loc>http://169.254.169.254/latest/meta-data/</loc></sitemap>
+        </sitemapindex>`,
+      'https://www.wavespestcontrol.com/sitemap-0.xml': `<?xml version="1.0"?>
+        <urlset>
+          <url><loc>https://www.wavespestcontrol.com/</loc></url>
+        </urlset>`,
+    };
+    const fetchFn = jest.fn((url) => ok(responses[url] || '<urlset></urlset>', 'application/xml'));
+
+    const list = await m.listUrls({
+      sitemapUrl: 'https://wavespestcontrol.com/sitemap.xml',
+      fetchFn,
+    });
+
+    expect(list).toEqual(['https://www.wavespestcontrol.com/']);
+    expect(fetchFn).toHaveBeenCalledWith('https://wavespestcontrol.com/sitemap.xml');
+    expect(fetchFn).toHaveBeenCalledWith('https://www.wavespestcontrol.com/sitemap-0.xml');
+    expect(fetchFn).not.toHaveBeenCalledWith('http://169.254.169.254/latest/meta-data/');
+  });
+  test('throws instead of returning partial results when sitemap index cap is exceeded', async () => {
+    const m = new SitemapManager();
+    const childLocs = Array.from({ length: MAX_SITEMAPS + 1 }, (_, idx) =>
+      `<sitemap><loc>https://www.wavespestcontrol.com/sitemap-${idx}.xml</loc></sitemap>`
+    ).join('');
+    const fetchFn = jest.fn((url) => {
+      if (url === 'https://www.wavespestcontrol.com/sitemap.xml') {
+        return ok(`<sitemapindex>${childLocs}</sitemapindex>`, 'application/xml');
+      }
+      return ok('<urlset><url><loc>https://www.wavespestcontrol.com/page/</loc></url></urlset>', 'application/xml');
+    });
+
+    await expect(m.listUrls({
+      sitemapUrl: 'https://www.wavespestcontrol.com/sitemap.xml',
+      fetchFn,
+    })).rejects.toThrow(/Sitemap index limit exceeded/);
+  });
+  test('allows exactly the configured number of child sitemap files', async () => {
+    const m = new SitemapManager();
+    const childLocs = Array.from({ length: MAX_SITEMAPS }, (_, idx) =>
+      `<sitemap><loc>https://www.wavespestcontrol.com/sitemap-${idx}.xml</loc></sitemap>`
+    ).join('');
+    const fetchFn = jest.fn((url) => {
+      if (url === 'https://www.wavespestcontrol.com/sitemap.xml') {
+        return ok(`<sitemapindex>${childLocs}</sitemapindex>`, 'application/xml');
+      }
+      return ok('<urlset><url><loc>https://www.wavespestcontrol.com/page/</loc></url></urlset>', 'application/xml');
+    });
+
+    await expect(m.listUrls({
+      sitemapUrl: 'https://www.wavespestcontrol.com/sitemap.xml',
+      fetchFn,
+    })).resolves.toEqual(['https://www.wavespestcontrol.com/page/']);
   });
 });

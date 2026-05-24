@@ -1,11 +1,19 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const SitemapManager = require('./sitemap-manager');
-const { normalizeUrl, extractDomain, NETWORK_DOMAINS } = require('../../utils/normalize-url');
+const { normalizeUrl, extractDomain, urlLookupVariants, NETWORK_DOMAINS } = require('../../utils/normalize-url');
+
+function supportedSeoDomain(domain) {
+  const normalizedDomain = (extractDomain(domain) || 'wavespestcontrol.com').replace(/^www\./i, '');
+  if (!NETWORK_DOMAINS.includes(normalizedDomain)) {
+    throw new Error(`Unsupported SEO domain: ${normalizedDomain}`);
+  }
+  return normalizedDomain;
+}
 
 class SitemapValidator {
   async validateDomain(domain) {
-    const normalizedDomain = extractDomain(domain) || 'wavespestcontrol.com';
+    const normalizedDomain = supportedSeoDomain(domain);
     const sitemapUrl = `https://${normalizedDomain}/sitemap.xml`;
 
     let rawUrls;
@@ -22,10 +30,12 @@ class SitemapValidator {
 
     const issues = [];
     const seenNormalized = new Map();
+    const sitemapUrlSet = new Set();
 
     for (const url of rawUrls) {
       const normalized = normalizeUrl(url);
       if (!normalized) continue;
+      sitemapUrlSet.add(normalized);
 
       // Duplicate check
       if (seenNormalized.has(normalized)) {
@@ -109,6 +119,8 @@ class SitemapValidator {
       }
     }
 
+    await this.syncSitemapPresence(normalizedDomain, sitemapUrlSet);
+
     // Upsert issues
     for (const issue of issues) {
       await db('seo_sitemap_issues')
@@ -134,6 +146,44 @@ class SitemapValidator {
 
     logger.info(`[SitemapValidator] ${normalizedDomain}: ${rawUrls.length} URLs checked, ${issues.length} issues found`);
     return { domain: normalizedDomain, urls_checked: rawUrls.length, issues_found: issues.length };
+  }
+
+  async syncSitemapPresence(domain, sitemapUrlSet) {
+    const urls = [...sitemapUrlSet].filter(Boolean);
+    const urlVariants = [...new Set(urls.flatMap(urlLookupVariants))];
+    const now = new Date();
+
+    if (urls.length > 0) {
+      await db('content_index_status')
+        .where('url', 'like', `%${domain}%`)
+        .whereIn('url', urlVariants)
+        .update({ sitemap_checked_at: now, in_sitemap: true, updated_at: now });
+
+      await db('content_index_status')
+        .where('url', 'like', `%${domain}%`)
+        .whereNotIn('url', urlVariants)
+        .update({ sitemap_checked_at: now, in_sitemap: false, updated_at: now });
+
+      await db('seo_url_intelligence')
+        .where('domain', domain)
+        .whereIn('url', urls)
+        .update({ in_sitemap: true, last_refreshed_at: now, updated_at: now });
+
+      await db('seo_url_intelligence')
+        .where('domain', domain)
+        .whereNotIn('url', urls)
+        .update({ in_sitemap: false, last_refreshed_at: now, updated_at: now });
+    } else {
+      await db('content_index_status')
+        .where('url', 'like', `%${domain}%`)
+        .update({ sitemap_checked_at: now, in_sitemap: false, updated_at: now });
+
+      await db('seo_url_intelligence')
+        .where('domain', domain)
+        .update({ in_sitemap: false, last_refreshed_at: now, updated_at: now });
+    }
+
+    return { domain, urls_marked_in_sitemap: urls.length };
   }
 
   async validateAllDomains() {
@@ -187,3 +237,4 @@ class SitemapValidator {
 }
 
 module.exports = new SitemapValidator();
+module.exports._internals = { supportedSeoDomain };
