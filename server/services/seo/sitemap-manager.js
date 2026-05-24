@@ -18,6 +18,8 @@ const logger = require('../logger');
 
 const DEFAULT_SITEMAP_URL = process.env.SITEMAP_URL || 'https://www.wavespestcontrol.com/sitemap.xml';
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_SITEMAPS = 25;
+const MAX_SITEMAP_DEPTH = 4;
 
 class SitemapManager {
   constructor() {
@@ -90,10 +92,7 @@ class SitemapManager {
   async _getCachedOrFetch(sitemapUrl, fetchFn) {
     const cached = this._cache.get(sitemapUrl);
     if (cached && Date.now() - cached.fetchedAt.getTime() < CACHE_TTL_MS) return cached;
-    const res = await fetchFn(sitemapUrl);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const xml = await res.text();
-    const originals = extractRawUrls(xml);
+    const originals = await fetchSitemapUrls(sitemapUrl, fetchFn);
     const urls = new Set(originals.map(normalize));
     const entry = { fetchedAt: new Date(), urls, originals };
     this._cache.set(sitemapUrl, entry);
@@ -105,12 +104,11 @@ class SitemapManager {
 // ── pure helpers ─────────────────────────────────────────────────────
 
 /**
- * Extract URLs from a sitemap.xml — supports both:
+ * Extract URLs from a sitemap.xml — supports:
  *   - <urlset><url><loc>...</loc></url></urlset>
  *   - <sitemapindex><sitemap><loc>...</loc></sitemap></sitemapindex>
- * For a sitemap index we DON'T recurse here (would explode the cache
- * for sitemap-of-sitemaps cases); caller passes the leaf sitemap URL
- * explicitly when needed. Most Astro builds produce a flat sitemap.
+ * extractUrls/extractRawUrls are intentionally pure single-document
+ * parsers. _getCachedOrFetch uses fetchSitemapUrls to recurse indexes.
  */
 function extractUrls(xml) {
   return new Set(extractRawUrls(xml).map(normalize));
@@ -122,12 +120,98 @@ function extractRawUrls(xml) {
   const re = /<loc>\s*([^<\s]+)\s*<\/loc>/g;
   let m;
   while ((m = re.exec(xml)) !== null) {
-    const raw = m[1];
+    const raw = decodeXmlText(m[1]);
     if (seen.has(raw)) continue;
     seen.add(raw);
     out.push(raw);
   }
   return out;
+}
+
+async function fetchSitemapUrls(sitemapUrl, fetchFn, state = { visited: new Set(), depth: 0 }) {
+  const resolvedUrl = resolveSitemapUrl(sitemapUrl, sitemapUrl);
+  if (!resolvedUrl) return [];
+  if (!isHttpUrl(resolvedUrl)) throw new Error(`Unsupported sitemap URL: ${resolvedUrl}`);
+  if (state.visited.has(resolvedUrl)) return [];
+  const rootUrl = state.rootUrl || resolvedUrl;
+  const isRoot = resolvedUrl === rootUrl;
+  if (!isRoot && state.visited.size > MAX_SITEMAPS) {
+    throw new Error(`Sitemap index limit exceeded (${MAX_SITEMAPS})`);
+  }
+  if (state.depth > MAX_SITEMAP_DEPTH) {
+    throw new Error(`Sitemap depth limit exceeded (${MAX_SITEMAP_DEPTH})`);
+  }
+
+  state.visited.add(resolvedUrl);
+
+  const res = await fetchFn(resolvedUrl);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const xml = await res.text();
+  const locs = extractRawUrls(xml);
+
+  if (!isSitemapIndex(xml)) return locs;
+
+  const urls = [];
+  const seen = new Set();
+  for (const loc of locs) {
+    const childUrl = resolveSitemapUrl(loc, resolvedUrl);
+    if (!childUrl) continue;
+    if (!isAllowedSitemapChild(childUrl, rootUrl)) continue;
+    const childUrls = await fetchSitemapUrls(childUrl, fetchFn, {
+      visited: state.visited,
+      depth: state.depth + 1,
+      rootUrl,
+    });
+    for (const child of childUrls) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      urls.push(child);
+    }
+  }
+  return urls;
+}
+
+function isSitemapIndex(xml) {
+  return /<\s*sitemapindex\b/i.test(String(xml || ''));
+}
+
+function resolveSitemapUrl(loc, baseUrl) {
+  try {
+    return new URL(String(loc || '').trim(), baseUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
+function isHttpUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedSitemapChild(childUrl, rootUrl) {
+  try {
+    const child = new URL(childUrl);
+    const root = new URL(rootUrl);
+    const childHost = child.hostname.replace(/^www\./i, '').toLowerCase();
+    const rootHost = root.hostname.replace(/^www\./i, '').toLowerCase();
+    return isHttpUrl(childUrl) && childHost === rootHost;
+  } catch {
+    return false;
+  }
+}
+
+function decodeXmlText(value) {
+  return String(value || '')
+    .trim()
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
 }
 
 function normalize(url) {
@@ -145,7 +229,13 @@ module.exports.SitemapManager = SitemapManager;
 module.exports._internals = {
   DEFAULT_SITEMAP_URL,
   CACHE_TTL_MS,
+  MAX_SITEMAPS,
+  MAX_SITEMAP_DEPTH,
   extractUrls,
   extractRawUrls,
+  fetchSitemapUrls,
+  isSitemapIndex,
+  resolveSitemapUrl,
+  isAllowedSitemapChild,
   normalize,
 };

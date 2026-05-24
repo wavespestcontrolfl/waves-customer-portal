@@ -186,6 +186,19 @@ function applyDiagnosisFields(record, service) {
   };
 }
 
+function sitemapMembershipForUrl(url, indexStatus, sitemapUrlSet) {
+  if (sitemapUrlSet) return sitemapUrlSet.has(url);
+  return indexStatus?.in_sitemap ?? null;
+}
+
+function supportedSeoDomain(domain) {
+  const normalizedDomain = (extractDomain(domain) || 'wavespestcontrol.com').replace(/^www\./i, '');
+  if (!NETWORK_DOMAINS.includes(normalizedDomain)) {
+    throw new Error(`Unsupported SEO domain: ${normalizedDomain}`);
+  }
+  return normalizedDomain;
+}
+
 class UrlIntelligence {
   // ── Pure functions ──────────────────────────────────────────────────
 
@@ -310,7 +323,7 @@ class UrlIntelligence {
 
   // ── Data refresh ────────────────────────────────────────────────────
 
-  async refreshUrl(rawUrl) {
+  async refreshUrl(rawUrl, { sitemapUrlSet = null } = {}) {
     const url = normalizeUrl(rawUrl);
     if (!url) return null;
 
@@ -394,7 +407,7 @@ class UrlIntelligence {
       index_status: indexStatus?.coverage_state || null,
       coverage_state: indexStatus?.coverage_state || null,
       indexing_state: indexStatus?.indexing_state || null,
-      in_sitemap: indexStatus?.in_sitemap ?? null,
+      in_sitemap: sitemapMembershipForUrl(url, indexStatus, sitemapUrlSet),
 
       // Technical
       status_code: audit?.status_code || null,
@@ -458,10 +471,22 @@ class UrlIntelligence {
 
   async refreshDomain(domain) {
     const start = Date.now();
-    const normalizedDomain = extractDomain(domain) || 'wavespestcontrol.com';
+    const normalizedDomain = supportedSeoDomain(domain);
 
     // Collect all known URLs for this domain from multiple sources
     const urlSet = new Set();
+    let sitemapUrlSet = null;
+
+    try {
+      const SitemapManager = require('./sitemap-manager');
+      const sitemapUrl = `https://${normalizedDomain}/sitemap.xml`;
+      const sitemapUrls = await SitemapManager.listUrls({ sitemapUrl });
+      sitemapUrlSet = new Set(sitemapUrls.map(normalizeUrl).filter(Boolean));
+      sitemapUrlSet.forEach((url) => urlSet.add(url));
+      logger.info(`[UrlIntelligence] refreshDomain ${normalizedDomain}: ${sitemapUrlSet.size} sitemap URLs found`);
+    } catch (err) {
+      logger.warn(`[UrlIntelligence] refreshDomain ${normalizedDomain}: sitemap fetch failed: ${err.message}`);
+    }
 
     const auditUrls = await db('seo_page_audits')
       .select('url')
@@ -483,7 +508,7 @@ class UrlIntelligence {
     const urls = [...urlSet].filter(Boolean);
     logger.info(`[UrlIntelligence] refreshDomain ${normalizedDomain}: ${urls.length} URLs found`);
 
-    const results = await promisePool(urls, 5, (u) => this.refreshUrl(u));
+    const results = await promisePool(urls, 5, (u) => this.refreshUrl(u, { sitemapUrlSet }));
     const succeeded = results.filter((r) => r.status === 'fulfilled').length;
     const failed = results.filter((r) => r.status === 'rejected').length;
 
@@ -1115,6 +1140,6 @@ class UrlIntelligence {
 }
 
 const urlIntelligence = new UrlIntelligence();
-urlIntelligence._internals = { hubSpokeConflictPair };
+urlIntelligence._internals = { hubSpokeConflictPair, sitemapMembershipForUrl, supportedSeoDomain };
 
 module.exports = urlIntelligence;
