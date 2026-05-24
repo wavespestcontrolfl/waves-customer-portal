@@ -17,9 +17,10 @@ function searchRef(search) {
 }
 
 function applyLeadSearch(query, search) {
-  if (!search) return query;
-  const s = `%${search}%`;
-  const ref = `%${searchRef(search)}%`;
+  const term = String(search || '').trim();
+  if (!term) return query;
+  const s = `%${term}%`;
+  const ref = searchRef(term);
   const digits = searchDigits(search);
   return query.where(function () {
     this.whereILike('leads.first_name', s)
@@ -28,9 +29,11 @@ function applyLeadSearch(query, search) {
       .orWhereILike('leads.email', s)
       .orWhereILike('leads.address', s)
       .orWhereILike('leads.service_interest', s)
-      .orWhereILike('lead_sources.name', s)
-      .orWhereRaw('leads.id::text ILIKE ?', [ref])
-      .orWhereRaw('leads.estimate_id::text ILIKE ?', [ref]);
+      .orWhereILike('lead_sources.name', s);
+    if (ref) {
+      this.orWhereRaw('leads.id::text ILIKE ?', [`%${ref}%`])
+        .orWhereRaw('leads.estimate_id::text ILIKE ?', [`%${ref}%`]);
+    }
     if (digits.length >= 7) {
       this.orWhereRaw("regexp_replace(COALESCE(leads.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
     }
@@ -38,9 +41,10 @@ function applyLeadSearch(query, search) {
 }
 
 function applyEstimateSearch(query, search) {
-  if (!search) return query;
-  const s = `%${search}%`;
-  const ref = `%${searchRef(search)}%`;
+  const term = String(search || '').trim();
+  if (!term) return query;
+  const s = `%${term}%`;
+  const ref = searchRef(term);
   const digits = searchDigits(search);
   return query.where(function () {
     this.whereILike('estimates.customer_name', s)
@@ -49,9 +53,11 @@ function applyEstimateSearch(query, search) {
       .orWhereILike('estimates.address', s)
       .orWhereILike('estimates.service_interest', s)
       .orWhereILike('estimates.lead_source', s)
-      .orWhereILike('estimates.source', s)
-      .orWhereRaw('estimates.id::text ILIKE ?', [ref])
-      .orWhereRaw('estimates.customer_id::text ILIKE ?', [ref]);
+      .orWhereILike('estimates.source', s);
+    if (ref) {
+      this.orWhereRaw('estimates.id::text ILIKE ?', [`%${ref}%`])
+        .orWhereRaw('estimates.customer_id::text ILIKE ?', [`%${ref}%`]);
+    }
     if (digits.length >= 7) {
       this.orWhereRaw("regexp_replace(COALESCE(estimates.customer_phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}%`]);
     }

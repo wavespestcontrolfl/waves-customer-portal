@@ -60,4 +60,15 @@ describe('admin pipeline route search prefilter', () => {
       ['%123%'],
     ]);
   });
+
+  test('search does not add broad id predicates for empty hash refs', () => {
+    const leadQuery = fakeQuery();
+    const estimateQuery = fakeQuery();
+
+    __private.applyLeadSearch(leadQuery, '#');
+    __private.applyEstimateSearch(estimateQuery, '#');
+
+    expect(leadQuery.calls.some((call) => call[0] === 'orWhereRaw' && call[1].includes('id::text'))).toBe(false);
+    expect(estimateQuery.calls.some((call) => call[0] === 'orWhereRaw' && call[1].includes('id::text'))).toBe(false);
+  });
 });
