@@ -143,7 +143,7 @@ async function buildFrontmatter(post) {
     } : undefined,
     og_image: heroRef || undefined,
     canonical,
-    schema_types: ['Article'],
+    schema_types: schemaTypesForContent(post.content, ['Article']),
     disclosure: { type: 'pricing-transparency' },
     tracking: domains ? { domains } : undefined,
   };
@@ -207,6 +207,22 @@ function normalizeTargetSites(value) {
   const sites = normalizeSpokeSites(value);
   if (sites.length > 0) return sites;
   return normalizeArray(value).length > 0 ? ['wavespestcontrol.com'] : [];
+}
+
+function contentHasFaqSection(content) {
+  const body = String(content || '');
+  return /^#{2,3}\s+(?:\*\*)?(?:frequently asked|common questions|faqs?\b)/im.test(body)
+    && /^#{3,4}\s+.+\?/m.test(body);
+}
+
+function schemaTypesForContent(content, baseTypes = ['Article']) {
+  const types = Array.from(new Set((Array.isArray(baseTypes) && baseTypes.length > 0 ? baseTypes : ['Article'])
+    .map((type) => String(type))
+    .filter(Boolean)));
+  if (contentHasFaqSection(content) && !types.includes('FAQPage')) {
+    types.push('FAQPage');
+  }
+  return types;
 }
 
 function estimateReadingTime(text) {
@@ -377,6 +393,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const branchSlug = slugify(slug.replace(/\//g, '-'));
   const branch = `content/autonomous-${branchSlug}-${shortId()}`;
   const body = String(draft.body || '').trim();
+  frontmatter.schema_types = schemaTypesForContent(body, frontmatter.schema_types);
   const markdown = fm.stringify(frontmatter, `${body}\n`);
   const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 
@@ -808,5 +825,7 @@ module.exports = {
     reviewEligibleForHead,
     commentEligibleForHead,
     isCodexAuthor,
+    contentHasFaqSection,
+    schemaTypesForContent,
   },
 };
