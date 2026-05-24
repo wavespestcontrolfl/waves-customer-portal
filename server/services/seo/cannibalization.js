@@ -15,7 +15,7 @@ class CannibalizationDetector {
     // Find queries with multiple pages getting impressions
     const queries = await baseQuery.clone()
       .select('query', 'domain')
-      .count('distinct page_url as page_count')
+      .countDistinct({ page_count: 'page_url' })
       .sum('impressions as total_impressions')
       .groupBy('query', 'domain')
       .having(db.raw('count(distinct page_url) >= 2'))

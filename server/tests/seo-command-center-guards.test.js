@@ -3,6 +3,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 
 const SiteAuditor = require('../services/seo/site-auditor');
+const CannibalizationDetector = require('../services/seo/cannibalization');
 const SeoActionGenerator = require('../services/seo/seo-action-generator');
 const UrlIntelligence = require('../services/seo/url-intelligence');
 const pageAuditDomainRepair004 = require('../models/migrations/20260526000004_repair_seo_page_audit_domains');
@@ -12,6 +13,8 @@ const db = require('../models/db');
 const ORIGINAL_ENV = { ...process.env };
 
 afterEach(() => {
+  db.mockReset();
+  delete db.raw;
   for (const key of Object.keys(process.env)) {
     if (!(key in ORIGINAL_ENV)) delete process.env[key];
   }
@@ -19,6 +22,19 @@ afterEach(() => {
 });
 
 describe('SEO Command Center guards', () => {
+  function makeQueryBuilder(result, overrides = {}) {
+    const builder = {
+      where: jest.fn(() => builder),
+      orderBy: jest.fn(() => builder),
+      orderByRaw: jest.fn(() => builder),
+      limit: jest.fn(() => builder),
+      first: jest.fn(() => Promise.resolve(result)),
+      then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
+      ...overrides,
+    };
+    return builder;
+  }
+
   test('site audit rejects unsupported target domains before server-side fetch setup', async () => {
     db.mockClear();
 
@@ -26,6 +42,57 @@ describe('SEO Command Center guards', () => {
       .rejects
       .toThrow(/Unsupported SEO audit domain/);
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('site audit dashboard reads page rows using the Eastern audit date', async () => {
+    const latestRun = {
+      id: 'run-1',
+      domain: 'wavespestcontrol.com',
+      status: 'completed',
+      run_date: new Date('2026-05-24T01:45:18.000Z'),
+    };
+    const runBuilders = [
+      makeQueryBuilder(latestRun),
+      makeQueryBuilder([latestRun]),
+    ];
+    const pagesBuilder = makeQueryBuilder([]);
+    const issuesBuilder = makeQueryBuilder([]);
+
+    db.mockImplementation((table) => {
+      if (table === 'seo_site_audit_runs') return runBuilders.shift();
+      if (table === 'seo_page_audits') return pagesBuilder;
+      if (table === 'seo_audit_issue_trends') return issuesBuilder;
+      throw new Error(`Unexpected table ${table}`);
+    });
+
+    const result = await SiteAuditor.getDashboard('wavespestcontrol.com');
+
+    expect(result.hasData).toBe(true);
+    expect(pagesBuilder.where).toHaveBeenCalledWith('audit_date', '2026-05-23');
+    expect(pagesBuilder.where).not.toHaveBeenCalledWith('audit_date', '2026-05-24');
+  });
+
+  test('cannibalization detector uses countDistinct for page counts', async () => {
+    const queryBuilder = makeQueryBuilder([], {
+      clone: jest.fn(() => queryBuilder),
+      select: jest.fn(() => queryBuilder),
+      countDistinct: jest.fn(() => queryBuilder),
+      count: jest.fn(() => queryBuilder),
+      sum: jest.fn(() => queryBuilder),
+      groupBy: jest.fn(() => queryBuilder),
+      having: jest.fn(() => queryBuilder),
+    });
+
+    db.raw = jest.fn((sql) => ({ sql }));
+    db.mockImplementation((table) => {
+      expect(table).toBe('gsc_query_page_map');
+      return queryBuilder;
+    });
+
+    await CannibalizationDetector.detect('wavespestcontrol.com');
+
+    expect(queryBuilder.countDistinct).toHaveBeenCalledWith({ page_count: 'page_url' });
+    expect(queryBuilder.count).not.toHaveBeenCalled();
   });
 
   test('site audit counts requested spoke-domain links as internal', async () => {
