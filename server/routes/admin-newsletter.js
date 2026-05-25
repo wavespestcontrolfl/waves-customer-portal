@@ -256,6 +256,30 @@ router.delete('/subscribers/:id', async (req, res, next) => {
 
 // ── Sends (campaigns) ────────────────────────────────────────────
 
+// GET /api/admin/newsletter/sends/latest-autopilot — most recent
+// autopilot-generated draft. The compose UI auto-loads this on mount
+// so the admin sees the weekly draft without digging through history.
+// Must be registered BEFORE /sends/:id so Express doesn't treat
+// "latest-autopilot" as an :id param.
+router.get('/sends/latest-autopilot', async (req, res, next) => {
+  try {
+    // Only return drafts from the current Thursday-anchored week so stale
+    // autopilot drafts from previous weeks don't resurface in the compose UI.
+    const now = new Date();
+    const nowET = etParts(now);
+    const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
+    const weekStart = parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T00:00:00`);
+
+    const draft = await db('newsletter_sends')
+      .where({ newsletter_type: 'local-weekly-fresh-events', status: 'draft' })
+      .whereNull('created_by')
+      .where('created_at', '>=', weekStart)
+      .orderBy('created_at', 'desc')
+      .first();
+    res.json({ draft: draft || null });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/newsletter/sends
 router.get('/sends', async (req, res, next) => {
   try {
@@ -1384,7 +1408,7 @@ router.post('/events/digest-plan', async (req, res, next) => {
     const { weekStart, weekEnd } = req.body || {};
     const now = new Date();
     const nowET = etParts(now);
-    const daysUntilThursday = (4 - nowET.dayOfWeek + 7) % 7;
+    const daysUntilThursday = (4 - nowET.dayOfWeek + 7) % 7; // 0 on Thu, 3 on Mon, 6 on Fri
     const defaultStart = addETDays(now, daysUntilThursday);
     const startDate = weekStart
       ? parseETDateTime(`${weekStart}T00:00:00`)
