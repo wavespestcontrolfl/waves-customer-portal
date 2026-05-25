@@ -3,7 +3,7 @@ const TEMPLATE = {
   name: 'Estimate Accepted - Annual Prepay',
   category: 'estimates',
   body: 'Hello {first_name}! Your {waveguard_tier} WaveGuard plan is approved. Our team will review and send your annual prepay invoice{amount_text}.\n\nQuestions or requests? Reply here.',
-  variables: ['first_name', 'waveguard_tier', 'amount_text'],
+  variables: JSON.stringify(['first_name', 'waveguard_tier', 'amount_text']),
   is_active: true,
   sort_order: 34,
   updated_at: new Date(),
