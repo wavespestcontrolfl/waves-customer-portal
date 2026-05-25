@@ -267,11 +267,8 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
     // autopilot drafts from previous weeks don't resurface in the compose UI.
     const now = new Date();
     const nowET = etParts(now);
-    const dayOfWeek = nowET.dayOfWeek;
-    const daysToThursday = dayOfWeek <= 4
-      ? (4 - dayOfWeek + 7) % 7   // This week's Thursday (or today if Thursday)
-      : -(dayOfWeek - 4);          // Go back to last Thursday (late view)
-    const weekStart = parseETDateTime(`${etDateString(addETDays(now, daysToThursday))}T00:00:00`);
+    const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
+    const weekStart = parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T00:00:00`);
 
     const draft = await db('newsletter_sends')
       .where({ newsletter_type: 'local-weekly-fresh-events', status: 'draft' })
@@ -1411,8 +1408,8 @@ router.post('/events/digest-plan', async (req, res, next) => {
     const { weekStart, weekEnd } = req.body || {};
     const now = new Date();
     const nowET = etParts(now);
-    const daysUntilThursday = (4 - nowET.dayOfWeek + 7) % 7;
-    const defaultStart = addETDays(now, daysUntilThursday);
+    const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
+    const defaultStart = addETDays(now, -daysBack);
     const startDate = weekStart
       ? parseETDateTime(`${weekStart}T00:00:00`)
       : parseETDateTime(`${etDateString(defaultStart)}T00:00:00`);
