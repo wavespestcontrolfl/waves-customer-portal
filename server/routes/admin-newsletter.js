@@ -1150,6 +1150,18 @@ router.patch('/events/:id', async (req, res, next) => {
       suppressionReason, familyFriendly, isFree, regionZone, priceText,
     } = req.body;
 
+    const VALID_ADMIN_STATUSES = ['pending', 'approved', 'rejected', 'featured'];
+    const VALID_EVENT_TYPES = ['one_time', 'annual', 'limited_run', 'recurring_series', 'special_edition', 'ongoing', 'unknown'];
+    const VALID_RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'seasonal', 'annual', 'custom', 'unknown'];
+    const VALID_FRESHNESS = ['fresh_one_time', 'fresh_annual', 'fresh_limited_run_opening', 'fresh_limited_run_closing', 'fresh_series_launch', 'fresh_special_edition', 'stale_recurring', 'expired', 'needs_review'];
+    const VALID_ZONES = ['south_sarasota', 'sarasota', 'manatee', 'pinellas', 'tampa'];
+
+    if (adminStatus !== undefined && !VALID_ADMIN_STATUSES.includes(adminStatus)) return res.status(400).json({ error: `invalid adminStatus: ${adminStatus}` });
+    if (eventType !== undefined && !VALID_EVENT_TYPES.includes(eventType)) return res.status(400).json({ error: `invalid eventType: ${eventType}` });
+    if (recurrenceType !== undefined && !VALID_RECURRENCE_TYPES.includes(recurrenceType)) return res.status(400).json({ error: `invalid recurrenceType: ${recurrenceType}` });
+    if (freshnessStatus !== undefined && !VALID_FRESHNESS.includes(freshnessStatus)) return res.status(400).json({ error: `invalid freshnessStatus: ${freshnessStatus}` });
+    if (regionZone !== undefined && regionZone !== null && !VALID_ZONES.includes(regionZone)) return res.status(400).json({ error: `invalid regionZone: ${regionZone}` });
+
     const updates = { updated_at: new Date() };
     if (adminStatus !== undefined) {
       updates.admin_status = adminStatus;
