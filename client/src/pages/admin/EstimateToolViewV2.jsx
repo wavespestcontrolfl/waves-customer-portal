@@ -3197,18 +3197,32 @@ export default function EstimateToolViewV2({
     }
     setSending(true);
     try {
-      const r = await fetch(`/api/admin/estimates/${useId}/send`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({
-          sendMethod,
-          scheduledAt: scheduled,
-          idempotencyKey:
-            globalThis.crypto?.randomUUID?.() ||
-            `estimate-send-${Date.now()}-${Math.random()}`,
-        }),
-      });
-      const d = await r.json().catch(() => ({}));
+      const sendRequest = async (quietHoursOverride = false) => {
+        const r = await fetch(`/api/admin/estimates/${useId}/send`, {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({
+            sendMethod: quietHoursOverride ? "sms" : sendMethod,
+            scheduledAt: quietHoursOverride ? null : scheduled,
+            quietHoursOverride,
+            idempotencyKey:
+              globalThis.crypto?.randomUUID?.() ||
+              `estimate-send-${Date.now()}-${Math.random()}`,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        return { r, d };
+      };
+      let { r, d } = await sendRequest(false);
+      const smsError = String(d?.channels?.sms?.error || d?.error || "");
+      if (
+        !scheduled &&
+        smsError &&
+        /quiet-hours|quiet hours|federal holidays/i.test(smsError) &&
+        confirm(`SMS failed: ${smsError}\n\nSend the SMS now anyway?`)
+      ) {
+        ({ r, d } = await sendRequest(true));
+      }
       if (!r.ok)
         throw new Error(summarizeEstimateSend(d) || `HTTP ${r.status}`);
       const label =

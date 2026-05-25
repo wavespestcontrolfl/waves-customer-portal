@@ -331,7 +331,8 @@ router.post('/:id/send', async (req, res, next) => {
     }
 
     // Send immediately
-    const result = await sendEstimateNow(estimate, sendMethod, { idempotencyKey });
+    const quietHoursOverride = req.body?.quietHoursOverride === true;
+    const result = await sendEstimateNow(estimate, sendMethod, { idempotencyKey, quietHoursOverride });
     if (!result.sent) {
       return res.status(422).json({
         success: false,
@@ -403,7 +404,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
               capturedAt: estimate.created_at || new Date().toISOString(),
             },
             entryPoint: 'admin_estimate_send',
-            metadata: { original_message_type: 'estimate_sent' },
+            metadata: {
+              original_message_type: 'estimate_sent',
+              quietHoursOverride: options.quietHoursOverride === true,
+              quietHoursOverrideSource: options.quietHoursOverride === true ? 'admin_estimate_send' : undefined,
+            },
           });
           if (!result.sent) {
             channels.sms = { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
