@@ -253,25 +253,31 @@ async function autoDraftFlagship() {
     return { skipped: true, reason };
   }
 
-  // 3. Idempotency: advisory-lock the dedupe check + insert to prevent
-  //    concurrent cron instances from creating duplicate drafts.
+  // 3. Idempotency: transaction-scoped advisory lock so the dedupe check +
+  //    insert are atomic. pg_advisory_xact_lock auto-releases when the
+  //    transaction ends — no leak if the process crashes mid-flight.
+  //    The Claude API call (~5-10s) runs inside the transaction; acceptable
+  //    for a weekly cron that isn't a hot path.
   const lockKey = Math.abs(Buffer.from(plan.startDate.toISOString()).readInt32BE(0) % 2147483647);
-  await db.raw('SELECT pg_advisory_lock(?)', [lockKey]);
 
   let row;
   let topEvents;
   let draft;
-  try {
-    const existing = await db('newsletter_sends')
+  let earlyReturn = null;
+
+  await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(?)', [lockKey]);
+
+    const existing = await trx('newsletter_sends')
       .where({ newsletter_type: NEWSLETTER_TYPE, status: 'draft' })
       .whereNull('created_by')
       .where('created_at', '>=', plan.startDate)
       .first();
 
     if (existing) {
-      await db.raw('SELECT pg_advisory_unlock(?)', [lockKey]);
       logger.info(`[newsletter-autopilot] draft already exists for this week: ${existing.id}`);
-      return { skipped: true, reason: `Draft already exists: ${existing.id}`, sendId: existing.id };
+      earlyReturn = { skipped: true, reason: `Draft already exists: ${existing.id}`, sendId: existing.id };
+      return; // transaction commits → lock auto-releases
     }
 
     // 4. Draft via Claude (top 12 events)
@@ -280,7 +286,7 @@ async function autoDraftFlagship() {
     draft = aiDraft;
 
     // 5. Save as newsletter_sends draft
-    [row] = await db('newsletter_sends').insert({
+    [row] = await trx('newsletter_sends').insert({
       subject: draft.subject,
       html_body: draft.htmlBody || null,
       text_body: draft.textBody || null,
@@ -294,12 +300,10 @@ async function autoDraftFlagship() {
       slug: generateSlug(draft.subject),
       created_by: null,
     }).returning('*');
+    // transaction commits → lock auto-releases
+  });
 
-    await db.raw('SELECT pg_advisory_unlock(?)', [lockKey]);
-  } catch (err) {
-    await db.raw('SELECT pg_advisory_unlock(?)', [lockKey]).catch(() => {});
-    throw err;
-  }
+  if (earlyReturn) return earlyReturn;
 
   logger.info(`[newsletter-autopilot] Draft created: sendId=${row.id}, events=${topEvents.length}`);
 
