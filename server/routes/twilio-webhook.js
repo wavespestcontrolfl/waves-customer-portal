@@ -6,6 +6,7 @@ const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
+const { detectSmsOptCommand } = require('../services/messaging/opt-out-detector');
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
@@ -81,16 +82,14 @@ router.post('/sms', async (req, res) => {
     }).catch(() => {});
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
-    const bodyTrimmed = (Body || '').trim().toUpperCase();
-    const STOP_KEYWORDS = ['STOP', 'UNSUBSCRIBE', 'CANCEL', 'QUIT', 'END'];
-    const START_KEYWORDS = ['START', 'SUBSCRIBE', 'YES'];
+    const optCommand = detectSmsOptCommand(Body);
 
-    if (STOP_KEYWORDS.includes(bodyTrimmed)) {
+    if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);
       await recordSuppression({
         phone: normalizedFrom || From,
-        reason: 'opt_out_keyword',
-        source: `twilio_webhook_${bodyTrimmed}`,
+        reason: optCommand.reason,
+        source: `twilio_webhook_${optCommand.detectionMethod}`,
         capturedBody: Body,
       });
       try {
@@ -100,18 +99,28 @@ router.post('/sms', async (req, res) => {
             .onConflict('customer_id')
             .merge({ sms_enabled: false });
         }
-        logger.info(`[sms-optout] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} opted out of SMS`);
+        logger.info(`[sms-optout] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} opted out of SMS via ${optCommand.detectionMethod}`);
       } catch (e) { logger.error(`[sms-optout] Failed to update prefs: ${e.message}`); }
 
       await db('sms_log').insert({
         customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
+        metadata: JSON.stringify({
+          opt_out_reason: optCommand.reason,
+          detection_method: optCommand.detectionMethod,
+          source_keyword: optCommand.sourceKeyword,
+        }),
       }).catch(() => {});
 
       if (customer) {
         await db('activity_log').insert({
           customer_id: customer.id, action: 'sms_opt_out',
-          description: `${customer.first_name} ${customer.last_name} unsubscribed from SMS (keyword: ${bodyTrimmed})`,
+          description: `${customer.first_name} ${customer.last_name} unsubscribed from SMS (${optCommand.detectionMethod})`,
+          metadata: JSON.stringify({
+            opt_out_reason: optCommand.reason,
+            detection_method: optCommand.detectionMethod,
+            source_keyword: optCommand.sourceKeyword,
+          }),
         }).catch(() => {});
       }
 
@@ -120,11 +129,11 @@ router.post('/sms', async (req, res) => {
       );
     }
 
-    if (START_KEYWORDS.includes(bodyTrimmed)) {
+    if (optCommand.action === 'opt_in') {
       const normalizedFrom = normalizeE164(From);
       await clearSuppression({
         phone: normalizedFrom || From,
-        source: `twilio_webhook_${bodyTrimmed}`,
+        source: `twilio_webhook_${optCommand.detectionMethod}`,
       });
       try {
         if (customer) {
@@ -139,6 +148,10 @@ router.post('/sms', async (req, res) => {
       await db('sms_log').insert({
         customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
+        metadata: JSON.stringify({
+          detection_method: optCommand.detectionMethod,
+          source_keyword: optCommand.sourceKeyword,
+        }),
       }).catch(() => {});
 
       if (customer) {

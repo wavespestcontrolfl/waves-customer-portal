@@ -13,6 +13,7 @@ const { mediaFromOutboundAttachments, signMediaForClient } = require('../service
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
+const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -555,6 +556,19 @@ router.post('/ai-auto-reply', async (req, res) => {
 // from the cron's classification.
 const BLOCKED_SCHEDULED_PURPOSES = new Set(['marketing', 'retention']);
 
+function csvEscape(value) {
+  if (value == null) return '';
+  const s = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function rowsToCsv(rows, columns) {
+  return [
+    columns.join(','),
+    ...rows.map((row) => columns.map((col) => csvEscape(row[col])).join(',')),
+  ].join('\n');
+}
+
 // POST /api/admin/communications/schedule-sms — schedule SMS for later.
 // The /5min scheduled-sms cron in server/services/scheduler.js picks up rows
 // where status='scheduled' AND scheduled_for <= now() and dispatches them
@@ -689,6 +703,179 @@ router.delete('/blocked-numbers/:number', async (req, res, next) => {
   try {
     await db('blocked_numbers').where({ number: req.params.number }).del();
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/communications/compliance-export
+// Query: customerId?, phone?, days?, format=json|csv
+router.get('/compliance-export', async (req, res, next) => {
+  try {
+    const days = Math.min(Math.max(parsePositiveInt(req.query.days) || 90, 1), 730);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const format = String(req.query.format || 'json').toLowerCase();
+    const normalizedPhone = normalizeCompliancePhone(req.query.phone || '');
+
+    let auditQuery = db('messaging_audit_log')
+      .where({ channel: 'sms' })
+      .where('created_at', '>=', since)
+      .orderBy('created_at', 'desc')
+      .limit(2000);
+
+    if (req.query.customerId) auditQuery = auditQuery.where({ customer_id: req.query.customerId });
+    if (normalizedPhone) auditQuery = auditQuery.where({ to_hash: phoneHash(normalizedPhone) });
+
+    const auditRows = await auditQuery.select(
+      'id',
+      'created_at',
+      'customer_id',
+      'to_last4',
+      'audience',
+      'purpose',
+      'entry_point',
+      'identity_trust_level',
+      'body_preview',
+      'segment_count',
+      'encoding',
+      'consent_status',
+      'consent_source',
+      'consent_campaign',
+      'validators_passed',
+      'validators_failed',
+      'blocked_code',
+      'blocked_reason',
+      'provider',
+      'provider_message_id',
+      'sent_at',
+      'provider_error',
+      'metadata'
+    );
+
+    let suppressionRows = [];
+    if (normalizedPhone) {
+      suppressionRows = await db('messaging_suppression')
+        .where({ phone: normalizedPhone })
+        .orderBy('created_at', 'desc')
+        .limit(50)
+        .catch((err) => {
+          if (/does not exist|messaging_suppression/i.test(err.message)) return [];
+          throw err;
+        });
+    }
+
+    let contactChecks = [];
+    if (normalizedPhone) {
+      contactChecks = await db('sms_contact_compliance_checks')
+        .where({ phone_hash: phoneHash(normalizedPhone) })
+        .orderBy('checked_at', 'desc')
+        .limit(50)
+        .catch((err) => {
+          if (/does not exist|sms_contact_compliance_checks/i.test(err.message)) return [];
+          throw err;
+        });
+    }
+
+    if (format === 'csv') {
+      const columns = [
+        'id', 'created_at', 'customer_id', 'to_last4', 'audience', 'purpose',
+        'entry_point', 'identity_trust_level', 'body_preview', 'segment_count',
+        'encoding', 'consent_status', 'consent_source', 'consent_campaign',
+        'validators_passed', 'validators_failed', 'blocked_code', 'blocked_reason',
+        'provider', 'provider_message_id', 'sent_at', 'provider_error', 'metadata',
+      ];
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="waves-sms-compliance-${Date.now()}.csv"`);
+      return res.send(rowsToCsv(auditRows, columns));
+    }
+
+    res.json({
+      days,
+      customerId: req.query.customerId || null,
+      phoneLast4: normalizedPhone ? normalizedPhone.replace(/\D/g, '').slice(-4) : null,
+      audit: auditRows,
+      suppression: suppressionRows.map((row) => ({
+        phoneLast4: String(row.phone || '').replace(/\D/g, '').slice(-4),
+        reason: row.reason,
+        active: !!row.active,
+        source: row.source,
+        capturedBody: row.captured_body,
+        createdAt: row.created_at,
+        clearedAt: row.cleared_at,
+      })),
+      contactChecks: contactChecks.map((row) => ({
+        phoneLast4: row.phone_last4,
+        source: row.source,
+        lineType: row.line_type,
+        carrier: row.carrier,
+        dncListed: row.dnc_listed,
+        reassignedRisk: row.reassigned_risk,
+        checkedAt: row.checked_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/communications/template-performance?days=30
+router.get('/template-performance', async (req, res, next) => {
+  try {
+    const days = Math.min(Math.max(parsePositiveInt(req.query.days) || 30, 1), 365);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const rows = await db('messaging_audit_log')
+      .where({ channel: 'sms' })
+      .where('created_at', '>=', since)
+      .select(db.raw("COALESCE(metadata->>'original_message_type', purpose, 'unknown') as template_key"))
+      .select(db.raw("COALESCE(metadata->>'sms_variant_key', '') as variant_key"))
+      .count('* as attempts')
+      .sum({ segments: 'segment_count' })
+      .select(db.raw("SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) as sent"))
+      .select(db.raw("SUM(CASE WHEN blocked_code IS NOT NULL THEN 1 ELSE 0 END) as blocked"))
+      .select(db.raw("SUM(CASE WHEN provider_error IS NOT NULL THEN 1 ELSE 0 END) as provider_failures"))
+      .groupByRaw("COALESCE(metadata->>'original_message_type', purpose, 'unknown'), COALESCE(metadata->>'sms_variant_key', '')")
+      .orderBy('attempts', 'desc');
+
+    res.json({
+      days,
+      templates: rows.map((row) => {
+        const attempts = Number(row.attempts || 0);
+        const sent = Number(row.sent || 0);
+        const blocked = Number(row.blocked || 0);
+        const providerFailures = Number(row.provider_failures || 0);
+        return {
+          templateKey: row.template_key,
+          variantKey: row.variant_key || null,
+          attempts,
+          sent,
+          blocked,
+          providerFailures,
+          segments: Number(row.segments || 0),
+          sendRate: attempts ? sent / attempts : 0,
+          blockRate: attempts ? blocked / attempts : 0,
+        };
+      }),
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/communications/contact-compliance-checks
+// Manual/provider-import scaffold for DNC/RND/line-type results.
+router.post('/contact-compliance-checks', async (req, res, next) => {
+  try {
+    const normalized = normalizeCompliancePhone(req.body?.phone);
+    if (!normalized) return res.status(400).json({ error: 'valid phone required' });
+    const digits = normalized.replace(/\D/g, '');
+    const [row] = await db('sms_contact_compliance_checks')
+      .insert({
+        phone_hash: phoneHash(normalized),
+        phone_last4: digits.slice(-4),
+        source: String(req.body.source || 'manual').slice(0, 40),
+        line_type: req.body.lineType || req.body.line_type || null,
+        carrier: req.body.carrier || null,
+        dnc_listed: req.body.dncListed ?? req.body.dnc_listed ?? null,
+        reassigned_risk: req.body.reassignedRisk ?? req.body.reassigned_risk ?? null,
+        consent_checked_at: req.body.consentCheckedAt || req.body.consent_checked_at || null,
+        raw_result: req.body.rawResult || req.body.raw_result || {},
+      })
+      .returning(['id', 'checked_at']);
+    res.status(201).json({ success: true, id: row?.id, checkedAt: row?.checked_at });
   } catch (err) { next(err); }
 });
 

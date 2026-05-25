@@ -43,6 +43,8 @@ const { loadContactState, checkConsentForPurpose } = require('./validators/conse
 const { loadSuppressionState, checkSuppression } = require('./validators/suppression');
 const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
 const { validateNoCustomerEmoji } = require('./validators/voice');
+const { checkFloridaQuietHours } = require('./quiet-hours');
+const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
 const { persistAudit } = require('./audit');
 const { sendViaTwilio } = require('./providers/twilio-sms');
@@ -110,6 +112,8 @@ async function sendCustomerMessage(input) {
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
     { name: 'check_suppression',          fn: () => checkSuppression(sendInput, policy, contactState) },
     { name: 'check_consent_for_purpose',  fn: () => checkConsentForPurpose(sendInput, policy, contactState) },
+    { name: 'check_contact_compliance',   fn: () => checkContactCompliance(sendInput, policy) },
+    { name: 'check_florida_quiet_hours',  fn: () => checkFloridaQuietHours(sendInput, policy) },
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
   ];
@@ -122,7 +126,12 @@ async function sendCustomerMessage(input) {
     if (result && result.ok) {
       validatorsPassed.push(step.name);
     } else {
-      blockedBy = { code: result.code, reason: result.reason, validator: step.name };
+      blockedBy = {
+        code: result.code,
+        reason: result.reason,
+        validator: step.name,
+        nextAllowedAt: result.nextAllowedAt || null,
+      };
       break;
     }
   }
@@ -146,6 +155,7 @@ async function sendCustomerMessage(input) {
       blocked: true,
       code: blockedBy.code,
       reason: blockedBy.reason,
+      nextAllowedAt: blockedBy.nextAllowedAt ? blockedBy.nextAllowedAt.toISOString() : undefined,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
