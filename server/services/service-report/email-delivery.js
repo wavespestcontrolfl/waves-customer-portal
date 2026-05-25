@@ -65,6 +65,45 @@ function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf }) {
+  const findings = customerActionFindings(Array.isArray(data?.findings) ? data.findings : []);
+  const applications = Array.isArray(data?.applications) ? data.applications : [];
+  const dynamicContext = data?.dynamicContext || {};
+  const advisory = data?.advisory || {};
+  const exteriorReadyAt = readyAt(dynamicContext, 'exterior');
+  const interiorReadyAt = readyAt(dynamicContext, 'interior');
+  const reentryParts = [
+    dynamicContext.reentry?.customerSummary,
+    exteriorReadyAt ? `Exterior ready at ${exteriorReadyAt}` : null,
+    interiorReadyAt ? `Interior ready at ${interiorReadyAt}` : null,
+    !exteriorReadyAt && minutes(advisory.exterior_reentry_min) ? `Exterior re-entry: ${minutes(advisory.exterior_reentry_min)}` : null,
+    !interiorReadyAt && minutes(advisory.interior_reentry_min) ? `Interior re-entry: ${minutes(advisory.interior_reentry_min)}` : null,
+  ].filter(Boolean);
+  const pressureMetric = (data?.metrics || []).find((metric) => /pressure/i.test(metric.label || ''));
+  const pressureValue = pressureMetric?.value != null && pressureMetric.value !== ''
+    ? String(pressureMetric.value)
+    : (data?.pressureIndex != null ? String(data.pressureIndex) : '');
+
+  return {
+    first_name: firstName(recipient.name || data?.customerName),
+    report_url: reportUrl,
+    service_label: serviceLabel,
+    service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
+    technician_name: data?.technicianName || '',
+    property_address: data?.cityState || '',
+    finding_summary: findings.length
+      ? `${countLabel(findings.length, 'finding')} documented for review`
+      : 'No action-required findings were documented.',
+    application_summary: countLabel(applications.length, 'application'),
+    reentry_summary: reentryParts.join(' '),
+    pressure_summary: dynamicContext.pressureTrend?.customerSummary || (pressureValue ? `Pressure index: ${pressureValue}` : ''),
+    pdf_note: pdf
+      ? 'Your PDF service report is attached.'
+      : 'A downloadable PDF will be available shortly.',
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+  };
+}
+
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
@@ -380,13 +419,13 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
     recipients.map((recipient) => EmailTemplateLibrary.sendTemplate({
         templateKey: 'service.report_ready',
         to: recipient.email,
-        payload: {
-          first_name: firstName(recipient.name || data?.customerName),
-          report_url: fullReportUrl,
-          service_label: serviceLabel,
-          service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
-          technician_name: data?.technicianName || '',
-        },
+        payload: serviceReportTemplatePayload({
+          recipient,
+          data,
+          reportUrl: fullReportUrl,
+          serviceLabel,
+          pdf,
+        }),
         recipientType: 'customer',
         recipientId: service.customer_id || null,
         triggerEventId: `service_report_ready:${recordId}:${recipient.role || 'recipient'}`,

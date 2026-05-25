@@ -163,6 +163,15 @@ describe('service report email recipient delivery', () => {
       'service_report_ready:record-1:primary',
       'service_report_ready:record-1:service_contact',
     ]);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'service.report_ready',
+      payload: expect.objectContaining({
+        property_address: 'Sarasota, FL',
+        finding_summary: 'No action-required findings were documented.',
+        application_summary: '0 applications',
+        pdf_note: 'Your PDF service report is attached.',
+      }),
+    }));
   });
 
   test('legacy fallback uses the same recipient idempotency keys as templates', async () => {

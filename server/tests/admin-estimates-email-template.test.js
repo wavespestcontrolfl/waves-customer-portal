@@ -102,11 +102,12 @@ describe('admin estimate email delivery', () => {
       triggerEventId: 'estimate_delivery:estimate-1',
       idempotencyKey: expect.stringMatching(/^estimate\.delivery:[a-f0-9]{64}$/),
       categories: ['estimate_delivery'],
-      payload: {
+      payload: expect.objectContaining({
         first_name: 'Taylor',
         estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample',
         price_summary: '$89/month',
-      },
+        next_step_summary: expect.any(String),
+      }),
     }));
     const nextSendKey = router._internals.estimateEmailIdempotencyKey({
       id: 'estimate-1',

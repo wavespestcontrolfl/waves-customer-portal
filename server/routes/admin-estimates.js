@@ -112,6 +112,34 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
+function moneySummary(estimate = {}) {
+  const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
+  const annualTotal = parseFloat(estimate.annual_total || estimate.annualTotal || 0);
+  const oneTimeTotal = parseFloat(estimate.onetime_total || estimate.oneTimeTotal || estimate.onetimeTotal || 0);
+  if (monthlyTotal > 0) {
+    return annualTotal > 0
+      ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr`
+      : `$${monthlyTotal.toFixed(0)}/mo`;
+  }
+  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
+  return '';
+}
+
+function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine }) {
+  const serviceSummary = inferEstimateServiceInterest({
+    ...estimate,
+    estimateData: estimate.estimate_data,
+  });
+  return {
+    first_name: firstName,
+    estimate_url: viewUrl,
+    price_summary: priceLine || moneySummary(estimate),
+    service_summary: serviceSummary || '',
+    property_address: estimate.address || '',
+    next_step_summary: 'When you are ready, open the estimate and accept it online. We will collect the final setup details after that.',
+  };
+}
+
 function assertEstimateSendable(estimate) {
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
@@ -174,11 +202,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'estimate.delivery',
         to: estimate.customer_email,
-        payload: {
-          first_name: firstName,
-          estimate_url: viewUrl,
-          price_summary: priceLine,
-        },
+        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine }),
         recipientType: estimate.customer_id ? 'customer' : 'lead',
         recipientId: estimate.customer_id || null,
         triggerEventId: `estimate_delivery:${estimate.id}`,

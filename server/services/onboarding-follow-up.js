@@ -82,6 +82,24 @@ async function onboardUrl(ob) {
   });
 }
 
+function planName(ob = {}) {
+  const tier = String(ob.waveguard_tier || '').trim();
+  if (!tier) return 'WaveGuard';
+  return /^waveguard/i.test(tier) ? tier : `WaveGuard ${tier}`;
+}
+
+function onboardingPayload(ob, firstName, url, extra = {}) {
+  return {
+    first_name: firstName,
+    onboarding_url: url,
+    plan_name: planName(ob),
+    setup_steps: 'Payment method, service preferences, and property details',
+    next_step_summary: 'Most customers finish setup in about two minutes. Once complete, we can keep your first service moving.',
+    support_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+    ...extra,
+  };
+}
+
 // Fire SMS (if phone) + email (if email). Returns true if at least one
 // attempt succeeded, so the caller knows whether to flip the stage flag.
 async function sendDualChannel(ob, { sms, email }) {
@@ -189,11 +207,7 @@ const OnboardingFollowUp = {
             email: {
               templateKey: 'onboarding.24h_reminder',
               stage: '24h',
-              payload: {
-                first_name: firstName,
-                onboarding_url: url,
-                plan_name: ob.waveguard_tier || 'Bronze',
-              },
+              payload: onboardingPayload(ob, firstName, url),
               subject: 'Finish setting up your Waves service',
               heading: `Welcome aboard, ${firstName}!`,
               body: `<p>Thanks for choosing Waves Pest Control! We just need a few quick details to get you on the schedule — it takes about 2 minutes.</p><p>Tap the button below to finish.</p>`,
@@ -227,10 +241,9 @@ const OnboardingFollowUp = {
             email: {
               templateKey: 'onboarding.72h_reminder',
               stage: '72h',
-              payload: {
-                first_name: firstName,
-                onboarding_url: url,
-              },
+              payload: onboardingPayload(ob, firstName, url, {
+                next_step_summary: 'No rush, but finishing setup helps us confirm your first service accurately.',
+              }),
               subject: 'Still here whenever you are',
               heading: `Hi ${firstName}`,
               body: `<p>Just a friendly nudge — whenever you're ready, finish up your Waves setup and we'll confirm your first service.</p><p>No rush. If anything is holding you up, just reply to this email.</p><p>— Adam, Waves Pest Control</p>`,
@@ -269,12 +282,10 @@ const OnboardingFollowUp = {
             email: {
               templateKey: 'onboarding.expiring_notice',
               stage: 'expiring',
-              payload: {
-                first_name: firstName,
-                onboarding_url: url,
+              payload: onboardingPayload(ob, firstName, url, {
                 expires_at: expDate,
-                plan_name: tier,
-              },
+                next_step_summary: 'Complete the remaining details from the link below, or reply if you need more time.',
+              }),
               subject: `Your Waves onboarding link expires ${expDate}`,
               heading: `Heads up — your link expires ${expDate}`,
               body: `<p>Your Waves onboarding link is set to expire on <strong>${expDate}</strong>. Finish up to lock in your WaveGuard ${tier} plan and get scheduled for your first service.</p><p>Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.</p>`,
