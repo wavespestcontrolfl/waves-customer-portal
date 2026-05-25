@@ -27,6 +27,23 @@ function notifyTwilioFailure(payload) {
   });
 }
 
+function scrubLeadAlertProviderError(value) {
+  return String(value || '')
+    .replace(/%2B1\d{10}/gi, '[phone]')
+    .replace(/\+1\d{10}\b/g, '[phone]')
+    .replace(/\b1\d{10}\b/g, '[phone]')
+    .replace(/\b\d{10}\b/g, '[phone]');
+}
+
+async function markLeadAlertCallLogFailed(callLogId, errorMessage, database = db) {
+  if (!callLogId) return;
+  await database('call_log').where({ id: callLogId }).update({
+    status: 'failed',
+    notes: `Twilio create failed: ${errorMessage}`,
+    updated_at: new Date(),
+  });
+}
+
 function capitalizeName(name) {
   if (!name) return '';
   return cleanText(name).toLowerCase()
@@ -280,6 +297,7 @@ router.post('/', async (req, res) => {
     const isDuringHours = etHour >= 8 && etHour < 20;
     let callConnected = false;
     let attemptedLeadCallFrom = null;
+    let pendingLeadAlertCallLogId = null;
 
     try {
       const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -315,6 +333,7 @@ router.post('/', async (req, res) => {
               })
               .returning(['id']);
             const callLogId = callLogRow?.id;
+            pendingLeadAlertCallLogId = callLogId || null;
 
             const promptParams = new URLSearchParams({
               customerNumber: phoneFormatted,
@@ -378,13 +397,19 @@ router.post('/', async (req, res) => {
             }
           }
         } catch (callErr) {
-          logger.error(`[lead-webhook] Lead alert call failed, falling back to SMS: ${callErr.message}`);
+          const safeError = scrubLeadAlertProviderError(callErr.message);
+          if (pendingLeadAlertCallLogId) {
+            await markLeadAlertCallLogFailed(pendingLeadAlertCallLogId, safeError).catch(err => {
+              logger.warn(`[lead-webhook] Could not mark lead alert call_log failed: ${err.message}`);
+            });
+          }
+          logger.error(`[lead-webhook] Lead alert call failed, falling back to SMS: ${safeError}`);
           notifyTwilioFailure({
             channel: 'voice',
             direction: 'outbound',
             phase: 'send_api',
             status: 'failed',
-            errorMessage: callErr.message,
+            errorMessage: safeError,
             from: attemptedLeadCallFrom,
             to: ADAM_CELL,
             link: '/admin/leads',
@@ -910,6 +935,8 @@ function inferServiceBucket(interest) {
 
 module.exports = router;
 module.exports._test = {
+  scrubLeadAlertProviderError,
+  markLeadAlertCallLogFailed,
   normalizeLeadServiceInterest,
   formatServiceInterestForFrequency,
   serviceInterestUpdateFromTriage,
