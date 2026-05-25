@@ -198,6 +198,37 @@ describe('service report email recipient delivery', () => {
     ]);
   });
 
+  test('does not fall back to legacy service report rendering in production', async () => {
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('active template not found'));
+
+    try {
+      const result = await sendServiceReportV1Email('record-1', {
+        token: 'token-1',
+        reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      });
+
+      expect(result).toEqual(expect.objectContaining({
+        ok: false,
+        error: 'Email send unavailable: service.report_ready template path failed and legacy fallback is disabled in production',
+        failedCount: 2,
+        blockedCount: 0,
+        attachedPdf: true,
+      }));
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(emailMessageRows).toEqual([]);
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = originalEnv;
+      }
+    }
+  });
+
   test('legacy fallback skips recipients already blocked by the template send', async () => {
     const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
 

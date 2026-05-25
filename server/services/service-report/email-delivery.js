@@ -108,6 +108,10 @@ function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
+function legacyTemplateFallbackAllowed() {
+  return process.env.NODE_ENV !== 'production';
+}
+
 function pdfAttachment(filename, buffer) {
   return {
     content: buffer.toString('base64'),
@@ -456,6 +460,17 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
   }
   let legacyRecipients = recipients;
   if (!sent.length && failed.length && failed.every(({ error }) => canFallbackFromTemplateEmailError(error))) {
+    if (!legacyTemplateFallbackAllowed()) {
+      const err = failed[0]?.error || new Error('Email template unavailable');
+      logger.error(`[service-report-v1-email] Legacy fallback disabled in production for ${recordId} — service.report_ready template send required: ${errorMessage(err)}`);
+      return {
+        ok: false,
+        error: 'Email send unavailable: service.report_ready template path failed and legacy fallback is disabled in production',
+        failedCount: failed.length,
+        blockedCount: blocked.length,
+        attachedPdf: !!pdf,
+      };
+    }
     legacyRecipients = failed.map(({ recipient }) => recipient).filter(Boolean);
     logger.warn(`[service-report-v1-email] Template unavailable for ${recordId}; falling back to legacy renderer for ${legacyRecipients.length} recipient(s): ${errorMessage(failed[0]?.error)}`);
   } else if (failed.length) {
