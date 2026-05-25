@@ -362,8 +362,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.palm) {
+      const palmCount = Number(services.palm.palmCount);
+      if (!palmCount || palmCount < 1) {
+        return res.status(400).json({ error: 'Palm count is required for palm injection pricing.' });
+      }
       engineInput.services.palm = {
-        palmCount: services.palm.palmCount ?? 1,
+        palmCount,
         treatmentType: services.palm.treatmentType || 'nutrition',
       };
     }
@@ -445,6 +449,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
     const sourceMeta = await resolveLeadSource(attr);
 
+    const isOneTimeOnly = !monthly && !annual && oneTimeTotal > 0;
+    const leadMonthlyValue = quoteRequired ? null : (monthly || null);
+
     const extractedData = JSON.stringify({
       stage: 'quote_calculated',
       homeSqFt: sqft,
@@ -453,6 +460,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       enriched: ep,
       annual,
       monthly,
+      oneTimeTotal: oneTimeTotal || 0,
+      isOneTimeOnly,
       quoteRequired,
       quoteRequiredReason: manualQuoteLine?.reason || null,
       quoteRequiredService: manualQuoteLine?.service || null,
@@ -478,7 +487,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         city: quoteCity || null,
         zip: quoteZip || null,
         service_interest: serviceInterest,
-        monthly_value: quoteRequired ? null : monthly,
+        monthly_value: leadMonthlyValue,
         extracted_data: extractedData,
         updated_at: new Date(),
       };
@@ -504,7 +513,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         lead_type: 'quote_wizard',
         first_contact_channel: 'website_quote',
         lead_source_id: sourceMeta.leadSourceId,
-        monthly_value: quoteRequired ? null : monthly,
+        monthly_value: leadMonthlyValue,
         status: 'new',
         gclid,
         extracted_data: extractedData,
@@ -668,7 +677,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         quoteRequired ? `Manual quote needed: ${contactFirstName} ${contactLastName}` : `Calculator quote: ${contactFirstName} ${contactLastName}`,
         quoteRequired
           ? `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`
-          : `${serviceInterest} · $${Math.round(monthly)}/mo · ${quoteFullAddress}`,
+          : isOneTimeOnly
+            ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
+            : `${serviceInterest} · $${Math.round(monthly)}/mo · ${quoteFullAddress}`,
         { icon: '\u{1F4B0}', link: '/admin/leads', metadata: { leadId: lead.id } }
       );
     } catch (e) {
