@@ -10,6 +10,37 @@
 
 const TwilioService = require('../../twilio');
 
+function sanitizeProviderError(value) {
+  if (!value) return '';
+  return String(value)
+    .replace(/\+?\d[\d\s().-]{6,}\d/g, '[redacted-phone]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500);
+}
+
+function formatProviderError(err) {
+  if (!err) return 'twilio threw';
+  if (err.providerError) return sanitizeProviderError(err.providerError);
+  const parts = [];
+  if (err.code) parts.push(`Twilio ${err.code}`);
+  if (err.status) parts.push(`HTTP ${err.status}`);
+  if (err.message) parts.push(sanitizeProviderError(err.message));
+  return parts.filter(Boolean).join(': ') || 'twilio threw';
+}
+
+function mediaUrlsAllowed(input) {
+  const metadata = input.metadata || {};
+  return metadata.allowMediaUrls === true || !!metadata.adminUserId;
+}
+
+function providerMediaUrls(input) {
+  const urls = input.metadata && input.metadata.mediaUrls;
+  if (!Array.isArray(urls) || urls.length === 0) return undefined;
+  if (!mediaUrlsAllowed(input)) return undefined;
+  return urls;
+}
+
 async function sendViaTwilio(input) {
   // metadata.original_message_type lets a caller force a specific
   // legacy messageType (e.g. 'lead_response', 'invoice', 'manual')
@@ -33,7 +64,7 @@ async function sendViaTwilio(input) {
       customerId: input.customerId || null,
       messageType,
       fromNumber: input.metadata && input.metadata.fromNumber,
-      mediaUrls: input.metadata && input.metadata.mediaUrls,
+      mediaUrls: providerMediaUrls(input),
       media: input.metadata && input.metadata.media,
       customerLocationId: input.metadata && input.metadata.customerLocationId,
       // Preserve admin attribution. services/twilio.js writes
@@ -73,7 +104,7 @@ async function sendViaTwilio(input) {
       raw: result,
     };
   } catch (err) {
-    return { sent: false, provider: 'twilio', error: err.message || 'twilio threw' };
+    return { sent: false, provider: 'twilio', error: formatProviderError(err) };
   }
 }
 
@@ -109,4 +140,10 @@ function mapPurposeToMessageType(purpose) {
 module.exports = {
   sendViaTwilio,
   mapPurposeToMessageType,
+  _internals: {
+    formatProviderError,
+    mediaUrlsAllowed,
+    providerMediaUrls,
+    sanitizeProviderError,
+  },
 };

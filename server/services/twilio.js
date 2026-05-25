@@ -42,6 +42,24 @@ function maskPhone(p) {
   return d.length >= 4 ? `***${d.slice(-4)}` : "***";
 }
 
+function sanitizeTwilioError(value) {
+  if (!value) return "";
+  return String(value)
+    .replace(/\+?\d[\d\s().-]{6,}\d/g, "[redacted-phone]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+function formatTwilioSendError(err) {
+  if (!err) return "Twilio send failed";
+  const parts = [];
+  if (err.code) parts.push(`Twilio ${err.code}`);
+  if (err.status) parts.push(`HTTP ${err.status}`);
+  if (err.message) parts.push(sanitizeTwilioError(err.message));
+  return parts.filter(Boolean).join(": ") || "Twilio send failed";
+}
+
 function getOwnerPhoneSet() {
   const candidates = [
     process.env.OWNER_PHONE,
@@ -400,14 +418,15 @@ const TwilioService = {
 
       return { success: true, sid: message.sid, fromNumber };
     } catch (err) {
-      logger.error(`SMS send failed to ${maskPhone(to)}: ${err.message}`);
+      const providerError = formatTwilioSendError(err);
+      logger.error(`SMS send failed to ${maskPhone(to)}: ${providerError}`);
       void require("./twilio-failure-alerts")
         .alertTwilioFailure({
           channel: "sms",
           direction: "outbound",
           phase: "send_api",
           status: "failed",
-          errorMessage: err.message,
+          errorMessage: providerError,
           from: attemptedFrom,
           to,
           link: "/admin/communications",
@@ -417,7 +436,11 @@ const TwilioService = {
             `[twilio-alerts] async notification failed: ${alertErr.message}`,
           );
         });
-      throw new Error("Failed to send SMS");
+      const wrapped = new Error(`Failed to send SMS: ${providerError}`);
+      wrapped.providerError = providerError;
+      wrapped.code = err.code;
+      wrapped.status = err.status;
+      throw wrapped;
     }
   },
 
