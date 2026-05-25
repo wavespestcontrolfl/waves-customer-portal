@@ -72,6 +72,10 @@ describe('Twilio messaging provider adapter', () => {
       sent: false,
       provider: 'twilio',
       error: expect.stringContaining('Twilio 21614'),
+      retryable: false,
+      terminal: true,
+      providerErrorCode: '21614',
+      providerHttpStatus: 400,
     });
     expect(result.error).toContain('[redacted-phone]');
     expect(result.error).not.toContain('+15551230000');
@@ -85,6 +89,59 @@ describe('Twilio messaging provider adapter', () => {
     const result = await sendViaTwilio(baseInput());
 
     expect(result.error).toBe('Twilio 30008: Unknown error for [redacted-phone]');
+  });
+
+  test('classifies rate limits and server errors as retryable', async () => {
+    const rateLimit = new Error('Too many requests');
+    rateLimit.code = 20429;
+    rateLimit.status = 429;
+
+    expect(_internals.classifyProviderFailure(rateLimit)).toMatchObject({
+      retryable: true,
+      terminal: false,
+      twilioCode: '20429',
+      httpStatus: 429,
+      retryAfterMs: 5 * 60 * 1000,
+    });
+
+    const serverError = new Error('Internal server error');
+    serverError.status = 503;
+    expect(_internals.classifyProviderFailure(serverError)).toMatchObject({
+      retryable: true,
+      terminal: false,
+      httpStatus: 503,
+    });
+  });
+
+  test('classifies network failures as retryable without a Twilio code', async () => {
+    TwilioService.sendSMS.mockRejectedValueOnce(new Error('socket hang up'));
+
+    const result = await sendViaTwilio(baseInput());
+
+    expect(result).toMatchObject({
+      sent: false,
+      provider: 'twilio',
+      retryable: true,
+      terminal: false,
+      retryAfterMs: 5 * 60 * 1000,
+    });
+  });
+
+  test('classifies unsuccessful provider results using their returned error', async () => {
+    TwilioService.sendSMS.mockResolvedValueOnce({
+      success: false,
+      error: 'HTTP 503: Twilio service unavailable',
+    });
+
+    const result = await sendViaTwilio(baseInput());
+
+    expect(result).toMatchObject({
+      sent: false,
+      retryable: true,
+      terminal: false,
+      providerHttpStatus: 503,
+    });
+    expect(result.error).toBe('HTTP 503: Twilio service unavailable');
   });
 
   test('exposes the same media authorization logic for direct unit coverage', () => {
@@ -113,5 +170,12 @@ describe('Twilio messaging provider adapter', () => {
         allowMediaUrls: true,
       },
     }))).toEqual({ ok: true });
+  });
+
+  test('computes provider retry time from retryAfterMs', () => {
+    const now = new Date('2026-05-25T12:00:00.000Z');
+    expect(sendInternals.nextProviderRetryAt({ retryable: true, retryAfterMs: 90_000 }, now).toISOString())
+      .toBe('2026-05-25T12:01:30.000Z');
+    expect(sendInternals.nextProviderRetryAt({ retryable: false }, now)).toBeNull();
   });
 });
