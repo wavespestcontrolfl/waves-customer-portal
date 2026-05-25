@@ -106,6 +106,26 @@ function internalAlertNotificationDelivered(stats) {
   return Number(stats.push?.sent || 0) > 0;
 }
 
+async function notifySmsGuardBlocked({ to, body, reason, messageType }) {
+  try {
+    const { triggerNotification } = require("./notification-triggers");
+    await triggerNotification("internal_admin_alert", {
+      title: "SMS guard blocked outbound message",
+      body: [
+        `Reason: ${reason}`,
+        `Message type: ${messageType || "n/a"}`,
+        `Recipient: ${maskPhone(to)}`,
+        `Body length: ${body?.length || 0}`,
+      ].join("\n"),
+      link: "/admin/sms-templates",
+      originalMessageType: "sms_guard_blocked",
+      originalToMasked: maskPhone(to),
+    });
+  } catch (err) {
+    logger.error(`[sms-guard] blocked-send admin notification failed: ${err.message}`);
+  }
+}
+
 async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
   if (options.allowOwnerSms === true) return null;
   if (!isKnownOwnerPhone(to) || !isInternalAdminAlertType(options.messageType)) return null;
@@ -272,28 +292,12 @@ const TwilioService = {
           );
           // Best-effort alert to the operator so a blocked send gets human eyes.
           // Non-blocking — if the alert path breaks we still refuse the send.
-          // Honors OWNER_SMS_DISABLED (the kill switch above only applied to
-          // the primary `to` argument; this branch directly calls
-          // c.messages.create against ownerPhone, so it needs its own guard).
-          (async () => {
-            try {
-              const ownerPhone = process.env.OWNER_PHONE || "+19413187612";
-              if (to !== ownerPhone && !isOwnerSmsSilenced(ownerPhone)) {
-                const c = getClient();
-                if (c) {
-                  await c.messages
-                    .create({
-                      to: ownerPhone,
-                      from: options.fromNumber || ownerPhone,
-                      body: `[SMS-GUARD] Blocked outbound to ${maskPhone(to)}\nReason: ${guard.reason}\nMessage type: ${options.messageType || "n/a"}\nBody length: ${body?.length || 0}`,
-                    })
-                    .catch(() => {});
-                }
-              }
-            } catch {
-              /* alert is best-effort */
-            }
-          })();
+          notifySmsGuardBlocked({
+            to,
+            body,
+            reason: guard.reason,
+            messageType: options.messageType,
+          });
           return {
             success: false,
             sid: null,
