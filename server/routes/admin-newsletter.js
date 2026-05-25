@@ -1767,10 +1767,17 @@ router.get('/calendar', async (req, res, next) => {
 router.post('/calendar', async (req, res, next) => {
   try {
     const { weekOf, topic, notes, homeownerMinuteTopic, targetSendAt, eventIds } = req.body;
-    if (!weekOf) return res.status(400).json({ error: 'weekOf is required' });
+    if (!weekOf || !/^\d{4}-\d{2}-\d{2}$/.test(weekOf)) {
+      return res.status(400).json({ error: 'weekOf must be YYYY-MM-DD format' });
+    }
 
     // Validate Thursday
     const d = new Date(weekOf + 'T12:00:00Z');
+    if (isNaN(d.getTime())) return res.status(400).json({ error: 'weekOf is not a valid date' });
+    // Round-trip check: ensure the date didn't normalize (e.g. Feb 30 → Mar 2)
+    if (d.toISOString().split('T')[0] !== weekOf) {
+      return res.status(400).json({ error: 'weekOf is not a valid calendar date' });
+    }
     if (d.getUTCDay() !== 4) return res.status(400).json({ error: 'weekOf must be a Thursday' });
 
     // Validate eventIds
