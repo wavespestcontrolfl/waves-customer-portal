@@ -58,7 +58,7 @@ function BlockRenderer({ blocks }) {
                 display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
                 padding: '5px 0', borderBottom: j < block.rows.length - 1 ? `1px solid ${SURFACE.border}` : 'none',
               }}>
-                <span style={{ fontSize: 13, fontWeight: 500, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                <span style={{ fontSize: 14, fontWeight: 500, color: SURFACE.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                   {row.label}
                 </span>
                 <span style={{ fontSize: 14, color: SURFACE.text, fontWeight: 500, textAlign: 'right', maxWidth: '60%' }}>
@@ -176,7 +176,7 @@ export default function PrepGuidePage() {
             <BlockRenderer blocks={data.blocks} />
 
             <div style={{ marginTop: 28, paddingTop: 20, borderTop: `1px solid ${SURFACE.border}` }}>
-              <p style={{ fontSize: 13, color: SURFACE.muted, lineHeight: 1.5, margin: 0 }}>
+              <p style={{ fontSize: 14, color: SURFACE.muted, lineHeight: 1.5, margin: 0 }}>
                 Questions? Call or text us at{' '}
                 <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: SURFACE.text, fontWeight: 500 }}>
                   {data.supportPhone || WAVES_SUPPORT_PHONE_DISPLAY}

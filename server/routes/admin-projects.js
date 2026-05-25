@@ -1010,12 +1010,22 @@ router.get('/:id', async (req, res, next) => {
       })
       : null;
 
+    const prepGuide = project.prep_token ? {
+      token: project.prep_token,
+      templateKey: project.prep_template_key || null,
+      viewCount: project.prep_view_count || 0,
+      firstViewedAt: project.prep_first_viewed_at || null,
+      expiresAt: project.prep_expires_at || null,
+      isExpired: project.prep_expires_at ? new Date(project.prep_expires_at) < new Date() : false,
+    } : null;
+
     res.json({
       project: {
         ...project,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
       },
+      prepGuide,
       upcomingAppointment: upcomingAppointment ? {
         serviceType: upcomingAppointment.service_type,
         scheduledDate: upcomingAppointment.scheduled_date,
@@ -1475,6 +1485,36 @@ router.post('/:id/send-prep-guide', requireAdmin, async (req, res, next) => {
       },
     );
     return res.status(result.skipped ? 400 : 502).json({ error: failure, template_key: templateKey });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/admin/projects/:id/prep-expiry — set or clear prep guide expiration
+// ---------------------------------------------------------------------------
+router.patch('/:id/prep-expiry', requireAdmin, async (req, res, next) => {
+  try {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!project.prep_token) return res.status(400).json({ error: 'Project has no prep guide' });
+
+    const { expires_at } = req.body || {};
+    const prepExpiresAt = expires_at ? new Date(expires_at) : null;
+
+    if (prepExpiresAt && isNaN(prepExpiresAt.getTime())) {
+      return res.status(400).json({ error: 'Invalid date' });
+    }
+
+    await db('projects').where({ id: project.id }).update({ prep_expires_at: prepExpiresAt });
+    await logProjectActivity(
+      req,
+      project,
+      prepExpiresAt ? 'project_prep_expiry_set' : 'project_prep_expiry_cleared',
+      prepExpiresAt
+        ? `Prep guide expires ${prepExpiresAt.toISOString()}`
+        : 'Prep guide expiration cleared',
+    );
+
+    return res.json({ ok: true, prep_expires_at: prepExpiresAt });
   } catch (err) { next(err); }
 });
 
