@@ -7,6 +7,24 @@ const { buildPipelineResponse } = require('../services/pipeline-opportunities');
 const MAX_CANDIDATES = 5000;
 const DEFAULT_REVIEWED_HISTORY_LIMIT = 20;
 const MAX_REVIEWED_HISTORY_LIMIT = 100;
+const SAVED_VIEW_NAME_MAX = 80;
+const SAVED_VIEW_SEARCH_MAX = 160;
+const SAVED_VIEW_SOURCE_MAX = 80;
+const SAVED_VIEW_SORTS = new Set(['default', 'next_follow_up']);
+const SAVED_VIEW_DATE_RANGES = new Set(['all', '7d', '30d']);
+const SAVED_VIEW_FILTERS = new Set([
+  'all',
+  'needs_action',
+  'new',
+  'estimate_needed',
+  'draft',
+  'sent',
+  'viewed',
+  'follow_up',
+  'duplicate_risk',
+  'won',
+  'lost',
+]);
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -115,6 +133,100 @@ function parseJsonObject(value) {
   } catch (_err) {
     return {};
   }
+}
+
+function cleanSavedViewName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, SAVED_VIEW_NAME_MAX);
+}
+
+function clampText(value, max) {
+  return String(value || '').trim().slice(0, max);
+}
+
+function normalizeSavedViewFilters(filters = {}) {
+  const rawFilter = String(filters.filter || filters.stage || 'needs_action').trim();
+  const rawSort = String(filters.sort || 'default').trim();
+  const rawDateRange = String(filters.dateRange || filters.date_range || 'all').trim();
+  return {
+    filter: SAVED_VIEW_FILTERS.has(rawFilter) ? rawFilter : 'needs_action',
+    search: clampText(filters.search, SAVED_VIEW_SEARCH_MAX),
+    sort: SAVED_VIEW_SORTS.has(rawSort) ? rawSort : 'default',
+    dateRange: SAVED_VIEW_DATE_RANGES.has(rawDateRange) ? rawDateRange : 'all',
+    source: clampText(filters.source, SAVED_VIEW_SOURCE_MAX),
+  };
+}
+
+function mapSavedView(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    filters: normalizeSavedViewFilters(parseJsonObject(row.filters)),
+    sortOrder: row.sort_order || 0,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+  };
+}
+
+async function listSavedPipelineViews({ database = db, technicianId }) {
+  if (!technicianId) return [];
+  const rows = await database('admin_pipeline_saved_views')
+    .where('technician_id', technicianId)
+    .orderBy('sort_order', 'asc')
+    .orderBy('created_at', 'asc')
+    .select('*');
+  return rows.map(mapSavedView);
+}
+
+async function createSavedPipelineView({
+  database = db,
+  technicianId,
+  name,
+  filters,
+}) {
+  if (!technicianId) {
+    const err = new Error('technicianId is required');
+    err.status = 400;
+    throw err;
+  }
+  const cleanName = cleanSavedViewName(name);
+  if (!cleanName) {
+    const err = new Error('Saved view name is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const maxSort = await database('admin_pipeline_saved_views')
+    .where('technician_id', technicianId)
+    .max('sort_order as max_sort')
+    .first();
+  const nextSort = Number(maxSort?.max_sort || 0) + 1;
+  const [row] = await database('admin_pipeline_saved_views')
+    .insert({
+      technician_id: technicianId,
+      name: cleanName,
+      filters: normalizeSavedViewFilters(filters),
+      sort_order: nextSort,
+      updated_at: new Date(),
+    })
+    .returning('*');
+  return mapSavedView(row);
+}
+
+async function deleteSavedPipelineView({ database = db, technicianId, viewId }) {
+  if (!technicianId || !viewId) {
+    const err = new Error('Saved view not found');
+    err.status = 404;
+    throw err;
+  }
+  const deleted = await database('admin_pipeline_saved_views')
+    .where({ id: viewId, technician_id: technicianId })
+    .del();
+  if (!deleted) {
+    const err = new Error('Saved view not found');
+    err.status = 404;
+    throw err;
+  }
+  return { deleted: true, id: viewId };
 }
 
 function parseOpportunityRef(value) {
@@ -1031,6 +1143,46 @@ async function fetchDismissedDuplicatePairs() {
   return db('pipeline_duplicate_risk_dismissals').select('estimate_id', 'lead_id');
 }
 
+// GET /api/admin/pipeline/saved-views
+router.get('/saved-views', async (req, res, next) => {
+  try {
+    const savedViews = await listSavedPipelineViews({
+      technicianId: req.technicianId || req.technician?.id || null,
+    });
+    res.json({ savedViews });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/pipeline/saved-views
+router.post('/saved-views', async (req, res, next) => {
+  try {
+    const savedView = await createSavedPipelineView({
+      technicianId: req.technicianId || req.technician?.id || null,
+      name: req.body?.name,
+      filters: req.body?.filters || {},
+    });
+    res.status(201).json({ savedView });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+// DELETE /api/admin/pipeline/saved-views/:viewId
+router.delete('/saved-views/:viewId', async (req, res, next) => {
+  try {
+    res.json(await deleteSavedPipelineView({
+      technicianId: req.technicianId || req.technician?.id || null,
+      viewId: req.params.viewId,
+    }));
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
 // GET /api/admin/pipeline/opportunities
 router.get('/opportunities', async (req, res, next) => {
   try {
@@ -1192,11 +1344,16 @@ module.exports.__private = {
   historyEvent,
   historyLimit,
   linkOpportunityRecords,
+  listSavedPipelineViews,
+  createSavedPipelineView,
+  deleteSavedPipelineView,
+  mapSavedView,
   mapAuditTimelineEvent,
   mapDismissalHistory,
   mapDismissalTimelineEvent,
   mapLeadActivityEvent,
   mapLinkedHistory,
+  normalizeSavedViewFilters,
   normalizeDismissReason,
   parseOpportunityRef,
   parseJsonObject,

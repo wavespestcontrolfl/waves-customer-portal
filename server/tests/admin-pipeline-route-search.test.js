@@ -109,12 +109,94 @@ describe('admin pipeline route search prefilter', () => {
   });
 });
 
+describe('admin pipeline saved views', () => {
+  test('normalizes saved view filters to the supported URL-backed shape', () => {
+    expect(__private.normalizeSavedViewFilters({
+      stage: 'viewed',
+      search: '  Jane Smith  ',
+      sort: 'next_follow_up',
+      date_range: '30d',
+      source: '  Google  ',
+    })).toEqual({
+      filter: 'viewed',
+      search: 'Jane Smith',
+      sort: 'next_follow_up',
+      dateRange: '30d',
+      source: 'Google',
+    });
+
+    expect(__private.normalizeSavedViewFilters({
+      filter: 'unknown',
+      sort: 'random',
+      dateRange: 'forever',
+    })).toMatchObject({
+      filter: 'needs_action',
+      sort: 'default',
+      dateRange: 'all',
+    });
+  });
+
+  test('creates saved views scoped to the technician', async () => {
+    const database = createFakeDb({
+      admin_pipeline_saved_views: [{ id: 'existing', technician_id: 'tech-1', sort_order: 2, filters: {} }],
+    });
+
+    const savedView = await __private.createSavedPipelineView({
+      database,
+      technicianId: 'tech-1',
+      name: '  Google leads  ',
+      filters: { filter: 'all', source: 'google' },
+    });
+
+    expect(savedView).toMatchObject({
+      name: 'Google leads',
+      sortOrder: 3,
+      filters: {
+        filter: 'all',
+        search: '',
+        sort: 'default',
+        dateRange: 'all',
+        source: 'google',
+      },
+    });
+    expect(database.state.admin_pipeline_saved_views).toHaveLength(2);
+    expect(database.state.admin_pipeline_saved_views[1]).toMatchObject({
+      technician_id: 'tech-1',
+      name: 'Google leads',
+      sort_order: 3,
+    });
+  });
+
+  test('deletes saved views only for the owning technician', async () => {
+    const database = createFakeDb({
+      admin_pipeline_saved_views: [
+        { id: 'view-1', technician_id: 'tech-1', name: 'Mine', sort_order: 1, filters: {} },
+        { id: 'view-2', technician_id: 'tech-2', name: 'Other', sort_order: 1, filters: {} },
+      ],
+    });
+
+    await expect(__private.deleteSavedPipelineView({
+      database,
+      technicianId: 'tech-1',
+      viewId: 'view-2',
+    })).rejects.toThrow('Saved view not found');
+
+    await expect(__private.deleteSavedPipelineView({
+      database,
+      technicianId: 'tech-1',
+      viewId: 'view-1',
+    })).resolves.toEqual({ deleted: true, id: 'view-1' });
+    expect(database.state.admin_pipeline_saved_views.map((row) => row.id)).toEqual(['view-2']);
+  });
+});
+
 function createFakeDb(seed = {}) {
   const state = {
     leads: [...(seed.leads || [])],
     estimates: [...(seed.estimates || [])],
     lead_activities: [],
     pipeline_duplicate_risk_dismissals: [],
+    admin_pipeline_saved_views: [...(seed.admin_pipeline_saved_views || [])],
     audit_log: [],
   };
 
@@ -125,7 +207,7 @@ function createFakeDb(seed = {}) {
     let conflictKey = null;
     let lastUpdatedRows = [];
     const rowMatches = (row) => wheres.every(([key, value]) => row[key] === value);
-    return {
+    const query = {
       where(key, value) {
         if (typeof key === 'object') {
           for (const [objectKey, objectValue] of Object.entries(key)) wheres.push([objectKey, objectValue]);
@@ -152,12 +234,14 @@ function createFakeDb(seed = {}) {
       },
       insert(payload) {
         insertPayload = payload;
-        if (!conflictKey) state[name].push(payload);
+        const row = { id: payload.id || `${name}-${state[name].length + 1}`, ...payload };
+        if (!conflictKey) state[name].push(row);
         else {
-          const index = state[name].findIndex((row) => row[conflictKey] === payload[conflictKey]);
-          if (index >= 0) state[name][index] = { ...state[name][index], ...payload };
-          else state[name].push(payload);
+          const index = state[name].findIndex((existing) => existing[conflictKey] === row[conflictKey]);
+          if (index >= 0) state[name][index] = { ...state[name][index], ...row };
+          else state[name].push(row);
         }
+        lastUpdatedRows = [row];
         return this;
       },
       onConflict(key) {
@@ -175,10 +259,19 @@ function createFakeDb(seed = {}) {
         state[name] = state[name].filter((row) => !rowMatches(row));
         return before - state[name].length;
       },
+      max(aliasExpression) {
+        const [column, alias] = String(aliasExpression).split(/\s+as\s+/i);
+        const rows = state[name].filter(rowMatches);
+        const max = rows.reduce((largest, row) => Math.max(largest, Number(row[column] || 0)), 0);
+        return {
+          first: () => ({ [alias || column]: max }),
+        };
+      },
       _updatePayload() {
         return updatePayload;
       },
     };
+    return query;
   }
 
   const fakeDb = (name) => table(name);
