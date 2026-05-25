@@ -855,3 +855,4 @@ module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 module.exports.isPausedByAdmin = isPausedByAdmin;
 module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
 module.exports.validateContent = validateContent;
+module.exports.normalizeUrl = normalizeUrl;

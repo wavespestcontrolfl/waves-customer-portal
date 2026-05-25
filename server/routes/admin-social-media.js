@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const SocialMediaService = require('../services/social-media');
-const { SOCIAL_FLAGS, isPausedByAdmin } = require('../services/social-media');
+const { SOCIAL_FLAGS, isPausedByAdmin, normalizeUrl } = require('../services/social-media');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -57,7 +57,7 @@ router.get('/rss', async (req, res, next) => {
     const items = await SocialMediaService.getRSSItems(url);
     // Mark which have been posted
     for (const item of items) {
-      const posted = await db('social_media_posts').where({ source_url: item.link }).first();
+      const posted = await db('social_media_posts').where({ source_url: normalizeUrl(item.link) || item.link }).first();
       item.posted = !!posted;
       item.postId = posted?.id;
     }
