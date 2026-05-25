@@ -144,7 +144,7 @@ async function autoDraftFlagship() {
   // Calendar IDs are intersected with the eligible pool so rejected/expired/out-of-window
   // events never slip through just because they were pre-planned on the calendar.
   const topEvents = scored.slice(0, 12);
-  const eligibleIds = new Set(topEvents.map((ev) => ev.id));
+  const eligibleIds = new Set(scored.map((ev) => ev.id));
   const eligiblePreferred = preferredEventIds.filter((id) => eligibleIds.has(id));
 
   let eventIds;
@@ -219,14 +219,22 @@ async function autoDraftFlagship() {
     // Calendar may still be unlinked after a partial failure (draft created
     // but calendar update didn't complete). Fix the linkage before returning.
     if (existingCalendar && !existingCalendar.send_id) {
-      await db('newsletter_calendar')
-        .where({ id: existingCalendar.id })
-        .update({
-          send_id: earlyReturn.sendId,
-          status: 'drafted',
-          updated_at: db.fn.now(),
-        });
-      logger.info(`[newsletter-autopilot] Linked existing draft ${earlyReturn.sendId} to calendar ${existingCalendar.id}`);
+      // Verify the deduped send is actually a flagship newsletter for this week
+      const dedupedSend = await db('newsletter_sends')
+        .where({ id: earlyReturn.sendId, newsletter_type: NEWSLETTER_TYPE })
+        .first();
+      if (dedupedSend) {
+        await db('newsletter_calendar')
+          .where({ id: existingCalendar.id })
+          .update({
+            send_id: earlyReturn.sendId,
+            status: 'drafted',
+            updated_at: db.fn.now(),
+          });
+        logger.info(`[newsletter-autopilot] Linked existing draft ${earlyReturn.sendId} to calendar ${existingCalendar.id}`);
+      } else {
+        logger.warn(`[newsletter-autopilot] Deduped send ${earlyReturn.sendId} is not a ${NEWSLETTER_TYPE} — skipping calendar linkage`);
+      }
     } else if (!existingCalendar) {
       await db('newsletter_calendar').insert({
         week_of: weekOf,
