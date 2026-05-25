@@ -36,7 +36,7 @@ exports.up = async function (knex) {
 
   for (const row of sent) {
     const datePart = row.sent_at
-      ? new Date(row.sent_at).toISOString().slice(0, 10)
+      ? new Date(row.sent_at).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
       : 'undated';
     const suffix = row.id.slice(0, 6);
     const slug = `${slugify(row.subject || 'newsletter')}-${datePart}-${suffix}`;
