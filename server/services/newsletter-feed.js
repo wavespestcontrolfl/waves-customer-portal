@@ -39,7 +39,7 @@ async function getPublishedPosts({ limit = 6 } = {}) {
 
   return rows.map((s) => ({
     title: s.subject || '',
-    link: s.slug ? `/newsletter/archive/${s.slug}` : `/newsletter/archive/${s.id}`,
+    link: `/newsletter/archive/${s.id}`,
     slug: s.slug || null,
     pubDate: s.sent_at ? new Date(s.sent_at).toUTCString() : '',
     description: s.preview_text || stripHtml(s.html_body || '').slice(0, 200),
