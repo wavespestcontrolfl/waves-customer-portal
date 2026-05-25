@@ -1165,9 +1165,10 @@ router.patch('/events/:id', async (req, res, next) => {
     const updates = { updated_at: new Date() };
     if (adminStatus !== undefined) {
       updates.admin_status = adminStatus;
-      if (adminStatus === 'featured') {
+      // Only increment times_featured on transition TO featured
+      if (adminStatus === 'featured' && event.admin_status !== 'featured') {
         updates.last_featured_at = new Date();
-        updates.times_featured = (event.times_featured || 0) + 1;
+        updates.times_featured = db.raw('COALESCE(times_featured, 0) + 1');
       }
     }
     if (eventType !== undefined) updates.event_type = eventType;
@@ -1179,17 +1180,25 @@ router.patch('/events/:id', async (req, res, next) => {
     if (regionZone !== undefined) updates.region_zone = regionZone;
     if (priceText !== undefined) updates.price_text = priceText;
 
-    // Recompute freshness score when type changes
+    // Recompute freshness when type or status changes
     if (eventType !== undefined || freshnessStatus !== undefined) {
       const { classifyFreshness } = require('../services/event-freshness');
-      const { freshness_status, freshness_score } = classifyFreshness({
-        event_type: eventType || event.event_type,
-        times_featured: event.times_featured,
-        start_at: event.start_at,
-        end_at: event.end_at,
-      });
-      if (freshnessStatus === undefined) updates.freshness_status = freshness_status;
-      updates.freshness_score = freshness_score;
+
+      if (freshnessStatus !== undefined) {
+        // Admin explicitly set freshness — use the matching base score
+        const { FRESHNESS_SCORES } = require('../services/event-freshness');
+        updates.freshness_score = FRESHNESS_SCORES[freshnessStatus] ?? 40;
+      } else {
+        // Derive freshness from event type
+        const { freshness_status, freshness_score } = classifyFreshness({
+          event_type: eventType || event.event_type,
+          times_featured: event.times_featured,
+          start_at: event.start_at,
+          end_at: event.end_at,
+        });
+        updates.freshness_status = freshness_status;
+        updates.freshness_score = freshness_score;
+      }
     }
 
     await db('events_raw').where({ id: req.params.id }).update(updates);
