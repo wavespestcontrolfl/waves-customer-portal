@@ -172,7 +172,35 @@ async function autoDraftFlagship() {
     // transaction commits → lock auto-releases
   });
 
-  if (earlyReturn) return earlyReturn;
+  if (earlyReturn) {
+    // Calendar may still be unlinked after a partial failure (draft created
+    // but calendar update didn't complete). Fix the linkage before returning.
+    if (existingCalendar && !existingCalendar.send_id) {
+      await db('newsletter_calendar')
+        .where({ id: existingCalendar.id })
+        .update({
+          send_id: earlyReturn.sendId,
+          status: 'drafted',
+          updated_at: db.fn.now(),
+        });
+      logger.info(`[newsletter-autopilot] Linked existing draft ${earlyReturn.sendId} to calendar ${existingCalendar.id}`);
+    } else if (!existingCalendar) {
+      await db('newsletter_calendar').insert({
+        week_of: weekOf,
+        topic: null,
+        status: 'drafted',
+        send_id: earlyReturn.sendId,
+        target_send_at: defaultTargetSendAt(weekOf),
+        event_ids: JSON.stringify([]),
+      }).onConflict('week_of').merge({
+        send_id: earlyReturn.sendId,
+        status: 'drafted',
+        updated_at: db.fn.now(),
+      });
+      logger.info(`[newsletter-autopilot] Created calendar entry for existing draft ${earlyReturn.sendId}`);
+    }
+    return earlyReturn;
+  }
 
   // 9. Link send to calendar entry (or create one)
   if (calendarEntry) {
