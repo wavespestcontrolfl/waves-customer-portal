@@ -7,6 +7,7 @@ describe('call recording appointment guardrails', () => {
     resolveCallContactPhone,
     resolveDefaultCallBookingTechnician,
     resolveSchedulableCallService,
+    shouldCreateCallLeadForCustomer,
     validatePhoneCallAppointmentCustomer,
   } = CallRecordingProcessor._test;
 
@@ -57,6 +58,28 @@ describe('call recording appointment guardrails', () => {
     expect(extractedNameMatchesCustomer(
       { first_name: 'Andrea' },
       { first_name: 'Andrea', last_name: 'Stone' }
+    )).toBe(true);
+  });
+
+  test('does not create call leads for existing customer lifecycle stages', () => {
+    expect(shouldCreateCallLeadForCustomer(
+      { id: 'cust-active', pipeline_stage: 'active_customer' },
+      { createdCustomerFromCall: false }
+    )).toBe(false);
+
+    expect(shouldCreateCallLeadForCustomer(
+      { id: 'cust-won', pipeline_stage: 'won' },
+      { createdCustomerFromCall: false }
+    )).toBe(false);
+
+    expect(shouldCreateCallLeadForCustomer(
+      { id: 'lead-customer', pipeline_stage: 'new_lead' },
+      { createdCustomerFromCall: false }
+    )).toBe(true);
+
+    expect(shouldCreateCallLeadForCustomer(
+      { id: 'new-from-call', pipeline_stage: 'new_lead' },
+      { createdCustomerFromCall: true }
     )).toBe(true);
   });
 

@@ -151,6 +151,24 @@ function customerPhoneMatches(phone, customer = {}) {
   return samePhone(phone, customer.phone);
 }
 
+const LEAD_PIPELINE_STAGES = new Set([
+  'new_lead',
+  'contacted',
+  'qualified',
+  'estimate_needed',
+  'estimate_draft',
+  'estimate_sent',
+  'estimate_viewed',
+  'follow_up',
+  'negotiating',
+]);
+
+function shouldCreateCallLeadForCustomer(customer, { createdCustomerFromCall = false } = {}) {
+  if (!customer) return false;
+  if (createdCustomerFromCall) return true;
+  return LEAD_PIPELINE_STAGES.has(String(customer.pipeline_stage || '').toLowerCase());
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
@@ -1336,6 +1354,7 @@ const CallRecordingProcessor = {
     const phone = resolveCallContactPhone(call, extracted.phone);
     let newsletterResult = null;
     let newsletterCandidate = null;
+    let createdCustomerFromCall = false;
 
     if (customerId && extracted.first_name && phone) {
       const currentCustomer = await db('customers').where({ id: customerId }).first().catch(() => null);
@@ -1415,6 +1434,7 @@ const CallRecordingProcessor = {
             nearest_location_id: loc.id,
           }).returning('*');
           customerId = newCust.id;
+          createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);
 
           await db('notification_prefs')
@@ -1468,7 +1488,14 @@ const CallRecordingProcessor = {
     // because Step 3 already created the customer — attribution would find the customer
     // and skip lead creation (race condition).
     let leadId = null;
-    if (customerId && !extracted.is_spam) {
+    const leadCustomer = customerId
+      ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
+      : null;
+    const shouldCreateLead = customerId && !extracted.is_spam && shouldCreateCallLeadForCustomer(leadCustomer, { createdCustomerFromCall });
+    if (!shouldCreateLead && customerId && !extracted.is_spam) {
+      logger.info(`[call-proc] Skipping lead creation for existing customer ${customerId} (${leadCustomer?.pipeline_stage || 'unknown'})`);
+    }
+    if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone
         const existingLead = phone ? await db('leads').where('phone', phone).orderBy('created_at', 'desc').first() : null;
@@ -2226,6 +2253,7 @@ CallRecordingProcessor._test = {
   validatePhoneCallAppointmentCustomer,
   extractedNameMatchesCustomer,
   normalizeCallExtraction,
+  shouldCreateCallLeadForCustomer,
 };
 
 module.exports = CallRecordingProcessor;
