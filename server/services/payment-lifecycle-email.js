@@ -429,9 +429,20 @@ async function sendPaymentFailed({
   const payUrl = invoice?.token
     ? `${publicPortalUrl()}/pay/${invoice.token}`
     : portalBillingUrl();
+  const method = payment ? methodParts({
+    method_type: payment.method_type,
+    card_brand: payment.card_brand,
+    brand: payment.card_brand,
+    last_four: payment.card_last_four || payment.last_four,
+  }) : null;
   const payload = {
     payment_url: payUrl,
+    invoice_title: invoice?.title || invoice?.service_type || clean(payment?.description).replace(/\s+[-\u2014]\s+FAILED$/i, '') || '',
     invoice_number: invoice?.invoice_number || '',
+    amount_due: money(payment?.amount || invoice?.total),
+    failed_payment_date: displayDate(payment?.payment_date || payment?.created_at),
+    retry_date: displayDate(payment?.next_retry_at),
+    payment_method_label: method?.last4 ? method.label : '',
   };
   const effectiveCustomerId = customerId || invoice?.customer_id || payment?.customer_id;
   if (!effectiveCustomerId) return { ok: false, skipped: true, reason: 'customer_not_resolved' };

@@ -16,6 +16,7 @@ const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const logger = require("./logger");
 const { shortenOrPassthrough } = require("./short-url");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
+const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -123,6 +124,34 @@ async function releaseStage(estId, flag) {
   await db("estimates")
     .where({ id: estId })
     .update({ [flag]: false });
+}
+
+function moneySummary(est = {}) {
+  const monthlyTotal = parseFloat(est.monthly_total || est.monthlyTotal || 0);
+  const annualTotal = parseFloat(est.annual_total || est.annualTotal || 0);
+  const oneTimeTotal = parseFloat(est.onetime_total || est.oneTimeTotal || est.onetimeTotal || 0);
+  if (monthlyTotal > 0) {
+    return annualTotal > 0
+      ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr`
+      : `$${monthlyTotal.toFixed(0)}/mo`;
+  }
+  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
+  return "";
+}
+
+function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
+  const serviceSummary = inferEstimateServiceInterest({
+    ...est,
+    estimateData: est.estimate_data,
+  });
+  return {
+    first_name: firstName,
+    estimate_url: estimateUrl,
+    service_summary: serviceSummary || "",
+    property_address: est.address || "",
+    price_summary: moneySummary(est),
+    ...extra,
+  };
 }
 
 // Shared sender — fires SMS if phone exists, email if email exists. Returns
@@ -264,7 +293,7 @@ const EstimateFollowUp = {
             email: {
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
-              payload: { first_name: firstName, estimate_url: url },
+              payload: estimateEmailPayload(est, firstName, url),
             },
           });
           if (ok) {
@@ -347,7 +376,7 @@ const EstimateFollowUp = {
             email: {
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
-              payload: { first_name: firstName, estimate_url: url },
+              payload: estimateEmailPayload(est, firstName, url),
             },
           });
           if (ok) {
@@ -431,7 +460,7 @@ const EstimateFollowUp = {
             email: {
               templateKey: "estimate.followup_final",
               stage: "final",
-              payload: { first_name: firstName, estimate_url: url },
+              payload: estimateEmailPayload(est, firstName, url),
             },
           });
           if (ok) {
@@ -522,8 +551,7 @@ const EstimateFollowUp = {
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
               payload: {
-                first_name: firstName,
-                estimate_url: url,
+                ...estimateEmailPayload(est, firstName, url),
                 expires_at: expDate,
               },
             },
@@ -563,4 +591,4 @@ const EstimateFollowUp = {
 };
 
 module.exports = EstimateFollowUp;
-module.exports._private = { sendDualChannel };
+module.exports._private = { sendDualChannel, estimateEmailPayload };

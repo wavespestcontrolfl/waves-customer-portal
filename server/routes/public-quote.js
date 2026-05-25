@@ -12,6 +12,8 @@ const AutomationRunner = require('../services/automation-runner');
 const { resolveLeadSource } = require('../services/lead-source-resolver');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const EmailTemplateLibrary = require('../services/email-template-library');
+const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
 const { normalizeWebsiteQuoteContact } = require('../utils/intake-normalize');
 const {
@@ -241,6 +243,42 @@ async function renderTemplate(templateKey, vars) {
     }
   } catch { /* fall through */ }
   return null;
+}
+
+async function sendQuoteRequestEmail({
+  lead,
+  email,
+  firstName,
+  requestedServices,
+  propertyAddress,
+  priceSummary,
+  nextStepSummary,
+  bookingUrl,
+}) {
+  if (!email || !sendgrid.isConfigured()) return { skipped: true };
+  try {
+    return await EmailTemplateLibrary.sendTemplate({
+      templateKey: 'quote.request_received',
+      to: email,
+      payload: {
+        first_name: firstName || 'there',
+        requested_services: requestedServices || 'Service quote',
+        property_address: propertyAddress || '',
+        price_summary: priceSummary || '',
+        next_step_summary: nextStepSummary || 'Our team will review the request and follow up if anything needs clarification.',
+        booking_url: bookingUrl || '',
+        support_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+      },
+      recipientType: 'lead',
+      recipientId: lead?.id || null,
+      triggerEventId: `quote_request_received:${lead?.id || email}`,
+      idempotencyKey: lead?.id ? `quote.request_received:${lead.id}` : null,
+      categories: ['quote_request', 'quote_request_received'],
+    });
+  } catch (e) {
+    logger.error(`[public-quote] quote request email failed for lead ${lead?.id || 'unknown'}: ${e.message}`);
+    return { skipped: true, error: e.message };
+  }
 }
 
 const quoteLimiter = rateLimit({
@@ -720,6 +758,42 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       logger.error(`[public-quote] Admin notify failed: ${e.message}`);
     }
 
+    let bookingUrl = null;
+    if (!quoteRequired && !isOneTimeOnly) {
+      try {
+        const wantsPest = !!services?.pest;
+        const bookingServiceId = wantsPest ? 'pest_control' : 'lawn_care';
+        const longBookingUrl = `${PORTAL_BASE_URL}/book?service=${bookingServiceId}&source=quote-wizard`;
+        bookingUrl = await shortenOrPassthrough(longBookingUrl, {
+          kind: 'booking', entityType: 'leads', entityId: lead.id,
+        });
+      } catch (e) {
+        logger.error(`[public-quote] Booking URL failed: ${e.message}`);
+      }
+    }
+
+    const priceSummary = quoteRequired
+      ? 'Manual review needed'
+      : isOneTimeOnly
+        ? `$${Math.round(oneTimeTotal)} one-time`
+        : `$${Math.round(monthly)}/mo`;
+    const nextStepSummary = quoteRequired
+      ? 'A Waves team member will review the property details and follow up with the right quote.'
+      : isOneTimeOnly
+        ? `Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} to schedule this one-time service.`
+        : 'You can book online now, or reply here if anything needs to be adjusted first.';
+
+    await sendQuoteRequestEmail({
+      lead,
+      email: contactEmail,
+      firstName: contactFirstName,
+      requestedServices: serviceInterest,
+      propertyAddress: quoteFullAddress,
+      priceSummary,
+      nextStepSummary,
+      bookingUrl,
+    });
+
     // Post-quote orchestration — customer self-serves with price + booking link.
     // The outbound-admin-call pattern is reserved for the no-price divert flow
     // via /api/leads (lead-webhook.js), where admin follow-up is actually needed.
@@ -729,11 +803,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const wantsPest = !!services?.pest;
         const wantsLawn = !!services?.lawn;
         const serviceLabel = wantsPest && wantsLawn ? 'Pest Control & Lawn Care' : wantsPest ? 'Pest Control' : 'Lawn Care';
-        const bookingServiceId = wantsPest ? 'pest_control' : 'lawn_care';
-        const longBookingUrl = `${PORTAL_BASE_URL}/book?service=${bookingServiceId}&source=quote-wizard`;
-        const bookingUrl = await shortenOrPassthrough(longBookingUrl, {
-          kind: 'booking', entityType: 'leads', entityId: lead.id,
-        });
         const customerBody = await renderTemplate(
           'estimate_accepted_onetime',
           { first_name: contactFirstName, service_label: serviceLabel, booking_url: bookingUrl },
