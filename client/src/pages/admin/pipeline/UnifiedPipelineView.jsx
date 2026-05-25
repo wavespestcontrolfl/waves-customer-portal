@@ -461,7 +461,7 @@ export default function UnifiedPipelineView() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  className="h-10 w-10 px-0 flex-shrink-0 text-alert-fg"
+                  className="h-10 w-10 px-0 flex-shrink-0 text-zinc-700"
                   onClick={deleteActiveSavedView}
                   disabled={savingView}
                   aria-label={`Delete saved pipeline view ${activeSavedView.name}`}
