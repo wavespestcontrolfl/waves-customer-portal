@@ -143,6 +143,47 @@ describe('admin estimate email delivery', () => {
     expect(retryKey).toBe(firstAttemptKey);
   });
 
+  test('does not fall back to SMTP for estimate delivery in production', async () => {
+    const originalEnv = process.env.NODE_ENV;
+    const originalPassword = process.env.GOOGLE_SMTP_PASSWORD;
+    process.env.NODE_ENV = 'production';
+    process.env.GOOGLE_SMTP_PASSWORD = 'configured-for-test';
+    EmailTemplateLibrary.sendTemplate.mockRejectedValueOnce(new Error('template not found'));
+
+    try {
+      const result = await router._internals.sendEstimateEmail({
+        estimate: {
+          id: 'estimate-1',
+          customer_email: 'taylor@example.com',
+          customer_id: null,
+          status: 'sent',
+          updated_at: '2026-05-18T10:00:00.000Z',
+        },
+        firstName: 'Taylor',
+        viewUrl: 'https://portal.wavespestcontrol.com/estimate/sample',
+        priceLine: '$89/month',
+        idempotencyKey: 'send-click-1',
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        error: 'Email send unavailable: SendGrid template path failed and SMTP fallback is disabled in production',
+        template: 'estimate.delivery',
+      });
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = originalEnv;
+      }
+      if (originalPassword === undefined) {
+        delete process.env.GOOGLE_SMTP_PASSWORD;
+      } else {
+        process.env.GOOGLE_SMTP_PASSWORD = originalPassword;
+      }
+    }
+  });
+
   test('blocks sending quote-required estimates', () => {
     expect(() => router._internals.assertEstimateSendable({
       id: 'estimate-quote-required',

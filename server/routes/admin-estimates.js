@@ -91,6 +91,13 @@ function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
+// SMTP is dev/staging-only. In production, estimate delivery must stay on
+// the email template path so email_messages, suppressions, and render issues
+// remain authoritative.
+function smtpFallbackAllowed() {
+  return process.env.NODE_ENV !== 'production';
+}
+
 function estimateEmailKeyPart(value) {
   if (!value) return '';
   const date = value instanceof Date ? value : new Date(value);
@@ -222,6 +229,15 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
       }
       logger.warn(`[admin-estimates] estimate.delivery template unavailable; falling back to SMTP for estimate ${estimate.id}: ${err.message}`);
     }
+  }
+
+  if (!smtpFallbackAllowed()) {
+    logger.error(`[admin-estimates] SMTP fallback disabled in production for estimate ${estimate.id} — SendGrid template send required`);
+    return {
+      ok: false,
+      error: 'Email send unavailable: SendGrid template path failed and SMTP fallback is disabled in production',
+      template: 'estimate.delivery',
+    };
   }
 
   if (!process.env.GOOGLE_SMTP_PASSWORD) {
@@ -1186,6 +1202,7 @@ router._internals = {
   estimateMatchesSentOnlyScope,
   sendEstimateEmail,
   estimateEmailIdempotencyKey,
+  smtpFallbackAllowed,
 };
 
 module.exports = router;
