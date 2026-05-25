@@ -1073,10 +1073,12 @@ router.get('/events/inbox', async (req, res, next) => {
       query = query.where('e.title', 'ilike', `%${q}%`);
     }
     if (date_from) {
-      query = query.where('e.start_at', '>=', new Date(date_from));
+      // Parse as ET start-of-day to match admin's local date intent
+      query = query.where('e.start_at', '>=', new Date(`${date_from}T00:00:00-04:00`));
     }
     if (date_to) {
-      query = query.where('e.start_at', '<=', new Date(date_to));
+      // Parse as ET end-of-day so the full selected date is included
+      query = query.where('e.start_at', '<=', new Date(`${date_to}T23:59:59-04:00`));
     }
 
     // Sort
@@ -1150,7 +1152,13 @@ router.patch('/events/:id', async (req, res, next) => {
     } = req.body;
 
     const updates = { updated_at: new Date() };
-    if (adminStatus !== undefined) updates.admin_status = adminStatus;
+    if (adminStatus !== undefined) {
+      updates.admin_status = adminStatus;
+      if (adminStatus === 'featured') {
+        updates.last_featured_at = new Date();
+        updates.times_featured = (event.times_featured || 0) + 1;
+      }
+    }
     if (eventType !== undefined) updates.event_type = eventType;
     if (recurrenceType !== undefined) updates.recurrence_type = recurrenceType;
     if (freshnessStatus !== undefined) updates.freshness_status = freshnessStatus;
@@ -1209,8 +1217,20 @@ router.post('/events/bulk-action', async (req, res, next) => {
     if (action === 'approve' || action === 'reset') {
       updates.suppression_reason = null;
     }
+    if (action === 'feature') {
+      updates.last_featured_at = new Date();
+    }
 
-    const count = await db('events_raw').whereIn('id', safeIds).update(updates);
+    let query = db('events_raw').whereIn('id', safeIds);
+    if (action === 'feature') {
+      query = query.update({
+        ...updates,
+        times_featured: db.raw('COALESCE(times_featured, 0) + 1'),
+      });
+    } else {
+      query = query.update(updates);
+    }
+    const count = await query;
     res.json({ success: true, updated: count });
   } catch (err) { next(err); }
 });
