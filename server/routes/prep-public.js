@@ -7,6 +7,7 @@
  * are filtered out so the page doesn't show a "Open prep guide" CTA
  * linking back to itself.
  */
+const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
@@ -68,6 +69,10 @@ router.get('/:token', async (req, res) => {
       .first();
     if (!project) return res.status(404).json({ error: 'Not found' });
 
+    if (project.prep_expires_at && new Date(project.prep_expires_at) < new Date()) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
     const customer = project.customer_id
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
@@ -119,6 +124,19 @@ router.get('/:token', async (req, res) => {
     };
 
     const renderedBlocks = filteredBlocks.map((b) => interpolateBlock(b, vars));
+
+    const ipHash = req.ip
+      ? crypto.createHash('sha256').update(req.ip).digest('hex').slice(0, 16)
+      : null;
+    void db('prep_guide_views').insert({
+      project_id: project.id,
+      ip_hash: ipHash,
+      user_agent: String(req.get('user-agent') || '').slice(0, 512) || null,
+    }).catch((err) => logger.warn(`[prep-public] view log failed: ${err.message}`));
+    void db('projects').where({ id: project.id }).update({
+      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+    }).catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));
 
     return res.json({
       customerFirstName,
