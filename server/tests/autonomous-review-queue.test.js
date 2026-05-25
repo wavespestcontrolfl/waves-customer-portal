@@ -10,6 +10,7 @@ const {
   normalizeStatus,
   parseJsonMaybe,
   summarizeDraft,
+  summarizeSeoCompletion,
 } = require('../services/content/autonomous-review-queue');
 
 describe('autonomous-review-queue read model helpers', () => {
@@ -79,9 +80,9 @@ describe('autonomous-review-queue read model helpers', () => {
         outcome: 'skipped_shadow_mode',
         shadow_mode: true,
         skip_reason: 'shadow_would_gate',
-        quality_gate_result: '{"ok":false,"total_score":50,"min_total_score":54,"hard_failures":[{"name":"title_meta_spam_free"}],"soft_failures":[]}',
+        quality_gate_result: '{"ok":false,"total_score":50,"min_total_score":54,"hard_failures":[{"name":"title_meta_spam_free"}],"soft_failures":[],"seo_completion":{"passed":true,"score":88,"summary":{"p0":0,"p1":1,"p2":0},"findings":[{"severity":"P1","code":"P1_MISSING_SERVICE_LINK","message":"Missing service link"}],"contract":{"internalLinks":[],"internalLinkRecommendations":[{"url":"/contact/","anchorText":"request a quote","reason":"conversion","required":true}],"breadcrumbs":[{"name":"Home","url":"/"},{"name":"Waves Blog","url":"/blog/"},{"name":"Draft","url":"/draft/"}],"faq":[{"question":"Q?","answer":"Answer"}],"schema":{"article":true,"breadcrumb":true,"faqPage":true},"reviewFlags":["missing_service_link"]}}}',
         uniqueness_gate_result: '{"ok":true}',
-        draft_payload: '{"title":"Draft","body":"Draft body"}',
+        draft_payload: '{"title":"Draft","body":"Draft body","seo_contract":{"internalLinks":[{"url":"/contact/","anchorText":"request a quote","reason":"conversion","required":true}]}}',
       },
     });
 
@@ -89,6 +90,13 @@ describe('autonomous-review-queue read model helpers', () => {
     expect(item.target_keyword).toBe('lawn pest control service');
     expect(item.brief.serp_signal.dominant_intent).toBe('informational');
     expect(item.run.gate_summary.hard_failures).toEqual(['title_meta_spam_free']);
+    expect(item.run.gate_summary.seo_completion_ok).toBe(true);
+    expect(item.run.seo_completion).toMatchObject({
+      available: true,
+      p0: 0,
+      p1: 1,
+      recommended_links: [expect.objectContaining({ url: '/contact/' })],
+    });
     expect(item.draft.title).toBe('Draft');
     expect(item.review_actions).toMatchObject({
       can_requeue: true,
@@ -125,5 +133,53 @@ describe('autonomous-review-queue read model helpers', () => {
     expect(note).toContain('Existing note');
     expect(note).toContain('[2026-05-24T12:00:00.000Z] adam: dismiss');
     expect(note).toContain('not worth doing');
+  });
+
+  test('summarizes SEO completion from a persisted gate result', () => {
+    const summary = summarizeSeoCompletion({
+      passed: false,
+      score: 40,
+      summary: { p0: 1, p1: 2, p2: 1 },
+      findings: [{ severity: 'P0', code: 'P0_FAQ_SCHEMA_WITHOUT_VISIBLE_FAQ' }],
+      contract: {
+        internalLinks: [{ url: '/contact/', anchorText: 'request a quote', reason: 'conversion', required: true }],
+        faq: [],
+        breadcrumbs: [],
+        schema: { article: true, breadcrumb: true, faqPage: true },
+        reviewFlags: ['faq_schema_without_visible_faq'],
+      },
+    });
+
+    expect(summary).toMatchObject({
+      available: true,
+      passed: false,
+      score: 40,
+      p0: 1,
+      p1: 2,
+      p2: 1,
+      recommended_links: [expect.objectContaining({ url: '/contact/' })],
+      review_flags: ['faq_schema_without_visible_faq'],
+    });
+  });
+
+  test('preserves SEO gate failures that do not include a contract', () => {
+    const summary = summarizeSeoCompletion({
+      passed: false,
+      score: 0,
+      summary: { p0: 1, p1: 0, p2: 0 },
+      findings: [{
+        severity: 'P0',
+        code: 'P0_SEO_COMPLETION_GATE_UNAVAILABLE',
+        message: 'SEO completion gate is unavailable.',
+      }],
+    });
+
+    expect(summary).toMatchObject({
+      available: true,
+      passed: false,
+      score: 0,
+      p0: 1,
+      findings: [expect.objectContaining({ code: 'P0_SEO_COMPLETION_GATE_UNAVAILABLE' })],
+    });
   });
 });

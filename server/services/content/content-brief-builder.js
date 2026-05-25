@@ -17,6 +17,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { THRESHOLDS } = require('./scoring-config');
+const { buildSeoRequirements } = require('./blog-seo-contract');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
@@ -91,10 +92,12 @@ const REQUIRED_SECTIONS = {
   'supporting-blog': [
     'hub link in intro',
     'one city mention (or generic SWFL framing)',
+    'early CTA within first 25% of article',
     '2+ H2 sections',
     'pro-tip callout',
+    'pest-practices homeowner guidance',
     'FAQ section (2–3 questions)',
-    'CTA to relevant city page',
+    'final CTA to relevant city/service page',
   ],
   refresh: [
     'preserve existing slug',
@@ -379,6 +382,12 @@ class ContentBriefBuilder {
       required_sections: REQUIRED_SECTIONS[pageType] || [],
       schema_types: SCHEMA_TYPES[pageType] || [],
       internal_links_to_add: this._internalLinksFor(opportunity, pageType),
+      seo_requirements: buildSeoRequirements({
+        page_type: pageType,
+        action_type: decision.action_type,
+        city: opportunity.city || null,
+        service: opportunity.service || null,
+      }),
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
       voice_constraints: VOICE_CONSTRAINTS,
 
@@ -492,5 +501,6 @@ module.exports._internals = {
   SCHEMA_TYPES,
   WORD_COUNT_TARGET,
   SERVICE_HUB_LINKS,
+  buildSeoRequirements,
   nextWeekday9amET,
 };

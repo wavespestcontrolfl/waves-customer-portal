@@ -323,6 +323,9 @@ describe('blog Astro frontmatter validation', () => {
       title: 'Blog: Ant Trails in Bradenton',
       body: expect.stringContaining('**Autonomous content publish**'),
     }));
+    expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining('## Autonomous Blog SEO Review'),
+    }));
     expect(gh.createIssueComment).toHaveBeenCalledWith(123, expect.stringContaining('@codex review'));
     expect(result).toMatchObject({
       url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/',
@@ -371,6 +374,35 @@ describe('blog Astro frontmatter validation', () => {
       url: 'https://www.wavespestcontrol.com/yellow-lawn-sarasota/',
       status: 'pr_open',
     });
+  });
+
+  test('includes SEO completion findings and recommended links in autonomous PR body', () => {
+    const { buildSeoReviewSection } = AstroPublisher._internals;
+    const body = buildSeoReviewSection({
+      frontmatter: validFrontmatter({ schema_types: ['Article', 'BreadcrumbList'] }),
+      brief: {
+        seo_completion_gate_result: {
+          passed: true,
+          score: 88,
+          summary: { p0: 0, p1: 1, p2: 0 },
+          findings: [
+            { severity: 'P1', code: 'P1_MISSING_SERVICE_LINK', message: 'Required service link is missing.' },
+          ],
+          contract: {
+            internalLinkRecommendations: [
+              { url: '/pest-control-bradenton-fl/', anchorText: 'Bradenton pest control', reason: 'city', required: true },
+              { url: '/contact/', anchorText: 'request a pest control quote', reason: 'conversion', required: true },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(body).toContain('## Autonomous Blog SEO Review');
+    expect(body).toContain('P0/P1/P2 findings: 0/1/0');
+    expect(body).toContain('P1 P1_MISSING_SERVICE_LINK');
+    expect(body).toContain('/pest-control-bradenton-fl/');
+    expect(body).toContain('Codex review completed');
   });
 
   test('rejects autonomous drafts whose canonical does not match the emitted slug', async () => {

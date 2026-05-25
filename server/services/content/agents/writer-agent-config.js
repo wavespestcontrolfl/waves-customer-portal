@@ -42,6 +42,7 @@ INPUT — a content brief with:
   - required_sections: ordered list the page must include
   - schema_types: structured-data types to emit
   - internal_links_to_add: URLs that must appear as anchors in the body
+  - seo_requirements: generated-blog SEO/conversion requirements
   - word_count_target: e.g. "900-1500" — intent-complete, not pad
   - voice_constraints: tone + forbidden + required_phrases
   - human_review_required + reason: if true, prepare the draft anyway —
@@ -70,7 +71,14 @@ PAGE-TYPE OUTPUT STANDARDS:
     Article + BreadcrumbList. Link to hub in intro. 2+ city mentions
     (the brief's city + one more SWFL city for breadth). 2+ H2 sections,
     1+ pro-tip callout, visible "Frequently Asked Questions" section with
-    2–3 question-style H3s and direct answers. Target 900–1500.
+    2–3 question-style H3s and direct answers. Include an early CTA within
+    the first 25% of the post and a final CTA near the end. For pest,
+    termite, mosquito, rodent, lawn-pest, WDO/WDI, and Florida pest ID
+    topics, include practical homeowner guidance: identify what the issue
+    likely is, why it happens in Southwest Florida, safe checks the
+    homeowner can do, what not to do, when to call a professional, and how
+    Waves approaches the issue. Do not make unsupported treatment
+    guarantees. Target 900–1500.
 
 TOOL USE:
 - Always call get_content_brief(opportunity_id) first to load the full brief
@@ -84,7 +92,7 @@ TOOL USE:
 
 OUTPUT — call emit_draft() once with the final shape:
   {
-    frontmatter: { title, meta_description, slug, schema, primary_keyword, secondary_keywords[], … },
+    frontmatter: { title, meta_description, slug, schema, schema_types, primary_keyword, secondary_keywords[], … },
     body: "...markdown...",
     schema: { … JSON-LD blocks … },
     notes_for_reviewer: "anything a human reviewer should know"

@@ -197,6 +197,7 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
   const qualityGate = parseJsonMaybe(run?.quality_gate_result, {});
   const uniquenessGate = parseJsonMaybe(run?.uniqueness_gate_result, {});
   const draft = summarizeDraft(parseJsonMaybe(run?.draft_payload, {}), { includeBody: includeDraftBody });
+  const seoCompletion = summarizeSeoCompletion(qualityGate?.seo_completion || draft.seo_completion || draft.seo_contract);
 
   return {
     id: opportunity.id,
@@ -231,6 +232,7 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
       conversion_signal: parseJsonMaybe(brief.conversion_signal, null),
       required_sections: parseJsonMaybe(brief.required_sections, []),
       internal_links_to_add: parseJsonMaybe(brief.internal_links_to_add, []),
+      seo_requirements: draft.seo_contract ? buildSeoRequirementsSummary(draft.seo_contract) : null,
       composed_at: brief.composed_at,
     } : null,
     run: run ? {
@@ -247,6 +249,7 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
       quality_gate_result: qualityGate,
       uniqueness_gate_result: uniquenessGate,
       gate_summary: summarizeGates(qualityGate, uniquenessGate),
+      seo_completion: seoCompletion,
     } : null,
     review_actions: reviewActions({ opportunity, run }),
     draft,
@@ -289,7 +292,62 @@ function summarizeDraft(draft, { includeBody = false } = {}) {
     meta_description: draft?.meta_description || draft?.frontmatter?.meta_description || null,
     body_length: body.length,
     body_preview: body ? body.slice(0, 700) : null,
+    seo_contract: draft?.seo_contract || null,
+    seo_completion_findings: Array.isArray(draft?.seo_completion_findings) ? draft.seo_completion_findings : [],
     body: includeBody ? (body || null) : undefined,
+  };
+}
+
+function summarizeSeoCompletion(value = {}) {
+  if (!value || Object.keys(value).length === 0) {
+    return {
+      available: false,
+      passed: null,
+      score: null,
+      p0: 0,
+      p1: 0,
+      p2: 0,
+      findings: [],
+      recommended_links: [],
+    };
+  }
+  const result = isSeoGateResult(value) ? value : { contract: value };
+  const findings = Array.isArray(result.findings) ? result.findings : [];
+  const summary = result.summary || {};
+  const contract = result.contract || value;
+  return {
+    available: true,
+    passed: result.passed !== false,
+    score: result.score ?? null,
+    p0: summary.p0 ?? countSeverity(findings, 'P0'),
+    p1: summary.p1 ?? countSeverity(findings, 'P1'),
+    p2: summary.p2 ?? countSeverity(findings, 'P2'),
+    findings,
+    recommended_links: Array.isArray(contract.internalLinkRecommendations)
+      ? contract.internalLinkRecommendations
+      : (Array.isArray(contract.internalLinks) ? contract.internalLinks : []),
+    breadcrumbs: Array.isArray(contract.breadcrumbs) ? contract.breadcrumbs : [],
+    faq_count: Array.isArray(contract.faq) ? contract.faq.length : 0,
+    schema: contract.schema || null,
+    review_flags: Array.isArray(contract.reviewFlags) ? contract.reviewFlags : [],
+  };
+}
+
+function isSeoGateResult(value = {}) {
+  return Object.prototype.hasOwnProperty.call(value, 'passed')
+    || Object.prototype.hasOwnProperty.call(value, 'summary')
+    || Object.prototype.hasOwnProperty.call(value, 'findings')
+    || Object.prototype.hasOwnProperty.call(value, 'score');
+}
+
+function buildSeoRequirementsSummary(contract = {}) {
+  return {
+    breadcrumbsRequired: true,
+    articleSchemaRequired: true,
+    faqSchemaPolicy: 'only_when_visible_faq_exists',
+    internalLinksRecommended: Array.isArray(contract.internalLinkRecommendations)
+      ? contract.internalLinkRecommendations.length
+      : (Array.isArray(contract.internalLinks) ? contract.internalLinks.length : 0),
   };
 }
 
@@ -305,7 +363,12 @@ function summarizeGates(qualityGate, uniquenessGate) {
     soft_failures: soft.map((f) => f.name || f.reason || String(f)).filter(Boolean),
     uniqueness_ok: uniquenessGate?.ok !== false,
     uniqueness_failures: uniqueness,
+    seo_completion_ok: qualityGate?.seo_completion?.passed ?? null,
   };
+}
+
+function countSeverity(findings, severity) {
+  return findings.filter((item) => item?.severity === severity).length;
 }
 
 function normalizeStatus(status) {
@@ -364,6 +427,7 @@ module.exports = {
   reviewActions,
   isTrustBuildRun,
   summarizeDraft,
+  summarizeSeoCompletion,
   summarizeGates,
   appendReviewerNote,
   normalizeDecision,

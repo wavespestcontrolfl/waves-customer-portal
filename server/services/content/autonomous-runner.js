@@ -54,6 +54,7 @@ const getBriefBuilder = lazy('brief-builder', './content-brief-builder');
 const getDispatcher = lazy('agent-dispatcher', './agents/agent-dispatcher');
 const getUniquenessGate = lazy('uniqueness-gate', './uniqueness-gate');
 const getQualityGate = lazy('content-quality-gate', './content-quality-gate');
+const getSeoCompletionGate = lazy('seo-completion-gate', './seo-completion-gate');
 const getAstroPublisher = lazy('astro-publisher', '../content-astro/astro-publisher');
 const getIndexNow = lazy('indexnow', '../seo/indexnow-submit');
 const getLinkPlanner = lazy('internal-link-planner', './internal-link-planner');
@@ -262,7 +263,75 @@ class AutonomousRunner {
     }
     run.quality_gate_result = qualityResult;
 
-    const gatesPass = uniquenessResult.ok && qualityResult.ok;
+    // 5a. SEO completion gate for generated supporting-blog drafts.
+    const seoCompletionGate = getSeoCompletionGate();
+    const requiresSeoCompletion = run.action_type === 'new_supporting_blog' || brief.page_type === 'supporting-blog';
+    const seoGateBrief = {
+      ...brief,
+      action_type: run.action_type === 'new_supporting_blog' ? run.action_type : brief.action_type,
+      page_type: brief.page_type || (run.action_type === 'new_supporting_blog' ? 'supporting-blog' : undefined),
+    };
+    let seoCompletionResult = requiresSeoCompletion
+      ? {
+          passed: false,
+          error: 'seo_completion_gate_unavailable',
+          findings: [{
+            severity: 'P0',
+            code: 'P0_SEO_COMPLETION_GATE_UNAVAILABLE',
+            message: 'SEO completion gate is unavailable for a generated supporting-blog draft.',
+            recommendation: 'Fix the SEO completion gate dependency before creating an Astro PR.',
+          }],
+          summary: { passed: false, p0: 1, p1: 0, p2: 0, p3: 0, needs_review: true },
+        }
+      : { passed: true, skipped: 'not_supporting_blog', findings: [], summary: { passed: true, p0: 0, p1: 0, p2: 0, p3: 0, needs_review: false } };
+    if (seoCompletionGate?.evaluate) {
+      const tSeo = Date.now();
+      try {
+        seoCompletionResult = seoCompletionGate.evaluate({
+          draft,
+          brief: seoGateBrief,
+          uniquenessResult,
+          shadowMode: run.shadow_mode,
+          actionType: run.action_type,
+          pageType: seoGateBrief.page_type,
+        });
+        if (requiresSeoCompletion && seoCompletionResult?.skipped) {
+          seoCompletionResult = {
+            passed: false,
+            error: 'seo_completion_gate_skipped_required',
+            findings: [{
+              severity: 'P0',
+              code: 'P0_SEO_COMPLETION_GATE_SKIPPED',
+              message: 'SEO completion gate skipped a generated supporting-blog draft that requires review.',
+              recommendation: 'Ensure the runner passes supporting-blog action/page metadata into the SEO completion gate before publishing.',
+            }],
+            summary: { passed: false, p0: 1, p1: 0, p2: 0, p3: 0, needs_review: true },
+          };
+        }
+      } catch (err) {
+        seoCompletionResult = {
+          passed: false,
+          error: err.message,
+          findings: [{ severity: 'P0', code: 'P0_SEO_COMPLETION_GATE_ERROR', message: err.message, recommendation: 'Fix the SEO completion gate error before publishing.' }],
+          summary: { passed: false, p0: 1, p1: 0, p2: 0, p3: 0, needs_review: true },
+        };
+      }
+      run.seo_completion_gate_ms = Date.now() - tSeo;
+    }
+    run.seo_completion_gate_result = seoCompletionResult;
+    if (qualityResult && typeof qualityResult === 'object') {
+      qualityResult.seo_completion = seoCompletionResult;
+      run.quality_gate_result = qualityResult;
+    }
+    if (seoCompletionResult?.contract) {
+      draft.seo_contract = seoCompletionResult.contract;
+      draft.seo_completion_findings = seoCompletionResult.findings || [];
+      run.draft_payload = draft;
+      brief.seo_completion_gate_result = seoCompletionResult;
+      brief.seo_contract = seoCompletionResult.contract;
+    }
+
+    const gatesPass = uniquenessResult.ok && qualityResult.ok && seoCompletionResult.passed !== false;
 
     // 6. Trust-build check.
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
@@ -291,7 +360,7 @@ class AutonomousRunner {
       const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: reason,
-        reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, brief), trustBuildNote].filter(Boolean).join(' | '),
+        reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), trustBuildNote].filter(Boolean).join(' | '),
       });
       await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
       return finalized;
@@ -604,7 +673,7 @@ class AutonomousRunner {
     return out;
   }
 
-  _summarizeForReviewer(uniquenessResult, qualityResult, brief) {
+  _summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief) {
     const lines = [];
     if (brief.human_review_required) lines.push(`router: ${brief.human_review_reason}`);
     if (!uniquenessResult.ok) {
@@ -615,6 +684,10 @@ class AutonomousRunner {
       const hard = (qualityResult.hard_failures || []).map((f) => f.name).join(', ');
       const soft = (qualityResult.soft_failures || []).slice(0, 3).map((f) => f.name).join(', ');
       lines.push(`quality: hard=${hard || 'none'} soft=${soft || 'none'} score=${qualityResult.total_score}/${qualityResult.min_total_score}`);
+    }
+    if (seoCompletionResult?.passed === false || seoCompletionResult?.summary?.needs_review) {
+      const summary = seoCompletionResult.summary || {};
+      lines.push(`seo_completion: P0=${summary.p0 || 0} P1=${summary.p1 || 0} P2=${summary.p2 || 0} score=${seoCompletionResult.score ?? 'n/a'}`);
     }
     return lines.join(' | ');
   }
