@@ -1408,8 +1408,8 @@ router.post('/events/digest-plan', async (req, res, next) => {
     const { weekStart, weekEnd } = req.body || {};
     const now = new Date();
     const nowET = etParts(now);
-    const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
-    const defaultStart = addETDays(now, -daysBack);
+    const daysUntilThursday = (4 - nowET.dayOfWeek + 7) % 7; // 0 on Thu, 3 on Mon, 6 on Fri
+    const defaultStart = addETDays(now, daysUntilThursday);
     const startDate = weekStart
       ? parseETDateTime(`${weekStart}T00:00:00`)
       : parseETDateTime(`${etDateString(defaultStart)}T00:00:00`);
