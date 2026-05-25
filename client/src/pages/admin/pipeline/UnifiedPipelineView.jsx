@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { AlertTriangle, Bookmark, ClipboardList, Plus, RefreshCw, Search, X } from "lucide-react";
+import { AlertTriangle, Bookmark, ClipboardList, Plus, RefreshCw, Save, Search, Trash2, X } from "lucide-react";
 import {
   Badge,
   Button,
@@ -92,6 +92,14 @@ function sourceLabel(opportunity) {
   return opportunity.source || "Unknown";
 }
 
+function filtersEqual(left, right) {
+  return left.filter === right.filter
+    && String(left.search || "").trim() === String(right.search || "").trim()
+    && left.sort === right.sort
+    && left.dateRange === right.dateRange
+    && String(left.source || "").trim().toLowerCase() === String(right.source || "").trim().toLowerCase();
+}
+
 function WarningBanner({ children }) {
   return (
     <div className="mb-4 flex items-start gap-2 rounded-sm border-hairline border-amber-300 bg-amber-50 px-3 py-2 text-13 text-amber-900">
@@ -128,6 +136,12 @@ export default function UnifiedPipelineView() {
   const [dateRange, setDateRange] = useState(() => dateRangeFromSearchParams(searchParams));
   const [source, setSource] = useState(() => searchParams.get("source") || "");
   const [page, setPage] = useState(() => pageFromSearchParams(searchParams));
+  const [savedViews, setSavedViews] = useState([]);
+  const [savedViewsError, setSavedViewsError] = useState(null);
+  const [savingView, setSavingView] = useState(false);
+  const [showSaveView, setShowSaveView] = useState(false);
+  const [saveViewName, setSaveViewName] = useState("");
+  const [selectedSavedViewId, setSelectedSavedViewId] = useState(null);
 
   useEffect(() => {
     const urlFilter = filterFromSearchParams(searchParams);
@@ -173,6 +187,7 @@ export default function UnifiedPipelineView() {
   const changeFilter = useCallback((nextFilter) => {
     setPage(1);
     setFilter(nextFilter);
+    setSelectedSavedViewId(null);
     updatePipelineUrl({ filter: nextFilter, page: 1 });
   }, [updatePipelineUrl]);
 
@@ -191,8 +206,83 @@ export default function UnifiedPipelineView() {
     setSort(next.sort);
     setDateRange(next.dateRange);
     setSource(next.source);
+    setSelectedSavedViewId(null);
     updatePipelineUrl({ ...next, page: 1 });
   }, [updatePipelineUrl]);
+
+  const applyFilters = useCallback((next, savedViewId = null) => {
+    setPage(1);
+    setFilter(next.filter);
+    setSearch(next.search);
+    setSort(next.sort);
+    setDateRange(next.dateRange);
+    setSource(next.source);
+    setSelectedSavedViewId(savedViewId);
+    updatePipelineUrl({ ...next, page: 1 });
+  }, [updatePipelineUrl]);
+
+  const loadSavedViews = useCallback(async () => {
+    try {
+      const data = await adminFetch("/admin/pipeline/saved-views");
+      setSavedViews(data.savedViews || []);
+      setSavedViewsError(null);
+    } catch (err) {
+      setSavedViewsError(err);
+    }
+  }, []);
+
+  const currentFilters = useMemo(() => ({
+    filter,
+    search,
+    sort,
+    dateRange,
+    source,
+  }), [dateRange, filter, search, sort, source]);
+
+  const activeSavedView = useMemo(() => (
+    savedViews.find((view) => view.id === selectedSavedViewId && filtersEqual(view.filters || {}, currentFilters))
+    || savedViews.find((view) => filtersEqual(view.filters || {}, currentFilters))
+    || null
+  ), [currentFilters, savedViews, selectedSavedViewId]);
+
+  const saveCurrentView = useCallback(async () => {
+    const name = saveViewName.trim();
+    if (!name) return;
+    setSavingView(true);
+    try {
+      const data = await adminFetch("/admin/pipeline/saved-views", {
+        method: "POST",
+        body: JSON.stringify({ name, filters: currentFilters }),
+      });
+      const savedView = data.savedView;
+      setSavedViews((views) => [...views, savedView]);
+      setSelectedSavedViewId(savedView.id);
+      setSaveViewName("");
+      setShowSaveView(false);
+      setSavedViewsError(null);
+    } catch (err) {
+      setSavedViewsError(err);
+    } finally {
+      setSavingView(false);
+    }
+  }, [currentFilters, saveViewName]);
+
+  const deleteActiveSavedView = useCallback(async () => {
+    if (!activeSavedView) return;
+    setSavingView(true);
+    try {
+      await adminFetch(`/admin/pipeline/saved-views/${encodeURIComponent(activeSavedView.id)}`, {
+        method: "DELETE",
+      });
+      setSavedViews((views) => views.filter((view) => view.id !== activeSavedView.id));
+      setSelectedSavedViewId(null);
+      setSavedViewsError(null);
+    } catch (err) {
+      setSavedViewsError(err);
+    } finally {
+      setSavingView(false);
+    }
+  }, [activeSavedView]);
 
   const loadPipeline = useCallback(async () => {
     setLoading(true);
@@ -228,6 +318,10 @@ export default function UnifiedPipelineView() {
     loadPipeline();
   }, [loadPipeline]);
 
+  useEffect(() => {
+    loadSavedViews();
+  }, [loadSavedViews]);
+
   const visibleOpportunities = useMemo(() => opportunities, [opportunities]);
   const showingDuplicateCleanup = filter === "duplicate_risk" && !search.trim();
   const activePreset = useMemo(() => activePipelinePresetKey({
@@ -237,6 +331,10 @@ export default function UnifiedPipelineView() {
     dateRange,
     source,
   }), [dateRange, filter, search, sort, source]);
+  const activeViewValue = activePreset !== "custom"
+    && !(selectedSavedViewId && activeSavedView)
+    ? `preset:${activePreset}`
+    : activeSavedView ? `saved:${activeSavedView.id}` : "custom";
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / (pagination.pageSize || 100)));
   const truncatedWarning = useMemo(() => {
     if (!meta?.truncated) return null;
@@ -316,25 +414,62 @@ export default function UnifiedPipelineView() {
             counts={counts}
             onChange={changeFilter}
           />
-          <div className="grid gap-2 lg:grid-cols-[210px_minmax(260px,1fr)_170px_150px_minmax(180px,240px)]">
-            <div className="relative">
-              <Bookmark
-                size={15}
-                strokeWidth={1.8}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-tertiary pointer-events-none z-10"
-                aria-hidden
-              />
-              <Select
-                value={activePreset}
-                onChange={(event) => applyPreset(event.target.value)}
-                aria-label="Apply saved pipeline view"
-                className="h-10 pl-9 text-13"
+          <div className="grid gap-2 lg:grid-cols-[minmax(280px,360px)_minmax(260px,1fr)_170px_150px_minmax(180px,240px)]">
+            <div className="flex gap-2 min-w-0">
+              <div className="relative flex-1 min-w-0">
+                <Bookmark
+                  size={15}
+                  strokeWidth={1.8}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-tertiary pointer-events-none z-10"
+                  aria-hidden
+                />
+                <Select
+                  value={activeViewValue}
+                  onChange={(event) => {
+                    const [type, value] = event.target.value.split(":");
+                    if (type === "preset") applyPreset(value);
+                    if (type === "saved") {
+                      const view = savedViews.find((item) => item.id === value);
+                      if (view?.filters) applyFilters(view.filters, view.id);
+                    }
+                  }}
+                  aria-label="Apply saved pipeline view"
+                  className="h-10 pl-9 text-13"
+                >
+                  <option value="custom" disabled>Custom View</option>
+                  {PIPELINE_PRESETS.map((preset) => (
+                    <option key={preset.key} value={`preset:${preset.key}`}>{preset.label}</option>
+                  ))}
+                  {savedViews.length > 0 && <option disabled>Saved Views</option>}
+                  {savedViews.map((view) => (
+                    <option key={view.id} value={`saved:${view.id}`}>{view.name}</option>
+                  ))}
+                </Select>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-10 w-10 px-0 flex-shrink-0"
+                onClick={() => setShowSaveView((value) => !value)}
+                disabled={savingView}
+                aria-label="Save current pipeline view"
+                title="Save current view"
               >
-                <option value="custom" disabled>Custom View</option>
-                {PIPELINE_PRESETS.map((preset) => (
-                  <option key={preset.key} value={preset.key}>{preset.label}</option>
-                ))}
-              </Select>
+                <Save size={14} strokeWidth={1.8} aria-hidden />
+              </Button>
+              {activeSavedView && (activePreset === "custom" || selectedSavedViewId === activeSavedView.id) && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="h-10 w-10 px-0 flex-shrink-0 text-alert-fg"
+                  onClick={deleteActiveSavedView}
+                  disabled={savingView}
+                  aria-label={`Delete saved pipeline view ${activeSavedView.name}`}
+                  title="Delete saved view"
+                >
+                  <Trash2 size={14} strokeWidth={1.8} aria-hidden />
+                </Button>
+              )}
             </div>
             <div className="relative">
               <input
@@ -344,6 +479,7 @@ export default function UnifiedPipelineView() {
                   const nextSearch = event.target.value;
                   setPage(1);
                   setSearch(nextSearch);
+                  setSelectedSavedViewId(null);
                   updatePipelineUrl({ search: nextSearch, page: 1 }, { replace: true });
                 }}
                 placeholder="Search name, phone, email, address, source, service, or ref"
@@ -366,6 +502,7 @@ export default function UnifiedPipelineView() {
                   onClick={() => {
                     setPage(1);
                     setSearch("");
+                    setSelectedSavedViewId(null);
                     updatePipelineUrl({ search: "", page: 1 }, { replace: true });
                   }}
                   aria-label="Clear search"
@@ -381,6 +518,7 @@ export default function UnifiedPipelineView() {
                 const nextSort = event.target.value;
                 setPage(1);
                 setSort(nextSort);
+                setSelectedSavedViewId(null);
                 updatePipelineUrl({ sort: nextSort, page: 1 });
               }}
               aria-label="Sort opportunities"
@@ -395,6 +533,7 @@ export default function UnifiedPipelineView() {
                 const nextDateRange = event.target.value;
                 setPage(1);
                 setDateRange(nextDateRange);
+                setSelectedSavedViewId(null);
                 updatePipelineUrl({ dateRange: nextDateRange, page: 1 });
               }}
               aria-label="Filter by activity date"
@@ -411,6 +550,7 @@ export default function UnifiedPipelineView() {
                 const nextSource = event.target.value;
                 setPage(1);
                 setSource(nextSource);
+                setSelectedSavedViewId(null);
                 updatePipelineUrl({ source: nextSource, page: 1 }, { replace: true });
               }}
               placeholder="Source"
@@ -418,6 +558,48 @@ export default function UnifiedPipelineView() {
               className="h-10 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-800 placeholder:text-ink-tertiary u-focus-ring"
             />
           </div>
+          {showSaveView && (
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                value={saveViewName}
+                onChange={(event) => setSaveViewName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") saveCurrentView();
+                  if (event.key === "Escape") setShowSaveView(false);
+                }}
+                maxLength={80}
+                placeholder="View name"
+                aria-label="Saved view name"
+                className="h-10 w-full sm:w-72 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-800 placeholder:text-ink-tertiary u-focus-ring"
+              />
+              <Button
+                size="sm"
+                className="h-10"
+                onClick={saveCurrentView}
+                disabled={savingView || !saveViewName.trim()}
+              >
+                Save View
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-10"
+                onClick={() => {
+                  setSaveViewName("");
+                  setShowSaveView(false);
+                }}
+                disabled={savingView}
+              >
+                Cancel
+              </Button>
+            </div>
+          )}
+          {savedViewsError && (
+            <div className="text-12 text-alert-fg">
+              {savedViewsError.message || "Saved views are unavailable."}
+            </div>
+          )}
         </CardHeader>
         <CardBody className="p-0">
           {loading ? (
