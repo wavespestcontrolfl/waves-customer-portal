@@ -1820,7 +1820,10 @@ router.patch('/calendar/:id', async (req, res, next) => {
     if (topic !== undefined) updates.topic = topic || null;
     if (notes !== undefined) updates.notes = notes || null;
     if (homeownerMinuteTopic !== undefined) updates.homeowner_minute_topic = homeownerMinuteTopic || null;
-    if (targetSendAt !== undefined) updates.target_send_at = parseETDateTime(targetSendAt);
+    if (targetSendAt !== undefined) {
+      if (!targetSendAt) return res.status(400).json({ error: 'targetSendAt cannot be null' });
+      updates.target_send_at = parseETDateTime(targetSendAt);
+    }
     if (status !== undefined) {
       const VALID = ['planned', 'drafted', 'scheduled', 'sent', 'skipped'];
       if (!VALID.includes(status)) return res.status(400).json({ error: 'invalid status' });
