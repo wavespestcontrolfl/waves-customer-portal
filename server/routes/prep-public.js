@@ -128,12 +128,12 @@ router.get('/:token', async (req, res) => {
     const ipHash = req.ip
       ? crypto.createHash('sha256').update(req.ip).digest('hex').slice(0, 16)
       : null;
-    db('prep_guide_views').insert({
+    void db('prep_guide_views').insert({
       project_id: project.id,
       ip_hash: ipHash,
       user_agent: String(req.get('user-agent') || '').slice(0, 512) || null,
     }).catch((err) => logger.warn(`[prep-public] view log failed: ${err.message}`));
-    db('projects').where({ id: project.id }).update({
+    void db('projects').where({ id: project.id }).update({
       prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
       prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
     }).catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));

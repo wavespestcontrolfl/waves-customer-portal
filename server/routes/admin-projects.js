@@ -27,7 +27,7 @@ const serviceLibrary = require('../services/service-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const ProjectEmail = require('../services/project-email');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('../services/project-report-links');
 const {
   buildProjectCloseoutPreview,
@@ -1498,7 +1498,7 @@ router.patch('/:id/prep-expiry', requireAdmin, async (req, res, next) => {
     if (!project.prep_token) return res.status(400).json({ error: 'Project has no prep guide' });
 
     const { expires_at } = req.body || {};
-    const prepExpiresAt = expires_at ? new Date(expires_at) : null;
+    const prepExpiresAt = expires_at ? parseETDateTime(expires_at) : null;
 
     if (prepExpiresAt && isNaN(prepExpiresAt.getTime())) {
       return res.status(400).json({ error: 'Invalid date' });
