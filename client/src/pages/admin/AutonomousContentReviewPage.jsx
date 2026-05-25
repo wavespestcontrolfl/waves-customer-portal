@@ -105,7 +105,7 @@ function Kpi({ label, value, tone }) {
 
 function gateTone(summary) {
   if (!summary) return "neutral";
-  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false) return "red";
+  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false) return "red";
   if ((summary.soft_failures || []).length > 0) return "amber";
   return "green";
 }
@@ -180,6 +180,9 @@ export default function AutonomousContentReviewPage() {
   const hardFailures = gateSummary?.hard_failures || [];
   const softFailures = gateSummary?.soft_failures || [];
   const uniquenessFailures = gateSummary?.uniqueness_failures || [];
+  const seoCompletion = selected?.run?.seo_completion;
+  const seoFindings = seoCompletion?.findings || [];
+  const recommendedLinks = seoCompletion?.recommended_links || [];
   const pendingCount = counts.pending_review || 0;
   const shadowCount = useMemo(() => items.filter((item) => item.run?.shadow_mode).length, [items]);
   const reviewActions = selected?.review_actions || {};
@@ -331,7 +334,7 @@ export default function AutonomousContentReviewPage() {
 
               <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 800, color: D.heading, marginBottom: 8 }}>
-                  {hardFailures.length === 0 && uniquenessFailures.length === 0 ? <CheckCircle2 size={16} color={D.green} /> : <AlertTriangle size={16} color={D.red} />}
+                  {hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false ? <CheckCircle2 size={16} color={D.green} /> : <AlertTriangle size={16} color={D.red} />}
                   Gate Summary
                 </div>
                 <div style={{ fontSize: 12, color: D.text, lineHeight: 1.6 }}>
@@ -342,8 +345,47 @@ export default function AutonomousContentReviewPage() {
                   Soft: {softFailures.length ? softFailures.join(", ") : "none"}
                   <br />
                   Uniqueness: {uniquenessFailures.length ? uniquenessFailures.join(", ") : (gateSummary?.uniqueness_ok === false ? "failed" : "none")}
+                  <br />
+                  SEO completion: {seoCompletion?.available ? `P0 ${seoCompletion.p0} / P1 ${seoCompletion.p1} / P2 ${seoCompletion.p2}` : "not run"}
                 </div>
               </div>
+
+              {seoCompletion?.available && (
+                <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 800, color: D.heading, marginBottom: 8 }}>
+                    {seoCompletion.p0 === 0 ? <CheckCircle2 size={16} color={D.green} /> : <AlertTriangle size={16} color={D.red} />}
+                    SEO Completion
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                    <Chip tone={seoCompletion.p0 > 0 ? "red" : "green"}>P0 {seoCompletion.p0}</Chip>
+                    <Chip tone={seoCompletion.p1 > 0 ? "amber" : "green"}>P1 {seoCompletion.p1}</Chip>
+                    <Chip tone={seoCompletion.p2 > 0 ? "amber" : "green"}>P2 {seoCompletion.p2}</Chip>
+                    <Chip>{seoCompletion.faq_count || 0} FAQs</Chip>
+                    <Chip>{recommendedLinks.length} links</Chip>
+                  </div>
+                  {seoFindings.length > 0 && (
+                    <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                      {seoFindings.slice(0, 6).map((finding) => (
+                        <div key={`${finding.severity}-${finding.code}`} style={{ fontSize: 12, lineHeight: 1.45, color: finding.severity === "P0" ? D.red : D.text }}>
+                          <strong>{finding.severity} {finding.code}</strong>: {finding.message}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {recommendedLinks.length > 0 && (
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={{ fontSize: 12, color: D.muted, fontWeight: 800 }}>Recommended links</div>
+                      {recommendedLinks.slice(0, 6).map((link) => (
+                        <div key={`${link.reason}-${link.url}`} style={{ fontSize: 12, color: D.text, lineHeight: 1.45 }}>
+                          <strong>{link.url}</strong>
+                          <br />
+                          Anchor: {link.anchorText || "—"} · Reason: {link.reason || "—"}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {selected.draft?.meta_description && (
                 <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>

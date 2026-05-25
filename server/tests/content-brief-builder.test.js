@@ -47,6 +47,51 @@ describe('SCHEMA_TYPES map (per v3.1 — no FAQPage as hard gate)', () => {
   });
 });
 
+describe('SEO requirements', () => {
+  test('supporting-blog requirements include SEO completion controls', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-seo',
+        page_url: null,
+        query: 'ghost ants lakewood ranch',
+        city: 'Lakewood Ranch',
+        service: 'pest',
+        bucket: 'no_content_yet',
+        signal_metadata: {},
+      },
+      signals: {
+        customer_signal: null,
+        serp_profile: null,
+        conversion_feedback: null,
+      },
+      decision: {
+        page_type: 'supporting-blog',
+        action_type: 'new_supporting_blog',
+        final_score: 82,
+        score_breakdown: {},
+        human_review_required: false,
+        human_review_reason: null,
+        router_notes: null,
+      },
+      existingBriefVersions: 0,
+    });
+
+    expect(brief.required_sections.join(' | ')).toMatch(/pest-practices|early CTA/i);
+    expect(brief.seo_requirements).toMatchObject({
+      breadcrumbsRequired: true,
+      articleSchemaRequired: true,
+      faqSchemaPolicy: 'only_when_visible_faq_exists',
+      internalLinksRequired: {
+        city: 1,
+        service: 1,
+        conversion: 1,
+      },
+      pestPracticesRequired: true,
+    });
+  });
+});
+
 describe('WORD_COUNT_TARGET map', () => {
   test('produces strings for each page type', () => {
     for (const t of ['city-service', 'customer-question', 'supporting-blog', 'refresh', 'metadata', 'gbp']) {

@@ -148,6 +148,7 @@ function loadRunnerWith({
   dispatcher = {},
   qualityGate = null,
   uniquenessGate = null,
+  seoCompletionGate = { evaluate: jest.fn().mockReturnValue({ passed: true, score: 100, summary: { p0: 0, p1: 0, p2: 0 }, findings: [] }) },
   publisher = null,
   indexNow = null,
   linkPlanner = null,
@@ -163,6 +164,7 @@ function loadRunnerWith({
   jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
   if (qualityGate) jest.doMock('../services/content/content-quality-gate', () => qualityGate);
   if (uniquenessGate) jest.doMock('../services/content/uniqueness-gate', () => uniquenessGate);
+  if (seoCompletionGate) jest.doMock('../services/content/seo-completion-gate', () => seoCompletionGate);
   if (publisher) jest.doMock('../services/content-astro/astro-publisher', () => publisher);
   if (indexNow) jest.doMock('../services/seo/indexnow-submit', () => indexNow);
   if (linkPlanner) jest.doMock('../services/content/internal-link-planner', () => linkPlanner);
@@ -326,6 +328,228 @@ describe('runNext general shadow behavior', () => {
 });
 
 describe('runNext post-publish bookkeeping', () => {
+  test('fails closed when SEO completion gate is unavailable for supporting blogs', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const claimedAt = new Date('2026-05-23T05:08:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_seo_unavailable',
+          action_type: 'new_supporting_blog',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_seo_unavailable',
+          action_type: 'new_supporting_blog',
+          page_type: 'supporting-blog',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { url: '/blog/seo-unavailable/', title: 'SEO Unavailable' },
+        }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({
+          ok: true,
+          hard_failures: [],
+          soft_failures: [],
+          total_score: 100,
+          min_total_score: 80,
+        }),
+      };
+      const publisher = { publishOrUpdatePage: jest.fn() };
+      const runner = loadRunnerWith({
+        queue,
+        briefBuilder,
+        dispatcher,
+        qualityGate,
+        seoCompletionGate: {},
+        publisher,
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.quality_gate_result.seo_completion).toMatchObject({
+        passed: false,
+        summary: { p0: 1 },
+      });
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('fails closed when SEO completion gate skips a runner-required supporting blog', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const claimedAt = new Date('2026-05-23T05:08:30Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_seo_skipped',
+          action_type: 'new_supporting_blog',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_seo_skipped',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { url: '/blog/seo-skipped/', title: 'SEO Skipped' },
+        }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({
+          ok: true,
+          hard_failures: [],
+          soft_failures: [],
+          total_score: 100,
+          min_total_score: 80,
+        }),
+      };
+      const seoCompletionGate = {
+        evaluate: jest.fn().mockReturnValue({
+          passed: true,
+          skipped: 'not_supporting_blog',
+          findings: [],
+          summary: { p0: 0, p1: 0, p2: 0 },
+        }),
+      };
+      const publisher = { publishOrUpdatePage: jest.fn() };
+      const runner = loadRunnerWith({
+        queue,
+        briefBuilder,
+        dispatcher,
+        qualityGate,
+        seoCompletionGate,
+        publisher,
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.quality_gate_result.seo_completion).toMatchObject({
+        passed: false,
+        error: 'seo_completion_gate_skipped_required',
+        summary: { p0: 1 },
+      });
+      expect(result.quality_gate_result.seo_completion.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'P0_SEO_COMPLETION_GATE_SKIPPED' }),
+      ]));
+      expect(seoCompletionGate.evaluate).toHaveBeenCalledWith(expect.objectContaining({
+        actionType: 'new_supporting_blog',
+        pageType: 'supporting-blog',
+      }));
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_skipped', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('summarizes SEO completion gate exceptions as P0 reviewer findings', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const claimedAt = new Date('2026-05-23T05:09:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({
+          id: 'opp_seo_throw',
+          action_type: 'new_supporting_blog',
+          claimed_at: claimedAt,
+        }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_seo_throw',
+          action_type: 'new_supporting_blog',
+          page_type: 'supporting-blog',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: { url: '/blog/seo-throw/', title: 'SEO Throw' },
+        }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({
+          ok: true,
+          hard_failures: [],
+          soft_failures: [],
+          total_score: 100,
+          min_total_score: 80,
+        }),
+      };
+      const runner = loadRunnerWith({
+        queue,
+        briefBuilder,
+        dispatcher,
+        qualityGate,
+        seoCompletionGate: { evaluate: jest.fn(() => { throw new Error('parser failed'); }) },
+        publisher: { publishOrUpdatePage: jest.fn() },
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.quality_gate_result.seo_completion).toMatchObject({
+        passed: false,
+        summary: { p0: 1 },
+      });
+      expect(result.reviewer_notes).toContain('seo_completion: P0=1');
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_throw', 'gate_fail', { claimToken: claimedAt });
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
   test('does not release a claim after publish succeeds but queue completion fails', async () => {
     const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
     const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;

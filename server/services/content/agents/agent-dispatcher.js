@@ -105,6 +105,7 @@ function buildInputPayload(brief) {
       city: brief.city || null,
       service: brief.service || null,
       word_count_target: brief.word_count_target,
+      seo_requirements: brief.seo_requirements || null,
       human_review_required: !!brief.human_review_required,
       router_notes: brief.router_notes || null,
     },

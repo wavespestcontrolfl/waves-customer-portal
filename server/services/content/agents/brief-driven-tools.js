@@ -27,6 +27,7 @@
 const db = require('../../../models/db');
 const logger = require('../../logger');
 const { etDateString, addETDays } = require('../../../utils/datetime-et');
+const { buildSeoRequirements } = require('../blog-seo-contract');
 
 // Lazy loaders — every dependency is optional. Each loader resolves
 // once and caches the result (or null if the module is unavailable on
@@ -74,12 +75,14 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           .orderBy('version', 'desc')
           .first();
         if (!row) return { error: `no brief found for opportunity ${opportunity_id}` };
-        return parseJsonbColumns(row, [
+        const brief = parseJsonbColumns(row, [
           'score_breakdown', 'serp_signal', 'gsc_signal',
           'customer_signal', 'conversion_signal',
           'required_sections', 'schema_types', 'internal_links_to_add',
           'voice_constraints',
         ]);
+        brief.seo_requirements = buildSeoRequirements(brief);
+        return brief;
       } catch (err) {
         return { error: `content_briefs read failed: ${err.message}` };
       }
