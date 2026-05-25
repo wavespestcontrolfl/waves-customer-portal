@@ -22,7 +22,7 @@
 // - Disposition gap: missed calls that lack an operator-set
 //   disposition should surface in a clear "needs review" state.
 import { useState, useEffect, useRef } from "react";
-import { PhoneCall } from "lucide-react";
+import { PhoneCall, Voicemail } from "lucide-react";
 import {
   Badge,
   Button,
@@ -116,6 +116,11 @@ function getCallBackFromNumber(call, fallbackFrom) {
     group.numbers.map((n) => n.number),
   );
   return knownNumbers.includes(preferred) ? preferred : fallbackFrom;
+}
+
+function getCallRouteLabel(call) {
+  if (!call) return "";
+  return [call.from_phone, call.to_phone].filter(Boolean).join(" → ");
 }
 
 function StatButton({ label, value, filter, active, onClick, alert }) {
@@ -384,11 +389,18 @@ export default function CallLogTabV2() {
   // conversation happened and it should show as "Discussion".
   const hadConversation = (c) =>
     Number(c.duration_seconds) > 5 || !!c.recording_url || !!c.transcription;
+  const isVoicemailCall = (c) =>
+    c.answered_by === "voicemail" || c.call_outcome === "voicemail";
   const isReallyMissed = (c) =>
     (!c.answered_by || c.answered_by === "missed") && !hadConversation(c);
   const answered = calls.filter((c) => c.answered_by === "human").length;
-  const voicemail = calls.filter((c) => c.answered_by === "voicemail").length;
+  const voicemail = calls.filter(isVoicemailCall).length;
   const missed = calls.filter(isReallyMissed).length;
+  const voicemailCalls = calls.filter(isVoicemailCall);
+  const voicemailWithoutTranscript = voicemailCalls.filter(
+    (c) => c.recording_url && !(c.transcription && c.transcription.length > 0),
+  ).length;
+  const recentVoicemails = voicemailCalls.slice(0, 5);
 
   const now = new Date();
   const thisMonthCalls = calls.filter((c) => {
@@ -410,7 +422,7 @@ export default function CallLogTabV2() {
   const filteredCalls = calls.filter((c) => {
     if (callFilter === "all") return true;
     if (callFilter === "answered") return c.answered_by === "human";
-    if (callFilter === "voicemail") return c.answered_by === "voicemail";
+    if (callFilter === "voicemail") return isVoicemailCall(c);
     if (callFilter === "missed") return isReallyMissed(c);
     return true;
   });
@@ -456,6 +468,135 @@ export default function CallLogTabV2() {
           }
         />{" "}
       </div>
+      {/* Voicemail queue */}
+      {recentVoicemails.length > 0 && (
+        <Card>
+          <CardBody>
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <Voicemail size={17} strokeWidth={1.75} className="text-ink-secondary" aria-hidden />
+                <div>
+                  <div className="text-14 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary">
+                    Voicemail
+                  </div>
+                  <div className="text-12 text-ink-tertiary">
+                    {voicemail} total
+                    {voicemailWithoutTranscript > 0
+                      ? ` · ${voicemailWithoutTranscript} awaiting transcript`
+                      : ""}
+                  </div>
+                </div>
+              </div>
+              <Button
+                variant={callFilter === "voicemail" ? "primary" : "secondary"}
+                size="sm"
+                onClick={() =>
+                  setCallFilter((p) => (p === "voicemail" ? "all" : "voicemail"))
+                }
+              >
+                {callFilter === "voicemail" ? "Showing" : "Show all"}
+              </Button>
+            </div>
+            <div className="divide-y divide-zinc-200">
+              {recentVoicemails.map((c) => {
+                const target = getCallBackTarget(c);
+                const transcriptPreview = c.transcription
+                  ? c.transcription.length > 180
+                    ? c.transcription.slice(0, 180).trim() + "…"
+                    : c.transcription
+                  : "";
+                const isProcessing =
+                  autoProcessingSid === c.twilio_call_sid ||
+                  processingCallSid === c.twilio_call_sid;
+
+                return (
+                  <div key={`voicemail-${c.id}`} className="py-3 first:pt-0 last:pb-0">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-14 text-ink-primary font-medium truncate">
+                          {getCallDisplayName(c)}
+                        </div>
+                        <div className="text-12 text-ink-tertiary">
+                          {getCallRouteLabel(c)} · {timeAgo(c.created_at)}
+                        </div>
+                      </div>
+                      {target && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          onClick={() => handleCallBack(c)}
+                          disabled={!!callbackCallingId}
+                          title="Call via Waves — rings your phone first, press 1 to connect"
+                        >
+                          <PhoneCall size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+                          {callbackCallingId === c.id ? "Calling…" : "Call back"}
+                        </Button>
+                      )}
+                    </div>
+                    {c.recording_url && (
+                      <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+                        <div className="text-11 text-ink-tertiary font-medium mb-1">
+                          Recording
+                          {c.recording_duration_seconds
+                            ? ` (${Math.floor(c.recording_duration_seconds / 60)}:${String(c.recording_duration_seconds % 60).padStart(2, "0")})`
+                            : ""}
+                        </div>
+                        <audio controls preload="none" className="w-full h-8">
+                          <source
+                            src={`${API_BASE}/admin/call-recordings/audio/${c.recording_sid || c.id}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
+                            type="audio/mpeg"
+                          />
+                        </audio>
+                      </div>
+                    )}
+                    {transcriptPreview ? (
+                      <div className="mt-2 text-13 text-ink-secondary italic leading-relaxed">
+                        "{transcriptPreview}"
+                      </div>
+                    ) : c.recording_url ? (
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className="text-12 text-ink-tertiary">
+                          {isProcessing ? "Transcribing…" : "No transcript yet"}
+                        </span>
+                        {!isProcessing && c.twilio_call_sid && (
+                          <button
+                            type="button"
+                            onClick={() => handleProcessCall(c.twilio_call_sid, false)}
+                            disabled={!!processingCallSid || !!autoProcessingSid}
+                            className="text-11 uppercase tracking-label text-ink-tertiary hover:text-ink-primary u-focus-ring"
+                          >
+                            Process
+                          </button>
+                        )}
+                      </div>
+                    ) : null}
+                    {callbackResult && callbackResult.callId === c.id && (
+                      <div
+                        className={cn(
+                          "mt-2 text-12",
+                          callbackResult.ok ? "text-ink-secondary" : "text-alert-fg",
+                        )}
+                      >
+                        {callbackResult.text}
+                      </div>
+                    )}
+                    {processResult && processResult.callSid === c.twilio_call_sid && (
+                      <div
+                        className={cn(
+                          "mt-2 text-12",
+                          processResult.ok ? "text-ink-secondary" : "text-alert-fg",
+                        )}
+                      >
+                        {processResult.text}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </CardBody>
+        </Card>
+      )}
       {/* Source analytics — desktop only */}
       {sortedSources.length > 0 && (
         <Card className="hidden md:block">
