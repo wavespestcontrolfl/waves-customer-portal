@@ -456,6 +456,12 @@ export default function AdminLayoutV2() {
                   <Link
                     key={path}
                     to={path}
+                    onClick={(e) => {
+                      if (location.pathname === path || location.pathname.startsWith(path + "/")) {
+                        e.preventDefault();
+                        navigate(path);
+                      }
+                    }}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -624,6 +630,12 @@ export default function AdminLayoutV2() {
                 <Link
                   key={path}
                   to={path}
+                  onClick={(e) => {
+                    if (location.pathname === path || location.pathname.startsWith(path + "/")) {
+                      e.preventDefault();
+                      navigate(path);
+                    }
+                  }}
                   aria-current={active ? "page" : undefined}
                   className={cn(
                     "flex-1 flex flex-col items-center justify-center gap-[3px] select-none no-underline",
