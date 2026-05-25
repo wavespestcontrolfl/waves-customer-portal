@@ -106,6 +106,7 @@ function isFederalHolidayET(date) {
 function shouldEnforceQuietHours(input, policy) {
   if (process.env.SMS_QUIET_HOURS_ENABLED === 'false') return false;
   if (!input || input.channel !== 'sms') return false;
+  if (input.metadata?.quietHoursOverride === true) return false;
   if (input.audience === 'internal' || input.audience === 'admin' || input.audience === 'tech') return false;
   if (policy?.requireConsent === 'marketing') return true;
   return QUIET_ENFORCED_PURPOSES.has(input.purpose);
