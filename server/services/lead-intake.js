@@ -47,10 +47,10 @@ const SERVICE_TEMPLATE_KEY = {
   one_time: 'lead_service_one_time',
 };
 
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch { /* fall through */ }
@@ -76,7 +76,11 @@ function looksLikeAddress(body) {
 async function sendBranchReply(customer, interest) {
   const templateKey = SERVICE_TEMPLATE_KEY[interest];
   const firstName = customer.first_name || 'there';
-  const body = await renderTemplate(templateKey, { first_name: firstName });
+  const body = await renderTemplate(
+    templateKey,
+    { first_name: firstName },
+    { workflow: 'lead_intake_branch_reply', entity_type: 'customer', entity_id: customer.id }
+  );
   if (!body) {
     logger.warn(`[lead-intake] ${templateKey} template missing/disabled; branch reply skipped for customer ${customer.id}`);
     return;
@@ -106,7 +110,11 @@ async function sendBranchReply(customer, interest) {
 
 async function sendAddressNudge(customer) {
   const firstName = customer.first_name || 'there';
-  const body = await renderTemplate('lead_address_needed', { first_name: firstName });
+  const body = await renderTemplate(
+    'lead_address_needed',
+    { first_name: firstName },
+    { workflow: 'lead_intake_address_needed', entity_type: 'customer', entity_id: customer.id }
+  );
   if (!body) {
     logger.warn(`[lead-intake] lead_address_needed template missing/disabled; address nudge skipped for customer ${customer.id}`);
     return;

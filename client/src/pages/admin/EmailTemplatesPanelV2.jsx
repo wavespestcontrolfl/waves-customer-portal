@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   CheckCircle,
   Eye,
   History,
@@ -329,6 +330,80 @@ function SendHistoryPanel({ messages, loading, onRefresh }) {
           </div>
         ) : (
           <div className="py-10 text-center text-13 text-ink-secondary">No email sends yet.</div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function TemplateIssuesPanel({ issues, loading, onRefresh, onOpenTemplate }) {
+  return (
+    <Card>
+      <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={15} />
+          <CardTitle>Template Issues</CardTitle>
+        </div>
+        <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
+          <RefreshCw size={14} /> Refresh
+        </Button>
+      </CardHeader>
+      <CardBody>
+        {loading ? (
+          <div className="py-10 text-center text-13 text-ink-secondary">Loading template issues...</div>
+        ) : issues.length ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-13">
+              <thead>
+                <tr className="border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary">
+                  <th className="py-2 pr-4 font-medium">When</th>
+                  <th className="py-2 pr-4 font-medium">Template</th>
+                  <th className="py-2 pr-4 font-medium">Issue</th>
+                  <th className="py-2 pr-4 font-medium">Context</th>
+                  <th className="py-2 font-medium">Details</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100">
+                {issues.map((issue) => (
+                  <tr key={issue.id}>
+                    <td className="py-3 pr-4 whitespace-nowrap text-ink-secondary">
+                      {formatDateTime(issue.created_at)}
+                    </td>
+                    <td className="py-3 pr-4 whitespace-nowrap">
+                      <button
+                        type="button"
+                        className="text-left text-zinc-900 hover:text-sky-700"
+                        onClick={() => onOpenTemplate(issue.template_key)}
+                      >
+                        {issue.template_key || "-"}
+                      </button>
+                    </td>
+                    <td className="py-3 pr-4 whitespace-nowrap">
+                      <Badge tone="danger">{issue.event_type || "issue"}</Badge>
+                    </td>
+                    <td className="py-3 pr-4 min-w-[220px] text-ink-secondary">
+                      <div>{issue.workflow || "-"}</div>
+                      {(issue.entity_type || issue.entity_id) && (
+                        <div className="text-11 text-ink-tertiary">
+                          {[issue.entity_type, issue.entity_id].filter(Boolean).join(" ")}
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-3 min-w-[260px] text-zinc-900">
+                      <div className="line-clamp-2">{issue.reason || "-"}</div>
+                      {Array.isArray(issue.unresolved_placeholders) && issue.unresolved_placeholders.length > 0 && (
+                        <div className="mt-1 text-11 text-ink-tertiary">
+                          {issue.unresolved_placeholders.join(", ")}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="py-10 text-center text-13 text-ink-secondary">No recent template issues.</div>
         )}
       </CardBody>
     </Card>
@@ -1525,6 +1600,8 @@ export default function EmailTemplatesPanelV2() {
   const [templateSettings, setTemplateSettings] = useState(null);
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [templateIssues, setTemplateIssues] = useState([]);
+  const [templateIssuesLoading, setTemplateIssuesLoading] = useState(false);
   const [suppressions, setSuppressions] = useState([]);
   const [suppressionStats, setSuppressionStats] = useState([]);
   const [suppressionLoading, setSuppressionLoading] = useState(false);
@@ -1621,6 +1698,14 @@ export default function EmailTemplatesPanelV2() {
       .finally(() => setHistoryLoading(false));
   }, []);
 
+  const loadTemplateIssues = useCallback(() => {
+    setTemplateIssuesLoading(true);
+    return adminFetch("/admin/email-templates/issues?limit=100")
+      .then((d) => setTemplateIssues(d.issues || []))
+      .catch((e) => setToast(`Template issues load failed: ${e.message}`))
+      .finally(() => setTemplateIssuesLoading(false));
+  }, []);
+
   const loadSuppressions = useCallback(() => {
     setSuppressionLoading(true);
     const params = new URLSearchParams();
@@ -1693,6 +1778,10 @@ export default function EmailTemplatesPanelV2() {
   useEffect(() => {
     if (activeView === "history") loadHistory();
   }, [activeView, loadHistory]);
+
+  useEffect(() => {
+    if (activeView === "issues") loadTemplateIssues();
+  }, [activeView, loadTemplateIssues]);
 
   useEffect(() => {
     if (activeView === "suppressions") loadSuppressions();
@@ -2233,6 +2322,14 @@ export default function EmailTemplatesPanelV2() {
           <History size={14} /> Send History
         </Button>
         <Button
+          variant={activeView === "issues" ? "primary" : "secondary"}
+          size="sm"
+          className="gap-2"
+          onClick={() => setActiveView("issues")}
+        >
+          <AlertTriangle size={14} /> Issues
+        </Button>
+        <Button
           variant={activeView === "suppressions" ? "primary" : "secondary"}
           size="sm"
           className="gap-2"
@@ -2275,6 +2372,17 @@ export default function EmailTemplatesPanelV2() {
         />
       ) : activeView === "history" ? (
         <SendHistoryPanel messages={history} loading={historyLoading} onRefresh={loadHistory} />
+      ) : activeView === "issues" ? (
+        <TemplateIssuesPanel
+          issues={templateIssues}
+          loading={templateIssuesLoading}
+          onRefresh={loadTemplateIssues}
+          onOpenTemplate={(key) => {
+            if (!key) return;
+            setSelectedKey(key);
+            setActiveView("templates");
+          }}
+        />
       ) : activeView === "suppressions" ? (
         <SuppressionsPanel
           groups={groups}

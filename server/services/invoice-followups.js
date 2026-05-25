@@ -32,6 +32,10 @@ async function resolveBody(step, ctx) {
     receipt_url: ctx.payUrl || '',
     service_date: ctx.serviceDate || '',
     service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
+  }, {
+    workflow: 'invoice_followup',
+    entity_type: 'invoice',
+    entity_id: ctx.invoiceId || null,
   });
 }
 
@@ -187,6 +191,7 @@ async function fireStep(row) {
     amount,
     serviceDate,
     payUrl,
+    invoiceId: row.invoice_id,
   });
   if (!body) {
     logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id} — pausing`);

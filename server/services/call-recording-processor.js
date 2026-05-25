@@ -1652,6 +1652,10 @@ const CallRecordingProcessor = {
             date_time: extracted.preferred_date_time,
             date: parsedDate,
             time: parsedTime,
+          }, {
+            workflow: 'appointment_call_confirmed',
+            entity_type: 'customer',
+            entity_id: customer.id,
           });
 
           // Content-level dedup: even if the concurrent-run guard above

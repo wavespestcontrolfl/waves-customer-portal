@@ -708,7 +708,8 @@ router.post('/confirm', async (req, res, next) => {
           time: timeLabel,
           address: addressLabel,
           confirmation_code: confCode,
-        }
+        },
+        { workflow: 'self_booking_confirmation', entity_type: 'scheduled_service', entity_id: serviceRow.id }
       );
       if (!smsBody) {
         logger.warn(`[booking:confirm] self_booking_confirmation template missing/disabled — skipping SMS for customer ${custId}`);

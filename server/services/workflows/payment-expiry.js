@@ -64,7 +64,7 @@ class PaymentExpiry {
             last_four: card.last_four,
             exp_date: expLabel,
           },
-          `Hello ${customer.first_name || 'there'}! Your ${cardLabel} ending in ${card.last_four} expires ${expLabel}.\n\nPlease update your payment method in your Waves Customer Portal at portal.wavespestcontrol.com to avoid any interruption in service.\n\nQuestions or requests? Reply to this message.`
+          { workflow: 'payment_method_expiry', entity_type: 'payment_method', entity_id: card.id || card.payment_method_id }
         );
 
         const sendResult = await sendCustomerMessage({

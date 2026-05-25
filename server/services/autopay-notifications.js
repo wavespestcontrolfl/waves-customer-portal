@@ -54,6 +54,7 @@ async function sendPreChargeReminders() {
       const body = await renderSmsTemplate(
         'autopay_pre_charge',
         { first_name: c.first_name, charge_date: dateStr },
+        { workflow: 'autopay_pre_charge', entity_type: 'customer', entity_id: c.id },
       );
       if (!body) {
         logger.warn(`[autopay-notifications] autopay_pre_charge template missing/disabled for customer ${c.id}`);
@@ -149,6 +150,7 @@ async function sendCardExpiryWarnings() {
           last_four: r.last4,
           exp_date: expStr,
         },
+        { workflow: templateKey, entity_type: 'payment_method', entity_id: r.payment_method_id },
       );
       if (!body) {
         logger.warn(`[autopay-notifications] ${templateKey} template missing/disabled for customer ${r.customer_id}`);

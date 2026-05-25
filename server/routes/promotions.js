@@ -356,6 +356,10 @@ router.post('/:id/interest', async (req, res, next) => {
         first_name: customer.first_name || 'there',
         service_name: serviceName || serviceType,
         new_tier: newTier,
+      }, {
+        workflow: 'promotions_upsell_interest',
+        entity_type: 'customer',
+        entity_id: customer.id,
       });
       const smsResult = await sendCustomerMessage({
         to: customer.phone,

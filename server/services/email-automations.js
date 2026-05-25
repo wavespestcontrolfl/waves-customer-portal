@@ -30,10 +30,7 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_RECURRING || 'aut_3f539f94-024a-466f-9d50-4454173627dd',
     tags: ['new customer', 'recurring'],
-    smsTemplate: (c) =>
-      `Hello ${c.first_name}! Welcome to Waves!\n\n` +
-      `You can also manage your account at portal.wavespestcontrol.com to view your upcoming appointments, reschedule services, request re-services, view invoices, and more.\n\n` +
-      `Questions or requests? Reply here.`,
+    smsTemplateKey: 'auto_new_recurring',
     enabled: true,
   },
   cold_lead: {
@@ -42,7 +39,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_COLD || 'aut_13dca63e-702d-4020-870c-27c742532a06',
     tags: ['cold customer'],
-    smsTemplate: null,
     enabled: true,
   },
   lawn_service: {
@@ -51,9 +47,7 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_LAWN || 'aut_0c794b25-1a87-46aa-9ef3-6c508348d288',
     tags: ['lawn', 'recurring'],
-    smsTemplate: (c) =>
-      `Hello ${c.first_name}! Welcome to a better lawn with Waves! We just emailed your our lawn care welcome guide + expert tips for the best results for your lawn!\n\n` +
-      `If you have any questions or need assistance, simply reply to this message.`,
+    smsTemplateKey: 'auto_lawn_service',
     enabled: true,
   },
   new_appointment: {
@@ -62,9 +56,7 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_APPT || 'aut_d34a894e-a5bc-43fc-af47-7efba42881e7',
     tags: ['new appointment', 'first-time'],
-    smsTemplate: (c) =>
-      `Hello ${c.first_name}! We just emailed you a breakdown of what to expect with your upcoming service with Waves!\n\n` +
-      `If you have any questions or need assistance, simply reply to this message.`,
+    smsTemplateKey: 'auto_new_appointment',
     enabled: true,
   },
   review_thank_you_lwr: {
@@ -73,7 +65,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_REVIEW_LWR || 'aut_7a99204b-3a0f-46db-914f-05722f2eb7f0',
     tags: ['reviewed', 'lakewood-ranch'],
-    smsTemplate: null,
     enabled: true,
   },
   review_thank_you_venice: {
@@ -82,7 +73,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_REVIEW_VENICE || 'aut_6fd321f7-dce1-4887-bd89-91cea7ac00b7',
     tags: ['reviewed', 'venice'],
-    smsTemplate: null,
     enabled: true,
   },
   review_thank_you_sarasota: {
@@ -91,7 +81,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_REVIEW_SARASOTA || 'aut_023254b1-bd8e-443a-a59f-a54e88cf54c7',
     tags: ['reviewed', 'sarasota'],
-    smsTemplate: null,
     enabled: true,
   },
   review_thank_you_parrish: {
@@ -100,7 +89,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_REVIEW_PARRISH || 'aut_e36ad726-024a-4741-83aa-3c7d08b054c2',
     tags: ['reviewed', 'parrish'],
-    smsTemplate: null,
     enabled: true,
   },
   bed_bug: {
@@ -109,9 +97,7 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_BEDBUG || 'aut_9e3657f3-82de-4d4f-84a5-ae757ac7e13b',
     tags: ['bed bug treatment', 'first-time'],
-    smsTemplate: (c) =>
-      `Hello ${c.first_name}! Let's get your home bed bug-free. We just emailed your Waves treatment guide—please review it to help us get the best results for your home!\n\n` +
-      `If you have any questions or need assistance, simply reply to this message.`,
+    smsTemplateKey: 'auto_bed_bug',
     enabled: true,
   },
   cockroach: {
@@ -120,9 +106,7 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_ROACH || 'aut_53cfd473-982b-49fd-b03d-62a9d462909c',
     tags: ['roach treatment', 'first-time'],
-    smsTemplate: (c) =>
-      `Hello ${c.first_name}! Let's get your home cockroach-free. We just emailed your Waves treatment guide—please review it to help us get the best results for your home!\n\n` +
-      `If you have any questions or need assistance, simply reply to this message.`,
+    smsTemplateKey: 'auto_cockroach',
     enabled: true,
   },
   new_lead: {
@@ -131,9 +115,7 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_NEW_LEAD || 'aut_d08077d4-3079-4e69-9488-f6669caf6a6c',
     tags: ['new lead'],
-    smsTemplate: (c) =>
-      `Hi ${c.first_name}! Thanks for your interest in Waves Pest Control. We just sent you an email with more info about our services.\n\n` +
-      `Reply here anytime if you have questions!`,
+    smsTemplateKey: 'auto_new_lead',
     enabled: true,
   },
   service_renewal: {
@@ -142,9 +124,7 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_RENEWAL || 'aut_6e9b0067-89c9-4c11-acbe-f62eaa80b1aa',
     tags: ['renewal reminder'],
-    smsTemplate: (c) =>
-      `Hi ${c.first_name}! Your Waves service is coming up for renewal. We just emailed you the details — take a look when you get a chance.\n\n` +
-      `Questions? Just reply here!`,
+    smsTemplateKey: 'auto_service_renewal',
     enabled: true,
   },
   pricing_update: {
@@ -153,7 +133,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_PRICING || 'aut_0d249df2-79fe-4e4d-a7ad-e35259e9d706',
     tags: ['pricing update'],
-    smsTemplate: null,
     enabled: true,
   },
   payment_failed: {
@@ -162,7 +141,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_PAYMENT_FAILED || 'aut_bf915f3e-8ca2-4355-be54-9a66e9633296',
     tags: ['payment failed'],
-    smsTemplate: null,
     enabled: true,
   },
   referral_nudge: {
@@ -171,7 +149,6 @@ const AUTOMATIONS = {
     trigger: 'manual',
     beehiivAutomationId: process.env.BEEHIIV_AUTO_REFERRAL || 'aut_45641d64-3111-49c2-87bb-3f1fe6ccce25',
     tags: ['referral'],
-    smsTemplate: null,
     enabled: true,
   },
 };
@@ -240,24 +217,26 @@ const EmailAutomationService = {
       localResult = { error: err.message };
     }
 
-    // Step 2: SMS — check DB template first, fall back to inline
-    if ((auto.smsTemplate || auto.smsTemplateKey) && customer.phone) {
+    // Step 2: SMS — DB templates are the source of truth. Missing/disabled
+    // SMS copy skips the SMS companion instead of falling back to inline copy.
+    if (auto.smsTemplateKey && customer.phone) {
       try {
         let smsBody = null;
 
         // Try DB template (editable from SMS Templates admin)
-        const templateKey = auto.smsTemplateKey || `auto_${key}`;
+        const templateKey = auto.smsTemplateKey;
         try {
           const templates = require('../routes/admin-sms-templates');
           smsBody = await templates.getTemplate(templateKey, {
             first_name: customer.first_name || '',
             last_name: customer.last_name || '',
+          }, {
+            workflow: 'email_automation_sms',
+            entity_type: 'customer',
+            entity_id: customer.id,
           });
-        } catch { /* template lookup failed — fall back to inline */ }
-
-        // Fall back to inline template function
-        if (!smsBody && auto.smsTemplate) {
-          smsBody = auto.smsTemplate(customer);
+        } catch (err) {
+          logger.warn(`[email-auto] SMS template ${templateKey} lookup failed for ${key}: ${err.message}`);
         }
 
         if (smsBody) {
@@ -278,6 +257,14 @@ const EmailAutomationService = {
           smsResult = sendResult.sent
             ? { sent: true }
             : { sent: false, blocked: sendResult.blocked, error: sendResult.code || sendResult.reason || 'SMS send blocked/failed' };
+        } else {
+          logger.warn(`[email-auto] SMS template ${templateKey} missing/disabled; SMS companion skipped for ${key} customer ${customer.id}`);
+          smsResult = {
+            sent: false,
+            skipped: true,
+            reason: 'template-missing',
+            template_key: templateKey,
+          };
         }
       } catch (err) {
         logger.error(`[email-auto] SMS failed for ${key}: ${err.message}`);

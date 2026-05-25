@@ -128,6 +128,10 @@ router.post('/', async (req, res, next) => {
         referee_name: refereeName.trim(),
         referrer_name: customer.first_name || 'your neighbor',
         referral_link: `https://wavespestcontrol.com?ref=${customer.referral_code}`,
+      }, {
+        workflow: 'referral_invite',
+        entity_type: 'referral',
+        entity_id: referral.id,
       });
       const smsResult = await sendCustomerMessage({
         to: refereePhone.trim(),

@@ -235,10 +235,10 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
   ]);
 }
 
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch { /* fall through */ }
@@ -806,6 +806,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const customerBody = await renderTemplate(
           'estimate_accepted_onetime',
           { first_name: contactFirstName, service_label: serviceLabel, booking_url: bookingUrl },
+          {
+            workflow: 'public_quote',
+            entity_type: 'lead',
+            entity_id: lead.id,
+          },
         );
         if (!customerBody) {
           logger.warn(`[public-quote] estimate_accepted_onetime template missing/disabled; booking SMS skipped for lead ${lead.id}`);
@@ -835,28 +840,37 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // One-time service SMS: price + call-to-schedule (no self-booking URL).
     if (normalizedPhone && !quoteRequired && isOneTimeOnly) {
       try {
-        const FALLBACK_ONETIME_BODY = `Hi ${contactFirstName}! Your ${serviceInterest} estimate is ready — $${Math.round(oneTimeTotal)}. Call us at ${WAVES_SUPPORT_PHONE_DISPLAY} or reply to this text to schedule.\n\n— Waves Pest Control`;
         const customerBody = await renderTemplate(
           'estimate_onetime_followup',
           { first_name: contactFirstName, service_label: serviceInterest, total: Math.round(oneTimeTotal), phone: WAVES_SUPPORT_PHONE_DISPLAY },
-        ) || FALLBACK_ONETIME_BODY;
-        const smsResult = await sendCustomerMessage({
-          to: normalizedPhone,
-          body: customerBody,
-          channel: 'sms',
-          audience: 'lead',
-          purpose: 'conversational',
-          leadId: lead.id,
-          identityTrustLevel: 'phone_provided_unverified',
-          entryPoint: 'public_quote_onetime_sms',
-          metadata: {
-            original_message_type: 'estimate_onetime_followup',
+          {
+            workflow: 'public_quote',
+            entity_type: 'lead',
+            entity_id: lead.id,
           },
-        });
-        if (!smsResult.sent) {
-          logger.warn(`[public-quote] One-time SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        );
+        if (!customerBody) {
+          logger.warn(`[public-quote] estimate_onetime_followup template missing/disabled; one-time SMS skipped for lead ${lead.id}`);
         } else {
-          logger.info(`[public-quote] One-time SMS sent for lead ${lead.id}`);
+          const smsResult = await sendCustomerMessage({
+            to: normalizedPhone,
+            body: customerBody,
+            channel: 'sms',
+            audience: 'lead',
+            purpose: 'conversational',
+            leadId: lead.id,
+            identityTrustLevel: 'phone_provided_unverified',
+            entryPoint: 'public_quote_onetime_sms',
+            metadata: {
+              original_message_type: 'estimate_onetime_followup',
+              mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
+            },
+          });
+          if (!smsResult.sent) {
+            logger.warn(`[public-quote] One-time SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          } else {
+            logger.info(`[public-quote] One-time SMS sent for lead ${lead.id}`);
+          }
         }
       } catch (e) { logger.error(`[public-quote] One-time SMS failed: ${e.message}`); }
     }

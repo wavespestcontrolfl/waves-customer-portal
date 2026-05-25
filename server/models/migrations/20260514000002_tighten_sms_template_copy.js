@@ -466,12 +466,20 @@ const TEMPLATES = [
     sort_order: 33,
   },
   {
+    template_key: 'estimate_accepted_annual_prepay',
+    name: 'Estimate Accepted — Annual Prepay',
+    category: 'estimates',
+    body: 'Hello {first_name}! Your {waveguard_tier} WaveGuard plan is approved. Our team will review and send your annual prepay invoice{amount_text}.\n\nQuestions or requests? Reply here.',
+    variables: ['first_name', 'waveguard_tier', 'amount_text'],
+    sort_order: 34,
+  },
+  {
     template_key: 'estimate_accepted_office',
     name: 'Estimate Accepted — Office Notification',
     category: 'estimates',
     body: 'Estimate accepted: {customer_name} at {address}. {waveguard_tier} WaveGuard ${monthly_total}/mo. Onboarding link sent.',
     variables: ['customer_name', 'address', 'waveguard_tier', 'monthly_total'],
-    sort_order: 34,
+    sort_order: 35,
   },
   {
     template_key: 'estimate_extended',

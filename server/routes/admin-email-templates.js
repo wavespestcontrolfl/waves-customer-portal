@@ -505,6 +505,32 @@ router.get('/send-history', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/email-templates/issues
+router.get('/issues', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const rows = await db('audit_log')
+      .where({ action: 'notification_template.email.render_issue' })
+      .orderBy('created_at', 'desc')
+      .limit(limit);
+    const issues = rows.map((row) => {
+      const metadata = EmailTemplates.asObject(row.metadata);
+      return {
+        id: row.id,
+        created_at: row.created_at,
+        template_key: metadata.template_key || null,
+        event_type: metadata.event_type || null,
+        workflow: metadata.workflow || null,
+        entity_type: metadata.entity_type || null,
+        entity_id: metadata.entity_id || null,
+        reason: metadata.reason || null,
+        unresolved_placeholders: metadata.unresolved_placeholders || null,
+      };
+    });
+    res.json({ issues });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/email-templates/suppressions
 router.get('/suppressions', async (req, res, next) => {
   try {

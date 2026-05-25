@@ -5,6 +5,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { formatSmsTemplateVars } = require('../utils/sms-time-format');
 const { TEMPLATES: CLEAN_DEFAULT_SMS_TEMPLATES } = require('../models/migrations/20260514000002_tighten_sms_template_copy');
 const SmsTemplateVariants = require('../services/sms-template-variants');
+const { auditNotificationTemplateIssue } = require('../services/audit-log');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -18,6 +19,51 @@ function canDeleteSmsTemplate(template) {
 
 function decorateTemplate(template) {
   return template ? { ...template, can_delete: canDeleteSmsTemplate(template) } : template;
+}
+
+function parseTemplateVariables(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map(String);
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function extractTemplatePlaceholders(body) {
+  const placeholders = new Set();
+  const re = /\{([a-zA-Z][a-zA-Z0-9_]*)\}/g;
+  let match;
+  while ((match = re.exec(String(body || '')))) {
+    placeholders.add(match[1]);
+  }
+  return [...placeholders];
+}
+
+function validateTemplateBody(body, variables) {
+  const allowed = new Set(parseTemplateVariables(variables));
+  const unknown = extractTemplatePlaceholders(body).filter((key) => !allowed.has(key));
+  if (!unknown.length) return null;
+  return {
+    error: 'Template body contains unknown placeholders',
+    unknown_placeholders: unknown,
+    allowed_placeholders: [...allowed],
+  };
+}
+
+function auditSmsTemplateIssue(templateKey, eventType, reason, details = {}) {
+  auditNotificationTemplateIssue({
+    channel: 'sms',
+    template_key: templateKey,
+    event_type: eventType,
+    workflow: details.workflow || null,
+    entity_type: details.entity_type || null,
+    entity_id: details.entity_id || null,
+    reason,
+    unresolved_placeholders: details.unresolved_placeholders || null,
+  }).catch(() => {});
 }
 
 // Auto-create table if missing + seed any new default templates that don't exist yet
@@ -72,6 +118,20 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /issues — recent SMS template render issues from audit_log.
+router.get('/issues', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
+    if (!(await db.schema.hasTable('audit_log'))) return res.json({ issues: [] });
+    const rows = await db('audit_log')
+      .where({ action: 'notification_template.sms.render_issue' })
+      .orderBy('created_at', 'desc')
+      .limit(limit)
+      .select('id', 'metadata', 'created_at');
+    res.json({ issues: rows });
+  } catch (err) { next(err); }
+});
+
 // GET /:id — single template
 router.get('/:id', async (req, res, next) => {
   try {
@@ -86,7 +146,14 @@ router.put('/:id', async (req, res, next) => {
   try {
     const { body, name, is_active, trigger_event_key } = req.body;
     const updates = { updated_at: new Date() };
-    if (body !== undefined) updates.body = body;
+    let existing = null;
+    if (body !== undefined) {
+      existing = await db('sms_templates').where({ id: req.params.id }).first();
+      if (!existing) return res.status(404).json({ error: 'Template not found' });
+      const validation = validateTemplateBody(body, existing.variables);
+      if (validation) return res.status(400).json(validation);
+      updates.body = body;
+    }
     if (name !== undefined) updates.name = name;
     if (is_active !== undefined) updates.is_active = is_active;
     if (trigger_event_key !== undefined) {
@@ -102,6 +169,8 @@ router.post('/', async (req, res, next) => {
   try {
     const { template_key, name, category, body, description, variables, is_internal } = req.body;
     if (!template_key || !name || !body) return res.status(400).json({ error: 'template_key, name, and body required' });
+    const validation = validateTemplateBody(body, variables || []);
+    if (validation) return res.status(400).json(validation);
     const [template] = await db('sms_templates').insert({
       template_key, name, category: category || 'custom', body,
       description, variables: variables ? JSON.stringify(variables) : null,
@@ -154,6 +223,10 @@ router.post('/:templateKey/variants', async (req, res, next) => {
     const { variantKey, variant_key, name, body, weight, status, isControl, is_control, metadata } = req.body || {};
     const cleanVariantKey = String(variantKey || variant_key || '').trim();
     if (!cleanVariantKey || !body) return res.status(400).json({ error: 'variantKey and body required' });
+    const template = await db('sms_templates').where({ template_key: req.params.templateKey }).first();
+    if (!template) return res.status(404).json({ error: 'Template not found' });
+    const validation = validateTemplateBody(body, template.variables);
+    if (validation) return res.status(400).json(validation);
     const [variant] = await db('sms_template_variants')
       .insert({
         template_key: req.params.templateKey,
@@ -184,6 +257,12 @@ router.post('/:templateKey/variants', async (req, res, next) => {
 router.put('/:templateKey/variants/:variantKey', async (req, res, next) => {
   try {
     const updates = { updated_at: new Date() };
+    if (req.body.body !== undefined) {
+      const template = await db('sms_templates').where({ template_key: req.params.templateKey }).first();
+      if (!template) return res.status(404).json({ error: 'Template not found' });
+      const validation = validateTemplateBody(req.body.body, template.variables);
+      if (validation) return res.status(400).json(validation);
+    }
     for (const [inputKey, dbKey] of [
       ['name', 'name'],
       ['body', 'body'],
@@ -264,19 +343,39 @@ router.isTemplateActive = async function(messageType) {
 };
 
 // Get template body by key (returns null if disabled)
-router.getTemplate = async function(templateKey, vars = {}) {
+router.getTemplate = async function(templateKey, vars = {}, context = {}) {
   try {
-    if (!(await db.schema.hasTable('sms_templates'))) return null;
+    if (!(await db.schema.hasTable('sms_templates'))) {
+      auditSmsTemplateIssue(templateKey, 'missing_table', 'sms_templates table missing', context);
+      return null;
+    }
     const t = await db('sms_templates').where({ template_key: templateKey }).first();
-    if (!t || t.is_active === false) return null;
+    if (!t) {
+      auditSmsTemplateIssue(templateKey, 'missing_template', 'template row missing', context);
+      return null;
+    }
+    if (t.is_active === false) {
+      auditSmsTemplateIssue(templateKey, 'inactive_template', 'template inactive', context);
+      return null;
+    }
     const variant = await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
     let body = variant?.body || t.body;
     for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {
       body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), val == null ? '' : String(val));
     }
-    if (/\{[a-zA-Z][a-zA-Z0-9_]*\}/.test(body)) return null;
+    const unresolved = extractTemplatePlaceholders(body);
+    if (unresolved.length) {
+      auditSmsTemplateIssue(templateKey, 'unresolved_placeholders', 'template rendered with unresolved placeholders', {
+        ...context,
+        unresolved_placeholders: unresolved,
+      });
+      return null;
+    }
     return body;
-  } catch { return null; }
+  } catch (err) {
+    auditSmsTemplateIssue(templateKey, 'render_error', err.message || 'template render failed', context);
+    return null;
+  }
 };
 
 module.exports = router;

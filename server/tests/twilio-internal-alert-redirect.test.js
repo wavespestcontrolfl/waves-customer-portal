@@ -98,4 +98,20 @@ describe('Twilio internal admin alert redirect', () => {
       body: 'New lead fallback path',
     }));
   });
+
+  test('blocks internal_alert SMS to unknown recipients by default', async () => {
+    const result = await TwilioService.sendSMS(
+      '+19415550123',
+      'Internal billing alert',
+      { messageType: 'internal_alert', link: '/admin/revenue' },
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      blocked: true,
+      guardBlocked: true,
+      error: 'Internal/admin alert recipient is not a known owner/admin phone',
+    });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+  });
 });

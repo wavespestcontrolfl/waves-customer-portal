@@ -257,6 +257,12 @@ function validateContract(input) {
   if (!policyModule.MESSAGE_PURPOSES.includes(input.purpose)) {
     return { ok: false, reason: `purpose must be one of: ${policyModule.MESSAGE_PURPOSES.join(', ')}` };
   }
+  if (input.purpose === 'internal_briefing' && !['internal', 'admin'].includes(input.audience)) {
+    return { ok: false, reason: 'internal_briefing purpose requires internal or admin audience' };
+  }
+  if (['internal', 'admin'].includes(input.audience) && input.purpose !== 'internal_briefing') {
+    return { ok: false, reason: 'internal/admin audience requires internal_briefing purpose' };
+  }
   if (
     input.identityTrustLevel != null &&
     !policyModule.IDENTITY_TRUST_LEVELS.includes(input.identityTrustLevel)

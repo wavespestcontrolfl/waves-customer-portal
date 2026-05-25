@@ -22,10 +22,10 @@ const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateStri
  * Render an SMS body from sms_templates. If the template is missing/disabled,
  * callers skip the SMS rather than sending hardcoded customer copy.
  */
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch { /* fall through */ }
@@ -33,10 +33,10 @@ async function renderTemplate(templateKey, vars) {
   return null;
 }
 
-async function renderRequiredTemplate(templateKey, vars) {
+async function renderRequiredTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch (err) {
@@ -404,6 +404,7 @@ const AppointmentReminders = {
               return renderTemplate(
                 'appointment_confirmation',
                 { first_name: firstName, service_type: registration.serviceLabel, date, time, day },
+                { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
               );
             }, 'confirmation', 'appointment_confirmation');
 
@@ -501,6 +502,7 @@ const AppointmentReminders = {
               return renderTemplate(
                 'reminder_72h',
                 { first_name: firstName, service_type: serviceLabel, day, date, time },
+                { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
               );
             }, 'reminder_72h', 'appointment_reminder_72h');
 
@@ -558,6 +560,7 @@ const AppointmentReminders = {
               return renderTemplate(
                 'reminder_24h',
                 { first_name: firstName, service_type: serviceLabel, time },
+                { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
               );
             }, 'appointment_reminder', 'appointment_reminder_24h');
 
@@ -640,6 +643,10 @@ const AppointmentReminders = {
             day,
             date,
             time,
+          }, {
+            workflow: 'appointment_rescheduled',
+            entity_type: 'scheduled_service',
+            entity_id: scheduledServiceId,
           });
         }, 'appointment_rescheduled', 'appointment_confirmation');
         logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -692,6 +699,10 @@ const AppointmentReminders = {
             service_type: serviceLabel,
             day,
             date,
+          }, {
+            workflow: 'appointment_cancelled',
+            entity_type: 'scheduled_service',
+            entity_id: scheduledServiceId,
           });
         }, 'appointment_cancelled', 'appointment_cancellation');
         logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
@@ -751,6 +762,7 @@ const AppointmentReminders = {
           return renderTemplate(
             'appointment_series_cancelled',
             { first_name: firstName, service_type: serviceLabel, scope: scopeText },
+            { workflow: 'appointment_series_cancelled', entity_type: 'scheduled_service', entity_id: representativeScheduledServiceId || record.scheduled_service_id },
           );
         }, 'appointment_series_cancelled', 'appointment_cancellation');
         logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);

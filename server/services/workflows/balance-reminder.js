@@ -231,6 +231,10 @@ class BalanceReminder {
       service_type: service.service_type || "service",
       service_timing: serviceTiming,
       pay_url: link,
+    }, {
+      workflow: `balance_reminder_${tier}`,
+      entity_type: "invoice",
+      entity_id: balance.oldestInvoiceId,
     });
     if (!message) {
       throw new Error(`balance_reminder_${tier} template missing/disabled`);
@@ -503,6 +507,10 @@ class BalanceReminder {
           service_date: completedOn || "your service date",
           service_date_clause: dateClause,
           pay_url: link,
+        }, {
+          workflow: "balance_late_payment_check",
+          entity_type: "invoice",
+          entity_id: oldestInvoice.id,
         });
       }
 
@@ -567,6 +575,10 @@ class BalanceReminder {
     if (recentReminder) {
       const body = await renderSmsTemplate("balance_payment_received", {
         first_name: customer.first_name || "there",
+      }, {
+        workflow: "balance_payment_received",
+        entity_type: "customer",
+        entity_id: customerId,
       });
       if (!body) {
         logger.warn(

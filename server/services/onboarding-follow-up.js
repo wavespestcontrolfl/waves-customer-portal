@@ -24,10 +24,10 @@ const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body && !body.includes('{first_name}')) return body;
     }
   } catch { /* fall through */ }
@@ -201,6 +201,7 @@ const OnboardingFollowUp = {
           const url = await onboardUrl(ob);
           const smsBody = await renderTemplate('onboarding_followup_24h',
             { first_name: firstName, onboarding_url: url, waveguard_tier: ob.waveguard_tier || 'Bronze' },
+            { workflow: 'onboarding_followup_24h', entity_type: 'onboarding_session', entity_id: ob.id },
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
@@ -235,6 +236,7 @@ const OnboardingFollowUp = {
           const url = await onboardUrl(ob);
           const smsBody = await renderTemplate('onboarding_followup_72h',
             { first_name: firstName, onboarding_url: url, waveguard_tier: ob.waveguard_tier || 'Bronze' },
+            { workflow: 'onboarding_followup_72h', entity_type: 'onboarding_session', entity_id: ob.id },
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,
@@ -276,6 +278,7 @@ const OnboardingFollowUp = {
           const tier = ob.waveguard_tier || 'Bronze';
           const smsBody = await renderTemplate('onboarding_followup_expiring',
             { first_name: firstName, onboarding_url: url, expires_at: expDate, waveguard_tier: tier },
+            { workflow: 'onboarding_followup_expiring', entity_type: 'onboarding_session', entity_id: ob.id },
           );
           const ok = await sendDualChannel(ob, {
             sms: smsBody,

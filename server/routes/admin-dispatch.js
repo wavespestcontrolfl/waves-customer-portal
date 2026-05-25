@@ -76,10 +76,10 @@ function computeTechEta(techRow, jobCoords) {
   return Math.max(1, Math.round((distMi / 30) * 60));
 }
 
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch { /* fall through */ }
@@ -166,10 +166,10 @@ function shouldInsertNoActivityFinding({
     && !String(concernText || '').trim();
 }
 
-async function renderRequiredTemplate(templateKey, vars) {
+async function renderRequiredTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch (err) {
@@ -2615,7 +2615,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           : null;
         if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
           sentSmsType = serviceReportV1SmsContext.smsType;
-          const body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars);
+          const body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
+            workflow: 'dispatch_service_complete',
+            entity_type: 'service_record',
+            entity_id: record.id,
+          });
           if (!body) throw new Error(`SMS template ${sentSmsType} is missing or inactive`);
           sentSmsBody = `${body}${reviewSuffix}`.trim();
           completionSmsWasTruncated = false;
@@ -2625,6 +2629,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             service_type: displayServiceType,
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
+          }, {
+            workflow: 'dispatch_service_complete',
+            entity_type: 'service_record',
+            entity_id: record.id,
           });
           if (!body) throw new Error('SMS template service_complete_with_invoice is missing or inactive');
           sentSmsType = 'service_complete_with_invoice';
@@ -2636,6 +2644,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
+            }, {
+              workflow: 'dispatch_service_complete',
+              entity_type: 'service_record',
+              entity_id: record.id,
             });
             if (!body) throw new Error('SMS template service_complete_prepaid is missing or inactive');
             sentSmsType = 'service_complete_prepaid';
@@ -2646,6 +2658,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
+            }, {
+              workflow: 'dispatch_service_complete',
+              entity_type: 'service_record',
+              entity_id: record.id,
             });
             if (!body) throw new Error('SMS template service_complete is missing or inactive');
             body = ensureSmsContainsReportLink(body, reportSmsUrl || reportUrl);
@@ -2657,6 +2673,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               const concise = await renderRequiredTemplate('service_complete_concise', {
                 first_name: svc.first_name || '',
                 portal_url: reportUrl,
+              }, {
+                workflow: 'dispatch_service_complete',
+                entity_type: 'service_record',
+                entity_id: record.id,
               });
               ({ body: sentSmsBody, truncated: completionSmsWasTruncated } = withRecap(body, concise));
             }
@@ -3118,6 +3138,10 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
               first_name: svc.first_name || 'there',
               start_date: displayDate,
               window_text: windowText,
+            }, {
+              workflow: 'dispatch_series_reschedule',
+              entity_type: 'scheduled_service',
+              entity_id: req.params.serviceId,
             });
             const msg = await sendCustomerMessage({
               to: svc.phone,
@@ -3183,7 +3207,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       } else {
         try {
           const vars = formatRescheduleTemplateVars(svc);
-          const body = await renderRequiredTemplate('appointment_rescheduled', vars);
+          const body = await renderRequiredTemplate('appointment_rescheduled', vars, {
+            workflow: 'dispatch_reschedule',
+            entity_type: 'scheduled_service',
+            entity_id: req.params.serviceId,
+          });
           const msg = await sendCustomerMessage({
             to: svc.phone,
             body,

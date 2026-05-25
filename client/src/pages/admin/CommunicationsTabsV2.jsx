@@ -41,6 +41,8 @@ import {
   Button,
   Card,
   CardBody,
+  Input,
+  Select,
   Switch,
   Textarea,
   Table,
@@ -61,15 +63,59 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+  }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const unknown = data?.unknown_placeholders?.length
+        ? `: ${data.unknown_placeholders.map((key) => `{${key}}`).join(", ")}`
+        : "";
+      throw new Error(`${data?.error || `HTTP ${r.status}`}${unknown}`);
+    }
+    return data;
   });
 }
 
 function canDeleteSmsTemplate(template) {
   if (template?.can_delete !== undefined) return template.can_delete === true;
   return template?.category === "custom";
+}
+
+function variantDraftFrom(variant = {}) {
+  return {
+    variantKey: variant.variant_key || "",
+    name: variant.name || variant.variant_key || "",
+    body: variant.body || "",
+    weight: variant.weight ?? 1,
+    status: variant.status || "active",
+    isControl: !!variant.is_control,
+  };
+}
+
+function variantDraftId(templateKey, variantKey) {
+  return `${templateKey}:${variantKey || "__new__"}`;
+}
+
+function issueMetadata(issue = {}) {
+  const value = issue.metadata || {};
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function issueTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 // ── SMS Templates Tab ───────────────────────────────────────────────
@@ -81,6 +127,14 @@ export function SmsTemplatesTabV2() {
   const [editBody, setEditBody] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(null);
+  const [saveError, setSaveError] = useState("");
+  const [variantsByKey, setVariantsByKey] = useState({});
+  const [loadingVariants, setLoadingVariants] = useState(null);
+  const [variantDrafts, setVariantDrafts] = useState({});
+  const [variantEditing, setVariantEditing] = useState({});
+  const [variantErrors, setVariantErrors] = useState({});
+  const [variantSaving, setVariantSaving] = useState(null);
+  const [templateIssues, setTemplateIssues] = useState([]);
   const [filter, setFilter] = useState("all");
   const [highlightKey, setHighlightKey] = useState(null);
   const hashApplied = useRef(false);
@@ -92,6 +146,12 @@ export function SmsTemplatesTabV2() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    adminFetch("/admin/sms-templates/issues?limit=10")
+      .then((d) => setTemplateIssues(d.issues || []))
+      .catch(() => setTemplateIssues([]));
   }, []);
 
   useEffect(() => {
@@ -115,6 +175,7 @@ export function SmsTemplatesTabV2() {
 
   const handleSave = async (id) => {
     setSaving(true);
+    setSaveError("");
     try {
       await adminFetch(`/admin/sms-templates/${id}`, {
         method: "PUT",
@@ -124,10 +185,133 @@ export function SmsTemplatesTabV2() {
         prev.map((t) => (t.id === id ? { ...t, body: editBody } : t)),
       );
       setEditing(null);
-    } catch {
-      alert("Save failed");
+    } catch (err) {
+      setSaveError(err.message || "Save failed");
     }
     setSaving(false);
+  };
+
+  const loadVariants = async (templateKey) => {
+    if (!templateKey || variantsByKey[templateKey]) return;
+    setLoadingVariants(templateKey);
+    try {
+      const data = await adminFetch(`/admin/sms-templates/${templateKey}/variants`);
+      setVariantsByKey((prev) => ({
+        ...prev,
+        [templateKey]: data.variants || [],
+      }));
+    } catch {
+      setVariantsByKey((prev) => ({ ...prev, [templateKey]: [] }));
+    }
+    setLoadingVariants(null);
+  };
+
+  const setVariantDraftField = (draftId, field, value) => {
+    setVariantDrafts((prev) => ({
+      ...prev,
+      [draftId]: {
+        ...prev[draftId],
+        [field]: value,
+      },
+    }));
+    setVariantErrors((prev) => ({ ...prev, [draftId]: "" }));
+  };
+
+  const startNewVariant = (templateKey) => {
+    const draftId = variantDraftId(templateKey);
+    setVariantDrafts((prev) => ({
+      ...prev,
+      [draftId]: variantDraftFrom(),
+    }));
+    setVariantEditing((prev) => ({ ...prev, [draftId]: true }));
+    setVariantErrors((prev) => ({ ...prev, [draftId]: "" }));
+  };
+
+  const startEditVariant = (templateKey, variant) => {
+    const draftId = variantDraftId(templateKey, variant.variant_key);
+    setVariantDrafts((prev) => ({
+      ...prev,
+      [draftId]: variantDraftFrom(variant),
+    }));
+    setVariantEditing((prev) => ({ ...prev, [draftId]: true }));
+    setVariantErrors((prev) => ({ ...prev, [draftId]: "" }));
+  };
+
+  const cancelVariantEdit = (draftId) => {
+    setVariantEditing((prev) => ({ ...prev, [draftId]: false }));
+    setVariantErrors((prev) => ({ ...prev, [draftId]: "" }));
+  };
+
+  const saveVariant = async (templateKey, variantKey = null) => {
+    const draftId = variantDraftId(templateKey, variantKey);
+    const draft = variantDrafts[draftId] || variantDraftFrom();
+    const cleanVariantKey = String(draft.variantKey || "").trim();
+    if (!variantKey && !cleanVariantKey) {
+      setVariantErrors((prev) => ({ ...prev, [draftId]: "Variant key required" }));
+      return;
+    }
+    if (!String(draft.body || "").trim()) {
+      setVariantErrors((prev) => ({ ...prev, [draftId]: "Body required" }));
+      return;
+    }
+
+    setVariantSaving(draftId);
+    setVariantErrors((prev) => ({ ...prev, [draftId]: "" }));
+    try {
+      const payload = {
+        variantKey: cleanVariantKey,
+        name: draft.name || cleanVariantKey,
+        body: draft.body,
+        weight: Number(draft.weight || 0),
+        status: draft.status || "active",
+        isControl: !!draft.isControl,
+      };
+      const data = await adminFetch(
+        variantKey
+          ? `/admin/sms-templates/${templateKey}/variants/${variantKey}`
+          : `/admin/sms-templates/${templateKey}/variants`,
+        {
+          method: variantKey ? "PUT" : "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+      const saved = data.variant;
+      setVariantsByKey((prev) => {
+        const current = prev[templateKey] || [];
+        const next = current.some((v) => v.variant_key === saved.variant_key)
+          ? current.map((v) => (v.variant_key === saved.variant_key ? saved : v))
+          : [...current, saved];
+        return { ...prev, [templateKey]: next };
+      });
+      setVariantEditing((prev) => ({ ...prev, [draftId]: false }));
+      if (!variantKey) {
+        setVariantDrafts((prev) => ({
+          ...prev,
+          [draftId]: variantDraftFrom(),
+        }));
+      }
+    } catch (err) {
+      setVariantErrors((prev) => ({ ...prev, [draftId]: err.message || "Variant save failed" }));
+    }
+    setVariantSaving(null);
+  };
+
+  const deleteVariant = async (templateKey, variantKey) => {
+    if (!window.confirm("Delete this SMS variant? This can't be undone.")) return;
+    const draftId = variantDraftId(templateKey, variantKey);
+    setVariantSaving(draftId);
+    try {
+      await adminFetch(`/admin/sms-templates/${templateKey}/variants/${variantKey}`, {
+        method: "DELETE",
+      });
+      setVariantsByKey((prev) => ({
+        ...prev,
+        [templateKey]: (prev[templateKey] || []).filter((v) => v.variant_key !== variantKey),
+      }));
+    } catch (err) {
+      setVariantErrors((prev) => ({ ...prev, [draftId]: err.message || "Variant delete failed" }));
+    }
+    setVariantSaving(null);
   };
 
   const handleDelete = async (id) => {
@@ -151,6 +335,18 @@ export function SmsTemplatesTabV2() {
     setTemplates((prev) =>
       prev.map((x) => (x.id === t.id ? { ...x, is_active: !x.is_active } : x)),
     );
+  };
+
+  const jumpToTemplate = (templateKey) => {
+    if (!templateKey) return;
+    setFilter("all");
+    setHighlightKey(templateKey);
+    window.setTimeout(() => {
+      document.getElementById(`sms-template-row-${templateKey}`)?.scrollIntoView({
+        block: "center",
+        behavior: "smooth",
+      });
+    }, 80);
   };
 
   const categories = [...new Set(templates.map((t) => t.category))];
@@ -209,6 +405,61 @@ export function SmsTemplatesTabV2() {
           ))}
         </div>{" "}
       </div>{" "}
+      {templateIssues.length ? (
+        <Card>
+          <CardBody>
+            <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
+              <div className="text-13 font-medium text-ink-primary">
+                Recent Template Issues
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => adminFetch("/admin/sms-templates/issues?limit=10")
+                  .then((d) => setTemplateIssues(d.issues || []))
+                  .catch(() => setTemplateIssues([]))}
+              >
+                Refresh
+              </Button>
+            </div>
+            <div className="flex flex-col gap-2">
+              {templateIssues.map((issue) => {
+                const meta = issueMetadata(issue);
+                return (
+                  <button
+                    key={issue.id || `${meta.template_key}-${issue.created_at}`}
+                    type="button"
+                    onClick={() => jumpToTemplate(meta.template_key)}
+                    className="w-full text-left rounded-xs border-hairline border-zinc-200 bg-zinc-50 hover:bg-zinc-100 transition-colors p-2"
+                  >
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <span className="text-12 font-mono text-ink-primary">
+                        {meta.template_key || "unknown_template"}
+                      </span>
+                      <span className="text-11 text-ink-tertiary">
+                        {issueTime(issue.created_at)}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-12 text-ink-secondary">
+                      {meta.event_type || "render_issue"}: {meta.reason || "Template could not render"}
+                    </div>
+                    {(meta.workflow || meta.entity_id) ? (
+                      <div className="mt-1 text-11 text-ink-tertiary">
+                        {[meta.workflow, meta.entity_type, meta.entity_id].filter(Boolean).join(" · ")}
+                      </div>
+                    ) : null}
+                    {meta.unresolved_placeholders?.length ? (
+                      <div className="mt-1 text-11 text-alert-fg">
+                        {meta.unresolved_placeholders.map((key) => `{${key}}`).join(", ")}
+                      </div>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          </CardBody>
+        </Card>
+      ) : null}
       <div className="flex flex-col gap-2">
         {filtered.map((t) => (
           <Card
@@ -265,7 +516,9 @@ export function SmsTemplatesTabV2() {
                       size="sm"
                       onClick={() => {
                         setEditing(t.id);
+                        setSaveError("");
                         setEditBody(t.body);
+                        loadVariants(t.template_key);
                       }}
                     >
                       Edit
@@ -286,11 +539,236 @@ export function SmsTemplatesTabV2() {
                 </div>{" "}
               </div>
               {editing === t.id ? (
-                <Textarea
-                  value={editBody}
-                  onChange={(e) => setEditBody(e.target.value)}
-                  rows={4}
-                />
+                <div className="flex flex-col gap-2">
+                  <Textarea
+                    value={editBody}
+                    onChange={(e) => {
+                      setEditBody(e.target.value);
+                      setSaveError("");
+                    }}
+                    rows={4}
+                  />
+                  {saveError ? (
+                    <div className="text-12 text-alert-fg">{saveError}</div>
+                  ) : null}
+                  <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-3">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <div className="text-11 uppercase tracking-label text-ink-tertiary">
+                        Variants
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {loadingVariants === t.template_key ? (
+                          <div className="text-11 text-ink-tertiary">Loading...</div>
+                        ) : null}
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => startNewVariant(t.template_key)}
+                        >
+                          Add Variant
+                        </Button>
+                      </div>
+                    </div>
+                    {variantEditing[variantDraftId(t.template_key)] ? (
+                      <div className="mb-2 rounded-xs border-hairline border-zinc-200 bg-white p-2">
+                        <div className="grid gap-2 md:grid-cols-4">
+                          <Input
+                            value={variantDrafts[variantDraftId(t.template_key)]?.variantKey || ""}
+                            onChange={(e) => setVariantDraftField(variantDraftId(t.template_key), "variantKey", e.target.value)}
+                            placeholder="variant_key"
+                          />
+                          <Input
+                            value={variantDrafts[variantDraftId(t.template_key)]?.name || ""}
+                            onChange={(e) => setVariantDraftField(variantDraftId(t.template_key), "name", e.target.value)}
+                            placeholder="Name"
+                          />
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            value={variantDrafts[variantDraftId(t.template_key)]?.weight ?? 1}
+                            onChange={(e) => setVariantDraftField(variantDraftId(t.template_key), "weight", e.target.value)}
+                          />
+                          <Select
+                            value={variantDrafts[variantDraftId(t.template_key)]?.status || "active"}
+                            onChange={(e) => setVariantDraftField(variantDraftId(t.template_key), "status", e.target.value)}
+                          >
+                            <option value="active">Active</option>
+                            <option value="draft">Draft</option>
+                            <option value="paused">Paused</option>
+                          </Select>
+                        </div>
+                        <Textarea
+                          className="mt-2"
+                          value={variantDrafts[variantDraftId(t.template_key)]?.body || ""}
+                          onChange={(e) => setVariantDraftField(variantDraftId(t.template_key), "body", e.target.value)}
+                          rows={3}
+                          placeholder="Variant body"
+                        />
+                        <div className="mt-2 flex items-center justify-between gap-3 flex-wrap">
+                          <label className="flex items-center gap-2 text-12 text-ink-secondary">
+                            <Switch
+                              checked={!!variantDrafts[variantDraftId(t.template_key)]?.isControl}
+                              onChange={() => setVariantDraftField(
+                                variantDraftId(t.template_key),
+                                "isControl",
+                                !variantDrafts[variantDraftId(t.template_key)]?.isControl,
+                              )}
+                            />
+                            Control
+                          </label>
+                          <div className="flex items-center gap-2">
+                            {variantErrors[variantDraftId(t.template_key)] ? (
+                              <div className="text-12 text-alert-fg">
+                                {variantErrors[variantDraftId(t.template_key)]}
+                              </div>
+                            ) : null}
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              onClick={() => saveVariant(t.template_key)}
+                              disabled={variantSaving === variantDraftId(t.template_key)}
+                            >
+                              Save Variant
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => cancelVariantEdit(variantDraftId(t.template_key))}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                    {(variantsByKey[t.template_key] || []).length ? (
+                      <div className="flex flex-col gap-2">
+                        {variantsByKey[t.template_key].map((variant) => (
+                          <div
+                            key={variant.id || variant.variant_key}
+                            className="flex items-start justify-between gap-3 rounded-xs border-hairline border-zinc-200 bg-white p-2"
+                          >
+                            {variantEditing[variantDraftId(t.template_key, variant.variant_key)] ? (
+                              <div className="min-w-0 flex-1">
+                                <div className="grid gap-2 md:grid-cols-4">
+                                  <Input
+                                    value={variant.variant_key}
+                                    disabled
+                                  />
+                                  <Input
+                                    value={variantDrafts[variantDraftId(t.template_key, variant.variant_key)]?.name || ""}
+                                    onChange={(e) => setVariantDraftField(variantDraftId(t.template_key, variant.variant_key), "name", e.target.value)}
+                                    placeholder="Name"
+                                  />
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    step="0.1"
+                                    value={variantDrafts[variantDraftId(t.template_key, variant.variant_key)]?.weight ?? 1}
+                                    onChange={(e) => setVariantDraftField(variantDraftId(t.template_key, variant.variant_key), "weight", e.target.value)}
+                                  />
+                                  <Select
+                                    value={variantDrafts[variantDraftId(t.template_key, variant.variant_key)]?.status || "active"}
+                                    onChange={(e) => setVariantDraftField(variantDraftId(t.template_key, variant.variant_key), "status", e.target.value)}
+                                  >
+                                    <option value="active">Active</option>
+                                    <option value="draft">Draft</option>
+                                    <option value="paused">Paused</option>
+                                  </Select>
+                                </div>
+                                <Textarea
+                                  className="mt-2"
+                                  value={variantDrafts[variantDraftId(t.template_key, variant.variant_key)]?.body || ""}
+                                  onChange={(e) => setVariantDraftField(variantDraftId(t.template_key, variant.variant_key), "body", e.target.value)}
+                                  rows={3}
+                                />
+                                <div className="mt-2 flex items-center justify-between gap-3 flex-wrap">
+                                  <label className="flex items-center gap-2 text-12 text-ink-secondary">
+                                    <Switch
+                                      checked={!!variantDrafts[variantDraftId(t.template_key, variant.variant_key)]?.isControl}
+                                      onChange={() => setVariantDraftField(
+                                        variantDraftId(t.template_key, variant.variant_key),
+                                        "isControl",
+                                        !variantDrafts[variantDraftId(t.template_key, variant.variant_key)]?.isControl,
+                                      )}
+                                    />
+                                    Control
+                                  </label>
+                                  <div className="flex items-center gap-2">
+                                    {variantErrors[variantDraftId(t.template_key, variant.variant_key)] ? (
+                                      <div className="text-12 text-alert-fg">
+                                        {variantErrors[variantDraftId(t.template_key, variant.variant_key)]}
+                                      </div>
+                                    ) : null}
+                                    <Button
+                                      variant="primary"
+                                      size="sm"
+                                      onClick={() => saveVariant(t.template_key, variant.variant_key)}
+                                      disabled={variantSaving === variantDraftId(t.template_key, variant.variant_key)}
+                                    >
+                                      Save Variant
+                                    </Button>
+                                    <Button
+                                      variant="secondary"
+                                      size="sm"
+                                      onClick={() => cancelVariantEdit(variantDraftId(t.template_key, variant.variant_key))}
+                                    >
+                                      Cancel
+                                    </Button>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-12 font-medium text-ink-primary">
+                                      {variant.name || variant.variant_key}
+                                    </span>
+                                    <Badge tone={variant.status === "active" ? "strong" : "neutral"}>
+                                      {variant.status || "draft"}
+                                    </Badge>
+                                    {variant.is_control ? <Badge tone="neutral">Control</Badge> : null}
+                                  </div>
+                                  <div className="mt-1 text-12 text-ink-secondary whitespace-pre-wrap">
+                                    {variant.body}
+                                  </div>
+                                </div>
+                                <div className="shrink-0 flex items-center gap-2">
+                                  <div className="text-11 font-mono u-nums text-ink-tertiary">
+                                    w{variant.weight ?? 1}
+                                  </div>
+                                  <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => startEditVariant(t.template_key, variant)}
+                                  >
+                                    Edit
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="px-2"
+                                    aria-label={`Delete ${variant.name || variant.variant_key}`}
+                                    onClick={() => deleteVariant(t.template_key, variant.variant_key)}
+                                    disabled={variantSaving === variantDraftId(t.template_key, variant.variant_key)}
+                                  >
+                                    <Trash2 size={14} />
+                                  </Button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-12 text-ink-tertiary">
+                        No active SMS variants configured for this template.
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
                 <div className="text-12 text-ink-secondary leading-relaxed whitespace-pre-wrap">
                   {t.body}

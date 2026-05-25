@@ -24,6 +24,7 @@ jest.mock('../routes/admin-sms-templates', () => ({
 const EmailTemplates = require('../services/email-template-library');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { _private } = require('../services/estimate-follow-up');
+const smsTemplates = require('../routes/admin-sms-templates');
 
 const baseEst = {
   id: 'est-1',
@@ -40,6 +41,20 @@ beforeEach(() => {
 });
 
 describe('estimate follow-up emails via template library', () => {
+  test('SMS renderer forwards workflow/entity context to template issues', async () => {
+    await _private.renderTemplate(
+      'estimate_followup_unviewed',
+      { first_name: 'Taylor', estimate_url: 'https://portal/x' },
+      { workflow: 'estimate_follow_up', entity_type: 'estimate', entity_id: 'est-1' },
+    );
+
+    expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
+      'estimate_followup_unviewed',
+      { first_name: 'Taylor', estimate_url: 'https://portal/x' },
+      { workflow: 'estimate_follow_up', entity_type: 'estimate', entity_id: 'est-1' },
+    );
+  });
+
   test('unviewed stage uses estimate.unviewed_followup with stage-scoped idempotency', async () => {
     EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true });
 

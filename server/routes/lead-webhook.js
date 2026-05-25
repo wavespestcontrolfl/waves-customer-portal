@@ -403,7 +403,11 @@ router.post('/', async (req, res) => {
     // thing in the morning without any back-and-forth. Edit copy in the
     // admin UI.
     try {
-      const replyMsg = await renderRequiredSmsTemplate('lead_auto_reply_biz', { first_name: firstName });
+      const replyMsg = await renderRequiredSmsTemplate(
+        'lead_auto_reply_biz',
+        { first_name: firstName },
+        { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customer.id }
+      );
 
       const smsResult = await sendCustomerMessage({
         to: phoneFormatted,

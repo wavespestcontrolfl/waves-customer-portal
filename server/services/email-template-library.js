@@ -6,6 +6,7 @@ const {
   ensureLegalTextFooter,
   ctaButton,
 } = require('./email-template');
+const { auditNotificationTemplateIssue } = require('./audit-log');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
@@ -169,6 +170,34 @@ function productionPlaceholderRenderedValues(rendered = {}) {
     findings.push('rendered_placeholder_copy');
   }
   return findings.sort();
+}
+
+async function auditEmailTemplateIssue({
+  templateKey,
+  versionId = null,
+  eventType,
+  reason,
+  recipientType = null,
+  recipientId = null,
+  triggerEventId = null,
+  automationRunId = null,
+  idempotencyKey = null,
+  missingVariables = null,
+}) {
+  try {
+    await auditNotificationTemplateIssue({
+      channel: 'email',
+      template_key: templateKey || (versionId ? `version:${versionId}` : 'unknown'),
+      event_type: eventType,
+      workflow: triggerEventId || automationRunId || idempotencyKey || null,
+      entity_type: recipientType,
+      entity_id: recipientId,
+      reason,
+      unresolved_placeholders: missingVariables,
+    });
+  } catch {
+    // Rendering/sending must not fail because audit_log is unavailable.
+  }
 }
 
 function normalizeBlocks(blocks) {
@@ -545,17 +574,70 @@ async function sendTemplate({
   let version;
   if (versionId) {
     const row = await loadVersion(versionId);
-    if (!row) throw new Error('template version not found');
+    if (!row) {
+      await auditEmailTemplateIssue({
+        templateKey,
+        versionId,
+        eventType: 'missing_version',
+        reason: 'template version not found',
+        recipientType,
+        recipientId,
+        triggerEventId,
+        automationRunId,
+        idempotencyKey,
+      });
+      throw new Error('template version not found');
+    }
     template = row.template;
     version = row;
   } else {
     const loaded = await loadTemplateByKey(templateKey);
-    if (!loaded?.template) throw new Error('template not found');
+    if (!loaded?.template) {
+      await auditEmailTemplateIssue({
+        templateKey,
+        eventType: 'missing_template',
+        reason: 'template not found',
+        recipientType,
+        recipientId,
+        triggerEventId,
+        automationRunId,
+        idempotencyKey,
+      });
+      throw new Error('template not found');
+    }
     template = loaded.template;
     version = loaded.activeVersion;
   }
-  assertTemplateSendable(template, { test });
-  if (!version) throw new Error('active template not found');
+  try {
+    assertTemplateSendable(template, { test });
+  } catch (err) {
+    await auditEmailTemplateIssue({
+      templateKey: template?.template_key || templateKey,
+      versionId,
+      eventType: 'disabled_template',
+      reason: err.message,
+      recipientType,
+      recipientId,
+      triggerEventId,
+      automationRunId,
+      idempotencyKey,
+    });
+    throw err;
+  }
+  if (!version) {
+    await auditEmailTemplateIssue({
+      templateKey: template?.template_key || templateKey,
+      versionId,
+      eventType: 'missing_active_version',
+      reason: 'active template not found',
+      recipientType,
+      recipientId,
+      triggerEventId,
+      automationRunId,
+      idempotencyKey,
+    });
+    throw new Error('active template not found');
+  }
 
   let retryMessage = null;
   if (idempotencyKey) {
@@ -590,6 +672,18 @@ async function sendTemplate({
   if (rendered.missingPayload.length) {
     const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
     err.status = 400;
+    await auditEmailTemplateIssue({
+      templateKey: template.template_key,
+      versionId: version.id,
+      eventType: 'missing_payload',
+      reason: err.message,
+      recipientType,
+      recipientId,
+      triggerEventId,
+      automationRunId,
+      idempotencyKey,
+      missingVariables: rendered.missingPayload,
+    });
     throw err;
   }
   if (!test && String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
@@ -598,6 +692,18 @@ async function sendTemplate({
       const err = new Error(`Placeholder values are not allowed in production email payloads: ${placeholderFields.join(', ')}`);
       err.status = 400;
       err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_PAYLOAD';
+      await auditEmailTemplateIssue({
+        templateKey: template.template_key,
+        versionId: version.id,
+        eventType: 'placeholder_payload',
+        reason: err.message,
+        recipientType,
+        recipientId,
+        triggerEventId,
+        automationRunId,
+        idempotencyKey,
+        missingVariables: placeholderFields,
+      });
       throw err;
     }
     const renderedPlaceholderFields = productionPlaceholderRenderedValues(rendered);
@@ -605,6 +711,18 @@ async function sendTemplate({
       const err = new Error(`Placeholder values are not allowed in production rendered emails: ${renderedPlaceholderFields.join(', ')}`);
       err.status = 400;
       err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_RENDERED';
+      await auditEmailTemplateIssue({
+        templateKey: template.template_key,
+        versionId: version.id,
+        eventType: 'placeholder_rendered',
+        reason: err.message,
+        recipientType,
+        recipientId,
+        triggerEventId,
+        automationRunId,
+        idempotencyKey,
+        missingVariables: renderedPlaceholderFields,
+      });
       throw err;
     }
   }
@@ -690,6 +808,17 @@ async function sendTemplate({
       status: 'failed',
       error_message: err.message.slice(0, 1000),
       updated_at: new Date(),
+    });
+    await auditEmailTemplateIssue({
+      templateKey: template.template_key,
+      versionId: version.id,
+      eventType: 'provider_send_error',
+      reason: err.message,
+      recipientType,
+      recipientId,
+      triggerEventId,
+      automationRunId,
+      idempotencyKey,
     });
     throw err;
   }

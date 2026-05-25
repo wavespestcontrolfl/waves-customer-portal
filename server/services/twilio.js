@@ -230,6 +230,23 @@ const TwilioService = {
         return { success: true, sid: "owner-sms-disabled", suppressed: true };
       }
 
+      if (
+        isInternalAdminAlertType(options.messageType) &&
+        !isKnownOwnerPhone(to) &&
+        options.allowUnknownInternalAlertRecipient !== true
+      ) {
+        logger.error(
+          `[twilio] blocked internal/admin alert to unknown recipient ${maskPhone(to)} (messageType=${options.messageType || "n/a"}, bodyLen=${body?.length || 0})`,
+        );
+        return {
+          success: false,
+          sid: null,
+          blocked: true,
+          guardBlocked: true,
+          error: "Internal/admin alert recipient is not a known owner/admin phone",
+        };
+      }
+
       const { isEnabled } = require("../config/feature-gates");
       if (!isEnabled("twilioSms")) {
         logger.info(
@@ -478,7 +495,7 @@ const TwilioService = {
             first_name: customer.first_name || "",
             service_type: service.service_type || "service",
             time,
-          })
+          }, { workflow: "twilio_reminder_24h", entity_type: "scheduled_service", entity_id: scheduledServiceId })
         : null;
     if (!body) {
       logger.warn(
@@ -542,7 +559,7 @@ const TwilioService = {
           eta_line: etaLine,
           track_clause: trackClause,
           track_url: trackUrl || "",
-        });
+        }, { workflow: "tech_en_route", entity_type: "customer", entity_id: customerId });
       }
       if (!body) {
         logger.warn(
@@ -600,7 +617,7 @@ const TwilioService = {
         body = await smsTemplatesRouter.getTemplate("tech_arrived", {
           first_name: firstName,
           tech_name: customerTechName,
-        });
+        }, { workflow: "tech_arrived", entity_type: "customer", entity_id: customerId });
       }
       if (!body) {
         logger.warn(
@@ -662,7 +679,7 @@ const TwilioService = {
       typeof smsTemplatesRouter.getTemplate === "function"
         ? await smsTemplatesRouter.getTemplate("service_complete", {
             first_name: customer.first_name || "",
-          })
+          }, { workflow: "service_complete", entity_type: "service_record", entity_id: serviceRecordId })
         : null;
     if (!body) {
       logger.warn(
@@ -694,7 +711,7 @@ const TwilioService = {
             waveguard_tier: customer.waveguard_tier || "",
             amount: amount.toFixed(2),
             charge_date: date,
-          })
+          }, { workflow: "billing_reminder", entity_type: "customer", entity_id: customerId })
         : null;
     if (!body) {
       logger.warn(
@@ -721,7 +738,7 @@ const TwilioService = {
         ? await smsTemplatesRouter.getTemplate("seasonal_alert", {
             first_name: customer.first_name || "",
             tip,
-          })
+          }, { workflow: "seasonal_alert", entity_type: "customer", entity_id: customerId })
         : null;
     if (!body) {
       logger.warn(

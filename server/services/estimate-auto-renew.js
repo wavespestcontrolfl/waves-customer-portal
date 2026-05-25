@@ -26,10 +26,10 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const RENEWAL_DAYS = 7;
 
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body && !body.includes('{first_name}')) return body;
     }
   } catch (err) {
@@ -82,6 +82,7 @@ const EstimateAutoRenew = {
             try {
               smsBody = await renderTemplate('estimate_auto_renewed',
                 { first_name: firstName, estimate_url: url },
+                { workflow: 'estimate_auto_renew', entity_type: 'estimate', entity_id: est.id },
               );
             } catch (e) {
               logger.warn(`[est-auto-renew] SMS template unavailable for estimate ${est.id}: ${e.message}`);

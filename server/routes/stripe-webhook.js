@@ -1284,6 +1284,10 @@ async function handleAchFailure(paymentIntent, failureReason) {
         body = await renderRequiredSmsTemplate(messageType, {
           first_name: customer.first_name || 'there',
           billing_url: billingUrl,
+        }, {
+          workflow: messageType,
+          entity_type: 'payment_intent',
+          entity_id: paymentIntent.id,
         });
         const smsResult = await sendBillingSms(customer, body, {
           original_message_type: messageType,
@@ -1516,6 +1520,10 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
           const smsBody = await renderRequiredSmsTemplate('ach_payment_processing', {
             first_name: customer.first_name || 'there',
             invoice_number: freshInvoice.invoice_number || '',
+          }, {
+            workflow: 'ach_payment_processing',
+            entity_type: 'invoice',
+            entity_id: freshInvoice.id,
           });
           const smsResult = await sendBillingSms(customer, smsBody, {
             original_message_type: 'ach_payment_processing',
@@ -1589,6 +1597,10 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
         const body = await renderRequiredSmsTemplate('bank_verification_incomplete', {
           first_name: customer.first_name || 'there',
           billing_url: `${publicPortalUrl()}/billing`,
+        }, {
+          workflow: 'bank_verification_incomplete',
+          entity_type: 'payment_intent',
+          entity_id: piId,
         });
         const smsResult = await sendBillingSms(
           customer,
@@ -1746,6 +1758,10 @@ async function handleSetupIntentFailed(setupIntent) {
         const body = await renderRequiredSmsTemplate('bank_verification_failed', {
           first_name: customer.first_name || 'there',
           billing_url: `${publicPortalUrl()}/billing`,
+        }, {
+          workflow: 'bank_verification_failed',
+          entity_type: 'setup_intent',
+          entity_id: setupIntent.id,
         });
         const smsResult = await sendBillingSms(
           customer,

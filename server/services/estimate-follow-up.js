@@ -94,14 +94,16 @@ async function safetyGate(est) {
   return { skip: false };
 }
 
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === "function") {
-      return await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
+      if (body) return body;
     }
-  } catch {
-    /* template lookup failed → null */
+  } catch (err) {
+    logger.warn(`[est-followup] SMS template ${templateKey} lookup failed: ${err.message}`);
   }
+  logger.warn(`[est-followup] SMS template ${templateKey} missing/disabled/invalid`);
   return null;
 }
 
@@ -282,6 +284,10 @@ const EstimateFollowUp = {
           const smsBody = await renderTemplate("estimate_followup_unviewed", {
             first_name: firstName,
             estimate_url: url,
+          }, {
+            workflow: "estimate_follow_up",
+            entity_type: "estimate",
+            entity_id: est.id,
           });
           if (!smsBody) {
             logger.warn(
@@ -365,6 +371,10 @@ const EstimateFollowUp = {
           const smsBody = await renderTemplate("estimate_followup_viewed", {
             first_name: firstName,
             estimate_url: url,
+          }, {
+            workflow: "estimate_follow_up",
+            entity_type: "estimate",
+            entity_id: est.id,
           });
           if (!smsBody) {
             logger.warn(
@@ -449,6 +459,10 @@ const EstimateFollowUp = {
           const smsBody = await renderTemplate("estimate_followup_final", {
             first_name: firstName,
             estimate_url: url,
+          }, {
+            workflow: "estimate_follow_up",
+            entity_type: "estimate",
+            entity_id: est.id,
           });
           if (!smsBody) {
             logger.warn(
@@ -540,6 +554,10 @@ const EstimateFollowUp = {
             first_name: firstName,
             estimate_url: url,
             expires_at: expDate,
+          }, {
+            workflow: "estimate_follow_up",
+            entity_type: "estimate",
+            entity_id: est.id,
           });
           if (!smsBody) {
             logger.warn(
@@ -592,4 +610,4 @@ const EstimateFollowUp = {
 };
 
 module.exports = EstimateFollowUp;
-module.exports._private = { sendDualChannel, estimateEmailPayload };
+module.exports._private = { sendDualChannel, estimateEmailPayload, renderTemplate };

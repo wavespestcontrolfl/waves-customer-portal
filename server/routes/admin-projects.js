@@ -1301,6 +1301,10 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
             first_name: firstName,
             project_type: typeLabel,
             report_url: reportUrl,
+          }, {
+            workflow: 'project_report_ready',
+            entity_type: 'project',
+            entity_id: project.id,
           });
           const result = await sendCustomerMessage({
             to: normalized,
