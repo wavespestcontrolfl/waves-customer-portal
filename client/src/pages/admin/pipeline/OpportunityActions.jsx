@@ -126,7 +126,7 @@ function primaryAction(opportunity) {
 }
 
 function menuActions(opportunity) {
-  const actions = [];
+  const actions = [{ label: "View History", kind: "view_history" }];
   if (opportunity.leadId) actions.push({ label: "Open Legacy Leads", kind: "navigate", to: "/admin/leads" });
   if (opportunity.estimateId) actions.push({ label: "Open Legacy Estimates", kind: "navigate", to: "/admin/estimates?tab=estimates" });
   if (opportunity.customerId) actions.push({ label: "Open Customer", kind: "navigate", to: `/admin/customers?customerId=${encodeURIComponent(opportunity.customerId)}` });
@@ -158,6 +158,28 @@ function menuActions(opportunity) {
   return actions;
 }
 
+function formatHistoryDate(value) {
+  if (!value) return "Unknown time";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+  }).format(date);
+}
+
+function historyQuery(opportunity) {
+  const params = new URLSearchParams();
+  appendParam(params, "opportunityId", opportunity.opportunityId);
+  appendParam(params, "leadId", opportunity.leadId);
+  appendParam(params, "estimateId", opportunity.estimateId);
+  params.set("limit", "80");
+  return params.toString();
+}
+
 export default function OpportunityActions({ opportunity, onRefresh, adminFetch }) {
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
@@ -169,6 +191,10 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
   const [linkEstimate, setLinkEstimate] = useState(null);
   const [selectedLeadId, setSelectedLeadId] = useState("");
   const [loadingCandidates, setLoadingCandidates] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
+  const [history, setHistory] = useState(null);
   const action = primaryAction(opportunity);
   const missingEstimateReadyFields = !opportunity.address || !opportunity.serviceInterest || (!opportunity.phone && !opportunity.email);
   const pendingConfig = pendingAction ? actionConfig(pendingAction.kind, opportunity) : null;
@@ -273,6 +299,21 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
     if (busy) return;
     if (item.kind === "navigate") {
       navigate(item.to);
+      return;
+    }
+    if (item.kind === "view_history") {
+      setHistoryOpen(true);
+      setHistoryLoading(true);
+      setHistoryError(null);
+      setHistory(null);
+      try {
+        const data = await adminFetch(`/admin/pipeline/opportunities/history?${historyQuery(opportunity)}`);
+        setHistory(data);
+      } catch (err) {
+        setHistoryError(err);
+      } finally {
+        setHistoryLoading(false);
+      }
       return;
     }
     if (item.kind === "follow_up") {
@@ -497,6 +538,61 @@ export default function OpportunityActions({ opportunity, onRefresh, adminFetch 
             disabled={busy || loadingCandidates || (pendingAction?.kind === "link_lead" && linkCandidates.length === 0)}
           >
             {busy ? "Working" : pendingConfig?.confirmLabel}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      <Dialog open={historyOpen} onClose={() => setHistoryOpen(false)} size="lg">
+        <DialogHeader>
+          <DialogTitle>Opportunity History</DialogTitle>
+        </DialogHeader>
+        <DialogBody>
+          {historyLoading ? (
+            <div className="text-13 text-ink-secondary">Loading history...</div>
+          ) : historyError ? (
+            <div className="rounded-xs border-hairline border-alert-fg/30 bg-red-50 px-3 py-2 text-12 text-alert-fg">
+              History failed: {historyError.message}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12">
+                <div className="font-medium text-zinc-900">
+                  {history?.opportunity?.customerName || opportunity.name || "Unknown Customer"}
+                </div>
+                <div className="mt-1 text-ink-secondary">
+                  {[history?.opportunity?.leadId && `Lead ${history.opportunity.leadId.slice(0, 8)}`, history?.opportunity?.estimateId && `Est ${history.opportunity.estimateId.slice(0, 8)}`]
+                    .filter(Boolean)
+                    .join(" / ") || "No linked records"}
+                </div>
+              </div>
+              {!history?.data?.length ? (
+                <div className="text-13 text-ink-secondary">No history events found.</div>
+              ) : (
+                <div className="space-y-3">
+                  {history.data.map((event) => (
+                    <div key={event.id} className="rounded-sm border-hairline border-zinc-200 bg-white p-3 text-12">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="font-medium text-zinc-900">{event.title}</div>
+                        <div className="text-11 text-ink-tertiary">{formatHistoryDate(event.occurredAt)}</div>
+                      </div>
+                      {event.description && (
+                        <div className="mt-1 text-ink-secondary">{event.description}</div>
+                      )}
+                      <div className="mt-2 flex flex-wrap gap-2 text-11 text-ink-tertiary">
+                        {event.actor && <span>{event.actor}</span>}
+                        {event.source && <span>{event.source.replace(/_/g, " ")}</span>}
+                        {event.metadata?.hasNote && <span>Has note</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => setHistoryOpen(false)}>
+            Close
           </Button>
         </DialogFooter>
       </Dialog>

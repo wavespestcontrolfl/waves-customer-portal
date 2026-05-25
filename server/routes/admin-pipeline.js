@@ -26,6 +26,10 @@ function cleanId(value) {
   return typeof value === 'string' ? value.trim() : value;
 }
 
+function firstPresent(...values) {
+  return values.find((value) => value !== null && value !== undefined && value !== '') ?? null;
+}
+
 function leadDisplayName(lead) {
   return [lead?.first_name, lead?.last_name].filter(Boolean).join(' ').trim() || lead?.name || 'Unknown Lead';
 }
@@ -108,10 +112,186 @@ function parseJsonObject(value) {
   }
 }
 
+function parseOpportunityRef(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { leadId: null, estimateId: null };
+  const leadMatch = raw.match(/(?:^|:)lead:([^:]+)/i);
+  const estimateMatch = raw.match(/(?:^|:)estimate:([^:]+)/i);
+  if (leadMatch || estimateMatch) {
+    return {
+      leadId: leadMatch ? cleanId(leadMatch[1]) : null,
+      estimateId: estimateMatch ? cleanId(estimateMatch[1]) : null,
+    };
+  }
+  if (raw.startsWith('lead:')) return { leadId: cleanId(raw.slice(5)), estimateId: null };
+  if (raw.startsWith('estimate:')) return { leadId: null, estimateId: cleanId(raw.slice(9)) };
+  return { leadId: null, estimateId: raw };
+}
+
 function historyLimit(value) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return DEFAULT_REVIEWED_HISTORY_LIMIT;
   return Math.min(Math.max(parsed, 1), MAX_REVIEWED_HISTORY_LIMIT);
+}
+
+function historyEvent({
+  id,
+  type,
+  title,
+  description = null,
+  actor = null,
+  occurredAt = null,
+  source = null,
+  metadata = {},
+}) {
+  return {
+    id: id || `${type}:${occurredAt || Math.random().toString(36).slice(2)}`,
+    type,
+    title,
+    description,
+    actor,
+    occurredAt,
+    source,
+    metadata: metadata || {},
+  };
+}
+
+function compareOccurredAt(left, right) {
+  const leftTime = left.occurredAt ? new Date(left.occurredAt).getTime() : 0;
+  const rightTime = right.occurredAt ? new Date(right.occurredAt).getTime() : 0;
+  return rightTime - leftTime;
+}
+
+function activityTitle(type) {
+  return String(type || 'activity')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function mapLeadActivityEvent(row) {
+  const metadata = parseJsonObject(row.metadata);
+  return historyEvent({
+    id: `lead_activity:${row.id}`,
+    type: row.activity_type || 'lead_activity',
+    title: activityTitle(row.activity_type),
+    description: row.description || null,
+    actor: row.performed_by || null,
+    occurredAt: row.created_at || null,
+    source: 'lead_activity',
+    metadata: {
+      estimateId: metadata.estimateId || metadata.estimate_id || null,
+      hasMetadata: Object.keys(metadata).length > 0,
+    },
+  });
+}
+
+function estimateLifecycleEvents(estimate) {
+  if (!estimate) return [];
+  return [
+    estimate.created_at && historyEvent({
+      id: `estimate:${estimate.id}:created`,
+      type: 'estimate_created',
+      title: 'Estimate Created',
+      description: estimate.status ? `Status: ${estimate.status}` : null,
+      actor: estimate.created_by_name || null,
+      occurredAt: estimate.created_at,
+      source: 'estimate',
+      metadata: { estimateId: estimate.id },
+    }),
+    estimate.sent_at && historyEvent({
+      id: `estimate:${estimate.id}:sent`,
+      type: 'estimate_sent',
+      title: 'Estimate Sent',
+      occurredAt: estimate.sent_at,
+      source: 'estimate',
+      metadata: { estimateId: estimate.id },
+    }),
+    estimate.viewed_at && historyEvent({
+      id: `estimate:${estimate.id}:viewed`,
+      type: 'estimate_viewed',
+      title: 'Estimate Viewed',
+      occurredAt: estimate.viewed_at,
+      source: 'estimate',
+      metadata: { estimateId: estimate.id },
+    }),
+    estimate.accepted_at && historyEvent({
+      id: `estimate:${estimate.id}:accepted`,
+      type: 'estimate_accepted',
+      title: 'Estimate Accepted',
+      occurredAt: estimate.accepted_at,
+      source: 'estimate',
+      metadata: { estimateId: estimate.id },
+    }),
+    estimate.declined_at && historyEvent({
+      id: `estimate:${estimate.id}:declined`,
+      type: 'estimate_declined',
+      title: 'Estimate Declined',
+      occurredAt: estimate.declined_at,
+      source: 'estimate',
+      metadata: { estimateId: estimate.id },
+    }),
+  ].filter(Boolean);
+}
+
+function leadLifecycleEvents(lead) {
+  if (!lead) return [];
+  return [
+    lead.created_at && historyEvent({
+      id: `lead:${lead.id}:created`,
+      type: 'lead_created',
+      title: 'Lead Created',
+      description: lead.status ? `Status: ${lead.status}` : null,
+      occurredAt: lead.created_at,
+      source: 'lead',
+      metadata: { leadId: lead.id },
+    }),
+    lead.first_contact_at && historyEvent({
+      id: `lead:${lead.id}:first_contact`,
+      type: 'lead_contacted',
+      title: 'Lead Contacted',
+      occurredAt: lead.first_contact_at,
+      source: 'lead',
+      metadata: { leadId: lead.id },
+    }),
+  ].filter(Boolean);
+}
+
+function mapDismissalTimelineEvent(row) {
+  return historyEvent({
+    id: `duplicate_dismissal:${row.id}`,
+    type: 'duplicate_dismissed',
+    title: 'Duplicate Match Dismissed',
+    description: normalizeDismissReason(row.reason).replace(/_/g, ' '),
+    actor: row.dismissed_by_name || null,
+    occurredAt: row.updated_at || row.created_at || null,
+    source: 'duplicate_review',
+    metadata: {
+      estimateId: row.estimate_id || null,
+      leadId: row.lead_id || null,
+      hasNote: Boolean(row.note),
+    },
+  });
+}
+
+function mapAuditTimelineEvent(row) {
+  const metadata = parseJsonObject(row.metadata);
+  const title = row.action === 'pipeline.duplicate_risk.reopen_link'
+    ? 'Duplicate Link Reopened'
+    : row.action === 'pipeline.duplicate_risk.reopen_dismissal'
+      ? 'Dismissed Match Reopened'
+      : activityTitle(row.action);
+  return historyEvent({
+    id: `audit:${row.id}`,
+    type: row.action || 'audit_event',
+    title,
+    actor: row.actor_name || row.actor_type || null,
+    occurredAt: row.created_at || null,
+    source: 'audit_log',
+    metadata: {
+      estimateId: metadata.estimateId || metadata.estimate_id || row.resource_id || null,
+      leadId: metadata.leadId || metadata.lead_id || null,
+    },
+  });
 }
 
 function mapDismissalHistory(row) {
@@ -252,6 +432,143 @@ async function getReviewedHistory({ database = db, limit = DEFAULT_REVIEWED_HIST
     .slice(0, safeLimit);
 
   return { data };
+}
+
+async function getOpportunityHistory({
+  database = db,
+  opportunityId = '',
+  leadId = null,
+  estimateId = null,
+  limit = 80,
+} = {}) {
+  const parsed = parseOpportunityRef(opportunityId);
+  const cleanLeadId = cleanId(leadId) || parsed.leadId;
+  const requestedEstimateId = cleanId(estimateId) || parsed.estimateId;
+  let cleanEstimateId = requestedEstimateId;
+
+  if (!cleanLeadId && !cleanEstimateId) {
+    const err = new Error('leadId or estimateId is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const [lead, estimateById] = await Promise.all([
+    cleanLeadId
+      ? database('leads')
+        .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
+        .select('leads.*', database.raw('lead_sources.name as source_name'))
+        .where('leads.id', cleanLeadId)
+        .first()
+      : null,
+    cleanEstimateId
+      ? database('estimates')
+        .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
+        .select('estimates.*', database.raw('technicians.name as created_by_name'))
+        .where('estimates.id', cleanEstimateId)
+        .first()
+      : null,
+  ]);
+
+  if (cleanLeadId && !lead) {
+    const err = new Error('Lead not found');
+    err.status = 404;
+    throw err;
+  }
+  if (cleanEstimateId && (!estimateById || estimateById.archived_at)) {
+    const err = new Error('Estimate not found');
+    err.status = 404;
+    throw err;
+  }
+
+  cleanEstimateId = cleanEstimateId || lead?.estimate_id || null;
+  const estimate = estimateById || (cleanEstimateId
+    ? await database('estimates')
+      .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
+      .select('estimates.*', database.raw('technicians.name as created_by_name'))
+      .where('estimates.id', cleanEstimateId)
+      .whereNull('estimates.archived_at')
+      .first()
+    : null);
+  if (!requestedEstimateId && cleanEstimateId && !estimate) {
+    cleanEstimateId = null;
+  }
+
+  const historyLimitSafe = historyLimit(limit);
+  const leadActivityRows = cleanLeadId
+    ? await database('lead_activities')
+      .where('lead_id', cleanLeadId)
+      .select('id', 'lead_id', 'activity_type', 'description', 'performed_by', 'metadata', 'created_at')
+      .orderBy('created_at', 'desc')
+      .limit(historyLimitSafe)
+    : [];
+
+  const dismissalTableExists = await database.schema.hasTable('pipeline_duplicate_risk_dismissals');
+  let dismissalQuery = null;
+  if (dismissalTableExists && cleanEstimateId) {
+    dismissalQuery = database('pipeline_duplicate_risk_dismissals')
+      .leftJoin('technicians', 'pipeline_duplicate_risk_dismissals.dismissed_by', 'technicians.id')
+      .select(
+        'pipeline_duplicate_risk_dismissals.*',
+        database.raw('technicians.name as dismissed_by_name'),
+      )
+      .where('pipeline_duplicate_risk_dismissals.estimate_id', cleanEstimateId);
+    if (cleanLeadId) dismissalQuery = dismissalQuery.where('pipeline_duplicate_risk_dismissals.lead_id', cleanLeadId);
+  }
+  const dismissalRows = dismissalQuery
+    ? await dismissalQuery.orderBy('pipeline_duplicate_risk_dismissals.updated_at', 'desc').limit(historyLimitSafe)
+    : [];
+
+  const auditActions = ['pipeline.duplicate_risk.reopen_dismissal', 'pipeline.duplicate_risk.reopen_link'];
+  const auditRows = cleanEstimateId
+    ? await database('audit_log')
+      .leftJoin('technicians as audit_technicians', 'audit_log.actor_id', 'audit_technicians.id')
+      .select(
+        'audit_log.id',
+        'audit_log.actor_type',
+        'audit_log.actor_id',
+        'audit_log.action',
+        'audit_log.resource_type',
+        'audit_log.resource_id',
+        'audit_log.metadata',
+        'audit_log.created_at',
+        database.raw('audit_technicians.name as actor_name'),
+      )
+      .where('audit_log.resource_type', 'estimate')
+      .where('audit_log.resource_id', cleanEstimateId)
+      .whereIn('action', auditActions)
+      .orderBy('audit_log.created_at', 'desc')
+      .limit(historyLimitSafe)
+    : [];
+
+  const filteredAuditRows = cleanLeadId
+    ? auditRows.filter((row) => {
+      const metadata = parseJsonObject(row.metadata);
+      const rowLeadId = metadata.leadId || metadata.lead_id || null;
+      return !rowLeadId || String(rowLeadId) === String(cleanLeadId);
+    })
+    : auditRows;
+
+  const events = [
+    ...leadLifecycleEvents(lead),
+    ...estimateLifecycleEvents(estimate),
+    ...leadActivityRows.map(mapLeadActivityEvent),
+    ...dismissalRows.map(mapDismissalTimelineEvent),
+    ...filteredAuditRows.map(mapAuditTimelineEvent),
+  ].sort(compareOccurredAt).slice(0, historyLimitSafe);
+
+  return {
+    opportunity: {
+      opportunityId: cleanLeadId ? `lead:${cleanLeadId}` : `estimate:${cleanEstimateId}`,
+      leadId: cleanLeadId || null,
+      estimateId: cleanEstimateId || null,
+      customerName: firstPresent(estimate ? estimateDisplayName(estimate) : null, lead ? leadDisplayName(lead) : null),
+      leadName: lead ? leadDisplayName(lead) : null,
+      estimateName: estimate ? estimateDisplayName(estimate) : null,
+      source: firstPresent(lead?.source_name, lead?.source, lead?.lead_source, estimate?.source, estimate?.lead_source),
+      status: firstPresent(estimate?.status, lead?.status),
+    },
+    data: events,
+  };
 }
 
 async function getLinkCandidateLeads({ database = db, estimateId }) {
@@ -746,6 +1063,21 @@ router.get('/opportunities/reviewed-history', async (req, res, next) => {
   }
 });
 
+// GET /api/admin/pipeline/opportunities/history
+router.get('/opportunities/history', async (req, res, next) => {
+  try {
+    res.json(await getOpportunityHistory({
+      opportunityId: req.query.opportunityId || req.query.opportunity_id || '',
+      leadId: req.query.leadId || req.query.lead_id || null,
+      estimateId: req.query.estimateId || req.query.estimate_id || null,
+      limit: req.query.limit,
+    }));
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
 // GET /api/admin/pipeline/opportunities/:estimateId/link-candidates
 router.get('/opportunities/:estimateId/link-candidates', async (req, res, next) => {
   try {
@@ -831,12 +1163,18 @@ module.exports.__private = {
   filterDismissedCandidates,
   filterReopenedLinkedHistory,
   getLinkCandidateLeads,
+  getOpportunityHistory,
   getReviewedHistory,
+  historyEvent,
   historyLimit,
   linkOpportunityRecords,
+  mapAuditTimelineEvent,
   mapDismissalHistory,
+  mapDismissalTimelineEvent,
+  mapLeadActivityEvent,
   mapLinkedHistory,
   normalizeDismissReason,
+  parseOpportunityRef,
   parseJsonObject,
   reopenReviewedDuplicate,
   searchDigits,
