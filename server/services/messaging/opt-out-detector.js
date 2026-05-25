@@ -25,8 +25,9 @@ const EXACT_OPT_IN = new Set([
 
 const OPT_OUT_PATTERNS = [
   /\b(stop|stopp|unsubscribe|unsub)\s+(texting|messaging|texts?|messages?|sms|me)\b/i,
-  /\bremove\s+me\b/i,
-  /\btake\s+me\s+off\b/i,
+  /\bremove\s+me\s+from\s+(your|this|the|my)?\s*(text\s+)?(list|texts?|messages?|messaging|sms)\b/i,
+  /\btake\s+me\s+off\s+(your|this|the|my)?\s*(text\s+)?(list|texts?|messages?|messaging|sms)\b/i,
+  /\btake\s+me\s+off\s+of\s+(your|this|the|my)?\s*(text\s+)?(list|texts?|messages?|messaging|sms)\b/i,
   /\bdo\s+not\s+(text|message|contact|sms)\b/i,
   /\bdon'?t\s+(text|message|contact|sms)\b/i,
   /\bno\s+(more\s+)?(texts?|messages?|sms)\b/i,

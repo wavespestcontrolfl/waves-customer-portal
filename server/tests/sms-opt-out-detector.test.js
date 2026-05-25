@@ -17,5 +17,7 @@ describe('SMS opt-out detector', () => {
   test('ignores normal replies', () => {
     expect(detectSmsOptCommand('Can we schedule for Tuesday?')).toEqual({ action: null });
     expect(detectSmsOptCommand('I need to cancel my service')).toEqual({ action: null });
+    expect(detectSmsOptCommand("please remove me from Friday's schedule")).toEqual({ action: null });
+    expect(detectSmsOptCommand('take me off the route tomorrow')).toEqual({ action: null });
   });
 });
