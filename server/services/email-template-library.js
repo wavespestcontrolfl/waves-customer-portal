@@ -125,6 +125,16 @@ function requiredPayloadMissing(template, payload) {
 }
 
 function productionPlaceholderPayloadValues(payload = {}) {
+  const reviewFixtureValues = new Set([
+    'review request type',
+    'review submitted at',
+    'review billing cadence',
+    'review paused until',
+    'review pause reason',
+    'review monthly rate',
+    'review setup steps',
+    'review next step summary',
+  ]);
   const findings = [];
   for (const [key, rawValue] of Object.entries(payload || {})) {
     if (rawValue == null) continue;
@@ -134,12 +144,29 @@ function productionPlaceholderPayloadValues(payload = {}) {
     const lower = value.toLowerCase();
     const isPlaceholder =
       /^sample(?:\s|$)/i.test(value) ||
+      reviewFixtureValues.has(lower) ||
       lower === 'customer@example.com' ||
       value === '.00' ||
-      /^https:\/\/portal\.wavespestcontrol\.com\/(?:sample|review-demo|demo)(?:$|[/?#])/i.test(value) ||
-      /^https:\/\/portal\.wavespestcontrol\.com\/[^?#]*\/(?:sample|review-demo|demo)(?:$|[/?#])/i.test(value) ||
+      /^https:\/\/portal\.wavespestcontrol\.com\/[^?#]*(?:sample|review-demo|demo)[^?#]*(?:$|[/?#])/i.test(value) ||
       /^\(941\)\s*555-\d{4}$/.test(value);
     if (isPlaceholder) findings.push(key);
+  }
+  return findings.sort();
+}
+
+function productionPlaceholderRenderedValues(rendered = {}) {
+  const text = [
+    rendered.subject || '',
+    rendered.previewText || '',
+    rendered.text || '',
+    rendered.html || '',
+  ].join('\n');
+  const findings = [];
+  if (/https:\/\/portal\.wavespestcontrol\.com\/[^"'<\s]*(?:sample|review-demo|demo)[^"'<\s]*/i.test(text)) {
+    findings.push('rendered_url');
+  }
+  if (/(?:^|[\n:>])\s*Review\s+(?:request type|submitted at|billing cadence|paused until|pause reason|monthly rate|setup steps|next step summary)(?=\s*(?:$|[\n<]))/i.test(text)) {
+    findings.push('rendered_placeholder_copy');
   }
   return findings.sort();
 }
@@ -573,6 +600,13 @@ async function sendTemplate({
       err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_PAYLOAD';
       throw err;
     }
+    const renderedPlaceholderFields = productionPlaceholderRenderedValues(rendered);
+    if (renderedPlaceholderFields.length) {
+      const err = new Error(`Placeholder values are not allowed in production rendered emails: ${renderedPlaceholderFields.join(', ')}`);
+      err.status = 400;
+      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_RENDERED';
+      throw err;
+    }
   }
 
   const fromName = template.from_name || 'Waves Pest Control';
@@ -668,6 +702,7 @@ module.exports = {
   validationFor,
   redactedPayloadSnapshot,
   productionPlaceholderPayloadValues,
+  productionPlaceholderRenderedValues,
   activeSuppressionFor,
   renderTemplate,
   renderVersion,

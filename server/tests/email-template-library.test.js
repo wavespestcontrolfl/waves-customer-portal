@@ -180,6 +180,9 @@ describe('email template library rendering', () => {
       portal_url: 'https://portal.wavespestcontrol.com/sample',
       estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample',
       demo_url: 'https://portal.wavespestcontrol.com/review-demo',
+      nested_demo_url: 'https://portal.wavespestcontrol.com/pay/demo-invoice',
+      request_type: 'Review request type',
+      request_subject: 'Review invoice 1042',
       company_phone: '(941) 555-0134',
     })).toEqual([
       'amount_due',
@@ -187,9 +190,29 @@ describe('email template library rendering', () => {
       'demo_url',
       'email',
       'estimate_url',
+      'nested_demo_url',
       'portal_url',
+      'request_type',
       'service_label',
     ]);
+  });
+
+  test('detects placeholder values after rendering production emails', () => {
+    expect(EmailTemplates.productionPlaceholderRenderedValues({
+      subject: 'We received your request',
+      previewText: '',
+      text: 'Type: Review request type\nPay invoice: https://portal.wavespestcontrol.com/pay/demo-invoice',
+      html: '',
+    })).toEqual(['rendered_placeholder_copy', 'rendered_url']);
+  });
+
+  test('allows legitimate rendered content that starts with review words', () => {
+    expect(EmailTemplates.productionPlaceholderRenderedValues({
+      subject: 'We received your request',
+      previewText: '',
+      text: 'Summary: Review monthly rate for next year',
+      html: '',
+    })).toEqual([]);
   });
 
   test('renders variables inside custom text bodies', () => {
