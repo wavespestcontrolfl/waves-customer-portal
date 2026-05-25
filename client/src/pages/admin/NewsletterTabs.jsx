@@ -317,7 +317,7 @@ export function ComposeView({
 
   // Auto-load pending autopilot draft on mount (if compose form is empty)
   useEffect(() => {
-    if (draftId) return; // already editing a draft
+    if (draftId || pendingEvent) return; // already editing a draft or event-seeded
     adminFetch("/admin/newsletter/sends/latest-autopilot")
       .then((d) => {
         if (!d?.draft) return;

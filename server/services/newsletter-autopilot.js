@@ -250,11 +250,23 @@ async function autoDraftFlagship() {
     return { skipped: true, reason };
   }
 
-  // 3. Draft via Claude (top 12 events)
+  // 3. Idempotency: skip if a draft already exists for this coverage window
+  const existing = await db('newsletter_sends')
+    .where({ newsletter_type: NEWSLETTER_TYPE, status: 'draft' })
+    .whereNull('created_by')
+    .where('created_at', '>=', plan.startDate)
+    .first();
+
+  if (existing) {
+    logger.info(`[newsletter-autopilot] draft already exists for this week: ${existing.id}`);
+    return { skipped: true, reason: `Draft already exists: ${existing.id}`, sendId: existing.id };
+  }
+
+  // 4. Draft via Claude (top 12 events)
   const topEvents = scored.slice(0, 12);
   const { draft, userPrompt } = await draftViaClaudeAI(topEvents);
 
-  // 4. Save as newsletter_sends draft
+  // 5. Save as newsletter_sends draft
   const [row] = await db('newsletter_sends').insert({
     subject: draft.subject,
     html_body: draft.htmlBody || null,
@@ -272,7 +284,7 @@ async function autoDraftFlagship() {
 
   logger.info(`[newsletter-autopilot] Draft created: sendId=${row.id}, events=${topEvents.length}`);
 
-  // 5. Notify admin that a draft is ready
+  // 6. Notify admin that a draft is ready
   try {
     const { triggerNotification } = require('./notification-triggers');
     await triggerNotification('newsletter_autopilot_draft', {
