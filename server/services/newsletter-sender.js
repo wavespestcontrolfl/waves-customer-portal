@@ -393,7 +393,7 @@ async function sendCampaign(sendId, opts = {}) {
   }
   await db('newsletter_sends').where({ id: send.id }).update(finalSendUpdate);
 
-  if (finalSendUpdate.status === 'sent') {
+  if (finalSendUpdate.status === 'sent' && accepted > 0) {
     const { sharePublishedNewsletter } = require('./content-scheduler');
     db('newsletter_sends').where({ id: send.id }).first().then((freshSend) => {
       if (freshSend) {

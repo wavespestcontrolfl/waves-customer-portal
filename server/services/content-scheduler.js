@@ -137,7 +137,13 @@ Return ONLY valid JSON with these keys:
 }
 
 async function sharePublishedNewsletter(send) {
-  if (!send.auto_share_social || send.shared_to_social) return true;
+  if (send.shared_to_social) return true;
+  if (!send.auto_share_social) {
+    await db('newsletter_sends').where('id', send.id)
+      .whereNot('social_share_status', 'skipped')
+      .update({ social_share_status: 'skipped' });
+    return true;
+  }
 
   // Atomic claim — prevents double-posting from concurrent resume/retry paths.
   // Also recovers rows stranded in 'processing' for >5 min (process died mid-share).
