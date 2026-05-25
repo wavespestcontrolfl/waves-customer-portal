@@ -91,8 +91,8 @@ async function autoDraftFlagship() {
     logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
     return { skipped: true, reason };
   }
-  if (existingCalendar && existingCalendar.send_id && ['drafted', 'scheduled', 'sent'].includes(existingCalendar.status)) {
-    const reason = `Calendar status is ${existingCalendar.status} (send_id: ${existingCalendar.send_id})`;
+  if (existingCalendar && ['drafted', 'scheduled', 'sent'].includes(existingCalendar.status)) {
+    const reason = `Calendar status is ${existingCalendar.status} (send_id: ${existingCalendar.send_id || 'null'})`;
     logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
     return { skipped: true, reason };
   }
@@ -149,6 +149,17 @@ async function autoDraftFlagship() {
   } else {
     // No calendar events — use top-scored
     eventIds = topEvents.map((ev) => ev.id);
+  }
+
+  // Verify selected events still exist — supplement if stale IDs reduced the count
+  const resolvedCount = await db('events_raw').whereIn('id', eventIds).count('* as c').first();
+  const actualCount = Number(resolvedCount?.c || 0);
+  if (actualCount < 5 && topEvents.length > 0) {
+    const supplementIds = topEvents
+      .map((ev) => ev.id)
+      .filter((id) => !eventIds.includes(id));
+    eventIds = [...eventIds, ...supplementIds].slice(0, 12);
+    logger.info(`[newsletter-autopilot] Supplemented events: ${actualCount} resolved, padded to ${eventIds.length}`);
   }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
