@@ -56,9 +56,15 @@ exports.up = async function up(knex) {
 
     const updatedBlocks = migrateCta(blocks);
 
+    const latest = await knex('email_template_versions')
+      .where({ template_id: template.id })
+      .max('version_number as max')
+      .first();
+    const nextVersion = (Number(latest?.max) || 0) + 1;
+
     const [newVersion] = await knex('email_template_versions').insert({
       template_id: template.id,
-      version_number: activeVersion.version_number + 1,
+      version_number: nextVersion,
       status: 'active',
       subject: activeVersion.subject,
       preview_text: activeVersion.preview_text,

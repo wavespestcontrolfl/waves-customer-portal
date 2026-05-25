@@ -72,7 +72,7 @@ router.get('/:token', async (req, res) => {
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
 
-    const templateKey = prepTemplateForProjectType(project.project_type);
+    const templateKey = project.prep_template_key || prepTemplateForProjectType(project.project_type);
     if (!templateKey) {
       return res.status(404).json({ error: 'Not found' });
     }

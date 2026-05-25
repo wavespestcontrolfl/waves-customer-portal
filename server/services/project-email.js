@@ -274,6 +274,7 @@ async function sendPrepGuide({
   }
   if (project?.id) {
     project.prep_token = await ensurePrepToken(project.id);
+    await db('projects').where({ id: project.id }).update({ prep_template_key: resolvedTemplateKey });
   }
   const payload = buildProjectPayload({ project, customer });
   return sendProjectTemplate({
