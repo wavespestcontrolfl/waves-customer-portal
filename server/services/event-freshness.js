@@ -274,7 +274,9 @@ function getCurrentNewsletterThursday() {
 }
 
 function getNewsletterWeekOf(date) {
-  const d = date instanceof Date ? date : parseETDateTime(date);
+  const d = date instanceof Date ? date : parseETDateTime(
+    typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date}T12:00:00` : date
+  );
   const et = etParts(d);
   const daysBack = (et.dayOfWeek - 4 + 7) % 7;
   return etDateString(addETDays(d, -daysBack));
