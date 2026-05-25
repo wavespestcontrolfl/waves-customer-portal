@@ -122,7 +122,7 @@ function wrapEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, footer
         </td></tr>
         <tr><td align="center" style="background:${SAND};padding:20px 32px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · <a href="${WAVES_WEBSITE_URL}" style="color:${MUTED};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${MUTED};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${MUTED};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${MUTED};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
         </td></tr>
       </table>
@@ -178,7 +178,7 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
         </td></tr>
         <tr><td align="center" style="background:${SAND};padding:18px 24px;border-top:1px solid ${RULE};">
           <div style="font-family:Inter,Arial,sans-serif;font-size:11px;color:${MUTED};line-height:1.55;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · <a href="${WAVES_WEBSITE_URL}" style="color:${MUTED};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${MUTED};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE} · <a href="${WAVES_WEBSITE_URL}" style="color:${MUTED};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${MUTED};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a> · ${WAVES_FL_LICENSE_LINE}
           </div>
         </td></tr>
       </table>

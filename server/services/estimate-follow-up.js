@@ -533,6 +533,7 @@ const EstimateFollowUp = {
           const expDate = new Date(est.expires_at).toLocaleDateString("en-US", {
             month: "long",
             day: "numeric",
+            year: "numeric",
             timeZone: "America/New_York",
           });
           const smsBody = await renderTemplate("estimate_followup_expiring", {
