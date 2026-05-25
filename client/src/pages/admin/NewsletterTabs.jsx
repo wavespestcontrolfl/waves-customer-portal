@@ -236,6 +236,11 @@ export function ComposeView({
   const pendingEventRef = useRef(pendingEvent);
   pendingEventRef.current = pendingEvent;
 
+  // Track whether the user has interacted with any compose field.
+  // Prevents the autopilot preload from binding draftId to the
+  // autopilot row when the user has already started typing.
+  const userHasEdited = useRef(false);
+
   // Segment
   const [segmentMode, setSegmentMode] = useState("all"); // all | customers | leads | custom
   const [segmentSources, setSegmentSources] = useState([]);
@@ -324,22 +329,24 @@ export function ComposeView({
   // Auto-load pending autopilot draft on mount (if compose form is empty).
   // Uses a cancelled flag so a late-resolving fetch won't overwrite
   // fields the user has started editing during the round-trip.
-  // Functional updaters ensure each setter only writes when the field
-  // is currently empty, preventing overwrites of in-progress edits.
+  // userHasEdited ref is the authoritative guard — if the user typed
+  // anything into subject/htmlBody/previewText/textBody before the
+  // fetch resolves, we skip hydration entirely (including draftId)
+  // so the user's new content doesn't get saved to the autopilot row.
   // pendingEventRef reads the latest value without adding it to deps.
   useEffect(() => {
     if (draftId || pendingEventRef.current) return; // already editing a draft or event-seeded
     let cancelled = false;
     adminFetch("/admin/newsletter/sends/latest-autopilot")
       .then((d) => {
-        if (cancelled || pendingEventRef.current) return;
+        if (cancelled || pendingEventRef.current || userHasEdited.current) return;
         if (!d?.draft) return;
         const ap = d.draft;
-        setDraftId((prev) => prev || ap.id);
-        setSubject((prev) => prev || ap.subject || "");
-        setPreviewText((prev) => prev || ap.preview_text || "");
-        setHtmlBody((prev) => prev || ap.html_body || "");
-        setTextBody((prev) => prev || ap.text_body || "");
+        setDraftId(ap.id);
+        setSubject(ap.subject || "");
+        setPreviewText(ap.preview_text || "");
+        setHtmlBody(ap.html_body || "");
+        setTextBody(ap.text_body || "");
         setSelectedTemplate("weekend");
         setAutopilotBanner(true);
       })
@@ -669,7 +676,7 @@ export function ComposeView({
             <input
               type="text"
               value={subject}
-              onChange={(e) => setSubject(e.target.value)}
+              onChange={(e) => { userHasEdited.current = true; setSubject(e.target.value); }}
               className={INPUT_CLS}
               placeholder="e.g. Florida spring pest alert — what to watch for"
             />{" "}
@@ -702,7 +709,7 @@ export function ComposeView({
             <input
               type="text"
               value={previewText}
-              onChange={(e) => setPreviewText(e.target.value)}
+              onChange={(e) => { userHasEdited.current = true; setPreviewText(e.target.value); }}
               className={INPUT_CLS}
               placeholder="One-line preview that renders after the subject in Gmail/Apple Mail."
             />{" "}
@@ -735,7 +742,7 @@ export function ComposeView({
             <FieldLabel>HTML body</FieldLabel>{" "}
             <textarea
               value={htmlBody}
-              onChange={(e) => setHtmlBody(e.target.value)}
+              onChange={(e) => { userHasEdited.current = true; setHtmlBody(e.target.value); }}
               rows={16}
               className={TEXTAREA_CLS}
               placeholder="<h1>Subject line</h1><p>Your newsletter content here. The unsubscribe footer is appended automatically.</p>"
@@ -755,7 +762,7 @@ export function ComposeView({
             </FieldLabel>{" "}
             <textarea
               value={textBody}
-              onChange={(e) => setTextBody(e.target.value)}
+              onChange={(e) => { userHasEdited.current = true; setTextBody(e.target.value); }}
               rows={5}
               className={INPUT_CLS}
               placeholder="Same content in plain text for mail clients that don't render HTML."

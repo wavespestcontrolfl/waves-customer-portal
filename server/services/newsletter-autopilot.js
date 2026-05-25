@@ -47,7 +47,10 @@ function generateSlug(subject) {
 async function buildDigestPlan() {
   const now = new Date();
   const nowET = etParts(now);
-  const daysUntilThursday = (4 - nowET.dayOfWeek + 7) % 7;
+  const dayOfWeek = nowET.dayOfWeek;
+  const daysUntilThursday = dayOfWeek <= 4
+    ? (4 - dayOfWeek + 7) % 7  // This week's Thursday (or today if Thursday)
+    : -(dayOfWeek - 4);         // Go back to last Thursday (late rerun)
   const defaultStart = addETDays(now, daysUntilThursday);
   const startDate = parseETDateTime(`${etDateString(defaultStart)}T00:00:00`);
   const endDate = parseETDateTime(`${etDateString(addETDays(startDate, 6))}T23:59:59`);
