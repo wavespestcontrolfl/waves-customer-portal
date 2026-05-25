@@ -328,8 +328,8 @@ export function ComposeView({
   }, [segmentFilter]);
 
   const activeNewsletterType = (() => {
-    if (!selectedTemplate) return null;
-    const t = TEMPLATES.find((x) => x.key === selectedTemplate);
+    const key = selectedTemplate || "blank";
+    const t = TEMPLATES.find((x) => x.key === key);
     return t?.newsletterType || null;
   })();
 
