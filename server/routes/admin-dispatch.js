@@ -2686,6 +2686,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               && Number(serviceReportPreviewAsset.byte_size || 0) <= 4_500_000
             ) {
               smsMetadata.mediaUrls = [serviceReportPreviewAsset.public_url];
+              smsMetadata.allowMediaUrls = true;
               smsMetadata.service_report_preview_asset_id = serviceReportPreviewAsset.id;
             }
           }
@@ -2708,6 +2709,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
             const fallbackMetadata = { ...smsMetadata };
             delete fallbackMetadata.mediaUrls;
+            delete fallbackMetadata.allowMediaUrls;
             fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
             smsResult = await sendCustomerMessage({
               ...sendInput,

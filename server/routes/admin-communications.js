@@ -101,6 +101,7 @@ router.post('/sms', async (req, res, next) => {
         adminUserId: req.technicianId,
         fromNumber: fromNumber || undefined,
         mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
+        allowMediaUrls: cleanMediaUrls.length > 0,
         media,
       },
     });

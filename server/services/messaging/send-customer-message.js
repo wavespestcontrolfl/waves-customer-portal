@@ -218,8 +218,12 @@ function validateContract(input) {
     return { ok: false, reason: 'to (recipient) is required' };
   }
   const hasMedia = Array.isArray(input.metadata?.mediaUrls) && input.metadata.mediaUrls.length > 0;
+  const mediaAllowed = input.metadata?.allowMediaUrls === true || !!input.metadata?.adminUserId;
   if (typeof input.body !== 'string') {
     return { ok: false, reason: 'body is required' };
+  }
+  if (!input.body.trim() && hasMedia && !mediaAllowed) {
+    return { ok: false, reason: 'media-only SMS requires explicit media authorization' };
   }
   if (!input.body.trim() && !hasMedia) {
     return { ok: false, reason: 'body or media is required' };
