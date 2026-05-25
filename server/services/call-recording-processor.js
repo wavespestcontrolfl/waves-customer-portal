@@ -1502,7 +1502,7 @@ const CallRecordingProcessor = {
 
         if (existingLead) {
           leadId = existingLead.id;
-          logger.info(`[call-proc] Found existing lead ${leadId} for ${phone}`);
+          logger.info(`[call-proc] Found existing lead ${leadId} for ${maskPhone(phone)}`);
         } else {
           // Resolve lead source from the Twilio number. Match every plausible
           // shape of `lead_sources.twilio_phone_number` because that column has
@@ -1528,7 +1528,7 @@ const CallRecordingProcessor = {
               .whereIn('twilio_phone_number', [...variants])
               .first();
             if (ls) leadSourceId = ls.id;
-            else logger.warn(`[call-proc] No lead_source matched ${call.to_phone} (variants tried: ${[...variants].join(', ')})`);
+            else logger.warn(`[call-proc] No lead_source matched ${maskPhone(call.to_phone)} (variants tried: ${[...variants].map(maskPhone).join(', ')})`);
           } catch (e) {
             logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
           }
@@ -2250,6 +2250,7 @@ CallRecordingProcessor._test = {
   resolveCallContactPhone,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
+  maskPhone,
   validatePhoneCallAppointmentCustomer,
   extractedNameMatchesCustomer,
   normalizeCallExtraction,

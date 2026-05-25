@@ -58,6 +58,19 @@ const formatTime = formatETTime;
 // stay intact in customer SMS.
 const ADMIN_PAREN_RE = /\s*\((?:[A-Z][a-z]+(?:-[A-Z][a-z]+)?|Every \d+ \w+|\d+-Year Term)\)/g;
 
+function maskPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits ? `***${digits.slice(-4)}` : 'unknown';
+}
+
+function sanitizeLookupError(value) {
+  return String(value || '')
+    .replace(/https:\/\/lookups\.twilio\.com\/v2\/PhoneNumbers\/[^?\s)]+/gi, 'https://lookups.twilio.com/v2/PhoneNumbers/[phone]')
+    .replace(/%2B\d{10,15}/g, '[phone]')
+    .replace(/\+\d{10,15}\b/g, '[phone]')
+    .replace(/\b\d{10,15}\b/g, '[phone]');
+}
+
 // Per-component cleanup: strips trailing admin-paren and em/en-dash
 // suffixes from a single service name. Only safe on one component at a
 // time (e.g. a single services.name value). Returns empty string on
@@ -169,7 +182,7 @@ async function isLandline(customerId, phone) {
       }
       return false;
     } catch (lookupErr) {
-      logger.warn(`[appt-remind] Twilio Lookup failed for ${phone}: ${lookupErr.message} — sending anyway`);
+      logger.warn(`[appt-remind] Twilio Lookup failed for ${maskPhone(phone)}: ${sanitizeLookupError(lookupErr.message)} - sending anyway`);
       return false; // Don't block on lookup failures
     }
   } catch (err) {
@@ -774,6 +787,11 @@ const AppointmentReminders = {
       return null;
     }
   },
+};
+
+AppointmentReminders._test = {
+  maskPhone,
+  sanitizeLookupError,
 };
 
 module.exports = AppointmentReminders;

@@ -4,6 +4,7 @@ describe('call recording appointment guardrails', () => {
   const {
     canonicalWavesService,
     extractedNameMatchesCustomer,
+    maskPhone,
     resolveCallContactPhone,
     resolveDefaultCallBookingTechnician,
     resolveSchedulableCallService,
@@ -47,6 +48,12 @@ describe('call recording appointment guardrails', () => {
       from_phone: '+19145234413',
       to_phone: '+19412975749',
     }, '+19412975749')).toBe('+19145234413');
+  });
+
+  test('masks phone values for call processor diagnostics', () => {
+    expect(maskPhone('+19415551212')).toBe('***1212');
+    expect(maskPhone('(941) 555-1212')).toBe('***1212');
+    expect(maskPhone('')).toBe('unknown');
   });
 
   test('detects transcript name mismatch against a linked customer', () => {

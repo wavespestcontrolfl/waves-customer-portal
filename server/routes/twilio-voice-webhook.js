@@ -89,6 +89,14 @@ function maskSid(sid) {
   return `${value.slice(0, 2)}…${value.slice(-6)}`;
 }
 
+function sanitizeVoiceProviderError(value) {
+  return String(value || '')
+    .replace(/https:\/\/lookups\.twilio\.com\/v2\/PhoneNumbers\/[^?\s)]+/gi, 'https://lookups.twilio.com/v2/PhoneNumbers/[phone]')
+    .replace(/%2B\d{10,15}/g, '[phone]')
+    .replace(/\+\d{10,15}\b/g, '[phone]')
+    .replace(/\b\d{10,15}\b/g, '[phone]');
+}
+
 let warnedForwardNumberFallback = false;
 
 function parseJsonObject(value) {
@@ -229,7 +237,7 @@ router.post('/voice', async (req, res) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
-      logger.info(`[GATE BLOCKED] Voice call from ${req.body.From} (gate: twilioVoice)`);
+      logger.info(`[GATE BLOCKED] Voice call from ${maskPhone(req.body.From)} (gate: twilioVoice)`);
       return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Thank you for calling Waves Pest Control. Please call back during business hours or text us at 941-318-7612.</Say></Response>');
     }
 
@@ -255,12 +263,12 @@ router.post('/voice', async (req, res) => {
           const lookupData = await lookupRes.json();
           const callerName = lookupData.caller_name?.caller_name;
           if (callerName && callerName !== 'UNKNOWN' && callerName.trim().length > 0) {
-            logger.info(`[CallerID] Lookup matched for inbound call ${CallSid}; deferring customer creation until transcript confirms first name`);
+            logger.info(`[CallerID] Lookup matched for inbound call ${maskSid(CallSid)}; deferring customer creation until transcript confirms first name`);
           }
         }
       } catch (lookupErr) {
         // Non-critical — Twilio Lookup is a paid add-on, may not be enabled
-        logger.info(`[CallerID] Lookup skipped: ${lookupErr.message}`);
+        logger.info(`[CallerID] Lookup skipped: ${sanitizeVoiceProviderError(lookupErr.message)}`);
       }
     }
 
@@ -295,10 +303,10 @@ router.post('/voice', async (req, res) => {
         domain: numberConfig?.domain || null,
       },
     }).catch((err) => {
-      logger.error(`recordTouchpoint failed for inbound CallSid=${CallSid}: ${err.message}`);
+      logger.error(`recordTouchpoint failed for inbound CallSid=${maskSid(CallSid)}: ${err.message}`);
     });
 
-    logger.info(`Inbound call: ${From} → ${To} (${CallSid}) customer=${customer?.first_name || 'unknown'}`);
+    logger.info(`Inbound call: ${maskPhone(From)} -> ${maskPhone(To)} (${maskSid(CallSid)}) customer=${customer?.first_name || 'unknown'}`);
 
     // Build TwiML response — fallback path that mirrors the production
     // Studio Flow ("Waves Inbound — All Numbers", FW5fdc2e44...).
@@ -632,7 +640,7 @@ router.post('/recording-status', async (req, res) => {
         // handler's defensive pattern: log and skip rather than synthesize
         // a wrongly-attributed row.
         logger.warn(
-          `[recording-status] No parent call_log row for CallSid=${CallSid} ParentCallSid=${ParentCallSid || 'none'}; skipping orphan insert (recording=${RecordingSid})`
+          `[recording-status] No parent call_log row for CallSid=${maskSid(CallSid)} ParentCallSid=${maskSid(ParentCallSid)}; skipping orphan insert (recording=${maskSid(RecordingSid)})`
         );
       }
 
@@ -703,10 +711,10 @@ router.post('/transcription', async (req, res) => {
 
       if (updated > 0) {
         queueVoiceMessageSync(matchedSid);
-        logger.info(`Transcription received: ${CallSid} (${TranscriptionText.length} chars)`);
+        logger.info(`Transcription received: ${maskSid(CallSid)} (${TranscriptionText.length} chars)`);
       } else {
         logger.warn(
-          `[transcription] No call_log row for CallSid=${CallSid} ParentCallSid=${ParentCallSid || 'none'}; transcription dropped (recording=${RecordingSid})`
+          `[transcription] No call_log row for CallSid=${maskSid(CallSid)} ParentCallSid=${maskSid(ParentCallSid)}; transcription dropped (recording=${maskSid(RecordingSid)})`
         );
       }
     }
@@ -885,7 +893,7 @@ router.post('/call-status', async (req, res) => {
       // upstream; log and skip rather than pollute communications history.
       if (isOutbound) {
         logger.warn(
-          `Outbound status_callback with no call_log row CallSid=${CallSid} — originator did not insert; skipping fallback insert`
+          `Outbound status_callback with no call_log row CallSid=${maskSid(CallSid)} - originator did not insert; skipping fallback insert`
         );
         return;
       }
@@ -932,7 +940,7 @@ router.post('/call-status', async (req, res) => {
           source: 'status_callback',
         },
       }).catch((err) => {
-        logger.error(`recordTouchpoint failed for CallSid=${CallSid}: ${err.message}`);
+        logger.error(`recordTouchpoint failed for CallSid=${maskSid(CallSid)}: ${err.message}`);
       });
     });
 
@@ -976,9 +984,12 @@ router.post('/call-status', async (req, res) => {
 router._test = {
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
+  maskPhone,
+  maskSid,
   metadataHasForwardAcceptance,
   rememberForwardAccept,
   resolveInboundDialCompletion,
+  sanitizeVoiceProviderError,
   wasForwardAccepted,
 };
 
