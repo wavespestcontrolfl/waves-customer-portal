@@ -176,7 +176,7 @@ export default function PrepGuidePage() {
             <BlockRenderer blocks={data.blocks} />
 
             <div style={{ marginTop: 28, paddingTop: 20, borderTop: `1px solid ${SURFACE.border}` }}>
-              <p style={{ fontSize: 14, color: SURFACE.muted, lineHeight: 1.5, margin: 0 }}>
+              <p style={{ fontSize: 16, color: SURFACE.muted, lineHeight: 1.5, margin: 0 }}>
                 Questions? Call or text us at{' '}
                 <a href={WAVES_SUPPORT_PHONE_TEL} style={{ color: SURFACE.text, fontWeight: 500 }}>
                   {data.supportPhone || WAVES_SUPPORT_PHONE_DISPLAY}
