@@ -80,6 +80,32 @@ router.get('/proposals', async (req, res, next) => {
   }
 });
 
+router.get('/metrics', async (req, res, next) => {
+  try {
+    const days = normalizeDays(req.query.days, 30);
+    const rows = await db('data_hygiene_proposals')
+      .where('created_at', '>=', db.raw(`now() - (? * interval '1 day')`, [days]))
+      .select(
+        'id',
+        'field',
+        'rule_id',
+        'source',
+        'status',
+        'reject_reason',
+        'confidence',
+        'evidence',
+        'created_at',
+        'updated_at'
+      )
+      .orderBy('created_at', 'desc')
+      .limit(1000);
+
+    res.json(buildMetrics(rows, { days }));
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/scan', async (req, res, next) => {
   try {
     if (!isEnabled('dataHygieneScanner')) {
@@ -390,6 +416,12 @@ function normalizeLimit(value, fallback) {
   return Math.min(parsed, 250);
 }
 
+function normalizeDays(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, 180);
+}
+
 function normalizePhases(value) {
   const raw = Array.isArray(value) ? value : ['normalization'];
   const phases = raw.map(String).filter((phase) => ALLOWED_PHASES.has(phase));
@@ -467,6 +499,99 @@ function summarizeEvidence(evidence = {}) {
     matched_label: evidence.matched_label || null,
     source_excerpt: evidence.source_excerpt || null,
   };
+}
+
+function buildMetrics(rows, { days }) {
+  const metrics = {
+    days,
+    total: rows.length,
+    statusCounts: {},
+    byField: {},
+    byMatchedLabel: {},
+    byExtractorVersion: {},
+    byRule: {},
+    daily: {},
+    topRejected: [],
+  };
+
+  for (const row of rows) {
+    const evidence = parseJsonMaybe(row.evidence) || {};
+    const matchedLabel = evidence.matched_label || 'unknown';
+    const extractorVersion = evidence.extractor_version || row.rule_id || 'unknown';
+    const day = row.created_at ? new Date(row.created_at).toISOString().slice(0, 10) : 'unknown';
+
+    incrementMetric(metrics.statusCounts, row.status || 'unknown');
+    updateMetricGroup(metrics.byField, row.field || 'unknown', row);
+    updateMetricGroup(metrics.byMatchedLabel, matchedLabel, row);
+    updateMetricGroup(metrics.byExtractorVersion, extractorVersion, row);
+    updateMetricGroup(metrics.byRule, row.rule_id || 'unknown', row);
+    updateMetricGroup(metrics.daily, day, row);
+
+    if (row.status === 'rejected') {
+      metrics.topRejected.push({
+        id: row.id,
+        field: row.field,
+        matchedLabel,
+        extractorVersion,
+        rejectReason: row.reject_reason || null,
+        confidence: row.confidence == null ? null : Number(row.confidence),
+        sourceExcerpt: evidence.source_excerpt || null,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      });
+    }
+  }
+
+  metrics.byField = finalizeMetricGroup(metrics.byField);
+  metrics.byMatchedLabel = finalizeMetricGroup(metrics.byMatchedLabel);
+  metrics.byExtractorVersion = finalizeMetricGroup(metrics.byExtractorVersion);
+  metrics.byRule = finalizeMetricGroup(metrics.byRule);
+  metrics.daily = finalizeMetricGroup(metrics.daily).sort((a, b) => String(a.key).localeCompare(String(b.key)));
+  metrics.topRejected = metrics.topRejected.slice(0, 12);
+
+  return metrics;
+}
+
+function updateMetricGroup(target, key, row) {
+  const bucket = target[key] || {
+    key,
+    total: 0,
+    pending: 0,
+    approved: 0,
+    rejected: 0,
+    reverted: 0,
+    stale: 0,
+    other: 0,
+    rejectReasons: {},
+  };
+  bucket.total += 1;
+  if (row.status === 'pending') bucket.pending += 1;
+  else if (row.status === 'approved' || row.status === 'auto_applied') bucket.approved += 1;
+  else if (row.status === 'rejected') {
+    bucket.rejected += 1;
+    incrementMetric(bucket.rejectReasons, row.reject_reason || 'unspecified');
+  } else if (row.status === 'reverted') bucket.reverted += 1;
+  else if (row.status === 'stale') bucket.stale += 1;
+  else bucket.other += 1;
+  target[key] = bucket;
+}
+
+function finalizeMetricGroup(group) {
+  return Object.values(group)
+    .map((bucket) => ({
+      ...bucket,
+      approvalRate: bucket.approved + bucket.rejected > 0
+        ? bucket.approved / (bucket.approved + bucket.rejected)
+        : null,
+      rejectionRate: bucket.approved + bucket.rejected > 0
+        ? bucket.rejected / (bucket.approved + bucket.rejected)
+        : null,
+    }))
+    .sort((a, b) => b.total - a.total || String(a.key).localeCompare(String(b.key)));
+}
+
+function incrementMetric(target, key) {
+  target[key] = (target[key] || 0) + 1;
 }
 
 function formatProposal(row) {

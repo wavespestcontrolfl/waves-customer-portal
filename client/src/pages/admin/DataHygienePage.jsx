@@ -67,9 +67,15 @@ function confidence(value) {
   return `${Math.round(Number(value) * 100)}%`;
 }
 
+function percent(value) {
+  if (value === null || value === undefined) return "-";
+  return `${Math.round(Number(value) * 100)}%`;
+}
+
 export default function DataHygienePage() {
   const [status, setStatus] = useState("pending");
   const [data, setData] = useState({ proposals: [] });
+  const [metrics, setMetrics] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState("");
@@ -83,8 +89,12 @@ export default function DataHygienePage() {
     setLoading(true);
     setError("");
     try {
-      const next = await adminFetch(`/admin/data-hygiene/proposals?status=${encodeURIComponent(status)}&limit=100`);
+      const [next, nextMetrics] = await Promise.all([
+        adminFetch(`/admin/data-hygiene/proposals?status=${encodeURIComponent(status)}&limit=100`),
+        adminFetch("/admin/data-hygiene/metrics?days=30"),
+      ]);
       setData(next);
+      setMetrics(nextMetrics);
       setSelectedId((current) => (
         next.proposals?.some((p) => p.id === current) ? current : next.proposals?.[0]?.id || null
       ));
@@ -254,6 +264,8 @@ export default function DataHygienePage() {
         {error && <div style={{ border: `1px solid #FCA5A5`, background: "#FEF2F2", color: D.red, padding: 12, borderRadius: 8, fontSize: 13 }}>{error}</div>}
         {notice && <div style={{ border: `1px solid #BBF7D0`, background: "#F0FDF4", color: D.green, padding: 12, borderRadius: 8, fontSize: 13 }}>{notice}</div>}
 
+        <MetricsPanel metrics={metrics} />
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 420px), 1fr))", gap: 14 }}>
           <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
             <div style={{ padding: 14, borderBottom: `1px solid ${D.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -380,6 +392,104 @@ export default function DataHygienePage() {
             )}
           </section>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MetricsPanel({ metrics }) {
+  const topField = metrics?.byField?.[0];
+  const topLabel = metrics?.byMatchedLabel?.[0];
+  const topVersion = metrics?.byExtractorVersion?.[0];
+  const rejected = metrics?.statusCounts?.rejected || 0;
+  const approved = metrics?.statusCounts?.approved || 0;
+
+  return (
+    <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ padding: 14, borderBottom: `1px solid ${D.border}`, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 850, color: D.heading }}>Quality Signals</div>
+          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>Last {metrics?.days || 30} days</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <Chip tone="green">{approved} approved</Chip>
+          <Chip tone={rejected ? "red" : "neutral"}>{rejected} rejected</Chip>
+        </div>
+      </div>
+      <div style={{ padding: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))", gap: 12 }}>
+        <MetricCard title="Noisiest field" bucket={topField} />
+        <MetricCard title="Noisiest label" bucket={topLabel} />
+        <MetricCard title="Extractor" bucket={topVersion} />
+      </div>
+      <div style={{ padding: "0 14px 14px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 12 }}>
+        <MetricTable title="By field" rows={metrics?.byField || []} keyLabel="Field" />
+        <MetricTable title="By label" rows={metrics?.byMatchedLabel || []} keyLabel="Label" />
+      </div>
+      <div style={{ padding: "0 14px 14px" }}>
+        <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
+          <div style={{ padding: 12, borderBottom: `1px solid ${D.border}`, fontSize: 13, fontWeight: 850, color: D.heading }}>Rejected excerpts</div>
+          {metrics?.topRejected?.length ? metrics.topRejected.map((row) => (
+            <div key={row.id} style={{ padding: 12, borderBottom: `1px solid ${D.border}`, display: "grid", gap: 6 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <Chip tone="red">{fieldLabel(row.field)}</Chip>
+                <span style={{ fontSize: 12, color: D.muted }}>{row.matchedLabel || "unknown"} · {row.extractorVersion || "unknown"} · {row.rejectReason || "rejected"}</span>
+              </div>
+              <div style={{ fontSize: 13, color: D.text, lineHeight: 1.45, overflowWrap: "anywhere" }}>
+                {row.sourceExcerpt || "No excerpt available."}
+              </div>
+            </div>
+          )) : (
+            <div style={{ padding: 12, color: D.muted, fontSize: 13 }}>No rejected excerpts in this window.</div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MetricCard({ title, bucket }) {
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, minHeight: 92 }}>
+      <div style={{ fontSize: 11, color: D.muted, fontWeight: 850, textTransform: "uppercase" }}>{title}</div>
+      <div style={{ fontSize: 16, fontWeight: 850, color: D.heading, marginTop: 8, overflowWrap: "anywhere" }}>{bucket?.key ? fieldLabel(bucket.key) : "-"}</div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, fontSize: 12, color: D.muted }}>
+        <span>{bucket?.total || 0} total</span>
+        <span>{percent(bucket?.rejectionRate)} rejected</span>
+      </div>
+    </div>
+  );
+}
+
+function MetricTable({ title, rows, keyLabel }) {
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ padding: 12, borderBottom: `1px solid ${D.border}`, fontSize: 13, fontWeight: 850, color: D.heading }}>{title}</div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ color: D.muted, textAlign: "left" }}>
+              <th style={{ padding: 10, fontWeight: 850 }}>{keyLabel}</th>
+              <th style={{ padding: 10, fontWeight: 850 }}>Total</th>
+              <th style={{ padding: 10, fontWeight: 850 }}>Approved</th>
+              <th style={{ padding: 10, fontWeight: 850 }}>Rejected</th>
+              <th style={{ padding: 10, fontWeight: 850 }}>Reject %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.slice(0, 6).map((row) => (
+              <tr key={row.key} style={{ borderTop: `1px solid ${D.border}` }}>
+                <td style={{ padding: 10, color: D.heading, fontWeight: 750, overflowWrap: "anywhere" }}>{fieldLabel(row.key)}</td>
+                <td style={{ padding: 10 }}>{row.total}</td>
+                <td style={{ padding: 10 }}>{row.approved}</td>
+                <td style={{ padding: 10 }}>{row.rejected}</td>
+                <td style={{ padding: 10 }}>{percent(row.rejectionRate)}</td>
+              </tr>
+            ))}
+            {!rows.length && (
+              <tr><td colSpan={5} style={{ padding: 12, color: D.muted }}>No metrics yet.</td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
