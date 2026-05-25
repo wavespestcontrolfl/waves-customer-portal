@@ -24,6 +24,7 @@ const {
   computeNewsletterEventUpdates,
   computeEmailMessageEventUpdates,
   suppressionForEmailEvent,
+  automationSuppressionGroupKeyForEvent,
   isFreshTimestamp,
   deliveryEmailMismatchLogMessage,
   canUseDeliveryIdFallback,
@@ -329,6 +330,37 @@ describe('email template suppression event mapping', () => {
     });
     expect(suppressionForEmailEvent({ event: 'blocked' })).toBeNull();
     expect(suppressionForEmailEvent({ event: 'dropped' })).toBeNull();
+  });
+
+  test('automation group unsubscribes map SendGrid ASM ids to local preference groups', () => {
+    const originalNewsletter = process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+    const originalService = process.env.SENDGRID_ASM_GROUP_SERVICE;
+    try {
+      process.env.SENDGRID_ASM_GROUP_NEWSLETTER = '101';
+      process.env.SENDGRID_ASM_GROUP_SERVICE = '202';
+
+      expect(automationSuppressionGroupKeyForEvent({
+        event: 'group_unsubscribe',
+        asm_group_id: 101,
+      })).toBe('marketing_newsletter');
+      expect(automationSuppressionGroupKeyForEvent({
+        event: 'group_unsubscribe',
+        asm_group_id: '202',
+      })).toBe('service_operational');
+      expect(automationSuppressionGroupKeyForEvent({
+        event: 'group_unsubscribe',
+        asm_group_id: '999',
+      })).toBeNull();
+      expect(automationSuppressionGroupKeyForEvent({
+        event: 'unsubscribe',
+        asm_group_id: '101',
+      })).toBeNull();
+    } finally {
+      if (originalNewsletter === undefined) delete process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+      else process.env.SENDGRID_ASM_GROUP_NEWSLETTER = originalNewsletter;
+      if (originalService === undefined) delete process.env.SENDGRID_ASM_GROUP_SERVICE;
+      else process.env.SENDGRID_ASM_GROUP_SERVICE = originalService;
+    }
   });
 });
 

@@ -473,6 +473,14 @@ function suppressionForEmailEvent(ev, groupKey = null) {
   return null;
 }
 
+function automationSuppressionGroupKeyForEvent(ev) {
+  if (String(ev?.event || '').toLowerCase() !== 'group_unsubscribe') return null;
+  const gid = String(ev?.asm_group_id || '');
+  if (gid && gid === String(process.env.SENDGRID_ASM_GROUP_NEWSLETTER || '')) return 'marketing_newsletter';
+  if (gid && gid === String(process.env.SENDGRID_ASM_GROUP_SERVICE || '')) return 'service_operational';
+  return null;
+}
+
 async function groupKeyForEmailMessage(message, client = db) {
   if (
     Object.prototype.hasOwnProperty.call(message || {}, 'suppression_group_key_snapshot') &&
@@ -601,6 +609,10 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
 async function handleAutomationEvent(ev, sendRow, client = db) {
   const now = new Date();
   const newsletterUnsubscribe = () => unsubscribeNewsletterSubscriber(ev.email, now, client);
+  const automationGroupKey = automationSuppressionGroupKeyForEvent(ev);
+  if (ev.event !== 'group_unsubscribe' || automationGroupKey) {
+    await recordEmailSuppressionForEvent(ev, null, automationGroupKey, now, client);
+  }
 
   switch (ev.event) {
     case 'delivered':
@@ -741,6 +753,7 @@ module.exports = router;
 module.exports.computeNewsletterEventUpdates = computeNewsletterEventUpdates;
 module.exports.computeEmailMessageEventUpdates = computeEmailMessageEventUpdates;
 module.exports.suppressionForEmailEvent = suppressionForEmailEvent;
+module.exports.automationSuppressionGroupKeyForEvent = automationSuppressionGroupKeyForEvent;
 module.exports.isFreshTimestamp = isFreshTimestamp;
 module.exports.deliveryEmailMismatchLogMessage = deliveryEmailMismatchLogMessage;
 module.exports.canUseDeliveryIdFallback = canUseDeliveryIdFallback;

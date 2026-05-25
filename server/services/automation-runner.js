@@ -19,6 +19,7 @@ const logger = require('./logger');
 const { wrapNewsletter, wrapServiceEmail, ensureLegalTextFooter } = require('./email-template');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
+const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
 
 function substitute(text, customer) {
   if (!text) return text;
@@ -53,6 +54,46 @@ function automationAsmGroupId(template) {
 
 function isNewsletterAutomation(template) {
   return String(template?.asm_group || 'service').trim().toLowerCase() === 'newsletter';
+}
+
+function automationSuppressionGroupKey(template) {
+  return isNewsletterAutomation(template) ? 'marketing_newsletter' : 'service_operational';
+}
+
+function automationSuppressionMatches(template, suppression) {
+  if (!suppression) return false;
+  const groupKey = String(suppression.group_key || '').trim();
+  const suppressionType = String(suppression.suppression_type || '').trim().toLowerCase();
+  const automationGroupKey = automationSuppressionGroupKey(template);
+  return (
+    !groupKey ||
+    groupKey === automationGroupKey ||
+    GLOBAL_SUPPRESSION_TYPES.has(suppressionType)
+  );
+}
+
+function automationSuppressionReason(suppression) {
+  return `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
+}
+
+async function activeAutomationSuppressionFor(template, email) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return null;
+  const rows = await db('email_suppressions')
+    .whereRaw('LOWER(email) = ?', [normalizedEmail])
+    .where({ status: 'active' });
+  return rows.find((row) => automationSuppressionMatches(template, row)) || null;
+}
+
+async function cancelEnrollmentForSuppression(enrollment, reason) {
+  await db('automation_enrollments').where({ id: enrollment.id }).update({
+    status: 'cancelled',
+    next_send_at: null,
+    completed_at: new Date(),
+    metadata: db.raw("jsonb_set(COALESCE(metadata,'{}'::jsonb), '{cancel_reason}', ?::jsonb, true)", [JSON.stringify('email_suppressed')]),
+    updated_at: new Date(),
+  });
+  logger.warn(`[automation-runner] cancelled enrollment=${enrollment.id} reason=${reason}`);
 }
 
 function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId }) {
@@ -225,6 +266,20 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
 
+  if (!testRecipient) {
+    const suppression = await activeAutomationSuppressionFor(template, recipient);
+    if (suppression) {
+      const reason = automationSuppressionReason(suppression);
+      await db('automation_step_sends').where({ id: sendRow.id }).update({
+        status: 'blocked',
+        failure_reason: reason.slice(0, 500),
+        updated_at: new Date(),
+      });
+      await cancelEnrollmentForSuppression(enrollment, reason);
+      return { sent: false, blocked: true, reason };
+    }
+  }
+
   try {
     const res = await sendgrid.sendOne({
       to: recipient,
@@ -374,4 +429,7 @@ module.exports = {
   normalizeAutomationFromEmail,
   automationAsmGroupId,
   renderAutomationStepContent,
+  automationSuppressionGroupKey,
+  automationSuppressionMatches,
+  activeAutomationSuppressionFor,
 };
