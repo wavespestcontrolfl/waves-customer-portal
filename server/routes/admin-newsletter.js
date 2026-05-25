@@ -1689,12 +1689,11 @@ router.get('/calendar', async (req, res, next) => {
 
     const currentThursday = getCurrentNewsletterThursday();
 
-    // Generate all Thursday dates in the window
+    // Generate all Thursday dates in the window (ET-safe)
+    const baseDate = parseETDateTime(`${currentThursday}T12:00:00`);
     const allWeeks = [];
     for (let i = -pastWeeks; i < futureWeeks; i++) {
-      const d = new Date(currentThursday);
-      d.setDate(d.getDate() + (i * 7));
-      allWeeks.push(d.toISOString().split('T')[0]);
+      allWeeks.push(etDateString(addETDays(baseDate, i * 7)));
     }
 
     // Fetch existing calendar rows
