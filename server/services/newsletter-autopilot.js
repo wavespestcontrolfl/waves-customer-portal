@@ -86,8 +86,13 @@ async function autoDraftFlagship() {
     return { skipped: true, reason };
   }
 
-  if (existingCalendar && ['drafted', 'scheduled', 'sent', 'skipped'].includes(existingCalendar.status)) {
-    const reason = `Calendar status is ${existingCalendar.status}`;
+  if (existingCalendar && existingCalendar.status === 'skipped') {
+    const reason = 'Calendar status is skipped';
+    logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
+    return { skipped: true, reason };
+  }
+  if (existingCalendar && existingCalendar.send_id && ['drafted', 'scheduled', 'sent'].includes(existingCalendar.status)) {
+    const reason = `Calendar status is ${existingCalendar.status} (send_id: ${existingCalendar.send_id})`;
     logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
     return { skipped: true, reason };
   }
