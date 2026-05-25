@@ -39,13 +39,51 @@ async function getPublishedPosts({ limit = 6 } = {}) {
 
   return rows.map((s) => ({
     title: s.subject || '',
-    link: `/newsletter/archive/${s.id}`,
+    link: s.slug ? `/newsletter/archive/${s.slug}` : `/newsletter/archive/${s.id}`,
+    slug: s.slug || null,
     pubDate: s.sent_at ? new Date(s.sent_at).toUTCString() : '',
     description: s.preview_text || stripHtml(s.html_body || '').slice(0, 200),
     image: null,
     source: 'newsletter',
     sourceName: 'Waves Newsletter',
+    newsletterType: s.newsletter_type || null,
+    indexability: s.indexability || 'index',
   }));
 }
 
-module.exports = { getPublishedPosts };
+async function getPostBySlug(slug) {
+  if (!slug || typeof slug !== 'string') return null;
+  const row = await db('newsletter_sends')
+    .where({ slug, status: 'sent' })
+    .first();
+  return row || null;
+}
+
+function buildRssXml(posts) {
+  const escXml = (s) => String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+  const items = posts.map((p) => `    <item>
+      <title>${escXml(p.title)}</title>
+      <link>https://www.wavespestcontrol.com${escXml(p.link)}</link>
+      <description>${escXml(p.description)}</description>
+      <pubDate>${p.pubDate}</pubDate>
+      <guid isPermaLink="true">https://www.wavespestcontrol.com${escXml(p.link)}</guid>
+    </item>`).join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Fresh This Week — Waves Pest Control</title>
+    <link>https://www.wavespestcontrol.com/newsletter</link>
+    <description>A weekly local events guide from North Port to Tampa, powered by Waves Pest Control.</description>
+    <language>en-us</language>
+    <lastBuildDate>${posts[0]?.pubDate || new Date().toUTCString()}</lastBuildDate>
+    <atom:link href="https://portal.wavespestcontrol.com/api/public/newsletter/rss" rel="self" type="application/rss+xml"/>
+${items}
+  </channel>
+</rss>`;
+}
+
+module.exports = { getPublishedPosts, getPostBySlug, buildRssXml, stripHtml };

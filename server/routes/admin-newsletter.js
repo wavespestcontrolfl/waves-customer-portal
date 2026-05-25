@@ -325,6 +325,18 @@ router.get('/sends/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function generateSlug(subject) {
+  const base = (subject || 'newsletter')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+  const date = etDateString();
+  return `${base}-${date}`;
+}
+
 // POST /api/admin/newsletter/sends — create a draft
 router.post('/sends', async (req, res, next) => {
   try {
@@ -348,6 +360,7 @@ router.post('/sends', async (req, res, next) => {
       segment_filter: segmentFilter || null,
       ai_prompt: aiPrompt || null,
       newsletter_type: newsletterType || null,
+      slug: generateSlug(subject),
       created_by: req.technicianId || null,
     }).returning('*');
 
