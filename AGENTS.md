@@ -253,11 +253,8 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/sendgrid-webhook`, `/api/lead-webhook`,
   `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
   posts/by-slug/:slug, rss — rate-limited, read-only for posts/rss,
-  double-opt-in for subscribe),
-  `/api/public/prep/:token` (read-only, 32-hex token format gate,
-  60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-  filters email-only blocks, server-side interpolation, generic 404).
-  New public routes outside this list are P0.
+  double-opt-in for subscribe). New public routes outside this list
+  are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
   terminal/expired-estimate rejection, public-route rate limits, no raw
