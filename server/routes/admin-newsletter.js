@@ -493,7 +493,7 @@ router.post('/sends/:id/test', async (req, res) => {
     res.json({ success: true, messageId: result.messageId });
   } catch (err) {
     logger.error(`[newsletter] test send failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
