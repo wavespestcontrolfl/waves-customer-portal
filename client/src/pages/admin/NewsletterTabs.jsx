@@ -253,7 +253,11 @@ export function ComposeView({
   // (pendingEvent) — those paths set their own template.
   useEffect(() => {
     if (!draftId && !pendingEvent && !selectedTemplate) {
-      applyTemplate('weekend');
+      const weekend = TEMPLATES.find((t) => t.key === 'weekend');
+      if (weekend) {
+        setHtmlBody(weekend.html);
+        setSelectedTemplate('weekend');
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
