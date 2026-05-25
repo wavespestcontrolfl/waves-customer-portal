@@ -1454,11 +1454,14 @@ router.post('/sends/:id/validate', async (req, res, next) => {
   try {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
-    let recipientCount = 0;
+    let recipientCount = null;
     try {
       const c = await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first();
       recipientCount = Number(c?.c || 0);
-    } catch { /* non-fatal */ }
+    } catch (queryErr) {
+      logger.error(`[newsletter] validate subscriber count failed: ${queryErr.message}`);
+      return res.status(500).json({ error: 'Could not verify subscriber count — try again' });
+    }
     const { errors, warnings } = validateNewsletterDraft(send, { recipientCount });
     res.json({ valid: errors.length === 0, errors, warnings });
   } catch (err) { next(err); }
