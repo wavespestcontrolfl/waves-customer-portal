@@ -241,4 +241,14 @@ describe('admin communications SMS route', () => {
       expect(builder.calls.offset).toEqual([4]);
     });
   });
+
+  test('CSV export escaping neutralizes spreadsheet formulas', () => {
+    const { csvEscape } = communicationsRouter._internals;
+
+    expect(csvEscape('=IMPORTXML("https://example.com")')).toBe('"\'=IMPORTXML(""https://example.com"")"');
+    expect(csvEscape('+SUM(1,1)')).toBe("\"'+SUM(1,1)\"");
+    expect(csvEscape('-10')).toBe("'-10");
+    expect(csvEscape('@cmd')).toBe("'@cmd");
+    expect(csvEscape('plain')).toBe('plain');
+  });
 });

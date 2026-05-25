@@ -558,7 +558,8 @@ const BLOCKED_SCHEDULED_PURPOSES = new Set(['marketing', 'retention']);
 
 function csvEscape(value) {
   if (value == null) return '';
-  const s = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  const raw = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  const s = /^[=+\-@]/.test(raw) ? `'${raw}` : raw;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -878,5 +879,7 @@ router.post('/contact-compliance-checks', async (req, res, next) => {
     res.status(201).json({ success: true, id: row?.id, checkedAt: row?.checked_at });
   } catch (err) { next(err); }
 });
+
+router._internals = { csvEscape, rowsToCsv };
 
 module.exports = router;
