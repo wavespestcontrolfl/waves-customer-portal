@@ -140,6 +140,10 @@ async function sharePublishedNewsletter(send) {
   if (!send.auto_share_social || send.shared_to_social) return true;
 
   // Atomic claim — prevents double-posting from concurrent resume/retry paths.
+  // Also recovers rows stranded in 'processing' for >5 min (process died mid-share).
+  const STALE_PROCESSING_MS = 5 * 60 * 1000;
+  const staleThreshold = new Date(Date.now() - STALE_PROCESSING_MS);
+
   const claimed = await db('newsletter_sends')
     .where({ id: send.id })
     .where('auto_share_social', true)
@@ -147,7 +151,11 @@ async function sharePublishedNewsletter(send) {
     .where((builder) =>
       builder
         .whereIn('social_share_status', ['pending', 'failed'])
-        .orWhereNull('social_share_status'),
+        .orWhereNull('social_share_status')
+        .orWhere((b) =>
+          b.where('social_share_status', 'processing')
+            .where('social_share_attempted_at', '<', staleThreshold),
+        ),
     )
     .update({
       social_share_status: 'processing',

@@ -549,6 +549,7 @@ export function ComposeView({
     setSubject("");
     setSubjectB("");
     setAbEnabled(false);
+    setAutoShareSocial(true);
     setPreviewText("");
     setHtmlBody("");
     setTextBody("");
