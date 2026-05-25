@@ -6,7 +6,7 @@
 // tab. The Automations tab is wired separately via
 // EmailAutomationsPanelV2 — imported directly by NewsletterPage.
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   AlertTriangle,
   CalendarClock,
@@ -230,6 +230,12 @@ export function ComposeView({
   const [segmentCount, setSegmentCount] = useState(null);
   const [autopilotBanner, setAutopilotBanner] = useState(false);
 
+  // Track the latest pendingEvent value so the mount-only autopilot
+  // preload effect can read a fresh value without adding pendingEvent
+  // to its dependency array (which would re-fire the fetch).
+  const pendingEventRef = useRef(pendingEvent);
+  pendingEventRef.current = pendingEvent;
+
   // Segment
   const [segmentMode, setSegmentMode] = useState("all"); // all | customers | leads | custom
   const [segmentSources, setSegmentSources] = useState([]);
@@ -318,19 +324,22 @@ export function ComposeView({
   // Auto-load pending autopilot draft on mount (if compose form is empty).
   // Uses a cancelled flag so a late-resolving fetch won't overwrite
   // fields the user has started editing during the round-trip.
+  // Functional updaters ensure each setter only writes when the field
+  // is currently empty, preventing overwrites of in-progress edits.
+  // pendingEventRef reads the latest value without adding it to deps.
   useEffect(() => {
-    if (draftId || pendingEvent) return; // already editing a draft or event-seeded
+    if (draftId || pendingEventRef.current) return; // already editing a draft or event-seeded
     let cancelled = false;
     adminFetch("/admin/newsletter/sends/latest-autopilot")
       .then((d) => {
-        if (cancelled) return;
+        if (cancelled || pendingEventRef.current) return;
         if (!d?.draft) return;
         const ap = d.draft;
-        setDraftId(ap.id);
-        setSubject(ap.subject || "");
-        setPreviewText(ap.preview_text || "");
-        setHtmlBody(ap.html_body || "");
-        setTextBody(ap.text_body || "");
+        setDraftId((prev) => prev || ap.id);
+        setSubject((prev) => prev || ap.subject || "");
+        setPreviewText((prev) => prev || ap.preview_text || "");
+        setHtmlBody((prev) => prev || ap.html_body || "");
+        setTextBody((prev) => prev || ap.text_body || "");
         setSelectedTemplate("weekend");
         setAutopilotBanner(true);
       })

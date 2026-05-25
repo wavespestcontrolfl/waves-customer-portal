@@ -256,6 +256,8 @@ async function autoDraftFlagship() {
   await db.raw('SELECT pg_advisory_lock(?)', [lockKey]);
 
   let row;
+  let topEvents;
+  let draft;
   try {
     const existing = await db('newsletter_sends')
       .where({ newsletter_type: NEWSLETTER_TYPE, status: 'draft' })
@@ -270,8 +272,9 @@ async function autoDraftFlagship() {
     }
 
     // 4. Draft via Claude (top 12 events)
-    const topEvents = scored.slice(0, 12);
-    const { draft, userPrompt } = await draftViaClaudeAI(topEvents);
+    topEvents = scored.slice(0, 12);
+    const { draft: aiDraft, userPrompt } = await draftViaClaudeAI(topEvents);
+    draft = aiDraft;
 
     // 5. Save as newsletter_sends draft
     [row] = await db('newsletter_sends').insert({
