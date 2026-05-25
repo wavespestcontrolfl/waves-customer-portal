@@ -635,6 +635,20 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         quoteRequiredReason: manualQuoteLine?.reason || null,
         quoteRequiredService: manualQuoteLine?.service || null,
         manualQuoteLines,
+        engineResult: {
+          summary: estimate?.summary || {},
+          lineItems: (estimate?.lineItems || []).map(item => ({
+            service: item.service,
+            name: item.name || item.label || item.displayName,
+            annual: item.annualAfterDiscount ?? item.annual ?? null,
+            monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
+            price: item.priceAfterDiscount ?? item.price ?? null,
+            total: item.totalAfterDiscount ?? item.total ?? null,
+            perApp: item.perApp ?? null,
+            frequency: item.frequency ?? item.visitsPerYear ?? null,
+          })),
+          waveGuard: estimate?.waveGuard || null,
+        },
       };
       if (quoteRequired) {
         estimateDataObj.result = buildQuoteRequiredEstimateResult(estimate, manualQuoteLines);
@@ -651,6 +665,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         address: quoteFullAddress,
         monthly_total: monthly || null,
         annual_total: annual || null,
+        onetime_total: oneTimeTotal || null,
         service_interest: serviceInterest,
         lead_source: sourceMeta.leadSourceName,
         lead_source_detail: sourceMeta.leadSourceDetail,
