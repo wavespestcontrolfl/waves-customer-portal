@@ -203,6 +203,7 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.dethatching ? 'Lawn Dethatching' : null,
     services.plugging ? 'Lawn Plugging' : null,
     services.topDressing ? 'Lawn Top Dressing' : null,
+    services.lawnPestControl ? 'Lawn Pest Control' : null,
   ].filter(Boolean).join(' + ');
 }
 
@@ -226,6 +227,7 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.dethatching ? 'Dethatching' : null,
     services.plugging ? 'Plugging' : null,
     services.topDressing ? 'Top Dressing' : null,
+    services.lawnPestControl ? 'Lawn Pest' : null,
   ]);
 }
 
@@ -283,6 +285,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
       'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
       'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
+      'lawnPestControl',
     ];
     if (!services || !ACCEPTED_KEYS.some(k => services[k])) {
       return res.status(400).json({ error: 'Select at least one service.' });
@@ -424,6 +427,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.topDressing = {
         depth: services.topDressing.depth || 'eighth',
       };
+    }
+    if (services.lawnPestControl) {
+      engineInput.services.lawnPestControl = {};
     }
 
     const estimate = generateEstimate(engineInput);
