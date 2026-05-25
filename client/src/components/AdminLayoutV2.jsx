@@ -457,6 +457,7 @@ export default function AdminLayoutV2() {
                     key={path}
                     to={path}
                     onClick={(e) => {
+                      if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                       if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                         e.preventDefault();
                         navigate(path);
@@ -631,6 +632,7 @@ export default function AdminLayoutV2() {
                   key={path}
                   to={path}
                   onClick={(e) => {
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                     if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                       e.preventDefault();
                       navigate(path);
