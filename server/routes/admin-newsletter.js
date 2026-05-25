@@ -22,7 +22,7 @@ const MODELS = require('../config/models');
 const { isFlagshipType, getNewsletterType } = require('../config/newsletter-types');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { isEligibleForFreshDigest, scoreFreshEvent } = require('../services/event-freshness');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -1297,13 +1297,14 @@ router.get('/events/sources', async (req, res, next) => {
 router.get('/events/approved-ids', async (req, res, next) => {
   try {
     const days = Math.min(14, Math.max(1, Number(req.query.days) || 10));
-    const cutoff = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    const todayET = parseETDateTime(`${etDateString()}T00:00:00`);
+    const cutoffET = addETDays(new Date(), days);
 
     const rows = await db('events_raw')
       .select('id', 'admin_status', 'start_at', 'end_at', 'event_url', 'event_type', 'freshness_status', 'times_featured')
       .whereIn('admin_status', ['approved', 'featured'])
-      .where('start_at', '>=', new Date())
-      .where('start_at', '<=', cutoff)
+      .where('start_at', '>=', todayET)
+      .where('start_at', '<=', cutoffET)
       .whereNotNull('event_url')
       .whereNotIn('freshness_status', ['expired', 'stale_recurring'])
       .orderByRaw('CASE WHEN admin_status = \'featured\' THEN 0 ELSE 1 END')
