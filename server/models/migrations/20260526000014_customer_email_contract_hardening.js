@@ -142,7 +142,7 @@ const PREP_TEMPLATES = [
   'prep.interior_pest',
 ];
 
-const PREP_REQUIRED = ['first_name', 'prep_url', 'project_type', 'service_date', 'property_address'];
+const PREP_REQUIRED = ['first_name', 'prep_url', 'project_type', 'service_date'];
 
 function json(value) {
   return JSON.stringify(value || (Array.isArray(value) ? [] : {}));
