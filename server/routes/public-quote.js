@@ -628,6 +628,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         services,
         monthly,
         annual,
+        oneTimeTotal: oneTimeTotal || 0,
+        isOneTimeOnly,
         enriched: ep,
         quoteRequired,
         quoteRequiredReason: manualQuoteLine?.reason || null,
@@ -647,8 +649,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         customer_phone: contactPhone,
         customer_email: contactEmail,
         address: quoteFullAddress,
-        monthly_total: monthly,
-        annual_total: annual,
+        monthly_total: monthly || null,
+        annual_total: annual || null,
         service_interest: serviceInterest,
         lead_source: sourceMeta.leadSourceName,
         lead_source_detail: sourceMeta.leadSourceDetail,
@@ -690,7 +692,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // The outbound-admin-call pattern is reserved for the no-price divert flow
     // via /api/leads (lead-webhook.js), where admin follow-up is actually needed.
     // Customer SMS: estimate_accepted_onetime template (DB-editable).
-    if (normalizedPhone && !quoteRequired) {
+    if (normalizedPhone && !quoteRequired && !isOneTimeOnly) {
       try {
         const wantsPest = !!services?.pest;
         const wantsLawn = !!services?.lawn;
