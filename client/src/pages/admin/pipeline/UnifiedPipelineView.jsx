@@ -166,9 +166,14 @@ export default function UnifiedPipelineView() {
   const visibleOpportunities = useMemo(() => opportunities, [opportunities]);
   const showingDuplicateCleanup = filter === "duplicate_risk" && !search.trim();
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / (pagination.pageSize || 100)));
-  const truncatedWarning = meta?.truncated
-    ? "Pipeline results were truncated by the server candidate cap. Narrow the search/filter for a complete result set."
-    : null;
+  const truncatedWarning = useMemo(() => {
+    if (!meta?.truncated) return null;
+    const cap = meta.candidateCap ? `${meta.candidateCap.toLocaleString()}-record` : "server";
+    const leadCount = meta.leadCandidatesReturned != null ? `${meta.leadCandidatesReturned.toLocaleString()} leads` : null;
+    const estimateCount = meta.estimateCandidatesReturned != null ? `${meta.estimateCandidatesReturned.toLocaleString()} estimates` : null;
+    const candidateSummary = [leadCount, estimateCount].filter(Boolean).join(" and ");
+    return `Pipeline results hit the ${cap} candidate cap${candidateSummary ? ` (${candidateSummary})` : ""}. Narrow the search or choose a more specific queue for complete counts.`;
+  }, [meta]);
 
   return (
     <div style={{ fontFamily: ROBOTO }}>

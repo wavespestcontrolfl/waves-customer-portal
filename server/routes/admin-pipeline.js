@@ -1047,6 +1047,13 @@ router.get('/opportunities', async (req, res, next) => {
       estimates,
       query,
       truncated,
+      candidateStats: {
+        candidateCap: MAX_CANDIDATES,
+        leadCandidates: leadsRaw.length,
+        estimateCandidates: estimatesRaw.length,
+        leadCandidatesReturned: leads.length,
+        estimateCandidatesReturned: estimates.length,
+      },
       dismissedDuplicatePairs,
     }));
   } catch (err) {
