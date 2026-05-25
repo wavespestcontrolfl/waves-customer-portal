@@ -22,16 +22,8 @@ import OpportunityActions from "./OpportunityActions";
 import OpportunityStageBadge from "./OpportunityStageBadge";
 import { PIPELINE_FILTERS } from "./pipelineStages";
 import UnifiedPipelineFilters from "./UnifiedPipelineFilters";
-import {
-  buildOpportunitySearchText,
-  normalizeOpportunities,
-  opportunityMatchesFilter,
-  sortOpportunities,
-} from "./opportunityNormalizer";
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
-const LEAD_LIMIT = 200;
-const ESTIMATE_LIMIT = 500;
 const DEFAULT_FILTER = "needs_action";
 const VALID_FILTERS = new Set(PIPELINE_FILTERS.map((filter) => filter.key));
 
@@ -108,7 +100,6 @@ export default function UnifiedPipelineView() {
   const [meta, setMeta] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [fallbackWarning, setFallbackWarning] = useState(null);
   const [filter, setFilter] = useState(() => filterFromSearchParams(searchParams));
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(() => pageFromSearchParams(searchParams));
@@ -145,7 +136,6 @@ export default function UnifiedPipelineView() {
   const loadPipeline = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
-    setFallbackWarning(null);
     const params = new URLSearchParams();
     params.set("stage", filter);
     params.set("page", String(page));
@@ -159,41 +149,14 @@ export default function UnifiedPipelineView() {
       setPagination(data.pagination || { page: 1, pageSize: 100, total: 0 });
       setMeta(data.meta || null);
       setLoading(false);
-      return;
-    } catch (err) {
-      setFallbackWarning(`Server pipeline endpoint failed, showing local fallback: ${err.message}`);
-    }
-
-    try {
-      const [leadResult, estimateResult] = await Promise.allSettled([
-        adminFetch(`/admin/leads?sort=first_contact_at&order=desc&page=1&limit=${LEAD_LIMIT}`),
-        adminFetch(`/admin/estimates?limit=${ESTIMATE_LIMIT}&pricingRisk=1`),
-      ]);
-      if (leadResult.status === "rejected" && estimateResult.status === "rejected") {
-        throw leadResult.reason || estimateResult.reason;
-      }
-      const leads = leadResult.status === "fulfilled" ? leadResult.value?.leads || [] : [];
-      const estimates = estimateResult.status === "fulfilled" ? estimateResult.value?.estimates || [] : [];
-      const q = search.trim().toLowerCase();
-      const normalized = sortOpportunities(normalizeOpportunities({ leads, estimates }))
-        .filter((opportunity) => opportunityMatchesFilter(opportunity, filter))
-        .filter((opportunity) => {
-          if (!q) return true;
-          const phoneQ = q.replace(/\D/g, "");
-          return buildOpportunitySearchText(opportunity).includes(phoneQ.length >= 7 ? phoneQ : q);
-        });
-      setOpportunities(normalized);
-      setCounts({ total: normalized.length, [filter]: normalized.length });
-      setPagination({ page: 1, pageSize: normalized.length, total: normalized.length });
-      setMeta({ source: "client_fallback", truncated: leadResult.value?.total > leads.length });
     } catch (err) {
       setLoadError(err);
       setOpportunities([]);
       setCounts({});
       setPagination({ page: 1, pageSize: 100, total: 0 });
       setMeta(null);
+      setLoading(false);
     }
-    setLoading(false);
   }, [filter, page, search]);
 
   useEffect(() => {
@@ -257,7 +220,6 @@ export default function UnifiedPipelineView() {
         </div>
       </div>
 
-      {fallbackWarning && <WarningBanner>{fallbackWarning}</WarningBanner>}
       {truncatedWarning && <WarningBanner>{truncatedWarning}</WarningBanner>}
 
       <Card className="mb-4">
