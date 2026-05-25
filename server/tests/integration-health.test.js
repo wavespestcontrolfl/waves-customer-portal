@@ -61,6 +61,7 @@ describe('integration health', () => {
 
     expect(gbp.health.status).toBe('degraded');
     expect(gbp.health.label).toBe('Degraded · 1/4');
+    expect(gbp.health.lastCheckedAt).toBe('2026-05-25T12:00:00.000Z');
     expect(gbp.health.children).toHaveLength(4);
   });
 

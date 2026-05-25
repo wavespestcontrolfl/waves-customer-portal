@@ -70,7 +70,7 @@ function summarizeEnv(integration, present) {
 
 function latestDate(rows) {
   const times = rows
-    .map((row) => row?.last_verified_at || row?.lastVerifiedAt)
+    .map((row) => row?.last_verified_at || row?.lastVerifiedAt || row?.lastCheckedAt)
     .filter(Boolean)
     .map((value) => new Date(value).getTime())
     .filter((value) => Number.isFinite(value));
