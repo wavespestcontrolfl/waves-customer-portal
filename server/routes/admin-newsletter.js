@@ -1782,7 +1782,7 @@ router.post('/calendar', async (req, res, next) => {
       }
     }
 
-    const sendAt = targetSendAt ? new Date(targetSendAt) : defaultTargetSendAt(weekOf);
+    const sendAt = targetSendAt ? parseETDateTime(targetSendAt) : defaultTargetSendAt(weekOf);
 
     const [row] = await db('newsletter_calendar')
       .insert({
@@ -1820,7 +1820,7 @@ router.patch('/calendar/:id', async (req, res, next) => {
     if (topic !== undefined) updates.topic = topic || null;
     if (notes !== undefined) updates.notes = notes || null;
     if (homeownerMinuteTopic !== undefined) updates.homeowner_minute_topic = homeownerMinuteTopic || null;
-    if (targetSendAt !== undefined) updates.target_send_at = new Date(targetSendAt);
+    if (targetSendAt !== undefined) updates.target_send_at = parseETDateTime(targetSendAt);
     if (status !== undefined) {
       const VALID = ['planned', 'drafted', 'scheduled', 'sent', 'skipped'];
       if (!VALID.includes(status)) return res.status(400).json({ error: 'invalid status' });
@@ -1829,6 +1829,10 @@ router.patch('/calendar/:id', async (req, res, next) => {
     if (eventIds !== undefined) {
       if (!Array.isArray(eventIds) || eventIds.length > 12) {
         return res.status(400).json({ error: 'eventIds must be array (max 12)' });
+      }
+      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!eventIds.every(id => typeof id === 'string' && uuidRe.test(id))) {
+        return res.status(400).json({ error: 'eventIds must be valid UUIDs' });
       }
       updates.event_ids = JSON.stringify(eventIds);
     }
