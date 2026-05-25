@@ -1659,11 +1659,13 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
     let imported = 0, skipped = 0, errors = 0;
     for (const c of customers) {
       try {
-        // Check if already unsubscribed — respect opt-out (CAN-SPAM)
+        // Skip subscribers who opted out OR are mid-double-opt-in — calling
+        // subscribeOrResubscribe with requireConfirmation:false would promote
+        // pending rows to active, bypassing the confirmation they started.
         const existing = await db('newsletter_subscribers')
-          .where('email', c.email.toLowerCase())
+          .where({ email: c.email.trim().toLowerCase() })
           .first();
-        if (existing && existing.status === 'unsubscribed') {
+        if (existing && (existing.status === 'unsubscribed' || existing.status === 'pending')) {
           skipped++;
           continue;
         }
@@ -1680,15 +1682,17 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
 
         if (result.action === 'created' || result.action === 'resubscribed') {
           imported++;
-          // Set region_zone from city
-          const zone = cityToZone(c.city);
-          if (zone && result.subscriber?.id) {
-            await db('newsletter_subscribers')
-              .where({ id: result.subscriber.id })
-              .update({ region_zone: zone });
-          }
         } else {
           skipped++;
+        }
+
+        // Always backfill region_zone if missing (covers already_active too)
+        const zone = cityToZone(c.city);
+        if (zone && result.subscriber?.id) {
+          await db('newsletter_subscribers')
+            .where({ id: result.subscriber.id })
+            .whereNull('region_zone')
+            .update({ region_zone: zone });
         }
       } catch (e) {
         errors++;
