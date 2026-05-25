@@ -1516,8 +1516,11 @@ router.patch('/sends/:id/blog-convertible', async (req, res, next) => {
     if (send.status !== 'sent') return res.status(400).json({ error: 'only sent newsletters can be marked for blog' });
 
     const { convertible } = req.body;
+    if (typeof convertible !== 'boolean') {
+      return res.status(400).json({ error: 'convertible must be a boolean' });
+    }
     await db('newsletter_sends').where({ id: req.params.id }).update({
-      blog_convertible: convertible !== false,
+      blog_convertible: convertible,
       updated_at: new Date(),
     });
     res.json({ success: true });
@@ -1530,6 +1533,10 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
   try {
     const send = await db('newsletter_sends').where({ id: req.params.id, status: 'sent' }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
+
+    if (!send.blog_convertible) {
+      return res.status(409).json({ error: 'Newsletter must be marked as blog-convertible before export' });
+    }
 
     // Generate blog-ready frontmatter + content
     const slug = send.slug || send.id;
