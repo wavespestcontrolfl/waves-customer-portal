@@ -17,6 +17,23 @@ exports.up = async function (knex) {
     if (!existing.has('published_content')) t.jsonb('published_content');
   });
 
+
+  // Deduplicate existing rows before adding unique indexes.
+  // Keep the most recent row for each source_url / source_guid.
+  await knex.raw(`
+    DELETE FROM social_media_posts a
+    USING social_media_posts b
+    WHERE a.source_url IS NOT NULL
+      AND a.source_url = b.source_url
+      AND a.created_at < b.created_at
+  `);
+  await knex.raw(`
+    DELETE FROM social_media_posts a
+    USING social_media_posts b
+    WHERE a.source_guid IS NOT NULL
+      AND a.source_guid = b.source_guid
+      AND a.created_at < b.created_at
+  `);
   // Partial unique indexes for deduplication
   await knex.raw(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_social_posts_source_url_unique

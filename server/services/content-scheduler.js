@@ -456,8 +456,8 @@ const ContentScheduler = {
     }
 
     // ── Process social posts ────────────────────────────────────
-    const { SOCIAL_FLAGS: flags } = require('./social-media');
-    if (!flags.automationEnabled || !flags.scheduledPosts) {
+    const { SOCIAL_FLAGS: flags, isPausedByAdmin: checkPause } = require('./social-media');
+    if (!flags.automationEnabled || !flags.scheduledPosts || await checkPause()) {
       return { blogCount, socialCount, errors, socialSkipped: true };
     }
 

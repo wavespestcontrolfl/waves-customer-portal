@@ -789,6 +789,11 @@ const SocialMediaService = {
 
     const text = content || await generateContent(platform, { title, description, link, locationName: locationId });
 
+    const validation = validateContent(text, platform);
+    if (!validation.valid) {
+      return { platform, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues };
+    }
+
     if (SOCIAL_FLAGS.dryRun) {
       logger.info(`[social] DRY RUN — postToSingle/${platform}: ${text.substring(0, 120)}...`);
       return { platform, success: false, dryRun: true, content: text };
