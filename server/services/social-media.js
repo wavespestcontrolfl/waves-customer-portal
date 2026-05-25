@@ -620,17 +620,22 @@ const SocialMediaService = {
     }
 
     // Generate content for each platform and post
+    const fbReady = !!process.env.FACEBOOK_ACCESS_TOKEN && !!FACEBOOK_PAGE_ID;
+    const igReady = fbReady && !!INSTAGRAM_ACCOUNT_ID && !!generatedImageUrl;
     const platforms = [
       {
         key: 'facebook',
-        enabled: SOCIAL_FLAGS.facebookEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN,
-        reason: !SOCIAL_FLAGS.facebookEnabled ? 'Disabled' : 'Not configured',
+        enabled: SOCIAL_FLAGS.facebookEnabled && fbReady,
+        reason: !SOCIAL_FLAGS.facebookEnabled ? 'Disabled'
+          : !FACEBOOK_PAGE_ID ? 'FACEBOOK_PAGE_ID not set'
+          : 'FACEBOOK_ACCESS_TOKEN not set',
       },
       {
         key: 'instagram',
-        enabled: SOCIAL_FLAGS.instagramEnabled && !!process.env.FACEBOOK_ACCESS_TOKEN && !!generatedImageUrl,
+        enabled: SOCIAL_FLAGS.instagramEnabled && igReady,
         reason: !SOCIAL_FLAGS.instagramEnabled ? 'Disabled'
-          : !process.env.FACEBOOK_ACCESS_TOKEN ? 'Not configured'
+          : !process.env.FACEBOOK_ACCESS_TOKEN ? 'FACEBOOK_ACCESS_TOKEN not set'
+          : !INSTAGRAM_ACCOUNT_ID ? 'INSTAGRAM_ACCOUNT_ID not set'
           : 'Image hosting not configured',
       },
       {
@@ -726,28 +731,35 @@ const SocialMediaService = {
     const postStatus = SOCIAL_FLAGS.dryRun ? 'dry_run'
       : platformResults.some(r => r.success) ? 'published' : 'failed';
 
+    const postRow = {
+      title,
+      description: (description || '').substring(0, 1000),
+      source_url: normalizedLink,
+      source_guid: guid,
+      source_type: source || 'manual',
+      platforms_posted: JSON.stringify(platformResults),
+      image_url: typeof generatedImageUrl === 'string' ? generatedImageUrl : null,
+      status: postStatus,
+      ai_model: MODELS.FLAGSHIP,
+      published_content: Object.keys(publishedContent).length > 0
+        ? JSON.stringify(publishedContent) : null,
+    };
+    const updateCols = { platforms_posted: postRow.platforms_posted, status: postRow.status, published_content: postRow.published_content };
+
     try {
-      await db.raw(`
-        INSERT INTO social_media_posts
-          (title, description, source_url, source_guid, source_type, platforms_posted,
-           image_url, status, ai_model, published_content)
-        VALUES (?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb)
-        ON CONFLICT (source_url) WHERE source_url IS NOT NULL DO UPDATE SET
-          platforms_posted = EXCLUDED.platforms_posted,
-          status = EXCLUDED.status,
-          published_content = EXCLUDED.published_content
-      `, [
-        title,
-        (description || '').substring(0, 1000),
-        normalizedLink,
-        guid,
-        source || 'manual',
-        JSON.stringify(platformResults),
-        typeof generatedImageUrl === 'string' ? generatedImageUrl : null,
-        postStatus,
-        MODELS.FLAGSHIP,
-        Object.keys(publishedContent).length > 0 ? JSON.stringify(publishedContent) : null,
-      ]);
+      const existingByUrl = normalizedLink
+        ? await db('social_media_posts').where('source_url', normalizedLink).first()
+        : null;
+      const existingByGuid = !existingByUrl && guid
+        ? await db('social_media_posts').where('source_guid', guid).first()
+        : null;
+      const existing = existingByUrl || existingByGuid;
+
+      if (existing) {
+        await db('social_media_posts').where('id', existing.id).update(updateCols);
+      } else {
+        await db('social_media_posts').insert(postRow);
+      }
     } catch (err) {
       logger.error(`[social] Failed to log post: ${err.message}`);
     }
