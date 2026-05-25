@@ -220,10 +220,15 @@ class UrlIntelligence {
       return 'duplicate_content';
     }
 
-    if (
-      (record.status_code && record.status_code >= 400) ||
-      record.technical_qa_score !== null && record.technical_qa_score < 40
-    ) {
+    if (record.status_code && record.status_code >= 400) {
+      // 404/410 with no traffic are stale audit entries, not active technical issues
+      if ((record.status_code === 404 || record.status_code === 410) &&
+          !record.gsc_impressions_28d && !record.gsc_clicks_28d) {
+        return 'low_value';
+      }
+      return 'technical_performance';
+    }
+    if (record.technical_qa_score !== null && record.technical_qa_score < 40) {
       return 'technical_performance';
     }
 
