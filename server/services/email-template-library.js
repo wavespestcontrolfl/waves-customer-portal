@@ -124,6 +124,25 @@ function requiredPayloadMissing(template, payload) {
   });
 }
 
+function productionPlaceholderPayloadValues(payload = {}) {
+  const findings = [];
+  for (const [key, rawValue] of Object.entries(payload || {})) {
+    if (rawValue == null) continue;
+    if (typeof rawValue === 'object') continue;
+    const value = String(rawValue).trim();
+    if (!value) continue;
+    const lower = value.toLowerCase();
+    const isPlaceholder =
+      /^sample(?:\s|$)/i.test(value) ||
+      lower === 'customer@example.com' ||
+      value === '.00' ||
+      /^https:\/\/portal\.wavespestcontrol\.com\/sample(?:$|[/?#])/i.test(value) ||
+      /^\(941\)\s*555-\d{4}$/.test(value);
+    if (isPlaceholder) findings.push(key);
+  }
+  return findings.sort();
+}
+
 function normalizeBlocks(blocks) {
   return asArray(blocks).map((block) => {
     const type = String(block?.type || 'paragraph').trim();
@@ -545,6 +564,15 @@ async function sendTemplate({
     err.status = 400;
     throw err;
   }
+  if (!test && String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    const placeholderFields = productionPlaceholderPayloadValues(payload || {});
+    if (placeholderFields.length) {
+      const err = new Error(`Placeholder values are not allowed in production email payloads: ${placeholderFields.join(', ')}`);
+      err.status = 400;
+      err.code = 'EMAIL_TEMPLATE_PLACEHOLDER_PAYLOAD';
+      throw err;
+    }
+  }
 
   const fromName = template.from_name || 'Waves Pest Control';
   const fromEmail = template.from_email || 'contact@wavespestcontrol.com';
@@ -638,6 +666,7 @@ module.exports = {
   normalizeBlocks,
   validationFor,
   redactedPayloadSnapshot,
+  productionPlaceholderPayloadValues,
   activeSuppressionFor,
   renderTemplate,
   renderVersion,

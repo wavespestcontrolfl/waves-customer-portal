@@ -171,6 +171,23 @@ describe('email template library rendering', () => {
     expect(rendered.missingPayload).toEqual(['expires_at']);
   });
 
+  test('detects obvious placeholder payload values before production sends', () => {
+    expect(EmailTemplates.productionPlaceholderPayloadValues({
+      first_name: 'Taylor',
+      service_label: 'Sample project type',
+      amount_due: '.00',
+      email: 'customer@example.com',
+      portal_url: 'https://portal.wavespestcontrol.com/sample',
+      company_phone: '(941) 555-0134',
+    })).toEqual([
+      'amount_due',
+      'company_phone',
+      'email',
+      'portal_url',
+      'service_label',
+    ]);
+  });
+
   test('renders variables inside custom text bodies', () => {
     const rendered = EmailTemplates.renderTemplate({
       template: serviceTemplate(),
