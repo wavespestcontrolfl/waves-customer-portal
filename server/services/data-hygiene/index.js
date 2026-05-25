@@ -46,12 +46,15 @@ const {
   upsertProposal,
   stalePendingNormalizationForResource,
 } = require('./proposal-store');
+const {
+  runMessageExtractionPhase,
+} = require('./message-extractor');
 
 const SCANNER_VERSION = 'phase1-normalization-v1';
 const BATCH_SIZE = 500;
 
 const VALID_MODES = ['cron', 'manual', 'bootstrap', 'dry_run'];
-const SUPPORTED_PHASES = new Set(['normalization']);
+const SUPPORTED_PHASES = new Set(['normalization', 'extraction']);
 
 async function runScan({ mode, phases = [], triggeredBy = null } = {}) {
   if (!VALID_MODES.includes(mode)) {
@@ -121,6 +124,12 @@ async function runScan({ mode, phases = [], triggeredBy = null } = {}) {
           dryRun: mode === 'dry_run',
         });
         mergeCounts(counts, phaseCounts);
+      } else if (phase === 'extraction') {
+        const phaseCounts = await runMessageExtractionPhase({
+          runId,
+          dryRun: mode === 'dry_run',
+        });
+        mergeExtractionCounts(counts, phaseCounts);
       }
     }
 
@@ -298,6 +307,7 @@ function createCounts(phases = []) {
     scanned: {
       customers: 0,
       customer_accounts: 0,
+      messages: 0,
     },
     by_source: {},
     by_rule: {},
@@ -315,9 +325,23 @@ function mergeCounts(target, source) {
   target.skipped_phases.push(...(source.skipped_phases || []));
   target.scanned.customers += source.scanned?.customers || 0;
   target.scanned.customer_accounts += source.scanned?.customer_accounts || 0;
+  target.scanned.messages += source.scanned?.messages || 0;
   mergeMap(target.by_source, source.by_source);
   mergeMap(target.by_rule, source.by_rule);
   mergeMap(target.by_tier, source.by_tier);
+}
+
+function mergeExtractionCounts(target, source = {}) {
+  target.created += source.created || 0;
+  target.would_create += source.would_create || 0;
+  target.duplicates += source.duplicates || 0;
+  target.errors += source.errors || 0;
+  target.scanned.messages += source.scanned?.messages || 0;
+  target.no_fields = (target.no_fields || 0) + (source.no_fields || 0);
+  target.skipped_sources = (target.skipped_sources || 0) + (source.skipped_sources || 0);
+  mergeMap(target.by_source, { 'message-extraction': (source.created || 0) + (source.would_create || 0) });
+  mergeMap(target.by_rule, source.by_rule);
+  mergeMap(target.by_field || (target.by_field = {}), source.by_field);
 }
 
 function mergeMap(target, source = {}) {

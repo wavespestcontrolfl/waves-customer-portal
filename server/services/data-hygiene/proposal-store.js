@@ -1,5 +1,10 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
+const {
+  hashSensitiveValue,
+  redactSensitiveValue,
+  vaultStoreSensitive,
+} = require('./sensitive-vault');
 
 function stableJson(value) {
   if (value === undefined) return 'null';
@@ -84,6 +89,74 @@ async function upsertProposal(proposal, { trx = null, run_id = null } = {}) {
   };
 }
 
+async function upsertSensitiveProposal(proposal, { trx = null, run_id = null } = {}) {
+  const client = trx || db;
+  if (!isSensitiveProposal(proposal) && proposal.is_sensitive !== true) {
+    throw new Error('upsertSensitiveProposal requires a sensitive proposal');
+  }
+
+  const insertWithVault = async (transaction) => {
+    const idempotencyKey = proposal.idempotency_key || buildIdempotencyKey(proposal);
+    const beforeHash = hashSensitiveValue(proposal.current_value);
+    const afterHash = hashSensitiveValue(proposal.proposed_value);
+    const evidence = {
+      ...(proposal.evidence || {}),
+      before_hash: beforeHash,
+      after_hash: afterHash,
+    };
+    const row = {
+      run_id,
+      rule_id: proposal.rule_id,
+      rule_version: proposal.rule_version,
+      resource_type: proposal.resource_type,
+      resource_id: proposal.resource_id || null,
+      scope_type: proposal.scope_type,
+      scope_id: proposal.scope_id,
+      field: proposal.field,
+      current_value: JSON.stringify(redactSensitiveValue(proposal.current_value, proposal.field)),
+      proposed_value: JSON.stringify(redactSensitiveValue(proposal.proposed_value, proposal.field)),
+      source: proposal.source,
+      confidence: proposal.confidence,
+      tier: proposal.tier,
+      evidence: JSON.stringify(evidence),
+      is_sensitive: true,
+      status: proposal.status || 'pending',
+      idempotency_key: idempotencyKey,
+    };
+
+    const inserted = await transaction('data_hygiene_proposals')
+      .insert(row)
+      .onConflict('idempotency_key')
+      .ignore()
+      .returning(['id']);
+
+    if (!inserted.length) {
+      return {
+        inserted: false,
+        id: null,
+        idempotency_key: idempotencyKey,
+      };
+    }
+
+    const proposalId = inserted[0].id;
+    await vaultStoreSensitive({
+      trx: transaction,
+      proposal_id: proposalId,
+      field: proposal.field,
+      before_raw: proposal.current_value === undefined ? null : proposal.current_value,
+      after_raw: proposal.proposed_value === undefined ? null : proposal.proposed_value,
+    });
+
+    return {
+      inserted: true,
+      id: proposalId,
+      idempotency_key: idempotencyKey,
+    };
+  };
+
+  return trx ? insertWithVault(client) : client.transaction(insertWithVault);
+}
+
 async function stalePendingNormalizationForResource({
   resource_type,
   resource_id,
@@ -128,6 +201,7 @@ module.exports = {
   buildIdempotencyKey,
   stableJson,
   upsertProposal,
+  upsertSensitiveProposal,
   stalePendingNormalizationForResource,
   isSensitiveProposal,
 };
