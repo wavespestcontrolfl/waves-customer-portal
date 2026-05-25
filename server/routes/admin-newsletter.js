@@ -674,7 +674,7 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
       const MAX_EVENT_IDS = 12;
       if (Array.isArray(eventIds) && eventIds.length > 0) {
         const safeIds = eventIds.slice(0, MAX_EVENT_IDS).filter(
-          (id) => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id),
+          (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id),
         );
         if (safeIds.length === 0) {
           return res.status(400).json({ error: 'eventIds must be valid UUIDs' });
@@ -1180,8 +1180,9 @@ router.patch('/events/:id', async (req, res, next) => {
     if (regionZone !== undefined) updates.region_zone = regionZone;
     if (priceText !== undefined) updates.price_text = priceText;
 
-    // Recompute freshness when type or status changes
-    if (eventType !== undefined || freshnessStatus !== undefined) {
+    // Recompute freshness when type, status, or times_featured changes
+    const featureTransition = adminStatus === 'featured' && event.admin_status !== 'featured';
+    if (eventType !== undefined || freshnessStatus !== undefined || featureTransition) {
       const { classifyFreshness } = require('../services/event-freshness');
 
       if (freshnessStatus !== undefined) {
@@ -1203,10 +1204,11 @@ router.patch('/events/:id', async (req, res, next) => {
           }
         }
       } else {
-        // Derive freshness from event type
+        // Derive freshness from event type (use incremented count if featuring)
+        const nextFeatured = featureTransition ? (event.times_featured || 0) + 1 : event.times_featured;
         const { freshness_status, freshness_score } = classifyFreshness({
           event_type: eventType || event.event_type,
-          times_featured: event.times_featured,
+          times_featured: nextFeatured,
           start_at: event.start_at,
           end_at: event.end_at,
         });
@@ -1234,7 +1236,7 @@ router.post('/events/bulk-action', async (req, res, next) => {
 
     const MAX_BULK = 50;
     const safeIds = ids.slice(0, MAX_BULK).filter(
-      (id) => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id),
+      (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id),
     );
     if (safeIds.length === 0) {
       return res.status(400).json({ error: 'no valid UUIDs provided' });
