@@ -49,6 +49,12 @@ const { countSegments } = require('./segment-counter');
 const { persistAudit } = require('./audit');
 const { sendViaTwilio } = require('./providers/twilio-sms');
 
+const RETRYABLE_BLOCK_CODES = new Set(['QUIET_HOURS_HOLD']);
+
+function isRetryableBlockedResult(result) {
+  return !!(result && result.blocked && RETRYABLE_BLOCK_CODES.has(result.code));
+}
+
 /**
  * Normalize a phone string to E.164 (best-effort). Mirrors the existing
  * twilio.js normalizePhone — kept private here so the wrapper doesn't
@@ -74,6 +80,9 @@ function normalizeRecipient(phone) {
  *   blocked: boolean,
  *   reason?: string,
  *   code?: string,
+ *   retryable?: boolean,
+ *   deferred?: boolean,
+ *   nextAllowedAt?: string,
  *   providerMessageId?: string,
  *   auditLogId?: string | null,
  *   segmentCount?: number,
@@ -155,6 +164,8 @@ async function sendCustomerMessage(input) {
       blocked: true,
       code: blockedBy.code,
       reason: blockedBy.reason,
+      retryable: RETRYABLE_BLOCK_CODES.has(blockedBy.code),
+      deferred: RETRYABLE_BLOCK_CODES.has(blockedBy.code),
       nextAllowedAt: blockedBy.nextAllowedAt ? blockedBy.nextAllowedAt.toISOString() : undefined,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
@@ -247,9 +258,11 @@ async function dispatchToProvider(input) {
 
 module.exports = {
   sendCustomerMessage,
+  isRetryableBlockedResult,
   // Exposed for tests
   _internals: {
     validateContract,
     normalizeRecipient,
+    isRetryableBlockedResult,
   },
 };
