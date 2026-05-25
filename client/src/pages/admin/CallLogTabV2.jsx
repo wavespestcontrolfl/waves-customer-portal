@@ -118,6 +118,11 @@ function getCallBackFromNumber(call, fallbackFrom) {
   return knownNumbers.includes(preferred) ? preferred : fallbackFrom;
 }
 
+function getCallRouteLabel(call) {
+  if (!call) return "";
+  return [call.from_phone, call.to_phone].filter(Boolean).join(" → ");
+}
+
 function StatButton({ label, value, filter, active, onClick, alert }) {
   return (
     <button
@@ -512,8 +517,7 @@ export default function CallLogTabV2() {
                           {getCallDisplayName(c)}
                         </div>
                         <div className="text-12 text-ink-tertiary">
-                          {c.direction === "inbound" ? c.from_phone : c.to_phone}
-                          {c.to_phone ? ` → ${c.to_phone}` : ""} · {timeAgo(c.created_at)}
+                          {getCallRouteLabel(c)} · {timeAgo(c.created_at)}
                         </div>
                       </div>
                       {target && (
