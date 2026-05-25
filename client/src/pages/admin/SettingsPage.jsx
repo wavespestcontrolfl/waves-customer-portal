@@ -376,7 +376,7 @@ export default function SettingsPage() {
         </div>
       )}
       {/* ── INTEGRATIONS ── */}
-      {tab === "integrations" && <IntegrationsTab gates={gates} />}
+      {tab === "integrations" && <IntegrationsTab canAdmin={user?.role === "admin"} />}
       {/* ── FEATURE GATES ── */}
       {tab === "gates" && (
         <Card>
@@ -1124,7 +1124,20 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
   );
 }
 
-function IntegrationsTab() {
+function IntegrationsTab({ canAdmin }) {
+  if (!canAdmin) {
+    return (
+      <Card>
+        <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+          Admin access required
+        </div>
+        <div style={{ fontSize: 12, color: D.muted }}>
+          Integration configuration is limited to admin users.
+        </div>
+      </Card>
+    );
+  }
+
   return <IntegrationHealthSection />;
 }
 
