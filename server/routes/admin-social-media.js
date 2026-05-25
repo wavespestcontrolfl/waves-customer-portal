@@ -3,24 +3,50 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const SocialMediaService = require('../services/social-media');
+const { SOCIAL_FLAGS, isPausedByAdmin } = require('../services/social-media');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// GET /status — platform connection status
+// GET /status — platform connection status + feature flags
 router.get('/status', async (req, res, next) => {
   try {
+    const paused = await isPausedByAdmin();
     res.json({
       platforms: {
-        facebook: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, pageId: process.env.FACEBOOK_PAGE_ID || '110336442031847' },
-        instagram: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, accountId: process.env.INSTAGRAM_ACCOUNT_ID || '17841465266249854' },
-        linkedin: { configured: !!process.env.LINKEDIN_ACCESS_TOKEN, companyId: process.env.LINKEDIN_COMPANY_ID || '89173265' },
-        gbp: { configured: true, locations: 4 },
+        facebook: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, enabled: SOCIAL_FLAGS.facebookEnabled, pageId: process.env.FACEBOOK_PAGE_ID || '' },
+        instagram: { configured: !!process.env.FACEBOOK_ACCESS_TOKEN, enabled: SOCIAL_FLAGS.instagramEnabled, accountId: process.env.INSTAGRAM_ACCOUNT_ID || '' },
+        linkedin: { configured: false, enabled: false, note: 'LinkedIn disabled — deliberate scope decision' },
+        gbp: { configured: true, enabled: SOCIAL_FLAGS.gbpEnabled, locations: 4 },
         gemini: { configured: !!process.env.GEMINI_API_KEY },
         ai: { configured: !!process.env.ANTHROPIC_API_KEY },
       },
+      automation: {
+        enabled: SOCIAL_FLAGS.automationEnabled,
+        paused,
+        dryRun: SOCIAL_FLAGS.dryRun,
+        rssAutopublish: SOCIAL_FLAGS.rssAutopublish,
+        scheduledPosts: SOCIAL_FLAGS.scheduledPosts,
+        newsletterAutoshare: SOCIAL_FLAGS.newsletterAutoshare,
+      },
       rssFeed: 'https://www.wavespestcontrol.com/feed/',
     });
+  } catch (err) { next(err); }
+});
+
+// POST /pause — toggle admin pause
+router.post('/pause', async (req, res, next) => {
+  try {
+    const { paused } = req.body;
+    const value = paused ? 'true' : 'false';
+    const existing = await db('system_settings').where('key', 'social_automation_paused').first();
+    if (existing) {
+      await db('system_settings').where('key', 'social_automation_paused').update({ value, updated_at: new Date() });
+    } else {
+      await db('system_settings').insert({ key: 'social_automation_paused', value, updated_at: new Date() });
+    }
+    logger.info(`[social] Automation ${paused ? 'paused' : 'resumed'} by admin`);
+    res.json({ paused: !!paused });
   } catch (err) { next(err); }
 });
 
@@ -201,17 +227,55 @@ router.get('/analytics', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /health — credential health for social media platforms
+// GET /health — credential health for social media platforms (cached 5 min)
+let healthCache = null;
+let healthCacheAt = 0;
+const HEALTH_CACHE_TTL = 5 * 60 * 1000;
+
 router.get('/health', async (req, res, next) => {
   try {
+    const now = Date.now();
+    if (healthCache && (now - healthCacheAt) < HEALTH_CACHE_TTL && !req.query.force) {
+      return res.json(healthCache);
+    }
+
     const tokenHealth = require('../services/token-health');
-    const platforms = ['facebook', 'instagram', 'linkedin', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
+    const platforms = ['facebook', 'instagram', 'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice'];
     const results = [];
     for (const p of platforms) {
       const r = await tokenHealth.checkSingle(p);
-      results.push(r);
+      results.push({ ...r, lastCheckedAt: new Date().toISOString() });
     }
-    res.json({ credentials: results });
+
+    healthCache = { credentials: results, checkedAt: new Date().toISOString() };
+    healthCacheAt = now;
+
+    res.json(healthCache);
+  } catch (err) { next(err); }
+});
+
+// GET /alerts — active social media alerts
+router.get('/alerts', async (req, res, next) => {
+  try {
+    const row = await db('system_settings')
+      .where('key', 'social_consecutive_failures_alert')
+      .first();
+    if (row) {
+      const alert = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+      res.json({ alert, active: true });
+    } else {
+      res.json({ alert: null, active: false });
+    }
+  } catch (err) { next(err); }
+});
+
+// DELETE /alerts — dismiss social media alert
+router.delete('/alerts', async (req, res, next) => {
+  try {
+    await db('system_settings')
+      .where('key', 'social_consecutive_failures_alert')
+      .del();
+    res.json({ dismissed: true });
   } catch (err) { next(err); }
 });
 

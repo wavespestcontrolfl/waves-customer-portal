@@ -1,0 +1,48 @@
+/**
+ * Migration 019 — Social Media Hardening
+ *
+ * Adds audit trail columns and uniqueness constraints to social_media_posts
+ * for the production safety layer before enabling automated posting.
+ */
+
+exports.up = async function (knex) {
+  const cols = await knex('information_schema.columns')
+    .where({ table_name: 'social_media_posts', table_schema: 'public' })
+    .select('column_name');
+  const existing = new Set(cols.map(c => c.column_name));
+
+  await knex.schema.alterTable('social_media_posts', t => {
+    if (!existing.has('ai_model')) t.string('ai_model', 80);
+    if (!existing.has('ai_raw_output')) t.text('ai_raw_output');
+    if (!existing.has('published_content')) t.jsonb('published_content');
+  });
+
+  // Partial unique indexes for deduplication
+  await knex.raw(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_social_posts_source_url_unique
+    ON social_media_posts (source_url)
+    WHERE source_url IS NOT NULL
+  `);
+
+  await knex.raw(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_social_posts_source_guid_unique
+    ON social_media_posts (source_guid)
+    WHERE source_guid IS NOT NULL
+  `);
+};
+
+exports.down = async function (knex) {
+  await knex.raw('DROP INDEX IF EXISTS idx_social_posts_source_url_unique');
+  await knex.raw('DROP INDEX IF EXISTS idx_social_posts_source_guid_unique');
+
+  const cols = await knex('information_schema.columns')
+    .where({ table_name: 'social_media_posts', table_schema: 'public' })
+    .select('column_name');
+  const existing = new Set(cols.map(c => c.column_name));
+
+  await knex.schema.alterTable('social_media_posts', t => {
+    if (existing.has('ai_model')) t.dropColumn('ai_model');
+    if (existing.has('ai_raw_output')) t.dropColumn('ai_raw_output');
+    if (existing.has('published_content')) t.dropColumn('published_content');
+  });
+};

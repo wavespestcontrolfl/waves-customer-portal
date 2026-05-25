@@ -47,6 +47,16 @@ function dateColumnKey(value) {
 async function sharePublishedBlog(blog) {
   if (!blog.auto_share_social || blog.shared_to_social) return true;
 
+  const { SOCIAL_FLAGS, isPausedByAdmin } = require('./social-media');
+  if (!SOCIAL_FLAGS.automationEnabled) {
+    logger.info(`[content-scheduler] Social share skipped for blog ${blog.id} — automation disabled`);
+    return true;
+  }
+  if (await isPausedByAdmin()) {
+    logger.info(`[content-scheduler] Social share skipped for blog ${blog.id} — paused by admin`);
+    return true;
+  }
+
   try {
     const SocialMediaService = require('./social-media');
     const link = blog.astro_live_url || blog.url || `https://www.wavespestcontrol.com/${blog.slug}`;
@@ -138,6 +148,17 @@ Return ONLY valid JSON with these keys:
 
 async function sharePublishedNewsletter(send) {
   if (send.shared_to_social) return true;
+
+  const { SOCIAL_FLAGS, isPausedByAdmin } = require('./social-media');
+  if (!SOCIAL_FLAGS.automationEnabled || !SOCIAL_FLAGS.newsletterAutoshare) {
+    logger.info(`[content-scheduler] Newsletter social share skipped for send ${send.id} — automation/newsletter flag disabled`);
+    return true;
+  }
+  if (await isPausedByAdmin()) {
+    logger.info(`[content-scheduler] Newsletter social share skipped for send ${send.id} — paused by admin`);
+    return true;
+  }
+
   if (!send.auto_share_social) {
     await db('newsletter_sends').where('id', send.id)
       .whereNot('social_share_status', 'skipped')
@@ -421,6 +442,11 @@ const ContentScheduler = {
     }
 
     // ── Process social posts ────────────────────────────────────
+    const { SOCIAL_FLAGS: flags } = require('./social-media');
+    if (!flags.automationEnabled || !flags.scheduledPosts) {
+      return { blogCount, socialCount, errors, socialSkipped: true };
+    }
+
     const pendingSocials = await db('social_media_posts')
       .where('publish_status', 'pending')
       .whereNotNull('scheduled_for')

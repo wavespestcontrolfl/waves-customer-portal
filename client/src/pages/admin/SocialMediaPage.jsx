@@ -119,18 +119,26 @@ export default function SocialMediaPage() {
   const [rssItems, setRssItems] = useState([]);
   const [history, setHistory] = useState([]);
   const [toast, setToast] = useState("");
+  const [health, setHealth] = useState(null);
+  const [pauseLoading, setPauseLoading] = useState(false);
+  const [alert, setAlert] = useState(null);
 
   const loadData = useCallback(async () => {
-    const [s, st, h] = await Promise.all([
+    const [s, st, h, hl, al] = await Promise.all([
       adminFetch("/admin/social-media/status").catch(() => null),
       adminFetch("/admin/social-media/stats").catch(() => null),
       adminFetch("/admin/social-media/history?limit=20").catch(() => ({
         posts: [],
       })),
+      adminFetch("/admin/social-media/health").catch(() => null),
+      adminFetch("/admin/social-media/alerts").catch(() => null),
     ]);
     setStatus(s);
     setStats(st);
     setHistory(h.posts || []);
+    setHealth(hl);
+    if (al?.active) setAlert(al.alert);
+    else setAlert(null);
   }, []);
 
   useEffect(() => {
@@ -154,9 +162,133 @@ export default function SocialMediaPage() {
         ariaLabel="Social Media section"
         navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
       />
-      {/* Platform connection status — same tiles as before, just without
-          the emoji icon row at the top. Operator can still scan which API
-          integrations are healthy at a glance. */}
+      {/* Failure alert banner */}
+      {alert && (
+        <div
+          style={{
+            ...sCard,
+            marginBottom: 12,
+            background: `${D.red}08`,
+            borderLeft: `4px solid ${D.red}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: D.red }}>
+              {alert.message}
+            </div>
+            <div style={{ fontSize: 11, color: D.muted }}>
+              Since {new Date(alert.raised_at).toLocaleString()}
+            </div>
+          </div>
+          <button
+            onClick={async () => {
+              await adminFetch("/admin/social-media/alerts", {
+                method: "DELETE",
+              }).catch(() => {});
+              setAlert(null);
+              showToast("Alert dismissed");
+            }}
+            style={sBtn(D.muted, "#fff")}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {/* Automation status banner */}
+      {status?.automation && (
+        <div
+          style={{
+            ...sCard,
+            marginBottom: 16,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 12,
+            borderLeft: `4px solid ${
+              status.automation.paused ? D.red
+              : status.automation.dryRun ? D.amber
+              : status.automation.enabled ? D.green
+              : D.muted
+            }`,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div
+              style={{
+                width: 10,
+                height: 10,
+                borderRadius: "50%",
+                background: status.automation.paused
+                  ? D.red
+                  : status.automation.dryRun
+                    ? D.amber
+                    : status.automation.enabled
+                      ? D.green
+                      : D.muted,
+              }}
+            />
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: D.heading }}>
+                Automation:{" "}
+                {status.automation.paused
+                  ? "Paused"
+                  : status.automation.dryRun
+                    ? "Dry Run"
+                    : status.automation.enabled
+                      ? "Active"
+                      : "Disabled"}
+              </div>
+              <div style={{ fontSize: 12, color: D.muted }}>
+                RSS: {status.automation.rssAutopublish ? "On" : "Off"} ·{" "}
+                Scheduled: {status.automation.scheduledPosts ? "On" : "Off"} ·{" "}
+                Newsletter: {status.automation.newsletterAutoshare ? "On" : "Off"}
+              </div>
+            </div>
+          </div>
+          {status.automation.enabled && (
+            <button
+              onClick={async () => {
+                setPauseLoading(true);
+                try {
+                  await adminFetch("/admin/social-media/pause", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      paused: !status.automation.paused,
+                    }),
+                  });
+                  await loadData();
+                  showToast(
+                    status.automation.paused
+                      ? "Automation resumed"
+                      : "Automation paused",
+                  );
+                } catch {
+                  showToast("Failed to toggle pause");
+                } finally {
+                  setPauseLoading(false);
+                }
+              }}
+              disabled={pauseLoading}
+              style={sBtn(
+                status.automation.paused ? D.green : D.red,
+                "#fff",
+              )}
+            >
+              {pauseLoading
+                ? "..."
+                : status.automation.paused
+                  ? "Resume"
+                  : "Pause All"}
+            </button>
+          )}
+        </div>
+      )}
+      {/* Platform health + connection status */}
       {status && (
         <div
           style={{
@@ -166,39 +298,83 @@ export default function SocialMediaPage() {
             flexWrap: "wrap",
           }}
         >
-          {Object.entries(status.platforms).map(([key, p]) => (
-            <div
-              key={key}
-              style={{
-                ...sCard,
-                flex: "1 1 140px",
-                minWidth: 140,
-                marginBottom: 0,
-                textAlign: "center",
-              }}
-            >
-              {" "}
+          {Object.entries(status.platforms).map(([key, p]) => {
+            const cred = health?.credentials?.find(
+              (c) => c.platform === key || c.platform === `${key}_lwr`,
+            );
+            const healthStatus = cred?.status || (p.configured ? "unknown" : "not_configured");
+            const statusColor =
+              healthStatus === "healthy" ? D.green
+              : healthStatus === "expired" ? D.red
+              : healthStatus === "error" ? D.amber
+              : D.muted;
+            const statusLabel =
+              !p.enabled && key !== "ai" && key !== "gemini"
+                ? "Disabled"
+                : healthStatus === "healthy"
+                  ? "Healthy"
+                  : healthStatus === "expired"
+                    ? "Expired"
+                    : healthStatus === "error"
+                      ? "Error"
+                      : healthStatus === "not_configured"
+                        ? "Not configured"
+                        : "Unknown";
+
+            return (
               <div
+                key={key}
                 style={{
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: D.heading,
-                  textTransform: "capitalize",
+                  ...sCard,
+                  flex: "1 1 140px",
+                  minWidth: 140,
+                  marginBottom: 0,
+                  textAlign: "center",
                 }}
               >
-                {key}
-              </div>{" "}
-              <div style={{ marginTop: 4 }}>
-                {p.configured ? (
-                  <span style={sBadge(`${D.green}22`, D.green)}>Connected</span>
-                ) : (
-                  <span style={sBadge(`${D.muted}22`, D.muted)}>
-                    Not configured
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: D.heading,
+                    textTransform: "capitalize",
+                  }}
+                >
+                  {key === "gbp" ? "GBP" : key}
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  <span
+                    style={sBadge(
+                      !p.enabled && key !== "ai" && key !== "gemini"
+                        ? `${D.muted}15`
+                        : `${statusColor}22`,
+                      !p.enabled && key !== "ai" && key !== "gemini"
+                        ? D.muted
+                        : statusColor,
+                    )}
+                  >
+                    {statusLabel}
                   </span>
+                </div>
+                {cred?.lastError && healthStatus !== "healthy" && (
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: D.muted,
+                      marginTop: 4,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      maxWidth: 140,
+                    }}
+                    title={cred.lastError}
+                  >
+                    {cred.lastError}
+                  </div>
                 )}
-              </div>{" "}
-            </div>
-          ))}
+              </div>
+            );
+          })}
         </div>
       )}
       {/* Stats — kept; sit below the platform connection row. */}
