@@ -1302,8 +1302,9 @@ function CalendarView() {
     try {
       let calendarId = row.id;
 
-      // If placeholder (no saved id), create the calendar row first
+      // Save current editor values first (create or update)
       if (!calendarId) {
+        // Placeholder — create the row
         const created = await adminFetch('/admin/newsletter/calendar', {
           method: 'POST',
           body: JSON.stringify({
@@ -1314,9 +1315,18 @@ function CalendarView() {
         });
         calendarId = created.entry?.id;
         if (!calendarId) throw new Error('Failed to create calendar entry');
+      } else {
+        // Existing row — persist any pending edits
+        await adminFetch(`/admin/newsletter/calendar/${calendarId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            topic: row.topic || null,
+            homeownerMinuteTopic: row.homeownerMinuteTopic || null,
+          }),
+        });
       }
 
-      // Draft from plan
+      // Now draft from the saved row
       await adminFetch(`/admin/newsletter/calendar/${calendarId}/draft-from-plan`, {
         method: 'POST',
       });
@@ -1324,7 +1334,6 @@ function CalendarView() {
       fetchCalendar();
     } catch (e) {
       console.error('Draft failed:', e.message);
-      alert(`Draft failed: ${e.message}`);
     } finally {
       setDraftingWeek(null);
     }
