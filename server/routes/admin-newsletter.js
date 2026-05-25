@@ -22,6 +22,7 @@ const MODELS = require('../config/models');
 const { isFlagshipType, getNewsletterType } = require('../config/newsletter-types');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { isEligibleForFreshDigest, scoreFreshEvent } = require('../services/event-freshness');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -1073,12 +1074,10 @@ router.get('/events/inbox', async (req, res, next) => {
       query = query.where('e.title', 'ilike', `%${q}%`);
     }
     if (date_from) {
-      // Parse as ET start-of-day to match admin's local date intent
-      query = query.where('e.start_at', '>=', new Date(`${date_from}T00:00:00-04:00`));
+      query = query.where('e.start_at', '>=', parseETDateTime(`${date_from}T00:00:00`));
     }
     if (date_to) {
-      // Parse as ET end-of-day so the full selected date is included
-      query = query.where('e.start_at', '<=', new Date(`${date_to}T23:59:59-04:00`));
+      query = query.where('e.start_at', '<=', parseETDateTime(`${date_to}T23:59:59`));
     }
 
     // Sort
