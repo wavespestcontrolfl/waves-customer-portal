@@ -753,6 +753,36 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }
 
+    // One-time service SMS: price + call-to-schedule (no self-booking URL).
+    if (normalizedPhone && !quoteRequired && isOneTimeOnly) {
+      try {
+        const FALLBACK_ONETIME_BODY = `Hi ${contactFirstName}! Your ${serviceInterest} estimate is ready — $${Math.round(oneTimeTotal)}. Call us at ${WAVES_SUPPORT_PHONE_DISPLAY} or reply to this text to schedule.\n\n— Waves Pest Control`;
+        const customerBody = await renderTemplate(
+          'estimate_onetime_followup',
+          { first_name: contactFirstName, service_label: serviceInterest, total: Math.round(oneTimeTotal), phone: WAVES_SUPPORT_PHONE_DISPLAY },
+        ) || FALLBACK_ONETIME_BODY;
+        const smsResult = await sendCustomerMessage({
+          to: normalizedPhone,
+          body: customerBody,
+          channel: 'sms',
+          audience: 'lead',
+          purpose: 'conversational',
+          leadId: lead.id,
+          identityTrustLevel: 'phone_provided_unverified',
+          entryPoint: 'public_quote_onetime_sms',
+          metadata: {
+            original_message_type: 'estimate_onetime_followup',
+            mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
+          },
+        });
+        if (!smsResult.sent) {
+          logger.warn(`[public-quote] One-time SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        } else {
+          logger.info(`[public-quote] One-time SMS sent for lead ${lead.id}`);
+        }
+      } catch (e) { logger.error(`[public-quote] One-time SMS failed: ${e.message}`); }
+    }
+
     // Newsletter enrollment — gated on explicit opt-in checkbox from the quote
     // wizard (QuotePage.jsx). Public quote emails are user-provided and
     // unverified, so they go through the same double-opt-in path as the
