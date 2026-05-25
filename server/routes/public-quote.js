@@ -821,7 +821,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             entryPoint: 'public_quote_booking_sms',
             metadata: {
               original_message_type: 'auto_reply',
-              mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
             },
           });
           if (!smsResult.sent) {
@@ -852,7 +851,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           entryPoint: 'public_quote_onetime_sms',
           metadata: {
             original_message_type: 'estimate_onetime_followup',
-            mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
           },
         });
         if (!smsResult.sent) {
