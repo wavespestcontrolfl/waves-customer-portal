@@ -29,16 +29,26 @@ exports.up = async function (knex) {
     table.unique(['slug']);
   });
 
-  // Backfill slugs for existing sent rows
-  const sent = await knex('newsletter_sends')
-    .where({ status: 'sent' })
-    .whereNotNull('sent_at')
-    .select('id', 'subject', 'sent_at');
+  // Backfill slugs for all rows that have a subject (sent, draft, scheduled)
+  const rows = await knex('newsletter_sends')
+    .whereNotNull('subject')
+    .select('id', 'subject', 'status', 'sent_at', 'created_at');
 
-  for (const row of sent) {
-    const datePart = row.sent_at
-      ? new Date(row.sent_at).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
-      : 'undated';
+  const etDateFormat = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+
+  for (const row of rows) {
+    const ts = row.status === 'sent' && row.sent_at ? row.sent_at : row.created_at;
+    let datePart = 'undated';
+    if (ts) {
+      const parts = etDateFormat.formatToParts(new Date(ts));
+      const get = (t) => parts.find((p) => p.type === t).value;
+      datePart = `${get('year')}-${get('month')}-${get('day')}`;
+    }
     const suffix = row.id.slice(0, 6);
     const slug = `${slugify(row.subject || 'newsletter')}-${datePart}-${suffix}`;
     await knex('newsletter_sends')
@@ -46,7 +56,7 @@ exports.up = async function (knex) {
       .update({ slug });
   }
 
-  console.log(`[20260525000001] Backfilled ${sent.length} newsletter slugs`);
+  console.log(`[20260525000001] Backfilled ${rows.length} newsletter slugs`);
 };
 
 exports.down = async function (knex) {
