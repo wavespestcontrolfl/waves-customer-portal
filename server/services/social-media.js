@@ -156,16 +156,13 @@ const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 const KNOWN_PHONES = new Set();
 try {
   const twilioNumbers = require('../config/twilio-numbers');
-  const gbpNumbers = twilioNumbers.GBP_NUMBERS || {};
-  const trackingNumbers = twilioNumbers.TRACKING_NUMBERS || [];
-  Object.values(gbpNumbers).forEach(n => {
+  const addPhone = (n) => {
     if (n.number) KNOWN_PHONES.add(n.number.replace(/\D/g, ''));
     if (n.formatted) KNOWN_PHONES.add(n.formatted.replace(/\D/g, ''));
-  });
-  trackingNumbers.forEach(n => {
-    if (n.number) KNOWN_PHONES.add(n.number.replace(/\D/g, ''));
-    if (n.formatted) KNOWN_PHONES.add(n.formatted.replace(/\D/g, ''));
-  });
+  };
+  if (twilioNumbers.locations) Object.values(twilioNumbers.locations).forEach(addPhone);
+  if (twilioNumbers.domainTracking) twilioNumbers.domainTracking.forEach(addPhone);
+  if (twilioNumbers.lawnDomainTracking) twilioNumbers.lawnDomainTracking.forEach(addPhone);
 } catch { /* twilio config not available */ }
 
 const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500 };
@@ -755,10 +752,8 @@ const SocialMediaService = {
       logger.error(`[social] Failed to log post: ${err.message}`);
     }
 
-    // Check for consecutive failure alerting
-    if (postStatus === 'failed') {
-      checkAndRaiseAlert().catch(() => {});
-    }
+    // Recompute failure alert state on every publish (raise on failure, clear on success)
+    checkAndRaiseAlert().catch(() => {});
 
     return {
       success: platformResults.some(r => r.success),
@@ -780,6 +775,11 @@ const SocialMediaService = {
     }
 
     const text = content || await generateContent(platform, { title, description, link, locationName: locationId });
+
+    if (SOCIAL_FLAGS.dryRun) {
+      logger.info(`[social] DRY RUN — postToSingle/${platform}: ${text.substring(0, 120)}...`);
+      return { platform, success: true, dryRun: true, content: text };
+    }
 
     if (platform === 'facebook') return postToFacebook(text, link);
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
