@@ -487,16 +487,16 @@ router.post('/sends/:id/send', async (req, res) => {
       }
     }
 
-    // Server-side validation gate for flagship sends (honors force flag)
-    if (isFlagshipType(send.newsletter_type) && !force) {
-      let recipientCount = 1;
-      try {
-        const c = await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first();
-        recipientCount = Number(c?.c || 0);
-      } catch { /* non-fatal */ }
-      const { errors, warnings } = validateNewsletterDraft(send, { recipientCount });
+    // Server-side validation gate for flagship sends. Hard errors
+    // (no subject, no body) always block. force=true skips only the
+    // 0-recipient check (existing contract) — not structural errors.
+    if (isFlagshipType(send.newsletter_type)) {
+      const recipientCount = force ? 1 : Number(
+        (await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first())?.c || 0
+      );
+      const { errors } = validateNewsletterDraft(send, { recipientCount });
       if (errors.length > 0) {
-        return res.status(400).json({ error: 'Validation failed', errors, warnings });
+        return res.status(400).json({ error: 'Validation failed', errors });
       }
     }
 
