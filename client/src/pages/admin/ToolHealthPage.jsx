@@ -84,6 +84,7 @@ export default function ToolHealthPage() {
   const [hours, setHours] = useState(24);
   const [err, setErr] = useState(null);
   const [expanded, setExpanded] = useState({});
+  const [adminUser, setAdminUser] = useState(null);
 
   const load = useCallback(() => {
     adminFetch(`/admin/tool-health?hours=${hours}`)
@@ -99,6 +100,12 @@ export default function ToolHealthPage() {
     const id = setInterval(load, 30_000);
     return () => clearInterval(id);
   }, [load]);
+
+  useEffect(() => {
+    adminFetch("/admin/auth/me")
+      .then((user) => setAdminUser(user))
+      .catch(() => setAdminUser(null));
+  }, []);
 
   if (err) {
     return (
@@ -205,15 +212,17 @@ export default function ToolHealthPage() {
           />{" "}
         </div>{" "}
       </div>
-      <div style={{ marginBottom: 24 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10 }}>
-          Integration Configuration
+      {adminUser?.role === "admin" && (
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10 }}>
+            Integration Configuration
+          </div>
+          <IntegrationHealthSection
+            intro="Credential health, environment readiness, and feature gates. Runtime tool success is tracked separately below."
+            showRefresh={false}
+          />
         </div>
-        <IntegrationHealthSection
-          intro="Credential health, environment readiness, and feature gates. Runtime tool success is tracked separately below."
-          showRefresh={false}
-        />
-      </div>
+      )}
       {pdfRenderer && (
         <div style={sCard}>
           <div
