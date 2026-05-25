@@ -11,9 +11,53 @@ jest.mock('../services/logger', () => ({
 
 const {
   renderAutomationStepContent,
+  automationSuppressionGroupKey,
+  automationSuppressionMatches,
+  activeAutomationSuppressionFor,
+  sendStep,
 } = require('../services/automation-runner');
+const db = require('../models/db');
+const sendgrid = require('../services/sendgrid-mail');
+
+function chain({ result = [], first, returning, updateResult = 1 } = {}) {
+  const q = {};
+  [
+    'where',
+    'whereRaw',
+    'whereNull',
+    'whereNotNull',
+    'orWhereNotNull',
+    'orWhereRaw',
+    'orderBy',
+    'orderByRaw',
+    'limit',
+  ].forEach((method) => {
+    q[method] = jest.fn(() => q);
+  });
+  q.insert = jest.fn(() => q);
+  q.update = jest.fn(() => Promise.resolve(updateResult));
+  q.first = jest.fn(async () => first);
+  q.returning = jest.fn(() => Promise.resolve(returning || []));
+  q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+  q.catch = (reject) => Promise.resolve(result).catch(reject);
+  return q;
+}
+
+function setDbQueues(queues) {
+  const tableQueues = new Map(Object.entries(queues));
+  db.mockImplementation((table) => {
+    const queue = tableQueues.get(table);
+    if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+    return queue.shift();
+  });
+}
 
 describe('automation runner rendering', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
   test('renders service automation content without newsletter chrome or legal unsubscribe text', () => {
     const rendered = renderAutomationStepContent({
       template: { asm_group: 'service' },
@@ -44,5 +88,142 @@ describe('automation runner rendering', () => {
     expect(rendered.html).toContain('<%asm_group_unsubscribe_raw_url%>');
     expect(rendered.text).toContain('Hi Taylor, here is the newsletter.');
     expect(rendered.text).toContain('Unsubscribe: <%asm_group_unsubscribe_raw_url%>');
+  });
+});
+
+describe('automation runner suppression guardrails', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  test('maps automation ASM groups to local email preference groups', () => {
+    expect(automationSuppressionGroupKey({ asm_group: 'newsletter' })).toBe('marketing_newsletter');
+    expect(automationSuppressionGroupKey({ asm_group: 'service' })).toBe('service_operational');
+    expect(automationSuppressionGroupKey({})).toBe('service_operational');
+  });
+
+  test('matches group-scoped and global suppressions for automations', () => {
+    const newsletterTemplate = { asm_group: 'newsletter' };
+    const serviceTemplate = { asm_group: 'service' };
+
+    expect(automationSuppressionMatches(newsletterTemplate, {
+      suppression_type: 'manual',
+      group_key: 'marketing_newsletter',
+    })).toBe(true);
+    expect(automationSuppressionMatches(newsletterTemplate, {
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+    })).toBe(false);
+    expect(automationSuppressionMatches(serviceTemplate, {
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+    })).toBe(true);
+    expect(automationSuppressionMatches(serviceTemplate, {
+      suppression_type: 'bounce',
+      group_key: 'marketing_newsletter',
+    })).toBe(true);
+    expect(automationSuppressionMatches(newsletterTemplate, {
+      suppression_type: 'unsubscribe',
+      group_key: null,
+    })).toBe(true);
+  });
+
+  test('loads the first active suppression that applies to the automation stream', async () => {
+    const serviceSuppression = {
+      id: 'suppression-2',
+      email: 'customer@example.com',
+      suppression_type: 'manual',
+      group_key: 'service_operational',
+      status: 'active',
+    };
+    setDbQueues({
+      email_suppressions: [
+        chain({
+          result: [
+            {
+              id: 'suppression-1',
+              email: 'customer@example.com',
+              suppression_type: 'manual',
+              group_key: 'marketing_newsletter',
+              status: 'active',
+            },
+            serviceSuppression,
+          ],
+        }),
+      ],
+    });
+
+    await expect(activeAutomationSuppressionFor(
+      { asm_group: 'service' },
+      'Customer@Example.com',
+    )).resolves.toEqual(serviceSuppression);
+  });
+
+  test('blocks real automation sends for locally suppressed recipients', async () => {
+    const sendUpdate = chain();
+    const enrollmentUpdate = chain();
+    setDbQueues({
+      automation_enrollments: [
+        chain({
+          first: {
+            id: 'enrollment-1',
+            template_key: 'cold_lead',
+            status: 'active',
+            current_step: 0,
+            email: 'customer@example.com',
+            first_name: 'Sam',
+            last_name: 'Customer',
+          },
+        }),
+        enrollmentUpdate,
+      ],
+      automation_templates: [
+        chain({ first: { key: 'cold_lead', name: 'Cold Lead', asm_group: 'newsletter' } }),
+      ],
+      automation_steps: [
+        chain({
+          result: [{
+            id: 'step-1',
+            step_order: 1,
+            subject: 'Hi {{first_name}}',
+            html_body: '<p>Hello {{first_name}}</p>',
+            text_body: 'Hello {{first_name}}',
+            from_email: 'automations@wavespestcontrol.com',
+            enabled: true,
+          }],
+        }),
+      ],
+      automation_step_sends: [
+        chain({ returning: [{ id: 'send-1' }] }),
+        sendUpdate,
+      ],
+      email_suppressions: [
+        chain({
+          result: [{
+            id: 'suppression-1',
+            email: 'customer@example.com',
+            suppression_type: 'unsubscribe',
+            group_key: 'marketing_newsletter',
+            status: 'active',
+          }],
+        }),
+      ],
+    });
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({
+      sent: false,
+      blocked: true,
+      reason: 'Suppressed: unsubscribe (marketing_newsletter)',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked',
+      failure_reason: 'Suppressed: unsubscribe (marketing_newsletter)',
+    }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'cancelled',
+      next_send_at: null,
+    }));
   });
 });
