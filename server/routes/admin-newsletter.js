@@ -21,7 +21,7 @@ const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 const { isFlagshipType, getNewsletterType } = require('../config/newsletter-types');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
-const { isEligibleForFreshDigest, scoreFreshEvent } = require('../services/event-freshness');
+const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 
@@ -1676,6 +1676,166 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
     }
 
     res.json({ success: true, imported, skipped, errors, total: customers.length });
+  } catch (err) { next(err); }
+});
+
+// ── Editorial Calendar ──────────────────────────────────────────────
+
+// GET /api/admin/newsletter/calendar
+router.get('/calendar', async (req, res, next) => {
+  try {
+    const pastWeeks = Math.min(12, Math.max(0, Number(req.query.pastWeeks) || 4));
+    const futureWeeks = Math.min(26, Math.max(1, Number(req.query.futureWeeks) || 12));
+
+    const currentThursday = getCurrentNewsletterThursday();
+
+    // Generate all Thursday dates in the window
+    const allWeeks = [];
+    for (let i = -pastWeeks; i < futureWeeks; i++) {
+      const d = new Date(currentThursday);
+      d.setDate(d.getDate() + (i * 7));
+      allWeeks.push(d.toISOString().split('T')[0]);
+    }
+
+    // Fetch existing calendar rows
+    const rows = await db('newsletter_calendar as cal')
+      .leftJoin('newsletter_sends as ns', 'ns.id', 'cal.send_id')
+      .select(
+        'cal.*',
+        'ns.subject as send_subject',
+        'ns.status as send_status',
+        'ns.recipient_count as send_recipient_count',
+        'ns.delivered_count as send_delivered_count',
+        'ns.opened_count as send_opened_count',
+        'ns.clicked_count as send_clicked_count',
+        'ns.sent_at as send_sent_at',
+      )
+      .whereIn('cal.week_of', allWeeks);
+
+    const rowMap = {};
+    for (const r of rows) {
+      rowMap[r.week_of instanceof Date ? r.week_of.toISOString().split('T')[0] : r.week_of] = r;
+    }
+
+    // Build response with placeholders for missing weeks
+    const calendar = allWeeks.map((weekOf) => {
+      const row = rowMap[weekOf];
+      if (row) {
+        return {
+          id: row.id,
+          weekOf: weekOf,
+          topic: row.topic,
+          notes: row.notes,
+          homeownerMinuteTopic: row.homeowner_minute_topic,
+          targetSendAt: row.target_send_at,
+          status: row.status,
+          sendId: row.send_id,
+          eventIds: row.event_ids || [],
+          isPlaceholder: false,
+          send: row.send_id ? {
+            subject: row.send_subject,
+            status: row.send_status,
+            recipientCount: row.send_recipient_count,
+            deliveredCount: row.send_delivered_count,
+            openedCount: row.send_opened_count,
+            clickedCount: row.send_clicked_count,
+            sentAt: row.send_sent_at,
+          } : null,
+        };
+      }
+      return {
+        id: null,
+        weekOf: weekOf,
+        topic: null,
+        notes: null,
+        homeownerMinuteTopic: null,
+        targetSendAt: null,
+        status: 'planned',
+        sendId: null,
+        eventIds: [],
+        isPlaceholder: true,
+        send: null,
+      };
+    });
+
+    res.json({ calendar, currentWeek: currentThursday });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/newsletter/calendar
+router.post('/calendar', async (req, res, next) => {
+  try {
+    const { weekOf, topic, notes, homeownerMinuteTopic, targetSendAt, eventIds } = req.body;
+    if (!weekOf) return res.status(400).json({ error: 'weekOf is required' });
+
+    // Validate Thursday
+    const d = new Date(weekOf + 'T12:00:00Z');
+    if (d.getUTCDay() !== 4) return res.status(400).json({ error: 'weekOf must be a Thursday' });
+
+    // Validate eventIds
+    if (eventIds !== undefined) {
+      if (!Array.isArray(eventIds)) return res.status(400).json({ error: 'eventIds must be an array' });
+      if (eventIds.length > 12) return res.status(400).json({ error: 'eventIds max 12' });
+      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!eventIds.every(id => typeof id === 'string' && uuidRe.test(id))) {
+        return res.status(400).json({ error: 'eventIds must be valid UUIDs' });
+      }
+    }
+
+    const sendAt = targetSendAt ? new Date(targetSendAt) : defaultTargetSendAt(weekOf);
+
+    const [row] = await db('newsletter_calendar')
+      .insert({
+        week_of: weekOf,
+        topic: topic || null,
+        notes: notes || null,
+        homeowner_minute_topic: homeownerMinuteTopic || null,
+        target_send_at: sendAt,
+        event_ids: JSON.stringify(eventIds || []),
+      })
+      .onConflict('week_of')
+      .merge({
+        topic: topic !== undefined ? (topic || null) : db.raw('newsletter_calendar.topic'),
+        notes: notes !== undefined ? (notes || null) : db.raw('newsletter_calendar.notes'),
+        homeowner_minute_topic: homeownerMinuteTopic !== undefined ? (homeownerMinuteTopic || null) : db.raw('newsletter_calendar.homeowner_minute_topic'),
+        target_send_at: targetSendAt ? sendAt : db.raw('newsletter_calendar.target_send_at'),
+        event_ids: eventIds !== undefined ? JSON.stringify(eventIds) : db.raw('newsletter_calendar.event_ids'),
+        updated_at: db.fn.now(),
+      })
+      .returning('*');
+
+    res.json({ success: true, entry: row });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/newsletter/calendar/:id
+router.patch('/calendar/:id', async (req, res, next) => {
+  try {
+    const entry = await db('newsletter_calendar').where({ id: req.params.id }).first();
+    if (!entry) return res.status(404).json({ error: 'not found' });
+
+    const { topic, notes, homeownerMinuteTopic, targetSendAt, eventIds, status } = req.body;
+
+    const updates = { updated_at: new Date() };
+    if (topic !== undefined) updates.topic = topic || null;
+    if (notes !== undefined) updates.notes = notes || null;
+    if (homeownerMinuteTopic !== undefined) updates.homeowner_minute_topic = homeownerMinuteTopic || null;
+    if (targetSendAt !== undefined) updates.target_send_at = new Date(targetSendAt);
+    if (status !== undefined) {
+      const VALID = ['planned', 'drafted', 'scheduled', 'sent', 'skipped'];
+      if (!VALID.includes(status)) return res.status(400).json({ error: 'invalid status' });
+      updates.status = status;
+    }
+    if (eventIds !== undefined) {
+      if (!Array.isArray(eventIds) || eventIds.length > 12) {
+        return res.status(400).json({ error: 'eventIds must be array (max 12)' });
+      }
+      updates.event_ids = JSON.stringify(eventIds);
+    }
+
+    await db('newsletter_calendar').where({ id: req.params.id }).update(updates);
+    const updated = await db('newsletter_calendar').where({ id: req.params.id }).first();
+    res.json({ success: true, entry: updated });
   } catch (err) { next(err); }
 });
 

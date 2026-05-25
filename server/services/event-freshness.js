@@ -15,7 +15,7 @@
  * because Railway runs UTC and newsletter editorial windows are ET.
  */
 
-const { etParts, parseETDateTime, etDateString } = require('../utils/datetime-et');
+const { etParts, parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
 // ── City → Zone mapping ──────────────────────────────────────────────
 // Matches the zones defined in server/config/newsletter-types.js
@@ -264,6 +264,26 @@ function isClosingWeek(event) {
   return days >= 0 && days <= 7;
 }
 
+// ── Newsletter Thursday helpers ──────────────────────────────────────
+
+function getCurrentNewsletterThursday() {
+  const now = new Date();
+  const nowET = etParts(now);
+  const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, ... 6 Wed
+  return etDateString(addETDays(now, -daysBack)); // YYYY-MM-DD of most recent Thursday
+}
+
+function getNewsletterWeekOf(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const et = etParts(d);
+  const daysBack = (et.dayOfWeek - 4 + 7) % 7;
+  return etDateString(addETDays(d, -daysBack));
+}
+
+function defaultTargetSendAt(weekOf) {
+  return parseETDateTime(`${weekOf}T08:00:00`); // Thursday 8 AM ET
+}
+
 module.exports = {
   cityToZone,
   CITY_ZONE_MAP,
@@ -273,4 +293,7 @@ module.exports = {
   scoreFreshEvent,
   isOpeningWeek,
   isClosingWeek,
+  getCurrentNewsletterThursday,
+  getNewsletterWeekOf,
+  defaultTargetSendAt,
 };
