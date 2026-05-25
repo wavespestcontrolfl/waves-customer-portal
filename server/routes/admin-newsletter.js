@@ -256,6 +256,22 @@ router.delete('/subscribers/:id', async (req, res, next) => {
 
 // ── Sends (campaigns) ────────────────────────────────────────────
 
+// GET /api/admin/newsletter/sends/latest-autopilot — most recent
+// autopilot-generated draft. The compose UI auto-loads this on mount
+// so the admin sees the weekly draft without digging through history.
+// Must be registered BEFORE /sends/:id so Express doesn't treat
+// "latest-autopilot" as an :id param.
+router.get('/sends/latest-autopilot', async (req, res, next) => {
+  try {
+    const draft = await db('newsletter_sends')
+      .where({ newsletter_type: 'local-weekly-fresh-events', status: 'draft' })
+      .whereNull('created_by')
+      .orderBy('created_at', 'desc')
+      .first();
+    res.json({ draft: draft || null });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/newsletter/sends
 router.get('/sends', async (req, res, next) => {
   try {

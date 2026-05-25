@@ -230,6 +230,28 @@ const TRIGGER_REGISTRY = {
       link: p.link || '/admin/dashboard',
     }),
   },
+  newsletter_autopilot_draft: {
+    label: 'Newsletter autopilot draft ready',
+    category: 'newsletter',
+    priority: 'normal',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Weekly newsletter draft ready',
+      body: `Autopilot drafted "${p.subject || 'Untitled'}" from ${p.eventCount || 0} events. Review and send when ready.`,
+      link: '/admin/newsletter?tab=compose',
+    }),
+  },
+  newsletter_autopilot_skipped: {
+    label: 'Newsletter autopilot skipped (not enough events)',
+    category: 'newsletter',
+    priority: 'high',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Newsletter autopilot skipped',
+      body: `${p.reason || 'Not enough approved events'}. Approve more events in the Event Inbox to enable next week's auto-draft.`,
+      link: '/admin/newsletter?tab=dashboard',
+    }),
+  },
   kb_audit_flagged: {
     label: 'Knowledge base audit flagged entries',
     category: 'knowledge',

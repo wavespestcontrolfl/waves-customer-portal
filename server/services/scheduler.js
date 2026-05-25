@@ -417,6 +417,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY THURSDAY 7AM ET — Newsletter autopilot
+  // Auto-drafts the weekly flagship digest from approved events. Never
+  // auto-sends — creates a draft for admin review. Skips if fewer than 3
+  // eligible events and notifies admin to approve more.
+  // =========================================================================
+  cron.schedule('0 7 * * 4', async () => {
+    try {
+      const { autoDraftFlagship } = require('./newsletter-autopilot');
+      const result = await autoDraftFlagship();
+      logger.info(`[newsletter-autopilot] ${result.skipped ? 'skipped' : 'drafted'}: ${result.reason || result.sendId}`);
+    } catch (err) {
+      logger.error(`[newsletter-autopilot] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Automation runner. Fires the next step of any enrollment
   // whose next_send_at has passed. Indexed query on automation_enrollments.
   // =========================================================================
