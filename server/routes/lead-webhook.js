@@ -194,6 +194,7 @@ router.post('/', async (req, res) => {
       if (!existing.city && normalizedAddress.city) updates.city = normalizedAddress.city;
       if (!existing.state && normalizedAddress.state) updates.state = normalizedAddress.state;
       if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;
+      if (existing.lead_intake_status) updates.lead_intake_status = null;
 
       await db('customers').where({ id: existing.id }).update(updates);
 
@@ -249,11 +250,17 @@ router.post('/', async (req, res) => {
       await LeadScorer.calculateScore(customer.id);
     }
 
-    if (isDuplicateSubmission) {
+    if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
       // Customer record + interaction note are written above so we still have an
-      // audit trail. Skip everything below (call, SMS, estimate, triage, agent)
-      // because we already fired all of that on the first submission.
-      return res.json({ success: true, customerId: customer.id, deduped: true });
+      // audit trail. Existing customers must not continue into lead acquisition:
+      // no new-lead notifications, lead auto-replies, lead intake state, draft
+      // estimates, leads rows, or lead-agent processing.
+      return res.json({
+        success: true,
+        customerId: customer.id,
+        deduped: !!isDuplicateSubmission,
+        existingCustomer: !isNewCustomer,
+      });
     }
 
     // Push + bell notification for admins
@@ -803,6 +810,10 @@ function shouldApplyTriageServiceInterest(currentServiceInterest, triageServiceI
   return !!serviceInterestUpdateFromTriage(currentServiceInterest, triageServiceInterest);
 }
 
+function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {}) {
+  return !!isNewCustomer && !isDuplicateSubmission;
+}
+
 function cleanPhone(value) {
   if (!value) return '';
   return String(value).replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
@@ -903,4 +914,5 @@ module.exports._test = {
   formatServiceInterestForFrequency,
   serviceInterestUpdateFromTriage,
   shouldApplyTriageServiceInterest,
+  shouldRunLeadAcquisition,
 };

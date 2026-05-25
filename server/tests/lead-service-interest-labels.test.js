@@ -12,6 +12,7 @@ describe('quote workflow service interest labels', () => {
     normalizeLeadServiceInterest,
     serviceInterestUpdateFromTriage,
     shouldApplyTriageServiceInterest,
+    shouldRunLeadAcquisition,
   } = leadWebhookRouter._test;
 
   test('public quote recurring pest labels include selected cadence', () => {
@@ -106,5 +107,14 @@ describe('quote workflow service interest labels', () => {
       .toBeNull();
     expect(serviceInterestUpdateFromTriage('Pest Control', ''))
       .toBeNull();
+  });
+
+  test('existing customer form submissions do not enter lead acquisition', () => {
+    expect(shouldRunLeadAcquisition({ isNewCustomer: true, isDuplicateSubmission: false }))
+      .toBe(true);
+    expect(shouldRunLeadAcquisition({ isNewCustomer: false, isDuplicateSubmission: false }))
+      .toBe(false);
+    expect(shouldRunLeadAcquisition({ isNewCustomer: true, isDuplicateSubmission: true }))
+      .toBe(false);
   });
 });
