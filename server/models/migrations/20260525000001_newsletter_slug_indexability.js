@@ -7,8 +7,9 @@
  *   Astro /newsletter/archive/[slug] pages.
  *
  * indexability: controls whether the archive page should be indexed
- *   by search engines. Weekly event digests decay fast so they get
- *   'noindex' after 30 days; evergreen educational content stays 'index'.
+ *   by search engines. Defaults to 'index' — the Astro archive pages
+ *   read this field to set robots meta. Age-based decay (auto-noindex
+ *   for stale event digests) is deferred to a future phase.
  */
 
 function slugify(text) {
