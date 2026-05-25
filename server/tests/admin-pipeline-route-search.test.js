@@ -503,3 +503,87 @@ describe('admin pipeline reviewed history helpers', () => {
     }])).toEqual([linked]);
   });
 });
+
+describe('admin pipeline opportunity history helpers', () => {
+  test('parses opportunity refs without relying on source table labels', () => {
+    expect(__private.parseOpportunityRef('lead:lead-1')).toEqual({ leadId: 'lead-1', estimateId: null });
+    expect(__private.parseOpportunityRef('estimate:est-1')).toEqual({ leadId: null, estimateId: 'est-1' });
+    expect(__private.parseOpportunityRef('lead:lead-1:estimate:est-1')).toEqual({ leadId: 'lead-1', estimateId: 'est-1' });
+    expect(__private.parseOpportunityRef('est-1')).toEqual({ leadId: null, estimateId: 'est-1' });
+  });
+
+  test('maps lead activity events without exposing raw metadata', () => {
+    const event = __private.mapLeadActivityEvent({
+      id: 'activity-1',
+      activity_type: 'linked_estimate',
+      description: 'Linked estimate est-1',
+      performed_by: 'Ada Admin',
+      metadata: JSON.stringify({ estimateId: 'est-1', privateThing: 'hidden' }),
+      created_at: '2026-05-24T12:00:00.000Z',
+    });
+
+    expect(event).toMatchObject({
+      id: 'lead_activity:activity-1',
+      type: 'linked_estimate',
+      title: 'Linked Estimate',
+      description: 'Linked estimate est-1',
+      actor: 'Ada Admin',
+      occurredAt: '2026-05-24T12:00:00.000Z',
+      source: 'lead_activity',
+      metadata: {
+        estimateId: 'est-1',
+        hasMetadata: true,
+      },
+    });
+    expect(event.metadata).not.toHaveProperty('privateThing');
+  });
+
+  test('maps duplicate dismissal timeline events with note presence only', () => {
+    const event = __private.mapDismissalTimelineEvent({
+      id: 'dismissal-1',
+      estimate_id: 'est-1',
+      lead_id: 'lead-1',
+      reason: 'bad_match',
+      note: 'Private note',
+      dismissed_by_name: 'Ada Admin',
+      updated_at: '2026-05-24T13:00:00.000Z',
+    });
+
+    expect(event).toMatchObject({
+      id: 'duplicate_dismissal:dismissal-1',
+      type: 'duplicate_dismissed',
+      title: 'Duplicate Match Dismissed',
+      description: 'bad match',
+      actor: 'Ada Admin',
+      occurredAt: '2026-05-24T13:00:00.000Z',
+      metadata: {
+        estimateId: 'est-1',
+        leadId: 'lead-1',
+        hasNote: true,
+      },
+    });
+    expect(event.metadata).not.toHaveProperty('note');
+  });
+
+  test('maps duplicate reopen audit events to readable titles', () => {
+    expect(__private.mapAuditTimelineEvent({
+      id: 'audit-1',
+      action: 'pipeline.duplicate_risk.reopen_link',
+      actor_type: 'technician',
+      actor_name: 'Ada Admin',
+      resource_id: 'est-1',
+      metadata: JSON.stringify({ estimateId: 'est-1', leadId: 'lead-1' }),
+      created_at: '2026-05-24T14:00:00.000Z',
+    })).toMatchObject({
+      id: 'audit:audit-1',
+      type: 'pipeline.duplicate_risk.reopen_link',
+      title: 'Duplicate Link Reopened',
+      actor: 'Ada Admin',
+      occurredAt: '2026-05-24T14:00:00.000Z',
+      metadata: {
+        estimateId: 'est-1',
+        leadId: 'lead-1',
+      },
+    });
+  });
+});
