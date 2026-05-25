@@ -397,11 +397,10 @@ router.post('/', async (req, res) => {
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
     // Auto-reply to lead — always send (whether call connected or not),
-    // 24/7. Same menu prompt regardless of hour: the state machine in
-    // server/services/lead-intake.js captures service interest + address
-    // overnight, so Virginia/Adam can send a finalized estimate first
-    // thing in the morning without any back-and-forth. Edit copy in the
-    // admin UI.
+    // 24/7. The template acknowledges the quote request; later inbound
+    // replies can still be classified by server/services/lead-intake.js
+    // when they include service interest or address details. Edit copy in
+    // the admin UI.
     try {
       const replyMsg = await renderRequiredSmsTemplate(
         'lead_auto_reply_biz',
