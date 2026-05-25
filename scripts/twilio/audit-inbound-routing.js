@@ -28,6 +28,7 @@ function argValue(name, fallback) {
 const DAYS = Math.max(1, parseInt(argValue('days', '30'), 10) || 30);
 const MODE = argValue('mode', 'studio'); // studio | app
 const EXPECTED_DRIFT = Math.max(0, parseInt(argValue('expected-drift', '0'), 10) || 0);
+const CALL_PAGE_SIZE = Math.max(1, Math.min(1000, parseInt(argValue('call-page-size', '1000'), 10) || 1000));
 
 function maskPhone(value) {
   const phone = String(value || '');
@@ -56,6 +57,21 @@ function expectedVoiceUrl() {
 function voiceUrlMatches(url) {
   if (MODE === 'app') return String(url || '') === APP_VOICE_URL;
   return String(url || '').includes(`/Flows/${FLOW_SID}`);
+}
+
+async function listCallPages(client, params) {
+  const calls = [];
+  let pages = 0;
+  let page = await client.calls.page({ ...params, pageSize: CALL_PAGE_SIZE });
+
+  while (page) {
+    pages += 1;
+    calls.push(...(page.instances || []));
+    if (!page.nextPageUrl) break;
+    page = await page.nextPage();
+  }
+
+  return { calls, pages };
 }
 
 async function auditTwilio() {
@@ -91,7 +107,7 @@ async function auditTwilio() {
     .filter(Boolean);
 
   const since = new Date(Date.now() - DAYS * 24 * 60 * 60 * 1000);
-  const calls = await client.calls.list({ startTimeAfter: since, limit: 1000 });
+  const { calls, pages } = await listCallPages(client, { startTimeAfter: since });
   const inbound = calls.filter((item) => (
     expectedNumbers.has(item.to) &&
     item.direction === 'inbound' &&
@@ -129,6 +145,9 @@ async function auditTwilio() {
     },
     twilioCalls: {
       days: DAYS,
+      fetchedTotal: calls.length,
+      pagesFetched: pages,
+      pageSize: CALL_PAGE_SIZE,
       inboundTotal: inbound.length,
       inboundByStatus: countBy(inbound, (item) => item.status),
       childLegsTotal: childLegs.length,
