@@ -1684,8 +1684,10 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
 // GET /api/admin/newsletter/calendar
 router.get('/calendar', async (req, res, next) => {
   try {
-    const pastWeeks = Math.min(12, Math.max(0, Number(req.query.pastWeeks ?? 4)));
-    const futureWeeks = Math.min(26, Math.max(1, Number(req.query.futureWeeks ?? 12)));
+    const rawPast = Number(req.query.pastWeeks ?? 4);
+    const pastWeeks = Math.min(12, Math.max(0, Number.isNaN(rawPast) ? 4 : rawPast));
+    const rawFuture = Number(req.query.futureWeeks ?? 12);
+    const futureWeeks = Math.min(26, Math.max(1, Number.isNaN(rawFuture) ? 12 : rawFuture));
 
     const currentThursday = getCurrentNewsletterThursday();
 
