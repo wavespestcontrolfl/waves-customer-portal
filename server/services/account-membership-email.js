@@ -3,7 +3,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact } = require('./customer-contact');
-const { publicPortalUrl } = require('../utils/portal-url');
+const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { currency } = require('./email-template');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -37,9 +37,8 @@ function money(value) {
   return currency(value);
 }
 
-function portalUrl(tab) {
-  const base = publicPortalUrl();
-  return tab ? `${base}/?tab=${encodeURIComponent(tab)}` : base;
+function portalTabUrl(tab = 'dashboard') {
+  return buildPortalUrl(`/?tab=${encodeURIComponent(tab || 'dashboard')}`);
 }
 
 function stableEventKey(value) {
@@ -167,7 +166,7 @@ async function sendTemplate({
   const finalPayload = {
     first_name: firstName,
     customer_name: fullName(recipientCustomer),
-    customer_portal_url: portalUrl(),
+    customer_portal_url: portalTabUrl('dashboard'),
     company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
     company_email: CONTACT_EMAIL,
     property_label: targetCustomer ? propertyLabel(targetCustomer) : '',
@@ -274,8 +273,8 @@ async function sendAccountUpdated({
       changed_items_summary: itemSummary(changedItems) || summary,
       changed_at: displayDate(changedAt),
       property_label: explicitPropertyLabel,
-      manage_preferences_url: portalUrl('visits'),
-      customer_portal_url: portalUrl(),
+      manage_preferences_url: portalTabUrl('visits'),
+      customer_portal_url: portalTabUrl('property'),
     },
     idempotencyKey: idempotencyKey || `account.updated:${recipientCustomerId}:${idHash}`,
     categories: ['account_updated'],
@@ -308,8 +307,8 @@ async function sendRequestReceived({
       request_status: clean(request.status) || 'new',
       submitted_at: displayDate(submittedAt),
       response_time: responseTime || (request.urgency === 'urgent' ? '2 hours' : '24 hours'),
-      customer_portal_url: portalUrl(),
-      portal_requests_url: portalUrl(),
+      customer_portal_url: portalTabUrl('dashboard'),
+      portal_requests_url: portalTabUrl('request'),
     },
     idempotencyKey: idempotencyKey || `account.request_received:${request.id}`,
     categories: ['request_received'],
@@ -340,8 +339,8 @@ async function sendRequestUpdated({
       request_summary: clean(request.description),
       request_status: status,
       updated_at: displayDate(request.updated_at || new Date()),
-      customer_portal_url: portalUrl(),
-      portal_requests_url: portalUrl(),
+      customer_portal_url: portalTabUrl('dashboard'),
+      portal_requests_url: portalTabUrl('request'),
     },
     idempotencyKey: idempotencyKey || `account.request_updated:${request.id}:${stableEventKey(request.updated_at || status)}`,
     categories: ['request_updated'],
@@ -363,7 +362,7 @@ function membershipPayload(customer = {}, extra = {}) {
     pause_reason: clean(extra.pauseReason),
     cancellation_effective_date: displayDate(extra.cancellationEffectiveDate),
     reactivated_at: displayDate(extra.reactivatedAt || extra.effectiveDate),
-    customer_portal_url: portalUrl(),
+    customer_portal_url: portalTabUrl('plan'),
   };
 }
 

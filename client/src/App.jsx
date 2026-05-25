@@ -208,6 +208,7 @@ function EstimatePublicGateway() {
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -256,7 +257,8 @@ function ProtectedRoute({ children }) {
     );
   }
 
-  return isAuthenticated ? children : <Navigate to="/login" replace />;
+  const next = `${location.pathname}${location.search}${location.hash}`;
+  return isAuthenticated ? children : <Navigate to={`/login?next=${encodeURIComponent(next)}`} replace />;
 }
 
 export default function App() {

@@ -3,7 +3,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact, getServiceContact } = require('./customer-contact');
 const { getProjectType } = require('./project-types');
-const { publicPortalUrl, portalUrl } = require('../utils/portal-url');
+const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
@@ -144,15 +144,14 @@ function buildProjectPayload({
   const firstName = firstToken(recipient.name) || firstToken(customer.first_name) || 'there';
   const typeLabel = projectTypeLabel(project);
   const serviceDate = displayDate(project.project_date || project.created_at);
-  const portal = publicPortalUrl();
   return {
     first_name: firstName,
     customer_name: customerName(customer),
     customer_email: recipient.email || cleanEmail(customer.email),
     customer_phone: clean(customer.phone),
-    customer_portal_url: portal,
-    portal_invite_url: portalInviteUrl || portalUrl('/login'),
-    prep_url: portalUrl('/login'),
+    customer_portal_url: portalUrl('/?tab=dashboard'),
+    portal_invite_url: portalInviteUrl || portalUrl('/login?next=%2F%3Ftab%3Ddashboard'),
+    prep_url: portalUrl('/?tab=visits'),
     report_url: reportUrl,
     report_type: typeLabel,
     project_type: typeLabel,
@@ -282,7 +281,7 @@ async function sendPortalInvite({
   const payload = buildProjectPayload({
     project,
     customer,
-    portalInviteUrl: portalInviteUrl || portalUrl('/login'),
+    portalInviteUrl: portalInviteUrl || portalUrl('/login?next=%2F%3Ftab%3Ddashboard'),
     recipient,
   });
   return sendProjectTemplate({
