@@ -50,9 +50,22 @@ const { persistAudit } = require('./audit');
 const { sendViaTwilio } = require('./providers/twilio-sms');
 
 const RETRYABLE_BLOCK_CODES = new Set(['QUIET_HOURS_HOLD']);
+const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
 
 function isRetryableBlockedResult(result) {
   return !!(result && result.blocked && RETRYABLE_BLOCK_CODES.has(result.code));
+}
+
+function nextProviderRetryAt(providerOutcome, now = new Date()) {
+  if (!providerOutcome || !providerOutcome.retryable) return null;
+  if (providerOutcome.nextAllowedAt) {
+    const explicit = new Date(providerOutcome.nextAllowedAt);
+    if (!Number.isNaN(explicit.getTime())) return explicit;
+  }
+  const delayMs = Number.isFinite(providerOutcome.retryAfterMs)
+    ? Math.max(0, providerOutcome.retryAfterMs)
+    : DEFAULT_PROVIDER_RETRY_DELAY_MS;
+  return new Date(now.getTime() + delayMs);
 }
 
 /**
@@ -189,11 +202,18 @@ async function sendCustomerMessage(input) {
   });
 
   if (!providerOutcome.sent) {
+    const retryAt = nextProviderRetryAt(providerOutcome);
     return {
       sent: false,
       blocked: false,
       code: 'PROVIDER_FAILURE',
       reason: providerOutcome.error || 'provider returned no message id',
+      retryable: !!providerOutcome.retryable,
+      deferred: !!providerOutcome.retryable,
+      terminal: providerOutcome.terminal === true,
+      nextAllowedAt: retryAt ? retryAt.toISOString() : undefined,
+      providerErrorCode: providerOutcome.providerErrorCode,
+      providerHttpStatus: providerOutcome.providerHttpStatus,
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
@@ -268,5 +288,6 @@ module.exports = {
     validateContract,
     normalizeRecipient,
     isRetryableBlockedResult,
+    nextProviderRetryAt,
   },
 };

@@ -157,7 +157,6 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
 function retryAtForDeferredSend(result) {
   if (
     !result ||
-    !result.blocked ||
     !(result.retryable || result.deferred || result.code === "QUIET_HOURS_HOLD")
   ) {
     return null;
@@ -1014,6 +1013,10 @@ const ReviewService = {
       autoTriggered: parseInt(totals.auto_triggered),
     };
   },
+};
+
+ReviewService.__private = {
+  retryAtForDeferredSend,
 };
 
 module.exports = ReviewService;

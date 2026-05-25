@@ -29,6 +29,52 @@ function formatProviderError(err) {
   return parts.filter(Boolean).join(': ') || 'twilio threw';
 }
 
+function providerFailureCode(err, error) {
+  if (err && err.code) return String(err.code);
+  const match = String(error || '').match(/\bTwilio\s+(\d{4,6})\b/i);
+  return match ? match[1] : null;
+}
+
+function providerFailureStatus(err, error) {
+  if (err && err.status) return Number(err.status);
+  const match = String(error || '').match(/\bHTTP\s+(\d{3})\b/i);
+  return match ? Number(match[1]) : null;
+}
+
+function classifyProviderFailure(err, fallbackError) {
+  const error = err ? formatProviderError(err) : (sanitizeProviderError(fallbackError) || 'twilio rejected');
+  const twilioCode = providerFailureCode(err, error);
+  const httpStatus = providerFailureStatus(err, error);
+  const lc = String(error || fallbackError || '').toLowerCase();
+
+  const terminalTwilioCodes = new Set([
+    '21211', // invalid To number
+    '21408', // permission denied for destination region
+    '21606', // From number cannot send SMS
+    '21608', // unverified trial destination
+    '21610', // recipient unsubscribed
+    '21612', // no route available
+    '21614', // number is not mobile/SMS-capable
+  ]);
+  const retryableTwilioCodes = new Set([
+    '20429', // Twilio rate limit
+  ]);
+
+  if (terminalTwilioCodes.has(twilioCode)) {
+    return { retryable: false, terminal: true, twilioCode, httpStatus, error };
+  }
+  if (retryableTwilioCodes.has(twilioCode)) {
+    return { retryable: true, terminal: false, twilioCode, httpStatus, error, retryAfterMs: 5 * 60 * 1000 };
+  }
+  if (httpStatus === 429 || httpStatus === 408 || httpStatus >= 500) {
+    return { retryable: true, terminal: false, twilioCode, httpStatus, error, retryAfterMs: 5 * 60 * 1000 };
+  }
+  if (/timeout|timed out|econnreset|etimedout|eai_again|socket hang up|network|temporar/.test(lc)) {
+    return { retryable: true, terminal: false, twilioCode, httpStatus, error, retryAfterMs: 5 * 60 * 1000 };
+  }
+  return { retryable: false, terminal: false, twilioCode, httpStatus, error };
+}
+
 function mediaUrlsAllowed(input) {
   const metadata = input.metadata || {};
   return metadata.allowMediaUrls === true || !!metadata.adminUserId;
@@ -78,10 +124,16 @@ async function sendViaTwilio(input) {
       return { sent: false, provider: 'twilio', error: 'twilio.sendSMS returned undefined' };
     }
     if (result.success === false) {
+      const failure = classifyProviderFailure(null, result.error || (result.guardBlocked ? 'sms-guard blocked' : result.gateBlocked ? 'feature gate blocked' : 'twilio rejected'));
       return {
         sent: false,
         provider: 'twilio',
-        error: result.error || (result.guardBlocked ? 'sms-guard blocked' : result.gateBlocked ? 'feature gate blocked' : 'twilio rejected'),
+        error: failure.error,
+        retryable: failure.retryable,
+        terminal: failure.terminal,
+        providerErrorCode: failure.twilioCode,
+        providerHttpStatus: failure.httpStatus,
+        retryAfterMs: failure.retryAfterMs,
         raw: result,
       };
     }
@@ -104,7 +156,17 @@ async function sendViaTwilio(input) {
       raw: result,
     };
   } catch (err) {
-    return { sent: false, provider: 'twilio', error: formatProviderError(err) };
+    const failure = classifyProviderFailure(err);
+    return {
+      sent: false,
+      provider: 'twilio',
+      error: failure.error,
+      retryable: failure.retryable,
+      terminal: failure.terminal,
+      providerErrorCode: failure.twilioCode,
+      providerHttpStatus: failure.httpStatus,
+      retryAfterMs: failure.retryAfterMs,
+    };
   }
 }
 
@@ -142,7 +204,10 @@ module.exports = {
   mapPurposeToMessageType,
   _internals: {
     formatProviderError,
+    classifyProviderFailure,
     mediaUrlsAllowed,
+    providerFailureCode,
+    providerFailureStatus,
     providerMediaUrls,
     sanitizeProviderError,
   },
