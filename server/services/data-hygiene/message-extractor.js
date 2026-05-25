@@ -7,7 +7,7 @@ const {
 } = require('./source-extraction-store');
 const { upsertSensitiveProposal } = require('./proposal-store');
 
-const EXTRACTOR_VERSION = 'message-property-preferences-v2';
+const EXTRACTOR_VERSION = 'message-property-preferences-v3';
 const DEFAULT_LOOKBACK_DAYS = 180;
 const DEFAULT_LIMIT = 1000;
 
@@ -45,8 +45,9 @@ const NOTE_PATTERNS = [
     rule_id: 'extract.pet_details',
     confidence: 0.820,
     regexes: [
-      /\b(?:dog|dogs|cat|cats|pet|pets)\b[^.!?\n]{0,140}/ig,
-      /\b(?:aggressive|loose|friendly|inside|in\s+the\s+yard)\s+(?:dog|dogs|cat|cats|pet|pets)\b[^.!?\n]{0,140}/ig,
+      /\b(?:dog|dogs|cat|cats|pet|pets)\b[^.!?\n]{0,100}\b(?:in\s+(?:the\s+)?(?:yard|backyard|house|home)|inside|outside|loose|aggressive|friendly|do\s+not\s+open\s+(?:the\s+)?gate|keep\s+(?:gate|door)\s+closed)\b[^.!?\n]{0,80}/ig,
+      /\b(?:aggressive|loose|friendly|inside|outside)\s+(?:dog|dogs|cat|cats|pet|pets)\b[^.!?\n]{0,120}/ig,
+      /\b(?:we|i)\s+have\s+(?:a\s+|an\s+)?(?:dog|dogs|cat|cats|pet|pets)\b[^.!?\n]{0,120}/ig,
     ],
   },
   {
@@ -66,7 +67,7 @@ const NOTE_PATTERNS = [
     regexes: [
       /\b(?:use|enter|entry|access|go\s+through|come\s+through)\b[^.!?\n]{0,140}\b(?:gate|door|entrance|side|yard|backyard|left|right)\b[^.!?\n]{0,80}/ig,
       /\b(?:side|back|left|right)\s+gate\b(?![^.!?\n]{0,80}\b(?:code|combo)\b)[^.!?\n]{0,140}/ig,
-      /\b(?:call|text|knock)\s+(?:before|first|when)\b[^.!?\n]{0,140}/ig,
+      /\b(?:call|text|knock)\s+(?:before|first)\b[^.!?\n]{0,80}\b(?:enter|entry|access|gate|arriv)/ig,
       /\b(?:do\s+not|don't)\s+open\s+(?:the\s+)?gate\b[^.!?\n]{0,140}/ig,
     ],
   },
@@ -302,11 +303,29 @@ function normalizeNoteFragment(value) {
 
   if (note.length < 8 || note.length > 180) return null;
   if (looksLikeAccessCodeBearingText(note)) return null;
+  if (looksLikeMessageTemplateText(note)) return null;
+  if (looksLikeTranscriptOrSpellingNoise(note)) return null;
+  if (looksLikeNonOperationalPetContext(note)) return null;
   return note;
 }
 
 function looksLikeAccessCodeBearingText(value) {
   return /\b(?:code|combo|pin|press)\b/i.test(value) && /[#*]?\d/.test(value);
+}
+
+function looksLikeMessageTemplateText(value) {
+  return /\b(?:your tech|your technician|will text|text when|en route|two-hour window|portal:|questions or need to reschedule)\b/i.test(value);
+}
+
+function looksLikeTranscriptOrSpellingNoise(value) {
+  return /\b(?:caller:|agent:|gmail\.com|email is|last name)\b/i.test(value)
+    || /\b(?:dog|apple|sam|boy|charlie|delta|echo|frank|george|henry)\b(?:\s+[A-Z]\b|\s+(?:apple|sam|boy|charlie|delta|echo|frank|george|henry)\b)/i.test(value);
+}
+
+function looksLikeNonOperationalPetContext(value) {
+  return /\b(?:no pets|no pet|don't have pets|do not have pets|dont have pets|without pets)\b/i.test(value)
+    || /\b(?:flea|fleas|vet|topical|occasional|random)\b/i.test(value)
+    || /\b(?:curious dog can get to|where .* dog can get to)\b/i.test(value);
 }
 
 function normalizeAccessCode(value) {

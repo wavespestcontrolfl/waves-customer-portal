@@ -456,6 +456,49 @@ describe('data hygiene message access extraction', () => {
     expect(normalizeNoteFragment('side gate code 1234')).toBeNull();
   });
 
+  test('skips rejected pet false positives from treatment, negation, and transcript spelling', () => {
+    const bodies = [
+      'Again no where our curious dog can get to.',
+      'Applying topical to the cats per vet instructions. Still see an occasional flea at random.',
+      'Caller: Email is last name Sperry. S P E R R Y D A S for Dog Apple Sam @gmail.com.',
+      "St. Pete. We don't have pets or anything like that.",
+    ];
+
+    for (const body of bodies) {
+      expect(buildNoteProposals({ ...baseMessage, body })
+        .some((proposal) => proposal.field === 'pet_details')).toBe(false);
+    }
+  });
+
+  test('skips rejected access false positives from outbound-style template text', () => {
+    const bodies = [
+      'Your tech will text when en route. Portal: wavespestcontrol.com/portal Questions?',
+      'Your technician will arrive within a two-hour window and text when 30 minutes out.',
+    ];
+
+    for (const body of bodies) {
+      expect(buildNoteProposals({ ...baseMessage, body })
+        .some((proposal) => proposal.field === 'access_notes')).toBe(false);
+    }
+  });
+
+  test('keeps durable pet and access operational notes', () => {
+    expect(buildNoteProposals({
+      ...baseMessage,
+      body: 'We have a friendly dog in the backyard, please keep gate closed.',
+    })).toEqual([
+      expect.objectContaining({
+        field: 'pet_details',
+        proposed_value: 'dog in the backyard, please keep gate closed',
+      }),
+    ]);
+
+    expect(buildNoteProposals({
+      ...baseMessage,
+      body: 'Please call before entering the gate, dog may be outside.',
+    }).map((proposal) => proposal.field)).toEqual(['pet_details', 'access_notes']);
+  });
+
   test('combines access code and note extraction without duplicate fields', () => {
     const proposals = buildMessageExtractionProposals({
       ...baseMessage,
