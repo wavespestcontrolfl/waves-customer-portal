@@ -1188,6 +1188,20 @@ router.patch('/events/:id', async (req, res, next) => {
         // Admin explicitly set freshness — use the matching base score
         const { FRESHNESS_SCORES } = require('../services/event-freshness');
         updates.freshness_score = FRESHNESS_SCORES[freshnessStatus] ?? 40;
+
+        // Auto-derive event_type when admin sets a fresh status on an
+        // unknown-type event, so eligibility doesn't reject it later
+        const resolvedType = eventType || event.event_type;
+        if (resolvedType === 'unknown' && freshnessStatus.startsWith('fresh_')) {
+          const STATUS_TO_TYPE = {
+            fresh_one_time: 'one_time', fresh_annual: 'annual',
+            fresh_limited_run_opening: 'limited_run', fresh_limited_run_closing: 'limited_run',
+            fresh_series_launch: 'recurring_series', fresh_special_edition: 'special_edition',
+          };
+          if (STATUS_TO_TYPE[freshnessStatus]) {
+            updates.event_type = STATUS_TO_TYPE[freshnessStatus];
+          }
+        }
       } else {
         // Derive freshness from event type
         const { freshness_status, freshness_score } = classifyFreshness({
@@ -1298,7 +1312,7 @@ router.get('/events/approved-ids', async (req, res, next) => {
   try {
     const days = Math.min(14, Math.max(1, Number(req.query.days) || 10));
     const todayET = parseETDateTime(`${etDateString()}T00:00:00`);
-    const cutoffET = addETDays(new Date(), days);
+    const cutoffET = parseETDateTime(`${etDateString(addETDays(new Date(), days))}T23:59:59`);
 
     const rows = await db('events_raw')
       .select('id', 'admin_status', 'start_at', 'end_at', 'event_url', 'event_type', 'freshness_status', 'times_featured')

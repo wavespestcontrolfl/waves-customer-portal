@@ -1053,18 +1053,21 @@ function EventInboxView({ onDraftFromEvent }) {
                   </td>
                   <td className="px-3 py-2">
                     <div className="text-13 font-medium text-ink-primary leading-snug line-clamp-1">
-                      {ev.eventUrl ? (
-                        <a
-                          href={ev.eventUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="hover:underline"
-                        >
-                          {ev.title}
-                        </a>
-                      ) : (
-                        ev.title
-                      )}
+                      {(() => {
+                        const safe = safeHttpUrl(ev.eventUrl);
+                        return safe ? (
+                          <a
+                            href={safe}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:underline"
+                          >
+                            {ev.title}
+                          </a>
+                        ) : (
+                          ev.title
+                        );
+                      })()}
                     </div>
                     {ev.venueName && (
                       <div className="text-11 text-ink-tertiary mt-0.5 line-clamp-1">
