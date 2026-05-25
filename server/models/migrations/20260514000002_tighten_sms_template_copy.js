@@ -386,12 +386,20 @@ const TEMPLATES = [
     sort_order: 24,
   },
   {
+    template_key: 'estimate_onetime_followup',
+    name: 'One-Time Service Quote Follow-Up',
+    category: 'estimates',
+    body: 'Hi {first_name}! Your {service_label} estimate is ready — ${total}. Call us at {phone} or reply to this text to schedule.\n\n— Waves Pest Control',
+    variables: ['first_name', 'service_label', 'total', 'phone'],
+    sort_order: 25,
+  },
+  {
     template_key: 'estimate_followup_viewed',
     name: 'Estimate Follow-Up — Viewed Not Accepted (48h) (hardcoded)',
     category: 'estimates',
     body: "Hello {first_name}! Saw you opened your Waves estimate. Any questions we can answer? {estimate_url}\n\nReply here and we'll help.",
     variables: ['first_name', 'estimate_url'],
-    sort_order: 25,
+    sort_order: 26,
   },
   {
     template_key: 'lead_service_pest',
