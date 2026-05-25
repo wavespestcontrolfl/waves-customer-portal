@@ -87,11 +87,13 @@ const TEMPLATES = [
   {
     key: "blank",
     label: "Blank",
+    newsletterType: "free-form",
     html: "",
   },
   {
     key: "weekend",
     label: "Weekend Lineup",
+    newsletterType: "local-weekly-fresh-events",
     html: `<h1>[Punchy weekend headline — e.g., "Your No-Lame-Plans Weekend Starts Here"]</h1>
 <p>What's good, neighbor — here's what's hitting around Southwest Florida this weekend. Pick one (or three) and get out of the house.</p>
 <h2>[Event 1 name]</h2>
@@ -110,6 +112,7 @@ const TEMPLATES = [
   {
     key: "pest_concern",
     label: "Pest / Lawn Concern",
+    newsletterType: "pest-education",
     html: `<h1>[Concern + region — e.g., "Mosquitoes are back across SWFL"]</h1>
 <p>Heads up — we've been getting [a lot] more calls about [pest / issue] this past week than usual. Here's what's going on and what to do.</p>
 <h2>Why now</h2>
@@ -125,6 +128,7 @@ const TEMPLATES = [
   {
     key: "local_spotlight",
     label: "Local Spotlight",
+    newsletterType: "local-spotlight",
     html: `<h1>[Food / spot / lifestyle hook — e.g., "Fresh bites we're hitting this month"]</h1>
 <p>Quick rundown of [restaurants / shops / spots] worth a stop around Southwest Florida — built from what our techs and neighbors are actually talking about.</p>
 <h2>[Spot 1 name]</h2>
@@ -141,6 +145,7 @@ const TEMPLATES = [
   {
     key: "service_promo",
     label: "Service Promo",
+    newsletterType: "service-promo",
     html: `<h1>[Offer headline — clear and direct, e.g., "$150 off a full-yard treatment, this week only"]</h1>
 <p>Quick one — we're running a [offer summary] for [audience: existing customers / new SWFL homeowners / etc.] through [expiration date].</p>
 <h2>The deal</h2>
@@ -322,6 +327,12 @@ export function ComposeView({
     };
   }, [segmentFilter]);
 
+  const activeNewsletterType = (() => {
+    const key = selectedTemplate || "blank";
+    const t = TEMPLATES.find((x) => x.key === key);
+    return t?.newsletterType || null;
+  })();
+
   const applyTemplate = (key) => {
     const t = TEMPLATES.find((x) => x.key === key);
     if (!t) return;
@@ -346,6 +357,7 @@ export function ComposeView({
         fromName,
         fromEmail,
         segmentFilter,
+        newsletterType: activeNewsletterType,
       };
       if (draftId) {
         await adminFetch(`/admin/newsletter/sends/${draftId}`, {
@@ -373,7 +385,7 @@ export function ComposeView({
     try {
       const res = await adminFetch("/admin/newsletter/preview", {
         method: "POST",
-        body: JSON.stringify({ htmlBody, previewText }),
+        body: JSON.stringify({ htmlBody, previewText, newsletterType: activeNewsletterType }),
       });
       setPreviewHtml(res.html || "");
     } catch (e) {
@@ -476,6 +488,7 @@ export function ComposeView({
     setHtmlBody("");
     setTextBody("");
     setScheduleAt("");
+    setSelectedTemplate(null);
   };
 
   const handleAiDraft = async ({
@@ -485,12 +498,14 @@ export function ComposeView({
     tone,
     includeCTA,
   }) => {
+    const tpl = template ? TEMPLATES.find((t) => t.key === template) : null;
+    const newsletterType = tpl?.newsletterType || null;
     const res = await adminFetch("/admin/newsletter/draft-ai", {
       method: "POST",
-      body: JSON.stringify({ prompt, template, audience, tone, includeCTA }),
+      body: JSON.stringify({ prompt, template, newsletterType, audience, tone, includeCTA }),
     });
     const d = res.draft || {};
-    if (d.subject) setSubject(d.subject);
+    if (d.subject || d.selectedSubject) setSubject(d.subject || d.selectedSubject);
     if (d.previewText) setPreviewText(d.previewText);
     if (d.htmlBody) setHtmlBody(d.htmlBody);
     if (d.textBody) setTextBody(d.textBody);

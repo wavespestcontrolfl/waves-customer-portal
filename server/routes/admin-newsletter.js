@@ -19,6 +19,8 @@ const NewsletterSender = require('../services/newsletter-sender');
 const { linkToCustomer, subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
+const { isFlagshipType, getNewsletterType } = require('../config/newsletter-types');
+const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -323,7 +325,7 @@ router.get('/sends/:id', async (req, res, next) => {
 // POST /api/admin/newsletter/sends — create a draft
 router.post('/sends', async (req, res, next) => {
   try {
-    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType } = req.body;
     if (!subject) return res.status(400).json({ error: 'subject required' });
 
     let normalizedFromEmail;
@@ -342,6 +344,7 @@ router.post('/sends', async (req, res, next) => {
       status: 'draft',
       segment_filter: segmentFilter || null,
       ai_prompt: aiPrompt || null,
+      newsletter_type: newsletterType || null,
       created_by: req.technicianId || null,
     }).returning('*');
 
@@ -356,7 +359,7 @@ router.patch('/sends/:id', async (req, res, next) => {
     if (!send) return res.status(404).json({ error: 'not found' });
     if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
 
-    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType } = req.body;
 
     // Validate from_email only when the caller is changing it. Skipping
     // validation on PATCHes that don't touch the field keeps existing
@@ -378,6 +381,7 @@ router.patch('/sends/:id', async (req, res, next) => {
       reply_to: replyTo ?? send.reply_to,
       segment_filter: segmentFilter !== undefined ? segmentFilter : send.segment_filter,
       ai_prompt: aiPrompt !== undefined ? aiPrompt : send.ai_prompt,
+      newsletter_type: newsletterType !== undefined ? newsletterType : send.newsletter_type,
       updated_at: new Date(),
     });
 
@@ -418,6 +422,7 @@ router.post('/sends/:id/test', async (req, res) => {
       body: send.html_body || '',
       unsubscribeUrl: demoUrl,
       preheader: send.preview_text || undefined,
+      newsletterType: send.newsletter_type || undefined,
     });
 
     const result = await sendgrid.sendOne({
@@ -592,12 +597,13 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
 // requiring a saved draft or a test send. Stateless: no DB read/write.
 router.post('/preview', async (req, res) => {
   try {
-    const { htmlBody, previewText } = req.body || {};
+    const { htmlBody, previewText, newsletterType } = req.body || {};
     const demoUrl = sendgrid.unsubscribeUrl('preview-demo-token');
     const html = wrapNewsletter({
       body: htmlBody || '',
       unsubscribeUrl: demoUrl,
       preheader: previewText || undefined,
+      newsletterType: newsletterType || undefined,
     });
     res.json({ html });
   } catch (err) {
@@ -632,39 +638,191 @@ router.post('/segment-preview', async (req, res, next) => {
 });
 
 // POST /api/admin/newsletter/draft-ai — Claude drafts a newsletter
-// Body: { prompt, template?, audience?, tone?, includeCTA? }
-//   template: one of 'weekend' | 'pest_concern' | 'local_spotlight'
-//             | 'service_promo' (or omitted for free-form). Maps to a
-//             structure + voice block that's appended to the system
-//             prompt — the templates themselves live in
-//             client/src/pages/admin/NewsletterTabs.jsx.
+// Body: { prompt, template?, newsletterType?, eventIds?, audience?, tone?, includeCTA? }
+//   newsletterType: when 'local-weekly-fresh-events', uses the flagship
+//     Phase 3 system prompt with structured section output + voice profile.
+//   template: legacy param — one of 'weekend' | 'pest_concern' |
+//     'local_spotlight' | 'service_promo'. Used when newsletterType is
+//     absent (backward compat).
+//   eventIds: optional array of events_raw UUIDs. When present, the
+//     approved events are fetched and injected into the user prompt so
+//     Claude drafts from real event data instead of inventing.
 router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
   try {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(400).json({ error: 'Anthropic API not configured' });
     }
-    const { prompt, template, audience, tone, includeCTA } = req.body;
+    const { prompt, template, newsletterType, eventIds, audience, tone, includeCTA } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
     }
-    // Bound prompt length so a runaway client can't pass a 50k-char prompt
-    // and balloon the input-token bill. 2000 chars comfortably fits the
-    // event-seeded prompts the dashboard generates.
-    if (prompt.length > 2000) {
-      return res.status(400).json({ error: 'prompt too long (max 2000 chars)' });
+    if (prompt.length > 4000) {
+      return res.status(400).json({ error: 'prompt too long (max 4000 chars)' });
     }
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    // Ground the draft in SWFL season + local community — this is a
-    // neighborhood newsletter, not a generic pest-industry blast.
     const month = new Date().toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' });
 
-    // Per-template structure + voice guidance — kept in sync with the
-    // TEMPLATES array in client/src/pages/admin/NewsletterTabs.jsx.
-    // The client's templates seed the Compose textarea; this guidance
-    // tells Claude to draft into the same structure when the operator
-    // picks a template + clicks AI Draft.
+    // ── Flagship flow: local-weekly-fresh-events ──────────────────────
+    if (isFlagshipType(newsletterType)) {
+      const typeConfig = getNewsletterType(newsletterType);
+      const voice = getVoiceProfile(typeConfig.voiceProfile);
+
+      let eventBlock = '';
+      const MAX_EVENT_IDS = 12;
+      if (Array.isArray(eventIds) && eventIds.length > 0) {
+        const safeIds = eventIds.slice(0, MAX_EVENT_IDS).filter(
+          (id) => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id),
+        );
+        if (safeIds.length === 0) {
+          return res.status(400).json({ error: 'eventIds must be valid UUIDs' });
+        }
+        const events = await db('events_raw as e')
+          .leftJoin('event_sources as s', 's.id', 'e.source_id')
+          .select(
+            'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
+            'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
+            'e.categories', 's.name as source_name',
+          )
+          .whereIn('e.id', safeIds);
+
+        if (events.length > 0) {
+          eventBlock = '\n\nAPPROVED EVENTS (use ONLY these — do not invent events):\n' +
+            events.map((ev, i) => {
+              const parts = [`${i + 1}. ${ev.title}`];
+              if (ev.city) parts.push(`   City: ${ev.city}`);
+              if (ev.start_at) parts.push(`   Date: ${new Date(ev.start_at).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' })}`);
+              if (ev.start_at) parts.push(`   Time: ${new Date(ev.start_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })}`);
+              if (ev.venue_name) parts.push(`   Venue: ${ev.venue_name}`);
+              if (ev.venue_address) parts.push(`   Address: ${ev.venue_address}`);
+              if (ev.event_url) parts.push(`   URL: ${ev.event_url}`);
+              if (ev.source_name) parts.push(`   Source: ${ev.source_name}`);
+              if (ev.description) parts.push(`   Details: ${ev.description.slice(0, 200)}`);
+              return parts.join('\n');
+            }).join('\n\n');
+        }
+      }
+
+      const flagshipSystemPrompt = `You write the Waves weekly local events newsletter — "Fresh This Week from North Port to Tampa."
+
+This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven weekend guide from North Port to Tampa, written like a friend texting "yo, here's what's actually worth doing."
+
+The newsletter leads with local events. Waves pest/lawn/homeowner content appears only as a short useful sidebar (Homeowner Minute) and a soft CTA at the end.
+
+CURRENT MONTH: ${month}
+
+SWFL SEASONAL CONTEXT (pick what's relevant):
+- Local events & seasonal rhythms by month:
+  • Jan–Feb: snowbird season peak, cooler mornings, dry lawns, red tide drift
+  • Mar: spring break traffic, love bugs starting, citrus bloom
+  • Apr: Bradenton Blues Festival week, baseball spring training tail, lawn pre-emergents
+  • May: DeSoto Heritage Festival & Grand Parade (Bradenton), mosquito season ramp, no-see-um peak at dawn/dusk
+  • Jun: hurricane season begins (Jun 1), afternoon thunderstorms daily, nitrogen blackout begins on lawns (Jun–Sept by county ordinance)
+  • Jul: 4th of July on the waterfront, peak rainy season, German roach pressure, palmetto bugs indoors
+  • Aug: back-to-school in Manatee/Sarasota schools, peak hurricane risk month, chinch bug damage on St. Augustine
+  • Sep: hurricane peak, Siesta Key Crystal Classic (sand sculpture), subterranean termite swarms after storms
+  • Oct: snowbirds return, cooler nights, rodent season begins (mice seeking warmth), Halloween on the barrier islands
+  • Nov: Sarasota Season of Sculpture, turkey trots, last major hurricane risk tapers, winter annuals go in
+  • Dec: holidays, boat parades (Downtown Bradenton Riverwalk, Venice), cooler weather drives indoor pest activity
+- SWFL pests by season: subterranean termites (swarm after rain), German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs on St. Augustine, sod webworms
+
+VOICE:
+- Irreverent but not mean
+- Energetic but not chaotic
+- Specific to this week's events
+- Conversational, like a local friend
+- Short, scannable, and useful
+- Never corporate
+- Owner-operator energy: "we", "our team", first names welcome
+
+SUBJECT LINES:
+- Punchy, max ${voice.subjectLineRules.maxLength} chars
+- FOMO-driven, specific to this week's event mix
+- Can be playful, emoji-led, or slightly ridiculous when appropriate
+- Never generic ("Monthly Newsletter", "Weekly Update")
+- Good examples: ${voice.subjectLineRules.examples.map(e => `"${e}"`).join(', ')}
+
+EVENT BLURBS:
+- Include city, date/day, venue/location when provided
+- Explain in one sentence why it is worth going
+- Do NOT invent events — use only the approved event records provided
+- Do NOT change dates, times, prices, venues, or URLs from the approved records
+- Do NOT include stale recurring events unless explicitly marked as fresh
+
+HOMEOWNER MINUTE:
+- One useful seasonal tip (pest, lawn, or home prep)
+- Max ~90 words
+- Genuinely useful, not salesy
+- No scare tactics, no hard pitch
+- Must stand on its own without selling Waves
+
+SIGN-OFF: Must end with "${voice.signoff}"
+
+NEVER WRITE:
+${voice.bannedCorporatePhrases.map(p => `- "${p}"`).join('\n')}
+
+FORMAT: HTML body only (no <html>/<head>/<body> wrapper, no unsubscribe footer).
+Use <h2> for section headers, <p> for paragraphs, <strong> for emphasis, <ul><li> for lists.
+
+REQUIRED SECTIONS (produce all of these):
+1. local_intro — 1-2 sentence casual hook for the week
+2. fresh_this_week — 4-6 top event picks (one-time, annual, opening weekends)
+3. just_starting — 1-2 new recurring series or seasonal launches
+4. weekend_picks — 2-3 Friday–Sunday highlights (can overlap with fresh_this_week)
+5. family_or_low_key_pick — one family-friendly or low-effort option
+6. road_trip_pick — one event worth the drive from outside the reader's immediate zone
+7. homeowner_minute — short seasonal tip from Waves
+8. waves_cta — soft call to action (book, call, reply)
+
+Return STRICT JSON with these keys:
+{
+  "subjectVariants": ["string", "string", "string"],
+  "selectedSubject": "string (your best pick from subjectVariants)",
+  "previewText": "string, 50-110 chars, complements subject without repeating",
+  "sections": {
+    "local_intro": "HTML string",
+    "fresh_this_week": "HTML string",
+    "just_starting": "HTML string",
+    "weekend_picks": "HTML string",
+    "family_or_low_key_pick": "HTML string",
+    "road_trip_pick": "HTML string",
+    "homeowner_minute": "HTML string",
+    "waves_cta": "HTML string"
+  },
+  "htmlBody": "string — all sections assembled into one HTML body",
+  "textBody": "string — plain-text version of the same content"
+}
+No prose outside the JSON.`;
+
+      const userPrompt = `Topic / prompt: ${prompt}
+${audience ? `Audience: ${audience}` : ''}
+${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
+
+      const response = await anthropic.messages.create({
+        model: MODELS.WORKHORSE,
+        max_tokens: 3000,
+        system: flagshipSystemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      });
+
+      const text = response.content?.[0]?.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('Claude did not return JSON');
+
+      const draft = JSON.parse(jsonMatch[0]);
+      const voiceCheck = validateVoice(
+        { subject: draft.selectedSubject || draft.subjectVariants?.[0], htmlBody: draft.htmlBody },
+        typeConfig.voiceProfile,
+      );
+      draft.voiceWarnings = voiceCheck.warnings;
+      draft.newsletterType = newsletterType;
+
+      // Map flagship output to legacy shape so the compose UI can consume it
+      draft.subject = draft.selectedSubject || draft.subjectVariants?.[0] || '';
+      return res.json({ success: true, draft });
+    }
+
+    // ── Legacy flow: template-guided or free-form ─────────────────────
     const TEMPLATE_GUIDANCE = {
       weekend: `
 TEMPLATE: Weekend Lineup
