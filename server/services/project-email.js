@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const logger = require('./logger');
+const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact, getServiceContact } = require('./customer-contact');
 const { getProjectType } = require('./project-types');
@@ -22,16 +23,11 @@ const PREP_TEMPLATE_BY_PROJECT_TYPE = Object.freeze({
   termite_inspection: 'prep.termite',
   termite_treatment: 'prep.termite',
   pre_treatment_termite_certificate: 'prep.termite',
+  bed_bug: 'prep.bed_bug',
+  wildlife_trapping: 'prep.wildlife',
 });
 
-const PREP_TEMPLATE_KEYS = new Set([
-  'prep.rodent',
-  'prep.flea',
-  'prep.mosquito',
-  'prep.lawn',
-  'prep.termite',
-  'prep.interior_pest',
-]);
+const PREP_TEMPLATE_KEYS = new Set(Object.values(PREP_TEMPLATE_BY_PROJECT_TYPE));
 
 function clean(value) {
   return String(value || '').trim();
@@ -151,7 +147,7 @@ function buildProjectPayload({
     customer_phone: clean(customer.phone),
     customer_portal_url: portalUrl('/?tab=dashboard'),
     portal_invite_url: portalInviteUrl || portalUrl('/login?next=%2F%3Ftab%3Ddashboard'),
-    prep_url: portalUrl('/?tab=visits'),
+    prep_url: project?.prep_token ? portalUrl(`/prep/${project.prep_token}`) : null,
     report_url: reportUrl,
     report_type: typeLabel,
     project_type: typeLabel,
@@ -227,6 +223,24 @@ function isPrepTemplateKey(value) {
   return PREP_TEMPLATE_KEYS.has(String(value || ''));
 }
 
+async function ensurePrepToken(projectId) {
+  const existing = await db('projects').select('prep_token').where({ id: projectId }).first();
+  if (existing?.prep_token) return existing.prep_token;
+
+  const token = crypto.randomBytes(16).toString('hex');
+  const updated = await db('projects')
+    .where({ id: projectId })
+    .whereNull('prep_token')
+    .update({ prep_token: token })
+    .returning(['prep_token']);
+
+  if (updated?.length) return updated[0].prep_token || token;
+
+  const afterRace = await db('projects').select('prep_token').where({ id: projectId }).first();
+  if (!afterRace?.prep_token) throw new Error(`Failed to ensure prep_token for project ${projectId}`);
+  return afterRace.prep_token;
+}
+
 async function sendProjectReportReady({
   project,
   customer,
@@ -257,6 +271,9 @@ async function sendPrepGuide({
   const resolvedTemplateKey = templateKey || prepTemplateForProjectType(project?.project_type);
   if (!isPrepTemplateKey(resolvedTemplateKey)) {
     return { ok: false, skipped: true, reason: 'unsupported_prep_template' };
+  }
+  if (project?.id) {
+    project.prep_token = await ensurePrepToken(project.id);
   }
   const payload = buildProjectPayload({ project, customer });
   return sendProjectTemplate({
@@ -300,6 +317,7 @@ async function sendPortalInvite({
 module.exports = {
   PREP_TEMPLATE_BY_PROJECT_TYPE,
   buildProjectPayload,
+  ensurePrepToken,
   isPrepTemplateKey,
   prepTemplateForProjectType,
   resolveProjectEmailRecipient,

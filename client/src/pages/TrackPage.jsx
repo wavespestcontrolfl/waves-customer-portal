@@ -300,6 +300,24 @@ function TrackerMap({ tech, property }) {
   );
 }
 
+function PrepLink({ prepToken }) {
+  if (!prepToken) return null;
+  return (
+    <a
+      href={`/prep/${prepToken}`}
+      style={{
+        display: 'block', marginTop: 16, padding: '12px 20px',
+        background: TRACK_SURFACE.surface, color: TRACK_SURFACE.text,
+        textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 14,
+        textDecoration: 'none', border: `1px solid ${TRACK_SURFACE.border}`,
+        fontFamily: FONT_BODY,
+      }}
+    >
+      View prep instructions
+    </a>
+  );
+}
+
 function Card({ children, accent }) {
   return (
     <div style={{
@@ -407,6 +425,7 @@ function ScheduledCard({ data }) {
           </div>
         );
       })()}
+      <PrepLink prepToken={data.prepToken} />
     </Card>
   );
 }
@@ -465,6 +484,7 @@ function EnRouteCard({ data }) {
         >
           TEXT {techFirst.toUpperCase()}
         </a>
+        <PrepLink prepToken={data.prepToken} />
       </Card>
     </>
   );
@@ -488,6 +508,7 @@ function OnPropertyCard({ data }) {
         </div>
       ) : null}
       <ServiceMeta data={data} />
+      <PrepLink prepToken={data.prepToken} />
     </Card>
   );
 }

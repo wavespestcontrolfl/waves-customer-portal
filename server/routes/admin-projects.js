@@ -1451,11 +1451,13 @@ router.post('/:id/send-prep-guide', requireAdmin, async (req, res, next) => {
           provider_message_id: result.messageId || null,
         },
       );
+      const freshProject = await db('projects').select('prep_token').where({ id: project.id }).first();
       return res.json({
         ok: true,
         sent: true,
         template_key: templateKey,
         message_id: result.messageId || null,
+        prep_token: freshProject?.prep_token || null,
       });
     }
 

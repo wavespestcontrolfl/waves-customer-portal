@@ -355,10 +355,19 @@ router.get('/:token', async (req, res, next) => {
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
+      prepToken: null,
       meta: {
         pollIntervalSeconds: row.track_state === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,
       },
     };
+
+    if (row.id) {
+      const linkedProject = await db('projects')
+        .where({ scheduled_service_id: row.id })
+        .whereNotNull('prep_token')
+        .first('prep_token');
+      if (linkedProject) response.prepToken = linkedProject.prep_token;
+    }
 
     res.json(response);
   } catch (err) {
