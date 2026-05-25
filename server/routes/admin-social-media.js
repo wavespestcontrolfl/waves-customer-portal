@@ -103,7 +103,7 @@ router.post('/publish-single', async (req, res, next) => {
 router.post('/check-rss', async (req, res, next) => {
   try {
     const url = req.body.feedUrl || 'https://www.wavespestcontrol.com/feed/';
-    const result = await SocialMediaService.checkAndPublish(url);
+    const result = await SocialMediaService.checkAndPublish(url, { manual: true });
     res.json(result);
   } catch (err) { next(err); }
 });

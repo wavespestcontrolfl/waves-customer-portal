@@ -341,9 +341,11 @@ async function uploadImageToS3(base64Data, filename) {
       ContentType: contentType,
     }));
 
-    const url = cdnDomain
-      ? `https://${cdnDomain}/${key}`
-      : `https://${config.s3.bucket}.s3.${config.s3.region}.amazonaws.com/${key}`;
+    if (!cdnDomain) {
+      logger.error('[social] SOCIAL_MEDIA_CDN_DOMAIN not set — private S3 URLs are not publicly fetchable');
+      return null;
+    }
+    const url = `https://${cdnDomain}/${key}`;
     logger.info(`[social] Image uploaded: ${url}`);
     return url;
   } catch (err) {

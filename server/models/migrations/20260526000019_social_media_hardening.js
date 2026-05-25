@@ -38,13 +38,13 @@ exports.up = async function (knex) {
   await knex.raw(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_social_posts_source_url_unique
     ON social_media_posts (source_url)
-    WHERE source_url IS NOT NULL
+    WHERE source_url IS NOT NULL AND source_type IN ('rss', 'blog_scheduled', 'newsletter')
   `);
 
   await knex.raw(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_social_posts_source_guid_unique
     ON social_media_posts (source_guid)
-    WHERE source_guid IS NOT NULL
+    WHERE source_guid IS NOT NULL AND source_type IN ('rss', 'blog_scheduled', 'newsletter')
   `);
 };
 
