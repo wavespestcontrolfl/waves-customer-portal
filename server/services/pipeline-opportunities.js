@@ -560,6 +560,7 @@ function buildPipelineResponse({
   query = {},
   now = new Date(),
   truncated = false,
+  candidateStats = {},
   dismissedDuplicatePairs = [],
 }) {
   const normalized = normalizeOpportunities({
@@ -579,6 +580,11 @@ function buildPipelineResponse({
     meta: {
       source: 'server',
       truncated,
+      candidateCap: candidateStats.candidateCap ?? null,
+      leadCandidates: candidateStats.leadCandidates ?? null,
+      estimateCandidates: candidateStats.estimateCandidates ?? null,
+      leadCandidatesReturned: candidateStats.leadCandidatesReturned ?? null,
+      estimateCandidatesReturned: candidateStats.estimateCandidatesReturned ?? null,
       generatedAt: asDate(now)?.toISOString() || new Date().toISOString(),
     },
   };

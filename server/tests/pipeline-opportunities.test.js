@@ -145,6 +145,33 @@ describe('pipeline opportunities read model', () => {
     expect(response.data[0]).not.toHaveProperty('rawEstimate');
   });
 
+  test('surfaces server candidate-cap metadata when response is truncated', () => {
+    const response = buildPipelineResponse({
+      leads: [lead({ estimate_id: 'est-1' })],
+      estimates: [estimate({ id: 'est-1' })],
+      query: { stage: 'all', page: 1, pageSize: 50 },
+      truncated: true,
+      candidateStats: {
+        candidateCap: 5000,
+        leadCandidates: 5001,
+        estimateCandidates: 42,
+        leadCandidatesReturned: 5000,
+        estimateCandidatesReturned: 42,
+      },
+      now: NOW,
+    });
+
+    expect(response.meta).toMatchObject({
+      source: 'server',
+      truncated: true,
+      candidateCap: 5000,
+      leadCandidates: 5001,
+      estimateCandidates: 42,
+      leadCandidatesReturned: 5000,
+      estimateCandidatesReturned: 42,
+    });
+  });
+
   test('counts are computed from search scope before the selected stage filter', () => {
     const response = buildPipelineResponse({
       leads: [
