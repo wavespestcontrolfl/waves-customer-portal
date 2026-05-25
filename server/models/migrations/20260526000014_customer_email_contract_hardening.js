@@ -251,7 +251,7 @@ function demoPayload(templateKey) {
     plan_name: 'WaveGuard Gold',
     setup_steps: 'Payment method, service preferences, and property details',
     next_step_summary: 'Most customers finish setup in about two minutes.',
-    onboarding_url: 'https://portal.wavespestcontrol.com/onboard/demo',
+    onboarding_url: 'https://portal.wavespestcontrol.com/login',
   };
   if (templateKey === 'membership.canceled') base.membership_status = 'Canceled';
   if (templateKey === 'membership.paused') base.membership_status = 'Paused';
