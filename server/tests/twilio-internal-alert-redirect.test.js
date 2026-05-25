@@ -1,4 +1,5 @@
 const mockTwilioCreate = jest.fn();
+const mockValidateOutbound = jest.fn(() => ({ ok: true }));
 
 jest.mock('twilio', () => jest.fn(() => ({
   messages: { create: mockTwilioCreate },
@@ -16,6 +17,9 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-sms-templates', () => ({
   isTemplateActive: jest.fn(async () => true),
+}));
+jest.mock('../services/sms-guard', () => ({
+  validateOutbound: (...args) => mockValidateOutbound(...args),
 }));
 jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(() => Promise.resolve()),
@@ -35,6 +39,7 @@ const { triggerNotification } = require('../services/notification-triggers');
 describe('Twilio internal admin alert redirect', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockValidateOutbound.mockReturnValue({ ok: true });
     mockTwilioCreate.mockResolvedValue({ sid: 'SM_fallback' });
     process.env.ADAM_PHONE = '+19415993489';
     process.env.WAVES_OFFICE_PHONE = '+19413187612';
@@ -112,6 +117,30 @@ describe('Twilio internal admin alert redirect', () => {
       guardBlocked: true,
       error: 'Internal/admin alert recipient is not a known owner/admin phone',
     });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+  });
+
+  test('reports SMS guard blocks through admin notifications without direct owner SMS', async () => {
+    mockValidateOutbound.mockReturnValueOnce({ ok: false, reason: 'unsubstituted_variable' });
+
+    const result = await TwilioService.sendSMS(
+      '+19415550123',
+      'Hi {{first_name}}',
+      { messageType: 'appointment_reminder' },
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      guardBlocked: true,
+      error: 'unsubstituted_variable',
+    });
+    expect(triggerNotification).toHaveBeenCalledWith('internal_admin_alert', expect.objectContaining({
+      title: 'SMS guard blocked outbound message',
+      body: expect.stringContaining('Reason: unsubstituted_variable'),
+      link: '/admin/sms-templates',
+      originalMessageType: 'sms_guard_blocked',
+      originalToMasked: '***0123',
+    }));
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 });
