@@ -21,6 +21,7 @@ const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 const { isFlagshipType, getNewsletterType } = require('../config/newsletter-types');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
+const { isEligibleForFreshDigest, scoreFreshEvent } = require('../services/event-freshness');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -1022,6 +1023,253 @@ router.get('/events', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// ── Event Inbox ──────────────────────────────────────────────────────
+// Admin curation endpoints for the newsletter content engine's
+// freshness-first editorial policy.
+
+// GET /api/admin/newsletter/events/inbox — paginated, filterable event
+// list for the Event Inbox UI. Returns events with freshness labels,
+// admin status, and source info.
+router.get('/events/inbox', async (req, res, next) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const { status, freshness, zone, source_id, q, date_from, date_to, sort } = req.query;
+
+    let query = db('events_raw as e')
+      .leftJoin('event_sources as s', 's.id', 'e.source_id')
+      .select(
+        'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
+        'e.venue_name', 'e.venue_address', 'e.city', 'e.geo_lat', 'e.geo_lng',
+        'e.event_url', 'e.image_url', 'e.categories',
+        'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
+        'e.admin_status', 'e.suppression_reason',
+        'e.last_featured_at', 'e.times_featured',
+        'e.region_zone', 'e.family_friendly', 'e.is_free', 'e.price_text',
+        'e.pulled_at', 'e.normalized_at',
+        's.name as source_name', 's.priority_tier as source_priority_tier',
+      );
+
+    // Filters
+    if (status && status !== 'all') {
+      query = query.where('e.admin_status', status);
+    }
+    if (freshness === 'fresh') {
+      query = query.where('e.freshness_status', 'like', 'fresh_%');
+    } else if (freshness === 'stale') {
+      query = query.whereIn('e.freshness_status', ['stale_recurring', 'expired']);
+    } else if (freshness === 'needs_review') {
+      query = query.where('e.freshness_status', 'needs_review');
+    }
+    if (zone) {
+      query = query.where('e.region_zone', zone);
+    }
+    if (source_id) {
+      query = query.where('e.source_id', source_id);
+    }
+    if (q) {
+      query = query.where('e.title', 'ilike', `%${q}%`);
+    }
+    if (date_from) {
+      query = query.where('e.start_at', '>=', new Date(date_from));
+    }
+    if (date_to) {
+      query = query.where('e.start_at', '<=', new Date(date_to));
+    }
+
+    // Sort
+    if (sort === 'date') {
+      query = query.orderByRaw('e.start_at IS NULL').orderBy('e.start_at', 'asc');
+    } else if (sort === 'newest') {
+      query = query.orderBy('e.pulled_at', 'desc');
+    } else {
+      // Default: freshness_score desc, then date asc
+      query = query.orderByRaw('e.freshness_score DESC NULLS LAST').orderByRaw('e.start_at ASC NULLS LAST');
+    }
+
+    const rows = await query.limit(limit).offset(offset);
+
+    // Status counts for filter tabs
+    const counts = await db('events_raw')
+      .select('admin_status')
+      .count('* as count')
+      .groupBy('admin_status');
+    const byStatus = { all: 0, pending: 0, approved: 0, rejected: 0, featured: 0 };
+    for (const r of counts) {
+      byStatus[r.admin_status] = Number(r.count);
+      byStatus.all += Number(r.count);
+    }
+
+    const events = rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      description: r.description,
+      startAt: r.start_at,
+      endAt: r.end_at,
+      venueName: r.venue_name,
+      venueAddress: r.venue_address,
+      city: r.city,
+      geoLat: r.geo_lat,
+      geoLng: r.geo_lng,
+      eventUrl: r.event_url,
+      imageUrl: r.image_url,
+      categories: r.categories || [],
+      eventType: r.event_type,
+      recurrenceType: r.recurrence_type,
+      freshnessStatus: r.freshness_status,
+      freshnessScore: r.freshness_score,
+      adminStatus: r.admin_status,
+      suppressionReason: r.suppression_reason,
+      lastFeaturedAt: r.last_featured_at,
+      timesFeatured: r.times_featured,
+      regionZone: r.region_zone,
+      familyFriendly: r.family_friendly,
+      isFree: r.is_free,
+      priceText: r.price_text,
+      sourceName: r.source_name,
+      sourcePriorityTier: r.source_priority_tier,
+      eligible: isEligibleForFreshDigest(r),
+      compositeScore: scoreFreshEvent(r),
+    }));
+
+    res.json({ events, counts: byStatus, limit, offset });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/newsletter/events/:id — admin curation
+router.patch('/events/:id', async (req, res, next) => {
+  try {
+    const event = await db('events_raw').where({ id: req.params.id }).first();
+    if (!event) return res.status(404).json({ error: 'not found' });
+
+    const {
+      adminStatus, eventType, recurrenceType, freshnessStatus,
+      suppressionReason, familyFriendly, isFree, regionZone, priceText,
+    } = req.body;
+
+    const updates = { updated_at: new Date() };
+    if (adminStatus !== undefined) updates.admin_status = adminStatus;
+    if (eventType !== undefined) updates.event_type = eventType;
+    if (recurrenceType !== undefined) updates.recurrence_type = recurrenceType;
+    if (freshnessStatus !== undefined) updates.freshness_status = freshnessStatus;
+    if (suppressionReason !== undefined) updates.suppression_reason = suppressionReason;
+    if (familyFriendly !== undefined) updates.family_friendly = familyFriendly;
+    if (isFree !== undefined) updates.is_free = isFree;
+    if (regionZone !== undefined) updates.region_zone = regionZone;
+    if (priceText !== undefined) updates.price_text = priceText;
+
+    // Recompute freshness score when type changes
+    if (eventType !== undefined || freshnessStatus !== undefined) {
+      const { classifyFreshness } = require('../services/event-freshness');
+      const { freshness_status, freshness_score } = classifyFreshness({
+        event_type: eventType || event.event_type,
+        times_featured: event.times_featured,
+        start_at: event.start_at,
+        end_at: event.end_at,
+      });
+      if (freshnessStatus === undefined) updates.freshness_status = freshness_status;
+      updates.freshness_score = freshness_score;
+    }
+
+    await db('events_raw').where({ id: req.params.id }).update(updates);
+    const updated = await db('events_raw').where({ id: req.params.id }).first();
+    res.json({ success: true, event: updated });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/newsletter/events/bulk-action — approve/reject multiple
+router.post('/events/bulk-action', async (req, res, next) => {
+  try {
+    const { action, ids, suppressionReason } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids required' });
+    }
+    if (!['approve', 'reject', 'feature', 'reset'].includes(action)) {
+      return res.status(400).json({ error: 'action must be approve, reject, feature, or reset' });
+    }
+
+    const MAX_BULK = 50;
+    const safeIds = ids.slice(0, MAX_BULK).filter(
+      (id) => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id),
+    );
+    if (safeIds.length === 0) {
+      return res.status(400).json({ error: 'no valid UUIDs provided' });
+    }
+
+    const statusMap = { approve: 'approved', reject: 'rejected', feature: 'featured', reset: 'pending' };
+    const updates = {
+      admin_status: statusMap[action],
+      updated_at: new Date(),
+    };
+    if (action === 'reject' && suppressionReason) {
+      updates.suppression_reason = suppressionReason;
+    }
+    if (action === 'approve' || action === 'reset') {
+      updates.suppression_reason = null;
+    }
+
+    const count = await db('events_raw').whereIn('id', safeIds).update(updates);
+    res.json({ success: true, updated: count });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/newsletter/events/sources — source health dashboard
+router.get('/events/sources', async (req, res, next) => {
+  try {
+    const sources = await db('event_sources')
+      .select('*')
+      .orderBy('priority_tier', 'asc')
+      .orderBy('name', 'asc');
+
+    // Event counts per source
+    const countsRaw = await db('events_raw')
+      .select('source_id')
+      .count('* as count')
+      .groupBy('source_id');
+    const countMap = Object.fromEntries(countsRaw.map((r) => [r.source_id, Number(r.count)]));
+
+    const result = sources.map((s) => ({
+      id: s.id,
+      name: s.name,
+      url: s.url,
+      feedUrl: s.feed_url,
+      feedType: s.feed_type,
+      coverageGeo: s.coverage_geo,
+      priorityTier: s.priority_tier,
+      enabled: s.enabled,
+      lastPulledAt: s.last_pulled_at,
+      lastPullStatus: s.last_pull_status,
+      lastError: s.last_error,
+      consecutiveFailures: s.consecutive_failures,
+      eventCount: countMap[s.id] || 0,
+    }));
+
+    res.json({ sources: result });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/newsletter/events/approved-ids — returns IDs of
+// approved/featured events in the upcoming window, for the AI draft
+// modal to auto-load into the flagship draft request.
+router.get('/events/approved-ids', async (req, res, next) => {
+  try {
+    const days = Math.min(14, Math.max(1, Number(req.query.days) || 10));
+    const cutoff = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
+    const rows = await db('events_raw')
+      .select('id')
+      .whereIn('admin_status', ['approved', 'featured'])
+      .where('start_at', '>=', new Date())
+      .where('start_at', '<=', cutoff)
+      .whereNotNull('event_url')
+      .orderByRaw('CASE WHEN admin_status = \'featured\' THEN 0 ELSE 1 END')
+      .orderByRaw('freshness_score DESC NULLS LAST')
+      .limit(12);
+
+    res.json({ ids: rows.map((r) => r.id), count: rows.length });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

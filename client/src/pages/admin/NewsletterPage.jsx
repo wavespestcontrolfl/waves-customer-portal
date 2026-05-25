@@ -31,6 +31,12 @@ import {
   MapPin,
   MailPlus,
   Send,
+  ListFilter,
+  Check,
+  X,
+  Star,
+  Search,
+  RefreshCw,
 } from "lucide-react";
 import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
@@ -57,6 +63,7 @@ const TABS = [
   { key: "compose", label: "Compose", desc: "Draft + send", Icon: MailPlus },
   { key: "history", label: "History", desc: "Performance", Icon: FileText },
   { key: "subscribers", label: "Subscribers", desc: "Audience", Icon: Users },
+  { key: "events", label: "Events", desc: "Inbox + sources", Icon: ListFilter },
   { key: "automations", label: "Automations", desc: "Drips", Icon: Zap },
 ];
 
@@ -697,6 +704,446 @@ function DashboardView({
   );
 }
 
+// ── Event Inbox ──────────────────────────────────────────────────────
+
+const FRESHNESS_LABELS = {
+  fresh_one_time: "One-Time",
+  fresh_annual: "Annual",
+  fresh_limited_run_opening: "Opening Week",
+  fresh_limited_run_closing: "Closing Week",
+  fresh_series_launch: "Series Launch",
+  fresh_special_edition: "Special Edition",
+  stale_recurring: "Stale Recurring",
+  expired: "Expired",
+  needs_review: "Needs Review",
+};
+
+const STATUS_FILTERS = ["all", "pending", "approved", "rejected", "featured"];
+
+function FreshnessBadge({ status }) {
+  const label = FRESHNESS_LABELS[status] || status;
+  const isFresh = status?.startsWith("fresh_");
+  const isStale =
+    status === "stale_recurring" || status === "expired";
+  const cls = isFresh
+    ? "bg-zinc-700 text-white"
+    : isStale
+      ? "bg-zinc-200 text-zinc-500"
+      : "bg-zinc-100 text-zinc-500 border border-dashed border-zinc-300";
+  return (
+    <span
+      className={`inline-block px-1.5 py-0.5 rounded text-10 font-medium ${cls}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+function AdminStatusBadge({ status }) {
+  const map = {
+    pending: "bg-zinc-200 text-zinc-600",
+    approved: "bg-zinc-800 text-white",
+    rejected: "bg-zinc-100 text-zinc-400 line-through",
+    featured: "bg-zinc-900 text-white",
+  };
+  return (
+    <span
+      className={`inline-block px-1.5 py-0.5 rounded text-10 font-medium ${map[status] || "bg-zinc-100 text-zinc-500"}`}
+    >
+      {status === "featured" && "★ "}
+      {status}
+    </span>
+  );
+}
+
+function EventInboxView({ onDraftFromEvent }) {
+  const [events, setEvents] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [sources, setSources] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState("pending");
+  const [freshnessFilter, setFreshnessFilter] = useState("");
+  const [zoneFilter, setZoneFilter] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selected, setSelected] = useState(new Set());
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+
+  const fetchEvents = () => {
+    setLoading(true);
+    const params = new URLSearchParams({ limit: "100" });
+    if (statusFilter && statusFilter !== "all")
+      params.set("status", statusFilter);
+    if (freshnessFilter) params.set("freshness", freshnessFilter);
+    if (zoneFilter) params.set("zone", zoneFilter);
+    if (searchQuery) params.set("q", searchQuery);
+    adminFetch(`/admin/newsletter/events/inbox?${params}`)
+      .then((d) => {
+        setEvents(d.events || []);
+        setCounts(d.counts || {});
+        setSelected(new Set());
+      })
+      .catch(() => setEvents([]))
+      .finally(() => setLoading(false));
+  };
+
+  const fetchSources = () => {
+    adminFetch("/admin/newsletter/events/sources")
+      .then((d) => setSources(d.sources || []))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    fetchEvents();
+    fetchSources();
+  }, [statusFilter, freshnessFilter, zoneFilter]);
+
+  const doSearch = () => fetchEvents();
+
+  const patchEvent = async (id, body) => {
+    await adminFetch(`/admin/newsletter/events/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    fetchEvents();
+  };
+
+  const bulkAction = async (action) => {
+    if (selected.size === 0) return;
+    await adminFetch("/admin/newsletter/events/bulk-action", {
+      method: "POST",
+      body: JSON.stringify({ action, ids: [...selected] }),
+    });
+    fetchEvents();
+  };
+
+  const toggleSelect = (id) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    if (selected.size === events.length) setSelected(new Set());
+    else setSelected(new Set(events.map((e) => e.id)));
+  };
+
+  const fmtDate = (d) => {
+    if (!d) return "—";
+    return new Date(d).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      weekday: "short",
+      timeZone: "America/New_York",
+    });
+  };
+
+  return (
+    <div className="space-y-4 mt-4">
+      {/* Source Health Strip */}
+      <div className="bg-white border-hairline border-zinc-200 rounded-sm">
+        <button
+          type="button"
+          onClick={() => setSourcesOpen(!sourcesOpen)}
+          className="w-full flex items-center justify-between px-4 py-3 text-left"
+        >
+          <span className="text-13 font-medium text-ink-primary">
+            Event Sources ({sources.length})
+          </span>
+          <span className="text-11 text-ink-tertiary">
+            {sourcesOpen ? "Hide" : "Show"}
+          </span>
+        </button>
+        {sourcesOpen && (
+          <div className="px-4 pb-3 flex flex-wrap gap-2">
+            {sources.map((s) => (
+              <div
+                key={s.id}
+                className="flex items-center gap-1.5 px-2 py-1 bg-zinc-50 border-hairline border-zinc-200 rounded text-11"
+              >
+                <span
+                  className={`inline-block w-1.5 h-1.5 rounded-full ${s.lastPullStatus === "success" ? "bg-green-500" : s.lastPullStatus === "error" ? "bg-red-500" : "bg-zinc-300"}`}
+                />
+                <span className="text-ink-primary font-medium truncate max-w-[140px]">
+                  {s.name.split("—")[0].trim()}
+                </span>
+                <span className="text-ink-tertiary">
+                  {s.eventCount}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Filters */}
+      <div className="bg-white border-hairline border-zinc-200 rounded-sm p-4 space-y-3">
+        {/* Status tabs */}
+        <div className="flex flex-wrap gap-1">
+          {STATUS_FILTERS.map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setStatusFilter(s)}
+              className={`px-2.5 py-1 rounded text-12 font-medium ${statusFilter === s ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"}`}
+            >
+              {s}
+              {counts[s] != null ? ` (${counts[s]})` : ""}
+            </button>
+          ))}
+        </div>
+
+        {/* Secondary filters */}
+        <div className="flex flex-wrap gap-2 items-end">
+          <div>
+            <label className="block text-11 text-ink-tertiary mb-0.5">
+              Freshness
+            </label>
+            <select
+              value={freshnessFilter}
+              onChange={(e) => setFreshnessFilter(e.target.value)}
+              className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm"
+            >
+              <option value="">All</option>
+              <option value="fresh">Fresh</option>
+              <option value="stale">Stale</option>
+              <option value="needs_review">Needs Review</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-11 text-ink-tertiary mb-0.5">
+              Zone
+            </label>
+            <select
+              value={zoneFilter}
+              onChange={(e) => setZoneFilter(e.target.value)}
+              className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm"
+            >
+              <option value="">All zones</option>
+              <option value="south_sarasota">South Sarasota</option>
+              <option value="sarasota">Sarasota</option>
+              <option value="manatee">Manatee</option>
+              <option value="pinellas">Pinellas</option>
+              <option value="tampa">Tampa</option>
+            </select>
+          </div>
+          <div className="flex-1 min-w-[160px]">
+            <label className="block text-11 text-ink-tertiary mb-0.5">
+              Search
+            </label>
+            <div className="flex gap-1">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && doSearch()}
+                placeholder="Search event titles..."
+                className="flex-1 h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm"
+              />
+              <button
+                type="button"
+                onClick={doSearch}
+                className="h-8 w-8 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm hover:bg-zinc-50"
+              >
+                <Search size={13} strokeWidth={1.75} />
+              </button>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={fetchEvents}
+            className="h-8 w-8 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm hover:bg-zinc-50"
+            title="Refresh"
+          >
+            <RefreshCw size={13} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        {/* Bulk actions */}
+        {selected.size > 0 && (
+          <div className="flex items-center gap-2 pt-1">
+            <span className="text-12 text-ink-secondary">
+              {selected.size} selected
+            </span>
+            <Button
+              size="sm"
+              onClick={() => bulkAction("approve")}
+            >
+              <Check size={12} className="mr-1" />
+              Approve
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => bulkAction("reject")}
+            >
+              <X size={12} className="mr-1" />
+              Reject
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => bulkAction("feature")}
+            >
+              <Star size={12} className="mr-1" />
+              Feature
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Event Table */}
+      <div className="bg-white border-hairline border-zinc-200 rounded-sm overflow-x-auto">
+        {loading ? (
+          <div className="p-8 text-center text-13 text-ink-tertiary">
+            Loading events...
+          </div>
+        ) : events.length === 0 ? (
+          <div className="p-8 text-center text-13 text-ink-tertiary">
+            No events match the current filters.
+          </div>
+        ) : (
+          <table className="w-full text-left">
+            <thead>
+              <tr className="border-b border-zinc-100">
+                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-8">
+                  <input
+                    type="checkbox"
+                    checked={selected.size === events.length && events.length > 0}
+                    onChange={toggleAll}
+                  />
+                </th>
+                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary">
+                  Event
+                </th>
+                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-24">
+                  Date
+                </th>
+                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-24">
+                  City
+                </th>
+                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-28">
+                  Freshness
+                </th>
+                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">
+                  Status
+                </th>
+                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">
+                  Score
+                </th>
+                <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-28">
+                  Actions
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((ev) => (
+                <tr
+                  key={ev.id}
+                  className={`border-b border-zinc-50 hover:bg-zinc-25 ${ev.adminStatus === "rejected" ? "opacity-50" : ""}`}
+                >
+                  <td className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(ev.id)}
+                      onChange={() => toggleSelect(ev.id)}
+                    />
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="text-13 font-medium text-ink-primary leading-snug line-clamp-1">
+                      {ev.eventUrl ? (
+                        <a
+                          href={ev.eventUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:underline"
+                        >
+                          {ev.title}
+                        </a>
+                      ) : (
+                        ev.title
+                      )}
+                    </div>
+                    {ev.venueName && (
+                      <div className="text-11 text-ink-tertiary mt-0.5 line-clamp-1">
+                        {ev.venueName}
+                      </div>
+                    )}
+                    <div className="text-10 text-ink-tertiary mt-0.5">
+                      {ev.sourceName?.split("—")[0]?.trim()}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-12 text-ink-secondary">
+                    {fmtDate(ev.startAt)}
+                  </td>
+                  <td className="px-3 py-2 text-12 text-ink-secondary">
+                    {ev.city || "—"}
+                  </td>
+                  <td className="px-3 py-2">
+                    <FreshnessBadge status={ev.freshnessStatus} />
+                  </td>
+                  <td className="px-3 py-2">
+                    <AdminStatusBadge status={ev.adminStatus} />
+                  </td>
+                  <td className="px-3 py-2 text-12 text-ink-secondary u-nums">
+                    {ev.compositeScore ?? "—"}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-1">
+                      {ev.adminStatus !== "approved" &&
+                        ev.adminStatus !== "featured" && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              patchEvent(ev.id, { adminStatus: "approved" })
+                            }
+                            className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-zinc-100"
+                            title="Approve"
+                          >
+                            <Check size={13} strokeWidth={2} />
+                          </button>
+                        )}
+                      {ev.adminStatus !== "rejected" && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            patchEvent(ev.id, {
+                              adminStatus: "rejected",
+                              suppressionReason: "manual_reject",
+                            })
+                          }
+                          className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-zinc-100"
+                          title="Reject"
+                        >
+                          <X size={13} strokeWidth={2} />
+                        </button>
+                      )}
+                      {ev.adminStatus !== "featured" && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            patchEvent(ev.id, { adminStatus: "featured" })
+                          }
+                          className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-zinc-100"
+                          title="Feature"
+                        >
+                          <Star size={13} strokeWidth={2} />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function NewsletterPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = useMemo(() => {
@@ -808,7 +1255,7 @@ export default function NewsletterPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Newsletter section"
-        navGridClassName="grid-cols-2 md:grid-cols-5"
+        navGridClassName="grid-cols-2 md:grid-cols-3 lg:grid-cols-6"
         action={{
           label: "New Campaign",
           icon: MailPlus,
@@ -837,6 +1284,7 @@ export default function NewsletterPage() {
       )}
       {tab === "history" && <HistoryView />}
       {tab === "subscribers" && <SubscribersView />}
+      {tab === "events" && <EventInboxView onDraftFromEvent={onDraftFromEvent} />}
       {tab === "automations" && <EmailAutomationsPanelV2 />}
     </div>
   );

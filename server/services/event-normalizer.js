@@ -34,6 +34,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { geocodeAddress } = require('./geocoder');
+const { classifyFreshness, cityToZone } = require('./event-freshness');
 
 let Anthropic;
 try {
@@ -45,18 +46,33 @@ const MODELS = require('../config/models');
 
 const MAX_BATCH = 50;
 
-async function extractVenueFromClaude({ title, description, existingVenue, city }) {
+async function extractVenueAndFreshness({ title, description, existingVenue, city }) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
   }
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   const systemPrompt = `You normalize event-listing metadata. Given a raw event, extract:
+
+VENUE:
 - venueName: the human name of the venue (e.g., "Van Wezel Performing Arts Hall", "Selby Gardens", "Mote Marine Lab"). Null if the event has no specific physical venue (online-only, "various locations", etc.) or you can't tell.
 - venueAddress: a single-line full street address geocodable by Google Maps (e.g., "777 N Tamiami Trail, Sarasota, FL 34236"). Include city + state when inferable. Null if you can't determine a real address. Don't invent.
 
+EVENT CLASSIFICATION:
+- eventType: one of "one_time" | "annual" | "limited_run" | "recurring_series" | "special_edition" | "ongoing" | "unknown"
+  • one_time = happens once (a specific festival date, a grand opening, a concert)
+  • annual = happens once per year (annual festival, yearly fundraiser)
+  • limited_run = runs for a set period then ends (art exhibit, multi-day festival, seasonal market with an end date)
+  • recurring_series = repeats regularly with no end date (weekly market, monthly meetup, weekly trivia)
+  • special_edition = a special/themed version of an otherwise recurring event
+  • ongoing = permanent attraction or always-available (museum, park — not really an "event")
+  • unknown = can't determine from the listing
+- recurrenceType: one of "none" | "daily" | "weekly" | "monthly" | "seasonal" | "annual" | "custom" | "unknown"
+- familyFriendly: true if clearly family-oriented or all-ages, false if clearly adults-only, null if unclear
+- isFree: true if free/no-cost, false if paid, null if unclear
+
 Output STRICT JSON only, no prose:
-{ "venueName": "string or null", "venueAddress": "string or null" }`;
+{ "venueName": "string or null", "venueAddress": "string or null", "eventType": "string", "recurrenceType": "string", "familyFriendly": "boolean or null", "isFree": "boolean or null" }`;
 
   const userPrompt = `Title: ${title || '(none)'}
 City context: ${city || '(unknown)'}
@@ -66,7 +82,7 @@ ${description || '(none)'}`;
 
   const response = await anthropic.messages.create({
     model: MODELS.WORKHORSE,
-    max_tokens: 400,
+    max_tokens: 500,
     system: systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   });
@@ -74,10 +90,24 @@ ${description || '(none)'}`;
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude returned no JSON');
   const parsed = JSON.parse(jsonMatch[0]);
+
+  const VALID_EVENT_TYPES = ['one_time', 'annual', 'limited_run', 'recurring_series', 'special_edition', 'ongoing', 'unknown'];
+  const VALID_RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'seasonal', 'annual', 'custom', 'unknown'];
+
   return {
     venueName: typeof parsed.venueName === 'string' ? parsed.venueName.trim() : null,
     venueAddress: typeof parsed.venueAddress === 'string' ? parsed.venueAddress.trim() : null,
+    eventType: VALID_EVENT_TYPES.includes(parsed.eventType) ? parsed.eventType : 'unknown',
+    recurrenceType: VALID_RECURRENCE_TYPES.includes(parsed.recurrenceType) ? parsed.recurrenceType : 'unknown',
+    familyFriendly: typeof parsed.familyFriendly === 'boolean' ? parsed.familyFriendly : null,
+    isFree: typeof parsed.isFree === 'boolean' ? parsed.isFree : null,
   };
+}
+
+// Backward compat — old callers that only need venue data
+async function extractVenueFromClaude(args) {
+  const result = await extractVenueAndFreshness(args);
+  return { venueName: result.venueName, venueAddress: result.venueAddress };
 }
 
 async function normalizeRow(row) {
@@ -98,25 +128,50 @@ async function normalizeRow(row) {
   let claudeCalled = false;
   let geocodeCalled = false;
 
-  // Stage 1: Claude pass (only if venue info is missing)
-  if (!row.venue_name || !row.venue_address) {
+  // Stage 1: Claude pass — venue extraction + freshness classification
+  // in a single API call. Always runs if venue is missing; also runs if
+  // freshness fields haven't been classified yet (event_type = 'unknown').
+  const needsVenue = !row.venue_name || !row.venue_address;
+  const needsFreshness = !row.event_type || row.event_type === 'unknown';
+  if (needsVenue || needsFreshness) {
     claudeCalled = true;
-    const extracted = await extractVenueFromClaude({
+    const extracted = await extractVenueAndFreshness({
       title: row.title,
       description: row.description,
       existingVenue: row.venue_name,
       city: row.city,
     });
     if (extracted.venueName && !row.venue_name) {
-      // Match column lengths in 20260427000003: venue_name varchar(256)
       updates.venue_name = extracted.venueName.slice(0, 256);
       row.venue_name = updates.venue_name;
     }
     if (extracted.venueAddress && !row.venue_address) {
-      // venue_address varchar(512)
       updates.venue_address = extracted.venueAddress.slice(0, 512);
       row.venue_address = updates.venue_address;
     }
+
+    // Stage 3: Freshness classification (from the same Claude call)
+    if (needsFreshness) {
+      updates.event_type = extracted.eventType;
+      updates.recurrence_type = extracted.recurrenceType;
+      if (extracted.familyFriendly !== null) updates.family_friendly = extracted.familyFriendly;
+      if (extracted.isFree !== null) updates.is_free = extracted.isFree;
+
+      const { freshness_status, freshness_score } = classifyFreshness({
+        event_type: extracted.eventType,
+        times_featured: row.times_featured || 0,
+        start_at: row.start_at,
+        end_at: row.end_at,
+      });
+      updates.freshness_status = freshness_status;
+      updates.freshness_score = freshness_score;
+    }
+  }
+
+  // Derive region_zone from city if not already set
+  if (!row.region_zone && row.city) {
+    const zone = cityToZone(row.city);
+    if (zone) updates.region_zone = zone;
   }
 
   // Stage 2: geocode pass (only if address is set and lat/lng missing)
