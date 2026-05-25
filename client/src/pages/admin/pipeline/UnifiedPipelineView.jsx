@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { AlertTriangle, ClipboardList, Plus, RefreshCw, Search, X } from "lucide-react";
+import { AlertTriangle, Bookmark, ClipboardList, Plus, RefreshCw, Search, X } from "lucide-react";
 import {
   Badge,
   Button,
@@ -8,6 +8,7 @@ import {
   CardBody,
   CardHeader,
   CardTitle,
+  Select,
   Table,
   TBody,
   TD,
@@ -20,7 +21,7 @@ import { adminFetch } from "../../../utils/admin-fetch";
 import DuplicateCleanupQueue from "./DuplicateCleanupQueue";
 import OpportunityActions from "./OpportunityActions";
 import OpportunityStageBadge from "./OpportunityStageBadge";
-import { PIPELINE_FILTERS } from "./pipelineStages";
+import { PIPELINE_FILTERS, PIPELINE_PRESETS, activePipelinePresetKey } from "./pipelineStages";
 import UnifiedPipelineFilters from "./UnifiedPipelineFilters";
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -180,6 +181,19 @@ export default function UnifiedPipelineView() {
     updatePipelineUrl({ page: nextPage });
   }, [updatePipelineUrl]);
 
+  const applyPreset = useCallback((presetKey) => {
+    const preset = PIPELINE_PRESETS.find((item) => item.key === presetKey);
+    if (!preset) return;
+    const next = preset.filters;
+    setPage(1);
+    setFilter(next.filter);
+    setSearch(next.search);
+    setSort(next.sort);
+    setDateRange(next.dateRange);
+    setSource(next.source);
+    updatePipelineUrl({ ...next, page: 1 });
+  }, [updatePipelineUrl]);
+
   const loadPipeline = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
@@ -216,6 +230,13 @@ export default function UnifiedPipelineView() {
 
   const visibleOpportunities = useMemo(() => opportunities, [opportunities]);
   const showingDuplicateCleanup = filter === "duplicate_risk" && !search.trim();
+  const activePreset = useMemo(() => activePipelinePresetKey({
+    filter,
+    search,
+    sort,
+    dateRange,
+    source,
+  }), [dateRange, filter, search, sort, source]);
   const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / (pagination.pageSize || 100)));
   const truncatedWarning = useMemo(() => {
     if (!meta?.truncated) return null;
@@ -295,7 +316,26 @@ export default function UnifiedPipelineView() {
             counts={counts}
             onChange={changeFilter}
           />
-          <div className="grid gap-2 lg:grid-cols-[minmax(260px,1fr)_170px_150px_minmax(180px,240px)]">
+          <div className="grid gap-2 lg:grid-cols-[210px_minmax(260px,1fr)_170px_150px_minmax(180px,240px)]">
+            <div className="relative">
+              <Bookmark
+                size={15}
+                strokeWidth={1.8}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-tertiary pointer-events-none z-10"
+                aria-hidden
+              />
+              <Select
+                value={activePreset}
+                onChange={(event) => applyPreset(event.target.value)}
+                aria-label="Apply saved pipeline view"
+                className="h-10 pl-9 text-13"
+              >
+                <option value="custom" disabled>Custom View</option>
+                {PIPELINE_PRESETS.map((preset) => (
+                  <option key={preset.key} value={preset.key}>{preset.label}</option>
+                ))}
+              </Select>
+            </div>
             <div className="relative">
               <input
                 type="search"
