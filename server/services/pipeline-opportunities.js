@@ -507,13 +507,14 @@ function filterOpportunities(opportunities, {
 } = {}) {
   const q = String(search || '').trim().toLowerCase();
   const phoneQ = normalizePhoneDigits(q);
+  const sourceTerm = String(source || '').trim().toLowerCase();
   const start = asDate(dateFrom);
   const end = asDate(dateTo);
   return opportunities.filter((opportunity) => {
     if (stage && stage !== 'all' && !opportunityMatchesFilter(opportunity, stage)) return false;
     if (status && opportunity.status !== status) return false;
     if (needsAction !== '' && String(opportunity.needsAction) !== String(needsAction === true || needsAction === 'true')) return false;
-    if (source && String(opportunity.source || '').toLowerCase() !== String(source).toLowerCase()) return false;
+    if (sourceTerm && !String(opportunity.source || '').toLowerCase().includes(sourceTerm)) return false;
     if (ownerId) {
       const rawLeadOwner = opportunity.rawLead?.assigned_to;
       const rawEstimateOwner = opportunity.rawEstimate?.created_by_technician_id;

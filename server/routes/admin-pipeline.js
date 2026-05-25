@@ -965,6 +965,18 @@ function applyEstimateSearch(query, search) {
   });
 }
 
+function applyLeadSourceFilter(query, source) {
+  const term = String(source || '').trim();
+  if (!term) return query;
+  const sourceTerm = `%${term}%`;
+  return query.where(function () {
+    this.whereILike('lead_sources.name', sourceTerm)
+      .orWhereILike('lead_sources.channel', sourceTerm)
+      .orWhereILike('leads.lead_source', sourceTerm)
+      .orWhereILike('leads.lead_type', sourceTerm);
+  });
+}
+
 async function fetchLeads({ search, source, ownerId }) {
   let query = db('leads')
     .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
@@ -980,13 +992,7 @@ async function fetchLeads({ search, source, ownerId }) {
     .limit(MAX_CANDIDATES + 1);
 
   query = applyLeadSearch(query, search);
-  if (source) {
-    query = query.where(function () {
-      this.whereILike('lead_sources.name', source)
-        .orWhereILike('lead_sources.channel', source)
-        .orWhereILike('leads.lead_type', source);
-    });
-  }
+  query = applyLeadSourceFilter(query, source);
   if (ownerId) query = query.where('leads.assigned_to', ownerId);
   return query;
 }
@@ -1001,9 +1007,10 @@ async function fetchEstimates({ search, source, ownerId }) {
 
   query = applyEstimateSearch(query, search);
   if (source) {
+    const sourceTerm = `%${String(source).trim()}%`;
     query = query.where(function () {
-      this.whereILike('estimates.source', source)
-        .orWhereILike('estimates.lead_source', source);
+      this.whereILike('estimates.source', sourceTerm)
+        .orWhereILike('estimates.lead_source', sourceTerm);
     });
   }
   if (ownerId) query = query.where('estimates.created_by_technician_id', ownerId);
@@ -1024,7 +1031,7 @@ router.get('/opportunities', async (req, res, next) => {
       stage: req.query.stage || req.query.filter || '',
       status: req.query.status || '',
       needsAction: req.query.needsAction ?? '',
-      source: req.query.source || '',
+      source: String(req.query.source || '').trim(),
       ownerId: req.query.ownerId || req.query.owner_id || '',
       dateFrom: req.query.dateFrom || req.query.date_from || '',
       dateTo: req.query.dateTo || req.query.date_to || '',
@@ -1162,6 +1169,7 @@ module.exports = router;
 module.exports.__private = {
   applyEstimateSearch,
   applyLeadSearch,
+  applyLeadSourceFilter,
   applyEstimateHistoryContext,
   compareHistoryCreatedAt,
   dismissDuplicateRisk,
