@@ -1505,4 +1505,107 @@ router.post('/sends/:id/validate', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Blog cross-publish ──────────────────────────────────────────
+
+// PATCH /api/admin/newsletter/sends/:id/blog-convertible
+// Mark a sent newsletter as blog-worthy (or unmark it).
+router.patch('/sends/:id/blog-convertible', async (req, res, next) => {
+  try {
+    const send = await db('newsletter_sends').where({ id: req.params.id }).first();
+    if (!send) return res.status(404).json({ error: 'not found' });
+    if (send.status !== 'sent') return res.status(400).json({ error: 'only sent newsletters can be marked for blog' });
+
+    const { convertible } = req.body;
+    await db('newsletter_sends').where({ id: req.params.id }).update({
+      blog_convertible: convertible !== false,
+      updated_at: new Date(),
+    });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/newsletter/sends/:id/blog-export
+// Export a sent newsletter as blog-ready content with v2 frontmatter.
+router.get('/sends/:id/blog-export', async (req, res, next) => {
+  try {
+    const send = await db('newsletter_sends').where({ id: req.params.id, status: 'sent' }).first();
+    if (!send) return res.status(404).json({ error: 'not found' });
+
+    // Generate blog-ready frontmatter + content
+    const slug = send.slug || send.id;
+    const sentDate = send.sent_at ? new Date(send.sent_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+
+    // Strip HTML to markdown-ish content (basic conversion)
+    const bodyHtml = send.html_body || '';
+    const bodyText = bodyHtml
+      .replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n\n')
+      .replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n\n')
+      .replace(/<h3[^>]*>(.*?)<\/h3>/gi, '### $1\n\n')
+      .replace(/<strong>(.*?)<\/strong>/gi, '**$1**')
+      .replace(/<em>(.*?)<\/em>/gi, '*$1*')
+      .replace(/<a[^>]+href="([^"]*)"[^>]*>(.*?)<\/a>/gi, '[$2]($1)')
+      .replace(/<li>(.*?)<\/li>/gi, '- $1\n')
+      .replace(/<ul>|<\/ul>|<ol>|<\/ol>/gi, '\n')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<p>(.*?)<\/p>/gi, '$1\n\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    const frontmatter = {
+      schemaVersion: 2,
+      title: send.subject,
+      slug: `/newsletter/${slug}/`,
+      meta_description: (send.preview_text || '').slice(0, 160),
+      primary_keyword: 'local events southwest florida',
+      category: 'seasonal',
+      post_type: 'seasonal',
+      service_areas_tag: ['Bradenton', 'Sarasota', 'Venice', 'North Port', 'Lakewood Ranch'],
+      author: {
+        name: 'The Waves Crew',
+        role: 'Newsletter Team',
+      },
+      published: sentDate,
+      updated: sentDate,
+      review_cadence: 'quarterly',
+      canonical: `https://www.wavespestcontrol.com/newsletter/${slug}/`,
+      schema_types: ['Article'],
+      newsletter_source: {
+        send_id: send.id,
+        newsletter_type: send.newsletter_type,
+        sent_at: send.sent_at,
+      },
+    };
+
+    // Mark as exported
+    await db('newsletter_sends').where({ id: send.id }).update({
+      blog_exported_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    const yaml = Object.entries(frontmatter)
+      .map(([k, v]) => {
+        if (typeof v === 'object' && !Array.isArray(v)) {
+          const inner = Object.entries(v).map(([ik, iv]) => `  ${ik}: "${iv}"`).join('\n');
+          return `${k}:\n${inner}`;
+        }
+        if (Array.isArray(v)) {
+          return `${k}:\n${v.map(i => `  - "${i}"`).join('\n')}`;
+        }
+        return `${k}: "${v}"`;
+      })
+      .join('\n');
+
+    const markdown = `---\n${yaml}\n---\n\n${bodyText}`;
+
+    res.json({
+      success: true,
+      frontmatter,
+      markdown,
+      htmlBody: send.html_body,
+      filename: `${slug}.md`,
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
