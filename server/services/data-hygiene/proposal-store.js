@@ -44,8 +44,8 @@ function buildIdempotencyKey(proposal) {
 function isSensitiveProposal(proposal) {
   const rule = String(proposal.rule_id || '');
   const field = String(proposal.field || '');
-  return /extract\.(gate_code|lockbox_code|garage_code|access_notes|parking_notes)/.test(rule)
-    || /(^|_)(gate_code|lockbox_code|garage_code|access_notes|parking_notes)$/.test(field);
+  return /extract\.(gate_code|lockbox_code|garage_code|access_notes|parking_notes|pet_details)/.test(rule)
+    || /(^|_)(gate_code|lockbox_code|garage_code|access_notes|parking_notes|pet_details)$/.test(field);
 }
 
 async function upsertProposal(proposal, { trx = null, run_id = null } = {}) {

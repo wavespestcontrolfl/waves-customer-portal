@@ -284,6 +284,24 @@ describe('data hygiene proposal idempotency', () => {
     })).toBe(true);
   });
 
+  test('pet_details is sensitive for extracted property preference proposals', () => {
+    expect(isSensitiveProposal({
+      resource_type: 'property_preferences',
+      resource_id: null,
+      scope_type: 'customer',
+      scope_id: '00000000-0000-0000-0000-000000000001',
+      field: 'pet_details',
+      current_value: null,
+      proposed_value: 'Dog is friendly but stays in the yard',
+      source: 'message-extraction',
+      rule_id: 'extract.pet_details',
+      rule_version: '1',
+      confidence: 0.8,
+      tier: 'medium',
+      evidence: {},
+    })).toBe(true);
+  });
+
   test('stale updates only mutate rows still pending', async () => {
     const rows = [{
       id: 'proposal-1',
