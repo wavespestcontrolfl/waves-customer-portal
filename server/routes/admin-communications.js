@@ -130,6 +130,8 @@ router.post('/sms', async (req, res, next) => {
 
 // POST /api/admin/communications/call — initiate an outbound call via Twilio
 router.post('/call', async (req, res, next) => {
+  let attemptedFrom = req.body?.fromNumber || null;
+  let attemptedTo = req.body?.to || null;
   try {
     const { to, fromNumber, customerId, source: rawSource, relatedCallId } = req.body;
     if (!to) return res.status(400).json({ error: 'to number required' });
@@ -150,11 +152,13 @@ router.post('/call', async (req, res, next) => {
     const client = twilio(config.twilio.accountSid, config.twilio.authToken);
 
     const from = fromNumber || TWILIO_NUMBERS.locations['lakewood-ranch'].number;
+    attemptedFrom = from;
     const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
     const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
     const metadata = relatedCallId ? { relatedCallId } : null;
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
+    attemptedTo = adminPhone;
 
     // Prefer the explicit customer picked in the UI. Phone-only lookup is
     // ambiguous when spouses/contacts share a number, so auto-link only when
@@ -240,8 +244,8 @@ router.post('/call', async (req, res, next) => {
       phase: 'send_api',
       status: 'failed',
       errorMessage: err.message,
-      from: req.body?.fromNumber,
-      to: req.body?.to,
+      from: attemptedFrom,
+      to: attemptedTo,
       link: '/admin/communications',
     });
     next(err);
