@@ -90,28 +90,65 @@ function maskSid(sid) {
 }
 
 let warnedForwardNumberFallback = false;
-const acceptedForwardParentCalls = new Map();
-const acceptedForwardDialCalls = new Map();
-const FORWARD_ACCEPT_TTL_MS = 2 * 60 * 60 * 1000;
 
-function rememberForwardAccept({ parentCallSid, dialCallSid }) {
-  const expiresAt = Date.now() + FORWARD_ACCEPT_TTL_MS;
-  if (parentCallSid) acceptedForwardParentCalls.set(parentCallSid, expiresAt);
-  if (dialCallSid) acceptedForwardDialCalls.set(dialCallSid, expiresAt);
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
-function wasForwardAccepted({ parentCallSid, dialCallSid }) {
-  const now = Date.now();
-  for (const [sid, expiresAt] of acceptedForwardParentCalls) {
-    if (expiresAt <= now) acceptedForwardParentCalls.delete(sid);
+async function rememberForwardAccept({ parentCallSid, dialCallSid }) {
+  if (!parentCallSid) {
+    logger.warn(`[voice] Forward accept missing ParentCallSid for child ${maskSid(dialCallSid)}`);
+    return 0;
   }
-  for (const [sid, expiresAt] of acceptedForwardDialCalls) {
-    if (expiresAt <= now) acceptedForwardDialCalls.delete(sid);
+
+  const acceptance = {
+    accepted: true,
+    parent_call_sid: parentCallSid,
+    dial_call_sid: dialCallSid || null,
+    accepted_at: new Date().toISOString(),
+  };
+
+  return db('call_log')
+    .where('twilio_call_sid', parentCallSid)
+    .update({
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{forward_acceptance}', ?::jsonb, true)",
+        [JSON.stringify(acceptance)]
+      ),
+      updated_at: new Date(),
+    });
+}
+
+function metadataHasForwardAcceptance(metadata, { parentCallSid, dialCallSid }) {
+  const acceptance = parseJsonObject(metadata).forward_acceptance || {};
+  if (acceptance.accepted !== true) return false;
+  if (parentCallSid && acceptance.parent_call_sid === parentCallSid) return true;
+  return !!(dialCallSid && acceptance.dial_call_sid === dialCallSid);
+}
+
+async function wasForwardAccepted({ parentCallSid, dialCallSid }) {
+  if (parentCallSid) {
+    const parentRow = await db('call_log')
+      .where('twilio_call_sid', parentCallSid)
+      .select('metadata')
+      .first();
+    if (metadataHasForwardAcceptance(parentRow?.metadata, { parentCallSid, dialCallSid })) return true;
   }
-  return (
-    (parentCallSid && acceptedForwardParentCalls.has(parentCallSid)) ||
-    (dialCallSid && acceptedForwardDialCalls.has(dialCallSid))
-  );
+
+  if (!dialCallSid) return false;
+
+  const childMatch = await db('call_log')
+    .whereRaw("metadata -> 'forward_acceptance' ->> 'dial_call_sid' = ?", [dialCallSid])
+    .select('metadata')
+    .first();
+  return metadataHasForwardAcceptance(childMatch?.metadata, { parentCallSid, dialCallSid });
 }
 
 function resolveInboundDialCompletion({ status, duration, forwardAccepted }) {
@@ -347,7 +384,7 @@ router.post('/call-complete', async (req, res) => {
 
     const duration = parseInt(DialCallDuration || CallDuration || 0);
     const status = DialCallStatus || 'completed';
-    const forwardAccepted = wasForwardAccepted({ parentCallSid: CallSid, dialCallSid: DialCallSid });
+    const forwardAccepted = await wasForwardAccepted({ parentCallSid: CallSid, dialCallSid: DialCallSid });
     const { shouldRecordVoicemail, answeredBy } = resolveInboundDialCompletion({
       status,
       duration,
@@ -462,7 +499,7 @@ router.post('/inbound-forward-accept', async (req, res) => {
     const twiml = new VoiceResponse();
 
     if (digits === '1') {
-      rememberForwardAccept({
+      await rememberForwardAccept({
         parentCallSid: req.body?.ParentCallSid,
         dialCallSid: req.body?.CallSid,
       });
@@ -939,7 +976,10 @@ router.post('/call-status', async (req, res) => {
 router._test = {
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
+  metadataHasForwardAcceptance,
+  rememberForwardAccept,
   resolveInboundDialCompletion,
+  wasForwardAccepted,
 };
 
 module.exports = router;
