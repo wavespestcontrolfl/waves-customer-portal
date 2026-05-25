@@ -204,7 +204,8 @@ async function createNewsletterDraft({
           'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
           'e.categories', 's.name as source_name',
         )
-        .whereIn('e.id', safeIds);
+        .whereIn('e.id', safeIds)
+        .orderByRaw('e.freshness_score DESC NULLS LAST');
 
       eventBlock = formatEventBlock(events);
     }
