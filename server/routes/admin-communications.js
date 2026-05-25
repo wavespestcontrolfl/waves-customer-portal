@@ -559,7 +559,7 @@ const BLOCKED_SCHEDULED_PURPOSES = new Set(['marketing', 'retention']);
 function csvEscape(value) {
   if (value == null) return '';
   const raw = typeof value === 'object' ? JSON.stringify(value) : String(value);
-  const s = /^[=+\-@]/.test(raw) ? `'${raw}` : raw;
+  const s = /^[\t\r\n ]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
