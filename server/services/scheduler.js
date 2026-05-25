@@ -433,6 +433,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6AM ET — Newsletter indexability decay: noindex stale event digests
+  // Event digest archive pages older than 30 days add nothing to search —
+  // stale "This Weekend in SWFL" content just dilutes the index. Flips
+  // indexability from 'index' → 'noindex' so the Astro archive pages
+  // set robots noindex and Google drops them from the SERPs.
+  // =========================================================================
+  cron.schedule('0 6 * * *', async () => {
+    try {
+      const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const count = await db('newsletter_sends')
+        .where('newsletter_type', 'local-weekly-fresh-events')
+        .where('status', 'sent')
+        .where('sent_at', '<', cutoff)
+        .where('indexability', 'index')
+        .update({ indexability: 'noindex', updated_at: new Date() });
+      if (count > 0) logger.info(`[newsletter-decay] Set ${count} stale digest(s) to noindex`);
+    } catch (err) {
+      logger.error(`[newsletter-decay] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Automation runner. Fires the next step of any enrollment
   // whose next_send_at has passed. Indexed query on automation_enrollments.
   // =========================================================================
