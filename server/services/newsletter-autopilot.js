@@ -91,11 +91,17 @@ async function autoDraftFlagship() {
     logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
     return { skipped: true, reason };
   }
-  if (existingCalendar && ['drafted', 'scheduled', 'sent'].includes(existingCalendar.status)) {
-    const reason = `Calendar status is ${existingCalendar.status} (send_id: ${existingCalendar.send_id || 'null'})`;
+  if (existingCalendar && ['scheduled', 'sent'].includes(existingCalendar.status)) {
+    const reason = `Calendar status is ${existingCalendar.status}`;
     logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
     return { skipped: true, reason };
   }
+  if (existingCalendar && existingCalendar.status === 'drafted' && existingCalendar.send_id) {
+    const reason = `Calendar already drafted (send_id: ${existingCalendar.send_id})`;
+    logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
+    return { skipped: true, reason };
+  }
+  // drafted without send_id falls through — autopilot will re-draft
 
   // 3. Look for a planned calendar entry with editorial guidance
   const calendarEntry = (existingCalendar && existingCalendar.status === 'planned')
@@ -151,15 +157,20 @@ async function autoDraftFlagship() {
     eventIds = topEvents.map((ev) => ev.id);
   }
 
+  // Sanitize event IDs — calendar event_ids come from JSONB and may contain
+  // malformed values that would cause Postgres uuid type errors in whereIn.
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let safeEventIds = eventIds.filter(id => typeof id === 'string' && uuidRe.test(id));
+
   // Verify selected events still exist — supplement if stale IDs reduced the count
-  const resolvedCount = await db('events_raw').whereIn('id', eventIds).count('* as c').first();
+  const resolvedCount = await db('events_raw').whereIn('id', safeEventIds).count('* as c').first();
   const actualCount = Number(resolvedCount?.c || 0);
   if (actualCount < 5 && topEvents.length > 0) {
     const supplementIds = topEvents
       .map((ev) => ev.id)
-      .filter((id) => !eventIds.includes(id));
-    eventIds = [...eventIds, ...supplementIds].slice(0, 12);
-    logger.info(`[newsletter-autopilot] Supplemented events: ${actualCount} resolved, padded to ${eventIds.length}`);
+      .filter((id) => !safeEventIds.includes(id));
+    safeEventIds = [...safeEventIds, ...supplementIds].slice(0, 12);
+    logger.info(`[newsletter-autopilot] Supplemented events: ${actualCount} resolved, padded to ${safeEventIds.length}`);
   }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
@@ -188,7 +199,7 @@ async function autoDraftFlagship() {
     // 8. Delegate AI drafting to the shared service
     const result = await createNewsletterDraft({
       prompt,
-      eventIds,
+      eventIds: safeEventIds,
       homeownerMinuteTopic,
       topic,
       newsletterType: NEWSLETTER_TYPE,
