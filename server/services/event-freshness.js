@@ -157,8 +157,11 @@ function isEligibleForFreshDigest(event) {
     return (event.times_featured || 0) <= 2;
   }
 
-  return event.freshness_status !== 'stale_recurring'
-    && event.freshness_status !== 'expired';
+  // Reject needs_review and unknown — require explicit classification before digest
+  if (event.freshness_status === 'needs_review') return false;
+  if (event.event_type === 'unknown') return false;
+
+  return false;
 }
 
 // ── scoreFreshEvent ──────────────────────────────────────────────────

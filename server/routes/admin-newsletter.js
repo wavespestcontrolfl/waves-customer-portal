@@ -1243,7 +1243,8 @@ router.post('/events/bulk-action', async (req, res, next) => {
 
     let query = db('events_raw').whereIn('id', safeIds);
     if (action === 'feature') {
-      query = query.update({
+      // Only increment times_featured on rows not already featured
+      query = query.whereNot('admin_status', 'featured').update({
         ...updates,
         times_featured: db.raw('COALESCE(times_featured, 0) + 1'),
       });
@@ -1299,7 +1300,7 @@ router.get('/events/approved-ids', async (req, res, next) => {
     const cutoff = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
     const rows = await db('events_raw')
-      .select('id', 'admin_status', 'start_at', 'event_url', 'event_type', 'freshness_status', 'times_featured')
+      .select('id', 'admin_status', 'start_at', 'end_at', 'event_url', 'event_type', 'freshness_status', 'times_featured')
       .whereIn('admin_status', ['approved', 'featured'])
       .where('start_at', '>=', new Date())
       .where('start_at', '<=', cutoff)
