@@ -33,6 +33,44 @@ function scheduleRecordingRecovery(callSid) {
 // fall back to raw on garbage.
 const { toE164 } = require('../utils/phone');
 
+function phoneDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function customerPhoneLookupKey(value) {
+  const normalized = toE164(value);
+  const digits = phoneDigits(normalized || value);
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  return digits;
+}
+
+function maskPhone(value) {
+  const digits = phoneDigits(value);
+  return digits ? `***${digits.slice(-4)}` : 'unknown';
+}
+
+async function findSingleCustomerByPhone(dbLike, phone) {
+  const key = customerPhoneLookupKey(phone);
+  if (!key) return null;
+
+  const query = dbLike('customers').whereNull('deleted_at');
+  if (key.length === 10) {
+    query.whereRaw(
+      "(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ? OR regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?)",
+      [key, `1${key}`]
+    );
+  } else {
+    query.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [key]);
+  }
+
+  const matches = await query.orderBy('updated_at', 'desc').limit(2);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    logger.warn(`[voice] ${matches.length} customers share caller phone ${maskPhone(phone)}; not auto-linking call_log`);
+  }
+  return null;
+}
+
 async function fetchTwilioCall(callSid) {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
   try {
@@ -133,7 +171,7 @@ router.post('/voice', async (req, res) => {
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
     // Match caller to customer
-    let customer = await db('customers').where({ phone: From }).first();
+    let customer = await findSingleCustomerByPhone(db, From);
 
     // #4: Caller ID Enrichment via Twilio Lookup API
     if (!customer && From) {
@@ -483,7 +521,7 @@ router.post('/recording-status', async (req, res) => {
             const fromPhone = toE164(recoveredFrom);
             const toPhone = toE164(recoveredTo);
             const numberConfig = TWILIO_NUMBERS.findByNumber(toPhone);
-            const customer = fromPhone ? await trx('customers').where({ phone: fromPhone }).first() : null;
+            const customer = fromPhone ? await findSingleCustomerByPhone(trx, fromPhone) : null;
 
             await trx('call_log').insert({
               customer_id: customer?.id || null,
@@ -778,16 +816,18 @@ router.post('/call-status', async (req, res) => {
       }
 
       // Inbound fallback: Studio Flow bypassed /voice — insert from status-callback fields.
-      const numberConfig = TWILIO_NUMBERS.findByNumber(To);
+      const fromPhone = toE164(From);
+      const toPhone = toE164(To);
+      const numberConfig = TWILIO_NUMBERS.findByNumber(toPhone);
       const customer = From
-        ? await trx('customers').where({ phone: From }).first()
+        ? await findSingleCustomerByPhone(trx, From)
         : null;
 
       await trx('call_log').insert({
         customer_id: customer?.id || null,
         direction: 'inbound',
-        from_phone: From,
-        to_phone: To,
+        from_phone: fromPhone,
+        to_phone: toPhone,
         twilio_call_sid: CallSid,
         status: CallStatus,
         duration_seconds: parseInt(CallDuration || 0),
@@ -857,5 +897,10 @@ router.post('/call-status', async (req, res) => {
     res.sendStatus(200);
   }
 });
+
+router._test = {
+  customerPhoneLookupKey,
+  findSingleCustomerByPhone,
+};
 
 module.exports = router;
