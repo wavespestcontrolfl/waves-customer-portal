@@ -669,7 +669,14 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
       const voice = getVoiceProfile(typeConfig.voiceProfile);
 
       let eventBlock = '';
+      const MAX_EVENT_IDS = 12;
       if (Array.isArray(eventIds) && eventIds.length > 0) {
+        const safeIds = eventIds.slice(0, MAX_EVENT_IDS).filter(
+          (id) => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id),
+        );
+        if (safeIds.length === 0) {
+          return res.status(400).json({ error: 'eventIds must be valid UUIDs' });
+        }
         const events = await db('events_raw as e')
           .leftJoin('event_sources as s', 's.id', 'e.source_id')
           .select(
@@ -677,7 +684,7 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
             'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
             'e.categories', 's.name as source_name',
           )
-          .whereIn('e.id', eventIds);
+          .whereIn('e.id', safeIds);
 
         if (events.length > 0) {
           eventBlock = '\n\nAPPROVED EVENTS (use ONLY these — do not invent events):\n' +

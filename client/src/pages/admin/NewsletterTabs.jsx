@@ -488,6 +488,7 @@ export function ComposeView({
     setHtmlBody("");
     setTextBody("");
     setScheduleAt("");
+    setSelectedTemplate(null);
   };
 
   const handleAiDraft = async ({
