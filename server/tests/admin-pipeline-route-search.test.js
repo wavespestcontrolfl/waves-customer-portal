@@ -72,15 +72,40 @@ describe('admin pipeline route search prefilter', () => {
     expect(estimateQuery.calls.some((call) => call[0] === 'orWhereRaw' && call[1].includes('id::text'))).toBe(false);
   });
 
-  test('lead source prefilter includes legacy lead_source text', () => {
+  test('lead source prefilter skips legacy lead_source when the column is absent', () => {
     const query = fakeQuery();
 
     __private.applyLeadSourceFilter(query, 'home advisor');
 
     expect(query.calls).toContainEqual(['whereILike', 'lead_sources.name', '%home advisor%']);
     expect(query.calls).toContainEqual(['orWhereILike', 'lead_sources.channel', '%home advisor%']);
-    expect(query.calls).toContainEqual(['orWhereILike', 'leads.lead_source', '%home advisor%']);
     expect(query.calls).toContainEqual(['orWhereILike', 'leads.lead_type', '%home advisor%']);
+    expect(query.calls).not.toContainEqual(['orWhereILike', 'leads.lead_source', '%home advisor%']);
+  });
+
+  test('lead source prefilter includes legacy lead_source text when the column exists', () => {
+    const query = fakeQuery();
+
+    __private.applyLeadSourceFilter(query, 'home advisor', { hasLegacyLeadSource: true });
+
+    expect(query.calls).toContainEqual(['whereILike', 'lead_sources.name', '%home advisor%']);
+    expect(query.calls).toContainEqual(['orWhereILike', 'lead_sources.channel', '%home advisor%']);
+    expect(query.calls).toContainEqual(['orWhereILike', 'leads.lead_type', '%home advisor%']);
+    expect(query.calls).toContainEqual(['orWhereILike', 'leads.lead_source', '%home advisor%']);
+  });
+
+  test('legacy lead_source column probe rechecks schema instead of caching forever', async () => {
+    const database = {
+      schema: {
+        hasColumn: jest.fn()
+          .mockResolvedValueOnce(true)
+          .mockResolvedValueOnce(false),
+      },
+    };
+
+    await expect(__private.hasLegacyLeadSourceColumn(database)).resolves.toBe(true);
+    await expect(__private.hasLegacyLeadSourceColumn(database)).resolves.toBe(false);
+    expect(database.schema.hasColumn).toHaveBeenCalledTimes(2);
   });
 });
 

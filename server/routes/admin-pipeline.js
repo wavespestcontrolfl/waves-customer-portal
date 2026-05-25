@@ -30,6 +30,11 @@ function firstPresent(...values) {
   return values.find((value) => value !== null && value !== undefined && value !== '') ?? null;
 }
 
+function hasLegacyLeadSourceColumn(database = db) {
+  if (!database?.schema?.hasColumn) return Promise.resolve(false);
+  return database.schema.hasColumn('leads', 'lead_source').catch(() => false);
+}
+
 function leadDisplayName(lead) {
   return [lead?.first_name, lead?.last_name].filter(Boolean).join(' ').trim() || lead?.name || 'Unknown Lead';
 }
@@ -965,19 +970,22 @@ function applyEstimateSearch(query, search) {
   });
 }
 
-function applyLeadSourceFilter(query, source) {
+function applyLeadSourceFilter(query, source, { hasLegacyLeadSource = false } = {}) {
   const term = String(source || '').trim();
   if (!term) return query;
   const sourceTerm = `%${term}%`;
   return query.where(function () {
     this.whereILike('lead_sources.name', sourceTerm)
       .orWhereILike('lead_sources.channel', sourceTerm)
-      .orWhereILike('leads.lead_source', sourceTerm)
       .orWhereILike('leads.lead_type', sourceTerm);
+    if (hasLegacyLeadSource) {
+      this.orWhereILike('leads.lead_source', sourceTerm);
+    }
   });
 }
 
 async function fetchLeads({ search, source, ownerId }) {
+  const hasLegacyLeadSource = source ? await hasLegacyLeadSourceColumn() : false;
   let query = db('leads')
     .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
     .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
@@ -992,7 +1000,7 @@ async function fetchLeads({ search, source, ownerId }) {
     .limit(MAX_CANDIDATES + 1);
 
   query = applyLeadSearch(query, search);
-  query = applyLeadSourceFilter(query, source);
+  query = applyLeadSourceFilter(query, source, { hasLegacyLeadSource });
   if (ownerId) query = query.where('leads.assigned_to', ownerId);
   return query;
 }
@@ -1170,6 +1178,7 @@ module.exports.__private = {
   applyEstimateSearch,
   applyLeadSearch,
   applyLeadSourceFilter,
+  hasLegacyLeadSourceColumn,
   applyEstimateHistoryContext,
   compareHistoryCreatedAt,
   dismissDuplicateRisk,
