@@ -1617,4 +1617,78 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Regional zone distribution ──────────────────────────────────────
+
+// GET /api/admin/newsletter/subscribers/zone-distribution
+// Returns subscriber count by region_zone for active subscribers.
+router.get('/subscribers/zone-distribution', async (req, res, next) => {
+  try {
+    const rows = await db('newsletter_subscribers')
+      .where({ status: 'active' })
+      .select('region_zone')
+      .count('* as count')
+      .groupBy('region_zone')
+      .orderBy('count', 'desc');
+
+    const distribution = {};
+    let total = 0;
+    for (const r of rows) {
+      const zone = r.region_zone || 'unknown';
+      distribution[zone] = Number(r.count);
+      total += Number(r.count);
+    }
+
+    res.json({ distribution, total });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/newsletter/subscribers/import-customers
+// Imports all customers with email addresses as newsletter subscribers.
+// Skips duplicates (existing subscribers by email). Links customer_id.
+// Derives region_zone from customer city.
+router.post('/subscribers/import-customers', async (req, res, next) => {
+  try {
+    const { cityToZone } = require('../services/event-freshness');
+
+    // Get all customers with emails
+    const customers = await db('customers')
+      .whereNotNull('email')
+      .where('email', '!=', '')
+      .select('id', 'email', 'first_name', 'last_name', 'city');
+
+    let imported = 0, skipped = 0, errors = 0;
+    for (const c of customers) {
+      try {
+        const result = await subscribeOrResubscribe({
+          email: c.email,
+          firstName: c.first_name || null,
+          lastName: c.last_name || null,
+          source: 'customer_import',
+          strict: false,
+          requireConfirmation: false,
+          linkCustomer: true,
+        });
+
+        if (result.action === 'created' || result.action === 'resubscribed') {
+          imported++;
+          // Set region_zone from city
+          const zone = cityToZone(c.city);
+          if (zone && result.subscriber?.id) {
+            await db('newsletter_subscribers')
+              .where({ id: result.subscriber.id })
+              .update({ region_zone: zone });
+          }
+        } else {
+          skipped++;
+        }
+      } catch (e) {
+        errors++;
+        logger.error(`[newsletter] import customer ${c.email} failed: ${e.message}`);
+      }
+    }
+
+    res.json({ success: true, imported, skipped, errors, total: customers.length });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
