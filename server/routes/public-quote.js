@@ -190,6 +190,19 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.mosquito ? 'Recurring Mosquito Control' : null,
     services.termite ? 'Termite Monitoring' : null,
     services.rodentBait ? 'Rodent Bait Stations' : null,
+    services.treeShrub ? 'Tree & Shrub Care' : null,
+    services.palm ? 'Palm Injections' : null,
+    services.flea ? 'Flea Treatment' : null,
+    services.stinging ? 'Wasp & Hornet Control' : null,
+    services.rodentTrapping ? 'Rodent Trapping' : null,
+    services.exclusion ? 'Rodent Exclusion' : null,
+    services.sanitation ? 'Rodent Sanitation' : null,
+    services.trenching ? 'Termite Trenching' : null,
+    services.preSlab ? 'Pre-Slab Termite Treatment' : null,
+    services.oneTimeLawn ? 'One-Time Lawn Treatment' : null,
+    services.dethatching ? 'Lawn Dethatching' : null,
+    services.plugging ? 'Lawn Plugging' : null,
+    services.topDressing ? 'Lawn Top Dressing' : null,
   ].filter(Boolean).join(' + ');
 }
 
@@ -200,6 +213,19 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.mosquito ? 'Mosquito' : null,
     services.termite ? 'Termite' : null,
     services.rodentBait ? 'Rodent Bait' : null,
+    services.treeShrub ? 'Tree & Shrub' : null,
+    services.palm ? 'Palm' : null,
+    services.flea ? 'Flea' : null,
+    services.stinging ? 'Wasp/Hornet' : null,
+    services.rodentTrapping ? 'Rodent Trap' : null,
+    services.exclusion ? 'Exclusion' : null,
+    services.sanitation ? 'Sanitation' : null,
+    services.trenching ? 'Trenching' : null,
+    services.preSlab ? 'Pre-Slab' : null,
+    services.oneTimeLawn ? 'One-Time Lawn' : null,
+    services.dethatching ? 'Dethatching' : null,
+    services.plugging ? 'Plugging' : null,
+    services.topDressing ? 'Top Dressing' : null,
   ]);
 }
 
@@ -253,10 +279,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (!contactFirstName || !contactLastName || !contactEmail || !contactPhone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
-    if (!services || (
-      !services.pest && !services.lawn &&
-      !services.mosquito && !services.termite && !services.rodentBait
-    )) {
+    const ACCEPTED_KEYS = [
+      'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
+      'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
+      'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
+    ];
+    if (!services || !ACCEPTED_KEYS.some(k => services[k])) {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
@@ -301,10 +329,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       },
       services: {},
     };
-    // Public quote endpoint handles recurring plans only. One-time service
-    // requests divert to /api/leads (lead-webhook.js) where the time-of-day
-    // call/SMS logic lives — one-time jobs typically need a human conversation
-    // (site visit, flare-up triage) before we can quote reliably.
     if (services.pest) {
       engineInput.services.pest = { frequency: services.pest.frequency || 'quarterly' };
     }
@@ -314,19 +338,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         tier: services.lawn.tier || 'enhanced',
       };
     }
-    // Recurring service paths exposed to the marketing-site /estimate
-    // funnel. Each takes its sizing input from the property profile
-    // (lawnSqFt for mosquito, footprint for termite/rodent), so callers
-    // only need to specify the program tier.
-    //
-    // Deliberately NOT exposed here:
-    //   • One-time services (bedBug, trenching, preSlab, dethatching,
-    //     plugging, topDressing, stinging, flea, oneTimeLawn, sanitation,
-    //     exclusion, rodentTrapping) — they divert to /api/leads per the
-    //     architecture note above (recurring-only public quoting).
-    //   • treeShrub + palm — they require count inputs the marketing
-    //     form doesn't collect yet; defer to a follow-up PR that adds
-    //     tree/palm count steps to the EstimateForm island.
     if (services.mosquito) {
       engineInput.services.mosquito = {
         tier: services.mosquito.tier || 'monthly12',
@@ -343,6 +354,73 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (services.rodentBait) {
       engineInput.services.rodentBait = {};
     }
+    if (services.treeShrub) {
+      engineInput.services.treeShrub = {
+        tier: services.treeShrub.tier,
+        access: services.treeShrub.access || 'easy',
+        treeCount: services.treeShrub.treeCount ?? 0,
+      };
+    }
+    if (services.palm) {
+      engineInput.services.palm = {
+        palmCount: services.palm.palmCount ?? 1,
+        treatmentType: services.palm.treatmentType || 'nutrition',
+      };
+    }
+    if (services.flea) {
+      engineInput.services.flea = {};
+    }
+    if (services.stinging) {
+      engineInput.services.stinging = {
+        species: services.stinging.species || 'PAPER_WASP',
+        tier: services.stinging.tier || 2,
+        removal: services.stinging.removal || 'NONE',
+      };
+    }
+    if (services.rodentTrapping) {
+      engineInput.services.rodentTrapping = {
+        pressure: services.rodentTrapping.pressure,
+        emergency: !!services.rodentTrapping.emergency,
+      };
+    }
+    if (services.exclusion) {
+      engineInput.services.exclusion = {
+        homeSqFt: sqft,
+        stories: engineInput.stories,
+      };
+    }
+    if (services.sanitation) {
+      engineInput.services.sanitation = {
+        tier: services.sanitation.tier || 'standard',
+        affectedSqFt: services.sanitation.affectedSqFt || 0,
+      };
+    }
+    if (services.trenching) {
+      engineInput.services.trenching = {};
+    }
+    if (services.preSlab) {
+      engineInput.services.preSlab = {};
+    }
+    if (services.oneTimeLawn) {
+      engineInput.services.oneTimeLawn = {
+        treatmentType: services.oneTimeLawn.treatmentType || 'weed',
+        track: services.oneTimeLawn.track || services.lawn?.track || 'st_augustine',
+        tier: services.oneTimeLawn.tier || services.lawn?.tier || 'enhanced',
+      };
+    }
+    if (services.dethatching) {
+      engineInput.services.dethatching = {};
+    }
+    if (services.plugging) {
+      engineInput.services.plugging = {
+        spacing: services.plugging.spacing || 12,
+      };
+    }
+    if (services.topDressing) {
+      engineInput.services.topDressing = {
+        depth: services.topDressing.depth || 'eighth',
+      };
+    }
 
     const estimate = generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
@@ -352,8 +430,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const quoteRequired = !!manualQuoteLine;
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
+    const oneTimeTotal = quoteRequired ? 0 : (
+      Number(estimate?.summary?.oneTimeTotal || 0) +
+      Number(estimate?.summary?.specialtyTotal || 0)
+    );
 
-    if (!quoteRequired && (!monthly || !annual)) {
+    if (!quoteRequired && !monthly && !annual && !oneTimeTotal) {
       logger.error('[public-quote] Engine returned zero price', { engineInput, estimate });
       return res.status(500).json({ error: 'Unable to calculate a price right now.' });
     }
@@ -714,7 +796,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       });
     }
 
-    res.json({
+    const response = {
       lead_id: lead.id,
       monthly_total: Math.round(monthly),
       annual_total: Math.round(annual),
@@ -723,7 +805,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       confidence,
       has_setup_fee: hasSetupFee,
       service_interest: serviceInterest,
-    });
+    };
+    if (oneTimeTotal > 0) {
+      response.one_time_total = Math.round(oneTimeTotal);
+    }
+    res.json(response);
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: `Something went wrong. Please call ${WAVES_SUPPORT_PHONE_DISPLAY} for a quote.` });
