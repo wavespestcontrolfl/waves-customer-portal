@@ -84,6 +84,7 @@ describe('project email service', () => {
       idempotencyKey: 'project.prep:test',
       payload: expect.objectContaining({
         service_date: 'May 20, 2026',
+        prep_url: 'https://portal.wavespestcontrol.com/?tab=visits',
       }),
     }));
   });
@@ -123,8 +124,8 @@ describe('project email service', () => {
       payload: expect.objectContaining({
         first_name: 'Taylor',
         customer_email: 'primary@example.com',
-        portal_invite_url: 'https://portal.wavespestcontrol.com/login',
-        customer_portal_url: 'https://portal.wavespestcontrol.com',
+        portal_invite_url: 'https://portal.wavespestcontrol.com/login?next=%2F%3Ftab%3Ddashboard',
+        customer_portal_url: 'https://portal.wavespestcontrol.com/?tab=dashboard',
       }),
     }));
   });

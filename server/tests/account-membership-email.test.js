@@ -100,6 +100,8 @@ describe('account and membership email sender', () => {
         first_name: 'Taylor',
         account_section: 'Notification preferences',
         changed_items_summary: '72-Hour Appointment Reminder: On to Off',
+        customer_portal_url: 'https://portal.wavespestcontrol.com/?tab=property',
+        manage_preferences_url: 'https://portal.wavespestcontrol.com/?tab=visits',
       }),
     }));
   });
@@ -131,6 +133,7 @@ describe('account and membership email sender', () => {
         request_type: 'Schedule Change',
         request_subject: 'Move my visit',
         response_time: '24 hours',
+        portal_requests_url: 'https://portal.wavespestcontrol.com/?tab=request',
       }),
     }));
   });
@@ -158,6 +161,7 @@ describe('account and membership email sender', () => {
         membership_change_summary: 'Tier: Silver to Gold; Monthly rate: $129.00 to $159.00',
         old_membership_tier: 'Silver',
         new_membership_tier: 'Gold',
+        customer_portal_url: 'https://portal.wavespestcontrol.com/?tab=plan',
       }),
     }));
   });

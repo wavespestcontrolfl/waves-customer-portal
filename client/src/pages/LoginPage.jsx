@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
 import Icon from '../components/Icon';
@@ -9,6 +9,16 @@ const SUPPORT_LINKS = [
   { label: 'Text', href: 'sms:+19412975749', icon: 'chat' },
   { label: 'Estimate', href: '/estimate', icon: 'arrowRight' },
 ];
+
+function safeNextPath(search) {
+  try {
+    const next = new URLSearchParams(search || '').get('next') || '/';
+    if (!next.startsWith('/') || next.startsWith('//') || next.startsWith('/admin')) return '/';
+    return next;
+  } catch {
+    return '/';
+  }
+}
 
 function normalizeAuthError(error) {
   if (!error) return '';
@@ -24,14 +34,16 @@ function normalizeAuthError(error) {
 export default function LoginPage() {
   const { sendCode, verifyCode, error, isAuthenticated, loading } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const nextPath = safeNextPath(location.search);
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
 
   useEffect(() => {
-    if (isAuthenticated) navigate('/', { replace: true });
-  }, [isAuthenticated, navigate]);
+    if (isAuthenticated) navigate(nextPath, { replace: true });
+  }, [isAuthenticated, navigate, nextPath]);
 
   const formatPhone = (value) => {
     const digits = value.replace(/\D/g, '').slice(0, 10);
@@ -58,7 +70,7 @@ export default function LoginPage() {
     setSending(true);
     const success = await verifyCode(`+1${digits}`, code);
     if (success) {
-      navigate('/', { replace: true });
+      navigate(nextPath, { replace: true });
     } else {
       setSending(false);
     }
