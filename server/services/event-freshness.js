@@ -10,7 +10,12 @@
  * Plus helpers:
  *   cityToZone(city) — map a city name to a newsletter coverage zone
  *   FRESHNESS_SCORES — reference table for base scores by event type
+ *
+ * All date comparisons use America/New_York via server/utils/datetime-et.js
+ * because Railway runs UTC and newsletter editorial windows are ET.
  */
+
+const { etParts, parseETDateTime, etDateString } = require('../utils/datetime-et');
 
 // ── City → Zone mapping ──────────────────────────────────────────────
 // Matches the zones defined in server/config/newsletter-types.js
@@ -140,7 +145,8 @@ function isEligibleForFreshDigest(event) {
 
   if (event.start_at) {
     const startDate = new Date(event.start_at);
-    if (startDate < new Date()) return false;
+    const nowET = parseETDateTime(`${etDateString()}T00:00:00`);
+    if (startDate < nowET) return false;
   } else {
     return false;
   }
@@ -200,7 +206,11 @@ function scoreFreshEvent(event) {
 
 function dateRelevanceScore(startAt) {
   if (!startAt) return 30;
-  const daysOut = (new Date(startAt) - new Date()) / (1000 * 60 * 60 * 24);
+  const eventET = etParts(new Date(startAt));
+  const nowET = etParts();
+  const eventDay = Date.UTC(eventET.year, eventET.month - 1, eventET.day);
+  const nowDay = Date.UTC(nowET.year, nowET.month - 1, nowET.day);
+  const daysOut = (eventDay - nowDay) / (1000 * 60 * 60 * 24);
   if (daysOut < 0) return 0;
   if (daysOut <= 3) return 100;  // This weekend
   if (daysOut <= 7) return 80;   // This week
@@ -234,20 +244,24 @@ function audienceFitScore(event) {
 
 // ── Time window helpers ──────────────────────────────────────────────
 
+function etDayDistance(timestamp) {
+  const eventET = etParts(new Date(timestamp));
+  const nowET = etParts();
+  const eventDay = Date.UTC(eventET.year, eventET.month - 1, eventET.day);
+  const nowDay = Date.UTC(nowET.year, nowET.month - 1, nowET.day);
+  return (eventDay - nowDay) / (1000 * 60 * 60 * 24);
+}
+
 function isOpeningWeek(event) {
   if (!event.start_at) return false;
-  const start = new Date(event.start_at);
-  const now = new Date();
-  const daysUntilStart = (start - now) / (1000 * 60 * 60 * 24);
-  return daysUntilStart >= -1 && daysUntilStart <= 7;
+  const days = etDayDistance(event.start_at);
+  return days >= -1 && days <= 7;
 }
 
 function isClosingWeek(event) {
   if (!event.end_at) return false;
-  const end = new Date(event.end_at);
-  const now = new Date();
-  const daysUntilEnd = (end - now) / (1000 * 60 * 60 * 24);
-  return daysUntilEnd >= 0 && daysUntilEnd <= 7;
+  const days = etDayDistance(event.end_at);
+  return days >= 0 && days <= 7;
 }
 
 module.exports = {
