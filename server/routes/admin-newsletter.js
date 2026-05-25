@@ -1540,7 +1540,7 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
 
     // Generate blog-ready frontmatter + content
     const slug = send.slug || send.id;
-    const sentDate = send.sent_at ? new Date(send.sent_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+    const sentDate = send.sent_at ? etDateString(new Date(send.sent_at)) : etDateString();
 
     // Strip HTML to markdown-ish content (basic conversion)
     const bodyHtml = send.html_body || '';
@@ -1590,16 +1590,18 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
       updated_at: new Date(),
     });
 
+    const escYaml = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+
     const yaml = Object.entries(frontmatter)
       .map(([k, v]) => {
         if (typeof v === 'object' && !Array.isArray(v)) {
-          const inner = Object.entries(v).map(([ik, iv]) => `  ${ik}: "${iv}"`).join('\n');
+          const inner = Object.entries(v).map(([ik, iv]) => `  ${ik}: "${escYaml(iv)}"`).join('\n');
           return `${k}:\n${inner}`;
         }
         if (Array.isArray(v)) {
-          return `${k}:\n${v.map(i => `  - "${i}"`).join('\n')}`;
+          return `${k}:\n${v.map(i => `  - "${escYaml(i)}"`).join('\n')}`;
         }
-        return `${k}: "${v}"`;
+        return `${k}: "${escYaml(v)}"`;
       })
       .join('\n');
 
