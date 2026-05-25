@@ -204,6 +204,7 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.plugging ? 'Lawn Plugging' : null,
     services.topDressing ? 'Lawn Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
+    services.bedBug ? 'Bed Bug Treatment' : null,
   ].filter(Boolean).join(' + ');
 }
 
@@ -228,6 +229,7 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.plugging ? 'Plugging' : null,
     services.topDressing ? 'Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest' : null,
+    services.bedBug ? 'Bed Bug' : null,
   ]);
 }
 
@@ -285,7 +287,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
       'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
       'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
-      'lawnPestControl',
+      'lawnPestControl', 'bedBug',
     ];
     if (!services || !ACCEPTED_KEYS.some(k => services[k])) {
       return res.status(400).json({ error: 'Select at least one service.' });
@@ -430,6 +432,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.lawnPestControl) {
       engineInput.services.lawnPestControl = {};
+    }
+    if (services.bedBug) {
+      engineInput.services.bedBug = {
+        method: services.bedBug.method || 'CHEMICAL',
+        rooms: Number(services.bedBug.rooms) || 2,
+        severity: services.bedBug.severity || 'moderate',
+        prepStatus: services.bedBug.prepStatus || 'ready',
+        occupancyType: services.bedBug.occupancyType || 'residential',
+      };
     }
 
     const estimate = generateEstimate(engineInput);
