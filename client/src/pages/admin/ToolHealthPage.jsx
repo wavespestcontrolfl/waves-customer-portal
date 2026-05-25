@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Activity, CalendarDays, Clock, RefreshCw, Timer } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
@@ -83,6 +84,7 @@ export default function ToolHealthPage() {
   const [hours, setHours] = useState(24);
   const [err, setErr] = useState(null);
   const [expanded, setExpanded] = useState({});
+  const [adminUser, setAdminUser] = useState(null);
 
   const load = useCallback(() => {
     adminFetch(`/admin/tool-health?hours=${hours}`)
@@ -98,6 +100,12 @@ export default function ToolHealthPage() {
     const id = setInterval(load, 30_000);
     return () => clearInterval(id);
   }, [load]);
+
+  useEffect(() => {
+    adminFetch("/admin/auth/me")
+      .then((user) => setAdminUser(user))
+      .catch(() => setAdminUser(null));
+  }, []);
 
   if (err) {
     return (
@@ -204,6 +212,17 @@ export default function ToolHealthPage() {
           />{" "}
         </div>{" "}
       </div>
+      {adminUser?.role === "admin" && (
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10 }}>
+            Integration Configuration
+          </div>
+          <IntegrationHealthSection
+            intro="Credential health, environment readiness, and feature gates. Runtime tool success is tracked separately below."
+            showRefresh={false}
+          />
+        </div>
+      )}
       {pdfRenderer && (
         <div style={sCard}>
           <div
