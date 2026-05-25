@@ -168,6 +168,7 @@ export function ComposeView({
   const [subject, setSubject] = useState("");
   const [subjectB, setSubjectB] = useState("");
   const [abEnabled, setAbEnabled] = useState(false);
+  const [autoShareSocial, setAutoShareSocial] = useState(true);
   const [previewText, setPreviewText] = useState("");
   const [htmlBody, setHtmlBody] = useState("");
   const [textBody, setTextBody] = useState("");
@@ -314,6 +315,7 @@ export function ComposeView({
         setPreviewText(ap.preview_text || "");
         setHtmlBody(ap.html_body || "");
         setTextBody(ap.text_body || "");
+        setAutoShareSocial(ap.auto_share_social !== false);
         setSelectedTemplate("weekend");
         setAutopilotBanner(true);
       })
@@ -372,6 +374,7 @@ export function ComposeView({
         fromEmail,
         segmentFilter,
         newsletterType: activeNewsletterType,
+        autoShareSocial,
       };
       if (draftId) {
         await adminFetch(`/admin/newsletter/sends/${draftId}`, {
@@ -513,6 +516,7 @@ export function ComposeView({
     setSubject("");
     setSubjectB("");
     setAbEnabled(false);
+    setAutoShareSocial(true);
     setPreviewText("");
     setHtmlBody("");
     setTextBody("");
@@ -983,6 +987,29 @@ export function ComposeView({
                 : "America/New_York timezone"}
             </div>{" "}
           </div>{" "}
+        </div>
+        <div className={PANEL_CLS}>
+          <PanelHeader title="Social" />
+          <div className="p-4 space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoShareSocial}
+                onChange={(e) => {
+                  setAutoShareSocial(e.target.checked);
+                  userHasEdited.current = true;
+                }}
+                className="mt-0.5 w-4 h-4 rounded border-hairline"
+              />
+              <span className="text-12 text-ink-secondary leading-snug">
+                Auto-post a teaser after this newsletter is sent
+              </span>
+            </label>
+            <div className="text-11 text-ink-tertiary pl-6">
+              Facebook, Instagram, LinkedIn & Google Business Profile.
+              Links to the public newsletter archive. Test sends are never posted.
+            </div>
+          </div>
         </div>
         {status && (
           <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-12 text-ink-secondary">

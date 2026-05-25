@@ -80,6 +80,165 @@ async function sharePublishedBlog(blog) {
   }
 }
 
+// ── Newsletter → Social ────────────────────────────────────────────────
+
+const NEWSLETTER_SOCIAL_FALLBACK = {
+  facebook: (subject) =>
+    `Fresh This Week is here: ${subject} — See what's happening from North Port to Tampa.`,
+  instagram: () =>
+    'Fresh This Week just dropped — local events across SW Florida. Link in bio. #FreshThisWeek #SWFL #SWFLevents',
+  linkedin: () =>
+    'Our latest Fresh This Week local guide is live, featuring events and community highlights across Southwest Florida.',
+  gbp: () =>
+    'Fresh This Week is live — local events and weekend ideas across Southwest Florida.',
+};
+
+async function generateNewsletterSocialContent(send) {
+  let Anthropic;
+  try {
+    const sdk = require('@anthropic-ai/sdk');
+    Anthropic = sdk.default || sdk.Anthropic || sdk;
+  } catch { return null; }
+  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
+
+  const MODELS = require('../config/models');
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  const safeSubject = String(send.subject || '').replace(/[\r\n]+/g, ' ').slice(0, 300);
+  const safePreview = String(send.preview_text || '').replace(/[\r\n]+/g, ' ').slice(0, 500);
+
+  const response = await client.messages.create({
+    model: MODELS.WORKHORSE,
+    max_tokens: 600,
+    messages: [{
+      role: 'user',
+      content: `Generate social media captions for Waves Pest Control's weekly local events guide "Fresh This Week."
+This is NOT a pest control post — it's a punchy, upbeat local events roundup for SW Florida (North Port to Tampa).
+Tone: fun, local-guide energy. Light FOMO is good ("just dropped", "here's what's happening this week") but don't be spammy or clickbaity.
+
+Newsletter subject: ${safeSubject}
+Newsletter preview: ${safePreview}
+
+Return ONLY valid JSON with these keys:
+- facebook: 150-250 chars, conversational, 1-2 emojis, do NOT include any URL
+- instagram: 150-300 chars before hashtags, end with 3-5 hashtags (#FreshThisWeek #SWFL #SWFLevents etc), do NOT include any URL
+- linkedin: 100-200 chars, professional but fun community tone, do NOT include any URL
+- gbp: 80-150 chars, short community-oriented tone, no hashtags, do NOT include any URL`,
+    }],
+  });
+
+  const text = (response.content[0]?.text || '').trim();
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+
+  const parsed = JSON.parse(jsonMatch[0]);
+  if (!parsed.facebook || !parsed.instagram || !parsed.linkedin || !parsed.gbp) return null;
+  return parsed;
+}
+
+async function sharePublishedNewsletter(send) {
+  if (send.shared_to_social) return true;
+  if (!send.auto_share_social) {
+    await db('newsletter_sends').where('id', send.id)
+      .whereNot('social_share_status', 'skipped')
+      .update({ social_share_status: 'skipped' });
+    return true;
+  }
+
+  // Atomic claim — prevents double-posting from concurrent resume/retry paths.
+  // Also recovers rows stranded in 'processing' for >5 min (process died mid-share).
+  const STALE_PROCESSING_MS = 5 * 60 * 1000;
+  const staleThreshold = new Date(Date.now() - STALE_PROCESSING_MS);
+
+  const claimed = await db('newsletter_sends')
+    .where({ id: send.id })
+    .where('auto_share_social', true)
+    .where('shared_to_social', false)
+    .where((builder) =>
+      builder
+        .whereIn('social_share_status', ['pending', 'failed'])
+        .orWhereNull('social_share_status')
+        .orWhere((b) =>
+          b.where('social_share_status', 'processing')
+            .where('social_share_attempted_at', '<', staleThreshold),
+        ),
+    )
+    .update({
+      social_share_status: 'processing',
+      social_share_attempted_at: new Date(),
+    });
+
+  if (!claimed) return true;
+
+  if (!send.slug) {
+    logger.warn(`[content-scheduler] Skipping social share; missing slug for newsletter send ${send.id}`);
+    await db('newsletter_sends').where('id', send.id).update({ social_share_status: 'skipped' });
+    return false;
+  }
+
+  try {
+    const SocialMediaService = require('./social-media');
+    const link = `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}`;
+
+    let customContent = null;
+    try {
+      customContent = await generateNewsletterSocialContent(send);
+    } catch (err) {
+      logger.warn(`[content-scheduler] Newsletter social content generation failed for send ${send.id}: ${err.message} — using fallback`);
+    }
+
+    if (!customContent) {
+      customContent = {
+        facebook: NEWSLETTER_SOCIAL_FALLBACK.facebook(send.subject || 'Fresh This Week'),
+        instagram: NEWSLETTER_SOCIAL_FALLBACK.instagram(),
+        linkedin: NEWSLETTER_SOCIAL_FALLBACK.linkedin(),
+        gbp: NEWSLETTER_SOCIAL_FALLBACK.gbp(),
+      };
+    }
+
+    const result = await SocialMediaService.publishToAll({
+      title: send.subject,
+      description: send.preview_text || send.subject,
+      link,
+      guid: `newsletter_${send.id}`,
+      source: 'newsletter',
+      customContent,
+    });
+
+    const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
+    const shared = result?.success || platforms.some((p) => p.success);
+
+    if (!shared) {
+      const failures = platforms
+        .filter((p) => !p.success)
+        .map((p) => `${p.platform || 'unknown'}:${p.error || 'failed'}`)
+        .join('; ');
+      logger.warn(`[content-scheduler] Social share produced no successful platforms for newsletter send ${send.id}${failures ? `: ${failures}` : ''}`);
+      await db('newsletter_sends').where('id', send.id).update({
+        social_share_status: 'failed',
+        social_share_error: (failures || 'all platforms failed').slice(0, 2000),
+        social_share_result: JSON.stringify(platforms),
+      });
+      return false;
+    }
+
+    await db('newsletter_sends').where('id', send.id).update({
+      shared_to_social: true,
+      shared_at: new Date(),
+      social_share_status: 'shared',
+      social_share_result: JSON.stringify(platforms),
+    });
+    return true;
+  } catch (err) {
+    logger.warn(`[content-scheduler] Social share failed for newsletter send ${send.id}: ${err.message}`);
+    await db('newsletter_sends').where('id', send.id).update({
+      social_share_status: 'failed',
+      social_share_error: String(err.message).slice(0, 2000),
+    });
+    return false;
+  }
+}
+
 const ContentScheduler = {
 
   /**
@@ -314,3 +473,4 @@ const ContentScheduler = {
 
 module.exports = ContentScheduler;
 module.exports.normalizeCalendarRange = normalizeCalendarRange;
+module.exports.sharePublishedNewsletter = sharePublishedNewsletter;
