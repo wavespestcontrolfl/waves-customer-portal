@@ -38,6 +38,7 @@ const NETWORK_DOMAINS = [
 function normalizeDomain(value) {
   return String(value || DEFAULT_SITE_URL)
     .trim()
+    .replace(/^sc-domain:/i, '')
     .replace(/^https?:\/\//i, '')
     .replace(/^www\./i, '')
     .replace(/\/.*$/, '')
@@ -48,7 +49,13 @@ function siteUrlForDomain(domain) {
   if (!domain) return DEFAULT_SITE_URL;
   const normalized = normalizeDomain(domain);
   if (normalized === normalizeDomain(DEFAULT_SITE_URL)) return DEFAULT_SITE_URL;
+  // Spoke domains may be registered as domain properties (sc-domain:) or URL-prefix (https://)
+  // Store both formats so syncDailyData can fall back
   return `https://${normalized}/`;
+}
+
+function domainPropertyUrl(domain) {
+  return `sc-domain:${normalizeDomain(domain)}`;
 }
 
 function applyDomainFilter(query, domain) {
@@ -169,7 +176,7 @@ class SearchConsoleService {
       return { synced: false };
     }
 
-    const siteUrl = siteUrlForDomain(domain);
+    let siteUrl = siteUrlForDomain(domain);
     const normalizedDomain = normalizeDomain(siteUrl);
 
     const endDate = new Date(Date.now() - 2 * 86400000); // GSC data has 2-day lag
@@ -199,6 +206,28 @@ class SearchConsoleService {
       return { synced: true, period: { start: startStr, end: endStr }, domain: normalizedDomain, siteUrl };
     } catch (err) {
       if (signal?.aborted || err?.name === 'AbortError') throw err;
+
+      // If URL-prefix property failed with permission error, try domain property format
+      const isDomainProp = siteUrl.startsWith('sc-domain:');
+      if (!isDomainProp && /permission/i.test(err.message)) {
+        const dpUrl = domainPropertyUrl(domain);
+        logger.info(`GSC retrying with domain property: ${dpUrl}`);
+        try {
+          siteUrl = dpUrl;
+          await this.syncQueries(startStr, endStr, siteUrl, { signal });
+          await this.syncPages(startStr, endStr, siteUrl, { signal });
+          await this.syncDeviceBreakdown(startStr, endStr, siteUrl, { signal });
+          await this.syncSitewideTotals(startStr, endStr, siteUrl, { signal });
+          await this.syncQueryPageMap(startStr, endStr, siteUrl, { signal });
+          logger.info(`GSC sync complete for ${siteUrl}`);
+          return { synced: true, period: { start: startStr, end: endStr }, domain: normalizedDomain, siteUrl };
+        } catch (retryErr) {
+          if (signal?.aborted || retryErr?.name === 'AbortError') throw retryErr;
+          logger.error(`GSC sync failed for ${siteUrl}: ${retryErr.message}`);
+          return { synced: false, error: retryErr.message };
+        }
+      }
+
       logger.error(`GSC sync failed for ${siteUrl}: ${err.message}`);
       return { synced: false, error: err.message };
     }

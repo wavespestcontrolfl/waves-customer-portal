@@ -26,8 +26,10 @@ const SPOKE_SITES = [
   { key: 'parrishfllawncare.com',        label: 'Parrish Lawn Care',                group: 'Lawn' },
   { key: 'sarasotafllawncare.com',       label: 'Sarasota Lawn Care',               group: 'Lawn' },
   { key: 'venicelawncare.com',           label: 'Venice Lawn Care',                 group: 'Lawn' },
+  { key: 'waveslawncare.com',            label: 'Waves Lawn Care',                  group: 'Lawn' },
   // Pest
   { key: 'bradentonflpestcontrol.com',   label: 'Bradenton Pest Control',           group: 'Pest' },
+  { key: 'northportflpestcontrol.com',   label: 'North Port Pest Control',          group: 'Pest' },
   { key: 'palmettoflpestcontrol.com',    label: 'Palmetto Pest Control',            group: 'Pest' },
   { key: 'parrishpestcontrol.com',       label: 'Parrish Pest Control',             group: 'Pest' },
   { key: 'sarasotaflpestcontrol.com',    label: 'Sarasota Pest Control',            group: 'Pest' },
