@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Activity, CalendarDays, Clock, RefreshCw, Timer } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
@@ -203,6 +204,15 @@ export default function ToolHealthPage() {
             value={summary.avgDurationMs ? `${summary.avgDurationMs}ms` : "—"}
           />{" "}
         </div>{" "}
+      </div>
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10 }}>
+          Integration Configuration
+        </div>
+        <IntegrationHealthSection
+          intro="Credential health, environment readiness, and feature gates. Runtime tool success is tracked separately below."
+          showRefresh={false}
+        />
       </div>
       {pdfRenderer && (
         <div style={sCard}>
