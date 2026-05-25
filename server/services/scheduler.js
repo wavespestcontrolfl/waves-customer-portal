@@ -576,6 +576,14 @@ function initScheduledJobs() {
           if (smsResult.sent) {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'sent', created_at: completedAt, updated_at: completedAt });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
+          } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: new Date(smsResult.nextAllowedAt),
+              updated_at: completedAt,
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quiet_hours_held_at', ?::timestamptz, 'quiet_hours_reason', ?)", [completedAt, smsResult.reason || null]),
+            });
+            logger.info(`[scheduled-sms] Held scheduled SMS ${msg.id} until ${smsResult.nextAllowedAt}`);
           } else {
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
             logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);

@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { formatSmsTemplateVars } = require('../utils/sms-time-format');
 const { TEMPLATES: CLEAN_DEFAULT_SMS_TEMPLATES } = require('../models/migrations/20260514000002_tighten_sms_template_copy');
+const SmsTemplateVariants = require('../services/sms-template-variants');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -137,6 +138,82 @@ router.post('/preview', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// GET /:templateKey/variants — lightweight SMS creative variants for lifecycle flows.
+router.get('/:templateKey/variants', async (req, res, next) => {
+  try {
+    const variants = await db('sms_template_variants')
+      .where({ template_key: req.params.templateKey })
+      .orderBy('created_at', 'asc');
+    res.json({ variants });
+  } catch (err) { next(err); }
+});
+
+// POST /:templateKey/variants
+router.post('/:templateKey/variants', async (req, res, next) => {
+  try {
+    const { variantKey, variant_key, name, body, weight, status, isControl, is_control, metadata } = req.body || {};
+    const cleanVariantKey = String(variantKey || variant_key || '').trim();
+    if (!cleanVariantKey || !body) return res.status(400).json({ error: 'variantKey and body required' });
+    const [variant] = await db('sms_template_variants')
+      .insert({
+        template_key: req.params.templateKey,
+        variant_key: cleanVariantKey,
+        name: name || cleanVariantKey,
+        body,
+        weight: Number.isFinite(Number(weight)) ? Number(weight) : 1,
+        status: status || 'active',
+        is_control: !!(isControl ?? is_control),
+        metadata: metadata || {},
+      })
+      .onConflict(['template_key', 'variant_key'])
+      .merge({
+        name: name || cleanVariantKey,
+        body,
+        weight: Number.isFinite(Number(weight)) ? Number(weight) : 1,
+        status: status || 'active',
+        is_control: !!(isControl ?? is_control),
+        metadata: metadata || {},
+        updated_at: new Date(),
+      })
+      .returning('*');
+    res.status(201).json({ variant });
+  } catch (err) { next(err); }
+});
+
+// PUT /:templateKey/variants/:variantKey
+router.put('/:templateKey/variants/:variantKey', async (req, res, next) => {
+  try {
+    const updates = { updated_at: new Date() };
+    for (const [inputKey, dbKey] of [
+      ['name', 'name'],
+      ['body', 'body'],
+      ['weight', 'weight'],
+      ['status', 'status'],
+      ['metadata', 'metadata'],
+    ]) {
+      if (req.body[inputKey] !== undefined) updates[dbKey] = req.body[inputKey];
+    }
+    if (req.body.isControl !== undefined) updates.is_control = !!req.body.isControl;
+    if (req.body.is_control !== undefined) updates.is_control = !!req.body.is_control;
+    const [variant] = await db('sms_template_variants')
+      .where({ template_key: req.params.templateKey, variant_key: req.params.variantKey })
+      .update(updates)
+      .returning('*');
+    if (!variant) return res.status(404).json({ error: 'variant not found' });
+    res.json({ variant });
+  } catch (err) { next(err); }
+});
+
+// DELETE /:templateKey/variants/:variantKey
+router.delete('/:templateKey/variants/:variantKey', async (req, res, next) => {
+  try {
+    await db('sms_template_variants')
+      .where({ template_key: req.params.templateKey, variant_key: req.params.variantKey })
+      .del();
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 // Map messageType values to template_key values
 const MSG_TYPE_TO_TEMPLATE = {
   confirmation: 'appointment_confirmation',
@@ -192,7 +269,8 @@ router.getTemplate = async function(templateKey, vars = {}) {
     if (!(await db.schema.hasTable('sms_templates'))) return null;
     const t = await db('sms_templates').where({ template_key: templateKey }).first();
     if (!t || t.is_active === false) return null;
-    let body = t.body;
+    const variant = await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
+    let body = variant?.body || t.body;
     for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {
       body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), val == null ? '' : String(val));
     }

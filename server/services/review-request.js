@@ -154,6 +154,23 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
   return retryAt;
 }
 
+function retryAtForDeferredSend(result) {
+  if (
+    !result ||
+    !result.blocked ||
+    !(result.retryable || result.deferred || result.code === "QUIET_HOURS_HOLD")
+  ) {
+    return null;
+  }
+  const nextAllowedAt = result.nextAllowedAt
+    ? new Date(result.nextAllowedAt)
+    : null;
+  if (nextAllowedAt && !Number.isNaN(nextAllowedAt.getTime())) {
+    return nextAllowedAt;
+  }
+  return new Date(Date.now() + 5 * 60 * 1000);
+}
+
 // ══════════════════════════════════════════════════════════════
 const ReviewService = {
   /**
@@ -361,62 +378,73 @@ const ReviewService = {
         logger.info(
           `[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"})`,
         );
-      } else if (result.blocked && result.code === "CONSENT_LOOKUP_FAILED") {
-        // Transient lookup failure inside the wrapper (DB error during
-        // consent validation). Distinct code from NO_CONSENT_RECORD;
-        // treat like a provider failure — re-queue for the cron rather
-        // than permanently suppress. Codex P1 round-2 on PR #545:
-        // NO_CONSENT_RECORD and CONSENT_LOOKUP_FAILED used to share the
-        // same code, which silently dropped legitimate review requests
-        // during DB blips.
-        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
-        await db("review_requests").where({ id: requestId }).update({
-          scheduled_for: retryAt,
-        });
-        // PII: ID + code only. result.reason can include recipient phone
-        // or message body when upstream provider/guard error strings
-        // propagate; full failure context lives on messaging_audit_log
-        // keyed on auditLogId.
-        logger.error(
-          `[review] SMS WRAPPER LOOKUP FAILED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${retryAt.toISOString()})`,
-        );
-      } else if (result.blocked) {
-        // True wrapper-policy block (opt-out, suppression, emoji, price
-        // leak, segment cap, identity, NO_CONSENT_RECORD). Mark
-        // suppressed so processScheduled() — which only picks rows with
-        // status='pending' — stops retrying. The request row stays for
-        // audit history; the audit_log row captures the block reason.
-        await db("review_requests").where({ id: requestId }).update({
-          status: "suppressed",
-        });
-        // PII: ID + code only — see WRAPPER LOOKUP FAILED above for why
-        // result.reason is dropped from log lines.
-        logger.warn(
-          `[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code})`,
-        );
       } else {
-        // Provider failure (Twilio/network). Mark for retry: keep
-        // status='pending' AND set scheduled_for=now+5min so
-        // processScheduled() (which selects status='pending' AND
-        // scheduled_for <= now()) picks it up on its next tick.
-        //
-        // Codex P1 on the redo PR #545: just leaving status='pending'
-        // wasn't enough for tech-triggered requests, which are created
-        // with scheduled_for=null and sent immediately. processScheduled
-        // does whereNotNull('scheduled_for'), so a null-scheduled_for
-        // pending row would never retry — silently dropping legitimate
-        // review requests on a Twilio blip. Setting scheduled_for moves
-        // the row into the cron's retry queue regardless of how it was
-        // originally created.
-        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
-        await db("review_requests").where({ id: requestId }).update({
-          scheduled_for: retryAt,
-        });
-        // PII: ID + code only — see WRAPPER LOOKUP FAILED above for why
-        // result.reason is dropped from log lines.
-        logger.error(
-          `[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${retryAt.toISOString()})`,
-        );
+        const deferredRetryAt = retryAtForDeferredSend(result);
+        if (deferredRetryAt) {
+          await db("review_requests").where({ id: requestId }).update({
+            status: "pending",
+            scheduled_for: deferredRetryAt,
+          });
+          logger.info(
+            `[review] SMS DEFERRED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${deferredRetryAt.toISOString()})`,
+          );
+        } else if (result.blocked && result.code === "CONSENT_LOOKUP_FAILED") {
+          // Transient lookup failure inside the wrapper (DB error during
+          // consent validation). Distinct code from NO_CONSENT_RECORD;
+          // treat like a provider failure — re-queue for the cron rather
+          // than permanently suppress. Codex P1 round-2 on PR #545:
+          // NO_CONSENT_RECORD and CONSENT_LOOKUP_FAILED used to share the
+          // same code, which silently dropped legitimate review requests
+          // during DB blips.
+          const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+          await db("review_requests").where({ id: requestId }).update({
+            scheduled_for: retryAt,
+          });
+          // PII: ID + code only. result.reason can include recipient phone
+          // or message body when upstream provider/guard error strings
+          // propagate; full failure context lives on messaging_audit_log
+          // keyed on auditLogId.
+          logger.error(
+            `[review] SMS WRAPPER LOOKUP FAILED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${retryAt.toISOString()})`,
+          );
+        } else if (result.blocked) {
+          // True wrapper-policy block (opt-out, suppression, emoji, price
+          // leak, segment cap, identity, NO_CONSENT_RECORD). Mark
+          // suppressed so processScheduled() — which only picks rows with
+          // status='pending' — stops retrying. The request row stays for
+          // audit history; the audit_log row captures the block reason.
+          await db("review_requests").where({ id: requestId }).update({
+            status: "suppressed",
+          });
+          // PII: ID + code only — see WRAPPER LOOKUP FAILED above for why
+          // result.reason is dropped from log lines.
+          logger.warn(
+            `[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code})`,
+          );
+        } else {
+          // Provider failure (Twilio/network). Mark for retry: keep
+          // status='pending' AND set scheduled_for=now+5min so
+          // processScheduled() (which selects status='pending' AND
+          // scheduled_for <= now()) picks it up on its next tick.
+          //
+          // Codex P1 on the redo PR #545: just leaving status='pending'
+          // wasn't enough for tech-triggered requests, which are created
+          // with scheduled_for=null and sent immediately. processScheduled
+          // does whereNotNull('scheduled_for'), so a null-scheduled_for
+          // pending row would never retry — silently dropping legitimate
+          // review requests on a Twilio blip. Setting scheduled_for moves
+          // the row into the cron's retry queue regardless of how it was
+          // originally created.
+          const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+          await db("review_requests").where({ id: requestId }).update({
+            scheduled_for: retryAt,
+          });
+          // PII: ID + code only — see WRAPPER LOOKUP FAILED above for why
+          // result.reason is dropped from log lines.
+          logger.error(
+            `[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${retryAt.toISOString()})`,
+          );
+        }
       }
     } catch (err) {
       // Same retry contract on a thrown exception (network down etc.):
