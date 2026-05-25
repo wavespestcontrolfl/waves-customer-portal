@@ -140,20 +140,25 @@ async function autoDraftFlagship() {
     ? `This week's theme: ${topic}. Fresh events from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`
     : `Fresh events this week from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`;
 
-  // Use calendar event IDs if specified, otherwise fall back to scored digest plan (top 12)
+  // Use calendar event IDs if specified, otherwise fall back to scored digest plan (top 12).
+  // Calendar IDs are intersected with the eligible pool so rejected/expired/out-of-window
+  // events never slip through just because they were pre-planned on the calendar.
   const topEvents = scored.slice(0, 12);
+  const eligibleIds = new Set(topEvents.map((ev) => ev.id));
+  const eligiblePreferred = preferredEventIds.filter((id) => eligibleIds.has(id));
+
   let eventIds;
-  if (preferredEventIds.length >= 5) {
-    // Calendar has enough events — use them directly
-    eventIds = preferredEventIds;
-  } else if (preferredEventIds.length > 0) {
-    // Calendar has some events but not enough — supplement with top-scored
+  if (eligiblePreferred.length >= 5) {
+    // Calendar picks are all eligible — use them
+    eventIds = eligiblePreferred;
+  } else if (eligiblePreferred.length > 0) {
+    // Some calendar picks are eligible — supplement with top-scored
     const supplementIds = topEvents
       .map((ev) => ev.id)
-      .filter((id) => !preferredEventIds.includes(id));
-    eventIds = [...preferredEventIds, ...supplementIds].slice(0, 12);
+      .filter((id) => !eligiblePreferred.includes(id));
+    eventIds = [...eligiblePreferred, ...supplementIds].slice(0, 12);
   } else {
-    // No calendar events — use top-scored
+    // No calendar picks are eligible — use top-scored
     eventIds = topEvents.map((ev) => ev.id);
   }
 
