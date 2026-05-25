@@ -97,7 +97,10 @@ function federalHolidayKeys(year) {
 
 function isFederalHolidayET(date) {
   const parts = etParts(date);
-  return federalHolidayKeys(parts.year).has(dateKey(parts));
+  const key = dateKey(parts);
+  return federalHolidayKeys(parts.year - 1).has(key)
+    || federalHolidayKeys(parts.year).has(key)
+    || federalHolidayKeys(parts.year + 1).has(key);
 }
 
 function shouldEnforceQuietHours(input, policy) {

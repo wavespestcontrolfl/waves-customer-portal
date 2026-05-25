@@ -45,6 +45,17 @@ describe('Florida SMS quiet-hours policy', () => {
     )).toMatchObject({ ok: false, code: 'QUIET_HOURS_HOLD' });
   });
 
+  test('blocks adjacent-year observed federal holidays', () => {
+    // New Year's Day 2028 is observed on Friday, December 31, 2027.
+    const observedNewYears = new Date('2027-12-31T16:00:00Z');
+    expect(isFederalHolidayET(observedNewYears)).toBe(true);
+    expect(checkFloridaQuietHours(
+      input('marketing'),
+      { requireConsent: 'marketing' },
+      observedNewYears
+    )).toMatchObject({ ok: false, code: 'QUIET_HOURS_HOLD' });
+  });
+
   test('finds a future allowed time', () => {
     const next = nextAllowedSendAt(new Date('2026-05-25T02:30:00Z'));
     expect(next.getTime()).toBeGreaterThan(new Date('2026-05-25T02:30:00Z').getTime());

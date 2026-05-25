@@ -13,6 +13,11 @@ function phoneHash(phone) {
   return crypto.createHash('sha256').update(String(phone || ''), 'utf8').digest('hex');
 }
 
+function isSmsMobileLineType(lineType) {
+  if (!lineType) return true;
+  return /^(mobile|wireless)$/i.test(String(lineType).trim());
+}
+
 async function latestContactCheck(phone) {
   const normalized = normalizePhone(phone);
   if (!normalized) return null;
@@ -47,7 +52,7 @@ async function checkContactCompliance(input, policy) {
       reason: 'Latest SMS contact compliance check marks this phone as reassigned-risk.',
     };
   }
-  if (latest.line_type && !/^mobile|wireless$/i.test(String(latest.line_type))) {
+  if (!isSmsMobileLineType(latest.line_type)) {
     return {
       ok: false,
       code: 'NON_MOBILE_SMS_RECIPIENT',
@@ -60,6 +65,7 @@ async function checkContactCompliance(input, policy) {
 module.exports = {
   normalizePhone,
   phoneHash,
+  isSmsMobileLineType,
   latestContactCheck,
   checkContactCompliance,
 };
