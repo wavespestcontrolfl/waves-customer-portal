@@ -1290,16 +1290,18 @@ router.get('/events/approved-ids', async (req, res, next) => {
     const cutoff = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 
     const rows = await db('events_raw')
-      .select('id')
+      .select('id', 'admin_status', 'start_at', 'event_url', 'event_type', 'freshness_status', 'times_featured')
       .whereIn('admin_status', ['approved', 'featured'])
       .where('start_at', '>=', new Date())
       .where('start_at', '<=', cutoff)
       .whereNotNull('event_url')
+      .whereNotIn('freshness_status', ['expired', 'stale_recurring'])
       .orderByRaw('CASE WHEN admin_status = \'featured\' THEN 0 ELSE 1 END')
       .orderByRaw('freshness_score DESC NULLS LAST')
-      .limit(12);
+      .limit(20);
 
-    res.json({ ids: rows.map((r) => r.id), count: rows.length });
+    const eligible = rows.filter((r) => isEligibleForFreshDigest(r)).slice(0, 12);
+    res.json({ ids: eligible.map((r) => r.id), count: eligible.length });
   } catch (err) { next(err); }
 });
 

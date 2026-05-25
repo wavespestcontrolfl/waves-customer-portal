@@ -134,6 +134,10 @@ function isEligibleForFreshDigest(event) {
   if (event.admin_status === 'rejected') return false;
   if (!event.event_url) return false;
 
+  // Hard reject on terminal freshness states regardless of event_type
+  if (event.freshness_status === 'expired') return false;
+  if (event.freshness_status === 'stale_recurring') return false;
+
   if (event.start_at) {
     const startDate = new Date(event.start_at);
     if (startDate < new Date()) return false;
