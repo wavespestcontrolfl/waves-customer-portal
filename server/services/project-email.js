@@ -152,6 +152,7 @@ function buildProjectPayload({
     customer_phone: clean(customer.phone),
     customer_portal_url: portal,
     portal_invite_url: portalInviteUrl || portalUrl('/login'),
+    prep_url: portalUrl('/login'),
     report_url: reportUrl,
     report_type: typeLabel,
     project_type: typeLabel,

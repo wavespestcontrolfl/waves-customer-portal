@@ -136,7 +136,8 @@ function productionPlaceholderPayloadValues(payload = {}) {
       /^sample(?:\s|$)/i.test(value) ||
       lower === 'customer@example.com' ||
       value === '.00' ||
-      /^https:\/\/portal\.wavespestcontrol\.com\/sample(?:$|[/?#])/i.test(value) ||
+      /^https:\/\/portal\.wavespestcontrol\.com\/(?:sample|review-demo|demo)(?:$|[/?#])/i.test(value) ||
+      /^https:\/\/portal\.wavespestcontrol\.com\/[^?#]*\/(?:sample|review-demo|demo)(?:$|[/?#])/i.test(value) ||
       /^\(941\)\s*555-\d{4}$/.test(value);
     if (isPlaceholder) findings.push(key);
   }
@@ -373,7 +374,7 @@ function renderTemplate({ template, version, payload = {}, unsubscribeUrl = null
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   const footerNote = mode === 'marketing'
     ? null
-    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:#009CDE;text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`;
+    : `Questions? Reply to this email or call <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:#006B99;text-decoration:none;font-weight:600;">${WAVES_SUPPORT_PHONE_DISPLAY}</a>.`;
   const html = mode === 'marketing'
     ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });

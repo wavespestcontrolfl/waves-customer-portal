@@ -178,11 +178,15 @@ describe('email template library rendering', () => {
       amount_due: '.00',
       email: 'customer@example.com',
       portal_url: 'https://portal.wavespestcontrol.com/sample',
+      estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample',
+      demo_url: 'https://portal.wavespestcontrol.com/review-demo',
       company_phone: '(941) 555-0134',
     })).toEqual([
       'amount_due',
       'company_phone',
+      'demo_url',
       'email',
+      'estimate_url',
       'portal_url',
       'service_label',
     ]);
