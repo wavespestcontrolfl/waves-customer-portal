@@ -50,6 +50,7 @@ import {
   Newspaper,
   Bot,
   Database,
+  DatabaseZap,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags } from "../hooks/useFeatureFlag";
@@ -107,6 +108,7 @@ const NAV_SECTIONS = [
       { path: "/admin/seo", icon: Search, label: "SEO" },
       { path: "/admin/content-engine", icon: Bot, label: "Content Engine" },
       { path: "/admin/content-registry", icon: Database, label: "Registry" },
+      { path: "/admin/data-hygiene", icon: DatabaseZap, label: "Data Hygiene" },
       { path: "/admin/social-media", icon: Share2, label: "Social Media" },
       { path: "/admin/blog", icon: Newspaper, label: "Blog" },
       { path: "/admin/newsletter", icon: Send, label: "Newsletter" },

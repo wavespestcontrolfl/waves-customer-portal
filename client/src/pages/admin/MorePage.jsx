@@ -23,6 +23,7 @@ import {
   LogOut,
   ExternalLink,
   ChevronRight,
+  DatabaseZap,
 } from "lucide-react";
 import { refetchFlags } from "../../hooks/useFeatureFlag";
 
@@ -68,6 +69,7 @@ const SECTIONS = [
     items: [
       { path: "/admin/knowledge", icon: Library, label: "Knowledge Base" },
       { path: "/admin/kb", icon: Brain, label: "Claudeopedia" },
+      { path: "/admin/data-hygiene", icon: DatabaseZap, label: "Data Hygiene" },
     ],
   },
   {

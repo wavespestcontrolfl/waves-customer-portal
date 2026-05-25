@@ -13,6 +13,11 @@ const {
 const {
   buildScanOutcome,
 } = require('../services/data-hygiene');
+const {
+  buildAccessCodeProposals,
+  normalizeAccessCode,
+  redactExcerpt,
+} = require('../services/data-hygiene/message-extractor');
 
 describe('data hygiene deterministic normalizers', () => {
   const id = '00000000-0000-0000-0000-000000000001';
@@ -322,5 +327,61 @@ describe('data hygiene run status', () => {
       verb: 'completed',
       errorMessage: null,
     });
+  });
+});
+
+describe('data hygiene message access extraction', () => {
+  const baseMessage = {
+    id: '00000000-0000-0000-0000-000000000101',
+    channel: 'sms',
+    customer_id: '00000000-0000-0000-0000-000000000001',
+    property_preferences_id: '00000000-0000-0000-0000-000000000201',
+    neighborhood_gate_code: null,
+    property_gate_code: null,
+    lockbox_code: null,
+    garage_code: null,
+  };
+
+  test('extracts obvious gate codes into property preference proposals', () => {
+    const proposals = buildAccessCodeProposals({
+      ...baseMessage,
+      body: 'Gate: #4821 then press 5\nYard: Side gate combo: 1234',
+    });
+
+    expect(proposals).toEqual([
+      expect.objectContaining({
+        field: 'property_gate_code',
+        proposed_value: '1234',
+        rule_id: 'extract.gate_code',
+        resource_type: 'property_preferences',
+        scope_id: baseMessage.customer_id,
+      }),
+      expect.objectContaining({
+        field: 'neighborhood_gate_code',
+        proposed_value: '#4821 then press 5',
+        rule_id: 'extract.gate_code',
+      }),
+    ]);
+    expect(proposals[0].evidence.source_excerpt).toContain('[redacted access code]');
+    expect(proposals[0].evidence.source_excerpt).not.toContain('1234');
+  });
+
+  test('skips already-matching stored codes and non-code access text', () => {
+    expect(buildAccessCodeProposals({
+      ...baseMessage,
+      neighborhood_gate_code: '7492',
+      body: 'Gate code is 7492',
+    })).toEqual([]);
+
+    expect(buildAccessCodeProposals({
+      ...baseMessage,
+      body: 'Side gate - lift latch, no code needed',
+    })).toEqual([]);
+  });
+
+  test('normalizes access codes conservatively', () => {
+    expect(normalizeAccessCode('#4821 then press 5')).toBe('#4821 then press 5');
+    expect(normalizeAccessCode('lift latch')).toBeNull();
+    expect(redactExcerpt('Gate code is 7492 for Dustin', '7492')).not.toContain('7492');
   });
 });
