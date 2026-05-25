@@ -131,9 +131,20 @@ async function autoDraftFlagship() {
 
   // Use calendar event IDs if specified, otherwise fall back to scored digest plan (top 12)
   const topEvents = scored.slice(0, 12);
-  const eventIds = preferredEventIds.length > 0
-    ? preferredEventIds
-    : topEvents.map((ev) => ev.id);
+  let eventIds;
+  if (preferredEventIds.length >= 5) {
+    // Calendar has enough events — use them directly
+    eventIds = preferredEventIds;
+  } else if (preferredEventIds.length > 0) {
+    // Calendar has some events but not enough — supplement with top-scored
+    const supplementIds = topEvents
+      .map((ev) => ev.id)
+      .filter((id) => !preferredEventIds.includes(id));
+    eventIds = [...preferredEventIds, ...supplementIds].slice(0, 12);
+  } else {
+    // No calendar events — use top-scored
+    eventIds = topEvents.map((ev) => ev.id);
+  }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
   //    insert are atomic. pg_advisory_xact_lock auto-releases when the
