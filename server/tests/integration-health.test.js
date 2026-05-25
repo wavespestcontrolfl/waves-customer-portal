@@ -65,6 +65,22 @@ describe('integration health', () => {
     expect(gbp.health.children).toHaveLength(4);
   });
 
+  test('GBP is degraded when stale healthy checks exist but required env vars are missing', async () => {
+    tokenHealth.getAll.mockResolvedValue([
+      { platform: 'gbp_lwr', status: 'healthy', last_verified_at: '2026-05-25T12:00:00.000Z' },
+      { platform: 'gbp_parrish', status: 'healthy', last_verified_at: '2026-05-25T12:00:00.000Z' },
+      { platform: 'gbp_sarasota', status: 'healthy', last_verified_at: '2026-05-25T12:00:00.000Z' },
+      { platform: 'gbp_venice', status: 'healthy', last_verified_at: '2026-05-25T12:00:00.000Z' },
+    ]);
+
+    const result = await getIntegrationHealth();
+    const gbp = result.integrations.find((integration) => integration.id === 'google_business_profile');
+
+    expect(gbp.health.status).toBe('degraded');
+    expect(gbp.health.label).toBe('Degraded · 4/4');
+    expect(gbp.health.reason).toContain('Missing required config');
+  });
+
   test('Beehiiv is not included in the admin integration registry', async () => {
     tokenHealth.getAll.mockResolvedValue([]);
 

@@ -141,8 +141,9 @@ function composeGrouped(integration, credByPlatform, present) {
   const totalChecks = children.length;
   let status = 'unknown';
 
-  if (connectedChecks === totalChecks) status = 'connected';
-  else if (knownChildren.length === 0 && envSummary.missingRequired.length) status = 'not_configured';
+  if (connectedChecks === totalChecks) {
+    status = envSummary.missingRequired.length ? 'degraded' : 'connected';
+  } else if (knownChildren.length === 0 && envSummary.missingRequired.length) status = 'not_configured';
   else if (connectedChecks > 0) status = 'degraded';
   else if (children.some((child) => child.status === 'expired')) status = 'expired';
   else if (children.some((child) => child.status === 'error')) status = 'error';
