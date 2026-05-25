@@ -1,14 +1,16 @@
 // client/src/pages/admin/NewsletterPage.jsx
 //
 // Top-level newsletter dashboard — first-class admin page under the
-// Marketing sidebar group. Five tabs:
+// Marketing sidebar group. Seven tabs:
 //   - Dashboard     stats + sample events + quick actions + recent posts
+//   - Calendar      editorial plan (16-week rolling view)
 //   - Compose       draft + send a newsletter
 //   - History       past sends
 //   - Subscribers   list + manage
+//   - Events        inbox + sources
 //   - Automations   drip + trigger flows
 //
-// Per-tab URL state via ?tab=dashboard|compose|history|subscribers|automations
+// Per-tab URL state via ?tab=dashboard|calendar|compose|history|subscribers|events|automations
 // so a refresh or a shared link lands on the right view. Default = dashboard.
 //
 // Compose / History / Subscribers render named exports from
@@ -24,6 +26,7 @@ import {
   Users,
   Zap,
   Calendar,
+  CalendarDays,
   FileText,
   TrendingUp,
   Sparkles,
@@ -60,6 +63,7 @@ function adminFetch(path, options = {}) {
 
 const TABS = [
   { key: "dashboard", label: "Dashboard", desc: "Overview", Icon: TrendingUp },
+  { key: "calendar", label: "Calendar", desc: "Editorial plan", Icon: CalendarDays },
   { key: "compose", label: "Compose", desc: "Draft + send", Icon: MailPlus },
   { key: "history", label: "History", desc: "Performance", Icon: FileText },
   { key: "subscribers", label: "Subscribers", desc: "Audience", Icon: Users },
@@ -1147,6 +1151,195 @@ function EventInboxView({ onDraftFromEvent }) {
   );
 }
 
+// ── Calendar View ───────────────────────────────────────────────────
+
+function CalendarRow({ row, isPast, isCurrent, rowCls, saving, onSave, fmtWeekLabel, STATUS_STYLE }) {
+  const [editTopic, setEditTopic] = useState(row.topic || '');
+  const [editTip, setEditTip] = useState(row.homeownerMinuteTopic || '');
+  const [dirty, setDirty] = useState(false);
+
+  // Reset local state when row data changes (after save/fetch)
+  useEffect(() => {
+    setEditTopic(row.topic || '');
+    setEditTip(row.homeownerMinuteTopic || '');
+    setDirty(false);
+  }, [row.topic, row.homeownerMinuteTopic]);
+
+  const handleTopicChange = (e) => { setEditTopic(e.target.value); setDirty(true); };
+  const handleTipChange = (e) => { setEditTip(e.target.value); setDirty(true); };
+
+  const handleSave = () => {
+    if (!dirty) return;
+    onSave({ topic: editTopic || null, homeownerMinuteTopic: editTip || null });
+  };
+
+  const handleBlur = () => { if (dirty) handleSave(); };
+  const handleKeyDown = (e) => { if (e.key === 'Enter') { e.target.blur(); } };
+
+  return (
+    <tr className={`border-b border-zinc-50 hover:bg-zinc-25 ${rowCls}`}>
+      <td className="px-3 py-2">
+        <div className="text-12 font-medium text-ink-primary">{fmtWeekLabel(row.weekOf)}</div>
+        {isCurrent && <div className="text-10 text-ink-tertiary font-medium">This week</div>}
+      </td>
+      <td className="px-3 py-2">
+        {isPast ? (
+          <span className="text-12 text-ink-secondary">{row.topic || '—'}</span>
+        ) : (
+          <input
+            type="text"
+            value={editTopic}
+            onChange={handleTopicChange}
+            onBlur={handleBlur}
+            onKeyDown={handleKeyDown}
+            placeholder="Add topic..."
+            className="w-full h-7 px-2 text-12 bg-transparent border-hairline border-zinc-200 rounded-sm focus:border-zinc-400 focus:outline-none"
+          />
+        )}
+      </td>
+      <td className="px-3 py-2">
+        {isPast ? (
+          <span className="text-12 text-ink-secondary">{row.homeownerMinuteTopic || '—'}</span>
+        ) : (
+          <input
+            type="text"
+            value={editTip}
+            onChange={handleTipChange}
+            onBlur={handleBlur}
+            onKeyDown={handleKeyDown}
+            placeholder="Tip topic..."
+            className="w-full h-7 px-2 text-12 bg-transparent border-hairline border-zinc-200 rounded-sm focus:border-zinc-400 focus:outline-none"
+          />
+        )}
+      </td>
+      <td className="px-3 py-2">
+        <span className={`inline-block px-1.5 py-0.5 rounded text-10 font-medium ${STATUS_STYLE[row.status] || STATUS_STYLE.planned}`}>
+          {row.status}
+        </span>
+      </td>
+      <td className="px-3 py-2 text-12 text-ink-secondary u-nums">
+        {(row.eventIds || []).length || '—'}
+      </td>
+      <td className="px-3 py-2">
+        {row.send ? (
+          <div className="text-10 text-ink-tertiary u-nums">
+            <span>{row.send.deliveredCount || 0} delivered</span>
+            {row.send.openedCount > 0 && <span> · {row.send.openedCount} opened</span>}
+          </div>
+        ) : (
+          <span className="text-10 text-ink-tertiary">—</span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function CalendarView() {
+  const [calendar, setCalendar] = useState([]);
+  const [currentWeek, setCurrentWeek] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(null); // weekOf being saved
+
+  const fetchCalendar = () => {
+    setLoading(true);
+    adminFetch('/admin/newsletter/calendar?pastWeeks=4&futureWeeks=12')
+      .then((d) => {
+        setCalendar(d.calendar || []);
+        setCurrentWeek(d.currentWeek || null);
+      })
+      .catch(() => setCalendar([]))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchCalendar(); }, []);
+
+  const saveEntry = async (weekOf, updates) => {
+    setSaving(weekOf);
+    try {
+      const entry = calendar.find(c => c.weekOf === weekOf);
+      if (entry && entry.id) {
+        await adminFetch(`/admin/newsletter/calendar/${entry.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(updates),
+        });
+      } else {
+        await adminFetch('/admin/newsletter/calendar', {
+          method: 'POST',
+          body: JSON.stringify({ weekOf, ...updates }),
+        });
+      }
+      fetchCalendar();
+    } catch (e) {
+      console.error('Save failed:', e.message);
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const fmtWeekLabel = (weekOf) => {
+    const start = new Date(weekOf + 'T12:00:00Z');
+    const end = new Date(start);
+    end.setDate(end.getDate() + 6);
+    return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+  };
+
+  const STATUS_STYLE = {
+    planned: 'bg-zinc-200 text-zinc-600',
+    drafted: 'bg-zinc-700 text-white',
+    scheduled: 'bg-zinc-800 text-white',
+    sent: 'bg-zinc-900 text-white',
+    skipped: 'bg-zinc-100 text-zinc-400 line-through',
+  };
+
+  if (loading) {
+    return <div className="p-8 text-center text-13 text-ink-tertiary">Loading calendar...</div>;
+  }
+
+  return (
+    <div className="space-y-4 mt-4">
+      <div className="bg-white border-hairline border-zinc-200 rounded-sm overflow-x-auto">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-zinc-100">
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-32">Week</th>
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary">Topic</th>
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-40">Homeowner Tip</th>
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">Status</th>
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-16">Events</th>
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-32">Performance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {calendar.map((row) => {
+              const isPast = row.weekOf < currentWeek;
+              const isCurrent = row.weekOf === currentWeek;
+              const rowCls = isCurrent
+                ? 'bg-zinc-50 border-l-2 border-l-zinc-900'
+                : isPast
+                  ? 'opacity-60'
+                  : '';
+
+              return (
+                <CalendarRow
+                  key={row.weekOf}
+                  row={row}
+                  isPast={isPast}
+                  isCurrent={isCurrent}
+                  rowCls={rowCls}
+                  saving={saving === row.weekOf}
+                  onSave={(updates) => saveEntry(row.weekOf, updates)}
+                  fmtWeekLabel={fmtWeekLabel}
+                  STATUS_STYLE={STATUS_STYLE}
+                />
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export default function NewsletterPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = useMemo(() => {
@@ -1258,7 +1451,7 @@ export default function NewsletterPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Newsletter section"
-        navGridClassName="grid-cols-2 md:grid-cols-3 lg:grid-cols-6"
+        navGridClassName="grid-cols-2 md:grid-cols-4 lg:grid-cols-7"
         action={{
           label: "New Campaign",
           icon: MailPlus,
@@ -1275,6 +1468,7 @@ export default function NewsletterPage() {
           subscribersActive={subscribersActive}
         />
       )}
+      {tab === "calendar" && <CalendarView />}
       {tab === "compose" && (
         <ComposeView
           pendingEvent={pendingDraftEvent}
