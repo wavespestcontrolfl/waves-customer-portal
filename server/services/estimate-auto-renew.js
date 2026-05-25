@@ -115,7 +115,7 @@ const EstimateAutoRenew = {
           if (est.customer_email) {
             try {
               let sentWithTemplateLibrary = false;
-              const formattedExpiry = newExpiry.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+              const formattedExpiry = newExpiry.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
               const extensionPayload = {
                 estimate_id: est.id,
                 customer_id: est.customer_id || '',
