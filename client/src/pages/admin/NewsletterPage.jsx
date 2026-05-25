@@ -1240,7 +1240,7 @@ function CalendarRow({ row, isPast, isCurrent, rowCls, saving, onSave, onDraft, 
           <Button
             size="sm"
             variant="secondary"
-            onClick={() => onDraft(row)}
+            onClick={() => onDraft({ ...row, topic: editTopic || null, homeownerMinuteTopic: editTip || null })}
             disabled={drafting}
           >
             <Sparkles size={12} strokeWidth={1.75} className="mr-1" />

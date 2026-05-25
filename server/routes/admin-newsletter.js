@@ -1870,7 +1870,7 @@ router.patch('/calendar/:id', async (req, res, next) => {
 
 const { createNewsletterDraft } = require('../services/newsletter-draft');
 
-router.post('/calendar/:id/draft-from-plan', async (req, res, next) => {
+router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, next) => {
   try {
     const result = await db.transaction(async (trx) => {
       const calendar = await trx('newsletter_calendar')
