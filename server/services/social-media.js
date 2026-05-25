@@ -750,17 +750,24 @@ const SocialMediaService = {
     };
     const updateCols = { platforms_posted: postRow.platforms_posted, status: postRow.status, published_content: postRow.published_content };
 
-    try {
-      const existingByUrl = normalizedLink
-        ? await db('social_media_posts').where('source_url', normalizedLink).first()
-        : null;
-      const existingByGuid = !existingByUrl && guid
-        ? await db('social_media_posts').where('source_guid', guid).first()
-        : null;
-      const existing = existingByUrl || existingByGuid;
+    const autoSources = ['rss', 'blog_scheduled', 'newsletter'];
+    const isAutoSource = autoSources.includes(postRow.source_type);
 
-      if (existing) {
-        await db('social_media_posts').where('id', existing.id).update(updateCols);
+    try {
+      if (isAutoSource) {
+        const existingByUrl = normalizedLink
+          ? await db('social_media_posts').where('source_url', normalizedLink).whereIn('source_type', autoSources).first()
+          : null;
+        const existingByGuid = !existingByUrl && guid
+          ? await db('social_media_posts').where('source_guid', guid).whereIn('source_type', autoSources).first()
+          : null;
+        const existing = existingByUrl || existingByGuid;
+
+        if (existing) {
+          await db('social_media_posts').where('id', existing.id).update(updateCols);
+        } else {
+          await db('social_media_posts').insert(postRow);
+        }
       } else {
         await db('social_media_posts').insert(postRow);
       }

@@ -24,6 +24,7 @@ exports.up = async function (knex) {
     DELETE FROM social_media_posts a
     USING social_media_posts b
     WHERE a.source_url IS NOT NULL
+      AND a.source_type IN ('rss', 'blog_scheduled', 'newsletter')
       AND a.source_url = b.source_url
       AND (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id < b.id))
   `);
@@ -31,6 +32,7 @@ exports.up = async function (knex) {
     DELETE FROM social_media_posts a
     USING social_media_posts b
     WHERE a.source_guid IS NOT NULL
+      AND a.source_type IN ('rss', 'blog_scheduled', 'newsletter')
       AND a.source_guid = b.source_guid
       AND (a.created_at < b.created_at OR (a.created_at = b.created_at AND a.id < b.id))
   `);
