@@ -71,6 +71,17 @@ describe('admin pipeline route search prefilter', () => {
     expect(leadQuery.calls.some((call) => call[0] === 'orWhereRaw' && call[1].includes('id::text'))).toBe(false);
     expect(estimateQuery.calls.some((call) => call[0] === 'orWhereRaw' && call[1].includes('id::text'))).toBe(false);
   });
+
+  test('lead source prefilter includes legacy lead_source text', () => {
+    const query = fakeQuery();
+
+    __private.applyLeadSourceFilter(query, 'home advisor');
+
+    expect(query.calls).toContainEqual(['whereILike', 'lead_sources.name', '%home advisor%']);
+    expect(query.calls).toContainEqual(['orWhereILike', 'lead_sources.channel', '%home advisor%']);
+    expect(query.calls).toContainEqual(['orWhereILike', 'leads.lead_source', '%home advisor%']);
+    expect(query.calls).toContainEqual(['orWhereILike', 'leads.lead_type', '%home advisor%']);
+  });
 });
 
 function createFakeDb(seed = {}) {

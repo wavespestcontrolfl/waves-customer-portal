@@ -26,6 +26,8 @@ import UnifiedPipelineFilters from "./UnifiedPipelineFilters";
 const ROBOTO = "'Roboto', Arial, sans-serif";
 const DEFAULT_FILTER = "needs_action";
 const VALID_FILTERS = new Set(PIPELINE_FILTERS.map((filter) => filter.key));
+const VALID_SORTS = new Set(["default", "next_follow_up"]);
+const VALID_DATE_RANGES = new Set(["all", "7d", "30d"]);
 
 function filterFromSearchParams(searchParams) {
   const value = searchParams.get("stage") || searchParams.get("filter") || DEFAULT_FILTER;
@@ -35,6 +37,25 @@ function filterFromSearchParams(searchParams) {
 function pageFromSearchParams(searchParams) {
   const value = Number.parseInt(searchParams.get("page") || "1", 10);
   return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function sortFromSearchParams(searchParams) {
+  const value = searchParams.get("sort") || "default";
+  return VALID_SORTS.has(value) ? value : "default";
+}
+
+function dateRangeFromSearchParams(searchParams) {
+  const value = searchParams.get("dateRange") || "all";
+  return VALID_DATE_RANGES.has(value) ? value : "all";
+}
+
+function dateFromForRange(range) {
+  const days = range === "7d" ? 7 : range === "30d" ? 30 : null;
+  if (!days) return null;
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  date.setHours(0, 0, 0, 0);
+  return date.toISOString();
 }
 
 function money(valueCents) {
@@ -101,37 +122,63 @@ export default function UnifiedPipelineView() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [filter, setFilter] = useState(() => filterFromSearchParams(searchParams));
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(() => searchParams.get("search") || "");
+  const [sort, setSort] = useState(() => sortFromSearchParams(searchParams));
+  const [dateRange, setDateRange] = useState(() => dateRangeFromSearchParams(searchParams));
+  const [source, setSource] = useState(() => searchParams.get("source") || "");
   const [page, setPage] = useState(() => pageFromSearchParams(searchParams));
 
   useEffect(() => {
     const urlFilter = filterFromSearchParams(searchParams);
     const urlPage = pageFromSearchParams(searchParams);
+    const urlSearch = searchParams.get("search") || "";
+    const urlSort = sortFromSearchParams(searchParams);
+    const urlDateRange = dateRangeFromSearchParams(searchParams);
+    const urlSource = searchParams.get("source") || "";
     if (urlFilter !== filter) setFilter(urlFilter);
     if (urlPage !== page) setPage(urlPage);
-  }, [filter, page, searchParams]);
+    if (urlSearch !== search) setSearch(urlSearch);
+    if (urlSort !== sort) setSort(urlSort);
+    if (urlDateRange !== dateRange) setDateRange(urlDateRange);
+    if (urlSource !== source) setSource(urlSource);
+  }, [dateRange, filter, page, search, searchParams, sort, source]);
 
-  const updatePipelineUrl = useCallback((nextFilter, nextPage = 1, { replace = false } = {}) => {
+  const updatePipelineUrl = useCallback((overrides = {}, { replace = false } = {}) => {
     setSearchParams((current) => {
       const nextParams = new URLSearchParams(current);
+      const nextFilter = overrides.filter ?? filter;
+      const nextPage = overrides.page ?? page;
+      const nextSearch = overrides.search ?? search;
+      const nextSort = overrides.sort ?? sort;
+      const nextDateRange = overrides.dateRange ?? dateRange;
+      const nextSource = overrides.source ?? source;
+
       nextParams.set("stage", nextFilter);
       nextParams.delete("filter");
       if (nextPage > 1) nextParams.set("page", String(nextPage));
       else nextParams.delete("page");
+      if (nextSearch.trim()) nextParams.set("search", nextSearch.trim());
+      else nextParams.delete("search");
+      if (nextSort !== "default") nextParams.set("sort", nextSort);
+      else nextParams.delete("sort");
+      if (nextDateRange !== "all") nextParams.set("dateRange", nextDateRange);
+      else nextParams.delete("dateRange");
+      if (nextSource.trim()) nextParams.set("source", nextSource.trim());
+      else nextParams.delete("source");
       return nextParams;
     }, { replace });
-  }, [setSearchParams]);
+  }, [dateRange, filter, page, search, setSearchParams, sort, source]);
 
   const changeFilter = useCallback((nextFilter) => {
     setPage(1);
     setFilter(nextFilter);
-    updatePipelineUrl(nextFilter, 1);
+    updatePipelineUrl({ filter: nextFilter, page: 1 });
   }, [updatePipelineUrl]);
 
   const changePage = useCallback((nextPage) => {
     setPage(nextPage);
-    updatePipelineUrl(filter, nextPage);
-  }, [filter, updatePipelineUrl]);
+    updatePipelineUrl({ page: nextPage });
+  }, [updatePipelineUrl]);
 
   const loadPipeline = useCallback(async () => {
     setLoading(true);
@@ -141,6 +188,10 @@ export default function UnifiedPipelineView() {
     params.set("page", String(page));
     params.set("pageSize", filter === "duplicate_risk" ? "25" : "100");
     if (search.trim()) params.set("search", search.trim());
+    if (sort !== "default") params.set("sort", sort);
+    if (source.trim()) params.set("source", source.trim());
+    const dateFrom = dateFromForRange(dateRange);
+    if (dateFrom) params.set("dateFrom", dateFrom);
 
     try {
       const data = await adminFetch(`/admin/pipeline/opportunities?${params.toString()}`);
@@ -157,7 +208,7 @@ export default function UnifiedPipelineView() {
       setMeta(null);
       setLoading(false);
     }
-  }, [filter, page, search]);
+  }, [dateRange, filter, page, search, sort, source]);
 
   useEffect(() => {
     loadPipeline();
@@ -244,43 +295,88 @@ export default function UnifiedPipelineView() {
             counts={counts}
             onChange={changeFilter}
           />
-          <div className="relative">
+          <div className="grid gap-2 lg:grid-cols-[minmax(260px,1fr)_170px_150px_minmax(180px,240px)]">
+            <div className="relative">
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => {
+                  const nextSearch = event.target.value;
+                  setPage(1);
+                  setSearch(nextSearch);
+                  updatePipelineUrl({ search: nextSearch, page: 1 }, { replace: true });
+                }}
+                placeholder="Search name, phone, email, address, source, service, or ref"
+                aria-label="Search opportunities"
+                className={cn(
+                  "w-full h-10 pl-10 pr-10 text-14 rounded-sm",
+                  "bg-white border-hairline border-zinc-300",
+                  "placeholder:text-ink-tertiary u-focus-ring",
+                )}
+              />
+              <Search
+                size={16}
+                strokeWidth={1.75}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-tertiary pointer-events-none"
+                aria-hidden
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPage(1);
+                    setSearch("");
+                    updatePipelineUrl({ search: "", page: 1 }, { replace: true });
+                  }}
+                  aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center h-7 w-7 rounded-full text-ink-tertiary hover:bg-zinc-100 u-focus-ring"
+                >
+                  <X size={14} strokeWidth={1.75} aria-hidden />
+                </button>
+              )}
+            </div>
+            <select
+              value={sort}
+              onChange={(event) => {
+                const nextSort = event.target.value;
+                setPage(1);
+                setSort(nextSort);
+                updatePipelineUrl({ sort: nextSort, page: 1 });
+              }}
+              aria-label="Sort opportunities"
+              className="h-10 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-800 u-focus-ring"
+            >
+              <option value="default">Needs action</option>
+              <option value="next_follow_up">Next follow-up</option>
+            </select>
+            <select
+              value={dateRange}
+              onChange={(event) => {
+                const nextDateRange = event.target.value;
+                setPage(1);
+                setDateRange(nextDateRange);
+                updatePipelineUrl({ dateRange: nextDateRange, page: 1 });
+              }}
+              aria-label="Filter by activity date"
+              className="h-10 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-800 u-focus-ring"
+            >
+              <option value="all">All activity</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+            </select>
             <input
               type="search"
-              value={search}
+              value={source}
               onChange={(event) => {
+                const nextSource = event.target.value;
                 setPage(1);
-                setSearch(event.target.value);
-                if (page !== 1) updatePipelineUrl(filter, 1, { replace: true });
+                setSource(nextSource);
+                updatePipelineUrl({ source: nextSource, page: 1 }, { replace: true });
               }}
-              placeholder="Search name, phone, email, address, source, service, or ref"
-              aria-label="Search opportunities"
-              className={cn(
-                "w-full h-10 pl-10 pr-10 text-14 rounded-sm",
-                "bg-white border-hairline border-zinc-300",
-                "placeholder:text-ink-tertiary u-focus-ring",
-              )}
+              placeholder="Source"
+              aria-label="Filter by source"
+              className="h-10 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-800 placeholder:text-ink-tertiary u-focus-ring"
             />
-            <Search
-              size={16}
-              strokeWidth={1.75}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-tertiary pointer-events-none"
-              aria-hidden
-            />
-            {search && (
-              <button
-                type="button"
-                onClick={() => {
-                  setPage(1);
-                  setSearch("");
-                  if (page !== 1) updatePipelineUrl(filter, 1, { replace: true });
-                }}
-                aria-label="Clear search"
-                className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center h-7 w-7 rounded-full text-ink-tertiary hover:bg-zinc-100 u-focus-ring"
-              >
-                <X size={14} strokeWidth={1.75} aria-hidden />
-              </button>
-            )}
           </div>
         </CardHeader>
         <CardBody className="p-0">

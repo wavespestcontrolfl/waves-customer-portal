@@ -191,6 +191,75 @@ describe('pipeline opportunities read model', () => {
     expect(response.counts.lost).toBe(1);
   });
 
+  test('source filter matches partial source labels', () => {
+    const response = buildPipelineResponse({
+      leads: [
+        lead({ id: 'lead-1', source_name: 'Google Ads' }),
+        lead({ id: 'lead-2', source_name: 'Referral' }),
+      ],
+      estimates: [],
+      query: { source: 'google', stage: 'all', page: 1, pageSize: 50 },
+      now: NOW,
+    });
+
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0]).toMatchObject({
+      leadId: 'lead-1',
+      source: 'Google Ads',
+    });
+  });
+
+  test('source filter matches legacy lead_source values surfaced in the read model', () => {
+    const response = buildPipelineResponse({
+      leads: [
+        lead({ id: 'lead-1', lead_source: 'Home Advisor' }),
+        lead({ id: 'lead-2', lead_source: 'Referral' }),
+      ],
+      estimates: [],
+      query: { source: 'advisor', stage: 'all', page: 1, pageSize: 50 },
+      now: NOW,
+    });
+
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0]).toMatchObject({
+      leadId: 'lead-1',
+      source: 'Home Advisor',
+    });
+  });
+
+  test('date range filters by last activity', () => {
+    const response = buildPipelineResponse({
+      leads: [
+        lead({ id: 'lead-1', last_activity_at: '2026-05-23T12:00:00.000Z' }),
+        lead({
+          id: 'lead-2',
+          created_at: '2026-05-01T12:00:00.000Z',
+          last_activity_at: '2026-05-01T12:00:00.000Z',
+        }),
+      ],
+      estimates: [],
+      query: { dateFrom: '2026-05-20T00:00:00.000Z', stage: 'all', page: 1, pageSize: 50 },
+      now: NOW,
+    });
+
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0].leadId).toBe('lead-1');
+  });
+
+  test('next follow-up sort orders earliest due opportunities first', () => {
+    const response = buildPipelineResponse({
+      leads: [
+        lead({ id: 'lead-1', next_follow_up_at: '2026-05-25T12:00:00.000Z' }),
+        lead({ id: 'lead-2', next_follow_up_at: '2026-05-24T13:00:00.000Z' }),
+      ],
+      estimates: [],
+      query: { sort: 'next_follow_up', stage: 'all', page: 1, pageSize: 50 },
+      now: NOW,
+    });
+
+    expect(response.data.map((opportunity) => opportunity.leadId)).toEqual(['lead-2', 'lead-1']);
+  });
+
   test('accepted linked estimate wins over stale lost lead status', () => {
     const [opportunity] = normalizeOpportunities({
       leads: [lead({ status: 'lost', estimate_id: 'est-1' })],
