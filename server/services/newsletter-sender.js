@@ -227,6 +227,7 @@ async function sendCampaign(sendId, opts = {}) {
     body: send.html_body || '',
     unsubscribeUrl: '{{unsubscribe_url}}',
     preheader: send.preview_text || undefined,
+    newsletterType: send.newsletter_type || undefined,
   });
 
   let accepted = 0, failed = 0;

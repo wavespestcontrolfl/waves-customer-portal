@@ -207,20 +207,42 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  *                                  // via the List-Unsubscribe header).
  *   preheader?: string,            // hidden inbox preview text
  *   footerNote?: string,           // optional small print under unsub
+ *   newsletterType?: string,       // when 'local-weekly-fresh-events',
+ *                                  // renders the local guide header
+ *                                  // instead of "The Waves Newsletter"
  * }} opts
  */
-function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
+function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, newsletterType } = {}) {
   const safeBody = body || '';
   const unsubLine = unsubscribeUrl
     ? `<a href="${unsubscribeUrl}" style="color:${MUTED};text-decoration:underline;">Unsubscribe</a> · `
     : '';
+
+  const isLocalGuide = newsletterType === 'local-weekly-fresh-events';
+
+  const headerBlock = isLocalGuide
+    ? `<a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
+            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="52" height="52" style="display:inline-block;width:52px;height:52px;max-width:52px;border:0;outline:none;" />
+          </a>
+          <div style="margin-top:10px;font-family:Inter,Arial,sans-serif;font-size:16px;letter-spacing:-0.01em;color:${NAVY};font-weight:800;">
+            Fresh This Week
+          </div>
+          <div style="margin-top:2px;font-family:Inter,Arial,sans-serif;font-size:11px;letter-spacing:0.02em;text-transform:uppercase;color:${MUTED};font-weight:600;">
+            A local weekend guide from the Waves crew
+          </div>`
+    : `<a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
+            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:72px;border:0;outline:none;" />
+          </a>
+          <div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:12px;letter-spacing:0;text-transform:none;color:${NAVY};font-weight:800;">
+            The Waves Newsletter
+          </div>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Waves Pest Control</title>
+<title>${isLocalGuide ? 'Fresh This Week — Waves' : 'Waves Pest Control'}</title>
 </head>
 <body style="margin:0;padding:0;background:${SAND};font-family:Inter,Arial,sans-serif;color:${BODY};">
   ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${SAND};">${preheader}</div>` : ''}
@@ -228,12 +250,7 @@ function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote } = {}) {
     <tr><td align="center" style="padding:24px 12px;">
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;background:${CARD};border-radius:16px;overflow:hidden;border:1px solid ${RULE};box-shadow:none;">
         <tr><td style="background:${CARD};padding:18px 24px;text-align:center;border-bottom:1px solid ${RULE};">
-          <a href="https://wavespestcontrol.com" style="text-decoration:none;display:inline-block;">
-            <img src="https://portal.wavespestcontrol.com/waves-logo.png" alt="Waves Pest Control &amp; Lawn Care" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:72px;border:0;outline:none;" />
-          </a>
-          <div style="margin-top:8px;font-family:Inter,Arial,sans-serif;font-size:12px;letter-spacing:0;text-transform:none;color:${NAVY};font-weight:800;">
-            The Waves Newsletter
-          </div>
+          ${headerBlock}
         </td></tr>
         <tr><td style="padding:28px 28px 8px 28px;font-family:Inter,Arial,sans-serif;font-size:15px;line-height:1.6;color:${BODY};">
           ${safeBody}
