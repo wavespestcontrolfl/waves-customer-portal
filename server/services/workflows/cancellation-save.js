@@ -65,6 +65,10 @@ class CancellationSave {
     // Step 1 — Immediate empathy message
     const step1Body = await renderRequiredSmsTemplate(cancellationTemplateKey(1, reasonKey), {
       first_name: customer.first_name || 'there',
+    }, {
+      workflow: 'cancellation_save_step1',
+      entity_type: 'sms_sequence',
+      entity_id: sequence.id,
     });
 
     await sendCancellationSms(customer, step1Body, { sequence_id: sequence.id, step: 1 });
@@ -86,6 +90,10 @@ class CancellationSave {
 
         const step2Body = await renderRequiredSmsTemplate(cancellationTemplateKey(2, reasonKey), {
           first_name: customer.first_name || 'there',
+        }, {
+          workflow: 'cancellation_save_step2',
+          entity_type: 'sms_sequence',
+          entity_id: sequence.id,
         });
 
         const result = await sendCancellationSms(customer, step2Body, { sequence_id: sequence.id, step: 2 });
@@ -106,6 +114,10 @@ class CancellationSave {
 
         const step3Body = await renderRequiredSmsTemplate('cancellation_save_step3', {
           first_name: customer.first_name || 'there',
+        }, {
+          workflow: 'cancellation_save_step3',
+          entity_type: 'sms_sequence',
+          entity_id: sequence.id,
         });
 
         const result = await sendCancellationSms(customer, step3Body, { sequence_id: sequence.id, step: 3 });
@@ -142,6 +154,10 @@ class CancellationSave {
 
       const body = await renderRequiredSmsTemplate('cancellation_save_accepted_offer', {
         first_name: customer.first_name || 'there',
+      }, {
+        workflow: 'cancellation_save_accepted_offer',
+        entity_type: 'sms_sequence',
+        entity_id: sequence.id,
       });
       await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'accepted_offer' });
 
@@ -163,6 +179,10 @@ class CancellationSave {
 
       const body = await renderRequiredSmsTemplate('cancellation_save_callback_requested', {
         first_name: customer.first_name || 'there',
+      }, {
+        workflow: 'cancellation_save_callback_requested',
+        entity_type: 'sms_sequence',
+        entity_id: sequence.id,
       });
       await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'callback_requested' });
 
@@ -174,6 +194,10 @@ class CancellationSave {
 
       const body = await renderRequiredSmsTemplate('cancellation_save_cancelled', {
         first_name: customer.first_name || 'there',
+      }, {
+        workflow: 'cancellation_save_cancelled',
+        entity_type: 'sms_sequence',
+        entity_id: sequence.id,
       });
       await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'cancelled' });
 

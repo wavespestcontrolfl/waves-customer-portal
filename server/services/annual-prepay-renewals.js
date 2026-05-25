@@ -597,6 +597,7 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
         term_end: formatDateLabel(claimedTerm.term_end),
         last_service_sentence: lastServiceSentence,
       },
+      { workflow: 'annual_prepay_renewal_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
     );
     if (!body) {
       logger.warn(`[annual-prepay] annual_prepay_renewal_reminder template missing/disabled for customer ${customer.id}`);

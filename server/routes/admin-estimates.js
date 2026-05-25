@@ -52,13 +52,16 @@ function estimateMatchesSentOnlyScope(estimate = {}) {
   return !!estimate.sent_at || SENT_ONLY_DELIVERY_ATTEMPT_STATUSES.includes(String(estimate.status || ''));
 }
 
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
-  } catch { /* fall through */ }
+  } catch (err) {
+    logger.warn(`[admin-estimates] SMS template ${templateKey} lookup failed: ${err.message}`);
+  }
+  logger.warn(`[admin-estimates] SMS template ${templateKey} missing/disabled/invalid`);
   return null;
 }
 
@@ -379,7 +382,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
-          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl });
+          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: viewUrl }, {
+            workflow: 'admin_estimate_send',
+            entity_type: 'estimate',
+            entity_id: estimate.id,
+          });
           if (!smsBody) throw new Error('SMS template estimate_sent is missing or inactive');
           const result = await sendCustomerMessage({
             to: normalized,
@@ -799,6 +806,10 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const msg = req.body.message || await renderTemplate('estimate_followup_unviewed', {
       first_name: firstName,
       estimate_url: viewUrl,
+    }, {
+      workflow: 'admin_estimate_followup',
+      entity_type: 'estimate',
+      entity_id: estimate.id,
     });
     if (!msg) return res.status(422).json({ error: 'SMS template estimate_followup_unviewed is missing or inactive' });
 
@@ -1026,6 +1037,11 @@ router.post('/:id/extend', async (req, res, next) => {
       const body = await renderTemplate(
         'estimate_extended',
         { first_name: firstName, estimate_url: viewUrl, new_expiry: newExpiryLabel, days_added: String(days) },
+        {
+          workflow: 'admin_estimate_extend',
+          entity_type: 'estimate',
+          entity_id: estimate.id,
+        },
       );
       if (!body) return res.status(422).json({ error: 'SMS template estimate_extended is missing or inactive' });
       smsResult = await sendCustomerMessage({

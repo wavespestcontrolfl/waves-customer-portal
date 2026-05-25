@@ -1109,6 +1109,10 @@ const InvoiceService = {
         service_type: serviceType,
         service_date: formattedDate || "today",
         pay_url: payUrl,
+      }, {
+        workflow: "invoice_send",
+        entity_type: "invoice",
+        entity_id: invoiceId,
       });
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
@@ -1503,6 +1507,10 @@ const InvoiceService = {
         amount,
         card_line: cardLine,
         receipt_url: receiptUrl,
+      }, {
+        workflow: "invoice_receipt",
+        entity_type: "invoice",
+        entity_id: invoiceId,
       });
     } catch (err) {
       logger.warn(`[invoice] Receipt template lookup failed: ${err.message}`);

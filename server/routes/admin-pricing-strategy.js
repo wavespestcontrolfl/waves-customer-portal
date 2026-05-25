@@ -237,11 +237,19 @@ router.post('/trigger-upsell/:customerId', async (req, res, next) => {
       message = await renderRequiredSmsTemplate('upsell_tier_upgrade', {
         first_name: firstName,
         next_tier: upsell.nextTier,
+      }, {
+        workflow: 'admin_pricing_upsell',
+        entity_type: 'customer',
+        entity_id: customer.id,
       });
     } else {
       message = await renderRequiredSmsTemplate('upsell_add_service', {
         first_name: firstName,
         service_name: upsell.service,
+      }, {
+        workflow: 'admin_pricing_upsell',
+        entity_type: 'customer',
+        entity_id: customer.id,
       });
     }
 

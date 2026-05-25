@@ -404,6 +404,10 @@ If no contradictions, return: { "contradictions": [] }`
         delta_line: deltaStr,
         tip_line: tip,
         portal_url: 'portal.wavespestcontrol.com',
+      }, {
+        workflow: 'lawn_health_report_ready',
+        entity_type: 'lawn_assessment',
+        entity_id: assessment.id,
       });
 
       const NotificationDispatcher = require('./notification-dispatcher');

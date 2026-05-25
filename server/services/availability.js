@@ -215,7 +215,8 @@ class AvailabilityEngine {
           time: timeLabel,
           address: addressLabel,
           confirmation_code: confCode,
-        }
+        },
+        { workflow: 'self_booking_confirmation', entity_type: 'scheduled_service', entity_id: scheduled.id }
       );
       if (!body) {
         logger.warn(`[availability] self_booking_confirmation template missing/disabled for customer ${customerId}`);

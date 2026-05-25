@@ -62,6 +62,7 @@ class UpsellTrigger {
     const body = await renderSmsTemplate(
       'waveguard_upsell',
       { first_name: customer.first_name || 'there', tier_label: tier.label },
+      { workflow: 'waveguard_upsell', entity_type: 'customer', entity_id: customerId },
     );
     if (!body) {
       logger.warn(`[upsell-trigger] waveguard_upsell template missing/disabled for customer ${customerId}`);

@@ -124,6 +124,10 @@ router.post('/enroll', async (req, res, next) => {
         body: await renderRequiredSmsTemplate('referral_enrollment', {
           first_name: firstName,
           referral_link: clickiLink,
+        }, {
+          workflow: 'admin_referral_enrollment',
+          entity_type: 'referral_promoter',
+          entity_id: promoter.id,
         }),
         channel: 'sms',
         audience: customerId ? 'customer' : 'lead',

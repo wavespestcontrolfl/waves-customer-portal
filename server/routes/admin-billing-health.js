@@ -108,6 +108,10 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
         const body = await renderRequiredSmsTemplate('manual_payment_receipt', {
           first_name: customer.first_name || 'there',
           receipt_line: receiptLine,
+        }, {
+          workflow: 'manual_payment_receipt',
+          entity_type: 'payment',
+          entity_id: payment.id,
         });
         const result = await sendCustomerMessage({
           audience: 'customer',

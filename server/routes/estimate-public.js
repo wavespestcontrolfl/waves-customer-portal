@@ -191,15 +191,15 @@ function hhmm(value) {
   return value ? String(value).slice(0, 5) : '';
 }
 
-async function renderTemplate(templateKey, vars, fallback) {
-  const body = await renderEditableSmsTemplate(templateKey, vars);
+async function renderTemplate(templateKey, vars, fallback, context = {}) {
+  const body = await renderEditableSmsTemplate(templateKey, vars, context);
   return body || fallback;
 }
 
-async function renderEditableSmsTemplate(templateKey, vars) {
+async function renderEditableSmsTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch { /* fall through */ }
@@ -4559,6 +4559,8 @@ router.put('/:token/accept', async (req, res, next) => {
             const customerBody = await renderTemplate(
               'estimate_accepted_onetime',
               { first_name: firstName, service_label: primarySvc.label, booking_url: bookingUrl },
+              undefined,
+              { workflow: 'estimate_accept_onetime_booking', entity_type: 'estimate', entity_id: estimate.id },
             );
             if (!customerBody) {
               logger.warn(`[estimate-accept] estimate_accepted_onetime template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
@@ -4599,6 +4601,8 @@ router.put('/:token/accept', async (req, res, next) => {
                 date: serviceDate,
                 time: timeWindow,
               },
+              undefined,
+              { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: reservationRow?.id || estimate.id },
             );
             if (!customerBody) {
               logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
@@ -4622,26 +4626,38 @@ router.put('/:token/accept', async (req, res, next) => {
           }
         } else if (annualPrepaySelected) {
           const amountText = annualPrepayInvoiceAmount != null ? ` for ${fmtMoney(annualPrepayInvoiceAmount)}` : '';
-          const customerBody = `Hi ${firstName}, your ${estimate.waveguard_tier || 'Bronze'} WaveGuard plan is approved. Our team will review and send your annual prepay invoice${amountText}.`;
-          const sendResult = await sendCustomerMessage({
-            to: estimate.customer_phone,
-            body: customerBody,
-            channel: 'sms',
-            audience: customerId ? 'customer' : 'lead',
-            purpose: 'estimate_followup',
-            customerId: customerId || undefined,
-            estimateId: estimate.id,
-            identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
-            consentBasis: customerId ? undefined : {
-              status: 'transactional_allowed',
-              source: 'estimate_token_acceptance',
-              capturedAt: new Date().toISOString(),
+          const customerBody = await renderEditableSmsTemplate(
+            'estimate_accepted_annual_prepay',
+            {
+              first_name: firstName,
+              waveguard_tier: estimate.waveguard_tier || 'Bronze',
+              amount_text: amountText,
             },
-            entryPoint: 'estimate_accept_annual_prepay',
-            metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
-          });
-          if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-          logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+            { workflow: 'estimate_accept_annual_prepay', entity_type: 'estimate', entity_id: estimate.id },
+          );
+          if (!customerBody) {
+            logger.warn(`[estimate-accept] estimate_accepted_annual_prepay SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);
+          } else {
+            const sendResult = await sendCustomerMessage({
+              to: estimate.customer_phone,
+              body: customerBody,
+              channel: 'sms',
+              audience: customerId ? 'customer' : 'lead',
+              purpose: 'estimate_followup',
+              customerId: customerId || undefined,
+              estimateId: estimate.id,
+              identityTrustLevel: customerId ? 'phone_matches_customer' : 'estimate_token_verified',
+              consentBasis: customerId ? undefined : {
+                status: 'transactional_allowed',
+                source: 'estimate_token_acceptance',
+                capturedAt: new Date().toISOString(),
+              },
+              entryPoint: 'estimate_accept_annual_prepay',
+              metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
+            });
+            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+          }
         } else {
           const longObUrl = onboardingToken ? `https://portal.wavespestcontrol.com/onboard/${onboardingToken}` : '';
           const obUrl = longObUrl
@@ -4655,6 +4671,7 @@ router.put('/:token/accept', async (req, res, next) => {
           const customerBody = await renderEditableSmsTemplate(
             'estimate_accepted_customer',
             { first_name: firstName, onboarding_url: obUrl },
+            { workflow: 'estimate_accept_customer', entity_type: 'estimate', entity_id: estimate.id },
           );
           if (!customerBody) {
             logger.warn(`[estimate-accept] estimate_accepted_customer SMS template missing/disabled/unrenderable; skipping customer SMS for estimate ${estimate.id}`);

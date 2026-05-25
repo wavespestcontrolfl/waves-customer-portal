@@ -159,6 +159,10 @@ router.post('/', authenticate, createLimiter, async (req, res, next) => {
         first_name: req.customer.first_name || 'there',
         category: categoryLabel,
         response_time: responseTime,
+      }, {
+        workflow: 'service_request_confirmation',
+        entity_type: 'service_request',
+        entity_id: request.id,
       });
       const smsResult = await sendCustomerMessage({
         to: req.customer.phone,

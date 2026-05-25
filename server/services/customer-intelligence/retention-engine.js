@@ -144,6 +144,10 @@ ${recentSMS || 'None'}`
     const message = await renderRequiredSmsTemplate(templateKey, {
       first_name: customer.first_name || 'there',
       waveguard_tier: customer.waveguard_tier || '',
+    }, {
+      workflow: 'retention_outreach',
+      entity_type: 'customer',
+      entity_id: customer.id,
     });
 
     // Save template outreach

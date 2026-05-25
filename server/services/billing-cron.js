@@ -46,10 +46,10 @@ const WAVES_OFFICE_PHONE = '+19413187612';
 const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
 
 // Render customer billing SMS from the editable template table.
-async function renderTemplate(templateKey, vars) {
+async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body && !body.includes('{first_name}')) return body;
     }
   } catch (err) {
@@ -176,6 +176,7 @@ const BillingCron = {
           const receiptLine = receiptUrl ? ` View your receipt: ${receiptUrl}` : '';
           const body = await renderTemplate('autopay_charge_success',
             { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
+            { workflow: 'monthly_billing_success', entity_type: 'customer', entity_id: customer.id },
           );
           await sendCustomerBillingSms({
             customer,
@@ -287,6 +288,7 @@ const BillingCron = {
         try {
           const body = await renderTemplate('autopay_charge_failed',
             { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+            { workflow: 'monthly_billing_failure', entity_type: 'customer', entity_id: customer.id },
           );
           await sendCustomerBillingSms({
             customer,
@@ -398,6 +400,7 @@ const BillingCron = {
           const receiptLine = retryReceiptUrl ? ` View your receipt: ${retryReceiptUrl}` : '';
           const body = await renderTemplate('autopay_retry_success',
             { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
+            { workflow: 'autopay_retry_success', entity_type: 'payment', entity_id: payment.id },
           );
           await sendCustomerBillingSms({
             customer,
@@ -435,6 +438,7 @@ const BillingCron = {
           try {
             const body = await renderTemplate('autopay_retry_final_failed',
               { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+              { workflow: 'autopay_retry_final_failed', entity_type: 'payment', entity_id: payment.id },
             );
             await sendCustomerBillingSms({
               customer,
@@ -526,6 +530,7 @@ const BillingCron = {
           try {
             const body = await renderTemplate('autopay_retry_failed',
               { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+              { workflow: 'autopay_retry_failed', entity_type: 'payment', entity_id: payment.id },
             );
             await sendCustomerBillingSms({
               customer,

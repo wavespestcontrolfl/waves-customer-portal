@@ -152,6 +152,61 @@ describe('admin email template routes', () => {
     });
   });
 
+  test('returns recent email template render issues', async () => {
+    const auditQuery = chain({
+      result: [{
+        id: 'audit-1',
+        created_at: '2026-05-25T12:00:00.000Z',
+        metadata: {
+          template_key: 'estimate.expiring_notice',
+          event_type: 'missing_payload',
+          workflow: 'estimate.expiring_notice:est-1',
+          entity_type: 'estimate',
+          entity_id: '11111111-1111-1111-1111-111111111111',
+          reason: 'Missing required variables: expires_at',
+          unresolved_placeholders: ['expires_at'],
+        },
+      }],
+    });
+    setDbQueues({
+      audit_log: [auditQuery],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/issues?limit=10`, {
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(200);
+      expect(auditQuery.limit).toHaveBeenCalledWith(10);
+      expect(await res.json()).toEqual({
+        issues: [{
+          id: 'audit-1',
+          created_at: '2026-05-25T12:00:00.000Z',
+          template_key: 'estimate.expiring_notice',
+          event_type: 'missing_payload',
+          workflow: 'estimate.expiring_notice:est-1',
+          entity_type: 'estimate',
+          entity_id: '11111111-1111-1111-1111-111111111111',
+          reason: 'Missing required variables: expires_at',
+          unresolved_placeholders: ['expires_at'],
+        }],
+      });
+    });
+  });
+
+  test('clamps email template issue limit to a positive integer', async () => {
+    const auditQuery = chain({ result: [] });
+    db.mockImplementation(() => auditQuery);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/issues?limit=-5`, {
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(200);
+      expect(auditQuery.limit).toHaveBeenCalledWith(1);
+    });
+  });
+
   test('updates template settings and normalizes variable contracts', async () => {
     const existing = {
       id: 'template-1',

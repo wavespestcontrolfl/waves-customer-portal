@@ -104,9 +104,9 @@ function templateReplace(template, vars) {
   return template.replace(/\{(\w+)\}/g, (_, k) => vars[k] || '');
 }
 
-async function renderReferralSms(templateKey, vars, legacyTemplate) {
+async function renderReferralSms(templateKey, vars, legacyTemplate, context = {}) {
   if (legacyTemplate) return templateReplace(legacyTemplate, vars);
-  return renderRequiredSmsTemplate(templateKey, vars);
+  return renderRequiredSmsTemplate(templateKey, vars, context);
 }
 
 async function sendSMS(to, body, options = {}) {
@@ -338,7 +338,11 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     referee_name: firstName,
     referrer_name: promoter.first_name || 'your neighbor',
     referral_link: referralLink,
-  }, settings.invite_sms_template);
+  }, settings.invite_sms_template, {
+    workflow: 'referral_invite',
+    entity_type: 'referral',
+    entity_id: referral.id,
+  });
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
     messageType: 'referral_invite',
     referralId: referral.id,
@@ -417,7 +421,11 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue }) {
         referrer_name: promoter.first_name,
         referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
         reward_amount: 'a referral reward',
-      }, settings.reward_sms_template);
+      }, settings.reward_sms_template, {
+        workflow: 'referral_reward',
+        entity_type: 'referral',
+        entity_id: referral.id,
+      });
       await sendSMS(promoter.customer_phone, rewardSms, {
         customerId: promoter.customer_id,
         messageType: 'referral_reward',
@@ -550,7 +558,11 @@ async function checkMilestones(promoterId) {
     milestone_level: newLevel,
     count: String(converted),
     bonus_amount: 'a bonus reward',
-  }, settings.milestone_sms_template);
+  }, settings.milestone_sms_template, {
+    workflow: 'referral_milestone',
+    entity_type: 'referral_promoter',
+    entity_id: promoter.id,
+  });
   await sendSMS(promoter.customer_phone, milestoneSms, {
     customerId: promoter.customer_id,
     messageType: 'referral_milestone',

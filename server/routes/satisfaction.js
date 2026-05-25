@@ -185,6 +185,10 @@ router.post('/', async (req, res, next) => {
         const body = await renderRequiredSmsTemplate('review_request', {
           first_name: customer.first_name || 'there',
           review_url: reviewLink,
+        }, {
+          workflow: 'satisfaction_review_request',
+          entity_type: 'customer',
+          entity_id: customer.id,
         });
         const smsResult = await sendCustomerMessage({
           to: customer.phone,

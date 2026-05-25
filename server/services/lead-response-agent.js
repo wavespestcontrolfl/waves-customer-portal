@@ -212,6 +212,10 @@ const LeadResponseAgent = {
             logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Falling back to safe generic response.`);
             const safeMessage = await renderRequiredSmsTemplate('lead_safe_ack', {
               first_name: lead.name?.split(' ')[0] || 'there',
+            }, {
+              workflow: 'lead_safe_ack',
+              entity_type: lead.leadId ? 'lead' : 'customer',
+              entity_id: lead.leadId || lead.customerId,
             });
             try {
               await executeLeadTool('queue_for_adam', {

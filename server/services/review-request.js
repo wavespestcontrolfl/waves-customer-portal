@@ -925,6 +925,7 @@ const ReviewService = {
           first_name: contact.name || customer.first_name || "",
           google_review_url: googleReviewUrl,
         },
+        { workflow: "review_request_followup", entity_type: "review_request", entity_id: reviewReq.id },
       );
       if (!body) {
         logger.warn(

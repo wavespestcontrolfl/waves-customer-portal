@@ -246,6 +246,10 @@ class AppointmentTagger {
     const body = await renderSmsTemplate(templateKey, {
       first_name: service.first_name || 'there',
       service_date: date,
+    }, {
+      workflow: 'appointment_tagger_prep',
+      entity_type: 'scheduled_service',
+      entity_id: service.id,
     });
     if (!body) {
       logger.warn(`[appointment-tagger] ${templateKey} template missing/disabled; prep SMS skipped for service ${service.id}`);

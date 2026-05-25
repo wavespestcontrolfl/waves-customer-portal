@@ -13,10 +13,18 @@ jest.mock('../models/db', () => {
   db.schema = { hasTable: jest.fn(async () => true) };
   return db;
 });
+jest.mock('../services/audit-log', () => ({
+  auditNotificationTemplateIssue: jest.fn(async () => null),
+}));
 
 const smsTemplates = require('../routes/admin-sms-templates');
+const { auditNotificationTemplateIssue } = require('../services/audit-log');
 
 describe('admin SMS template renderer', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
   test('renders supplied variables', async () => {
     const body = await smsTemplates.getTemplate('sample_template', {
       first_name: 'Sam',
@@ -32,5 +40,11 @@ describe('admin SMS template renderer', () => {
     });
 
     expect(body).toBeNull();
+    expect(auditNotificationTemplateIssue).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'sms',
+      template_key: 'sample_template',
+      event_type: 'unresolved_placeholders',
+      unresolved_placeholders: ['track_url'],
+    }));
   });
 });

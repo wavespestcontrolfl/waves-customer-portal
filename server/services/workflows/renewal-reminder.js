@@ -69,7 +69,8 @@ class RenewalReminder {
                 first_name: customer.first_name || 'there',
                 renewal_label: field.label,
                 urgency,
-              }
+              },
+              { workflow: 'renewal_reminder', entity_type: 'customer', entity_id: customer.id }
             );
             if (!body) {
               logger.warn(`[renewal-reminder] template missing/disabled — skipping customer ${customer.id} (${field.column})`);

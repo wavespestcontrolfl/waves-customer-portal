@@ -220,6 +220,10 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
       referee_name: friendly,
       referrer_name: promoter.first_name || 'your neighbor',
       referral_link: referralLink,
+    }, {
+      workflow: 'referral_invite',
+      entity_type: 'referral_promoter',
+      entity_id: promoter.id,
     });
 
     const smsResult = await sendCustomerMessage({

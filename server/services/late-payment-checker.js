@@ -94,6 +94,10 @@ const LatePaymentService = {
         invoice_title: invoiceTitle,
         service_date_clause: dateClause,
         pay_url: payUrl,
+      }, {
+        workflow: 'late_payment_reminder',
+        entity_type: 'invoice',
+        entity_id: inv.id,
       });
       if (!body) {
         logger.warn(`[late-payment] template ${templateKey} missing/disabled — skipping reminder for invoice ${inv.id}`);

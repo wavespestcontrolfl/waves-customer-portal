@@ -552,6 +552,10 @@ router.post('/send-request', async (req, res, next) => {
       first_name: firstName,
       review_url: rateUrl,
       service_type: svcLabel,
+    }, {
+      workflow: 'admin_review_request',
+      entity_type: 'review_request',
+      entity_id: reviewReq.id,
     });
 
     const smsResult = await sendCustomerMessage({

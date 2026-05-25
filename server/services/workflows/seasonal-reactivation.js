@@ -65,6 +65,10 @@ class SeasonalReactivation {
           hook_text: hookText,
           address_clause: customer.address ? ` at ${customer.address}` : '',
           call_number: callNumber,
+        }, {
+          workflow: 'seasonal_reactivation',
+          entity_type: 'customer',
+          entity_id: customer.id,
         });
         if (!body) {
           logger.warn(`[seasonal-reactivation] template missing/disabled — skipping customer ${customer.id}`);

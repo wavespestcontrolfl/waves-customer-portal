@@ -555,6 +555,10 @@ router.post('/:token/complete', loadSession, async (req, res, next) => {
         service_type: s.service_type,
         service_date: svcDate,
         tech_clause: svc ? ` with ${svc.tech_name}` : '',
+      }, {
+        workflow: 'onboarding_welcome',
+        entity_type: 'onboarding_session',
+        entity_id: s.id,
       });
       if (!welcomeBody) {
         logger.warn(`[onboarding] onboarding_welcome template missing/disabled — skipping welcome SMS for customer ${c.id}`);

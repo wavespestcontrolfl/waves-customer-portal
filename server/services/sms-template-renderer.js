@@ -1,17 +1,17 @@
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 
-async function renderSmsTemplate(templateKey, vars) {
+async function renderSmsTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars, context);
       if (body) return body;
     }
   } catch { /* missing template */ }
   return undefined;
 }
 
-async function renderRequiredSmsTemplate(templateKey, vars) {
-  const body = await renderSmsTemplate(templateKey, vars);
+async function renderRequiredSmsTemplate(templateKey, vars, context = {}) {
+  const body = await renderSmsTemplate(templateKey, vars, context);
   if (body) return body;
   throw new Error(`SMS template ${templateKey} is missing, inactive, or invalid`);
 }

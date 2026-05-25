@@ -41,24 +41,25 @@ class RescheduleSMS {
     const option1 = `${opt1.displayDate}, ${opt1.suggestedWindow.display}`;
     const option2 = `${opt2.displayDate}, ${opt2.suggestedWindow.display}`;
 
+    const templateContext = { workflow: 'reschedule_options', entity_type: 'scheduled_service', entity_id: serviceId };
     let smsBody;
     let templateKey;
     if (reasonCode.startsWith('weather')) {
       templateKey = 'reschedule_options_weather';
       smsBody = await renderSmsTemplate(templateKey, {
         first_name: service.first_name, service_type: serviceType, original_date: originalDate, option_1: option1, option_2: option2,
-      });
+      }, templateContext);
     } else if (reasonCode === 'customer_noshow' || reasonCode === 'gate_locked') {
       const accessIssue = reasonCode === 'gate_locked' ? 'the gate was locked' : "couldn't access the property";
       templateKey = 'reschedule_options_access';
       smsBody = await renderSmsTemplate(templateKey, {
         first_name: service.first_name, service_type: serviceType, access_issue: accessIssue, option_1: option1, option_2: option2,
-      });
+      }, templateContext);
     } else {
       templateKey = 'reschedule_options_general';
       smsBody = await renderSmsTemplate(templateKey, {
         first_name: service.first_name, service_type: serviceType, original_date: originalDate, reason_text: reasonText ? ` ${reasonText}` : '', option_1: option1, option_2: option2,
-      });
+      }, templateContext);
     }
     if (!smsBody) {
       logger.warn(`[reschedule-sms] template ${templateKey} missing/disabled — service ${serviceId}`);
@@ -138,7 +139,8 @@ class RescheduleSMS {
 
       const confirmedBody = await renderSmsTemplate(
         'reschedule_confirmed_sms_reply',
-        { date: displayDate, time: selectedOption.window.display }
+        { date: displayDate, time: selectedOption.window.display },
+        { workflow: 'reschedule_confirmed', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id }
       );
       if (confirmedBody) {
         await sendAppointmentSms({
@@ -161,7 +163,11 @@ class RescheduleSMS {
 
     if (responseType === 'call_requested') {
       const customer = await db('customers').where({ id: customerId }).first();
-      const callBody = await renderSmsTemplate('reschedule_call_requested', {});
+      const callBody = await renderSmsTemplate(
+        'reschedule_call_requested',
+        {},
+        { workflow: 'reschedule_call_requested', entity_type: 'scheduled_service', entity_id: pending.scheduled_service_id }
+      );
       if (callBody) {
         await sendAppointmentSms({
           to: customer.phone,

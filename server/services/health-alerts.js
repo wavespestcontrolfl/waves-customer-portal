@@ -267,7 +267,11 @@ async function executeAction(alertId, actionIndex) {
       let msg = FALLBACKS[alertKey];
       try {
         if (typeof smsTemplatesRouter.getTemplate === 'function') {
-          const rendered = await smsTemplatesRouter.getTemplate(TEMPLATE_KEY_MAP[alertKey], { first_name: customer.first_name || 'there' });
+          const rendered = await smsTemplatesRouter.getTemplate(
+            TEMPLATE_KEY_MAP[alertKey],
+            { first_name: customer.first_name || 'there' },
+            { workflow: 'health_alert_followup', entity_type: 'customer', entity_id: customer.id }
+          );
           if (rendered && !rendered.includes('{first_name}')) msg = rendered;
         }
       } catch { /* use fallback */ }

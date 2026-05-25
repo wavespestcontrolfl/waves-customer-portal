@@ -388,6 +388,34 @@ async function auditHygieneProposalRevert({
   });
 }
 
+async function auditNotificationTemplateIssue({
+  channel = 'sms',
+  template_key,
+  event_type,
+  workflow = null,
+  entity_type = null,
+  entity_id = null,
+  reason,
+  unresolved_placeholders = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'system',
+    action: `notification_template.${channel}.render_issue`,
+    resource_type: 'notification_template',
+    resource_id: null,
+    metadata: {
+      channel,
+      template_key,
+      event_type,
+      workflow,
+      entity_type,
+      entity_id,
+      reason,
+      unresolved_placeholders,
+    },
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -409,6 +437,7 @@ module.exports = {
   auditHygieneProposalApply,
   auditHygieneProposalReject,
   auditHygieneProposalRevert,
+  auditNotificationTemplateIssue,
   ipFromReq,
   uaFromReq,
 };
