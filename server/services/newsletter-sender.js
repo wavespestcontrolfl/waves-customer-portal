@@ -515,7 +515,11 @@ async function processScheduledSends() {
         const { errors } = validateNewsletterDraft(row, { recipientCount });
         if (errors.length > 0) {
           logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
-          await db('newsletter_sends').where({ id: row.id }).update({ status: 'failed' });
+          await db('newsletter_sends').where({ id: row.id }).update({
+            status: 'draft',
+            scheduled_for: null,
+            updated_at: new Date(),
+          });
           continue;
         }
       }
