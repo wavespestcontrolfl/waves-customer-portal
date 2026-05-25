@@ -1659,6 +1659,15 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
     let imported = 0, skipped = 0, errors = 0;
     for (const c of customers) {
       try {
+        // Check if already unsubscribed — respect opt-out (CAN-SPAM)
+        const existing = await db('newsletter_subscribers')
+          .where('email', c.email.toLowerCase())
+          .first();
+        if (existing && existing.status === 'unsubscribed') {
+          skipped++;
+          continue;
+        }
+
         const result = await subscribeOrResubscribe({
           email: c.email,
           firstName: c.first_name || null,
