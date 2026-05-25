@@ -1153,7 +1153,7 @@ function EventInboxView({ onDraftFromEvent }) {
 
 // ── Calendar View ───────────────────────────────────────────────────
 
-function CalendarRow({ row, isPast, isCurrent, rowCls, saving, onSave, fmtWeekLabel, STATUS_STYLE }) {
+function CalendarRow({ row, isPast, isCurrent, rowCls, saving, onSave, onDraft, drafting, fmtWeekLabel, STATUS_STYLE }) {
   const [editTopic, setEditTopic] = useState(row.topic || '');
   const [editTip, setEditTip] = useState(row.homeownerMinuteTopic || '');
   const [dirty, setDirty] = useState(false);
@@ -1175,6 +1175,11 @@ function CalendarRow({ row, isPast, isCurrent, rowCls, saving, onSave, fmtWeekLa
 
   const handleBlur = () => { if (dirty) handleSave(); };
   const handleKeyDown = (e) => { if (e.key === 'Enter') { e.target.blur(); } };
+
+  // Draft button is enabled only for planned rows that are not past
+  const canDraft = !isPast
+    && row.status === 'planned'
+    && !drafting;
 
   return (
     <tr className={`border-b border-zinc-50 hover:bg-zinc-25 ${rowCls}`}>
@@ -1230,6 +1235,21 @@ function CalendarRow({ row, isPast, isCurrent, rowCls, saving, onSave, fmtWeekLa
           <span className="text-10 text-ink-tertiary">—</span>
         )}
       </td>
+      <td className="px-3 py-2">
+        {canDraft ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => onDraft(row)}
+            disabled={drafting}
+          >
+            <Sparkles size={12} strokeWidth={1.75} className="mr-1" />
+            Draft
+          </Button>
+        ) : drafting ? (
+          <span className="text-10 text-ink-tertiary">Drafting...</span>
+        ) : null}
+      </td>
     </tr>
   );
 }
@@ -1239,6 +1259,7 @@ function CalendarView() {
   const [currentWeek, setCurrentWeek] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(null); // weekOf being saved
+  const [draftingWeek, setDraftingWeek] = useState(null); // weekOf being drafted
 
   const fetchCalendar = () => {
     setLoading(true);
@@ -1276,6 +1297,39 @@ function CalendarView() {
     }
   };
 
+  const handleDraft = async (row) => {
+    setDraftingWeek(row.weekOf);
+    try {
+      let calendarId = row.id;
+
+      // If placeholder (no saved id), create the calendar row first
+      if (!calendarId) {
+        const created = await adminFetch('/admin/newsletter/calendar', {
+          method: 'POST',
+          body: JSON.stringify({
+            weekOf: row.weekOf,
+            topic: row.topic || null,
+            homeownerMinuteTopic: row.homeownerMinuteTopic || null,
+          }),
+        });
+        calendarId = created.entry?.id;
+        if (!calendarId) throw new Error('Failed to create calendar entry');
+      }
+
+      // Draft from plan
+      await adminFetch(`/admin/newsletter/calendar/${calendarId}/draft-from-plan`, {
+        method: 'POST',
+      });
+
+      fetchCalendar();
+    } catch (e) {
+      console.error('Draft failed:', e.message);
+      alert(`Draft failed: ${e.message}`);
+    } finally {
+      setDraftingWeek(null);
+    }
+  };
+
   const fmtWeekLabel = (weekOf) => {
     const start = new Date(weekOf + 'T12:00:00Z');
     const end = new Date(start);
@@ -1307,6 +1361,7 @@ function CalendarView() {
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">Status</th>
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-16">Events</th>
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-32">Performance</th>
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-24"></th>
             </tr>
           </thead>
           <tbody>
@@ -1328,6 +1383,8 @@ function CalendarView() {
                   rowCls={rowCls}
                   saving={saving === row.weekOf}
                   onSave={(updates) => saveEntry(row.weekOf, updates)}
+                  onDraft={handleDraft}
+                  drafting={draftingWeek === row.weekOf}
                   fmtWeekLabel={fmtWeekLabel}
                   STATUS_STYLE={STATUS_STYLE}
                 />

@@ -1866,4 +1866,76 @@ router.patch('/calendar/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Calendar → Draft ────────────────────────────────────────────────
+
+const { createNewsletterDraft } = require('../services/newsletter-draft');
+
+router.post('/calendar/:id/draft-from-plan', async (req, res, next) => {
+  try {
+    const result = await db.transaction(async (trx) => {
+      const calendar = await trx('newsletter_calendar')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+
+      if (!calendar) {
+        const err = new Error('not found');
+        err.status = 404;
+        throw err;
+      }
+
+      // Idempotent: return existing send if already drafted
+      if (calendar.send_id) {
+        const existingSend = await trx('newsletter_sends')
+          .where({ id: calendar.send_id })
+          .first();
+        return { existing: true, send: existingSend };
+      }
+
+      if (calendar.status === 'skipped') {
+        const err = new Error('Cannot draft a skipped week');
+        err.status = 400;
+        throw err;
+      }
+
+      // Build prompt from calendar plan
+      const eventIds = Array.isArray(calendar.event_ids) ? calendar.event_ids : [];
+      const prompt = calendar.topic
+        ? `This week's theme: ${calendar.topic}. Fresh events from North Port to Tampa.${calendar.homeowner_minute_topic ? ` Homeowner Minute: ${calendar.homeowner_minute_topic}.` : ''}`
+        : `Fresh events this week from North Port to Tampa.${calendar.homeowner_minute_topic ? ` Homeowner Minute: ${calendar.homeowner_minute_topic}.` : ''}`;
+
+      const { send } = await createNewsletterDraft({
+        prompt,
+        eventIds,
+        homeownerMinuteTopic: calendar.homeowner_minute_topic,
+        topic: calendar.topic,
+        newsletterType: 'local-weekly-fresh-events',
+        audience: 'Waves subscribers — North Port to Tampa',
+        tone: 'Neighborly, FOMO-driven, local friend energy',
+        includeCTA: true,
+        trx,
+      });
+
+      // Link send to calendar
+      await trx('newsletter_calendar')
+        .where({ id: calendar.id })
+        .update({
+          send_id: send.id,
+          status: 'drafted',
+          updated_at: trx.fn.now(),
+        });
+
+      return { existing: false, send };
+    });
+
+    if (result.existing) {
+      return res.json({ success: true, existing: true, send: result.send });
+    }
+    res.json({ success: true, existing: false, send: result.send });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
 module.exports = router;
