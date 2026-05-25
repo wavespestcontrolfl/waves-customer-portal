@@ -103,6 +103,67 @@ describe('pipeline opportunities read model', () => {
     expect(response.data[0].leadId).toBe('lead-1');
   });
 
+  test('paginates after linked lead and estimate records are deduplicated', () => {
+    const response = buildPipelineResponse({
+      leads: [
+        lead({ id: 'lead-1', estimate_id: 'est-1', created_at: '2026-05-20T12:00:00.000Z' }),
+        lead({ id: 'lead-2', first_name: 'Alex', estimate_id: 'est-2', created_at: '2026-05-19T12:00:00.000Z' }),
+      ],
+      estimates: [
+        estimate({ id: 'est-1', created_at: '2026-05-21T12:00:00.000Z' }),
+        estimate({ id: 'est-2', customer_name: 'Alex Rivera', created_at: '2026-05-18T12:00:00.000Z' }),
+      ],
+      query: { stage: 'all', page: 1, pageSize: 1 },
+      now: NOW,
+    });
+
+    expect(response.counts.total).toBe(2);
+    expect(response.pagination).toMatchObject({
+      page: 1,
+      pageSize: 1,
+      total: 2,
+    });
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0]).toMatchObject({
+      opportunityId: 'lead:lead-1',
+      sourceType: 'lead_estimate',
+      leadId: 'lead-1',
+      estimateId: 'est-1',
+    });
+  });
+
+  test('response strips raw source records from opportunities', () => {
+    const response = buildPipelineResponse({
+      leads: [lead({ estimate_id: 'est-1' })],
+      estimates: [estimate({ id: 'est-1' })],
+      query: { stage: 'all', page: 1, pageSize: 50 },
+      now: NOW,
+    });
+
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0]).not.toHaveProperty('rawLead');
+    expect(response.data[0]).not.toHaveProperty('rawEstimate');
+  });
+
+  test('counts are computed from search scope before the selected stage filter', () => {
+    const response = buildPipelineResponse({
+      leads: [
+        lead({ id: 'lead-1', first_name: 'Jane', phone: '(555) 123-4567' }),
+        lead({ id: 'lead-2', first_name: 'Jane', phone: '(555) 123-4567', status: 'lost' }),
+        lead({ id: 'lead-3', first_name: 'Pat', phone: '(941) 555-0000' }),
+      ],
+      estimates: [],
+      query: { search: '5551234567', stage: 'new', page: 1, pageSize: 50 },
+      now: NOW,
+    });
+
+    expect(response.data).toHaveLength(1);
+    expect(response.data[0].leadId).toBe('lead-1');
+    expect(response.counts.total).toBe(2);
+    expect(response.counts.new).toBe(1);
+    expect(response.counts.lost).toBe(1);
+  });
+
   test('accepted linked estimate wins over stale lost lead status', () => {
     const [opportunity] = normalizeOpportunities({
       leads: [lead({ status: 'lost', estimate_id: 'est-1' })],
