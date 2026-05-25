@@ -196,7 +196,8 @@ function validateContent(text, platform) {
 
 // ── URL Normalization ──
 function normalizeUrl(url) {
-  if (!url) return url;
+  if (!url || !String(url).trim()) return null;
+  if (!url || !String(url).trim()) return null;
   try {
     const u = new URL(url);
     u.protocol = 'https:';
@@ -539,27 +540,29 @@ const SocialMediaService = {
     const items = await fetchRSSFeed(feedUrl);
     if (!items.length) return { processed: 0, results: [] };
 
-    // Advisory lock prevents overlapping cron runs / deploys from double-posting
-    let lockAcquired = false;
-    try {
-      const [{ pg_try_advisory_lock: acquired }] = await db.raw(
-        'SELECT pg_try_advisory_lock(?) as pg_try_advisory_lock', [RSS_LOCK_ID]
-      ).then(r => r.rows);
-      lockAcquired = acquired;
-    } catch { lockAcquired = true; /* skip lock if not supported */ }
-
-    if (!lockAcquired) {
-      logger.info('[social] RSS check skipped — another instance holds the lock');
-      return { processed: 0, results: [], locked: true };
-    }
-
+    // Advisory lock prevents overlapping cron runs / deploys from double-posting.
+    // Uses transaction-scoped lock so acquire+release use the same connection.
     const results = [];
-    try {
+    let lockAcquired = false;
+
+    await db.transaction(async (trx) => {
+      try {
+        const lockResult = await trx.raw(
+          'SELECT pg_try_advisory_xact_lock(?) as locked', [RSS_LOCK_ID]
+        );
+        lockAcquired = lockResult.rows[0]?.locked;
+      } catch { lockAcquired = true; }
+
+      if (!lockAcquired) {
+        logger.info('[social] RSS check skipped — another instance holds the lock');
+        return;
+      }
+
       for (const item of items.slice(0, 5)) {
-        const normalizedUrl = normalizeUrl(item.link);
+        const normalizedUrl = normalizeUrl(item.link) || null;
         const normalizedGuid = item.guid || normalizedUrl;
 
-        const existing = await db('social_media_posts')
+        const existing = await trx('social_media_posts')
           .where({ source_url: normalizedUrl })
           .orWhere({ source_guid: normalizedGuid })
           .first();
@@ -580,10 +583,9 @@ const SocialMediaService = {
           results.push({ item: item.title, error: err.message });
         }
       }
-    } finally {
-      try { await db.raw('SELECT pg_advisory_unlock(?)', [RSS_LOCK_ID]); } catch { /* best-effort */ }
-    }
+    });
 
+    if (!lockAcquired) return { processed: 0, results: [], locked: true };
     return { processed: results.length, results };
   },
 
