@@ -10,7 +10,9 @@ function validateNewsletterDraft(send, opts = {}) {
   const warnings = [];
 
   if (!send.subject || !send.subject.trim()) errors.push('Subject line is required');
-  if (!send.html_body || !send.html_body.trim()) errors.push('HTML body is required');
+  if ((!send.html_body || !send.html_body.trim()) && (!send.text_body || !send.text_body.trim())) {
+    errors.push('Body is required (HTML or plain text)');
+  }
   if (opts.recipientCount === 0) errors.push('Segment matches 0 active subscribers');
 
   const typeConfig = getNewsletterType(send.newsletter_type);
