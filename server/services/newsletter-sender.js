@@ -492,6 +492,9 @@ async function resumeCampaign(sendId) {
  * can't stampede the others.
  */
 async function processScheduledSends() {
+  const { isFlagshipType } = require('../config/newsletter-types');
+  const { validateNewsletterDraft } = require('../services/newsletter-validator');
+
   const due = await db('newsletter_sends')
     .where({ status: 'scheduled' })
     .where('scheduled_for', '<=', new Date())
@@ -504,6 +507,18 @@ async function processScheduledSends() {
   let processed = 0;
   for (const row of due) {
     try {
+      // Validate flagship sends before dispatching
+      if (isFlagshipType(row.newsletter_type)) {
+        const recipientCount = Number(
+          (await buildSubscriberQuery(row.segment_filter).count('* as c').first())?.c || 0
+        );
+        const { errors } = validateNewsletterDraft(row, { recipientCount });
+        if (errors.length > 0) {
+          logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
+          await db('newsletter_sends').where({ id: row.id }).update({ status: 'failed' });
+          continue;
+        }
+      }
       await sendCampaign(row.id);
       processed++;
     } catch (err) {

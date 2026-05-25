@@ -593,15 +593,20 @@ export function ComposeView({
           </div>{" "}
           {activeNewsletterType === "local-weekly-fresh-events" && (
             <DigestPlanner
-              onDraftFromPlan={({ eventIds, prompt }) => {
-                handleAiDraft({
-                  prompt,
-                  template: "weekend",
-                  audience: "Waves subscribers — North Port to Tampa",
-                  tone: "Neighborly, FOMO-driven, local friend energy",
-                  includeCTA: true,
-                  eventIds,
-                });
+              onDraftFromPlan={async ({ eventIds, prompt }) => {
+                try {
+                  setStatus("Drafting from plan…");
+                  await handleAiDraft({
+                    prompt,
+                    template: "weekend",
+                    audience: "Waves subscribers — North Port to Tampa",
+                    tone: "Neighborly, FOMO-driven, local friend energy",
+                    includeCTA: true,
+                    eventIds,
+                  });
+                } catch (e) {
+                  setStatus("Draft failed: " + e.message);
+                }
               }}
             />
           )}
