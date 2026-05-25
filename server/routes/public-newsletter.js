@@ -402,12 +402,8 @@ router.get('/posts/:id', async (req, res) => {
   try {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id);
     if (!isUuid) return res.status(404).json({ error: 'not found' });
-
-    const row = await db('newsletter_sends')
-      .where({ id: req.params.id, status: 'sent' })
-      .first();
+    const row = await db('newsletter_sends').where({ id: req.params.id, status: 'sent' }).first();
     if (!row) return res.status(404).json({ error: 'not found' });
-
     res.json({
       id: row.id,
       slug: row.slug || null,

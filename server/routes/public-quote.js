@@ -203,6 +203,8 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.dethatching ? 'Lawn Dethatching' : null,
     services.plugging ? 'Lawn Plugging' : null,
     services.topDressing ? 'Lawn Top Dressing' : null,
+    services.lawnPestControl ? 'Lawn Pest Control' : null,
+    services.bedBug ? 'Bed Bug Treatment' : null,
   ].filter(Boolean).join(' + ');
 }
 
@@ -226,6 +228,8 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.dethatching ? 'Dethatching' : null,
     services.plugging ? 'Plugging' : null,
     services.topDressing ? 'Top Dressing' : null,
+    services.lawnPestControl ? 'Lawn Pest' : null,
+    services.bedBug ? 'Bed Bug' : null,
   ]);
 }
 
@@ -283,6 +287,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
       'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
       'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
+      'lawnPestControl', 'bedBug',
     ];
     if (!services || !ACCEPTED_KEYS.some(k => services[k])) {
       return res.status(400).json({ error: 'Select at least one service.' });
@@ -423,6 +428,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (services.topDressing) {
       engineInput.services.topDressing = {
         depth: services.topDressing.depth || 'eighth',
+      };
+    }
+    if (services.lawnPestControl) {
+      engineInput.services.lawnPestControl = {};
+    }
+    if (services.bedBug) {
+      engineInput.services.bedBug = {
+        method: services.bedBug.method || 'CHEMICAL',
+        rooms: Number(services.bedBug.rooms) || 2,
+        severity: services.bedBug.severity || 'moderate',
+        prepStatus: services.bedBug.prepStatus || 'ready',
+        occupancyType: services.bedBug.occupancyType || 'residential',
       };
     }
 
@@ -745,6 +762,36 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           }
         }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
+    }
+
+    // One-time service SMS: price + call-to-schedule (no self-booking URL).
+    if (normalizedPhone && !quoteRequired && isOneTimeOnly) {
+      try {
+        const FALLBACK_ONETIME_BODY = `Hi ${contactFirstName}! Your ${serviceInterest} estimate is ready — $${Math.round(oneTimeTotal)}. Call us at ${WAVES_SUPPORT_PHONE_DISPLAY} or reply to this text to schedule.\n\n— Waves Pest Control`;
+        const customerBody = await renderTemplate(
+          'estimate_onetime_followup',
+          { first_name: contactFirstName, service_label: serviceInterest, total: Math.round(oneTimeTotal), phone: WAVES_SUPPORT_PHONE_DISPLAY },
+        ) || FALLBACK_ONETIME_BODY;
+        const smsResult = await sendCustomerMessage({
+          to: normalizedPhone,
+          body: customerBody,
+          channel: 'sms',
+          audience: 'lead',
+          purpose: 'conversational',
+          leadId: lead.id,
+          identityTrustLevel: 'phone_provided_unverified',
+          entryPoint: 'public_quote_onetime_sms',
+          metadata: {
+            original_message_type: 'estimate_onetime_followup',
+            mediaUrls: ['https://www.wavespestcontrol.com/wp-content/uploads/2026/01/waves-pest-and-lawn-logo.png'],
+          },
+        });
+        if (!smsResult.sent) {
+          logger.warn(`[public-quote] One-time SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        } else {
+          logger.info(`[public-quote] One-time SMS sent for lead ${lead.id}`);
+        }
+      } catch (e) { logger.error(`[public-quote] One-time SMS failed: ${e.message}`); }
     }
 
     // Newsletter enrollment — gated on explicit opt-in checkbox from the quote
