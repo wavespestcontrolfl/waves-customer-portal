@@ -15,7 +15,10 @@ const {
 } = require('../services/data-hygiene');
 const {
   buildAccessCodeProposals,
+  buildMessageExtractionProposals,
+  buildNoteProposals,
   normalizeAccessCode,
+  normalizeNoteFragment,
   redactExcerpt,
 } = require('../services/data-hygiene/message-extractor');
 
@@ -340,6 +343,9 @@ describe('data hygiene message access extraction', () => {
     property_gate_code: null,
     lockbox_code: null,
     garage_code: null,
+    pet_details: null,
+    parking_notes: null,
+    access_notes: null,
   };
 
   test('extracts obvious gate codes into property preference proposals', () => {
@@ -383,5 +389,65 @@ describe('data hygiene message access extraction', () => {
     expect(normalizeAccessCode('#4821 then press 5')).toBe('#4821 then press 5');
     expect(normalizeAccessCode('lift latch')).toBeNull();
     expect(redactExcerpt('Gate code is 7492 for Dustin', '7492')).not.toContain('7492');
+  });
+
+  test('extracts pet, parking, and access notes as review proposals', () => {
+    const proposals = buildNoteProposals({
+      ...baseMessage,
+      body: 'Dog is friendly but stays in the yard. Please park on street only. Use left side gate for entry.',
+    });
+
+    expect(proposals).toEqual([
+      expect.objectContaining({
+        field: 'pet_details',
+        proposed_value: 'Dog is friendly but stays in the yard',
+        rule_id: 'extract.pet_details',
+      }),
+      expect.objectContaining({
+        field: 'parking_notes',
+        proposed_value: 'park on street only',
+        rule_id: 'extract.parking_notes',
+      }),
+      expect.objectContaining({
+        field: 'access_notes',
+        proposed_value: 'Use left side gate for entry',
+        rule_id: 'extract.access_notes',
+      }),
+    ]);
+  });
+
+  test('appends note proposals to existing property preference text', () => {
+    const [proposal] = buildNoteProposals({
+      ...baseMessage,
+      parking_notes: 'Use driveway if open',
+      body: 'Parking: park on street only today.',
+    });
+
+    expect(proposal).toMatchObject({
+      field: 'parking_notes',
+      current_value: 'Use driveway if open',
+      proposed_value: 'Use driveway if open; Parking: park on street only today',
+    });
+  });
+
+  test('skips note fragments that appear to contain access codes', () => {
+    expect(buildNoteProposals({
+      ...baseMessage,
+      body: 'Use side gate code 1234 to enter.',
+    })).toEqual([]);
+    expect(normalizeNoteFragment('side gate code 1234')).toBeNull();
+  });
+
+  test('combines access code and note extraction without duplicate fields', () => {
+    const proposals = buildMessageExtractionProposals({
+      ...baseMessage,
+      body: 'Gate code is 7492. Dog is friendly. Park on street.',
+    });
+
+    expect(proposals.map((p) => p.field)).toEqual([
+      'neighborhood_gate_code',
+      'pet_details',
+      'parking_notes',
+    ]);
   });
 });

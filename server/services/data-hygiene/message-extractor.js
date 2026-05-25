@@ -7,7 +7,7 @@ const {
 } = require('./source-extraction-store');
 const { upsertSensitiveProposal } = require('./proposal-store');
 
-const EXTRACTOR_VERSION = 'access-codes-v1';
+const EXTRACTOR_VERSION = 'message-property-preferences-v2';
 const DEFAULT_LOOKBACK_DAYS = 180;
 const DEFAULT_LIMIT = 1000;
 
@@ -38,6 +38,40 @@ const ACCESS_PATTERNS = [
   },
 ];
 
+const NOTE_PATTERNS = [
+  {
+    field: 'pet_details',
+    label: 'pet_warning',
+    rule_id: 'extract.pet_details',
+    confidence: 0.820,
+    regexes: [
+      /\b(?:dog|dogs|cat|cats|pet|pets)\b[^.!?\n]{0,140}/ig,
+      /\b(?:aggressive|loose|friendly|inside|in\s+the\s+yard)\s+(?:dog|dogs|cat|cats|pet|pets)\b[^.!?\n]{0,140}/ig,
+    ],
+  },
+  {
+    field: 'parking_notes',
+    label: 'parking_note',
+    rule_id: 'extract.parking_notes',
+    confidence: 0.800,
+    regexes: [
+      /\b(?:park|parking)\b[^.!?\n]{0,140}/ig,
+    ],
+  },
+  {
+    field: 'access_notes',
+    label: 'access_note',
+    rule_id: 'extract.access_notes',
+    confidence: 0.800,
+    regexes: [
+      /\b(?:use|enter|entry|access|go\s+through|come\s+through)\b[^.!?\n]{0,140}\b(?:gate|door|entrance|side|yard|backyard|left|right)\b[^.!?\n]{0,80}/ig,
+      /\b(?:side|back|left|right)\s+gate\b(?![^.!?\n]{0,80}\b(?:code|combo)\b)[^.!?\n]{0,140}/ig,
+      /\b(?:call|text|knock)\s+(?:before|first|when)\b[^.!?\n]{0,140}/ig,
+      /\b(?:do\s+not|don't)\s+open\s+(?:the\s+)?gate\b[^.!?\n]{0,140}/ig,
+    ],
+  },
+];
+
 async function runMessageExtractionPhase({
   runId,
   dryRun = false,
@@ -62,7 +96,7 @@ async function runMessageExtractionPhase({
         continue;
       }
 
-      const proposals = buildAccessCodeProposals(row);
+      const proposals = buildMessageExtractionProposals(row);
       if (!proposals.length) {
         if (!dryRun) {
           await recordExtractionAttempt({
@@ -150,8 +184,18 @@ async function loadCandidateMessages({ lookbackDays, limit }) {
       'pp.neighborhood_gate_code',
       'pp.property_gate_code',
       'pp.lockbox_code',
-      'pp.garage_code'
+      'pp.garage_code',
+      'pp.pet_details',
+      'pp.parking_notes',
+      'pp.access_notes'
     );
+}
+
+function buildMessageExtractionProposals(row) {
+  return dedupeByField([
+    ...buildAccessCodeProposals(row),
+    ...buildNoteProposals(row),
+  ]);
 }
 
 function buildAccessCodeProposals(row) {
@@ -197,6 +241,74 @@ function buildAccessCodeProposals(row) {
   return dedupeByField(proposals);
 }
 
+function buildNoteProposals(row) {
+  const body = String(row.body || '');
+  if (!body.trim()) return [];
+
+  const proposals = [];
+  for (const pattern of NOTE_PATTERNS) {
+    const note = firstNoteMatch(body, pattern.regexes);
+    if (!note) continue;
+
+    const current = row[pattern.field] || null;
+    if (current && normalizeForCompare(current).includes(normalizeForCompare(note))) continue;
+
+    proposals.push({
+      rule_id: pattern.rule_id,
+      rule_version: '1',
+      resource_type: 'property_preferences',
+      resource_id: row.property_preferences_id || null,
+      scope_type: 'customer',
+      scope_id: row.customer_id,
+      field: pattern.field,
+      current_value: current,
+      proposed_value: current ? `${String(current).trim()}; ${note}` : note,
+      source: 'message-extraction',
+      confidence: pattern.confidence,
+      tier: 'medium',
+      evidence: {
+        evidence_source_type: 'message',
+        evidence_source_id: row.id,
+        message_id: row.id,
+        channel: row.channel,
+        matched_label: pattern.label,
+        extractor_version: EXTRACTOR_VERSION,
+        source_excerpt: redactExcerpt(body, note),
+      },
+    });
+  }
+
+  return dedupeByField(proposals);
+}
+
+function firstNoteMatch(body, regexes) {
+  for (const regex of regexes) {
+    regex.lastIndex = 0;
+    const matches = String(body || '').matchAll(regex);
+    for (const match of matches) {
+      const note = normalizeNoteFragment(match[0]);
+      if (note) return note;
+    }
+  }
+  return null;
+}
+
+function normalizeNoteFragment(value) {
+  const note = String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,;:.-]*(?:please|pls)\s+/i, '')
+    .replace(/[\s,;:.-]+$/g, '')
+    .trim();
+
+  if (note.length < 8 || note.length > 180) return null;
+  if (looksLikeAccessCodeBearingText(note)) return null;
+  return note;
+}
+
+function looksLikeAccessCodeBearingText(value) {
+  return /\b(?:code|combo|pin|press)\b/i.test(value) && /[#*]?\d/.test(value);
+}
+
 function normalizeAccessCode(value) {
   if (!value) return null;
   const raw = String(value)
@@ -223,8 +335,9 @@ function redactExcerpt(body, code) {
   const idx = compact.toLowerCase().indexOf(String(code).toLowerCase());
   const start = idx >= 0 ? Math.max(0, idx - 60) : 0;
   const excerpt = compact.slice(start, start + 120);
-  return excerpt
-    .replace(new RegExp(escapeRegex(code), 'ig'), '[redacted access code]')
+  const target = normalizeAccessCode(code) ? new RegExp(escapeRegex(code), 'ig') : null;
+  const redacted = target ? excerpt.replace(target, '[redacted access code]') : excerpt;
+  return redacted
     .replace(/[#*]?\d[\d\s-]{1,15}(?:\s+then\s+press\s+\d+)?/gi, '[redacted access code]');
 }
 
@@ -262,7 +375,10 @@ function increment(target, key) {
 module.exports = {
   EXTRACTOR_VERSION,
   runMessageExtractionPhase,
+  buildMessageExtractionProposals,
   buildAccessCodeProposals,
+  buildNoteProposals,
   normalizeAccessCode,
+  normalizeNoteFragment,
   redactExcerpt,
 };
