@@ -82,9 +82,9 @@ function adminFetch(path, options = {}) {
 }
 
 // Starter HTML templates. Operator picks one → seeds the HTML body textarea.
-// Voice + structure modeled on the Beehiiv-era newsletter history (Weekend
-// Lineup was ~60% of sends and the highest-engagement format; Pest/Lawn
-// Concern is the educational evergreen). Headlines are deliberately
+// "Fresh This Week" (née Weekend Lineup) is the flagship — ~60% of
+// historical sends and highest-engagement format. Blank is the escape
+// hatch for rare one-off free-form sends. Headlines are deliberately
 // placeholder-y so the operator (or AI Draft) can rewrite them per send —
 // the value here is the structure + voice cues, not literal headlines.
 // Deliberately minimal markup — SendGrid footer is appended automatically.
@@ -97,7 +97,7 @@ const TEMPLATES = [
   },
   {
     key: "weekend",
-    label: "Weekend Lineup",
+    label: "Fresh This Week",
     newsletterType: "local-weekly-fresh-events",
     html: `<h1>[Punchy weekend headline — e.g., "Your No-Lame-Plans Weekend Starts Here"]</h1>
 <p>What's good, neighbor — here's what's hitting around Southwest Florida this weekend. Pick one (or three) and get out of the house.</p>
@@ -112,54 +112,6 @@ const TEMPLATES = [
 <h2>One more thing</h2>
 <p>[Optional pest/lawn tie-in — e.g., "If your yard's looking rough before guests come over, we've got a same-week slot." Drop this section if you'd rather keep it pure events.]</p>
 <p>Have a good one out there.</p>
-<p>— The Waves crew</p>`,
-  },
-  {
-    key: "pest_concern",
-    label: "Pest / Lawn Concern",
-    newsletterType: "pest-education",
-    html: `<h1>[Concern + region — e.g., "Mosquitoes are back across SWFL"]</h1>
-<p>Heads up — we've been getting [a lot] more calls about [pest / issue] this past week than usual. Here's what's going on and what to do.</p>
-<h2>Why now</h2>
-<p>[One or two sentences: weather, life cycle, sandy-soil angle, recent rain — whatever the trigger is.]</p>
-<h2>Signs to watch for</h2>
-<ul> <li>[Sign 1 — make it specific and visible]</li> <li>[Sign 2]</li> <li>[Sign 3]</li> <li>[Sign 4 — optional]</li>
-</ul>
-<h2>What to do this week</h2>
-<p>[2-3 sentences of practical advice a homeowner can do today. Then a soft mention of Waves if they want help — don't oversell.]</p>
-<p>Stay ahead of it,</p>
-<p>— The Waves crew</p>`,
-  },
-  {
-    key: "local_spotlight",
-    label: "Local Spotlight",
-    newsletterType: "local-spotlight",
-    html: `<h1>[Food / spot / lifestyle hook — e.g., "Fresh bites we're hitting this month"]</h1>
-<p>Quick rundown of [restaurants / shops / spots] worth a stop around Southwest Florida — built from what our techs and neighbors are actually talking about.</p>
-<h2>[Spot 1 name]</h2>
-<p><strong>[Neighborhood / city]</strong>— [Why it's worth a visit. 1-2 sentences max. Drop a vibe or a specific dish.]</p>
-<h2>[Spot 2 name]</h2>
-<p><strong>[Neighborhood / city]</strong>— [Why-visit blurb.]</p>
-<h2>[Spot 3 name]</h2>
-<p><strong>[Neighborhood / city]</strong>— [Why-visit blurb.]</p>
-<h2>[Optional spot 4]</h2>
-<p><strong>[Neighborhood / city]</strong>— [Why-visit blurb.]</p>
-<p>Tell 'em Waves sent you.</p>
-<p>— The Waves crew</p>`,
-  },
-  {
-    key: "service_promo",
-    label: "Service Promo",
-    newsletterType: "service-promo",
-    html: `<h1>[Offer headline — clear and direct, e.g., "$150 off a full-yard treatment, this week only"]</h1>
-<p>Quick one — we're running a [offer summary] for [audience: existing customers / new SWFL homeowners / etc.] through [expiration date].</p>
-<h2>The deal</h2>
-<p>[One or two sentences: exact offer, eligibility, dollar value.]</p>
-<h2>What's included</h2>
-<ul> <li>[Inclusion 1]</li> <li>[Inclusion 2]</li> <li>[Inclusion 3]</li>
-</ul>
-<h2>How to claim</h2>
-<p>Reply to this email or call us before [expiration date]. We'll lock it in same day.</p>
 <p>— The Waves crew</p>`,
   },
 ];
@@ -294,6 +246,21 @@ export function ComposeView({
     if (onPendingEventConsumed) onPendingEventConsumed();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingEvent]);
+
+  // Auto-select the flagship template for brand-new composes so the
+  // operator lands in the "Fresh This Week" flow by default. Skip when
+  // loading an existing draft (draftId) or when event-seeded
+  // (pendingEvent) — those paths set their own template.
+  useEffect(() => {
+    if (!draftId && !pendingEvent && !selectedTemplate) {
+      const weekend = TEMPLATES.find((t) => t.key === 'weekend');
+      if (weekend) {
+        setHtmlBody(weekend.html);
+        setSelectedTemplate('weekend');
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const segmentFilter = useMemo(() => {
     const f = {};
@@ -635,17 +602,15 @@ export function ComposeView({
           <div>
             {" "}
             <FieldLabel>Template</FieldLabel>{" "}
-            <div className="flex flex-wrap gap-1.5">
-              {TEMPLATES.map((t) => (
-                <button
-                  key={t.key}
-                  type="button"
-                  onClick={() => applyTemplate(t.key)}
-                  className="h-8 px-3 text-12 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring"
-                >
-                  {t.label}
-                </button>
-              ))}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => applyTemplate('weekend')}
+                className="h-8 px-3 text-12 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring"
+              >
+                Fresh This Week
+              </button>
+              <button type="button" onClick={() => applyTemplate('blank')} className="text-11 text-ink-tertiary hover:text-ink-secondary underline">Start from scratch</button>
             </div>{" "}
           </div>{" "}
           {activeNewsletterType === "local-weekly-fresh-events" && (
@@ -1027,7 +992,7 @@ export function ComposeView({
       </aside>
       {aiOpen && (
         <AiDraftModal
-          initialTemplate={selectedTemplate}
+          initialNewsletterType={activeNewsletterType}
           initialPrompt={aiInitialPrompt}
           onClose={() => {
             setAiOpen(false);
@@ -1431,18 +1396,13 @@ function DigestPlanner({ onDraftFromPlan }) {
 
 // ── AI draft modal ────────────────────────────────────────────────
 
-function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
+function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }) {
   const [prompt, setPrompt] = useState(initialPrompt || "");
-  const [template, setTemplate] = useState(initialTemplate || "");
   const [audience, setAudience] = useState("Existing Waves customers");
   const [tone, setTone] = useState("Neighborly, owner-operator");
   const [includeCTA, setIncludeCTA] = useState(true);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
-
-  // Templates eligible for AI drafting — every TEMPLATES entry except
-  // 'blank', which has no structure for Claude to follow.
-  const draftableTemplates = TEMPLATES.filter((t) => t.key !== "blank");
 
   const run = async () => {
     if (prompt.trim().length < 8) {
@@ -1452,9 +1412,10 @@ function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
     setLoading(true);
     setErr("");
     try {
+      const effectiveTemplate = initialNewsletterType === 'free-form' ? null : 'weekend';
       await onDraft({
         prompt,
-        template: template || null,
+        template: effectiveTemplate,
         audience,
         tone,
         includeCTA,
@@ -1502,29 +1463,7 @@ function AiDraftModal({ initialTemplate, initialPrompt, onClose, onDraft }) {
             placeholder="e.g. Spring uptick in no-see-ums and what homeowners can do this week. Want to mention our mosquito service as a soft CTA."
           />{" "}
         </div>{" "}
-        <div>
-          {" "}
-          <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
-            Template (optional)
-          </label>{" "}
-          <select
-            value={template}
-            onChange={(e) => setTemplate(e.target.value)}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
-          >
-            {" "}
-            <option value="">Free-form (no template)</option>
-            {draftableTemplates.map((t) => (
-              <option key={t.key} value={t.key}>
-                {t.label}
-              </option>
-            ))}
-          </select>{" "}
-          <p className="text-11 text-ink-tertiary mt-1">
-            Picks a structure + voice for Claude to draft into. Defaults to
-            whatever you last clicked above.
-          </p>{" "}
-        </div>{" "}
+        {" "}
         <div className="grid grid-cols-2 gap-3">
           {" "}
           <div>

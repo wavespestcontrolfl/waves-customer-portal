@@ -695,9 +695,8 @@ router.post('/segment-preview', async (req, res, next) => {
 // Body: { prompt, template?, newsletterType?, eventIds?, audience?, tone?, includeCTA? }
 //   newsletterType: when 'local-weekly-fresh-events', uses the flagship
 //     Phase 3 system prompt with structured section output + voice profile.
-//   template: legacy param — one of 'weekend' | 'pest_concern' |
-//     'local_spotlight' | 'service_promo'. Used when newsletterType is
-//     absent (backward compat).
+//   template: 'weekend' (only remaining template). Used when
+//     newsletterType is absent (backward compat).
 //   eventIds: optional array of events_raw UUIDs. When present, the
 //     approved events are fetched and injected into the user prompt so
 //     Claude drafts from real event data instead of inventing.
@@ -887,30 +886,6 @@ TEMPLATE: Weekend Lineup
 - Sign off "— The Waves crew" (not "Waves Pest Control").
 - Tone is neighborly + slightly irreverent; this format is the highest-engagement one historically.`,
 
-      pest_concern: `
-TEMPLATE: Pest / Lawn Concern
-- Lead with an emoji + concern headline (e.g., "🦟 Mosquitoes are back across SWFL").
-- <h2>Why now</h2> — 1-2 sentences on weather/season/lifecycle trigger.
-- <h2>Signs to watch for</h2> — <ul><li> with 3-5 specific, visible signs.
-- <h2>What to do this week</h2> — 2-3 sentences of practical homeowner advice + soft Waves mention. Don't oversell.
-- Sign off "Stay ahead of it, — The Waves crew".`,
-
-      local_spotlight: `
-TEMPLATE: Local Spotlight
-- Lead with an emoji + food/shop/lifestyle hook.
-- Open: 1-2 sentences framing the rundown ("built from what our techs and neighbors are talking about").
-- Body: 3-4 spots. Each uses <h2>[Spot name]</h2> followed by <p><strong>[Neighborhood / city]</strong> — [1-2 sentences on why to visit. Drop a vibe or a specific dish]</p>.
-- Sign off with a casual closer like "Tell 'em Waves sent you. — The Waves crew".`,
-
-      service_promo: `
-TEMPLATE: Service Promo
-- Lead with an emoji + a clear, direct offer headline (no clickbait — say the dollar value or % off).
-- Open: 1-2 sentences naming the offer, audience, and expiration date.
-- <h2>The deal</h2> — exact offer, eligibility, dollar value.
-- <h2>What's included</h2> — <ul><li> 3-4 inclusions.
-- <h2>How to claim</h2> — clear next step (reply, call) and expiration.
-- This is a promotional template — DO end with a clear CTA regardless of the includeCTA setting.
-- Sign off "— The Waves crew".`,
     };
     const templateGuidance = TEMPLATE_GUIDANCE[template] || '';
 
