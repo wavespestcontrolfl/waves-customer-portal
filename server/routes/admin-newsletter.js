@@ -24,6 +24,7 @@ const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
+const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -455,7 +456,10 @@ router.post('/sends/:id/test', async (req, res) => {
     // Default to the logged-in admin's own email so an empty test-email
     // input doesn't fire into the shared contact@ inbox where Virginia
     // works real customer replies.
-    const testEmail = req.body.email || req.technician?.email || 'contact@wavespestcontrol.com';
+    const testEmail = assertInternalEmailRecipient(
+      req.body.email || req.technician?.email || 'contact@wavespestcontrol.com',
+      { adminEmail: req.technician?.email },
+    );
     // Demo unsubscribe URL — won't resolve to a real subscriber but the link
     // renders correctly and Gmail/Apple Mail will show the native unsub UI.
     const demoUrl = sendgrid.unsubscribeUrl('test-' + send.id);
@@ -489,7 +493,7 @@ router.post('/sends/:id/test', async (req, res) => {
     res.json({ success: true, messageId: result.messageId });
   } catch (err) {
     logger.error(`[newsletter] test send failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

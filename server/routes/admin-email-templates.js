@@ -7,6 +7,7 @@ const EmailTemplates = require('../services/email-template-library');
 const AutomationExecutor = require('../services/email-template-automation-executor');
 const { isEnabled } = require('../config/feature-gates');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -1105,8 +1106,10 @@ router.post('/versions/:id/preview', async (req, res) => {
 router.post('/versions/:id/test', async (req, res) => {
   try {
     if (!sendgrid.isConfigured()) return res.status(400).json({ error: 'SendGrid not configured' });
-    const to = cleanString(req.body.toEmail || req.body.email || req.technician?.email || 'contact@wavespestcontrol.com').toLowerCase();
-    if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) return res.status(400).json({ error: 'valid toEmail required' });
+    const to = assertInternalEmailRecipient(
+      req.body.toEmail || req.body.email || req.technician?.email || 'contact@wavespestcontrol.com',
+      { adminEmail: req.technician?.email },
+    );
     const result = await EmailTemplates.sendTemplate({
       versionId: req.params.id,
       to,
