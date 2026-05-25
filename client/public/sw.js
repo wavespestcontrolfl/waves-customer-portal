@@ -1,4 +1,4 @@
-const CACHE_NAME = 'waves-v9-ai-estimator-refresh';
+const CACHE_NAME = 'waves-v10-admin-activation-stable';
 const OFFLINE_URL = '/';
 
 const OFFLINE_FALLBACK_HTML = `<!doctype html>
