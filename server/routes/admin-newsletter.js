@@ -1684,8 +1684,8 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
 // GET /api/admin/newsletter/calendar
 router.get('/calendar', async (req, res, next) => {
   try {
-    const pastWeeks = Math.min(12, Math.max(0, Number(req.query.pastWeeks) || 4));
-    const futureWeeks = Math.min(26, Math.max(1, Number(req.query.futureWeeks) || 12));
+    const pastWeeks = Math.min(12, Math.max(0, Number(req.query.pastWeeks ?? 4)));
+    const futureWeeks = Math.min(26, Math.max(1, Number(req.query.futureWeeks ?? 12)));
 
     const currentThursday = getCurrentNewsletterThursday();
 
@@ -1781,7 +1781,13 @@ router.post('/calendar', async (req, res, next) => {
       }
     }
 
-    const sendAt = targetSendAt ? parseETDateTime(targetSendAt) : defaultTargetSendAt(weekOf);
+    let sendAt;
+    if (targetSendAt) {
+      sendAt = parseETDateTime(targetSendAt);
+      if (isNaN(sendAt.getTime())) return res.status(400).json({ error: 'Invalid targetSendAt format' });
+    } else {
+      sendAt = defaultTargetSendAt(weekOf);
+    }
 
     const [row] = await db('newsletter_calendar')
       .insert({
@@ -1821,7 +1827,9 @@ router.patch('/calendar/:id', async (req, res, next) => {
     if (homeownerMinuteTopic !== undefined) updates.homeowner_minute_topic = homeownerMinuteTopic || null;
     if (targetSendAt !== undefined) {
       if (!targetSendAt) return res.status(400).json({ error: 'targetSendAt cannot be null' });
-      updates.target_send_at = parseETDateTime(targetSendAt);
+      const parsed = parseETDateTime(targetSendAt);
+      if (isNaN(parsed.getTime())) return res.status(400).json({ error: 'Invalid targetSendAt format' });
+      updates.target_send_at = parsed;
     }
     if (status !== undefined) {
       const VALID = ['planned', 'drafted', 'scheduled', 'sent', 'skipped'];
