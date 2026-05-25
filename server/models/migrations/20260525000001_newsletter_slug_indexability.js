@@ -38,7 +38,8 @@ exports.up = async function (knex) {
     const datePart = row.sent_at
       ? new Date(row.sent_at).toISOString().slice(0, 10)
       : 'undated';
-    const slug = `${slugify(row.subject || 'newsletter')}-${datePart}`;
+    const suffix = row.id.slice(0, 6);
+    const slug = `${slugify(row.subject || 'newsletter')}-${datePart}-${suffix}`;
     await knex('newsletter_sends')
       .where({ id: row.id })
       .update({ slug });

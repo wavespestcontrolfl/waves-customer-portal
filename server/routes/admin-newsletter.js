@@ -332,9 +332,10 @@ function generateSlug(subject) {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 80);
+    .slice(0, 64);
   const date = etDateString();
-  return `${base}-${date}`;
+  const suffix = require('crypto').randomUUID().slice(0, 6);
+  return `${base}-${date}-${suffix}`;
 }
 
 // POST /api/admin/newsletter/sends — create a draft
