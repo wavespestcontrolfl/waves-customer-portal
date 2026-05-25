@@ -1,9 +1,9 @@
 /**
- * SMS service-intent classifier for the lead-intake auto-reply flow.
+ * SMS service-intent classifier for the lead-intake flow.
  *
- * When a new lead has just received the "Pest Control, Lawn Care, or
- * One-Time Service?" auto-reply, we call classifyServiceIntent(body) on
- * their next inbound SMS to route them into the right estimate draft.
+ * When a new lead replies after submitting a quote request, we call
+ * classifyServiceIntent(body) on their inbound SMS to route them into the
+ * right estimate draft when they mention service details.
  *
  *   classifyServiceIntent(body) -> Promise<{
  *     interest: 'pest' | 'lawn' | 'one_time' | null,
@@ -82,9 +82,7 @@ async function claudeClassify(body) {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey });
 
-    const prompt = `You are classifying a customer SMS reply for Waves Pest Control.
-
-The customer was just asked: "What are you interested in — Pest Control, Lawn Care, or a One-Time Service?"
+    const prompt = `You are classifying a customer SMS reply after they submitted a quote request for Waves Pest Control.
 
 Their reply: ${JSON.stringify(body)}
 

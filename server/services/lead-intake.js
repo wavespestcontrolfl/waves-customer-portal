@@ -1,8 +1,9 @@
 /**
  * SMS lead-intake state machine.
  *
- * Runs when a new lead replies to the "What are you interested in?"
- * auto-reply sent by lead-webhook.js. Drives a two-step capture:
+ * Runs when a new lead replies after the quote-request acknowledgment sent
+ * by lead-webhook.js. Drives a two-step capture when their message includes
+ * service interest:
  *
  *   awaiting_service  →  (classify pest/lawn/one_time)  →  awaiting_address
  *                                                           ↓
