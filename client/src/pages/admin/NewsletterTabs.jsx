@@ -315,11 +315,15 @@ export function ComposeView({
       .catch(() => setTagSuggestions([]));
   }, []);
 
-  // Auto-load pending autopilot draft on mount (if compose form is empty)
+  // Auto-load pending autopilot draft on mount (if compose form is empty).
+  // Uses a cancelled flag so a late-resolving fetch won't overwrite
+  // fields the user has started editing during the round-trip.
   useEffect(() => {
     if (draftId || pendingEvent) return; // already editing a draft or event-seeded
+    let cancelled = false;
     adminFetch("/admin/newsletter/sends/latest-autopilot")
       .then((d) => {
+        if (cancelled) return;
         if (!d?.draft) return;
         const ap = d.draft;
         setDraftId(ap.id);
@@ -331,6 +335,7 @@ export function ComposeView({
         setAutopilotBanner(true);
       })
       .catch(() => { /* no autopilot draft — nothing to do */ });
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -250,37 +250,50 @@ async function autoDraftFlagship() {
     return { skipped: true, reason };
   }
 
-  // 3. Idempotency: skip if a draft already exists for this coverage window
-  const existing = await db('newsletter_sends')
-    .where({ newsletter_type: NEWSLETTER_TYPE, status: 'draft' })
-    .whereNull('created_by')
-    .where('created_at', '>=', plan.startDate)
-    .first();
+  // 3. Idempotency: advisory-lock the dedupe check + insert to prevent
+  //    concurrent cron instances from creating duplicate drafts.
+  const lockKey = Math.abs(Buffer.from(plan.startDate.toISOString()).readInt32BE(0) % 2147483647);
+  await db.raw('SELECT pg_advisory_lock(?)', [lockKey]);
 
-  if (existing) {
-    logger.info(`[newsletter-autopilot] draft already exists for this week: ${existing.id}`);
-    return { skipped: true, reason: `Draft already exists: ${existing.id}`, sendId: existing.id };
+  let row;
+  try {
+    const existing = await db('newsletter_sends')
+      .where({ newsletter_type: NEWSLETTER_TYPE, status: 'draft' })
+      .whereNull('created_by')
+      .where('created_at', '>=', plan.startDate)
+      .first();
+
+    if (existing) {
+      await db.raw('SELECT pg_advisory_unlock(?)', [lockKey]);
+      logger.info(`[newsletter-autopilot] draft already exists for this week: ${existing.id}`);
+      return { skipped: true, reason: `Draft already exists: ${existing.id}`, sendId: existing.id };
+    }
+
+    // 4. Draft via Claude (top 12 events)
+    const topEvents = scored.slice(0, 12);
+    const { draft, userPrompt } = await draftViaClaudeAI(topEvents);
+
+    // 5. Save as newsletter_sends draft
+    [row] = await db('newsletter_sends').insert({
+      subject: draft.subject,
+      html_body: draft.htmlBody || null,
+      text_body: draft.textBody || null,
+      preview_text: draft.previewText || null,
+      from_name: 'Waves Pest Control',
+      from_email: 'newsletter@wavespestcontrol.com',
+      reply_to: 'contact@wavespestcontrol.com',
+      status: 'draft',
+      newsletter_type: NEWSLETTER_TYPE,
+      ai_prompt: userPrompt,
+      slug: generateSlug(draft.subject),
+      created_by: null,
+    }).returning('*');
+
+    await db.raw('SELECT pg_advisory_unlock(?)', [lockKey]);
+  } catch (err) {
+    await db.raw('SELECT pg_advisory_unlock(?)', [lockKey]).catch(() => {});
+    throw err;
   }
-
-  // 4. Draft via Claude (top 12 events)
-  const topEvents = scored.slice(0, 12);
-  const { draft, userPrompt } = await draftViaClaudeAI(topEvents);
-
-  // 5. Save as newsletter_sends draft
-  const [row] = await db('newsletter_sends').insert({
-    subject: draft.subject,
-    html_body: draft.htmlBody || null,
-    text_body: draft.textBody || null,
-    preview_text: draft.previewText || null,
-    from_name: 'Waves Pest Control',
-    from_email: 'newsletter@wavespestcontrol.com',
-    reply_to: 'contact@wavespestcontrol.com',
-    status: 'draft',
-    newsletter_type: NEWSLETTER_TYPE,
-    ai_prompt: userPrompt,
-    slug: generateSlug(draft.subject),
-    created_by: null,
-  }).returning('*');
 
   logger.info(`[newsletter-autopilot] Draft created: sendId=${row.id}, events=${topEvents.length}`);
 
