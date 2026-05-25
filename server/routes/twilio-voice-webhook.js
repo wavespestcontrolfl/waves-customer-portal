@@ -90,6 +90,41 @@ function maskSid(sid) {
 }
 
 let warnedForwardNumberFallback = false;
+const acceptedForwardParentCalls = new Map();
+const acceptedForwardDialCalls = new Map();
+const FORWARD_ACCEPT_TTL_MS = 2 * 60 * 60 * 1000;
+
+function rememberForwardAccept({ parentCallSid, dialCallSid }) {
+  const expiresAt = Date.now() + FORWARD_ACCEPT_TTL_MS;
+  if (parentCallSid) acceptedForwardParentCalls.set(parentCallSid, expiresAt);
+  if (dialCallSid) acceptedForwardDialCalls.set(dialCallSid, expiresAt);
+}
+
+function wasForwardAccepted({ parentCallSid, dialCallSid }) {
+  const now = Date.now();
+  for (const [sid, expiresAt] of acceptedForwardParentCalls) {
+    if (expiresAt <= now) acceptedForwardParentCalls.delete(sid);
+  }
+  for (const [sid, expiresAt] of acceptedForwardDialCalls) {
+    if (expiresAt <= now) acceptedForwardDialCalls.delete(sid);
+  }
+  return (
+    (parentCallSid && acceptedForwardParentCalls.has(parentCallSid)) ||
+    (dialCallSid && acceptedForwardDialCalls.has(dialCallSid))
+  );
+}
+
+function resolveInboundDialCompletion({ status, duration, forwardAccepted }) {
+  const shouldRecordVoicemail = ['no-answer', 'busy', 'failed'].includes(status)
+    || (status === 'completed' && !forwardAccepted);
+
+  let answeredBy = 'unknown';
+  if (status === 'completed' && duration > 0 && forwardAccepted) answeredBy = 'human';
+  else if (status === 'no-answer' || status === 'busy') answeredBy = 'missed';
+  if (shouldRecordVoicemail) answeredBy = 'voicemail';
+
+  return { shouldRecordVoicemail, answeredBy };
+}
 
 function parseForwardNumbers(value) {
   const seen = new Set();
@@ -308,17 +343,16 @@ router.post('/voice', async (req, res) => {
 // =========================================================================
 router.post('/call-complete', async (req, res) => {
   try {
-    const { CallSid, CallDuration, DialCallStatus, DialCallDuration } = req.body;
+    const { CallSid, CallDuration, DialCallSid, DialCallStatus, DialCallDuration } = req.body;
 
     const duration = parseInt(DialCallDuration || CallDuration || 0);
     const status = DialCallStatus || 'completed';
-    const shouldRecordVoicemail = ['no-answer', 'busy', 'failed'].includes(status);
-
-    // Determine if answered
-    let answeredBy = 'unknown';
-    if (status === 'completed' && duration > 0) answeredBy = 'human';
-    else if (status === 'no-answer' || status === 'busy') answeredBy = 'missed';
-    if (shouldRecordVoicemail) answeredBy = 'voicemail';
+    const forwardAccepted = wasForwardAccepted({ parentCallSid: CallSid, dialCallSid: DialCallSid });
+    const { shouldRecordVoicemail, answeredBy } = resolveInboundDialCompletion({
+      status,
+      duration,
+      forwardAccepted,
+    });
 
     const callUpdate = {
       status,
@@ -428,6 +462,10 @@ router.post('/inbound-forward-accept', async (req, res) => {
     const twiml = new VoiceResponse();
 
     if (digits === '1') {
+      rememberForwardAccept({
+        parentCallSid: req.body?.ParentCallSid,
+        dialCallSid: req.body?.CallSid,
+      });
       twiml.say({ voice: 'Polly.Joanna' }, 'Connecting.');
     } else {
       twiml.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
@@ -901,6 +939,7 @@ router.post('/call-status', async (req, res) => {
 router._test = {
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
+  resolveInboundDialCompletion,
 };
 
 module.exports = router;
