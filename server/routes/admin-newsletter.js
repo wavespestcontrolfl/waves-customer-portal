@@ -365,7 +365,7 @@ function generateSlug(subject) {
 // POST /api/admin/newsletter/sends — create a draft
 router.post('/sends', async (req, res, next) => {
   try {
-    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial } = req.body;
     if (!subject) return res.status(400).json({ error: 'subject required' });
 
     let normalizedFromEmail;
@@ -387,6 +387,7 @@ router.post('/sends', async (req, res, next) => {
       newsletter_type: newsletterType || null,
       slug: generateSlug(subject),
       created_by: req.technicianId || null,
+      auto_share_social: autoShareSocial !== false,
     }).returning('*');
 
     res.json({ success: true, send: row });
@@ -400,7 +401,7 @@ router.patch('/sends/:id', async (req, res, next) => {
     if (!send) return res.status(404).json({ error: 'not found' });
     if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
 
-    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType } = req.body;
+    const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial } = req.body;
 
     // Validate from_email only when the caller is changing it. Skipping
     // validation on PATCHes that don't touch the field keeps existing
@@ -423,6 +424,7 @@ router.patch('/sends/:id', async (req, res, next) => {
       segment_filter: segmentFilter !== undefined ? segmentFilter : send.segment_filter,
       ai_prompt: aiPrompt !== undefined ? aiPrompt : send.ai_prompt,
       newsletter_type: newsletterType !== undefined ? newsletterType : send.newsletter_type,
+      auto_share_social: autoShareSocial !== undefined ? autoShareSocial : send.auto_share_social,
       updated_at: new Date(),
     });
 

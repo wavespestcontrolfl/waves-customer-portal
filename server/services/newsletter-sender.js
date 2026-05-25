@@ -393,6 +393,17 @@ async function sendCampaign(sendId, opts = {}) {
   }
   await db('newsletter_sends').where({ id: send.id }).update(finalSendUpdate);
 
+  if (finalSendUpdate.status === 'sent') {
+    const { sharePublishedNewsletter } = require('./content-scheduler');
+    db('newsletter_sends').where({ id: send.id }).first().then((freshSend) => {
+      if (freshSend) {
+        sharePublishedNewsletter(freshSend).catch((err) => {
+          logger.warn(`[newsletter] social share failed for send ${send.id}: ${err.message}`);
+        });
+      }
+    }).catch(() => {});
+  }
+
   return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent };
 }
 
