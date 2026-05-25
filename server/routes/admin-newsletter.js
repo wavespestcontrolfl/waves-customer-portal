@@ -22,7 +22,8 @@ const MODELS = require('../config/models');
 const { isFlagshipType, getNewsletterType } = require('../config/newsletter-types');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { isEligibleForFreshDigest, scoreFreshEvent } = require('../services/event-freshness');
-const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
+const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
+const { validateNewsletterDraft } = require('../services/newsletter-validator');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -483,6 +484,19 @@ router.post('/sends/:id/send', async (req, res) => {
         return res.status(400).json({
           error: 'segment matches 0 active subscribers; pass { force: true } to send anyway',
         });
+      }
+    }
+
+    // Server-side validation gate for flagship sends (honors force flag)
+    if (isFlagshipType(send.newsletter_type) && !force) {
+      let recipientCount = 1;
+      try {
+        const c = await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first();
+        recipientCount = Number(c?.c || 0);
+      } catch { /* non-fatal */ }
+      const { errors, warnings } = validateNewsletterDraft(send, { recipientCount });
+      if (errors.length > 0) {
+        return res.status(400).json({ error: 'Validation failed', errors, warnings });
       }
     }
 
@@ -1346,6 +1360,107 @@ router.get('/events/approved-ids', async (req, res, next) => {
 
     const eligible = rows.filter((r) => isEligibleForFreshDigest(r)).slice(0, 12);
     res.json({ ids: eligible.map((r) => r.id), count: eligible.length });
+  } catch (err) { next(err); }
+});
+
+// ── Digest Planner ───────────────────────────────────────────────────
+
+router.post('/events/digest-plan', async (req, res, next) => {
+  try {
+    const { weekStart, weekEnd } = req.body || {};
+    const now = new Date();
+    const nowET = etParts(now);
+    const daysUntilThursday = (4 - nowET.dayOfWeek + 7) % 7 || 7;
+    const defaultStart = addETDays(now, daysUntilThursday);
+    const startDate = weekStart
+      ? parseETDateTime(`${weekStart}T00:00:00`)
+      : parseETDateTime(`${etDateString(defaultStart)}T00:00:00`);
+    const endDate = weekEnd
+      ? parseETDateTime(`${weekEnd}T23:59:59`)
+      : parseETDateTime(`${etDateString(addETDays(startDate, 6))}T23:59:59`);
+
+    const rows = await db('events_raw as e')
+      .leftJoin('event_sources as s', 's.id', 'e.source_id')
+      .select(
+        'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
+        'e.venue_name', 'e.city', 'e.event_url',
+        'e.event_type', 'e.freshness_status', 'e.freshness_score',
+        'e.admin_status', 'e.times_featured',
+        'e.region_zone', 'e.family_friendly', 'e.is_free',
+        's.name as source_name', 's.priority_tier as source_priority_tier',
+      )
+      .whereIn('e.admin_status', ['approved', 'featured'])
+      .where('e.start_at', '>=', startDate)
+      .where('e.start_at', '<=', endDate)
+      .whereNotNull('e.event_url')
+      .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+      .orderByRaw('e.freshness_score DESC NULLS LAST');
+
+    const eligible = rows.filter((r) => isEligibleForFreshDigest(r));
+    const scored = eligible.map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
+      .sort((a, b) => b.compositeScore - a.compositeScore);
+    const suppressed = rows.filter((r) => !isEligibleForFreshDigest(r))
+      .map((r) => ({ id: r.id, title: r.title, reason: r.freshness_status }));
+
+    const assigned = new Set();
+    const pick = (filter, max) => {
+      const result = [];
+      for (const ev of scored) {
+        if (assigned.has(ev.id)) continue;
+        if (filter(ev)) { result.push(ev); assigned.add(ev.id); if (result.length >= max) break; }
+      }
+      return result;
+    };
+    const fmt = (ev) => ({
+      id: ev.id, title: ev.title, city: ev.city, startAt: ev.start_at, endAt: ev.end_at,
+      venueName: ev.venue_name, eventUrl: ev.event_url, eventType: ev.event_type,
+      freshnessStatus: ev.freshness_status, regionZone: ev.region_zone,
+      familyFriendly: ev.family_friendly, isFree: ev.is_free,
+      compositeScore: ev.compositeScore, sourceName: ev.source_name,
+    });
+    const isWeekend = (ev) => {
+      if (!ev.start_at) return false;
+      const dow = etParts(new Date(ev.start_at)).dayOfWeek;
+      return dow === 5 || dow === 6 || dow === 0;
+    };
+    const zoneCounts = {};
+    for (const ev of scored) { if (ev.region_zone) zoneCounts[ev.region_zone] = (zoneCounts[ev.region_zone] || 0) + 1; }
+    const majorityZone = Object.entries(zoneCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+
+    const sections = {
+      fresh_this_week: pick((ev) => ['one_time', 'annual', 'limited_run', 'special_edition'].includes(ev.event_type), 6).map(fmt),
+      just_starting: pick((ev) => ev.event_type === 'recurring_series' && (ev.times_featured || 0) <= 2, 2).map(fmt),
+      weekend_picks: pick((ev) => isWeekend(ev), 3).map(fmt),
+      family_or_low_key_pick: pick((ev) => ev.family_friendly === true || ev.is_free === true, 1).map(fmt),
+      road_trip_pick: pick((ev) => ev.region_zone && ev.region_zone !== majorityZone, 1).map(fmt),
+    };
+
+    const warnings = [];
+    if (sections.fresh_this_week.length < 5) warnings.push(`Only ${sections.fresh_this_week.length} fresh events (recommended minimum 5)`);
+    if (sections.family_or_low_key_pick.length === 0) warnings.push('No family-friendly or free pick found');
+    if (sections.road_trip_pick.length === 0) warnings.push('No road trip pick found');
+    if (sections.just_starting.length === 0) warnings.push('No new recurring series for "Just Starting"');
+
+    res.json({
+      weekStart: etDateString(startDate), weekEnd: etDateString(endDate),
+      sections, suppressed,
+      stats: { totalApproved: rows.length, totalEligible: eligible.length, totalAssigned: assigned.size, totalSuppressed: suppressed.length, zoneCoverage: zoneCounts },
+      warnings,
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/sends/:id/validate', async (req, res, next) => {
+  try {
+    const send = await db('newsletter_sends').where({ id: req.params.id }).first();
+    if (!send) return res.status(404).json({ error: 'not found' });
+    let recipientCount = 0;
+    try {
+      const c = await NewsletterSender.buildSubscriberQuery(send.segment_filter).count('* as c').first();
+      recipientCount = Number(c?.c || 0);
+    } catch { /* non-fatal */ }
+    const { errors, warnings } = validateNewsletterDraft(send, { recipientCount });
+    res.json({ valid: errors.length === 0, errors, warnings });
   } catch (err) { next(err); }
 });
 

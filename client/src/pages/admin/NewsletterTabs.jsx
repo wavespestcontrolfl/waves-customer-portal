@@ -8,15 +8,20 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
+  AlertTriangle,
   CalendarClock,
+  CalendarDays,
+  CheckCircle2,
   Download,
   Eye,
   MailCheck,
   Save,
   Search,
   Send,
+  Sparkles,
   UserPlus,
   Wand2,
+  XCircle,
 } from "lucide-react";
 import { Badge, Button, Card, cn } from "../../components/ui";
 
@@ -416,12 +421,27 @@ export function ComposeView({
 
   // Open the typed-confirm modal. The actual fetch happens in confirmSend
   // once the operator types SEND and clicks the button.
-  const sendNow = () => {
+  const [validationResult, setValidationResult] = useState(null);
+
+  const sendNow = async () => {
     if (!draftId) {
       setStatus("Save a draft first.");
       return;
     }
-    setSendConfirmOpen(true);
+    try {
+      setStatus("Validating…");
+      const v = await adminFetch(`/admin/newsletter/sends/${draftId}/validate`, {
+        method: "POST",
+      });
+      setValidationResult(v);
+      if (v.errors?.length > 0) {
+        setStatus("Validation failed — fix errors before sending.");
+        return;
+      }
+      setSendConfirmOpen(true);
+    } catch (e) {
+      setStatus("Validation check failed: " + e.message);
+    }
   };
 
   const confirmSend = async () => {
@@ -497,12 +517,13 @@ export function ComposeView({
     audience,
     tone,
     includeCTA,
+    eventIds,
   }) => {
     const tpl = template ? TEMPLATES.find((t) => t.key === template) : null;
     const newsletterType = tpl?.newsletterType || null;
     const res = await adminFetch("/admin/newsletter/draft-ai", {
       method: "POST",
-      body: JSON.stringify({ prompt, template, newsletterType, audience, tone, includeCTA }),
+      body: JSON.stringify({ prompt, template, newsletterType, eventIds, audience, tone, includeCTA }),
     });
     const d = res.draft || {};
     if (d.subject || d.selectedSubject) setSubject(d.subject || d.selectedSubject);
@@ -570,6 +591,20 @@ export function ComposeView({
               ))}
             </div>{" "}
           </div>{" "}
+          {activeNewsletterType === "local-weekly-fresh-events" && (
+            <DigestPlanner
+              onDraftFromPlan={({ eventIds, prompt }) => {
+                handleAiDraft({
+                  prompt,
+                  template: "weekend",
+                  audience: "Waves subscribers — North Port to Tampa",
+                  tone: "Neighborly, FOMO-driven, local friend energy",
+                  includeCTA: true,
+                  eventIds,
+                });
+              }}
+            />
+          )}
           <div>
             {" "}
             <FieldLabel>
@@ -859,6 +894,25 @@ export function ComposeView({
               <Send size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
               Send To Audience
             </Button>{" "}
+            {validationResult && (
+              <div className="mt-2 space-y-1">
+                {validationResult.errors?.map((e, i) => (
+                  <div key={`e${i}`} className="flex items-start gap-1.5 text-11 text-red-700 bg-red-50 rounded px-2 py-1">
+                    <XCircle size={11} className="mt-0.5 shrink-0" />{e}
+                  </div>
+                ))}
+                {validationResult.warnings?.map((w, i) => (
+                  <div key={`w${i}`} className="flex items-start gap-1.5 text-11 text-amber-700 bg-amber-50 rounded px-2 py-1">
+                    <AlertTriangle size={11} className="mt-0.5 shrink-0" />{w}
+                  </div>
+                ))}
+                {validationResult.valid && !validationResult.warnings?.length && (
+                  <div className="flex items-center gap-1.5 text-11 text-green-700 bg-green-50 rounded px-2 py-1">
+                    <CheckCircle2 size={11} className="shrink-0" />Validation passed
+                  </div>
+                )}
+              </div>
+            )}
           </div>{" "}
         </div>{" "}
         <div className={PANEL_CLS}>
@@ -1176,6 +1230,139 @@ function ConfirmRow({ label, value, hint }) {
         <div className="text-13 text-zinc-900 break-words">{value}</div>
         {hint && <div className="text-11 text-ink-tertiary mt-0.5">{hint}</div>}
       </div>{" "}
+    </div>
+  );
+}
+
+// ── Digest Planner ────────────────────────────────────────────────
+
+const SECTION_LABELS = {
+  fresh_this_week: "Fresh This Week",
+  just_starting: "Just Starting",
+  weekend_picks: "Weekend Picks",
+  family_or_low_key_pick: "Family / Low-Key Pick",
+  road_trip_pick: "Road Trip Pick",
+};
+
+function DigestPlanner({ onDraftFromPlan }) {
+  const [plan, setPlan] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [weekStart, setWeekStart] = useState("");
+  const [homeownerTopic, setHomeownerTopic] = useState("");
+  const [suppressedOpen, setSuppressedOpen] = useState(false);
+
+  const generatePlan = async () => {
+    setLoading(true);
+    try {
+      const body = {};
+      if (weekStart) body.weekStart = weekStart;
+      const res = await adminFetch("/admin/newsletter/events/digest-plan", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setPlan(res);
+    } catch (e) {
+      setPlan({ error: e.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const draftFromPlan = () => {
+    if (!plan?.sections) return;
+    const allEvents = Object.values(plan.sections).flat();
+    const ids = allEvents.map((e) => e.id);
+    const summary = allEvents.slice(0, 8).map((e) => `${e.title} (${e.city || "SWFL"})`).join(", ");
+    const prompt = `Fresh events this week from North Port to Tampa: ${summary}.${homeownerTopic ? ` Homeowner Minute topic: ${homeownerTopic}.` : ""}`;
+    onDraftFromPlan({ eventIds: ids, prompt });
+  };
+
+  const fmtDate = (d) => {
+    if (!d) return "—";
+    return new Date(d).toLocaleDateString("en-US", {
+      month: "short", day: "numeric", weekday: "short", timeZone: "America/New_York",
+    });
+  };
+
+  return (
+    <div className="border-hairline border-zinc-200 rounded-sm bg-zinc-50 p-3 space-y-3">
+      <div className="flex items-center gap-2">
+        <CalendarDays size={14} strokeWidth={1.75} className="text-ink-secondary" />
+        <span className="text-13 font-medium text-ink-primary">Digest Planner</span>
+      </div>
+      <div className="flex items-end gap-2">
+        <div className="flex-1">
+          <label className="block text-11 text-ink-tertiary mb-0.5">Week starting (Thursday)</label>
+          <input type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)}
+            className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm w-full" />
+        </div>
+        <Button size="sm" onClick={generatePlan} disabled={loading}>
+          <Sparkles size={12} className="mr-1" />{loading ? "Planning…" : "Generate Plan"}
+        </Button>
+      </div>
+      {plan?.error && <div className="text-12 text-red-600 bg-red-50 rounded p-2">{plan.error}</div>}
+      {plan?.sections && (
+        <>
+          <div className="text-11 text-ink-tertiary">
+            {plan.weekStart} — {plan.weekEnd} · {plan.stats?.totalEligible || 0} eligible · {plan.stats?.totalAssigned || 0} assigned
+          </div>
+          {plan.warnings?.length > 0 && (
+            <div className="space-y-1">
+              {plan.warnings.map((w, i) => (
+                <div key={i} className="flex items-start gap-1.5 text-11 text-amber-700 bg-amber-50 rounded px-2 py-1">
+                  <AlertTriangle size={11} className="mt-0.5 shrink-0" />{w}
+                </div>
+              ))}
+            </div>
+          )}
+          {Object.entries(SECTION_LABELS).map(([key, label]) => {
+            const events = plan.sections[key] || [];
+            return (
+              <div key={key}>
+                <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-1">{label} ({events.length})</div>
+                {events.length === 0 ? (
+                  <div className="text-11 text-ink-tertiary italic">None assigned</div>
+                ) : (
+                  <div className="space-y-1">
+                    {events.map((ev) => (
+                      <div key={ev.id} className="flex items-center justify-between bg-white border-hairline border-zinc-200 rounded px-2 py-1.5">
+                        <div className="min-w-0">
+                          <div className="text-12 font-medium text-ink-primary truncate">{ev.title}</div>
+                          <div className="text-10 text-ink-tertiary">{ev.city || "—"} · {fmtDate(ev.startAt)}</div>
+                        </div>
+                        <span className="text-10 text-ink-tertiary u-nums ml-2 shrink-0">{ev.compositeScore}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {plan.suppressed?.length > 0 && (
+            <div>
+              <button type="button" onClick={() => setSuppressedOpen(!suppressedOpen)} className="text-11 text-ink-tertiary hover:text-ink-secondary">
+                {suppressedOpen ? "Hide" : "Show"} suppressed ({plan.suppressed.length})
+              </button>
+              {suppressedOpen && (
+                <div className="mt-1 space-y-0.5">
+                  {plan.suppressed.map((s) => (
+                    <div key={s.id} className="text-11 text-ink-tertiary line-through">{s.title} — {s.reason}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div>
+            <label className="block text-11 text-ink-tertiary mb-0.5">Homeowner Minute topic (optional)</label>
+            <input type="text" value={homeownerTopic} onChange={(e) => setHomeownerTopic(e.target.value)}
+              placeholder="e.g. Check patio planters for standing water"
+              className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm w-full" />
+          </div>
+          <Button onClick={draftFromPlan} className="w-full">
+            <Wand2 size={13} className="mr-1.5" />Draft Newsletter from Plan
+          </Button>
+        </>
+      )}
     </div>
   );
 }
