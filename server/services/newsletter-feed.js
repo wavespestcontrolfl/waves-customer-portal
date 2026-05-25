@@ -40,6 +40,7 @@ async function getPublishedPosts({ limit = 6 } = {}) {
   return rows.map((s) => ({
     title: s.subject || '',
     link: `/newsletter/archive/${s.id}`,
+    slugLink: s.slug ? `/newsletter/archive/${s.slug}` : null,
     slug: s.slug || null,
     pubDate: s.sent_at ? new Date(s.sent_at).toUTCString() : '',
     description: s.preview_text || stripHtml(s.html_body || '').slice(0, 200),
@@ -53,17 +54,23 @@ async function getPublishedPosts({ limit = 6 } = {}) {
 
 async function getPostBySlug(slug) {
   if (!slug || typeof slug !== 'string') return null;
-  return db('newsletter_sends').where({ slug, status: 'sent' }).first() || null;
+  const row = await db('newsletter_sends')
+    .where({ slug, status: 'sent' })
+    .first();
+  return row || null;
 }
 
 function buildRssXml(posts) {
-  const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const escXml = (s) => String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
   const items = posts.map((p) => `    <item>
-      <title>${esc(p.title)}</title>
-      <link>https://www.wavespestcontrol.com${esc(p.link)}</link>
-      <description>${esc(p.description)}</description>
+      <title>${escXml(p.title)}</title>
+      <link>https://www.wavespestcontrol.com${escXml(p.slugLink || p.link)}</link>
+      <description>${escXml(p.description)}</description>
       <pubDate>${p.pubDate}</pubDate>
-      <guid isPermaLink="true">https://www.wavespestcontrol.com${esc(p.link)}</guid>
+      <guid isPermaLink="true">https://www.wavespestcontrol.com${escXml(p.slugLink || p.link)}</guid>
     </item>`).join('\n');
 
   return `<?xml version="1.0" encoding="UTF-8"?>

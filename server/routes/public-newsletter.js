@@ -338,6 +338,8 @@ router.post('/confirm/:token', async (req, res) => {
 });
 
 // GET /api/public/newsletter/posts
+// Recent sent campaigns for the unauthenticated /newsletter landing
+// page and the Astro marketing site's newsletter section.
 router.get('/posts', async (req, res) => {
   try {
     const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 6));
@@ -349,32 +351,41 @@ router.get('/posts', async (req, res) => {
   }
 });
 
-// GET /api/public/newsletter/rss — RSS 2.0 feed
+// GET /api/public/newsletter/rss — RSS 2.0 feed for the Astro site
+// and any feed reader. Replaces the old Beehiiv RSS feed.
 router.get('/rss', async (req, res) => {
   try {
     const posts = await getPublishedPosts({ limit: 20 });
     const { buildRssXml } = require('../services/newsletter-feed');
-    res.type('application/rss+xml').send(buildRssXml(posts));
+    const xml = buildRssXml(posts);
+    res.type('application/rss+xml').send(xml);
   } catch (err) {
-    logger.error(`[newsletter] RSS failed: ${err.message}`);
+    logger.error(`[newsletter] RSS feed failed: ${err.message}`);
     res.status(500).type('text/plain').send('RSS feed temporarily unavailable');
   }
 });
 
 // GET /api/public/newsletter/posts/by-slug/:slug
+// Slug-based lookup for the Astro /newsletter/archive/[slug] pages.
 router.get('/posts/by-slug/:slug', async (req, res) => {
   try {
     const { getPostBySlug } = require('../services/newsletter-feed');
     const row = await getPostBySlug(req.params.slug);
     if (!row) return res.status(404).json({ error: 'not found' });
+
     res.json({
-      id: row.id, slug: row.slug, subject: row.subject,
+      id: row.id,
+      slug: row.slug,
+      subject: row.subject,
       newsletterType: row.newsletter_type || null,
       previewText: row.preview_text || null,
-      htmlBody: row.html_body || '', textBody: row.text_body || null,
-      sentAt: row.sent_at, indexability: row.indexability || 'index',
+      htmlBody: row.html_body || '',
+      textBody: row.text_body || null,
+      sentAt: row.sent_at,
+      indexability: row.indexability || 'index',
       seo: {
-        title: row.subject, description: row.preview_text || '',
+        title: row.subject,
+        description: row.preview_text || '',
         canonicalUrl: `https://www.wavespestcontrol.com/newsletter/archive/${row.slug}`,
         indexability: row.indexability || 'index',
       },
@@ -385,7 +396,8 @@ router.get('/posts/by-slug/:slug', async (req, res) => {
   }
 });
 
-// GET /api/public/newsletter/posts/:id — UUID lookup (backward compat)
+// GET /api/public/newsletter/posts/:id
+// UUID-based lookup (backward compat for existing archive links).
 router.get('/posts/:id', async (req, res) => {
   try {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id);
@@ -393,11 +405,15 @@ router.get('/posts/:id', async (req, res) => {
     const row = await db('newsletter_sends').where({ id: req.params.id, status: 'sent' }).first();
     if (!row) return res.status(404).json({ error: 'not found' });
     res.json({
-      id: row.id, slug: row.slug || null, subject: row.subject,
+      id: row.id,
+      slug: row.slug || null,
+      subject: row.subject,
       newsletterType: row.newsletter_type || null,
       previewText: row.preview_text || null,
-      htmlBody: row.html_body || '', textBody: row.text_body || null,
-      sentAt: row.sent_at, indexability: row.indexability || 'index',
+      htmlBody: row.html_body || '',
+      textBody: row.text_body || null,
+      sentAt: row.sent_at,
+      indexability: row.indexability || 'index',
     });
   } catch (err) {
     logger.error(`[newsletter] public post lookup failed: ${err.message}`);

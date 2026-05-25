@@ -250,8 +250,11 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
   `/api/public/estimates/:token/ask`, `/api/reports/:token/*`,
   `/api/stripe/webhook`, `/api/twilio/*-webhook`, `/api/bouncie-webhook`,
-  `/api/sendgrid-webhook`, `/api/lead-webhook`. New public routes outside
-  this list are P0.
+  `/api/sendgrid-webhook`, `/api/lead-webhook`,
+  `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
+  posts/by-slug/:slug, rss — rate-limited, read-only for posts/rss,
+  double-opt-in for subscribe). New public routes outside this list
+  are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
   terminal/expired-estimate rejection, public-route rate limits, no raw
