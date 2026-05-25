@@ -9,6 +9,8 @@ describe('quote workflow service interest labels', () => {
   } = publicQuoteRouter._internals;
 
   const {
+    scrubLeadAlertProviderError,
+    markLeadAlertCallLogFailed,
     normalizeLeadServiceInterest,
     serviceInterestUpdateFromTriage,
     shouldApplyTriageServiceInterest,
@@ -116,5 +118,38 @@ describe('quote workflow service interest labels', () => {
       .toBe(false);
     expect(shouldRunLeadAcquisition({ isNewCustomer: true, isDuplicateSubmission: true }))
       .toBe(false);
+  });
+
+  test('lead alert provider diagnostics scrub phone numbers', () => {
+    expect(scrubLeadAlertProviderError('bad url customerNumber=%2B19415550199'))
+      .toBe('bad url customerNumber=[phone]');
+    expect(scrubLeadAlertProviderError('failed for +19415550199 and 19415550199'))
+      .toBe('failed for [phone] and [phone]');
+  });
+
+  test('lead auto-bridge call log failures are marked failed with scrubbed error text', async () => {
+    const updates = [];
+    const database = jest.fn((table) => ({
+      where(clause) {
+        return {
+          update(patch) {
+            updates.push({ table, clause, patch });
+            return Promise.resolve(1);
+          },
+        };
+      },
+    }));
+
+    await markLeadAlertCallLogFailed('call-log-1', 'bad request for [phone]', database);
+
+    expect(updates).toEqual([{
+      table: 'call_log',
+      clause: { id: 'call-log-1' },
+      patch: expect.objectContaining({
+        status: 'failed',
+        notes: 'Twilio create failed: bad request for [phone]',
+        updated_at: expect.any(Date),
+      }),
+    }]);
   });
 });
