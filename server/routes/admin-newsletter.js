@@ -1683,7 +1683,7 @@ router.post('/subscribers/import-customers', async (req, res, next) => {
         }
       } catch (e) {
         errors++;
-        logger.error(`[newsletter] import customer ${c.email} failed: ${e.message}`);
+        logger.error(`[newsletter] import customer id=${c.id} failed: ${e.message}`);
       }
     }
 
