@@ -387,6 +387,7 @@ export function ComposeView({
       !confirm("Replace the current HTML body with this template?")
     )
       return;
+    userHasEdited.current = true;
     setHtmlBody(t.html);
     setSelectedTemplate(key === "blank" ? null : key);
   };
@@ -560,6 +561,7 @@ export function ComposeView({
     includeCTA,
     eventIds,
   }) => {
+    userHasEdited.current = true;
     const tpl = template ? TEMPLATES.find((t) => t.key === template) : null;
     const newsletterType = tpl?.newsletterType || null;
     const res = await adminFetch("/admin/newsletter/draft-ai", {
