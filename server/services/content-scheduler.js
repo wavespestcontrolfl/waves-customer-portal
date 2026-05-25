@@ -67,6 +67,11 @@ async function sharePublishedBlog(blog) {
       guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
     });
+    if (result?.dryRun) {
+      logger.info(`[content-scheduler] Social share dry-run for blog ${blog.id} — not marking as shared`);
+      return true;
+    }
+
     const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
     const shared = result?.success || platforms.some((platform) => platform.success);
 
@@ -225,6 +230,15 @@ async function sharePublishedNewsletter(send) {
       source: 'newsletter',
       customContent,
     });
+
+    if (result?.dryRun) {
+      logger.info(`[content-scheduler] Newsletter social share dry-run for send ${send.id} �� not marking as shared`);
+      await db('newsletter_sends').where('id', send.id).update({
+        social_share_status: 'pending',
+        social_share_attempted_at: null,
+      });
+      return true;
+    }
 
     const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
     const shared = result?.success || platforms.some((p) => p.success);

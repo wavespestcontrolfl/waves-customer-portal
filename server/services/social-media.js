@@ -663,7 +663,7 @@ const SocialMediaService = {
 
         if (SOCIAL_FLAGS.dryRun) {
           logger.info(`[social] DRY RUN — ${p.key}: ${content.substring(0, 120)}...`);
-          platformResults.push({ platform: p.key, success: true, dryRun: true, content });
+          platformResults.push({ platform: p.key, success: false, dryRun: true, content });
           continue;
         }
 
@@ -706,7 +706,7 @@ const SocialMediaService = {
 
         if (SOCIAL_FLAGS.dryRun) {
           logger.info(`[social] DRY RUN — gbp/${loc.name}: ${gbpContent.substring(0, 120)}...`);
-          platformResults.push({ platform: 'gbp', location: loc.id, success: true, dryRun: true, content: gbpContent });
+          platformResults.push({ platform: 'gbp', location: loc.id, success: false, dryRun: true, content: gbpContent });
           continue;
         }
 
@@ -769,6 +769,7 @@ const SocialMediaService = {
 
     return {
       success: platformResults.some(r => r.success),
+      dryRun: SOCIAL_FLAGS.dryRun,
       platforms: platformResults,
     };
   },
@@ -790,7 +791,7 @@ const SocialMediaService = {
 
     if (SOCIAL_FLAGS.dryRun) {
       logger.info(`[social] DRY RUN — postToSingle/${platform}: ${text.substring(0, 120)}...`);
-      return { platform, success: true, dryRun: true, content: text };
+      return { platform, success: false, dryRun: true, content: text };
     }
 
     if (platform === 'facebook') return postToFacebook(text, link);
