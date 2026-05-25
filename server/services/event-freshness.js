@@ -176,7 +176,7 @@ function scoreFreshEvent(event) {
   let score = 0;
 
   // Freshness (35%)
-  score += (event.freshness_score || 50) * 0.35;
+  score += (event.freshness_score ?? 50) * 0.35;
 
   // Date relevance (20%) — events this weekend score highest
   score += dateRelevanceScore(event.start_at) * 0.20;

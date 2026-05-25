@@ -1268,6 +1268,23 @@ router.post('/events/bulk-action', async (req, res, next) => {
       query = query.update(updates);
     }
     const count = await query;
+
+    // Recompute freshness for bulk-featured rows so times_featured
+    // changes are reflected in freshness_status/score
+    if (action === 'feature' && count > 0) {
+      const { classifyFreshness } = require('../services/event-freshness');
+      const featured = await db('events_raw')
+        .select('id', 'event_type', 'times_featured', 'start_at', 'end_at')
+        .whereIn('id', safeIds)
+        .where('admin_status', 'featured');
+      for (const row of featured) {
+        const { freshness_status, freshness_score } = classifyFreshness(row);
+        await db('events_raw').where({ id: row.id }).update({
+          freshness_status, freshness_score,
+        });
+      }
+    }
+
     res.json({ success: true, updated: count });
   } catch (err) { next(err); }
 });
