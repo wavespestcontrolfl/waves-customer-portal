@@ -133,6 +133,18 @@ async function pollPost(post) {
         astro_preview_url: url,
         updated_at: new Date(),
       });
+
+      if (post.astro_status === 'pr_open' && post.publish_status === 'publishing') {
+        try {
+          const { mergeAstro } = require('./astro-publisher');
+          await mergeAstro(post.id);
+          logger.info(`[pages-poll] auto-merged PR for ${post.slug || post.id} (preview build succeeded)`);
+          return { ok: true, url, autoMerged: true };
+        } catch (mergeErr) {
+          logger.warn(`[pages-poll] auto-merge failed for ${post.slug || post.id}: ${mergeErr.message}`);
+        }
+      }
+
       return { ok: true, url };
     }
 
