@@ -13,6 +13,8 @@ const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
 const KnowledgeBridge = require('../services/knowledge-bridge');
 const LawnIntel = require('../services/lawn-intelligence');
+const LawnSnapshot = require('../services/lawn-snapshot');
+const RecommendationEngine = require('../services/lawn-recommendation-engine');
 const { withConcurrency, majorityVote } = require('../services/lawn-photo-merge');
 
 let PhotoService;
@@ -85,6 +87,11 @@ function scoreValue(value, fallback = 0) {
   if (Number.isFinite(n)) return Math.max(0, Math.min(100, Math.round(n)));
   const f = Number(fallback);
   return Number.isFinite(f) ? Math.max(0, Math.min(100, Math.round(f))) : 0;
+}
+
+function customerVisibleForQualityCheck(qualityCheck = {}) {
+  if (!qualityCheck || typeof qualityCheck !== 'object') return true;
+  return qualityCheck.passed !== false;
 }
 
 let hasServiceRecordColumnPromise = null;
@@ -470,7 +477,7 @@ router.post('/assess', async (req, res, next) => {
           quality_score: qualityScore,
           quality_gate_passed: qualityCheck.passed !== false,
           quality_issues: JSON.stringify(qualityCheck.issues || []),
-          customer_visible: true,
+          customer_visible: customerVisibleForQualityCheck(qualityCheck),
           is_best_photo: false,
           taken_at: new Date(),
         }).returning('*');
@@ -613,16 +620,39 @@ router.post('/confirm', async (req, res, next) => {
     // Agronomic Wiki: link only when a durable service_record exists.
     // Assessments captured inside Complete Service are back-linked after
     // completion creates that record.
+    let resolvedServiceRecordId = updated.service_record_id || null;
     try {
       const wiki = require('../services/agronomic-wiki');
       const serviceRecordId = await resolveAssessmentServiceRecordId(updated);
       if (serviceRecordId) {
+        resolvedServiceRecordId = serviceRecordId;
         updated.service_record_id = serviceRecordId;
         const outcome = await wiki.linkTreatmentOutcome(serviceRecordId);
         await attachOutcomePhotoRefs(outcome, assessmentId);
       }
     } catch (wikiErr) {
       logger.error(`[lawn-assessment] Wiki linkTreatmentOutcome failed (non-blocking): ${wikiErr.message}`);
+    }
+
+    // Property Health Snapshot + Smart Recommendation Cards. This is
+    // intentionally isolated from confirmation success: confirmation is the
+    // source-of-truth event, while snapshot generation can be retried by admin.
+    let propertySnapshot = null;
+    let recommendationCards = [];
+    try {
+      propertySnapshot = await LawnSnapshot.buildLawnSnapshot({
+        assessmentId,
+        serviceId: updated.service_id || null,
+        serviceRecordId: resolvedServiceRecordId,
+        generatedBy: req.technician?.role === 'admin' ? 'admin' : 'tech',
+      });
+      recommendationCards = await RecommendationEngine.generateRecommendationCards({
+        snapshotId: propertySnapshot.id,
+        assessmentId,
+        customerId: updated.customer_id,
+      });
+    } catch (snapshotErr) {
+      logger.error(`[lawn-assessment] Snapshot/recommendation generation failed (non-blocking): ${snapshotErr.message}`);
     }
 
     // Knowledge Bridge + Lawn Intelligence: fire all async intelligence (non-blocking)
@@ -660,7 +690,22 @@ router.post('/confirm', async (req, res, next) => {
       }
     });
 
-    res.json({ success: true, assessment: updated });
+    res.json({
+      success: true,
+      assessment: updated,
+      propertySnapshot: propertySnapshot ? {
+        id: propertySnapshot.id,
+        status: propertySnapshot.status,
+        customer_visible: propertySnapshot.customer_visible,
+      } : null,
+      recommendationCards: recommendationCards.map((card) => ({
+        id: card.id,
+        type: card.type,
+        status: card.status,
+        customer_visible: card.customer_visible,
+        requires_human_approval: card.requires_human_approval,
+      })),
+    });
   } catch (err) {
     next(err);
   }
@@ -759,5 +804,10 @@ router.get('/latest/:customerId', async (req, res, next) => {
     next(err);
   }
 });
+
+router._test = {
+  customerVisibleForQualityCheck,
+  normalizeStressFlags,
+};
 
 module.exports = router;
