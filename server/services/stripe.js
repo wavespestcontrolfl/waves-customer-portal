@@ -954,8 +954,13 @@ const StripeService = {
 
         baseAmount = parseFloat(lockedInvoice.total);
         // PI starts at BASE amount only — no surcharge at setup time.
-        // Surcharge is calculated at /quote after PM funding is known,
-        // then applied at /finalize.
+        // Card payments: surcharge is applied via the /quote → /finalize two-step flow.
+        // Express Checkout (wallets): intentionally base-only in phase 1 (no surcharge).
+        // ACH: no surcharge by design.
+        // The legacy setup→confirmPayment→/confirm path charges whatever the PI
+        // amount is at confirm time — if a card payment bypasses /quote+/finalize,
+        // it would charge base-only (under-collect). The PayPageV2 UI prevents
+        // this by routing all card submissions through the two-step flow.
         cardSurcharge = 0;
         cardTotal = baseAmount;
         const baseCents = Math.round(baseAmount * 100);

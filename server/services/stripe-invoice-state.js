@@ -61,11 +61,19 @@ function chargeAmountCents(paymentIntent) {
   return Number(paymentIntent?.amount || 0);
 }
 
-function expectedChargeCents(invoiceBaseAmount, actualMethodType) {
+function expectedChargeCents(invoiceBaseAmount, actualMethodType, paymentIntent) {
   if (!actualMethodType || invoiceBaseAmount === undefined || invoiceBaseAmount === null) return null;
+  // When the PI has metadata with base_amount and card_surcharge, use those
+  // as the source of truth — they reflect what was actually set at charge time
+  // (including surcharge for credit cards, base-only for debit/ACH/express).
+  if (paymentIntent?.metadata?.base_amount != null) {
+    const base = Math.round(Number(paymentIntent.metadata.base_amount) * 100);
+    const surcharge = Math.round(Number(paymentIntent.metadata.card_surcharge || 0) * 100);
+    return base + surcharge;
+  }
   const amount = Number(invoiceBaseAmount);
   if (!Number.isFinite(amount)) return null;
-  return Math.round(computeChargeAmount(amount, actualMethodType).total * 100);
+  return Math.round(amount * 100);
 }
 
 function assertInvoicePaymentIntentTenderMatches(paymentIntent, actualMethodType, invoiceBaseAmount) {
@@ -77,7 +85,7 @@ function assertInvoicePaymentIntentTenderMatches(paymentIntent, actualMethodType
   }
 
   const actualCents = chargeAmountCents(paymentIntent);
-  const expectedCents = expectedChargeCents(invoiceBaseAmount, actualMethodType);
+  const expectedCents = expectedChargeCents(invoiceBaseAmount, actualMethodType, paymentIntent);
   if (expectedCents !== null && actualCents > 0 && Math.abs(actualCents - expectedCents) > 1) {
     throw new Error('Payment amount does not match the selected payment method. Please refresh the invoice and try again.');
   }
