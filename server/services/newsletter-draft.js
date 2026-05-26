@@ -237,7 +237,34 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude did not return JSON');
 
-  const draft = JSON.parse(jsonMatch[0]);
+  let rawJson = jsonMatch[0];
+  // Repair common Claude JSON issues
+  rawJson = rawJson.replace(/,\s*([\]}])/g, '$1');  // trailing commas
+  rawJson = rawJson.replace(/[\x00-\x1F\x7F]/g, (ch) => {  // unescaped control chars
+    if (ch === '\n' || ch === '\r' || ch === '\t') return ch;
+    return '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0');
+  });
+
+  let draft;
+  try {
+    draft = JSON.parse(rawJson);
+  } catch (firstErr) {
+    const logger = require('./logger');
+    logger.warn(`[newsletter-draft] JSON repair: first parse failed (${firstErr.message}), retrying with Claude`);
+    // Ask Claude to fix its own JSON
+    const repairResponse = await anthropic.messages.create({
+      model: MODELS.WORKHORSE,
+      max_tokens: 4000,
+      messages: [
+        { role: 'user', content: `The following JSON has syntax errors. Fix ONLY the JSON syntax (trailing commas, unescaped quotes, etc) and return ONLY the valid JSON. Do not change any content.\n\n${rawJson}` },
+      ],
+    });
+    const repairText = repairResponse.content?.[0]?.text || '';
+    const repairMatch = repairText.match(/\{[\s\S]*\}/);
+    if (!repairMatch) throw firstErr;
+    let repairedJson = repairMatch[0].replace(/,\s*([\]}])/g, '$1');
+    draft = JSON.parse(repairedJson);
+  }
 
   // 5. Run voice validation
   const voiceCheck = validateVoice(
