@@ -7,8 +7,11 @@ const {
   hasConcreteServiceInterest,
   mapServiceInterestToEstimateServices,
 } = require('../services/lead-estimate-automation');
+const leadWebhookRouter = require('../routes/lead-webhook');
 
 describe('lead estimate automation gate', () => {
+  const { buildLeadWebhookIntake } = leadWebhookRouter._test;
+
   test('defaults the automation threshold to medium confidence', () => {
     expect(MIN_AUTOMATION_CONFIDENCE).toBe('medium');
     expect(confidenceMeetsMinimum('medium')).toBe(true);
@@ -166,5 +169,86 @@ describe('lead estimate automation gate', () => {
     });
     expect(draft.monthly).toBeUndefined();
     expect(draft.estimateData.automation.draftEstimateAutomation.status).toBe('manual_review_required');
+  });
+
+  test('prices a realistic wavespestcontrol.com webhook payload into a generated draft', () => {
+    const intake = buildLeadWebhookIntake({
+      firstName: 'maria',
+      lastName: 'garcia',
+      email: 'maria@example.com',
+      phone: '(941) 555-0101',
+      address: '100 Wave Ave, Sarasota, FL 34236',
+      service_interest: 'Mosquito Control',
+      frequency: 'ongoing',
+      page_url: 'https://www.wavespestcontrol.com/mosquito',
+      homeSqFt: 2100,
+      lotSqFt: 9500,
+    });
+    const readiness = evaluateLeadEstimateAutomationReadiness({
+      intake,
+      phone: '+19415550101',
+      serviceInterest: intake.serviceInterest,
+    });
+    const draft = buildAutomatedLeadDraftEstimate({
+      intake,
+      body: { homeSqFt: 2100, lotSqFt: 9500 },
+      readiness,
+    });
+
+    expect(intake.leadSource).toMatchObject({
+      source: 'waves_website',
+      detail: 'mosquito page',
+    });
+    expect(readiness).toMatchObject({
+      ready: true,
+      confidence: 'medium',
+    });
+    expect(draft.automation).toMatchObject({
+      status: 'generated',
+      generated: true,
+    });
+    expect(draft.estimateData).toMatchObject({
+      services: { mosquito: { tier: 'monthly12' } },
+      quoteRequired: false,
+    });
+    expect(draft.monthly).toBeGreaterThan(0);
+  });
+
+  test('spoke-domain termite treatment payload stays draft manual review', () => {
+    const intake = buildLeadWebhookIntake({
+      name: 'Terry Termite',
+      email: 'terry@example.com',
+      phone: '9415550102',
+      address: '200 Colony Rd, Bradenton, FL 34205',
+      domain: 'bradentonflpestcontrol.com',
+      specific_service: 'termite_treatment',
+      frequency: 'one-time',
+      homeSqFt: 1800,
+      lotSqFt: 7200,
+    });
+    const readiness = evaluateLeadEstimateAutomationReadiness({
+      intake,
+      phone: '+19415550102',
+      serviceInterest: intake.serviceInterest,
+    });
+    const draft = buildAutomatedLeadDraftEstimate({
+      intake,
+      body: { homeSqFt: 1800, lotSqFt: 7200 },
+      readiness,
+    });
+
+    expect(intake.leadSource).toMatchObject({
+      source: 'domain_website',
+      detail: 'bradentonflpestcontrol.com',
+      area: 'Bradenton',
+    });
+    expect(intake.serviceInterest).toBe('One-Time Termite Treatment');
+    expect(readiness.ready).toBe(true);
+    expect(draft.automation).toMatchObject({
+      status: 'manual_review_required',
+      generated: false,
+      unsupportedReason: 'termite_treatment_requires_manual_scope',
+    });
+    expect(draft.monthly).toBeUndefined();
   });
 });
