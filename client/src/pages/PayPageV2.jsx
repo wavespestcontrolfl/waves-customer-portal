@@ -423,6 +423,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
         paymentElement.on('change', (event) => {
           if (cancelled) return;
+          // Clear pending surcharge quote on any element change — the customer
+          // may have edited card details, making the old PM stale.
+          setAwaitingConfirm(false);
+          setQuoteData(null);
           setElementError(event.error?.message || null);
           const nextMethod = event.value?.type || null;
           if (nextMethod && nextMethod !== selectedMethodRef.current) {
