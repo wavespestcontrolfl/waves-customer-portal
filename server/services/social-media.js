@@ -327,10 +327,9 @@ async function uploadImageToS3(base64Data, filename) {
     try {
       const sharp = require('sharp');
       buffer = await sharp(buffer).jpeg({ quality: 85 }).toBuffer();
-    } catch {
-      // sharp not available — upload as-is
-      contentType = 'image/png';
-      finalFilename = filename;
+    } catch (sharpErr) {
+      logger.error(`[social] sharp unavailable — cannot convert to JPEG for Instagram: ${sharpErr.message}`);
+      return null;
     }
 
     const key = `social-media/${finalFilename}`;
@@ -598,6 +597,13 @@ const SocialMediaService = {
    * Publish content to all configured platforms.
    */
   async publishToAll({ title, description, link, guid, source, imageUrl, customContent }) {
+    if (!SOCIAL_FLAGS.automationEnabled) {
+      return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
+    }
+    if (await isPausedByAdmin()) {
+      return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] };
+    }
+
     const platformResults = [];
 
     // Only generate an AI image if Instagram can actually consume it.
