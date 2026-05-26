@@ -77,6 +77,15 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
   const oneTime = isOneTimeServiceText(text);
   const recurring = isRecurringServiceText(text);
 
+  if (/\baeration\b|\bplugging\b|\blawn plug\b|\bcore plug\b/.test(text)) {
+    return {
+      services,
+      supported: false,
+      unsupportedReason: 'lawn_aeration_plugging_requires_manual_scope',
+      review,
+    };
+  }
+
   if (/\bpest\b/.test(text) || /\bant\b/.test(text) || /\bcockroach\b/.test(text) || /\broach\b/.test(text)) {
     if (oneTime) {
       services.oneTimePest = {};
