@@ -1794,7 +1794,7 @@ function priceLawnCare(property, options = {}) {
   const tiers = includeHiddenTiers
     ? allTiers
     : allTiers.filter(t => !LAWN_TIERS[t.tier]?.hidden);
-  const selected = allTiers.find(t => t.tier === selectedTier) || allTiers[2];
+  const selected = tiers.find(t => t.tier === selectedTier) || tiers.find(t => t.tier === 'enhanced') || tiers[0];
   const monthly = selected.monthly;
   const annual = selected.annual;
   const perApp = selected.perApp;

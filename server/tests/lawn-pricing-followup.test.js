@@ -547,6 +547,17 @@ describe('lawn pricing production follow-up', () => {
     expect(zoysia.selected.perApp).toBeLessThanOrEqual(120);
   });
 
+  test('requesting hidden tier without includeHiddenTiers falls back to enhanced', () => {
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
+    const lawn = priceLawnCare(property, {
+      track: 'st_augustine', tier: 'basic', lawnFreq: 4,
+    });
+
+    expect(lawn.tiers).toHaveLength(3);
+    expect(lawn.tiers.map(t => t.tier)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(lawn.selected.tier).toBe('enhanced');
+  });
+
   test('useLawnCostFloor defaults to true for recurring lawn', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
