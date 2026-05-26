@@ -598,7 +598,7 @@ function LawnHealthCard({ scores, initialScores, photos, beforeAfter, trend, rec
             </div>
           ) : (
             <div style={{ fontSize: 12, color: B.grayMid, marginTop: 4 }}>
-              Your lawn's journey since starting the premium program.
+              Your lawn's journey since starting the program.
             </div>
           )}
           {overallDelta !== 0 && (
@@ -5490,8 +5490,8 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'lawn_care', name: 'Lawn Care Program', icon: 'sprout',
-    frequencies: ['4x per year', '6x per year', '9x per year', '12x per year'],
-    basePrice: 65, description: 'Fertilization, weed control, fungicide treatments, soil testing, thatch monitoring',
+    frequencies: ['4 Apps', '6 Apps', '9 Apps', '12 Apps'],
+    basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, soil testing, thatch monitoring',
     products: ['Prodiamine 65 WDG', 'Celsius WG', '16-4-8 + Micros', 'Headway G'],
   },
   {

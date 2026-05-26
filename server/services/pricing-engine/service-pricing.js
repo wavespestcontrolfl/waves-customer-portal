@@ -1749,7 +1749,7 @@ function priceLawnCare(property, options = {}) {
 
   const annualCost = scaledMaterial + annualLabor + GLOBAL.ADMIN_ANNUAL;
 
-  // ── Tier array: basic / standard / enhanced / premium pre-priced ──
+  // ── Tier array: 4 Apps / 6 Apps / 9 Apps / 12 Apps ──
   const TIER_LIST = ['basic', 'standard', 'enhanced', 'premium'];
   const tiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
@@ -1768,7 +1768,7 @@ function priceLawnCare(property, options = {}) {
       perApp: Math.round(ann / tc.freq * 100) / 100,
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
-      label: `${t.charAt(0).toUpperCase()}${t.slice(1)} (${tc.freq}/yr)`,
+      label: tc.label || `${tc.freq} Apps`,
       recommended: t === selectedTier,
       pricingBasis: market.pricingBasis,
       pricingSource: costFloorApplied ? 'COST_FLOOR' : market.pricingSource,
