@@ -1623,7 +1623,7 @@ function RegistryTab({ showToast }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await adminFetch("/admin/inventory?perPage=500");
+      const data = await adminFetch("/admin/inventory?limit=500");
       setProducts(data.products || []);
     } catch {
       setProducts([]);
