@@ -479,17 +479,26 @@ class GoogleBusinessService {
           logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
         });
 
+        let usedGbp = false;
         if (loc.googleLocationResourceName && await this._getClient(loc.id)) {
-          const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id, 100);
-          for (const review of reviews) {
-            const normalized = this._normalizeGbpReview(review, loc);
-            const result = await this._upsertGbpReview(normalized);
-            if (result.inserted) totalNew++;
-            totalSynced++;
+          try {
+            const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id, 100);
+            for (const review of reviews) {
+              const normalized = this._normalizeGbpReview(review, loc);
+              const result = await this._upsertGbpReview(normalized);
+              if (result.inserted) totalNew++;
+              totalSynced++;
+            }
+            sources[loc.id] = 'gbp';
+            usedGbp = true;
+            logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
+          } catch (gbpErr) {
+            errors.push({ location: loc.name, error: gbpErr.message, source: 'gbp' });
+            logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpErr.message}`);
           }
-          sources[loc.id] = 'gbp';
-          logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
-        } else {
+        }
+
+        if (!usedGbp) {
           const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY);
           totalSynced += sample.synced;
           totalNew += sample.new;
