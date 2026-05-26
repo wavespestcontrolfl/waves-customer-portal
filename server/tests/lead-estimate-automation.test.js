@@ -92,6 +92,20 @@ describe('lead estimate automation gate', () => {
     });
   });
 
+  test('keeps lawn aeration and plugging out of automated estimate generation', () => {
+    expect(mapServiceInterestToEstimateServices('Lawn Aeration & Plugging')).toMatchObject({
+      supported: false,
+      services: {},
+      unsupportedReason: 'lawn_aeration_plugging_requires_manual_scope',
+    });
+
+    expect(mapServiceInterestToEstimateServices('Recurring Lawn Care + Core Plugging')).toMatchObject({
+      supported: false,
+      services: {},
+      unsupportedReason: 'lawn_aeration_plugging_requires_manual_scope',
+    });
+  });
+
   test('generates draft estimate data for a ready lead without sending it', () => {
     const readiness = evaluateLeadEstimateAutomationReadiness({
       phone: '+19415550199',
