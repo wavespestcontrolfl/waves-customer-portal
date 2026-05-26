@@ -1486,15 +1486,17 @@ const StripeService = {
         // Don't block (payment already succeeded at Stripe), but check if it's
         // a credit card that should have been surcharged.
         let pmFunding = null;
+        let isWalletPM = false;
         try {
           const pmId = typeof pi.payment_method === 'string' ? pi.payment_method : pi.payment_method?.id;
           if (pmId) {
             const pmObj = await stripe.paymentMethods.retrieve(pmId);
             pmFunding = pmObj.card?.funding || null;
+            isWalletPM = !!pmObj.card?.wallet;
           }
         } catch { /* non-fatal — PM may be detached */ }
 
-        if (pmFunding === 'credit') {
+        if (pmFunding === 'credit' && !isWalletPM) {
           logger.error(
             `[stripe] Card payment on PI ${paymentIntentId} bypassed /finalize. ` +
             `Invoice ${invoice.invoice_number}. Blocking confirm — customer must use /quote+/finalize.`,
@@ -1517,6 +1519,11 @@ const StripeService = {
           const err = new Error('Payment requires surcharge finalization. Please refresh and try again.');
           err.code = 'SURCHARGE_NOT_FINALIZED';
           throw err;
+        } else if (pmFunding === 'credit' && isWalletPM) {
+          logger.info(
+            `[stripe] Wallet credit card on PI ${paymentIntentId} confirmed at base-only ` +
+            `(Express Checkout, phase 1). Invoice ${invoice.invoice_number}.`,
+          );
         } else {
           logger.info(
             `[stripe] Non-credit card (${pmFunding || 'unknown'}) on PI ${paymentIntentId} ` +
@@ -1551,16 +1558,18 @@ const StripeService = {
         let expectedSurcharge = metaSurcharge;
         if (metaSurcharge === 0 && pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach') {
           let pmFunding = pi.metadata?.card_funding || null;
+          let isWalletBypass = false;
           if (!pmFunding) {
             try {
               const pmId = typeof pi.payment_method === 'string' ? pi.payment_method : pi.payment_method?.id;
               if (pmId) {
                 const pmObj = await stripe.paymentMethods.retrieve(pmId);
                 pmFunding = pmObj.card?.funding || null;
+                isWalletBypass = !!pmObj.card?.wallet;
               }
             } catch { /* non-fatal */ }
           }
-          if (pmFunding === 'credit') {
+          if (pmFunding === 'credit' && !isWalletBypass) {
             const { computeSurchargeCents } = require('./stripe-pricing');
             expectedSurcharge = computeSurchargeCents(metaBase);
           }
