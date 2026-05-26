@@ -18,6 +18,70 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const PushService = require('./push-notifications');
 
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const PHONE_CANDIDATE_RE = /\+?\d[\d\s().-]{6,}\d/g;
+const STREET_ADDRESS_RE = /\b\d{1,6}\s+[A-Za-z0-9 .'-]+?\s(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Court|Ct|Circle|Cir|Boulevard|Blvd|Trail|Trl|Terrace|Ter|Place|Pl|Parkway|Pkwy|Way)\b/gi;
+const SENSITIVE_TEXT_KEY_RE = /(message|body|note|reason|summary|text|description|title)/i;
+
+function maskPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (digits.length < 4) return 'unknown';
+  return `***${digits.slice(-4)}`;
+}
+
+function maskEmail(value) {
+  const text = String(value || '').trim();
+  const [local, domain] = text.split('@');
+  if (!local || !domain) return '[email]';
+  return `${local.slice(0, 1)}***@${domain.toLowerCase()}`;
+}
+
+function redactPhoneCandidate(match) {
+  const digits = String(match || '').replace(/\D/g, '');
+  return digits.length >= 10 ? maskPhone(match) : match;
+}
+
+function redactSensitiveText(value) {
+  if (value === null || value === undefined) return value;
+  return String(value)
+    .replace(EMAIL_RE, (match) => maskEmail(match))
+    .replace(STREET_ADDRESS_RE, '[address]')
+    .replace(PHONE_CANDIDATE_RE, redactPhoneCandidate);
+}
+
+function sanitizeNotificationValue(value, key = '') {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map((item) => sanitizeNotificationValue(item, key));
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, entryValue]) => [
+        entryKey,
+        sanitizeNotificationValue(entryValue, entryKey),
+      ])
+    );
+  }
+  if (typeof value !== 'string') return value;
+
+  if (/phone/i.test(key)) return maskPhone(value);
+  if (/email/i.test(key)) return maskEmail(value);
+  if (/address/i.test(key)) return '[address]';
+  if (SENSITIVE_TEXT_KEY_RE.test(key)) return redactSensitiveText(value).slice(0, 1500);
+  return redactSensitiveText(value);
+}
+
+function sanitizeNotificationPayload(_triggerKey, payload = {}) {
+  return sanitizeNotificationValue(payload);
+}
+
+function sanitizeBuiltNotification(built = {}) {
+  return {
+    ...built,
+    title: redactSensitiveText(built.title || 'Notification'),
+    body: built.body === null || built.body === undefined ? built.body : redactSensitiveText(built.body),
+  };
+}
+
 // priority: 'urgent' (red, double vibrate), 'high' (amber), 'normal' (teal), 'low' (gray)
 const TRIGGER_REGISTRY = {
   new_lead: {
@@ -29,8 +93,8 @@ const TRIGGER_REGISTRY = {
       const bodyParts = [
         `${p.name || 'A prospect'}${p.source ? ' via ' + p.source : ''}${p.area ? ' (' + p.area + ')' : p.zip ? ' (' + p.zip + ')' : ''}`,
       ];
-      if (p.phone) bodyParts.push(p.phone);
-      if (p.message) bodyParts.push(`"${String(p.message).slice(0, 140)}"`);
+      if (p.phone) bodyParts.push(`Phone: ${maskPhone(p.phone)}`);
+      if (p.message) bodyParts.push('Message included on lead record');
       return {
         title: p.title || 'New lead',
         body: bodyParts.join(' - '),
@@ -44,8 +108,8 @@ const TRIGGER_REGISTRY = {
     priority: 'high',
     group: 'Communication',
     build: (p) => ({
-      title: `SMS from ${p.fromName || p.fromPhone || 'unknown'}`,
-      body: (p.message || '').slice(0, 140),
+      title: `SMS from ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
+      body: redactSensitiveText(p.message || '').slice(0, 140),
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
@@ -304,7 +368,8 @@ async function triggerNotification(triggerKey, payload = {}) {
       return;
     }
 
-    const built = trigger.build(payload);
+    const built = sanitizeBuiltNotification(trigger.build(payload));
+    const safePayload = sanitizeNotificationPayload(triggerKey, payload);
 
     // Load per-user preferences (default to enabled if no row exists)
     let prefs = [];
@@ -335,7 +400,7 @@ async function triggerNotification(triggerKey, payload = {}) {
             trigger.category,
             built.title,
             built.body,
-            { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload } }
+            { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload } }
           );
           bellWritten = true;
         } catch (e) {
@@ -396,4 +461,16 @@ function listTriggers() {
   }));
 }
 
-module.exports = { triggerNotification, listTriggers, TRIGGER_REGISTRY, __private: { pushTagFor } };
+module.exports = {
+  triggerNotification,
+  listTriggers,
+  TRIGGER_REGISTRY,
+  __private: {
+    maskEmail,
+    maskPhone,
+    pushTagFor,
+    redactSensitiveText,
+    sanitizeBuiltNotification,
+    sanitizeNotificationPayload,
+  },
+};
