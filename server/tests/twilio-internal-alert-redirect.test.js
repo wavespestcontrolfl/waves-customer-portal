@@ -82,7 +82,7 @@ describe('Twilio internal admin alert redirect', () => {
     }));
   });
 
-  test('falls back to Twilio SMS when notification redirect does not deliver', async () => {
+  test('suppresses owner SMS fallback when notification redirect does not deliver', async () => {
     triggerNotification.mockResolvedValueOnce({
       bellWritten: false,
       push: { subscriptions: 0, sent: 0, failed: 0, skipped: 0 },
@@ -96,12 +96,31 @@ describe('Twilio internal admin alert redirect', () => {
 
     expect(result).toMatchObject({
       success: true,
-      sid: 'SM_fallback',
+      sid: 'internal-admin-notification-undelivered',
+      suppressed: true,
+      notificationRedirected: false,
+      notificationUndelivered: true,
     });
-    expect(mockTwilioCreate).toHaveBeenCalledWith(expect.objectContaining({
-      to: '+19415993489',
-      body: 'New lead fallback path',
-    }));
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+  });
+
+  test('suppresses owner SMS fallback when notification redirect throws', async () => {
+    triggerNotification.mockRejectedValueOnce(new Error('notification table unavailable'));
+
+    const result = await TwilioService.sendSMS(
+      '+19415993489',
+      'New lead exception path',
+      { messageType: 'internal_alert', link: '/admin/leads' },
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      sid: 'internal-admin-notification-error',
+      suppressed: true,
+      notificationRedirected: false,
+      notificationError: true,
+    });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 
   test('blocks internal_alert SMS to unknown recipients by default', async () => {
