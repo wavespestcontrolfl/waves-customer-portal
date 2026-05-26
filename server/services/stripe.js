@@ -1241,13 +1241,21 @@ const StripeService = {
       throw new Error('Invoice has no active PaymentIntent');
     }
 
-    const { baseCents, surchargeCents, totalCents, rateBps, policyVersion, funding, methodType, paymentMethodId } = quote;
+    // Re-derive charge from PM + invoice — never trust client-provided amounts
+    const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
+    const funding = pm.card?.funding || null;
+    const baseAmount = parseFloat(invoice.total);
+    const chargeInfo = computeChargeAmount(baseAmount, pm.type || 'card', { funding });
+    const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
+
     const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
+    const usePreview = !!surchargeDetails;
     const saveCard = !!opts.saveCard;
 
-    // Update PI with final amount (base + surcharge) and confirm
+    // Update PI with final amount, attach PM, then confirm server-side
     const updateParams = {
       amount: totalCents,
+      payment_method: quote.paymentMethodId,
       metadata: {
         waves_invoice_id: invoiceId,
         invoice_number: invoice.invoice_number,
@@ -1263,16 +1271,32 @@ const StripeService = {
 
     if (surchargeDetails) updateParams.amount_details = surchargeDetails;
 
+    if (saveCard && invoice.customer_id) {
+      updateParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
+      updateParams.setup_future_usage = 'off_session';
+    }
+
     try {
-      const paymentIntent = await stripe.paymentIntents.update(
+      await stripe.paymentIntents.update(
         invoice.stripe_payment_intent_id,
         updateParams,
-        surchargeDetails ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+        usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
       );
 
+      // Confirm the PI server-side (attaches PM + charges the card)
+      const confirmed = await stripe.paymentIntents.confirm(
+        invoice.stripe_payment_intent_id,
+        {},
+        usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+      );
+
+      logger.info(`[stripe] Finalized invoice ${invoice.invoice_number}: funding=${funding} surcharge=${surchargeCents}c total=${totalCents}c PI=${confirmed.id} status=${confirmed.status}`);
+
       return {
-        paymentIntentId: paymentIntent.id,
-        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: confirmed.id,
+        clientSecret: confirmed.client_secret,
+        status: confirmed.status,
+        requiresAction: confirmed.status === 'requires_action',
         base: baseCents / 100,
         surcharge: surchargeCents / 100,
         total: totalCents / 100,
