@@ -264,7 +264,7 @@ export function pickAutoScheduleEstimate({
   return { estimate, key };
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, onClose, onCreated }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
 
@@ -406,6 +406,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // recurring cadence group on this appointment, matching the prior
   // single-form-level count semantics.
   const [recurringCount, setRecurringCount] = useState('');
+  const [collectPrepay, setCollectPrepay] = useState(false);
+  const [prepayMethod, setPrepayMethod] = useState('cash');
+  const [prepayNote, setPrepayNote] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
@@ -548,6 +551,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     applyScheduleEstimate(auto.estimate.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
+
+  const defaultEstimateAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!defaultEstimateId || defaultEstimateAppliedRef.current) return;
+    if (scheduleEstimatesLoading || !scheduleEstimates.length) return;
+    const match = scheduleEstimates.find(e => String(e.id) === String(defaultEstimateId));
+    if (!match) return;
+    defaultEstimateAppliedRef.current = true;
+    applyScheduleEstimate(match.id);
+  }, [defaultEstimateId, scheduleEstimates, scheduleEstimatesLoading]);
+
   const formatDiscountLabel = (d) => {
     if (!d) return '';
     if (d.discount_type === 'free_service') return 'Free';
@@ -965,6 +979,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             : undefined,
           createInvoice: true,
           sendConfirmation: sendSms,
+          prepaid: collectPrepay && isRecurring ? {
+            totalAmount: services.reduce((sum, s) => sum + Number(s.price || 0), 0) * (hasFiniteRecurringCount ? parsedRecurringCount : 4),
+            method: prepayMethod,
+            note: prepayNote || undefined,
+          } : undefined,
         };
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
@@ -993,6 +1012,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setTimeout(() => {
       createdGroupKeysRef.current = new Set();
       onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
+      onChange?.({ id: results[0]?.id, scheduledDate: apptDate });
     }, 1200);
   };
 
@@ -1683,6 +1703,55 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           )}
         </div>
+
+        {/* Prepaid collection toggle */}
+        {hasRecurringServices && (() => {
+          const parsedCount = Number.parseInt(recurringCount, 10);
+          const finiteCount = Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : 0;
+          if (!finiteCount) return null;
+          const perVisit = services.reduce((sum, s) => sum + Number(s.price || 0), 0);
+          const total = perVisit * finiteCount;
+          return (
+            <div style={{ ...sectionStyle, background: collectPrepay ? '#F0FDF4' : undefined, border: collectPrepay ? '1px solid #BBF7D0' : undefined, borderRadius: 8, padding: collectPrepay ? 14 : undefined }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input type="checkbox" checked={collectPrepay} onChange={(e) => setCollectPrepay(e.target.checked)} />
+                <span style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Collect prepayment</span>
+              </label>
+              {collectPrepay && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 13, color: '#52525B', marginBottom: 8 }}>
+                    {finiteCount} visits &times; ${perVisit.toFixed(2)} = <strong>${total.toFixed(2)}</strong>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                    {['cash', 'check', 'card', 'other'].map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setPrepayMethod(m)}
+                        style={{
+                          padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                          border: prepayMethod === m ? '1.5px solid #166534' : '1px solid #D4D4D8',
+                          background: prepayMethod === m ? '#DCFCE7' : '#fff',
+                          color: prepayMethod === m ? '#166534' : '#52525B',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {m.charAt(0).toUpperCase() + m.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Note (optional)"
+                    value={prepayNote}
+                    onChange={(e) => setPrepayNote(e.target.value)}
+                    style={{ width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid #D4D4D8', fontSize: 13 }}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Section 3: Date */}
         <div style={sectionStyle}>

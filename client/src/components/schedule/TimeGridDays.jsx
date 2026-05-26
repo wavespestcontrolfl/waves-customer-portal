@@ -217,22 +217,31 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
           return min == null ? '' : minutesToLabel(min);
         })()}
       </div>
-      <button
-        type="button"
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation();
-          const customerId = service.customerId || service.customer_id;
-          if (customerId) onViewCustomer?.(service);
-        }}
-        className={cn(
-          'block w-full text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
-          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            const customerId = service.customerId || service.customer_id;
+            if (customerId) onViewCustomer?.(service);
+          }}
+          className={cn(
+            'text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+            'text-inherit bg-transparent border-0 p-0 cursor-pointer'
+          )}
+          title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
+        >
+          {service.customerName || 'Unassigned'}
+        </button>
+        {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && height >= SLOT_HEIGHT * 2 && (
+          <span
+            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
+            style={{ height: 14, padding: '0 5px', background: '#DCFCE7', color: '#166534', fontSize: 9 }}
+            title="Prepaid"
+          >$</span>
         )}
-        title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
-      >
-        {service.customerName || 'Unassigned'}
-      </button>
+      </div>
       {isLawnService(service) && onTreatmentPlan && (
         <button
           type="button"
@@ -482,22 +491,31 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer }
       <div className="u-nums text-10 opacity-90 mb-0.5">
         {dayLabel} · {timeLabel}
       </div>
-      <button
-        type="button"
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation();
-          const customerId = service.customerId || service.customer_id;
-          if (customerId) onViewCustomer?.(service);
-        }}
-        className={cn(
-          'block w-full text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
-          'text-inherit bg-transparent border-0 p-0 cursor-pointer'
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            const customerId = service.customerId || service.customer_id;
+            if (customerId) onViewCustomer?.(service);
+          }}
+          className={cn(
+            'text-left text-11 leading-tight font-semibold truncate u-focus-ring rounded-[3px]',
+            'text-inherit bg-transparent border-0 p-0 cursor-pointer'
+          )}
+          title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
+        >
+          {service.customerName || 'Unassigned'}
+        </button>
+        {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
+          <span
+            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
+            style={{ height: 14, padding: '0 5px', background: '#DCFCE7', color: '#166534', fontSize: 9 }}
+            title="Prepaid"
+          >$</span>
         )}
-        title={(service.customerId || service.customer_id) ? 'Open customer profile' : undefined}
-      >
-        {service.customerName || 'Unassigned'}
-      </button>
+      </div>
       {serviceDisplayName(service) && (
         <div className="truncate opacity-90">{serviceDisplayName(service)}</div>
       )}

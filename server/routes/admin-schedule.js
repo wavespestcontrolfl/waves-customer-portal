@@ -1028,6 +1028,7 @@ router.get('/', async (req, res, next) => {
         recurringIntervalDays: s.recurring_interval_days ?? null,
         skipWeekends: !!s.skip_weekends,
         weekendShift: s.weekend_shift || null,
+        sourceEstimateId: s.source_estimate_id || null,
       };
     }));
 
@@ -1129,6 +1130,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.recurring_interval_days',
           'scheduled_services.skip_weekends',
           'scheduled_services.weekend_shift',
+          'scheduled_services.source_estimate_id',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
           'customers.autopay_payment_method_id',
@@ -1201,6 +1203,7 @@ router.get('/week', async (req, res, next) => {
           recurringIntervalDays: s.recurring_interval_days ?? null,
           skipWeekends: !!s.skip_weekends,
           weekendShift: s.weekend_shift || null,
+          sourceEstimateId: s.source_estimate_id || null,
         };
       }));
 
@@ -1262,6 +1265,8 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.recurring_interval_days',
         'scheduled_services.skip_weekends',
         'scheduled_services.weekend_shift',
+        'scheduled_services.source_estimate_id',
+        'scheduled_services.prepaid_amount',
         'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
         'customers.city', 'customers.zip',
         'technicians.name as tech_name'
@@ -1306,6 +1311,8 @@ router.get('/month', async (req, res, next) => {
         recurringIntervalDays: s.recurring_interval_days ?? null,
         skipWeekends: !!s.skip_weekends,
         weekendShift: s.weekend_shift || null,
+        sourceEstimateId: s.source_estimate_id || null,
+        prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       });
     });
 
@@ -1724,7 +1731,211 @@ router.post('/', requireAdmin, async (req, res, next) => {
       logger.error(`[schedule] dispatch board create broadcast failed: ${e.message}`);
     }
 
+    if (req.body.prepaid && isRecurring) {
+      try {
+        const { totalAmount, method, note } = req.body.prepaid;
+        if (totalAmount > 0) {
+          await stampSeriesPrepaid(db, {
+            anchorServiceId: svc.id,
+            totalAmount: Number(totalAmount),
+            method: method || 'cash',
+            note: note || null,
+          });
+        }
+      } catch (e) { logger.error(`[schedule] prepaid stamp failed (non-blocking): ${e.message}`); }
+    }
+
     res.status(201).json({ id: svc.id, recurringCreated: isRecurring ? (recurringCount || 4) : 1 });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/list — paginated list view with filters
+router.get('/list', async (req, res, next) => {
+  try {
+    const {
+      from, to, status, techId, serviceType, prepaid, search,
+      page: pageParam, limit: limitParam,
+    } = req.query;
+    const page = Math.max(1, parseInt(pageParam) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(limitParam) || 25));
+    const offset = (page - 1) * limit;
+
+    let q = db('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id');
+
+    // Date range — default: today forward
+    const dateFrom = from || etDateString();
+    q = q.where('scheduled_services.scheduled_date', '>=', dateFrom);
+    if (to) q = q.where('scheduled_services.scheduled_date', '<=', to);
+
+    // Status filter — default: exclude cancelled/rescheduled
+    if (status && status !== 'all') {
+      q = q.where('scheduled_services.status', status);
+    } else if (!status) {
+      q = q.whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled']);
+    }
+
+    // Tech filter (support "unassigned")
+    if (techId === 'unassigned') {
+      q = q.whereNull('scheduled_services.technician_id');
+    } else if (techId) {
+      q = q.where('scheduled_services.technician_id', techId);
+    }
+
+    // Service type filter
+    if (serviceType) {
+      q = q.where('scheduled_services.service_type', 'ILIKE', `%${serviceType}%`);
+    }
+
+    // Prepaid filter
+    if (prepaid === 'true') {
+      q = q.whereNotNull('scheduled_services.prepaid_amount').where('scheduled_services.prepaid_amount', '>', 0);
+    } else if (prepaid === 'false') {
+      q = q.where(function () {
+        this.whereNull('scheduled_services.prepaid_amount').orWhere('scheduled_services.prepaid_amount', '<=', 0);
+      });
+    }
+
+    // Search (customer name or service type)
+    if (search) {
+      const term = `%${search}%`;
+      q = q.where(function () {
+        this.whereRaw("CONCAT(customers.first_name, ' ', customers.last_name) ILIKE ?", [term])
+          .orWhere('scheduled_services.service_type', 'ILIKE', term);
+      });
+    }
+
+    // Count total before pagination
+    const countQ = q.clone().clearSelect().clearOrder().count('scheduled_services.id as cnt').first();
+    const totalResult = await countQ;
+    const total = parseInt(totalResult?.cnt || 0);
+
+    // Select fields + paginate
+    const services = await q
+      .select(
+        'scheduled_services.id', 'scheduled_services.customer_id',
+        'scheduled_services.scheduled_date', 'scheduled_services.service_type',
+        'scheduled_services.status', 'scheduled_services.window_start', 'scheduled_services.window_end',
+        'scheduled_services.estimated_duration_minutes', 'scheduled_services.estimated_price',
+        'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
+        'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
+        'scheduled_services.is_recurring', 'scheduled_services.recurring_pattern',
+        'scheduled_services.source_estimate_id',
+        'customers.first_name', 'customers.last_name', 'customers.address', 'customers.city', 'customers.zip',
+        'technicians.name as tech_name'
+      )
+      .orderBy('scheduled_services.scheduled_date')
+      .orderByRaw('COALESCE(scheduled_services.route_order, 999)')
+      .limit(limit)
+      .offset(offset);
+
+    const mapped = services.map(s => ({
+      id: s.id,
+      customerId: s.customer_id,
+      customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
+      scheduledDate: s.scheduled_date instanceof Date ? s.scheduled_date.toISOString().split('T')[0] : String(s.scheduled_date).split('T')[0],
+      serviceType: normalizeServiceType(s.service_type),
+      status: s.status,
+      windowStart: s.window_start,
+      windowEnd: s.window_end,
+      duration: s.estimated_duration_minutes || 30,
+      price: s.estimated_price != null ? Number(s.estimated_price) : null,
+      prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
+      prepaidMethod: s.prepaid_method || null,
+      prepaidAt: s.prepaid_at || null,
+      technicianId: s.technician_id,
+      technicianName: s.tech_name,
+      zone: s.zone || getZone(s.city, s.zip),
+      address: s.address || null,
+      city: s.city || null,
+      isRecurring: s.is_recurring,
+      recurringPattern: s.recurring_pattern || null,
+      sourceEstimateId: s.source_estimate_id || null,
+    }));
+
+    res.json({
+      services: mapped,
+      total,
+      page,
+      pageSize: limit,
+      totalPages: Math.ceil(total / limit),
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/bulk-action — batch operations on services
+router.post('/bulk-action', requireAdmin, async (req, res, next) => {
+  try {
+    const { action, serviceIds, payload } = req.body;
+    if (!action || !Array.isArray(serviceIds) || serviceIds.length === 0) {
+      return res.status(400).json({ error: 'action and serviceIds[] required' });
+    }
+    if (serviceIds.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 service IDs per bulk action' });
+    }
+    const validActions = ['reassign', 'reschedule', 'cancel', 'mark_prepaid'];
+    if (!validActions.includes(action)) {
+      return res.status(400).json({ error: `Invalid action. Must be one of: ${validActions.join(', ')}` });
+    }
+
+    const updated = [];
+    const failed = [];
+
+    await db.transaction(async (trx) => {
+      for (const id of serviceIds) {
+        try {
+          const svc = await trx('scheduled_services').where({ id }).first();
+          if (!svc) { failed.push({ id, reason: 'not found' }); continue; }
+
+          switch (action) {
+            case 'reassign': {
+              const techId = payload?.technicianId || null;
+              await trx('scheduled_services').where({ id }).update({ technician_id: techId });
+              updated.push(id);
+              break;
+            }
+            case 'reschedule': {
+              const updates = { scheduled_date: payload?.scheduledDate };
+              if (payload?.windowStart) updates.window_start = payload.windowStart;
+              if (payload?.windowEnd) updates.window_end = payload.windowEnd;
+              if (!updates.scheduled_date) { failed.push({ id, reason: 'scheduledDate required' }); continue; }
+              await trx('scheduled_services').where({ id }).update(updates);
+              updated.push(id);
+              break;
+            }
+            case 'cancel': {
+              await trx('scheduled_services').where({ id }).update({ status: 'cancelled' });
+              updated.push(id);
+              break;
+            }
+            case 'mark_prepaid': {
+              const amt = Number(payload?.totalAmount || 0);
+              if (amt <= 0) { failed.push({ id, reason: 'totalAmount must be > 0' }); continue; }
+              await trx('scheduled_services').where({ id }).update({
+                prepaid_amount: amt,
+                prepaid_method: payload?.method || 'cash',
+                prepaid_note: payload?.note || null,
+                prepaid_at: new Date(),
+              });
+              updated.push(id);
+              break;
+            }
+          }
+        } catch (e) {
+          failed.push({ id, reason: e.message });
+        }
+      }
+    });
+
+    res.json({
+      success: true,
+      action,
+      updatedCount: updated.length,
+      failedCount: failed.length,
+      updated,
+      failed,
+    });
   } catch (err) { next(err); }
 });
 
@@ -3172,6 +3383,32 @@ router.get('/:id/wdo-brief', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!svc.pre_service_brief) return res.json({ brief: null });
     res.json({ brief: typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/:id/estimate-source
+router.get('/:id/estimate-source', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .first('source_estimate_id');
+    if (!svc || !svc.source_estimate_id) return res.json({ linked: false });
+    const est = await db('estimates')
+      .where({ id: svc.source_estimate_id })
+      .first('id', 'token', 'monthly_total', 'annual_total', 'onetime_total', 'created_at', 'status');
+    if (!est) return res.json({ linked: false });
+    const quotedTotal = Number(est.monthly_total || 0) + Number(est.onetime_total || 0);
+    res.json({
+      linked: true,
+      estimateId: est.id,
+      estimateToken: est.token,
+      quotedTotal,
+      monthlyTotal: Number(est.monthly_total || 0),
+      annualTotal: Number(est.annual_total || 0),
+      onetimeTotal: Number(est.onetime_total || 0),
+      estimateStatus: est.status,
+      createdAt: est.created_at,
+    });
   } catch (err) { next(err); }
 });
 
