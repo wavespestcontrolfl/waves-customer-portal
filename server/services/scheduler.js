@@ -677,6 +677,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MINUTES — Auto-send generated lead-webhook estimates.
+  // Production gate defaults OFF. When enabled, this rechecks eligibility after
+  // the configured delay and then uses the same sendEstimateNow path as manual
+  // and scheduled sends.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    if (!isEnabled('leadEstimateAutoSend')) return;
+    try {
+      const {
+        leadEstimateAutoSendConfigFromEnv,
+        processLeadEstimateAutoSendBatch,
+      } = require('./lead-estimate-auto-send');
+      const result = await processLeadEstimateAutoSendBatch({
+        config: leadEstimateAutoSendConfigFromEnv(),
+      });
+      if (result.scanned || result.sent || result.blocked || result.failed || result.recovered || result.staleBlocked) {
+        logger.info(`[lead-estimate-auto-send] scanned=${result.scanned} sent=${result.sent} blocked=${result.blocked} failed=${result.failed} skipped=${result.skipped} recovered=${result.recovered} staleBlocked=${result.staleBlocked}`);
+      }
+    } catch (err) {
+      logger.error(`Lead estimate auto-send cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MINUTES — Send scheduled invoices whose time has arrived
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
