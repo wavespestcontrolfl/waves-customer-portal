@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   CheckCircle2,
+  ClipboardList,
   FileText,
   Package,
   Percent,
@@ -136,6 +137,7 @@ export default function InventoryPage() {
           : "Approvals",
       Icon: CheckCircle2,
     },
+    { key: "registry", label: "Registry", Icon: ClipboardList },
     { key: "protocols", label: "Protocols", Icon: FileText },
     { key: "margins", label: "Service Margins", Icon: Percent },
     { key: "scrape", label: "Scrape Health", Icon: ShieldCheck },
@@ -151,7 +153,7 @@ export default function InventoryPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Inventory section"
-        navGridClassName="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
+        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
         action={
           tab === "products"
             ? {
@@ -268,6 +270,7 @@ export default function InventoryPage() {
           setShowAddForm={setShowAddForm}
         />
       )}
+      {tab === "registry" && <RegistryTab showToast={showToast} />}
       {tab === "vendors" && <VendorsTab showToast={showToast} />}
       {tab === "approvals" && (
         <ApprovalsTab showToast={showToast} onUpdate={loadStats} />
@@ -1591,6 +1594,216 @@ function ExpandedProduct({
           )}
         </div>{" "}
       </div>{" "}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// REGISTRY TAB — Customer-facing content & visibility
+// ══════════════════════════════════════════════════════════════
+const VISIBILITY_OPTIONS = [
+  { value: "internal_only", label: "Internal Only", color: D.muted },
+  { value: "portal_only", label: "Portal", color: D.teal },
+  { value: "public", label: "Public", color: D.green },
+];
+const STATUS_OPTIONS = [
+  { value: "draft", label: "Draft", color: D.muted },
+  { value: "approved_for_portal", label: "Approved (Portal)", color: D.teal },
+  { value: "approved_for_public", label: "Approved (Public)", color: D.green },
+  { value: "retired", label: "Retired", color: D.red },
+];
+
+function RegistryTab({ showToast }) {
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({});
+  const [filter, setFilter] = useState("all");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await adminFetch("/admin/inventory?perPage=500");
+      setProducts(data.products || []);
+    } catch {
+      setProducts([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const startEdit = (p) => {
+    setEditing(p.id);
+    setForm({
+      customerVisibility: p.customerVisibility || "internal_only",
+      contentStatus: p.contentStatus || "draft",
+      commonName: p.commonName || "",
+      publicSummary: p.publicSummary || "",
+      portalSummary: p.portalSummary || "",
+      customerSafetySummary: p.customerSafetySummary || "",
+      petKidGuidanceText: p.petKidGuidanceText || "",
+      targetPests: (p.targetPests || []).join(", "),
+      applicationZones: (p.applicationZones || []).join(", "),
+    });
+  };
+
+  const save = async (id) => {
+    try {
+      const payload = {
+        ...form,
+        targetPests: form.targetPests
+          ? form.targetPests.split(",").map((s) => s.trim()).filter(Boolean)
+          : [],
+        applicationZones: form.applicationZones
+          ? form.applicationZones.split(",").map((s) => s.trim()).filter(Boolean)
+          : [],
+      };
+      await adminFetch(`/admin/inventory/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      showToast("Registry updated");
+      setEditing(null);
+      load();
+    } catch (e) {
+      showToast(`Failed: ${e.message}`);
+    }
+  };
+
+  const filtered = products.filter((p) => {
+    if (filter === "all") return true;
+    if (filter === "public") return p.customerVisibility === "public";
+    if (filter === "portal") return p.customerVisibility === "portal_only";
+    if (filter === "draft") return p.contentStatus === "draft";
+    if (filter === "needs_content") return p.customerVisibility !== "internal_only" && !p.publicSummary;
+    return true;
+  });
+
+  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        {[
+          { key: "all", label: "All Products" },
+          { key: "public", label: "Public" },
+          { key: "portal", label: "Portal" },
+          { key: "draft", label: "Drafts" },
+          { key: "needs_content", label: "Needs Content" },
+        ].map((f) => (
+          <button
+            key={f.key}
+            onClick={() => setFilter(f.key)}
+            style={{
+              ...sBtn(filter === f.key ? D.teal : "transparent", filter === f.key ? "#fff" : D.muted),
+              border: filter === f.key ? "none" : `1px solid ${D.border}`,
+              fontSize: 11,
+              padding: "4px 10px",
+            }}
+          >
+            {f.label}
+          </button>
+        ))}
+        <span style={{ color: D.muted, fontSize: 11, alignSelf: "center", marginLeft: 8 }}>
+          {filtered.length} product{filtered.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gap: 8 }}>
+        {filtered.map((p) => {
+          const isEditing = editing === p.id;
+          const vis = VISIBILITY_OPTIONS.find((v) => v.value === (p.customerVisibility || "internal_only"));
+          const stat = STATUS_OPTIONS.find((s) => s.value === (p.contentStatus || "draft"));
+
+          return (
+            <div key={p.id} style={{ ...sCard, padding: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: isEditing ? 12 : 0 }}>
+                <span style={{ color: D.text, fontWeight: 500, flex: 1 }}>{p.name}</span>
+                <span style={{ fontSize: 11, color: D.muted }}>{p.category}</span>
+                <span style={sBadge(`${vis.color}22`, vis.color)}>{vis.label}</span>
+                <span style={sBadge(`${stat.color}22`, stat.color)}>{stat.label}</span>
+                {!isEditing && (
+                  <button onClick={() => startEdit(p)} style={{ ...sBtn(D.teal, "#fff"), fontSize: 11, padding: "3px 10px" }}>
+                    Edit
+                  </button>
+                )}
+              </div>
+
+              {isEditing && (
+                <div style={{ display: "grid", gap: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    <div>
+                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Visibility</label>
+                      <select value={form.customerVisibility} onChange={(e) => setForm((f) => ({ ...f, customerVisibility: e.target.value }))} style={sInput}>
+                        {VISIBILITY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Status</label>
+                      <select value={form.contentStatus} onChange={(e) => setForm((f) => ({ ...f, contentStatus: e.target.value }))} style={sInput}>
+                        {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Common Name</label>
+                      <input value={form.commonName} onChange={(e) => setForm((f) => ({ ...f, commonName: e.target.value }))} placeholder="Plain-language name" style={sInput} />
+                    </div>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div>
+                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Target Pests (comma-separated)</label>
+                      <input value={form.targetPests} onChange={(e) => setForm((f) => ({ ...f, targetPests: e.target.value }))} placeholder="ants, roaches, spiders" style={sInput} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Application Zones (comma-separated)</label>
+                      <input value={form.applicationZones} onChange={(e) => setForm((f) => ({ ...f, applicationZones: e.target.value }))} placeholder="exterior perimeter, interior cracks" style={sInput} />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Public Summary (why we use it — 1-2 sentences)</label>
+                    <textarea value={form.publicSummary} onChange={(e) => setForm((f) => ({ ...f, publicSummary: e.target.value }))} rows={2} placeholder="Non-repellent transfer insecticide that eliminates entire colonies..." style={{ ...sInput, resize: "vertical" }} />
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Portal Summary (shown in service history)</label>
+                    <textarea value={form.portalSummary} onChange={(e) => setForm((f) => ({ ...f, portalSummary: e.target.value }))} rows={2} placeholder="Applied to your exterior perimeter to create a transfer zone..." style={{ ...sInput, resize: "vertical" }} />
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div>
+                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Customer Safety Summary</label>
+                      <textarea value={form.customerSafetySummary} onChange={(e) => setForm((f) => ({ ...f, customerSafetySummary: e.target.value }))} rows={2} placeholder="Applied according to label directions..." style={{ ...sInput, resize: "vertical" }} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Pet/Kid Guidance</label>
+                      <textarea value={form.petKidGuidanceText} onChange={(e) => setForm((f) => ({ ...f, petKidGuidanceText: e.target.value }))} rows={2} placeholder="Safe once dry, typically 15-30 minutes" style={{ ...sInput, resize: "vertical" }} />
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                    <button onClick={() => setEditing(null)} style={{ ...sBtn("transparent", D.muted), border: `1px solid ${D.border}`, fontSize: 11, padding: "4px 12px" }}>
+                      Cancel
+                    </button>
+                    <button onClick={() => save(p.id)} style={{ ...sBtn(D.green, "#fff"), fontSize: 11, padding: "4px 12px" }}>
+                      Save Registry
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!isEditing && p.publicSummary && (
+                <div style={{ marginTop: 6, fontSize: 12, color: D.muted, fontStyle: "italic" }}>
+                  {p.publicSummary}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
