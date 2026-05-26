@@ -5,14 +5,16 @@
  * projects.prep_expires_at: optional expiration for prep tokens.
  */
 exports.up = async function up(knex) {
-  await knex.schema.createTableIfNotExists('prep_guide_views', (t) => {
-    t.increments('id').primary();
-    t.integer('project_id').notNullable().references('id').inTable('projects').onDelete('CASCADE');
-    t.string('ip_hash', 64).nullable();
-    t.string('user_agent', 512).nullable();
-    t.timestamp('viewed_at').defaultTo(knex.fn.now());
-    t.index(['project_id', 'viewed_at']);
-  });
+  if (!(await knex.schema.hasTable('prep_guide_views'))) {
+    await knex.schema.createTable('prep_guide_views', (t) => {
+      t.increments('id').primary();
+      t.integer('project_id').notNullable().references('id').inTable('projects').onDelete('CASCADE');
+      t.string('ip_hash', 64).nullable();
+      t.string('user_agent', 512).nullable();
+      t.timestamp('viewed_at').defaultTo(knex.fn.now());
+      t.index(['project_id', 'viewed_at']);
+    });
+  }
 
   const [hasPrepExpiresAt, hasPrepFirstViewedAt, hasPrepViewCount] = await Promise.all([
     knex.schema.hasColumn('projects', 'prep_expires_at'),
