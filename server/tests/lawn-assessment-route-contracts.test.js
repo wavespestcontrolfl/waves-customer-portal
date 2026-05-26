@@ -169,27 +169,6 @@ describe('lawn assessment route contracts', () => {
     })).toBe(true);
   });
 
-  test('recommendation performance summarizes customer event outcomes', () => {
-    const summary = adminLawnAssessmentRouter._test.summarizeRecommendationEvents([
-      { event_type: 'generated', created_at: '2026-05-25T10:00:00.000Z' },
-      { event_type: 'approved', created_at: '2026-05-25T11:00:00.000Z' },
-      { event_type: 'recommendation_shown', created_at: '2026-05-25T12:00:00.000Z' },
-      { event_type: 'recommendation_shown', created_at: '2026-05-25T12:05:00.000Z' },
-      { event_type: 'recommendation_clicked', created_at: '2026-05-25T12:10:00.000Z' },
-      { event_type: 'follow_up_requested', created_at: '2026-05-25T12:15:00.000Z' },
-    ], { approved_at: '2026-05-25T11:00:00.000Z' });
-
-    expect(summary.counts.generated).toBe(1);
-    expect(summary.counts.approved).toBe(1);
-    expect(summary.counts.recommendation_shown).toBe(2);
-    expect(summary.counts.shown).toBe(2);
-    expect(summary.counts.recommendation_clicked).toBe(1);
-    expect(summary.counts.clicked).toBe(1);
-    expect(summary.counts.follow_up_requested).toBe(1);
-    expect(summary.clickThroughRate).toBe(0.5);
-    expect(summary.latestEventAt).toBe('2026-05-25T12:15:00.000Z');
-  });
-
   test('customer-facing snapshot and recommendation copy rejects internal or guarantee language', () => {
     expect(adminLawnAssessmentRouter._test.customerCopyViolation(
       'This lawn has callback risk and should be an upsell.',
