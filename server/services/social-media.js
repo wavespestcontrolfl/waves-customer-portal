@@ -553,7 +553,7 @@ const SocialMediaService = {
           'SELECT pg_try_advisory_xact_lock(?) as locked', [RSS_LOCK_ID]
         );
         lockAcquired = lockResult.rows[0]?.locked;
-      } catch { lockAcquired = true; }
+      } catch (lockErr) { logger.warn(`[social] Advisory lock failed: ${lockErr.message} — skipping run`); }
 
       if (!lockAcquired) {
         logger.info('[social] RSS check skipped — another instance holds the lock');

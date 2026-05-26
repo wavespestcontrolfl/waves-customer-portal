@@ -69,7 +69,7 @@ async function sharePublishedBlog(blog) {
     });
     if (result?.dryRun) {
       logger.info(`[content-scheduler] Social share dry-run for blog ${blog.id} — not marking as shared`);
-      return false;
+      return true;
     }
 
     const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
@@ -81,7 +81,7 @@ async function sharePublishedBlog(blog) {
         .map((platform) => `${platform.platform || 'unknown'}:${platform.error || 'failed'}`)
         .join('; ');
       logger.warn(`[content-scheduler] Social share produced no successful platforms for blog ${blog.id}${failures ? `: ${failures}` : ''}`);
-      return false;
+      return true;
     }
 
     await db('blog_posts').where('id', blog.id).update({
@@ -91,7 +91,7 @@ async function sharePublishedBlog(blog) {
     return true;
   } catch (err) {
     logger.warn(`[content-scheduler] Social share failed for blog ${blog.id}: ${err.message}`);
-    return false;
+    return true;
   }
 }
 
@@ -199,7 +199,7 @@ async function sharePublishedNewsletter(send) {
   if (!send.slug) {
     logger.warn(`[content-scheduler] Skipping social share; missing slug for newsletter send ${send.id}`);
     await db('newsletter_sends').where('id', send.id).update({ social_share_status: 'skipped' });
-    return false;
+    return true;
   }
 
   try {
@@ -254,7 +254,7 @@ async function sharePublishedNewsletter(send) {
         social_share_error: (failures || 'all platforms failed').slice(0, 2000),
         social_share_result: JSON.stringify(platforms),
       });
-      return false;
+      return true;
     }
 
     await db('newsletter_sends').where('id', send.id).update({
@@ -270,7 +270,7 @@ async function sharePublishedNewsletter(send) {
       social_share_status: 'failed',
       social_share_error: String(err.message).slice(0, 2000),
     });
-    return false;
+    return true;
   }
 }
 
