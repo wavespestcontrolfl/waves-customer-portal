@@ -1477,11 +1477,17 @@ const StripeService = {
 
       // Check for card payments that bypassed the /quote+/finalize surcharge flow.
       // Express Checkout (wallets) are allowed at base-only (phase 1).
-      // The surcharge_policy_version metadata is set by /finalize — its absence
-      // on a card payment means the two-step disclosure was skipped.
+      // The surcharge_policy_version metadata is set by /finalize. Older
+      // already-surcharged PIs may lack that key, so allow a positive recorded
+      // surcharge before treating the payment as a bypass.
       const isCardFamily = pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach';
       const wasFinalized = pi.metadata?.surcharge_policy_version;
-      if (isCardFamily && !wasFinalized) {
+      const recordedSurchargeCents = Math.max(
+        Math.round(Number(pi.metadata?.card_surcharge || 0) * 100),
+        Number(pi.amount_details?.surcharge?.amount || 0),
+      );
+      const surchargeAlreadyApplied = recordedSurchargeCents > 0;
+      if (isCardFamily && !wasFinalized && !surchargeAlreadyApplied) {
         // Card payment without surcharge_policy_version = bypassed /finalize.
         // Don't block (payment already succeeded at Stripe), but check if it's
         // a credit card that should have been surcharged.

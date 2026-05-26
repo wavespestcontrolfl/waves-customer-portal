@@ -234,6 +234,12 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
   const piMeta = paymentIntent.metadata || {};
   if (piMeta.surcharge_policy_version || !paymentIntent.payment_method) return null;
 
+  const recordedSurchargeCents = Math.max(
+    Math.round(Number(piMeta.card_surcharge || 0) * 100),
+    Number(paymentIntent.amount_details?.surcharge?.amount || 0),
+  );
+  if (recordedSurchargeCents > 0) return null;
+
   const methodTypes = paymentIntent.payment_method_types || [];
   const isCardCandidate = details.paymentMethod === 'card' || methodTypes.includes('card');
   if (!isCardCandidate) return null;
