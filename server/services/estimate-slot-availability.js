@@ -29,6 +29,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
+const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const {
   pricingBundleMatchesEstimateTotals,
 } = require('./estimate-pricing-bundle-utils');
@@ -42,6 +43,7 @@ const DEFAULT_OPTS = {
   expanderMaxResults: 3,
   durationMinutes: 60,
   includeWeekends: true,
+  minimumLeadMinutes: 120,
 };
 
 const SERVICE_LABELS = {
@@ -605,6 +607,22 @@ function splitSlotResults(slots, maxResults, expanderMaxResults) {
   };
 }
 
+function dateWithTimeSlotId(date, windowStart, techId) {
+  return `${date}_${String(windowStart).replace(':', '-')}_${techId || 'unassigned'}`;
+}
+
+function dedupeSlots(slots = []) {
+  const seen = new Set();
+  const out = [];
+  for (const slot of slots) {
+    const key = slot?.slotId || `${slot?.date}|${slot?.windowStart}|${slot?.techId || 'unassigned'}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(slot);
+  }
+  return out;
+}
+
 function compareCustomerFacingSlots(a, b) {
   const dateCmp = String(a?.date || '').localeCompare(String(b?.date || ''));
   if (dateCmp !== 0) return dateCmp;
@@ -619,6 +637,73 @@ function compareCustomerFacingSlots(a, b) {
   if (aDetour !== bDetour) return aDetour - bDetour;
 
   return String(a?.slotId || '').localeCompare(String(b?.slotId || ''));
+}
+
+function etDateRange(windowDays, now = new Date()) {
+  const safeWindowDays = Math.max(1, Number(windowDays) || DEFAULT_OPTS.windowDays);
+  const start = etDateString(now);
+  const end = etDateString(addETDays(now, safeWindowDays));
+  return { dateFrom: start, dateTo: end };
+}
+
+function enumerateETDateStrings(dateFrom, dateTo, { includeWeekends = true } = {}) {
+  const dates = [];
+  const start = new Date(`${dateFrom}T12:00:00Z`);
+  const end = new Date(`${dateTo}T12:00:00Z`);
+  for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    const ymd = d.toISOString().slice(0, 10);
+    const dow = d.getUTCDay();
+    if (!includeWeekends && (dow === 0 || dow === 6)) continue;
+    dates.push(ymd);
+  }
+  return dates;
+}
+
+function earliestBookableMinuteForDate(date, now = new Date(), minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes) {
+  if (date !== etDateString(now)) return 0;
+  const parts = etParts(now);
+  return parts.hour * 60 + parts.minute + Math.max(0, Number(minimumLeadMinutes) || 0);
+}
+
+async function buildAsapCapacitySlots({
+  dateFrom,
+  dateTo,
+  durationMinutes,
+  includeWeekends = true,
+  maxCandidates = 36,
+  minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes,
+  now = new Date(),
+} = {}) {
+  const techs = await db('technicians')
+    .where({ active: true })
+    .select('id', 'name');
+  if (!techs.length) return [];
+
+  const candidates = [];
+  for (const date of enumerateETDateStrings(dateFrom, dateTo, { includeWeekends })) {
+    const earliestMinute = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
+    for (const windowStart of PREFERRED_WINDOWS) {
+      if (timeToMinutes(windowStart) < earliestMinute) continue;
+      const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
+      if (!slotWindowFitsDay(windowStart, windowEnd)) continue;
+      for (const tech of techs) {
+        candidates.push({
+          slotId: dateWithTimeSlotId(date, windowStart, tech.id),
+          date,
+          windowStart,
+          windowEnd,
+          durationMinutes,
+          techFirstName: (tech.name || '').split(/\s+/)[0] || null,
+          techId: tech.id,
+          routeOptimal: false,
+          nearbyJob: null,
+          capacityType: 'asap_open',
+        });
+        if (candidates.length >= maxCandidates) return candidates;
+      }
+    }
+  }
+  return candidates;
 }
 
 function selectCustomerFacingSlots(slots, limit) {
@@ -750,26 +835,44 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     serviceProfile.serviceMode,
     serviceProfile.selectedFrequency || 'default',
     serviceProfile.durationMinutes,
+    opts.minimumLeadMinutes,
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
   if (cached) {
     return { ...cached.result, metadata: { ...cached.result.metadata, cacheHit: true } };
   }
 
+  const { dateFrom, dateTo } = etDateRange(opts.windowDays);
+  const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
   const coords = await resolveEstimateCoords(estimate);
 
   // If we can't resolve coords, degrade gracefully: return empty primary,
-  // no expander. The route-public handler still 200s — customer just sees
-  // the fallback "reach out to schedule" messaging on the page.
+  // no route-proximity tags. Getting the customer on the calendar still
+  // matters more than withholding slots because geocoding failed.
   if (!coords) {
+    const asapRaw = await buildAsapCapacitySlots({
+      dateFrom,
+      dateTo,
+      durationMinutes: serviceProfile.durationMinutes,
+      includeWeekends: opts.includeWeekends,
+      maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
+      minimumLeadMinutes: opts.minimumLeadMinutes,
+    });
+    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
+    const spread = spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes);
+    const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
+    const selected = selectCustomerFacingSlots(filtered, TARGET_TOTAL);
+    const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const fallback = {
-      primary: [],
-      expander: [],
+      primary,
+      expander,
       metadata: {
         estimateAddress: estimate.address || null,
         estimateCoords: null,
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
+        includeWeekends: opts.includeWeekends,
+        minimumLeadMinutes: opts.minimumLeadMinutes,
         serviceProfile,
         generatedAt: new Date().toISOString(),
         cacheHit: false,
@@ -779,23 +882,28 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     return fallback;
   }
 
-  const today = new Date();
-  const dateFrom = today.toISOString().slice(0, 10);
-  const end = new Date(today.getTime() + opts.windowDays * 86400000);
-  const dateTo = end.toISOString().slice(0, 10);
-
   // Pull a generous topN so we can split customer-facing slots post-hoc
   // without a second call. find-time sorts by score (detour + day penalty)
   // ascending, so this includes far more candidates than we'll surface.
-  const raw = await findAvailableSlots({
-    lat: coords.lat,
-    lng: coords.lng,
-    durationMinutes: serviceProfile.durationMinutes,
-    dateFrom,
-    dateTo,
-    topN: Number.MAX_SAFE_INTEGER,
-    includeWeekends: opts.includeWeekends,
-  });
+  const [raw, asapRaw] = await Promise.all([
+    findAvailableSlots({
+      lat: coords.lat,
+      lng: coords.lng,
+      durationMinutes: serviceProfile.durationMinutes,
+      dateFrom,
+      dateTo,
+      topN: Number.MAX_SAFE_INTEGER,
+      includeWeekends: opts.includeWeekends,
+    }),
+    buildAsapCapacitySlots({
+      dateFrom,
+      dateTo,
+      durationMinutes: serviceProfile.durationMinutes,
+      includeWeekends: opts.includeWeekends,
+      maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
+      minimumLeadMinutes: opts.minimumLeadMinutes,
+    }),
+  ]);
 
   const classifiedRaw = (raw?.slots || [])
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
@@ -806,8 +914,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
-  const sortedPool = [...classified].sort(compareCustomerFacingSlots);
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
+  const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
   const spread = spreadWindowsAcrossDay(sortedPool, serviceProfile.durationMinutes);
   // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
   // slots; that can land them on an existing booking, so re-filter once
@@ -826,6 +934,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,
+      minimumLeadMinutes: opts.minimumLeadMinutes,
       serviceProfile,
       generatedAt: new Date().toISOString(),
       cacheHit: false,
@@ -864,10 +973,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     };
   }
 
-  const today = new Date();
-  const dateFrom = today.toISOString().slice(0, 10);
-  const end = new Date(today.getTime() + opts.windowDays * 86400000);
-  const dateTo = end.toISOString().slice(0, 10);
+  const { dateFrom, dateTo } = etDateRange(opts.windowDays);
 
   const raw = await findAvailableSlots({
     lat: coords.lat,
@@ -940,6 +1046,10 @@ module.exports = {
     parseAnchorTime,
     pickNearbyAnchor,
     classifySlot,
+    buildAsapCapacitySlots,
+    earliestBookableMinuteForDate,
+    enumerateETDateStrings,
+    etDateRange,
     splitSlotResults,
     selectCustomerFacingSlots,
     compareCustomerFacingSlots,

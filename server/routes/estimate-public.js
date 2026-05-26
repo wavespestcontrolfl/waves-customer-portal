@@ -480,8 +480,8 @@ const SERVICE_COPY = {
     aiTitle: 'Waves AI reviewed your property before pricing this estimate',
     aiBody: 'We reviewed your home, lot, and pest-risk factors before pricing this plan.',
     askChips: [
-      'What products do you use?',
-      'Are pets and kids safe?',
+      'How do you handle ants?',
+      'Can you treat inside?',
       'When am I charged?',
       'What happens after approval?',
     ],
@@ -583,10 +583,10 @@ const SERVICE_COPY = {
     aiTitle: 'Waves AI reviewed your lawn before pricing this estimate',
     aiBody: 'We reviewed your lawn size, turf type, and treatment needs before pricing this plan.',
     askChips: [
-      'What gets applied each visit?',
+      'How does your lawn assessment tech work?',
+      'What lawn issues do you check?',
       'When do visits start?',
       'What about weeds?',
-      'Is it safe for my dog?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for lawn care.",
@@ -598,10 +598,10 @@ const SERVICE_COPY = {
     aiTitle: 'Waves AI reviewed your property before pricing this estimate',
     aiBody: 'We reviewed the services, property details, and pricing rules used for this plan.',
     askChips: [
-      'What is included?',
+      'What is included in this plan?',
+      'How do you handle ants?',
+      'How does your lawn assessment tech work?',
       'Are pets and kids safe?',
-      'When am I charged?',
-      'What happens after approval?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this plan.",
@@ -2636,7 +2636,7 @@ function renderPage(token, estimate, estData) {
       ${intelligence.signals.map((signal) => `<div class="intelligence-signal">${escapeHtml(signal)}</div>`).join('')}
     </div>` : ''}
   </section>` : '';
-  // Service-aware quick-question chips: 2 service-specific (when applicable),
+  // Service-aware quick-question chips: 2 estimate-specific service prompts,
   // a safety chip for any chemical service, then 1 universal billing chip —
   // capped at 4 so the prompt row stays scannable.
   const askPrompts = (() => {
@@ -2649,8 +2649,8 @@ function renderPage(token, estimate, estData) {
     const hasRodent = recurring.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
     const hasPalm = recurring.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));
     const hasPestAny = !!pestRecurring || hasPestOneTime;
-    if (hasPestAny) servicePrompts.push('What products do you use?');
-    if (hasLawn) servicePrompts.push('What gets applied each visit?');
+    if (hasPestAny) servicePrompts.push('How do you handle ants?');
+    if (hasLawn) servicePrompts.push('How does your lawn assessment tech work?');
     if (hasMosquito) servicePrompts.push('How long does it last?');
     if (hasTermite) servicePrompts.push('How does the bait work?');
     if (hasTreeShrub) servicePrompts.push('Which trees get treated?');

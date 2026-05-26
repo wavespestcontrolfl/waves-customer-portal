@@ -70,6 +70,20 @@ describe('estimate AI support context', () => {
           confidence: 'high',
           data_point_count: 12,
         }],
+        services: [{
+          service_key: 'lawn_care',
+          name: 'Lawn Care',
+          category: 'lawn_care',
+          description: 'Seasonal lawn care program.',
+          default_products: ['0-0-7 Granular', 'Celsius WG'],
+        }],
+        products_catalog: [{
+          name: 'Celsius WG',
+          category: 'herbicide',
+          active_ingredient: 'Thiencarbazone + Iodosulfuron + Dicamba',
+          active: true,
+          label_verified: true,
+        }],
       }),
       question: 'What is included with lawn care?',
       context: {
@@ -94,6 +108,20 @@ describe('estimate AI support context', () => {
         dataPointCount: 12,
       }),
     ]);
+    expect(result.serviceLibrary).toEqual([
+      expect.objectContaining({
+        source: 'admin_service_library',
+        path: 'lawn_care',
+      }),
+    ]);
+    expect(result.productCatalog).toEqual([
+      expect.objectContaining({
+        source: 'admin_product_catalog',
+        title: 'herbicide active ingredient',
+        activeIngredient: 'Thiencarbazone + Iodosulfuron + Dicamba',
+      }),
+    ]);
+    expect(JSON.stringify(result)).not.toContain('Celsius WG');
     expect(result.externalSources.some((source) => source.title.includes('UF/IFAS'))).toBe(true);
     expect(result.externalSources.some((source) => source.title.includes('Florida-Friendly'))).toBe(true);
   });

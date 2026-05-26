@@ -41,6 +41,9 @@ const REPO_CONTEXT_FILES = [
   'server/services/pricing-engine/README.md',
 ];
 
+const REPO_CONTEXT_DIRS = ['wiki', 'docs'];
+const REPO_CONTEXT_FILE_LIMIT = 80;
+
 const EXTERNAL_REFERENCES = {
   general: [
     {
@@ -245,6 +248,106 @@ async function searchAgronomicWiki(db, terms) {
   }
 }
 
+function parseJsonList(value) {
+  if (Array.isArray(value)) return value.map(cleanText).filter(Boolean);
+  if (value && typeof value === 'object') return Object.values(value).map(cleanText).filter(Boolean);
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return parseJsonList(parsed);
+  } catch {
+    return value.split(',').map(cleanText).filter(Boolean);
+  }
+}
+
+async function searchServiceLibrary(db, terms) {
+  if (!db || !terms.length) return [];
+  try {
+    const rows = await db('services')
+      .where(function activeServices() {
+        this.where({ is_active: true }).orWhereNull('is_active');
+      })
+      .where(function relevantServices() {
+        for (const term of terms) {
+          const like = `%${term}%`;
+          this.orWhere('service_key', 'ilike', like)
+            .orWhere('name', 'ilike', like)
+            .orWhere('short_name', 'ilike', like)
+            .orWhere('description', 'ilike', like)
+            .orWhere('category', 'ilike', like)
+            .orWhereRaw('default_products::text ILIKE ?', [like]);
+        }
+      })
+      .select('service_key', 'name', 'description', 'category', 'frequency', 'visits_per_year', 'default_products')
+      .limit(6);
+
+    return rows.map((row) => {
+      const products = parseJsonList(row.default_products);
+      const parts = [
+        row.description,
+        row.frequency ? `Frequency: ${row.frequency}` : '',
+        row.visits_per_year ? `Visits per year: ${row.visits_per_year}` : '',
+      ].filter(Boolean);
+      return {
+        source: 'admin_service_library',
+        path: row.service_key,
+        title: row.name || row.service_key,
+        category: row.category || null,
+        _productNames: products,
+        snippet: trimSnippet(parts.join(' ')),
+      };
+    }).filter((row) => row.snippet || row.title);
+  } catch (err) {
+    logger.warn(`[estimate-ai-context] services lookup skipped: ${err.message}`);
+    return [];
+  }
+}
+
+async function searchProductCatalog(db, terms, productNames = []) {
+  const lookupTerms = unique([...terms, ...productNames]).slice(0, 20);
+  if (!db || !lookupTerms.length) return [];
+  try {
+    const rows = await db('products_catalog')
+      .where(function activeProducts() {
+        this.where({ active: true }).orWhereNull('active');
+      })
+      .where(function relevantProducts() {
+        for (const term of lookupTerms) {
+          const like = `%${term}%`;
+          this.orWhere('name', 'ilike', like)
+            .orWhere('category', 'ilike', like)
+            .orWhere('active_ingredient', 'ilike', like)
+            .orWhere('moa_group', 'ilike', like);
+        }
+      })
+      .select('name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit', 'epa_reg_number', 'label_verified')
+      .limit(8);
+
+    return rows.map((row) => {
+      const parts = [
+        row.category,
+        row.active_ingredient ? `Active ingredient: ${row.active_ingredient}` : '',
+        row.moa_group ? `MOA: ${row.moa_group}` : '',
+        row.epa_reg_number ? `EPA Reg. No. ${row.epa_reg_number}` : '',
+        row.label_verified === true ? 'Label verified in admin catalog' : '',
+      ].filter(Boolean);
+      return {
+        source: 'admin_product_catalog',
+        path: row.active_ingredient || row.category || 'product_catalog',
+        title: row.active_ingredient ? `${row.category || 'Product'} active ingredient` : (row.category || 'Product catalog entry'),
+        category: row.category || null,
+        activeIngredient: row.active_ingredient || null,
+        epaRegNumber: row.epa_reg_number || null,
+        labelVerified: row.label_verified === true,
+        snippet: trimSnippet(parts.join(' - ')),
+      };
+    }).filter((row) => row.snippet || row.title);
+  } catch (err) {
+    logger.warn(`[estimate-ai-context] products_catalog lookup skipped: ${err.message}`);
+    return [];
+  }
+}
+
 function scoreLine(line, terms) {
   const lower = line.toLowerCase();
   return terms.reduce((score, term) => score + (lower.includes(term.toLowerCase()) ? 1 : 0), 0);
@@ -283,10 +386,40 @@ function snippetFromFile(relativePath, terms) {
 
 function loadRepoContext(terms) {
   if (!terms.length) return [];
-  return REPO_CONTEXT_FILES
+  const discovered = [];
+  for (const dir of REPO_CONTEXT_DIRS) {
+    discovered.push(...discoverMarkdownFiles(dir));
+  }
+  return unique([...REPO_CONTEXT_FILES, ...discovered])
     .map((file) => snippetFromFile(file, terms))
     .filter(Boolean)
     .slice(0, 5);
+}
+
+function discoverMarkdownFiles(relativeDir) {
+  const root = path.join(ROOT, relativeDir);
+  if (!root.startsWith(ROOT) || !fs.existsSync(root)) return [];
+  const out = [];
+  const walk = (dir) => {
+    if (out.length >= REPO_CONTEXT_FILE_LIMIT) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= REPO_CONTEXT_FILE_LIMIT) break;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile() && /\.mdx?$/i.test(entry.name)) {
+        out.push(path.relative(ROOT, full));
+      }
+    }
+  };
+  walk(root);
+  return out;
 }
 
 function externalReferencesFor(serviceKeys) {
@@ -307,16 +440,22 @@ async function loadEstimateAiSupportContext({ db, question, context } = {}) {
   const serviceKeys = serviceKeysFromContext(context, question);
   const searchTerms = searchTermsFromContext(context, question);
 
-  const [knowledgeBase, agronomicWiki] = await Promise.all([
+  const [knowledgeBase, agronomicWiki, serviceLibrary] = await Promise.all([
     searchKnowledgeBase(db, searchTerms),
     searchAgronomicWiki(db, searchTerms),
+    searchServiceLibrary(db, searchTerms),
   ]);
+  const serviceProductNames = serviceLibrary.flatMap((row) => row._productNames || []);
+  const productCatalog = await searchProductCatalog(db, searchTerms, serviceProductNames);
+  const publicServiceLibrary = serviceLibrary.map(({ _productNames, ...row }) => row);
 
   return {
     serviceKeys,
     searchTerms,
     knowledgeBase,
     agronomicWiki,
+    serviceLibrary: publicServiceLibrary,
+    productCatalog,
     repositoryFiles: loadRepoContext(searchTerms),
     externalSources: externalReferencesFor(serviceKeys),
   };

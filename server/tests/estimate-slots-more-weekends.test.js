@@ -53,6 +53,19 @@ describe('estimate slot weekend and expander behavior', () => {
       .toEqual(['day-one-9', 'day-one-10']);
   });
 
+  test('asap slot helpers use Eastern calendar dates and skip same-day windows inside lead time', () => {
+    const now = new Date('2026-05-26T14:15:00Z'); // 10:15 AM ET
+
+    expect(slotAvailabilityInternals.etDateRange(3, now)).toEqual({
+      dateFrom: '2026-05-26',
+      dateTo: '2026-05-29',
+    });
+    expect(slotAvailabilityInternals.earliestBookableMinuteForDate('2026-05-26', now, 120))
+      .toBe(12 * 60 + 15);
+    expect(slotAvailabilityInternals.earliestBookableMinuteForDate('2026-05-27', now, 120))
+      .toBe(0);
+  });
+
   test('estimate slot spreading happens before the final customer-facing limit', () => {
     const genericSlots = Array.from({ length: 6 }, (_, idx) => ({
       slotId: `generic-${idx}`,
