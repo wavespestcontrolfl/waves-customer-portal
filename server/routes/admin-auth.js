@@ -42,7 +42,7 @@ router.post('/login', async (req, res, next) => {
     const valid = await bcrypt.compare(password, tech.password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ technicianId: tech.id, role: tech.role, name: tech.name }, config.jwt.secret, { expiresIn: '12h' });
+    const token = jwt.sign({ technicianId: tech.id, role: tech.role, name: tech.name }, config.jwt.secret, { expiresIn: '30d' });
     const refreshToken = jwt.sign({ technicianId: tech.id, type: 'refresh' }, config.jwt.secret, { expiresIn: '30d' });
 
     await db('technicians').where({ id: tech.id }).update({ last_login_at: db.fn.now() });
