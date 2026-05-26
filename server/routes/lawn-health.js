@@ -115,6 +115,136 @@ function photoAssessmentLookupCriteria(customerId, assessmentId) {
   };
 }
 
+function parseJsonObject(value, fallback = {}) {
+  if (value == null) return fallback;
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function parseJsonArray(value, fallback = []) {
+  if (value == null) return fallback;
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function formatCustomerSnapshot(row) {
+  if (!row) return null;
+  const findings = parseJsonArray(row.findings)
+    .map((finding) => ({
+      key: finding.key,
+      label: finding.label,
+      severity: finding.severity,
+      customerCopy: finding.customer_copy,
+      locationLabel: finding.location_label || null,
+    }))
+    .filter((finding) => finding.customerCopy);
+  const treatment = parseJsonObject(row.treatment_context);
+  const expectedWindow = parseJsonObject(row.expected_window);
+
+  return {
+    id: row.id,
+    assessmentId: row.assessment_id,
+    headline: row.headline,
+    summary: row.summary_customer,
+    status: row.status,
+    generatedAt: row.generated_at,
+    findings,
+    treatment: {
+      completedToday: treatment.completed_today === true,
+      serviceType: treatment.service_type || null,
+      productsAppliedSummary: treatment.products_applied_summary || null,
+    },
+    weatherContext: parseJsonObject(row.weather_context).customer_copy || null,
+    expectedWindow: {
+      minDays: expectedWindow.min_days || null,
+      maxDays: expectedWindow.max_days || null,
+    },
+    nextWatchItems: parseJsonArray(row.next_watch_items),
+    disclaimers: parseJsonArray(row.disclaimers),
+  };
+}
+
+function formatCustomerRecommendation(row) {
+  if (!row) return null;
+  const action = parseJsonObject(row.recommended_action);
+  return {
+    id: row.id,
+    type: row.type,
+    title: row.title,
+    priority: row.priority,
+    customerCopy: row.customer_copy,
+    action: {
+      type: action.action_type || null,
+      label: action.cta_label || null,
+      plan: action.plan || null,
+    },
+  };
+}
+
+async function getCustomerVisibleSnapshotData(customerId, latestAssessmentId) {
+  const snapshot = await db('property_health_snapshots')
+    .where({
+      customer_id: customerId,
+      domain: 'lawn',
+      customer_visible: true,
+    })
+    .whereNotNull('approved_at')
+    .modify((query) => {
+      if (latestAssessmentId) query.where({ assessment_id: latestAssessmentId });
+    })
+    .orderBy('created_at', 'desc')
+    .first()
+    .catch(() => null);
+
+  if (!snapshot) return { latestSnapshot: null, recommendationCards: [] };
+
+  const cards = await db('property_recommendation_cards')
+    .where({
+      snapshot_id: snapshot.id,
+      customer_id: customerId,
+      domain: 'lawn',
+      customer_visible: true,
+    })
+    .whereIn('status', ['approved', 'customer_visible', 'accepted'])
+    .where(function () {
+      this.whereNotNull('approved_at')
+        .orWhere(function () {
+          this.where({ type: 'customer_education', requires_human_approval: false });
+        });
+    })
+    .orderByRaw(`
+      CASE priority
+        WHEN 'high' THEN 1
+        WHEN 'medium' THEN 2
+        ELSE 3
+      END
+    `)
+    .orderBy('created_at', 'asc')
+    .limit(3)
+    .catch(() => []);
+
+  return {
+    latestSnapshot: formatCustomerSnapshot(snapshot),
+    recommendationCards: cards.map(formatCustomerRecommendation).filter(Boolean),
+  };
+}
+
 // =========================================================================
 // GET /api/lawn-health/:customerId — Full lawn health dashboard data
 // =========================================================================
@@ -144,6 +274,8 @@ router.get('/:customerId', async (req, res, next) => {
         photos: [],
         beforeAfter: null,
         trend: [],
+        latestSnapshot: null,
+        recommendationCards: [],
       });
     }
 
@@ -265,6 +397,8 @@ router.get('/:customerId', async (req, res, next) => {
       }
     } catch { /* ignore */ }
 
+    const { latestSnapshot, recommendationCards } = await getCustomerVisibleSnapshotData(customerId, latest.id);
+
     res.json({
       hasLawnCare: true,
       scores: formatScore(latest),
@@ -275,6 +409,8 @@ router.get('/:customerId', async (req, res, next) => {
       recommendations,
       seasonalContext,
       neighborBenchmark: normalizeNeighborBenchmark(neighborBenchmark),
+      latestSnapshot,
+      recommendationCards,
       assessmentCount: assessments.length,
       nextMilestone: assessments.length < 3
         ? { message: `${3 - assessments.length} more visit${assessments.length < 2 ? 's' : ''} until full trend data`, type: 'visits' }
@@ -384,6 +520,8 @@ router.get('/:customerId/photos/:assessmentId', async (req, res, next) => {
 router._test = {
   normalizeNeighborBenchmark,
   photoAssessmentLookupCriteria,
+  formatCustomerSnapshot,
+  formatCustomerRecommendation,
 };
 
 module.exports = router;
