@@ -38,6 +38,7 @@ const {
   withSupplementedRecurringServices,
 } = require('../routes/estimate-public');
 const {
+  answerEstimateQuestion,
   answerEstimateQuestionFallback,
   buildEstimateAssistantContext,
   cleanAssistantAnswer,
@@ -442,8 +443,8 @@ describe('public estimate one-time breakdown', () => {
       showOneTimePestAddOns: false,
     }));
     expect(payload.askChips).toEqual([
-      'What products do you use?',
-      'Are pets and kids safe?',
+      'How do you handle ants?',
+      'Can you treat inside?',
       'When am I charged?',
       'What happens after approval?',
     ]);
@@ -554,8 +555,8 @@ describe('public estimate one-time breakdown', () => {
       showOneTimePestAddOns: false,
     }));
     expect(payload.askChips).toEqual(expect.arrayContaining([
-      'What products do you use?',
-      'What gets applied each visit?',
+      'How do you handle ants?',
+      'How does your lawn assessment tech work?',
     ]));
   });
 
@@ -1915,6 +1916,29 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Find a date & time that works for you');
   });
 
+  test('server-rendered one-time termite estimates include termite ask prompt', () => {
+    const html = renderPage('termite-onetime-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 725,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{ service: 'trenching', name: 'Termite Trenching', price: 725 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('data-estimate-ask-prompt="How does the bait work?"');
+  });
+
   test('server-rendered booking review buttons use explicit click listeners', () => {
     const html = renderPage('booking-token', {
       status: 'sent',
@@ -2579,6 +2603,64 @@ describe('public estimate one-time breakdown', () => {
   test('estimate assistant strips markdown from AI answers before rendering', () => {
     expect(cleanAssistantAnswer('Your **WaveGuard Silver** plan includes:\n- **Lawn Care** at `$104.40` per app.'))
       .toBe('Your WaveGuard Silver plan includes: Lawn Care at $104.40 per app.');
+  });
+
+  test('estimate assistant uses admin and repo support context for product questions', async () => {
+    const fakeSupportDb = (table) => ({
+      where(arg) {
+        if (typeof arg === 'function') arg.call(this);
+        return this;
+      },
+      whereNull() { return this; },
+      orWhere() { return this; },
+      orWhereNull() { return this; },
+      orWhereRaw() { return this; },
+      select() { return this; },
+      limit(count) {
+        const rows = {
+          services: [{
+            service_key: 'pest_control',
+            name: 'General Pest Control',
+            category: 'pest_control',
+            description: 'Exterior perimeter and interior support when needed.',
+            default_products: ['Demand CS', 'Alpine WSG'],
+          }],
+          products_catalog: [{
+            name: 'Alpine WSG',
+            category: 'insecticide',
+            active_ingredient: 'Dinotefuran',
+            active: true,
+            label_verified: true,
+          }],
+        }[table] || [];
+        return Promise.resolve(rows.slice(0, count));
+      },
+    });
+
+    const result = await answerEstimateQuestion({
+      question: 'How do you handle ants?',
+      estimate: {
+        customer_name: 'Stan Customer',
+        waveguard_tier: 'Silver',
+        monthly_total: 116.7,
+      },
+      pricingBundle: {
+        waveGuardTier: 'Silver',
+        frequencies: [{
+          key: 'quarterly',
+          label: 'Quarterly',
+          monthly: 116.7,
+          included: [{ label: 'Pest Control' }],
+        }],
+      },
+      database: fakeSupportDb,
+    });
+
+    expect(result.answer).toContain('active ingredients/classes');
+    expect(result.answer).toContain('Dinotefuran');
+    expect(result.answer).not.toContain('Demand CS');
+    expect(result.answer).not.toContain('Alpine WSG');
+    expect(result.answer).not.toContain('I do not see specific product details listed on your estimate');
   });
 
   test('estimate assistant uses selected cadence and all first-visit fees', () => {

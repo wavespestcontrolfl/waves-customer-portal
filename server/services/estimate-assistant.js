@@ -1,6 +1,8 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
+const { loadEstimateAiSupportContext } = require('./estimate-ai-context');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -19,7 +21,9 @@ Answer questions about the customer's estimate, Waves services, WaveGuard, billi
 
 Rules:
 - Use only the estimate context for prices, services selected, schedules, discounts, billing terms, and property details.
-- If the context does not contain a specific fact, say you do not see it on this estimate and suggest calling or texting Waves.
+- Use the supportContext for service procedures, products, label/safety references, and Waves admin knowledge. Do not expose internal cost notes.
+- Never give customer-facing product brand names. If product context is relevant, use active ingredients, treatment classes, and how the treatment works.
+- If neither the estimate context nor supportContext contains a specific fact, say you do not see it and suggest calling or texting Waves.
 - Do not make appointments, accept estimates, cancel service, reschedule service, promise arrival times, diagnose medical risk, or guarantee chemical safety.
 - Keep answers concise: 2-4 short sentences.
 - Plain text only. Do not use Markdown, bold markers, headings, or bullet lists.
@@ -599,6 +603,70 @@ function listServices(context = {}) {
   return rows.map((row) => row.summary || serviceLine(row)).filter(Boolean).join('\n');
 }
 
+function supportRows(context = {}) {
+  const support = context.supportContext || context.aiSupport || {};
+  return [
+    ...(Array.isArray(support.serviceLibrary) ? support.serviceLibrary : []),
+    ...(Array.isArray(support.productCatalog) ? support.productCatalog : []),
+    ...(Array.isArray(support.knowledgeBase) ? support.knowledgeBase : []),
+    ...(Array.isArray(support.agronomicWiki) ? support.agronomicWiki : []),
+    ...(Array.isArray(support.repositoryFiles) ? support.repositoryFiles : []),
+  ];
+}
+
+function supportRowMatchesQuestion(row = {}, question = '') {
+  const text = cleanText([
+    row.title,
+    row.path,
+    row.category,
+    row.snippet,
+    ...(Array.isArray(row.products) ? row.products : []),
+  ].filter(Boolean).join(' ')).toLowerCase();
+  const terms = cleanText(question)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((term) => term.length >= 4 && !['what', 'when', 'does', 'each', 'visit', 'safe', 'kids', 'pets', 'product', 'products'].includes(term));
+  return !terms.length || terms.some((term) => text.includes(term));
+}
+
+function activeIngredientsFromSupport(context = {}, question = '') {
+  const ingredients = [];
+  for (const row of supportRows(context)) {
+    if (row.source === 'admin_product_catalog' && row.activeIngredient) ingredients.push(row.activeIngredient);
+  }
+  return [...new Set(ingredients.map(cleanText).filter(Boolean))].slice(0, 8);
+}
+
+function summarizeSupportContext(context = {}, question = '') {
+  return supportRows(context)
+    .filter((row) => supportRowMatchesQuestion(row, question))
+    .map((row) => row.snippet || row.title)
+    .map(cleanText)
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(' ');
+}
+
+function treatmentApproachForQuestion(question = '') {
+  const q = cleanText(question).toLowerCase();
+  if (/\bant|ants\b/.test(q)) {
+    return 'For ants, the goal is to reduce exterior entry pressure, treat trails and nesting zones when found, and support interior activity when it is included or needed.';
+  }
+  if (/\bbed\s*bug|bedbug\b/.test(q)) {
+    return 'For bed bugs, the approach depends on inspection findings and can combine targeted crack-and-crevice treatment, growth-regulator strategy, and follow-up guidance.';
+  }
+  if (/\blawn|turf|grass|weed|fungus|fertil|chinch\b/.test(q)) {
+    return 'For lawns, Waves starts from turf condition, weed pressure, fungus pressure, irrigation clues, and seasonal Southwest Florida restrictions before selecting the treatment.';
+  }
+  if (/\bmosquito|mosquitoes\b/.test(q)) {
+    return 'For mosquitoes, the focus is shaded resting zones, breeding-pressure checks, and timing around weather so the barrier treatment has the best chance to hold.';
+  }
+  if (/\btermite|termites\b/.test(q)) {
+    return 'For termites, the treatment method depends on whether the estimate is for monitoring, bait, soil treatment, or a construction-stage treatment.';
+  }
+  return 'The technician selects the treatment method from the service type, inspection findings, label directions, and conditions at your property that day.';
+}
+
 function findService(context = {}, pattern) {
   return (Array.isArray(context.services) ? context.services : [])
     .find((row) => pattern.test(`${row.label} ${row.detail} ${row.summary}`));
@@ -667,17 +735,39 @@ function answerEstimateQuestionFallback(question, context = {}) {
     ].filter(Boolean).join(' ');
   }
 
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application)\b/.test(q)) {
+    const activeIngredients = activeIngredientsFromSupport(context, question);
+    const labelCopy = 'Your technician will follow the product label directions for every application.';
+    if (activeIngredients.length) {
+      return [
+        `${treatmentApproachForQuestion(question)} Active ingredients/classes in the admin catalog for this service type include ${activeIngredients.join(', ')}.`,
+        `${labelCopy} If you have pets, kids, sensitivities, or want the exact product for your home that day, call or text Waves at ${phone}.`,
+      ].filter(Boolean).join(' ');
+    }
+    return `${treatmentApproachForQuestion(question)} ${labelCopy} If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`;
+  }
+
   if (/\b(lawn|turf|weed|fungus|grass|fertil)\b/.test(q)) {
     const lawn = findService(context, /lawn|turf|weed|fungus|grass|fertil/i);
+    const activeIngredients = activeIngredientsFromSupport(context, question);
     return lawn
-      ? `For lawn care, this estimate shows ${lawn.summary}. Waves adjusts lawn treatments for Southwest Florida turf conditions across the year.`
+      ? [
+          `For lawn care, this estimate shows ${lawn.summary}.`,
+          treatmentApproachForQuestion(question),
+          activeIngredients.length ? `Relevant active ingredients/classes in the admin catalog include ${activeIngredients.join(', ')}.` : '',
+        ].filter(Boolean).join(' ')
       : `I do not see lawn care on this estimate. Call or text Waves at ${phone} if you want it added.`;
   }
 
-  if (/\b(pest|bug|roach|ant|spider|inside|interior|outside|exterior)\b/.test(q)) {
+  if (/\b(pest|bug|roach|ants?|spider|inside|interior|outside|exterior)\b/.test(q)) {
     const pest = findService(context, /pest|roach|ant|spider|perimeter/i);
+    const activeIngredients = activeIngredientsFromSupport(context, question);
     return pest
-      ? `For pest control, this estimate shows ${pest.summary}. The service is built around exterior protection, with interior service handled when included or needed.`
+      ? [
+          `For pest control, this estimate shows ${pest.summary}.`,
+          treatmentApproachForQuestion(question),
+          activeIngredients.length ? `Relevant active ingredients/classes in the admin catalog include ${activeIngredients.join(', ')}.` : '',
+        ].filter(Boolean).join(' ')
       : `I do not see pest control on this estimate. Call or text Waves at ${phone} if you want it added.`;
   }
 
@@ -694,10 +784,6 @@ function answerEstimateQuestionFallback(question, context = {}) {
 
   if (/\b(who|waves|company|local|license|insured|contact|phone|text|email)\b/.test(q)) {
     return `Waves Pest Control is a local ${COMPANY.serviceArea} pest control and lawn care company. You can call or text ${phone}, or email ${COMPANY.email}.`;
-  }
-
-  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|spray|label)\b/.test(q)) {
-    return `Your technician will follow product label directions for every application. If you have pets, kids, sensitivities, or a specific product question, call or text Waves at ${phone} so the team can give instructions for your home.`;
   }
 
   return `I can answer questions about this estimate, pricing, included services, billing, scheduling, or Waves. For anything not shown here, call or text Waves at ${phone}.`;
@@ -734,6 +820,7 @@ async function answerEstimateQuestion({
   pricingBundle,
   selectedFrequency,
   serviceMode,
+  database = db,
 } = {}) {
   const cleanQuestion = cleanText(question);
   const context = buildEstimateAssistantContext({
@@ -743,8 +830,25 @@ async function answerEstimateQuestion({
     selectedFrequency,
     serviceMode,
   });
+  try {
+    context.supportContext = await loadEstimateAiSupportContext({
+      db: database,
+      question: cleanQuestion,
+      context,
+    });
+  } catch (err) {
+    logger.warn(`[estimate-assistant] support context skipped: ${err.message}`);
+  }
 
   if (context.billing?.quoteRequired) {
+    return {
+      answer: answerEstimateQuestionFallback(cleanQuestion, context),
+      source: 'fallback',
+    };
+  }
+
+  if (/\b(safe|pet|dog|cat|kid|child|chemical|product|products|spray|label|applied|application|lawn|turf|weed|fungus|fertil|pest|roach|ants?|spider|inside|interior|outside|exterior)\b/i.test(cleanQuestion)
+      && supportRows(context).length) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',

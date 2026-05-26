@@ -53,6 +53,65 @@ describe('estimate slot weekend and expander behavior', () => {
       .toEqual(['day-one-9', 'day-one-10']);
   });
 
+  test('deduping merged asap and route pools preserves route metadata', () => {
+    const merged = slotAvailabilityInternals.dedupeSlots([
+      {
+        slotId: '2026-05-27_09-00_tech-1',
+        date: '2026-05-27',
+        windowStart: '09:00',
+        techId: 'tech-1',
+        routeOptimal: false,
+        nearbyJob: null,
+        capacityType: 'asap_open',
+      },
+      {
+        slotId: '2026-05-27_09-00_tech-1',
+        date: '2026-05-27',
+        windowStart: '09:00',
+        techId: 'tech-1',
+        routeOptimal: true,
+        nearbyJob: { detourMinutes: 4 },
+      },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toEqual(expect.objectContaining({
+      routeOptimal: true,
+      nearbyJob: { detourMinutes: 4 },
+    }));
+  });
+
+  test('asap slot helpers use Eastern calendar dates and skip same-day windows inside lead time', () => {
+    const now = new Date('2026-05-26T14:15:00Z'); // 10:15 AM ET
+
+    expect(slotAvailabilityInternals.etDateRange(3, now)).toEqual({
+      dateFrom: '2026-05-26',
+      dateTo: '2026-05-29',
+    });
+    expect(slotAvailabilityInternals.earliestBookableMinuteForDate('2026-05-26', now, 120))
+      .toBe(12 * 60 + 15);
+    expect(slotAvailabilityInternals.earliestBookableMinuteForDate('2026-05-27', now, 120))
+      .toBe(0);
+  });
+
+  test('asap slot cap preserves later windows when many techs are active', () => {
+    const techs = Array.from({ length: 30 }, (_, idx) => ({ id: `tech-${idx + 1}`, name: `Tech ${idx + 1}` }));
+    const slots = slotAvailabilityInternals.buildAsapCapacitySlotsForTechs({
+      dateFrom: '2026-05-27',
+      dateTo: '2026-05-27',
+      durationMinutes: 60,
+      techs,
+      maxCandidates: 12,
+    });
+
+    const windows = new Set(slots.map((slot) => slot.windowStart));
+    expect(slots).toHaveLength(12);
+    expect(windows.has('09:00')).toBe(true);
+    expect(windows.has('10:00')).toBe(true);
+    expect(windows.has('11:00')).toBe(true);
+    expect(windows.has('13:00')).toBe(true);
+  });
+
   test('estimate slot spreading happens before the final customer-facing limit', () => {
     const genericSlots = Array.from({ length: 6 }, (_, idx) => ({
       slotId: `generic-${idx}`,

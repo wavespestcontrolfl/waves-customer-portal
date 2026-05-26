@@ -5,8 +5,8 @@ export const SERVICE_COPY = {
     aiTitle: 'Waves AI reviewed your property before pricing this estimate',
     aiBody: 'We reviewed your home, lot, and pest-risk factors before pricing this plan.',
     askChips: [
-      'What products do you use?',
-      'Are pets and kids safe?',
+      'How do you handle ants?',
+      'Can you treat inside?',
       'When am I charged?',
       'What happens after approval?',
     ],
@@ -93,10 +93,10 @@ export const SERVICE_COPY = {
     aiTitle: 'Waves AI reviewed your lawn before pricing this estimate',
     aiBody: 'We reviewed your lawn size, turf type, and treatment needs before pricing this plan.',
     askChips: [
-      'What gets applied each visit?',
+      'How does your lawn assessment tech work?',
+      'What lawn issues do you check?',
       'When do visits start?',
       'What about weeds?',
-      'Is it safe for my dog?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for lawn care.",
@@ -108,10 +108,10 @@ export const SERVICE_COPY = {
     aiTitle: 'Waves AI reviewed your property before pricing this estimate',
     aiBody: 'We reviewed the services, property details, and pricing rules used for this plan.',
     askChips: [
-      'What is included?',
+      'What is included in this plan?',
+      'How do you handle ants?',
+      'How does your lawn assessment tech work?',
       'Are pets and kids safe?',
-      'When am I charged?',
-      'What happens after approval?',
     ],
     priceWording: {
       dayLine: "That's about {amount}/day for this plan.",
