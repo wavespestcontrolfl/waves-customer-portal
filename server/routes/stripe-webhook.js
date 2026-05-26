@@ -265,7 +265,16 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
   }
 
   const stripe = getStripe();
-  if (!stripe) return null;
+  if (!stripe) {
+    return {
+      reason: `Could not verify card funding for unfinalized PI ${paymentIntent.id}: Stripe is not configured`,
+      alertType: 'surcharge_bypass_unknown_funding_webhook',
+      severity: 'high',
+      title: `Unknown funding on unfinalized card - invoice ${invoice?.invoice_number || 'unknown'}`,
+      description: `Card payment succeeded without surcharge finalization and webhook funding verification could not run. PI: ${paymentIntent.id}. Not settled locally until manual review verifies whether surcharge was required.`,
+      metadata: { funding_lookup_error: 'stripe_not_configured' },
+    };
+  }
 
   try {
     const pmId = typeof paymentIntent.payment_method === 'string'
@@ -287,7 +296,15 @@ async function shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, in
       };
     }
   } catch (pmErr) {
-    logger.warn(`[stripe-webhook] Could not verify funding for unfinalized card PI ${paymentIntent.id}: ${pmErr.message}`);
+    logger.error(`[stripe-webhook] Could not verify funding for unfinalized card PI ${paymentIntent.id}: ${pmErr.message}`);
+    return {
+      reason: `Could not verify card funding for unfinalized PI ${paymentIntent.id}: ${pmErr.message}`,
+      alertType: 'surcharge_bypass_unknown_funding_webhook',
+      severity: 'high',
+      title: `Unknown funding on unfinalized card - invoice ${invoice?.invoice_number || 'unknown'}`,
+      description: `Card payment succeeded without surcharge finalization and funding lookup failed. PI: ${paymentIntent.id}. Not settled locally until manual review verifies whether surcharge was required.`,
+      metadata: { funding_lookup_error: pmErr.message },
+    };
   }
 
   return null;
