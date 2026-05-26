@@ -33,6 +33,7 @@ const {
   resolveRecurringFirstVisitAmount,
   resolveRecurringFirstVisitAmountFromFrequency,
   shouldApplyFirstViewSideEffects,
+  shouldPersistPestOnlyRecurringChoice,
   validateRecurringSlotPaymentPreference,
   sameDayVisitTotalForPricingFrequency,
   withSupplementedRecurringServices,
@@ -1610,6 +1611,10 @@ describe('public estimate one-time breakdown', () => {
       expect.objectContaining({ service: 'termite_bait_installation', amount: 556 }),
       expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
     ]));
+    expect(payload.oneTimeBreakdown.items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: 'one_time_adjustment' }),
+    ]));
+    expect(payload.oneTimeBreakdown.total).toBe(655);
   });
 
   test('classifies fallback-saved native roach initial by service key', async () => {
@@ -4237,6 +4242,39 @@ describe('public estimate one-time breakdown', () => {
       'Palm Injection',
       'Rodent Bait Stations',
     ]);
+  });
+
+  test('acceptance one-time choice recurring filter only applies to pest choices', () => {
+    expect(shouldPersistPestOnlyRecurringChoice({
+      show_one_time_option: true,
+    }, {
+      result: {
+        recurring: {
+          services: [{ service: 'mosquito', name: 'Mosquito', mo: 82.5 }],
+        },
+        oneTime: {
+          total: 275,
+          items: [{ service: 'one_time_mosquito', name: 'One-Time Mosquito Treatment', price: 275 }],
+        },
+      },
+    })).toBe(false);
+
+    expect(shouldPersistPestOnlyRecurringChoice({
+      show_one_time_option: true,
+    }, {
+      result: {
+        recurring: {
+          services: [
+            { service: 'pest_control', name: 'Pest Control', mo: 45 },
+            { service: 'lawn_care', name: 'Lawn Care', mo: 75 },
+          ],
+        },
+        oneTime: {
+          total: 250,
+          items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }],
+        },
+      },
+    })).toBe(true);
   });
 
   test('engine pricing bundle uses net palm price after Gold flat credits', async () => {

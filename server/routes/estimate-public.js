@@ -4383,7 +4383,8 @@ router.put('/:token/accept', async (req, res, next) => {
           billingPeriodLabel: effectiveBillingCadence.periodLabel,
           selectedAt: new Date().toISOString(),
         };
-        if (estimate.show_one_time_option && Array.isArray(nextEstimateData.result?.recurring?.services)) {
+        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData);
+        if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.result?.recurring?.services)) {
           nextEstimateData.result = {
             ...nextEstimateData.result,
             recurring: {
@@ -4392,7 +4393,7 @@ router.put('/:token/accept', async (req, res, next) => {
             },
           };
         }
-        if (estimate.show_one_time_option && Array.isArray(nextEstimateData.recurring?.services)) {
+        if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.recurring?.services)) {
           nextEstimateData.recurring = {
             ...nextEstimateData.recurring,
             services: nextEstimateData.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
@@ -5588,7 +5589,8 @@ function normalizeOneTimeBreakdown(estData) {
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
   const hasRecurringPest = recurringServicesForFee.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
   const hasRecurringTermiteBait = recurringServicesForFee.some((s) => recurringServiceKey(s) === 'termite_bait');
-  if (Number.isFinite(membershipFee) && membershipFee > 0 && (hasRecurringPest || hasRecurringTermiteBait)) {
+  const hasExplicitWaveGuardSetup = rows.some((row) => row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row));
+  if (Number.isFinite(membershipFee) && membershipFee > 0 && (hasRecurringPest || hasRecurringTermiteBait) && !hasExplicitWaveGuardSetup) {
     addRows([{
       service: 'waveguard_setup',
       name: 'WaveGuard setup',
@@ -5746,6 +5748,11 @@ function isStructuralOneTimeOnlyEstimate(estData, estimate = {}) {
 
 function defaultServiceModeForEstimate(estData, estimate = {}) {
   return isStructuralOneTimeOnlyEstimate(estData, estimate) ? 'one_time' : 'recurring';
+}
+
+function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
+  if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return false;
+  return oneTimePestChoiceAmountFromBreakdown(normalizeOneTimeBreakdown(estData)) > 0;
 }
 
 function acceptanceServiceLists(estData) {
@@ -7721,6 +7728,7 @@ module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
+module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
