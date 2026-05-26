@@ -192,7 +192,7 @@ export default function MobileManualCardSheet({
           className="text-ink-secondary"
           style={{ fontSize: 15, marginTop: 8 }}
         >
-          ${surcharge.toFixed(2)} with 3.99% credit card surcharge
+          ${amount.toFixed(2)}
         </div>
 
         {/* Card form — Stripe Payment Element restricted to card tender */}

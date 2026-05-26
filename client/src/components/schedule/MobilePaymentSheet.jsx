@@ -142,7 +142,7 @@ export default function MobilePaymentSheet({
             className="text-ink-tertiary"
             style={{ fontSize: 14, marginTop: 10 }}
           >
-            ${surcharge.toFixed(2)} with 3.99% credit card surcharge
+            ${amount.toFixed(2)}
           </div>
 
           {/* Tap to Pay card */}

@@ -24,7 +24,7 @@
 // Helpers under test are pure — no DB, no Stripe SDK, no Twilio. Each
 // lives in its own *-helpers / *-pricing module to keep the test
 // runtime fast and free of side-effect imports.
-const { computeChargeAmount, isCardMethodType, CARD_SURCHARGE_RATE } = require('../services/stripe-pricing');
+const { computeChargeAmount, isCardMethodType, CARD_SURCHARGE_RATE, shouldSurcharge, computeRefundSurcharge, SURCHARGE_POLICY_VERSION } = require('../services/stripe-pricing');
 const { isBillingDayMatch } = require('../services/billing-helpers');
 const {
   INVOICE_UPDATE_ALLOWED_FIELDS,
@@ -47,50 +47,128 @@ const {
 describe('stripe computeChargeAmount', () => {
   test('ACH (us_bank_account) pays the quoted amount with no surcharge', () => {
     const r = computeChargeAmount(100, 'us_bank_account');
-    expect(r).toEqual({ base: 100, surcharge: 0, total: 100 });
+    expect(r.surcharge).toBe(0);
+    expect(r.total).toBe(100);
+    expect(r.surchargeCents).toBe(0);
+    expect(r.totalCents).toBe(10000);
   });
 
   test('ach alias also bypasses surcharge', () => {
-    expect(computeChargeAmount(100, 'ach')).toEqual({ base: 100, surcharge: 0, total: 100 });
-    expect(computeChargeAmount(100, 'bank')).toEqual({ base: 100, surcharge: 0, total: 100 });
-    expect(computeChargeAmount(100, 'bank_account')).toEqual({ base: 100, surcharge: 0, total: 100 });
-  });
-
-  test('card adds 3.99% rounded to cents', () => {
-    const r = computeChargeAmount(100, 'card');
-    // 100 * 0.0399 = 3.99 exactly
-    expect(r).toEqual({ base: 100, surcharge: 3.99, total: 103.99 });
-  });
-
-  test('apple_pay / google_pay / link are card-family (surcharged)', () => {
-    for (const m of ['apple_pay', 'google_pay', 'link']) {
+    for (const m of ['ach', 'bank', 'bank_account']) {
       const r = computeChargeAmount(100, m);
-      expect(r.surcharge).toBeCloseTo(3.99, 2);
-      expect(r.total).toBeCloseTo(103.99, 2);
+      expect(r.surcharge).toBe(0);
+      expect(r.total).toBe(100);
     }
   });
 
-  test('rounding is two-step: round(base × rate) added to base', () => {
-    // 33.33 × 0.0399 = 1.329867 → round to 1.33 → 33.33 + 1.33 = 34.66
-    const r = computeChargeAmount(33.33, 'card');
-    expect(r).toEqual({ base: 33.33, surcharge: 1.33, total: 34.66 });
+  test('card with funding=credit adds 3% (floor-rounded)', () => {
+    const r = computeChargeAmount(100, 'card', { funding: 'credit' });
+    expect(r.surchargeCents).toBe(300);
+    expect(r.totalCents).toBe(10300);
+    expect(r.surcharge).toBe(3);
+    expect(r.total).toBe(103);
+    expect(r.rateBps).toBe(300);
+    expect(r.policyVersion).toBe(SURCHARGE_POLICY_VERSION);
   });
 
-  test('null / unknown method types default to card-family (fail closed)', () => {
-    // Defaulting to "no surcharge" on an unknown method would silently
-    // lose 3.99% on every Klarna / Cash App / Affirm transaction Stripe
-    // ever ships into automatic_payment_methods. Default the other way.
-    expect(isCardMethodType(null)).toBe(false); // null returns early
+  test('card with funding=debit → no surcharge', () => {
+    const r = computeChargeAmount(100, 'card', { funding: 'debit' });
+    expect(r.surchargeCents).toBe(0);
+    expect(r.total).toBe(100);
+  });
+
+  test('card with funding=prepaid → no surcharge', () => {
+    const r = computeChargeAmount(100, 'card', { funding: 'prepaid' });
+    expect(r.surchargeCents).toBe(0);
+    expect(r.total).toBe(100);
+  });
+
+  test('card with funding=null (unknown) → no surcharge', () => {
+    const r = computeChargeAmount(100, 'card', { funding: null });
+    expect(r.surchargeCents).toBe(0);
+    expect(r.total).toBe(100);
+  });
+
+  test('card with no funding option → no surcharge (safe default)', () => {
+    const r = computeChargeAmount(100, 'card');
+    expect(r.surchargeCents).toBe(0);
+    expect(r.total).toBe(100);
+  });
+
+  test('floor rounding never exceeds 3% cap', () => {
+    const r = computeChargeAmount(33.33, 'card', { funding: 'credit' });
+    expect(r.surchargeCents).toBe(99);
+    expect(r.totalCents).toBe(3432);
+    expect(r.surchargeCents / r.baseCents).toBeLessThanOrEqual(0.03);
+  });
+
+  test('stripeMaxCents caps the surcharge', () => {
+    const r = computeChargeAmount(1000, 'card', { funding: 'credit', stripeMaxCents: 20 });
+    expect(r.surchargeCents).toBe(20);
+    expect(r.totalCents).toBe(100020);
+  });
+
+  test('apple_pay / google_pay / link need funding=credit to surcharge', () => {
+    for (const m of ['apple_pay', 'google_pay', 'link']) {
+      expect(computeChargeAmount(100, m).surchargeCents).toBe(0);
+      expect(computeChargeAmount(100, m, { funding: 'credit' }).surchargeCents).toBe(300);
+    }
+  });
+
+  test('null / unknown method types: isCardMethodType behavior', () => {
+    expect(isCardMethodType(null)).toBe(false);
     expect(isCardMethodType('cashapp')).toBe(true);
     expect(isCardMethodType('klarna')).toBe(true);
-    expect(isCardMethodType('affirm')).toBe(true);
   });
 
-  test('CARD_SURCHARGE_RATE is the canonical 3.99% the consent text references', () => {
-    // The "save card" consent copy embeds "3.99% processing fee" verbatim
-    // (server/services/payment-method-consent-text.js). If that constant
-    // ever moves, the consent_text_version MUST bump in lockstep.
-    expect(CARD_SURCHARGE_RATE).toBeCloseTo(0.0399, 4);
+  test('CARD_SURCHARGE_RATE is 3% (legacy compat)', () => {
+    expect(CARD_SURCHARGE_RATE).toBeCloseTo(0.03, 4);
+  });
+});
+
+describe('shouldSurcharge', () => {
+  test('only credit cards get surcharged', () => {
+    expect(shouldSurcharge('card', 'credit')).toBe(true);
+    expect(shouldSurcharge('card', 'debit')).toBe(false);
+    expect(shouldSurcharge('card', 'prepaid')).toBe(false);
+    expect(shouldSurcharge('card', null)).toBe(false);
+    expect(shouldSurcharge('card', undefined)).toBe(false);
+    expect(shouldSurcharge('us_bank_account', 'credit')).toBe(false);
+    expect(shouldSurcharge('ach', 'credit')).toBe(false);
+  });
+});
+
+describe('computeRefundSurcharge', () => {
+  test('full refund returns all surcharge', () => {
+    expect(computeRefundSurcharge({
+      refundBaseCents: 10000, originalBaseCents: 10000,
+      originalSurchargeCents: 300, totalRefundedBaseCents: 0, alreadyRefundedSurchargeCents: 0,
+    })).toBe(300);
+  });
+
+  test('partial refund prorates surcharge', () => {
+    expect(computeRefundSurcharge({
+      refundBaseCents: 5000, originalBaseCents: 10000,
+      originalSurchargeCents: 300, totalRefundedBaseCents: 0, alreadyRefundedSurchargeCents: 0,
+    })).toBe(150);
+  });
+
+  test('cumulative partial refunds do not over-refund', () => {
+    const first = computeRefundSurcharge({
+      refundBaseCents: 5000, originalBaseCents: 10000,
+      originalSurchargeCents: 300, totalRefundedBaseCents: 0, alreadyRefundedSurchargeCents: 0,
+    });
+    const second = computeRefundSurcharge({
+      refundBaseCents: 5000, originalBaseCents: 10000,
+      originalSurchargeCents: 300, totalRefundedBaseCents: 5000, alreadyRefundedSurchargeCents: first,
+    });
+    expect(first + second).toBe(300);
+  });
+
+  test('no surcharge to refund → 0', () => {
+    expect(computeRefundSurcharge({
+      refundBaseCents: 5000, originalBaseCents: 10000, originalSurchargeCents: 0,
+    })).toBe(0);
   });
 });
 
@@ -282,7 +360,7 @@ describe('invoice assertInvoiceCollectible', () => {
 describe('stripe invoice ACH state helpers', () => {
   test('card-priced invoice PaymentIntent accepts a real card settlement', () => {
     expect(() => assertInvoicePaymentIntentTenderMatches({
-      amount: 7799,
+      amount: 7500,
       payment_method_types: ['card', 'us_bank_account'],
       metadata: { selected_method_category: 'card', base_amount: '75' },
     }, 'card', 75)).not.toThrow();
@@ -290,18 +368,21 @@ describe('stripe invoice ACH state helpers', () => {
 
   test('card-priced invoice PaymentIntent rejects a real ACH settlement', () => {
     expect(() => assertInvoicePaymentIntentTenderMatches({
-      amount_received: 7799,
+      amount_received: 7500,
       payment_method_types: ['card', 'us_bank_account'],
       metadata: { selected_method_category: 'card', base_amount: '75' },
     }, 'us_bank_account', 75)).toThrow(/Payment method changed/);
   });
 
-  test('mixed-method invoice PaymentIntent rejects ACH at the card total even without selected metadata', () => {
+  test('mixed-method invoice PaymentIntent without selected_method_category — amounts match so no throw', () => {
+    // With no surcharge difference between card and ACH, amount-based
+    // mismatch detection can't distinguish them. The method-family check
+    // only fires when selected_method_category is present.
     expect(() => assertInvoicePaymentIntentTenderMatches({
-      amount_received: 7799,
+      amount_received: 7500,
       payment_method_types: ['card', 'us_bank_account'],
       metadata: { base_amount: '75' },
-    }, 'us_bank_account', 75)).toThrow(/Payment amount does not match/);
+    }, 'us_bank_account', 75)).not.toThrow();
   });
 
   test('ACH-priced invoice PaymentIntent rejects a real card settlement', () => {
@@ -328,7 +409,7 @@ describe('stripe invoice ACH state helpers', () => {
     }, 'card_present')).toBe(true);
 
     expect(isTerminalInvoicePaymentIntent({
-      amount_received: 7799,
+      amount_received: 7500,
       payment_method_types: ['card', 'us_bank_account'],
       metadata: { selected_method_category: 'card' },
     }, 'card')).toBe(false);

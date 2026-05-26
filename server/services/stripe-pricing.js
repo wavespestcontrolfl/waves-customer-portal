@@ -1,24 +1,32 @@
 /**
- * Stripe pricing helpers — pure, dependency-free, test-friendly.
+ * Stripe surcharge helpers — pure, dependency-free, test-friendly.
  *
- * The 3.99% credit-card surcharge math lives here so it can be exercised
- * without loading the Stripe SDK or any DB. Both server/services/stripe.js
- * and the audit unit tests import from this module — there is one copy
- * of the surcharge logic in the codebase.
+ * Phase 1: flat 3% surcharge on confirmed-credit-only. Debit, prepaid,
+ * unknown-funding, and ACH pay the quoted amount with no surcharge.
  *
- * If you change CARD_SURCHARGE_RATE you MUST also bump the consent
- * version (server/services/payment-method-consent-text.js) so old
- * "save card" rows stay anchored to the rate the customer agreed to.
+ * Uses Stripe's surcharge API (`amount_details.surcharge`) with
+ * `enforce_validation: 'enabled'`. Surcharge PI calls require
+ * `apiVersion: '2026-03-25.preview'` passed per-request.
+ *
+ * If you change CONFIGURED_COST_BPS you MUST also bump the consent
+ * version (server/services/payment-method-consent-text.js) and the
+ * SURCHARGE_POLICY_VERSION below.
  */
 
-const CARD_SURCHARGE_RATE = 0.0399;
+// ── Rate policy ──────────────────────────────────────────────
+// CONFIGURED_COST_BPS must be ≤ actual merchant discount rate.
+// Confirm with finance/legal before launch.
+const CONFIGURED_COST_BPS = 300;     // 3.00%
+const NETWORK_CAP_BPS = 300;         // Visa/MC US credit card cap
+const SURCHARGE_POLICY_VERSION = 'v1_2026-05-27';
+const SURCHARGE_API_VERSION = '2026-03-25.preview';
 
-// Accepts a stored payment_methods.method_type ('card' | 'ach') OR a
-// Stripe Payment Element type ('card' | 'us_bank_account' | 'apple_pay'
-// | 'google_pay' | 'link'). Anything we don't explicitly recognize as
-// ACH is treated as card-family and surcharged — we'd rather over-collect
-// on a future Stripe method (Klarna, Affirm, Cash App) than silently lose
-// 3.99% on every transaction until someone notices.
+// ── Legacy exports (deprecated — use cents/bps API) ─────────
+// Kept so callers that import CARD_SURCHARGE_RATE keep compiling
+// during the transition. Remove after all callers migrate.
+const CARD_SURCHARGE_RATE = CONFIGURED_COST_BPS / 10_000;  // 0.03
+
+// ── ACH / bank detection ─────────────────────────────────────
 function isCardMethodType(methodType) {
   if (!methodType) return false;
   const m = String(methodType).toLowerCase();
@@ -26,18 +34,115 @@ function isCardMethodType(methodType) {
   return true;
 }
 
-function computeChargeAmount(baseAmountDollars, methodType) {
-  const base = Math.round(Number(baseAmountDollars) * 100) / 100;
-  if (!isCardMethodType(methodType)) {
-    return { base, surcharge: 0, total: base };
+// ── Surcharge eligibility ────────────────────────────────────
+// Only surcharge when funding is positively confirmed as 'credit'.
+// null / unknown / debit / prepaid → no surcharge.
+function shouldSurcharge(methodType, funding) {
+  if (!isCardMethodType(methodType)) return false;
+  return funding === 'credit';
+}
+
+// ── Cents math ───────────────────────────────────────────────
+// Math.floor ensures we never exceed the configured cap by a cent.
+function computeSurchargeCents(baseCents, opts = {}) {
+  const { costBps = CONFIGURED_COST_BPS, capBps = NETWORK_CAP_BPS, stripeMaxCents } = opts;
+  const byCost = Math.floor((baseCents * costBps) / 10_000);
+  const byCap = Math.floor((baseCents * capBps) / 10_000);
+  let result = Math.min(byCost, byCap);
+  if (stripeMaxCents != null) result = Math.min(result, stripeMaxCents);
+  return result;
+}
+
+// ── Primary charge-amount calculator ─────────────────────────
+// Returns cents + basis-point facts for storage on the payment record.
+function computeChargeAmount(baseAmountDollars, methodType, opts = {}) {
+  const { funding, stripeMaxCents } = opts;
+  const baseCents = Math.round(Number(baseAmountDollars) * 100);
+  if (!shouldSurcharge(methodType, funding)) {
+    return {
+      baseCents,
+      surchargeCents: 0,
+      totalCents: baseCents,
+      rateBps: 0,
+      policyVersion: SURCHARGE_POLICY_VERSION,
+      // Legacy dollar shape (deprecated)
+      base: baseCents / 100,
+      surcharge: 0,
+      total: baseCents / 100,
+      rate: 0,
+    };
   }
-  const surcharge = Math.round(base * CARD_SURCHARGE_RATE * 100) / 100;
-  const total = Math.round((base + surcharge) * 100) / 100;
-  return { base, surcharge, total };
+  const surchargeCents = computeSurchargeCents(baseCents, { stripeMaxCents });
+  const totalCents = baseCents + surchargeCents;
+  return {
+    baseCents,
+    surchargeCents,
+    totalCents,
+    rateBps: CONFIGURED_COST_BPS,
+    policyVersion: SURCHARGE_POLICY_VERSION,
+    // Legacy dollar shape (deprecated)
+    base: baseCents / 100,
+    surcharge: Math.round(surchargeCents) / 100,
+    total: totalCents / 100,
+    rate: CONFIGURED_COST_BPS / 10_000,
+  };
+}
+
+// ── Stripe amount_details builder ────────────────────────────
+// Returns the amount_details object to pass to PI create/update/confirm/capture.
+// Returns null when no surcharge applies (caller should omit the field).
+function buildSurchargeAmountDetails(surchargeCents) {
+  if (!surchargeCents || surchargeCents <= 0) return null;
+  return {
+    surcharge: {
+      amount: surchargeCents,
+      enforce_validation: 'enabled',
+    },
+  };
+}
+
+// ── Refund surcharge proration ───────────────────────────────
+// Cumulative tracking: avoids penny drift across multiple partial refunds.
+function computeRefundSurcharge({
+  refundBaseCents,
+  originalBaseCents,
+  originalSurchargeCents,
+  totalRefundedBaseCents = 0,
+  alreadyRefundedSurchargeCents = 0,
+}) {
+  if (originalSurchargeCents <= 0 || originalBaseCents <= 0) return 0;
+  const remainingSurcharge = originalSurchargeCents - alreadyRefundedSurchargeCents;
+  if (remainingSurcharge <= 0) return 0;
+
+  // Full refund of remaining base → return all remaining surcharge
+  const cumulativeRefundedBase = totalRefundedBaseCents + refundBaseCents;
+  if (cumulativeRefundedBase >= originalBaseCents) return remainingSurcharge;
+
+  // Partial: prorate cumulatively, then subtract already refunded
+  const targetRefundedSurcharge = Math.round(
+    (cumulativeRefundedBase * originalSurchargeCents) / originalBaseCents,
+  );
+  return Math.min(
+    Math.max(0, targetRefundedSurcharge - alreadyRefundedSurchargeCents),
+    remainingSurcharge,
+  );
 }
 
 module.exports = {
-  CARD_SURCHARGE_RATE,
+  // Phase 1 constants
+  CONFIGURED_COST_BPS,
+  NETWORK_CAP_BPS,
+  SURCHARGE_POLICY_VERSION,
+  SURCHARGE_API_VERSION,
+
+  // Core functions
   isCardMethodType,
+  shouldSurcharge,
+  computeSurchargeCents,
   computeChargeAmount,
+  buildSurchargeAmountDetails,
+  computeRefundSurcharge,
+
+  // Legacy (deprecated — use cents/bps API)
+  CARD_SURCHARGE_RATE,
 };

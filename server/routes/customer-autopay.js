@@ -59,11 +59,11 @@ router.get('/', async (req, res, next) => {
         is_default: true,
         autopay_enabled: true,
       })
-      .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled');
+      .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled', 'card_funding', 'card_brand');
     const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod);
     const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod;
     const nextCharge = customerAutopayEnabled
-      ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type)
+      ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type, { funding: chargeableAutopayMethod.card_funding })
       : null;
 
     let state = 'disabled';

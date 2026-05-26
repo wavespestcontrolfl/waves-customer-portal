@@ -139,7 +139,8 @@ router.post('/:token/setup', async (req, res, next) => {
 
 // =========================================================================
 // POST /api/pay/:token/update-amount — Adjust PI for selected payment method
-// (adds a 3.99% processing surcharge for card-family methods; ACH stays at base)
+// No surcharge at this stage — both card and ACH stay at base amount.
+// Surcharge is added at /quote + /finalize after PM funding is known.
 // =========================================================================
 router.post('/:token/update-amount', async (req, res, next) => {
   try {
@@ -174,7 +175,56 @@ router.post('/:token/update-amount', async (req, res, next) => {
 });
 
 // =========================================================================
+// POST /api/pay/:token/quote — Get surcharge quote for a specific PM
+// =========================================================================
+router.post('/:token/quote', async (req, res, next) => {
+  try {
+    const { paymentMethodId } = req.body || {};
+    if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+
+    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (err) {
+      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+    }
+
+    const result = await StripeService.quoteInvoiceSurcharge(invoice.id, paymentMethodId);
+    res.json(result);
+  } catch (err) {
+    logger.error(`[pay-v2] Quote error: ${err.message}`);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// POST /api/pay/:token/finalize — Confirm payment with surcharge applied
+// =========================================================================
+router.post('/:token/finalize', async (req, res, next) => {
+  try {
+    const { quoteToken, saveCard } = req.body || {};
+    if (!quoteToken) return res.status(400).json({ error: 'quoteToken required' });
+
+    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    try {
+      assertInvoiceCollectible(invoice.status);
+    } catch (err) {
+      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+    }
+
+    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteToken, { saveCard: !!saveCard });
+    res.json(result);
+  } catch (err) {
+    logger.error(`[pay-v2] Finalize error: ${err.message}`);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// =========================================================================
 // POST /api/pay/:token/confirm — Confirm Stripe payment for invoice
+// (Legacy — kept for ACH confirmation and Express Checkout which skip /finalize)
 // =========================================================================
 router.post('/:token/confirm', async (req, res, next) => {
   try {

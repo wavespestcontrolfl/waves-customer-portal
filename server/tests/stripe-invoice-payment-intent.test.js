@@ -95,12 +95,12 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(result.clientSecret).toBe('pi_fresh_secret');
     expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(2);
     expect(stripeClient.paymentIntents.create.mock.calls[0][0]).toEqual(expect.objectContaining({
-      amount: 7799,
+      amount: 7500,
       payment_method_types: ['card'],
       metadata: expect.objectContaining({
         selected_method_category: 'card',
         base_amount: '75',
-        card_surcharge: '2.99',
+        card_surcharge: '0',
       }),
     }));
     expect(stripeClient.paymentIntents.create.mock.calls[0][1].idempotencyKey).toContain('pi_canceled');
@@ -127,14 +127,14 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_open', expect.objectContaining({
-      amount: 7799,
+      amount: 7500,
       payment_method_types: ['card'],
       setup_future_usage: '',
       metadata: expect.objectContaining({
         waves_invoice_id: invoiceRow.id,
         selected_method_category: 'card',
         base_amount: '75',
-        card_surcharge: '2.99',
+        card_surcharge: '0',
       }),
     }));
     expect(stripeClient.paymentIntents.update.mock.calls[0][1]).not.toHaveProperty('currency');
@@ -211,17 +211,17 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     jest.doMock('../models/db', () => dbMock);
   });
 
-  test('card-family updates lock the PaymentIntent to card at the surcharged total', async () => {
+  test('card-family updates keep the PaymentIntent at base amount (surcharge deferred to /finalize)', async () => {
     const StripeService = require('../services/stripe');
     await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
 
     expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_invoice', expect.objectContaining({
-      amount: 7799,
+      amount: 7500,
       payment_method_types: ['card'],
       metadata: expect.objectContaining({
         selected_method_category: 'card',
         base_amount: '75',
-        card_surcharge: '2.99',
+        card_surcharge: '0',
       }),
     }));
   });
