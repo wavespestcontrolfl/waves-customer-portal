@@ -46,10 +46,30 @@ function firstNonEmpty(...values) {
 
 const SERVICE_INTEREST_LABELS = {
   pest: 'Pest Control',
+  general_pest: 'Pest Control',
   pest_control: 'Pest Control',
   pest_control_lawn_care: 'Pest Control + Lawn Care',
+  general_pest_lawn_care: 'Pest Control + Lawn Care',
   lawn: 'Lawn Care',
   lawn_care: 'Lawn Care',
+  mosquito_control: 'Mosquito Control',
+  mosquito_lawn_care: 'Mosquito Control + Lawn Care',
+  termite_treatment: 'Termite Treatment',
+  bed_bug_treatment: 'Bed Bug Treatment',
+  ant_control: 'Ant Control',
+  flea_tick_control: 'Flea & Tick Control',
+  spider_wasp_control: 'Spider & Wasp Control',
+  lawn_fertilization: 'Lawn Fertilization',
+  weed_control: 'Weed Control',
+  lawn_pest_control: 'Lawn Pest Control',
+  tree_shrub_care: 'Tree & Shrub Care',
+  palm_injections: 'Palm Tree Injections',
+  aeration_plugging: 'Lawn Aeration & Plugging',
+  not_sure_pest: 'Pest Control Consultation',
+  not_sure_lawn: 'Lawn Care Consultation',
+  not_sure_both: 'Pest Control + Lawn Care Consultation',
+  inspection: 'Inspection',
+  commercial_service: 'Commercial Service',
   both: 'Pest Control + Lawn Care',
   mosquito: 'Mosquito Control',
   termite: 'Termite',
@@ -64,6 +84,16 @@ const SERVICE_INTEREST_LABELS = {
   top_dressing: 'Top Dressing',
   overseeding: 'Overseeding',
   other: 'Other Services',
+};
+
+const FREQUENCY_LABELS = {
+  ongoing: 'Recurring',
+  recurring: 'Recurring',
+  'one-time': 'One-Time',
+  one_time: 'One-Time',
+  'not-sure': 'Consultation',
+  not_sure: 'Consultation',
+  consult: 'Consultation',
 };
 
 function titleizeServiceValue(value) {
@@ -82,16 +112,35 @@ function serviceLabelFor(value) {
   return /^[a-z0-9_-]+$/i.test(raw) ? titleizeServiceValue(raw) : raw;
 }
 
+function normalizeFrequencyKey(value) {
+  return firstNonEmpty(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function formatServiceInterestForFrequency(serviceLabel, frequency) {
+  const label = serviceLabelFor(serviceLabel);
+  if (!label) return '';
+  if (/\bconsultation\b/i.test(label)) return label;
+  const frequencyKey = normalizeFrequencyKey(frequency);
+  const frequencyLabel = FREQUENCY_LABELS[frequencyKey] ?? titleizeServiceValue(frequency);
+  if (!frequencyLabel) return label;
+  return label.split(/\s+\+\s+/)
+    .filter(Boolean)
+    .map(part => (frequencyLabel === 'Consultation' ? `${part} Consultation` : `${frequencyLabel} ${part}`))
+    .join(' + ');
+}
+
 function normalizeServiceInterest(body = {}) {
   const explicit = firstNonEmpty(body.service_interest, body.serviceInterest, body.service);
   if (explicit) return serviceLabelFor(explicit);
 
-  const interest = firstNonEmpty(body.interest);
+  const interest = firstNonEmpty(body.specific_service, body.specificService, body.interest);
   const otherService = firstNonEmpty(body.otherService, body.other_service);
   if (!interest) return '';
-  return interest.toLowerCase() === 'other'
+  const serviceLabel = interest.toLowerCase() === 'other'
     ? serviceLabelFor(otherService || interest)
     : serviceLabelFor(interest);
+  const frequency = firstNonEmpty(body.frequency, body.Frequency);
+  return frequency ? formatServiceInterestForFrequency(serviceLabel, frequency) : serviceLabel;
 }
 
 router.post('/property-lookup', lookupLimiter, async (req, res) => {
@@ -208,3 +257,7 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 });
 
 module.exports = router;
+module.exports._test = {
+  normalizeServiceInterest,
+  formatServiceInterestForFrequency,
+};
