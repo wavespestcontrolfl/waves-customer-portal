@@ -30,13 +30,13 @@ router.get('/', async (req, res, next) => {
 
     const productServiceMap = {};
     for (const m of usageMappings) {
-      if (!productServiceMap[m.product_id]) productServiceMap[m.product_id] = [];
-      productServiceMap[m.product_id].push(m.service_type);
+      if (!productServiceMap[m.product_id]) productServiceMap[m.product_id] = new Set();
+      productServiceMap[m.product_id].add(m.service_type);
     }
 
     const serviceGroupMap = {};
     for (const p of products) {
-      const serviceTypes = productServiceMap[p.id] || ['General'];
+      const serviceTypes = productServiceMap[p.id] ? [...productServiceMap[p.id]] : ['General'];
       for (const st of serviceTypes) {
         if (!serviceGroupMap[st]) {
           serviceGroupMap[st] = {
