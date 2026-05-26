@@ -281,12 +281,32 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
       homeowner_minute: 'Homeowner Minute',
       waves_cta: '',
     };
+    const NAVY = '#1B2C5B';
+    const BLUE = '#009CDE';
+    const RULE = '#E8E0D4';
+    const styledH2 = (title) =>
+      `<h2 style="font-family:Inter,Arial,sans-serif;font-size:18px;font-weight:800;color:${NAVY};margin:28px 0 12px 0;padding-bottom:6px;border-bottom:2px solid ${RULE};">${title}</h2>`;
+
     const parts = [];
     for (const key of sectionOrder) {
-      const html = draft.sections[key];
+      let html = draft.sections[key];
       if (!html) continue;
+
+      // Strip Claude's raw h2 tags (we add our own styled ones)
+      html = html.replace(/<h2[^>]*>[\s\S]*?<\/h2>/gi, '');
+      // Style event list items
+      html = html.replace(/<li>/g,
+        `<li style="margin:0 0 14px 0;padding:12px 14px;background:#FAFAF8;border-radius:8px;border-left:3px solid ${BLUE};">`);
+      html = html.replace(/<ul>/g, '<ul style="list-style:none;padding:0;margin:0 0 16px 0;">');
+      html = html.replace(/<a\s+href=/g, `<a style="color:${BLUE};text-decoration:underline;" href=`);
+      html = html.replace(/<p>/g, '<p style="margin:0 0 14px 0;">');
+
+      if (key === 'homeowner_minute') {
+        html = `<div style="margin:20px 0;padding:16px 18px;background:#F0F7FA;border-radius:10px;border-left:3px solid ${BLUE};">${html}</div>`;
+      }
+
       const label = sectionLabels[key];
-      if (label) parts.push(`<h2>${label}</h2>\n${html}`);
+      if (label) parts.push(styledH2(label) + '\n' + html);
       else parts.push(html);
     }
     draft.htmlBody = parts.join('\n\n');
