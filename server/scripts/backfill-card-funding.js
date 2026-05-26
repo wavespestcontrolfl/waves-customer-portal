@@ -13,7 +13,8 @@
  * Controlled concurrency (5 at a time), retry on rate limit, resumable.
  */
 
-const knex = require('../db');
+require('dotenv').config();
+const knex = require('../models/db');
 const Stripe = require('stripe');
 const stripeConfig = require('../config/stripe-config');
 
