@@ -344,8 +344,21 @@ const StripeService = {
 
     // Apply credit card surcharge when funding is confirmed as 'credit'.
     // Debit/prepaid/unknown-funding/ACH pay the quoted amount with no surcharge.
-    if (!card.card_funding && isCardMethodType(card.method_type)) {
-      logger.warn(`[stripe] card_funding is null for PM ${card.id} — treating as non-credit (no surcharge). Backfill card_funding to avoid this.`);
+    if (card.method_type === 'card' && !card.card_funding && card.stripe_payment_method_id) {
+      try {
+        const pmObj = await stripe.paymentMethods.retrieve(card.stripe_payment_method_id);
+        const fetchedFunding = pmObj.card?.funding || null;
+        if (fetchedFunding) {
+          card.card_funding = fetchedFunding;
+          await db('payment_methods').where({ id: card.id }).update({
+            card_funding: fetchedFunding,
+            card_funding_checked_at: new Date(),
+          });
+          logger.info(`[stripe] Backfilled card_funding=${fetchedFunding} for card ${card.id}`);
+        }
+      } catch (fetchErr) {
+        logger.warn(`[stripe] Could not fetch funding for card ${card.id}: ${fetchErr.message}`);
+      }
     }
     const chargeInfo = computeChargeAmount(amountDollars, card.method_type, { funding: card.card_funding });
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
@@ -627,6 +640,24 @@ const StripeService = {
             if (activeIntent.status !== 'canceled') {
               await stripe.paymentIntents.cancel(activeIntent.id);
             }
+          }
+        }
+
+        // On-demand funding fetch for legacy cards missing card_funding
+        if (card.method_type === 'card' && !card.card_funding && card.stripe_payment_method_id) {
+          try {
+            const pmObj = await stripe.paymentMethods.retrieve(card.stripe_payment_method_id);
+            const fetchedFunding = pmObj.card?.funding || null;
+            if (fetchedFunding) {
+              card.card_funding = fetchedFunding;
+              await trx('payment_methods').where({ id: card.id }).update({
+                card_funding: fetchedFunding,
+                card_funding_checked_at: new Date(),
+              });
+              logger.info(`[stripe] Backfilled card_funding=${fetchedFunding} for card ${card.id}`);
+            }
+          } catch (fetchErr) {
+            logger.warn(`[stripe] Could not fetch funding for card ${card.id}: ${fetchErr.message}`);
           }
         }
 
@@ -1194,6 +1225,7 @@ const StripeService = {
     const payloadJson = JSON.stringify({
       invoiceId,
       paymentMethodId,
+      invoiceTotal: baseAmount,
       quotedAt: Date.now(),
     });
     const signature = crypto.createHmac('sha256', hmacSecret).update(payloadJson).digest('base64url');
@@ -1254,6 +1286,11 @@ const StripeService = {
     const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
     const funding = pm.card?.funding || null;
     const baseAmount = parseFloat(invoice.total);
+
+    if (quote.invoiceTotal != null && Math.abs(baseAmount - quote.invoiceTotal) > 0.01) {
+      throw new Error('Invoice total changed since quote was created. Please request a new quote.');
+    }
+
     const chargeInfo = computeChargeAmount(baseAmount, pm.type || 'card', { funding });
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
 
