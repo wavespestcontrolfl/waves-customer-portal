@@ -76,6 +76,12 @@ function staleAutoSendRecoveryDecision(autoSend = {}, estimate = {}, now = new D
   };
 }
 
+function minutesSince(value, now = new Date()) {
+  const time = value ? new Date(value).getTime() : NaN;
+  if (!Number.isFinite(time)) return null;
+  return Math.max(0, Math.floor((now.getTime() - time) / 60000));
+}
+
 function mergeAutoSendMetadata(estimateData, patch) {
   const data = parseJsonObject(estimateData);
   const automation = parseJsonObject(data.automation);
@@ -151,6 +157,105 @@ function leadEstimateAutoSendEligibility(estimate = {}, options = {}) {
   return { eligible: true, reason: null };
 }
 
+function leadEstimateAutoSendAuditRow(estimate = {}, options = {}) {
+  const config = {
+    delayMinutes: DEFAULT_DELAY_MINUTES,
+    staleClaimMinutes: DEFAULT_STALE_CLAIM_MINUTES,
+    allowedReviewReasons: DEFAULT_ALLOWED_REVIEW_REASONS,
+    sendMethod: 'both',
+    ...options,
+  };
+  const now = options.now instanceof Date ? options.now : new Date();
+  const summary = leadAutomationSummary(estimate.estimate_data || estimate.estimateData);
+  const base = {
+    id: estimate.id,
+    status: estimate.status || null,
+    createdAt: estimate.created_at || estimate.createdAt || null,
+    ageMinutes: minutesSince(estimate.created_at || estimate.createdAt, now),
+    leadSource: estimate.lead_source || estimate.leadSource || null,
+    leadSourceDetail: estimate.lead_source_detail || estimate.leadSourceDetail || null,
+    serviceInterest: estimate.service_interest || estimate.serviceInterest || null,
+    monthlyTotal: estimate.monthly_total ?? estimate.monthlyTotal ?? null,
+    oneTimeTotal: estimate.onetime_total ?? estimate.oneTimeTotal ?? estimate.onetimeTotal ?? null,
+    contact: {
+      hasPhone: !!(estimate.customer_phone || estimate.customerPhone),
+      hasEmail: !!(estimate.customer_email || estimate.customerEmail),
+    },
+    automation: {
+      status: summary.status,
+      generated: summary.generated,
+      quoteRequired: summary.quoteRequired,
+      review: summary.review,
+      autoSend: {
+        claimedAt: summary.autoSend.claimedAt || summary.autoSend.claimed_at || null,
+        attemptedAt: summary.autoSend.attemptedAt || summary.autoSend.attempted_at || null,
+        blockedAt: summary.autoSend.blockedAt || summary.autoSend.blocked_at || null,
+        blockedReason: summary.autoSend.blockedReason || summary.autoSend.blocked_reason || null,
+        sendMethod: summary.autoSend.sendMethod || summary.autoSend.send_method || estimate.send_method || null,
+      },
+    },
+    scheduledAt: estimate.scheduled_at || estimate.scheduledAt || null,
+    sentAt: estimate.sent_at || estimate.sentAt || null,
+  };
+
+  const claimedAt = summary.autoSend.claimedAt || summary.autoSend.claimed_at;
+  const attemptedAt = summary.autoSend.attemptedAt || summary.autoSend.attempted_at;
+  const blockedAt = summary.autoSend.blockedAt || summary.autoSend.blocked_at;
+  const staleClaim = isStaleAutoSendClaim(summary.autoSend, now, config.staleClaimMinutes);
+  const matchesStaleRecoveryPredicates = estimate.status === 'sending'
+    && claimedAt
+    && staleClaim
+    && !attemptedAt
+    && !blockedAt
+    && !base.sentAt
+    && !base.scheduledAt
+    && summary.status === 'generated';
+  if (matchesStaleRecoveryPredicates) {
+    const recovery = staleAutoSendRecoveryDecision(summary.autoSend, estimate, now);
+    const recoveredEstimate = {
+      ...estimate,
+      status: 'draft',
+      estimate_data: mergeAutoSendMetadata(estimate.estimate_data || estimate.estimateData, recovery.patch),
+    };
+    const recoveredEligibility = recovery.includedSms
+      ? { eligible: false, reason: 'stale_claim_sms_idempotency_unknown' }
+      : leadEstimateAutoSendEligibility(recoveredEstimate, { ...config, now });
+    return {
+      ...base,
+      phase: options.phase || null,
+      action: recovery.includedSms
+        ? 'stale_block_sms_replay'
+        : recoveredEligibility.eligible
+        ? 'stale_recover_then_send'
+        : 'stale_recover_then_block',
+      wouldSend: !recovery.includedSms && recoveredEligibility.eligible,
+      eligibility: recoveredEligibility,
+      staleClaim: true,
+      staleRecovery: {
+        includedSms: recovery.includedSms,
+        wouldRecover: !recovery.includedSms,
+        wouldBlock: recovery.includedSms,
+      },
+    };
+  }
+
+  const eligibility = leadEstimateAutoSendEligibility(estimate, { ...config, now });
+  let action = 'blocked';
+  if (eligibility.eligible) action = 'would_send';
+  else if (eligibility.reason === 'delay_not_elapsed') action = 'waiting';
+  else if (['already_attempted', 'already_blocked', 'already_claimed'].includes(eligibility.reason)) action = 'skipped';
+
+  return {
+    ...base,
+    phase: options.phase || null,
+    action,
+    wouldSend: eligibility.eligible,
+    eligibility,
+    staleClaim: !!(claimedAt && staleClaim),
+    staleRecovery: null,
+  };
+}
+
 async function candidateLeadEstimateAutoSends({
   database = db,
   now = new Date(),
@@ -180,13 +285,11 @@ async function candidateLeadEstimateAutoSends({
     .select('*');
 }
 
-async function recoverStaleLeadEstimateAutoSendClaims({
+async function staleLeadEstimateAutoSendClaimCandidates({
   database = db,
-  now = new Date(),
-  staleClaimMinutes = DEFAULT_STALE_CLAIM_MINUTES,
   limit = DEFAULT_LIMIT,
 } = {}) {
-  const possibleStaleClaims = await database('estimates')
+  return database('estimates')
     .where({ source: 'lead_webhook', status: 'sending' })
     .whereNull('sent_at')
     .whereNull('scheduled_at')
@@ -202,6 +305,78 @@ async function recoverStaleLeadEstimateAutoSendClaims({
     .orderBy('updated_at', 'asc')
     .limit(limit)
     .select('*');
+}
+
+async function previewLeadEstimateAutoSendAudit({
+  database = db,
+  now = new Date(),
+  config = leadEstimateAutoSendConfigFromEnv(),
+  limit = config.limit || DEFAULT_LIMIT,
+} = {}) {
+  const [staleRows, candidateRows] = await Promise.all([
+    staleLeadEstimateAutoSendClaimCandidates({ database, limit }),
+    candidateLeadEstimateAutoSends({
+      database,
+      now,
+      delayMinutes: config.delayMinutes,
+      limit,
+    }),
+  ]);
+
+  const staleEstimates = staleRows.map((estimate) => leadEstimateAutoSendAuditRow(estimate, {
+    ...config,
+    now,
+    phase: 'stale_claim_recovery',
+  }));
+  const candidateEstimates = candidateRows.map((estimate) => leadEstimateAutoSendAuditRow(estimate, {
+    ...config,
+    now,
+    phase: 'candidate_send',
+  }));
+  const estimates = [...staleEstimates, ...candidateEstimates];
+  const counts = estimates.reduce((acc, row) => {
+    acc.total += 1;
+    acc.actions[row.action] = (acc.actions[row.action] || 0) + 1;
+    const reason = row.eligibility?.reason || 'eligible';
+    acc.reasons[reason] = (acc.reasons[reason] || 0) + 1;
+    if (row.wouldSend) acc.wouldSend += 1;
+    if (row.action === 'stale_recover_then_send') acc.staleRecoverThenSend += 1;
+    if (row.action === 'stale_block_sms_replay') acc.staleBlockedSmsReplay += 1;
+    return acc;
+  }, {
+    total: 0,
+    wouldSend: 0,
+    staleRecoverThenSend: 0,
+    staleBlockedSmsReplay: 0,
+    actions: {},
+    reasons: {},
+  });
+
+  return {
+    generatedAt: now.toISOString(),
+    config: {
+      delayMinutes: config.delayMinutes,
+      staleClaimMinutes: config.staleClaimMinutes,
+      allowedReviewReasons: config.allowedReviewReasons,
+      sendMethod: config.sendMethod,
+      limit,
+    },
+    counts,
+    phases: {
+      staleClaimRecovery: staleEstimates.length,
+      candidateSend: candidateEstimates.length,
+    },
+    estimates,
+  };
+}
+
+async function recoverStaleLeadEstimateAutoSendClaims({
+  database = db,
+  now = new Date(),
+  staleClaimMinutes = DEFAULT_STALE_CLAIM_MINUTES,
+  limit = DEFAULT_LIMIT,
+} = {}) {
+  const possibleStaleClaims = await staleLeadEstimateAutoSendClaimCandidates({ database, limit });
 
   const result = { recovered: 0, blocked: 0 };
   for (const estimate of possibleStaleClaims) {
@@ -383,8 +558,10 @@ module.exports = {
   isStaleAutoSendClaim,
   staleAutoSendRecoveryDecision,
   leadEstimateAutoSendConfigFromEnv,
+  leadEstimateAutoSendAuditRow,
   leadEstimateAutoSendEligibility,
   leadAutomationSummary,
   mergeAutoSendMetadata,
+  previewLeadEstimateAutoSendAudit,
   processLeadEstimateAutoSendBatch,
 };
