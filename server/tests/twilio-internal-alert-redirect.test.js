@@ -32,9 +32,13 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: jest.fn(async () => ({ bellWritten: true, push: null })),
 }));
+jest.mock('../services/audit-log', () => ({
+  auditInternalAdminAlertDeliveryIssue: jest.fn(() => Promise.resolve()),
+}));
 
 const TwilioService = require('../services/twilio');
 const { triggerNotification } = require('../services/notification-triggers');
+const { auditInternalAdminAlertDeliveryIssue } = require('../services/audit-log');
 
 describe('Twilio internal admin alert redirect', () => {
   beforeEach(() => {
@@ -101,6 +105,18 @@ describe('Twilio internal admin alert redirect', () => {
       notificationRedirected: false,
       notificationUndelivered: true,
     });
+    expect(auditInternalAdminAlertDeliveryIssue).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'undelivered',
+      message_type: 'internal_alert',
+      to_masked: '***3489',
+      body_length: 'New lead fallback path'.length,
+      title: 'New lead fallback path',
+      link: '/admin/leads',
+      reason: 'notification_redirect_undelivered',
+      stats: expect.objectContaining({
+        bellWritten: false,
+      }),
+    }));
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 
@@ -120,6 +136,16 @@ describe('Twilio internal admin alert redirect', () => {
       notificationRedirected: false,
       notificationError: true,
     });
+    expect(auditInternalAdminAlertDeliveryIssue).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'error',
+      message_type: 'internal_alert',
+      to_masked: '***3489',
+      body_length: 'New lead exception path'.length,
+      title: 'New lead exception path',
+      link: '/admin/leads',
+      reason: 'notification table unavailable',
+      stats: null,
+    }));
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 

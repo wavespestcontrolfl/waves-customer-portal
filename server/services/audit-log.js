@@ -416,6 +416,34 @@ async function auditNotificationTemplateIssue({
   });
 }
 
+async function auditInternalAdminAlertDeliveryIssue({
+  outcome,
+  message_type = null,
+  to_masked = null,
+  body_length = 0,
+  title = null,
+  link = null,
+  reason = null,
+  stats = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'system',
+    action: 'notification.internal_admin_alert.delivery_issue',
+    resource_type: 'notification',
+    resource_id: null,
+    metadata: {
+      outcome,
+      message_type,
+      to_masked,
+      body_length,
+      title,
+      link,
+      reason,
+      stats,
+    },
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -438,6 +466,7 @@ module.exports = {
   auditHygieneProposalReject,
   auditHygieneProposalRevert,
   auditNotificationTemplateIssue,
+  auditInternalAdminAlertDeliveryIssue,
   ipFromReq,
   uaFromReq,
 };

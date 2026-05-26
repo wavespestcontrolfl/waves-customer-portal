@@ -129,6 +129,15 @@ function internalAlertNotificationDelivered(stats) {
   return Number(stats.push?.sent || 0) > 0;
 }
 
+function auditInternalAlertDeliveryIssue(details) {
+  try {
+    const { auditInternalAdminAlertDeliveryIssue } = require("./audit-log");
+    auditInternalAdminAlertDeliveryIssue(details);
+  } catch (err) {
+    logger.error(`[twilio] internal alert delivery audit failed: ${err.message}`);
+  }
+}
+
 async function notifySmsGuardBlocked({ to, body, reason, messageType }) {
   try {
     const { triggerNotification } = require("./notification-triggers");
@@ -164,6 +173,16 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
       logger.warn(
         `[twilio] internal alert notification redirect did not deliver; suppressed owner/admin SMS fallback (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
       );
+      auditInternalAlertDeliveryIssue({
+        outcome: "undelivered",
+        message_type: options.messageType || null,
+        to_masked: maskPhone(to),
+        body_length: body?.length || 0,
+        title: payload.title,
+        link: payload.link,
+        reason: "notification_redirect_undelivered",
+        stats,
+      });
       return {
         success: true,
         sid: "internal-admin-notification-undelivered",
@@ -183,6 +202,16 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
     };
   } catch (err) {
     logger.error(`[twilio] internal alert notification redirect failed; suppressed owner/admin SMS fallback: ${err.message}`);
+    auditInternalAlertDeliveryIssue({
+      outcome: "error",
+      message_type: options.messageType || null,
+      to_masked: maskPhone(to),
+      body_length: body?.length || 0,
+      title: payload.title,
+      link: payload.link,
+      reason: err.message,
+      stats: null,
+    });
     return {
       success: true,
       sid: "internal-admin-notification-error",
