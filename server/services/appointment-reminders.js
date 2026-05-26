@@ -622,15 +622,25 @@ const AppointmentReminders = {
         return null;
       }
 
-      // Reset reminder flags
+      // Reset reminder flags — but if the new time is already inside the
+      // 24h window, keep reminder_24h_sent true so the cron doesn't re-send
+      // a redundant day-before reminder right after the reschedule confirmation.
+      const now = new Date();
+      const msUntil = newApptTime.getTime() - now.getTime();
+      const hoursUntil = msUntil / 3600000;
+      const newDateET = etDateString(newApptTime);
+      const tomorrowET = etDateString(addETDays(now, 1));
+      const alreadyInside24hWindow = hoursUntil > 0 && hoursUntil <= 24.25 && newDateET === tomorrowET;
+      const alreadyInside72hWindow = hoursUntil > 0 && hoursUntil <= 72.25;
+
       await db('appointment_reminders')
         .where({ id: record.id })
         .update({
           appointment_time: newApptTime,
-          reminder_72h_sent: false,
-          reminder_72h_sent_at: null,
-          reminder_24h_sent: false,
-          reminder_24h_sent_at: null,
+          reminder_72h_sent: alreadyInside72hWindow,
+          reminder_72h_sent_at: alreadyInside72hWindow ? new Date() : null,
+          reminder_24h_sent: alreadyInside24hWindow,
+          reminder_24h_sent_at: alreadyInside24hWindow ? new Date() : null,
           updated_at: new Date(),
         });
 
