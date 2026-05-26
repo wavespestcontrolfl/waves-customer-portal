@@ -2644,7 +2644,9 @@ function renderPage(token, estimate, estData) {
     const hasLawn = recurring.some((s) => /lawn|turf/i.test(s?.name || s?.label || s?.service || ''));
     const hasMosquito = recurring.some((s) => /mosquito/i.test(s?.name || s?.label || s?.service || ''))
       || oneTimeItems.some((item) => serviceCategoryForOneTimeItem(item) === 'mosquito');
-    const hasTermite = recurring.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''));
+    const hasTermite = recurring.some((s) => /termite/i.test(s?.name || s?.label || s?.service || ''))
+      || oneTimeItems.some((item) => /termite/i.test(item?.service || item?.label || item?.name || '')
+        || ['termite_bait', 'termite_trenching', 'pre_slab_termiticide'].includes(serviceCategoryForOneTimeItem(item)));
     const hasTreeShrub = recurring.some((s) => /\btree\b|shrub/i.test(s?.name || s?.label || s?.service || ''));
     const hasRodent = recurring.some((s) => /rodent/i.test(s?.name || s?.label || s?.service || ''));
     const hasPalm = recurring.some((s) => /palm/i.test(s?.name || s?.label || s?.service || ''));

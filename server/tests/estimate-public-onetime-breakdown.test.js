@@ -1916,6 +1916,29 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Find a date & time that works for you');
   });
 
+  test('server-rendered one-time termite estimates include termite ask prompt', () => {
+    const html = renderPage('termite-onetime-token', {
+      status: 'sent',
+      customerName: 'Terry Customer',
+      address: '321 Barrier Way',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 725,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          items: [{ service: 'trenching', name: 'Termite Trenching', price: 725 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+
+    expect(html).toContain('data-estimate-ask-prompt="How does the bait work?"');
+  });
+
   test('server-rendered booking review buttons use explicit click listeners', () => {
     const html = renderPage('booking-token', {
       status: 'sent',

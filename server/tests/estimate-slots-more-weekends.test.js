@@ -66,6 +66,24 @@ describe('estimate slot weekend and expander behavior', () => {
       .toBe(0);
   });
 
+  test('asap slot cap preserves later windows when many techs are active', () => {
+    const techs = Array.from({ length: 30 }, (_, idx) => ({ id: `tech-${idx + 1}`, name: `Tech ${idx + 1}` }));
+    const slots = slotAvailabilityInternals.buildAsapCapacitySlotsForTechs({
+      dateFrom: '2026-05-27',
+      dateTo: '2026-05-27',
+      durationMinutes: 60,
+      techs,
+      maxCandidates: 12,
+    });
+
+    const windows = new Set(slots.map((slot) => slot.windowStart));
+    expect(slots).toHaveLength(12);
+    expect(windows.has('09:00')).toBe(true);
+    expect(windows.has('10:00')).toBe(true);
+    expect(windows.has('11:00')).toBe(true);
+    expect(windows.has('13:00')).toBe(true);
+  });
+
   test('estimate slot spreading happens before the final customer-facing limit', () => {
     const genericSlots = Array.from({ length: 6 }, (_, idx) => ({
       slotId: `generic-${idx}`,

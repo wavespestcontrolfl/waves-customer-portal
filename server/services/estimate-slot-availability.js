@@ -665,29 +665,28 @@ function earliestBookableMinuteForDate(date, now = new Date(), minimumLeadMinute
   return parts.hour * 60 + parts.minute + Math.max(0, Number(minimumLeadMinutes) || 0);
 }
 
-async function buildAsapCapacitySlots({
+function buildAsapCapacitySlotsForTechs({
   dateFrom,
   dateTo,
   durationMinutes,
+  techs = [],
   includeWeekends = true,
   maxCandidates = 36,
   minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes,
   now = new Date(),
 } = {}) {
-  const techs = await db('technicians')
-    .where({ active: true })
-    .select('id', 'name');
   if (!techs.length) return [];
 
-  const candidates = [];
+  const groups = [];
   for (const date of enumerateETDateStrings(dateFrom, dateTo, { includeWeekends })) {
     const earliestMinute = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
     for (const windowStart of PREFERRED_WINDOWS) {
       if (timeToMinutes(windowStart) < earliestMinute) continue;
       const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
       if (!slotWindowFitsDay(windowStart, windowEnd)) continue;
+      const group = [];
       for (const tech of techs) {
-        candidates.push({
+        group.push({
           slotId: dateWithTimeSlotId(date, windowStart, tech.id),
           date,
           windowStart,
@@ -699,11 +698,27 @@ async function buildAsapCapacitySlots({
           nearbyJob: null,
           capacityType: 'asap_open',
         });
-        if (candidates.length >= maxCandidates) return candidates;
       }
+      groups.push(group);
     }
   }
-  return candidates;
+  const safeMax = Math.max(0, Number(maxCandidates) || 0);
+  const selected = [];
+  const maxGroupLength = groups.reduce((max, group) => Math.max(max, group.length), 0);
+  for (let techIndex = 0; techIndex < maxGroupLength && selected.length < safeMax; techIndex += 1) {
+    for (const group of groups) {
+      if (selected.length >= safeMax) break;
+      if (group[techIndex]) selected.push(group[techIndex]);
+    }
+  }
+  return selected.sort(compareCustomerFacingSlots);
+}
+
+async function buildAsapCapacitySlots(options = {}) {
+  const techs = await db('technicians')
+    .where({ active: true })
+    .select('id', 'name');
+  return buildAsapCapacitySlotsForTechs({ ...options, techs });
 }
 
 function selectCustomerFacingSlots(slots, limit) {
@@ -1047,6 +1062,7 @@ module.exports = {
     pickNearbyAnchor,
     classifySlot,
     buildAsapCapacitySlots,
+    buildAsapCapacitySlotsForTechs,
     earliestBookableMinuteForDate,
     enumerateETDateStrings,
     etDateRange,
