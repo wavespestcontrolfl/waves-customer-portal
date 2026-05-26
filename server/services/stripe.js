@@ -1434,6 +1434,21 @@ const StripeService = {
         }
       }
 
+      // Block card payments that bypassed the /quote+/finalize surcharge flow.
+      // Express Checkout (wallets) are allowed at base-only (phase 1).
+      // The surcharge_policy_version metadata is set by /finalize — its absence
+      // on a card payment means the two-step disclosure was skipped.
+      const isCardFamily = pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach';
+      const wasFinalized = pi.metadata?.surcharge_policy_version;
+      if (isCardFamily && !wasFinalized) {
+        // Allow Express Checkout (apple_pay, google_pay, link) at base — phase 1 design
+        const isExpressCheckout = ['apple_pay', 'google_pay', 'link'].includes(pmdType);
+        if (!isExpressCheckout) {
+          logger.error(`[stripe] Card payment on PI ${paymentIntentId} bypassed /finalize (no surcharge_policy_version). Rejecting.`);
+          throw new Error('Payment was not properly finalized. Please try again.');
+        }
+      }
+
       const actualMethodType = pmdType || resolvedPaymentMethod;
       const invoiceBaseAmount = Number(invoice.total);
       assertInvoicePaymentIntentTenderMatches(pi, actualMethodType, invoiceBaseAmount);
