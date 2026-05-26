@@ -1839,8 +1839,8 @@ router.get('/list', async (req, res, next) => {
       status: s.status,
       windowStart: s.window_start,
       windowEnd: s.window_end,
-      duration: s.estimated_duration_minutes || 30,
-      price: s.estimated_price != null ? Number(s.estimated_price) : null,
+      estimatedDuration: s.estimated_duration_minutes || 30,
+      estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       prepaidMethod: s.prepaid_method || null,
       prepaidAt: s.prepaid_at || null,
@@ -1882,43 +1882,68 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     const updated = [];
     const failed = [];
 
+    const { transitionJobStatus } = require('../services/job-status');
+
     for (const id of serviceIds) {
       try {
-        await db.transaction(async (trx) => {
-          const svc = await trx('scheduled_services').where({ id }).first();
-          if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
-
-          switch (action) {
-            case 'reassign': {
-              const techId = payload?.technicianId || null;
-              await trx('scheduled_services').where({ id }).update({ technician_id: techId });
-              break;
-            }
-            case 'reschedule': {
-              const updates = { scheduled_date: payload?.scheduledDate };
+        switch (action) {
+          case 'reassign': {
+            await db.transaction(async (trx) => {
+              await assignScheduleJobs({
+                jobId: id,
+                technicianId: payload?.technicianId || null,
+                actorId: req.technicianId,
+                assignmentScope: 'this_only',
+                trx,
+              });
+            });
+            try { await emitDispatchJobUpdate({ jobId: id, actorId: req.technicianId }); } catch {}
+            break;
+          }
+          case 'reschedule': {
+            if (!payload?.scheduledDate) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
+            await db.transaction(async (trx) => {
+              const svc = await trx('scheduled_services').where({ id }).first();
+              if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
+              const updates = { scheduled_date: payload.scheduledDate };
               if (payload?.windowStart) updates.window_start = payload.windowStart;
               if (payload?.windowEnd) updates.window_end = payload.windowEnd;
-              if (!updates.scheduled_date) throw Object.assign(new Error('scheduledDate required'), { isValidation: true });
               await trx('scheduled_services').where({ id }).update(updates);
-              break;
-            }
-            case 'cancel': {
-              await trx('scheduled_services').where({ id }).update({ status: 'cancelled' });
-              break;
-            }
-            case 'mark_prepaid': {
-              const amt = Number(payload?.totalAmount || 0);
-              if (amt <= 0) throw Object.assign(new Error('totalAmount must be > 0'), { isValidation: true });
-              await trx('scheduled_services').where({ id }).update({
-                prepaid_amount: amt,
-                prepaid_method: payload?.method || 'cash',
-                prepaid_note: payload?.note || null,
-                prepaid_at: new Date(),
-              });
-              break;
-            }
+            });
+            break;
           }
-        });
+          case 'cancel': {
+            const svc = await db('scheduled_services').where({ id }).first();
+            if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
+            const fromStatus = svc.status;
+            await db.transaction(async (trx) => {
+              await transitionJobStatus({
+                jobId: id,
+                fromStatus,
+                toStatus: 'cancelled',
+                transitionedBy: req.technicianId,
+                notes: 'Bulk cancellation',
+                trx,
+              });
+            });
+            try {
+              const AppointmentReminders = require('../services/appointment-reminders');
+              await AppointmentReminders.handleCancellation(id);
+            } catch {}
+            break;
+          }
+          case 'mark_prepaid': {
+            const amt = Number(payload?.totalAmount || 0);
+            if (amt <= 0) throw Object.assign(new Error('totalAmount must be > 0'), { isValidation: true });
+            await db('scheduled_services').where({ id }).update({
+              prepaid_amount: amt,
+              prepaid_method: payload?.method || 'cash',
+              prepaid_note: payload?.note || null,
+              prepaid_at: new Date(),
+            });
+            break;
+          }
+        }
         updated.push(id);
       } catch (e) {
         failed.push({ id, reason: e.message });
