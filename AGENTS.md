@@ -256,7 +256,10 @@ finding and warns on P1. Reviewers must return JSON matching
   double-opt-in for subscribe),
   `/api/public/prep/:token` (read-only, 32-hex token format gate,
   60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-  filters email-only blocks, server-side interpolation, generic 404).
+  filters email-only blocks, server-side interpolation, generic 404),
+  `/api/public/products` (read-only export; returns only active +
+  customer_visibility=public + content_status=approved_for_public products;
+  excludes pricing, vendor, SKU, dilution, MOA, inventory fields).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,
