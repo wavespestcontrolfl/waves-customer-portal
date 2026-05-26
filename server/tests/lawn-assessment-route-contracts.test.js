@@ -64,4 +64,52 @@ describe('lawn assessment route contracts', () => {
     expect(adminLawnAssessmentRouter._test.customerVisibleForQualityCheck({})).toBe(true);
     expect(adminLawnAssessmentRouter._test.customerVisibleForQualityCheck(null)).toBe(true);
   });
+
+  test('recommendation customer visibility requires approval except low-risk education', () => {
+    expect(adminLawnAssessmentRouter._test.canShowRecommendationToCustomer({
+      type: 'tier_upgrade',
+      approved_at: null,
+      requires_human_approval: true,
+    })).toBe(false);
+    expect(adminLawnAssessmentRouter._test.canShowRecommendationToCustomer({
+      type: 'tier_upgrade',
+      approved_at: new Date().toISOString(),
+      requires_human_approval: true,
+    })).toBe(true);
+    expect(adminLawnAssessmentRouter._test.canShowRecommendationToCustomer({
+      type: 'customer_education',
+      approved_at: null,
+      requires_human_approval: false,
+    })).toBe(true);
+  });
+
+  test('snapshot and recommendation rows normalize json columns for admin review', () => {
+    expect(adminLawnAssessmentRouter._test.normalizeSnapshotRow({
+      id: 'snapshot-1',
+      findings: '[{"key":"weed_pressure"}]',
+      property_context: '{"grass_type":"st_augustine"}',
+      treatment_context: '{}',
+      weather_context: '{}',
+      expected_window: '{"min_days":14}',
+      next_watch_items: '["Monitor weed pressure"]',
+      disclaimers: '[]',
+    })).toMatchObject({
+      findings: [{ key: 'weed_pressure' }],
+      property_context: { grass_type: 'st_augustine' },
+      expected_window: { min_days: 14 },
+      next_watch_items: ['Monitor weed pressure'],
+    });
+
+    expect(adminLawnAssessmentRouter._test.normalizeRecommendationRow({
+      id: 'card-1',
+      trigger_signals: '[{"key":"confirmed_assessment"}]',
+      recommended_action: '{"action_type":"upgrade_plan"}',
+      guardrails: '{"admin_approval_required":true}',
+      outcome: '{}',
+    })).toMatchObject({
+      trigger_signals: [{ key: 'confirmed_assessment' }],
+      recommended_action: { action_type: 'upgrade_plan' },
+      guardrails: { admin_approval_required: true },
+    });
+  });
 });

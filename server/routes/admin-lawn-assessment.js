@@ -150,6 +150,88 @@ async function attachOutcomePhotoRefs(outcome, assessmentId) {
   }
 }
 
+function normalizeSnapshotRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    property_context: parseJsonObject(row.property_context),
+    findings: parseJsonArray(row.findings),
+    treatment_context: parseJsonObject(row.treatment_context),
+    weather_context: parseJsonObject(row.weather_context),
+    expected_window: parseJsonObject(row.expected_window),
+    next_watch_items: parseJsonArray(row.next_watch_items),
+    disclaimers: parseJsonArray(row.disclaimers),
+  };
+}
+
+function normalizeRecommendationRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    trigger_signals: parseJsonArray(row.trigger_signals),
+    recommended_action: parseJsonObject(row.recommended_action),
+    guardrails: parseJsonObject(row.guardrails),
+    outcome: parseJsonObject(row.outcome),
+  };
+}
+
+function assertAdminAction(req, res) {
+  if (req.techRole === 'admin') return true;
+  res.status(403).json({ error: 'Admin approval required' });
+  return false;
+}
+
+function canShowRecommendationToCustomer(card) {
+  if (!card) return false;
+  if (card.approved_at) return true;
+  return card.type === 'customer_education' && card.requires_human_approval === false;
+}
+
+function recommendationEventMetadata(card = {}, extra = {}) {
+  return {
+    type: card.type || null,
+    status: card.status || null,
+    customer_visible: card.customer_visible === true,
+    ...extra,
+  };
+}
+
+async function logRecommendationEvent({ recommendationId, snapshotId, customerId, eventType, req, metadata = {} }) {
+  await db('property_recommendation_events').insert({
+    recommendation_id: recommendationId || null,
+    snapshot_id: snapshotId || null,
+    customer_id: customerId || null,
+    event_type: eventType,
+    actor_type: req?.techRole === 'admin' ? 'admin' : 'tech',
+    actor_id: req?.technicianId || null,
+    metadata: JSON.stringify(metadata),
+  }).catch((err) => logger.error(`[lawn-assessment] Recommendation event log failed: ${err.message}`));
+}
+
+async function getSnapshotReviewPayload(assessmentId) {
+  const snapshot = await db('property_health_snapshots')
+    .where({ assessment_id: assessmentId, domain: 'lawn' })
+    .orderBy('created_at', 'desc')
+    .first();
+  if (!snapshot) return { snapshot: null, recommendationCards: [] };
+
+  const cards = await db('property_recommendation_cards')
+    .where({ snapshot_id: snapshot.id })
+    .orderByRaw(`
+      CASE priority
+        WHEN 'high' THEN 1
+        WHEN 'medium' THEN 2
+        ELSE 3
+      END
+    `)
+    .orderBy('created_at', 'asc');
+
+  return {
+    snapshot: normalizeSnapshotRow(snapshot),
+    recommendationCards: cards.map(normalizeRecommendationRow),
+  };
+}
+
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
 
@@ -712,6 +794,222 @@ router.post('/confirm', async (req, res, next) => {
 });
 
 // =========================================================================
+// GET /:assessmentId/snapshot — snapshot + recommendation review payload
+// =========================================================================
+router.get('/:assessmentId/snapshot', async (req, res, next) => {
+  try {
+    const assessment = await db('lawn_assessments')
+      .where({ id: req.params.assessmentId })
+      .first('id');
+    if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
+
+    res.json(await getSnapshotReviewPayload(req.params.assessmentId));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// POST /:assessmentId/snapshot/regenerate — rebuild internal snapshot/cards
+// =========================================================================
+router.post('/:assessmentId/snapshot/regenerate', async (req, res, next) => {
+  try {
+    if (!assertAdminAction(req, res)) return;
+
+    const assessment = await db('lawn_assessments')
+      .where({ id: req.params.assessmentId })
+      .first();
+    if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
+    if (assessment.confirmed_by_tech !== true) {
+      return res.status(400).json({ error: 'Cannot generate a snapshot from an unconfirmed assessment' });
+    }
+
+    const snapshot = await LawnSnapshot.buildLawnSnapshot({
+      assessmentId: assessment.id,
+      serviceId: assessment.service_id || null,
+      serviceRecordId: assessment.service_record_id || null,
+      generatedBy: 'admin',
+    });
+    await RecommendationEngine.generateRecommendationCards({
+      snapshotId: snapshot.id,
+      assessmentId: assessment.id,
+      customerId: assessment.customer_id,
+    });
+
+    res.json({ success: true, ...(await getSnapshotReviewPayload(assessment.id)) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// PATCH /snapshots/:snapshotId — edit/approve/hide customer snapshot
+// =========================================================================
+router.patch('/snapshots/:snapshotId', async (req, res, next) => {
+  try {
+    if (!assertAdminAction(req, res)) return;
+
+    const snapshot = await db('property_health_snapshots')
+      .where({ id: req.params.snapshotId, domain: 'lawn' })
+      .first();
+    if (!snapshot) return res.status(404).json({ error: 'Snapshot not found' });
+
+    const allowedStatuses = new Set(['draft', 'tech_confirmed', 'admin_approved', 'customer_visible', 'archived']);
+    const patch = { updated_at: new Date() };
+    const { headline, summary_customer, summary_internal, status, customer_visible: customerVisible } = req.body || {};
+
+    if (headline != null) patch.headline = String(headline).slice(0, 180);
+    if (summary_customer != null) patch.summary_customer = String(summary_customer);
+    if (summary_internal != null) patch.summary_internal = String(summary_internal);
+    if (status != null) {
+      if (!allowedStatuses.has(status)) return res.status(400).json({ error: 'Invalid snapshot status' });
+      patch.status = status;
+    }
+    if (customerVisible != null) {
+      patch.customer_visible = customerVisible === true;
+      if (customerVisible === true) {
+        patch.status = 'customer_visible';
+        patch.approved_by = req.technicianId;
+        patch.approved_at = new Date();
+      }
+    }
+    if (req.body?.approve === true) {
+      patch.status = 'admin_approved';
+      patch.approved_by = req.technicianId;
+      patch.approved_at = new Date();
+    }
+    if (req.body?.hide === true) {
+      patch.customer_visible = false;
+      patch.status = 'archived';
+    }
+
+    const [updated] = await db('property_health_snapshots')
+      .where({ id: snapshot.id })
+      .update(patch)
+      .returning('*');
+
+    res.json({ success: true, snapshot: normalizeSnapshotRow(updated) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// PATCH /recommendations/:recommendationId — edit/approve/dismiss cards
+// =========================================================================
+router.patch('/recommendations/:recommendationId', async (req, res, next) => {
+  try {
+    if (!assertAdminAction(req, res)) return;
+
+    const card = await db('property_recommendation_cards')
+      .where({ id: req.params.recommendationId, domain: 'lawn' })
+      .first();
+    if (!card) return res.status(404).json({ error: 'Recommendation not found' });
+
+    const allowedStatuses = new Set([
+      'draft',
+      'needs_admin_review',
+      'approved',
+      'customer_visible',
+      'dismissed',
+      'accepted',
+      'expired',
+    ]);
+    const patch = { updated_at: new Date() };
+    const body = req.body || {};
+
+    if (body.title != null) patch.title = String(body.title).slice(0, 180);
+    if (body.customer_copy != null) patch.customer_copy = String(body.customer_copy);
+    if (body.internal_reason != null) patch.internal_reason = String(body.internal_reason);
+    if (body.priority != null) {
+      if (!['low', 'medium', 'high'].includes(body.priority)) return res.status(400).json({ error: 'Invalid priority' });
+      patch.priority = body.priority;
+    }
+    if (body.status != null) {
+      if (!allowedStatuses.has(body.status)) return res.status(400).json({ error: 'Invalid recommendation status' });
+      patch.status = body.status;
+    }
+
+    if (body.approve === true) {
+      patch.status = 'approved';
+      patch.approved_by = req.technicianId;
+      patch.approved_at = new Date();
+    }
+    if (body.dismiss === true) {
+      patch.status = 'dismissed';
+      patch.customer_visible = false;
+      patch.outcome = JSON.stringify({
+        ...parseJsonObject(card.outcome),
+        dismissed_at: new Date().toISOString(),
+      });
+    }
+    if (body.customer_visible != null) {
+      const nextVisible = body.customer_visible === true;
+      const candidate = { ...card, ...patch, customer_visible: nextVisible };
+      if (nextVisible && !canShowRecommendationToCustomer(candidate)) {
+        patch.approved_by = req.technicianId;
+        patch.approved_at = new Date();
+      }
+      patch.customer_visible = nextVisible;
+      if (nextVisible) patch.status = 'customer_visible';
+    }
+
+    const [updated] = await db('property_recommendation_cards')
+      .where({ id: card.id })
+      .update(patch)
+      .returning('*');
+
+    const eventType = body.dismiss === true
+      ? 'dismissed'
+      : body.customer_visible === true
+        ? 'shown'
+        : body.approve === true
+          ? 'approved'
+          : 'edited';
+    await logRecommendationEvent({
+      recommendationId: updated.id,
+      snapshotId: updated.snapshot_id,
+      customerId: updated.customer_id,
+      eventType,
+      req,
+      metadata: recommendationEventMetadata(updated),
+    });
+
+    res.json({ success: true, recommendation: normalizeRecommendationRow(updated) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// POST /recommendations/:recommendationId/events — append outcome event
+// =========================================================================
+router.post('/recommendations/:recommendationId/events', async (req, res, next) => {
+  try {
+    const card = await db('property_recommendation_cards')
+      .where({ id: req.params.recommendationId, domain: 'lawn' })
+      .first();
+    if (!card) return res.status(404).json({ error: 'Recommendation not found' });
+
+    const eventType = String(req.body?.event_type || '').trim();
+    if (!eventType) return res.status(400).json({ error: 'event_type is required' });
+
+    await logRecommendationEvent({
+      recommendationId: card.id,
+      snapshotId: card.snapshot_id,
+      customerId: card.customer_id,
+      eventType,
+      req,
+      metadata: parseJsonObject(req.body?.metadata),
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
 // GET /service/:serviceId — latest assessment captured for a scheduled visit
 // =========================================================================
 router.get('/service/:serviceId', async (req, res, next) => {
@@ -808,6 +1106,9 @@ router.get('/latest/:customerId', async (req, res, next) => {
 router._test = {
   customerVisibleForQualityCheck,
   normalizeStressFlags,
+  normalizeSnapshotRow,
+  normalizeRecommendationRow,
+  canShowRecommendationToCustomer,
 };
 
 module.exports = router;

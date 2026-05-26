@@ -98,6 +98,189 @@ const EMPTY_TURF_PROFILE = {
   active: true,
 };
 
+function SnapshotReviewPanel({
+  review,
+  loading,
+  onSnapshotAction,
+  onRecommendationAction,
+}) {
+  const snapshot = review?.snapshot;
+  const cards = review?.recommendationCards || [];
+  const [summary, setSummary] = useState("");
+  const [cardCopy, setCardCopy] = useState({});
+
+  useEffect(() => {
+    setSummary(snapshot?.summary_customer || "");
+    setCardCopy(
+      Object.fromEntries(cards.map((card) => [card.id, card.customer_copy || ""])),
+    );
+  }, [snapshot?.id, cards.length]);
+
+  if (loading && !snapshot) {
+    return (
+      <div style={{ ...cardStyle, marginTop: 14 }}>
+        <div style={{ fontSize: 13, color: D.muted }}>Loading snapshot review...</div>
+      </div>
+    );
+  }
+
+  if (!snapshot) {
+    return (
+      <div style={{ ...cardStyle, marginTop: 14 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+          Customer Snapshot
+        </div>
+        <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+          No snapshot has been generated for this assessment yet.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...cardStyle, marginTop: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: D.heading }}>
+            Customer Snapshot
+          </div>
+          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+            {snapshot.status} · {snapshot.customer_visible ? "Customer visible" : "Internal only"}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            onClick={() => onSnapshotAction(snapshot.id, { approve: true })}
+            style={{ ...btnOutline, padding: "7px 9px", color: D.green }}
+          >
+            Approve
+          </button>
+          <button
+            type="button"
+            onClick={() => onSnapshotAction(snapshot.id, { customer_visible: true })}
+            style={{ ...btnOutline, padding: "7px 9px", color: D.teal }}
+          >
+            Show
+          </button>
+          <button
+            type="button"
+            onClick={() => onSnapshotAction(snapshot.id, { hide: true })}
+            style={{ ...btnOutline, padding: "7px 9px", color: D.red }}
+          >
+            Hide
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 4 }}>
+          Customer summary
+        </div>
+        <textarea
+          value={summary}
+          onChange={(event) => setSummary(event.target.value)}
+          rows={4}
+          style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }}
+        />
+        <button
+          type="button"
+          onClick={() => onSnapshotAction(snapshot.id, { summary_customer: summary })}
+          style={{ ...btnOutline, marginTop: 8, padding: "7px 10px" }}
+        >
+          Save summary
+        </button>
+      </div>
+
+      {!!snapshot.findings?.length && (
+        <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
+          {snapshot.findings.slice(0, 3).map((finding) => (
+            <div
+              key={finding.key}
+              style={{
+                padding: 8,
+                borderRadius: 8,
+                border: `1px solid ${D.border}`,
+                background: D.input,
+                fontSize: 12,
+                color: D.text,
+              }}
+            >
+              <strong>{finding.label}</strong> · Severity {finding.severity}
+              <div style={{ color: D.muted, marginTop: 3 }}>{finding.customer_copy}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ marginTop: 16, fontSize: 13, fontWeight: 800, color: D.heading }}>
+        Recommendation Cards
+      </div>
+      {cards.length === 0 ? (
+        <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+          No recommendation cards generated.
+        </div>
+      ) : (
+        <div style={{ marginTop: 8, display: "grid", gap: 10 }}>
+          {cards.map((card) => (
+            <div key={card.id} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>{card.title}</div>
+                  <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                    {card.type} · {card.priority} · {card.status} · {card.customer_visible ? "Customer visible" : "Internal only"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  <button
+                    type="button"
+                    onClick={() => onRecommendationAction(card.id, { approve: true })}
+                    style={{ ...btnOutline, padding: "6px 8px", color: D.green }}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRecommendationAction(card.id, { customer_visible: true })}
+                    style={{ ...btnOutline, padding: "6px 8px", color: D.teal }}
+                  >
+                    Show
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRecommendationAction(card.id, { dismiss: true })}
+                    style={{ ...btnOutline, padding: "6px 8px", color: D.red }}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+              <textarea
+                value={cardCopy[card.id] || ""}
+                onChange={(event) => setCardCopy((prev) => ({ ...prev, [card.id]: event.target.value }))}
+                rows={3}
+                style={{ ...inputStyle, marginTop: 8, resize: "vertical", lineHeight: 1.5 }}
+              />
+              <button
+                type="button"
+                onClick={() => onRecommendationAction(card.id, { customer_copy: cardCopy[card.id] || "" })}
+                style={{ ...btnOutline, marginTop: 7, padding: "6px 9px" }}
+              >
+                Save copy
+              </button>
+              {card.internal_reason && (
+                <div style={{ fontSize: 11, color: D.muted, marginTop: 7 }}>
+                  Internal: {card.internal_reason}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function LawnAssessmentPanel() {
   // 'profile' step lets the tech edit a customer's turf profile from
   // the lawn-care surface — feeds the WaveGuard plan engine later.
@@ -118,6 +301,9 @@ export default function LawnAssessmentPanel() {
   // calibration pipeline actually meaningful.
   const [techScores, setTechScores] = useState(null);
   const [confirming, setConfirming] = useState(false);
+  const [assessmentConfirmed, setAssessmentConfirmed] = useState(false);
+  const [snapshotReview, setSnapshotReview] = useState(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const [showGuide, setShowGuide] = useState(
     () => !localStorage.getItem("lawn_guide_seen"),
@@ -200,6 +386,8 @@ export default function LawnAssessmentPanel() {
         }),
       });
       setResult(r);
+      setSnapshotReview(null);
+      setAssessmentConfirmed(false);
       // Seed from the server's season-adjusted scores so the review
       // tiles match what will be persisted if the tech makes no changes.
       const initialScores = r.adjustedScores || r.displayScores;
@@ -219,23 +407,84 @@ export default function LawnAssessmentPanel() {
       // Send the tech-confirmed scores. Falls back to the server-adjusted
       // scores when the tech didn't change anything.
       const adjustedScores = techScores || result.adjustedScores || result.displayScores;
-      await adminFetch("/admin/lawn-assessment/confirm", {
+      const response = await adminFetch("/admin/lawn-assessment/confirm", {
         method: "POST",
         body: JSON.stringify({
           assessmentId: result.assessment.id,
           adjustedScores,
         }),
       });
-      alert("Assessment confirmed!");
-      setStep("select");
-      setPhotos([]);
-      setResult(null);
-      setTechScores(null);
-      setSelectedCustomer(null);
+      setResult((prev) => ({
+        ...prev,
+        assessment: response.assessment || prev.assessment,
+      }));
+      setAssessmentConfirmed(true);
+      await loadSnapshotReview(response?.assessment?.id || result.assessment.id);
+      alert("Assessment confirmed. Snapshot is ready for admin review.");
     } catch (e) {
       alert("Confirm failed: " + e.message);
     }
     setConfirming(false);
+  };
+
+  const finishAssessment = () => {
+    setStep("select");
+    setPhotos([]);
+    setResult(null);
+    setTechScores(null);
+    setSnapshotReview(null);
+    setAssessmentConfirmed(false);
+    setSelectedCustomer(null);
+  };
+
+  const loadSnapshotReview = async (assessmentId) => {
+    if (!assessmentId) return null;
+    setSnapshotLoading(true);
+    try {
+      const review = await adminFetch(
+        `/admin/lawn-assessment/${assessmentId}/snapshot`,
+      );
+      setSnapshotReview(review);
+      return review;
+    } catch {
+      setSnapshotReview(null);
+      return null;
+    } finally {
+      setSnapshotLoading(false);
+    }
+  };
+
+  const patchSnapshot = async (snapshotId, body) => {
+    if (!snapshotId || !result?.assessment?.id) return;
+    setSnapshotLoading(true);
+    try {
+      await adminFetch(`/admin/lawn-assessment/snapshots/${snapshotId}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      await loadSnapshotReview(result.assessment.id);
+    } catch (e) {
+      alert("Snapshot update failed: " + e.message);
+      setSnapshotLoading(false);
+    }
+  };
+
+  const patchRecommendation = async (recommendationId, body) => {
+    if (!recommendationId || !result?.assessment?.id) return;
+    setSnapshotLoading(true);
+    try {
+      await adminFetch(
+        `/admin/lawn-assessment/recommendations/${recommendationId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        },
+      );
+      await loadSnapshotReview(result.assessment.id);
+    } catch (e) {
+      alert("Recommendation update failed: " + e.message);
+      setSnapshotLoading(false);
+    }
   };
 
   // Clamp + step the tech-edited score. Range matches the AI display
@@ -404,6 +653,8 @@ export default function LawnAssessmentPanel() {
                   setStep("select");
                   setPhotos([]);
                   setResult(null);
+                  setSnapshotReview(null);
+                  setAssessmentConfirmed(false);
                 },
               }
             : null
@@ -924,26 +1175,44 @@ export default function LawnAssessmentPanel() {
           </div>{" "}
           <div style={{ display: "flex", gap: 8 }}>
             {" "}
-            <button
-              onClick={handleConfirm}
-              disabled={confirming}
-              style={{
-                ...btnStyle(D.green),
-                flex: 1,
-                padding: 14,
-                fontSize: 15,
-                opacity: confirming ? 0.5 : 1,
-              }}
-            >
-              {confirming ? "Confirming..." : "Confirm Scores"}
-            </button>{" "}
+            {assessmentConfirmed ? (
+              <button
+                onClick={finishAssessment}
+                style={{ ...btnStyle(D.teal), flex: 1, padding: 14, fontSize: 15 }}
+              >
+                Done
+              </button>
+            ) : (
+              <button
+                onClick={handleConfirm}
+                disabled={confirming}
+                style={{
+                  ...btnStyle(D.green),
+                  flex: 1,
+                  padding: 14,
+                  fontSize: 15,
+                  opacity: confirming ? 0.5 : 1,
+                }}
+              >
+                {confirming ? "Confirming..." : "Confirm Scores"}
+              </button>
+            )}{" "}
             <button
               onClick={() => setStep("capture")}
+              disabled={assessmentConfirmed}
               style={{ ...btnOutline, padding: "14px 20px" }}
             >
               Retake
             </button>{" "}
           </div>{" "}
+          {(snapshotLoading || snapshotReview?.snapshot) && (
+            <SnapshotReviewPanel
+              review={snapshotReview}
+              loading={snapshotLoading}
+              onSnapshotAction={patchSnapshot}
+              onRecommendationAction={patchRecommendation}
+            />
+          )}
         </div>
       )}
       {/* HISTORY VIEW */}
