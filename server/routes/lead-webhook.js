@@ -20,6 +20,10 @@ const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
 } = require('../services/estimate-automation-duplicates');
+const {
+  automationNote,
+  evaluateLeadEstimateAutomationReadiness,
+} = require('../services/lead-estimate-automation');
 
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((alertErr) => {
@@ -90,6 +94,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Valid phone number required' });
     }
     const phoneFormatted = '+1' + phone.slice(-10);
+    let estimateAutomationReadiness = null;
 
     // Look up matching lead_sources record for proper attribution
     let leadSourceId = null;
@@ -230,6 +235,13 @@ router.post('/', async (req, res) => {
       await PipelineManager.onEvent(customer.id, 'lead_created');
       await LeadScorer.calculateScore(customer.id);
     }
+
+    estimateAutomationReadiness = evaluateLeadEstimateAutomationReadiness({
+      intake,
+      customer,
+      phone: phoneFormatted,
+      serviceInterest,
+    });
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
       // Customer record + interaction note are written above so we still have an
@@ -473,7 +485,12 @@ router.post('/', async (req, res) => {
             lead_source: leadSource.source,
             lead_source_detail: leadSource.detail,
             token: estimateToken,
-            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}.`,
+            estimate_data: JSON.stringify({
+              automation: {
+                leadEstimateAutomation: estimateAutomationReadiness,
+              },
+            }),
+            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(estimateAutomationReadiness)}`,
           }).returning(['id', 'service_interest']);
           createdEstimateId = estimateRow?.id || null;
           createdEstimateServiceInterest = estimateRow?.service_interest || createdEstimateServiceInterest;
@@ -494,6 +511,28 @@ router.post('/', async (req, res) => {
         lead_source_id: leadSourceId,
         lead_type: 'form_submission',
         service_interest: serviceInterest || null,
+        extracted_data: JSON.stringify({
+          stage: 'lead_webhook_received',
+          service_interest: serviceInterest || null,
+          automation: {
+            leadEstimateAutomation: estimateAutomationReadiness,
+          },
+          attribution: {
+            leadSource,
+            formId,
+            formName,
+            pageUrl,
+            landingUrl,
+            utm: {
+              source: utmSource,
+              medium: utmMedium,
+              campaign: utmCampaign,
+              content: utmContent,
+              term: utmTerm,
+            },
+          },
+          address: normalizedAddress,
+        }),
         first_contact_at: new Date(),
         first_contact_channel: 'form',
         status: 'new',
