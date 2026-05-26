@@ -19,6 +19,7 @@
  *   'appointment_confirmation' | // booked/scheduled confirmation
  *   'appointment_cancellation' |
  *   'tech_en_route'      |
+ *   'service_completion' |
  *   'billing'             |   // overdue, statement, dunning
  *   'payment_receipt'     |   // paid receipt / payment confirmation
  *   'payment_failure'     |   // failed charge / retry / bank-verification action required
@@ -76,6 +77,7 @@ const MESSAGE_PURPOSES = [
   'appointment_confirmation',
   'appointment_cancellation',
   'tech_en_route',
+  'service_completion',
   'billing',
   'payment_receipt',
   'payment_failure',
@@ -197,6 +199,15 @@ const PURPOSE_POLICY = {
     maxSegments: 2,
     requireConsent: 'transactional',
     prefsColumn: 'tech_en_route',
+    minIdentityTrust: 'service_contact_authorized',
+    requireIds: ['customerId'],
+  },
+  service_completion: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'transactional',
+    prefsColumn: 'service_completed',
     minIdentityTrust: 'service_contact_authorized',
     requireIds: ['customerId'],
   },
