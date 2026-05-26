@@ -565,8 +565,11 @@ const SocialMediaService = {
         const normalizedGuid = item.guid || normalizedUrl;
 
         const existing = await trx('social_media_posts')
-          .where({ source_url: normalizedUrl })
-          .orWhere({ source_guid: normalizedGuid })
+          .where(function() {
+            this.where({ source_url: normalizedUrl })
+              .orWhere({ source_guid: normalizedGuid });
+          })
+          .whereNot('status', 'dry_run')
           .first();
 
         if (existing) continue;
@@ -789,6 +792,12 @@ const SocialMediaService = {
    * Post to a single platform (from admin UI).
    */
   async postToSingle(platform, { title, description, link, content, imageUrl, locationId }) {
+    if (!SOCIAL_FLAGS.automationEnabled) {
+      return { platform, success: false, error: 'Automation is disabled' };
+    }
+    if (await isPausedByAdmin()) {
+      return { platform, success: false, error: 'Automation is paused' };
+    }
     const flagMap = { facebook: 'facebookEnabled', instagram: 'instagramEnabled', gbp: 'gbpEnabled' };
     const flagKey = flagMap[platform];
     if (flagKey && !SOCIAL_FLAGS[flagKey]) {

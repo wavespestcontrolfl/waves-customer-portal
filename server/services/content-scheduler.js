@@ -81,7 +81,7 @@ async function sharePublishedBlog(blog) {
         .map((platform) => `${platform.platform || 'unknown'}:${platform.error || 'failed'}`)
         .join('; ');
       logger.warn(`[content-scheduler] Social share produced no successful platforms for blog ${blog.id}${failures ? `: ${failures}` : ''}`);
-      return true;
+      return false;
     }
 
     await db('blog_posts').where('id', blog.id).update({
