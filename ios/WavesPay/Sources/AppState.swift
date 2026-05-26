@@ -59,9 +59,10 @@ final class AppState: ObservableObject {
         flow = .validating
         do {
             let validated = try await API.validateHandoff(token: token)
-            // Pull jti out of the JWT's claims so /payment-intent can use it.
-            // Signature check happened server-side — client-side we only
-            // need the claim value.
+            if let fresh = validated.authToken {
+                Keychain.write(key: "authToken", value: fresh)
+                self.authToken = fresh
+            }
             PendingHandoff.jti = JWTDecoder.extractClaim(token: token, key: "jti")
             flow = .ready(validated)
         } catch {
