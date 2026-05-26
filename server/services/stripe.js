@@ -1531,7 +1531,7 @@ const StripeService = {
         } else if (pmLookupFailed) {
           logger.error(
             `[stripe] FAIL-CLOSED: Could not determine funding for unfinalized card PI ${paymentIntentId}. ` +
-            `Invoice ${invoice.invoice_number}. Creating alert for manual review.`,
+            `Invoice ${invoice.invoice_number}. Blocking confirm — customer must retry through /quote+/finalize.`,
           );
           try {
             await db('customer_health_alerts').insert({
@@ -1547,6 +1547,9 @@ const StripeService = {
           } catch (alertErr) {
             logger.error(`[stripe] Unknown-funding alert insert failed: ${alertErr.message}`);
           }
+          const err = new Error('Payment requires surcharge verification. Please refresh and try again.');
+          err.code = 'SURCHARGE_FUNDING_UNKNOWN';
+          throw err;
         } else {
           logger.info(
             `[stripe] Non-credit card (${pmFunding || 'unknown'}) on PI ${paymentIntentId} ` +
