@@ -251,4 +251,53 @@ describe('lead estimate automation gate', () => {
     });
     expect(draft.monthly).toBeUndefined();
   });
+
+  test('triage service-interest changes regenerate draft pricing from the new service', () => {
+    const intake = buildLeadWebhookIntake({
+      name: 'Casey Change',
+      email: 'casey@example.com',
+      phone: '9415550105',
+      address: '500 Switch Ln, Sarasota, FL 34236',
+      domain: 'sarasotaflpestcontrol.com',
+      service_interest: 'Pest Control',
+      homeSqFt: 2000,
+      lotSqFt: 8000,
+    });
+    const initialReadiness = evaluateLeadEstimateAutomationReadiness({
+      intake,
+      phone: '+19415550105',
+      serviceInterest: intake.serviceInterest,
+    });
+    const initialDraft = buildAutomatedLeadDraftEstimate({
+      intake,
+      body: { homeSqFt: 2000, lotSqFt: 8000 },
+      readiness: initialReadiness,
+    });
+
+    const triagedServiceInterest = 'Recurring Mosquito Control';
+    const triageIntake = {
+      ...intake,
+      serviceInterest: triagedServiceInterest,
+    };
+    const triageReadiness = evaluateLeadEstimateAutomationReadiness({
+      intake: triageIntake,
+      phone: '+19415550105',
+      serviceInterest: triagedServiceInterest,
+    });
+    const triageDraft = buildAutomatedLeadDraftEstimate({
+      intake: triageIntake,
+      body: { homeSqFt: 2000, lotSqFt: 8000 },
+      readiness: triageReadiness,
+    });
+
+    expect(initialDraft.estimateData.services).toEqual({
+      pest: { frequency: 'quarterly' },
+    });
+    expect(initialDraft.estimateData.engineResult.lineItems[0].service).toBe('pest_control');
+    expect(triageDraft.estimateData.services).toEqual({
+      mosquito: { tier: 'monthly12' },
+    });
+    expect(triageDraft.estimateData.engineResult.lineItems[0].service).toBe('mosquito');
+    expect(triageDraft.monthly).not.toBe(initialDraft.monthly);
+  });
 });

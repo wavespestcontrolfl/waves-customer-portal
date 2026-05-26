@@ -584,6 +584,24 @@ router.post('/', async (req, res) => {
               await db('leads').where('id', leadRecord.id).update(updates);
             }
             if (createdEstimateId && triageServiceInterestUpdate) {
+              const triageReadiness = evaluateLeadEstimateAutomationReadiness({
+                intake: {
+                  ...intake,
+                  serviceInterest: triageServiceInterestUpdate,
+                },
+                customer,
+                phone: phoneFormatted,
+                serviceInterest: triageServiceInterestUpdate,
+              });
+              const triageDraftEstimate = buildAutomatedLeadDraftEstimate({
+                intake: {
+                  ...intake,
+                  serviceInterest: triageServiceInterestUpdate,
+                },
+                customer,
+                body,
+                readiness: triageReadiness,
+              });
               const estimateUpdateQuery = db('estimates')
                 .where({
                   id: createdEstimateId,
@@ -599,6 +617,15 @@ router.post('/', async (req, res) => {
               }
               await estimateUpdateQuery.update({
                 service_interest: triageServiceInterestUpdate,
+                monthly_total: triageDraftEstimate?.monthly || null,
+                annual_total: triageDraftEstimate?.annual || null,
+                onetime_total: triageDraftEstimate?.oneTimeTotal || null,
+                estimate_data: JSON.stringify(triageDraftEstimate?.estimateData || {
+                  automation: {
+                    leadEstimateAutomation: triageReadiness,
+                    draftEstimateAutomation: triageDraftEstimate?.automation || null,
+                  },
+                }),
                 updated_at: new Date(),
               });
             }
