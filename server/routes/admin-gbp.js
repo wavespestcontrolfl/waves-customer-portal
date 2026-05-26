@@ -65,6 +65,41 @@ function mapPlacesData(place) {
   };
 }
 
+function addressToString(address) {
+  if (!address) return null;
+  if (typeof address === 'string') return address;
+  return [
+    ...(address.addressLines || []),
+    [address.locality, address.administrativeArea, address.postalCode].filter(Boolean).join(', '),
+  ].filter(Boolean).join(', ') || null;
+}
+
+function mapGbpData(location) {
+  const periods = location.regularHours?.periods || [];
+  const regularHours = periods.length ? periods.reduce((acc, period) => {
+    const day = String(period.openDay || '').toLowerCase();
+    if (!day) return acc;
+    const open = period.openTime ? `${String(period.openTime.hours || 0).padStart(2, '0')}:${String(period.openTime.minutes || 0).padStart(2, '0')}` : null;
+    const close = period.closeTime ? `${String(period.closeTime.hours || 0).padStart(2, '0')}:${String(period.closeTime.minutes || 0).padStart(2, '0')}` : null;
+    acc[day] = { open, close };
+    return acc;
+  }, {}) : null;
+
+  return {
+    business_name: location.title || null,
+    description: location.profile?.description || null,
+    address: addressToString(location.storefrontAddress || location.address),
+    phone: location.phoneNumbers?.primaryPhone || location.primaryPhone || null,
+    additional_phones: location.phoneNumbers?.additionalPhones || [],
+    website_url: location.websiteUri || null,
+    primary_category: location.categories?.primaryCategory?.displayName || location.primaryCategory?.displayName || null,
+    additional_categories: location.categories?.additionalCategories || [],
+    regular_hours: regularHours,
+    service_areas: location.serviceArea?.places?.placeInfos || [],
+    hide_address: location.metadata?.hasVoiceOfMerchant === false ? null : Boolean(location.storefrontAddress === undefined && location.serviceArea),
+  };
+}
+
 // =========================================================================
 // Helper: diff two records, return array of { field, oldVal, newVal }
 // =========================================================================
@@ -97,10 +132,21 @@ router.get('/locations', async (req, res, next) => {
     const storedMap = {};
     for (const row of stored) storedMap[row.location_id] = row;
 
+    const credentialStatuses = await Promise.all(WAVES_LOCATIONS.map(async loc => {
+      try {
+        await gbpService._getHeaders(loc.id);
+        return [loc.id, { hasCredentials: true, authError: null }];
+      } catch (err) {
+        return [loc.id, { hasCredentials: false, authError: err.message }];
+      }
+    }));
+    const credentialMap = Object.fromEntries(credentialStatuses);
+
     const locations = WAVES_LOCATIONS.map(loc => ({
       ...loc,
       gbp: storedMap[loc.id] || null,
-      hasCredentials: !!gbpService._getClient(loc.id),
+      hasCredentials: credentialMap[loc.id]?.hasCredentials || false,
+      authError: credentialMap[loc.id]?.authError || null,
     }));
 
     // Get pending update counts per location
@@ -137,11 +183,21 @@ router.get('/locations/:id', async (req, res, next) => {
       .orderBy('detected_at', 'desc')
       .limit(50);
 
+    let hasCredentials = false;
+    let authError = null;
+    try {
+      await gbpService._getHeaders(id);
+      hasCredentials = true;
+    } catch (err) {
+      authError = err.message;
+    }
+
     res.json({
       config: configLoc,
       gbp: gbp || null,
       recentUpdates,
-      hasCredentials: !!gbpService._getClient(id),
+      hasCredentials,
+      authError,
     });
   } catch (err) {
     next(err);
@@ -156,26 +212,38 @@ router.post('/locations/:id/sync', async (req, res, next) => {
     const { id } = req.params;
     const configLoc = WAVES_LOCATIONS.find(l => l.id === id);
     if (!configLoc) return res.status(404).json({ error: 'Location not found' });
-    if (!configLoc.googlePlaceId) return res.status(400).json({ error: 'No Google Place ID configured for this location' });
-    if (!GOOGLE_MAPS_API_KEY) return res.status(500).json({ error: 'GOOGLE_MAPS_API_KEY not configured' });
-
-    // Fetch from Google Places API (New)
-    const url = `https://places.googleapis.com/v1/places/${configLoc.googlePlaceId}`;
-    const placesRes = await fetch(url, {
-      headers: {
-        'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-        'X-Goog-FieldMask': PLACES_FIELD_MASK,
-      },
-    });
-
-    if (!placesRes.ok) {
-      const errText = await placesRes.text();
-      logger.error(`[gbp-mgmt] Places API error for ${id}: ${placesRes.status} ${errText}`);
-      return res.status(502).json({ error: `Google Places API error: ${placesRes.status}`, details: errText });
+    let incoming = null;
+    let source = 'gbp';
+    if (configLoc.googleLocationResourceName) {
+      try {
+        const gbpData = await gbpService.getLocationDetails(configLoc.googleLocationResourceName, id);
+        incoming = mapGbpData(gbpData);
+      } catch (err) {
+        logger.warn(`[gbp-mgmt] GBP API read failed for ${id}, falling back to Places: ${err.message}`);
+      }
     }
 
-    const placeData = await placesRes.json();
-    const incoming = mapPlacesData(placeData);
+    if (!incoming) {
+      source = 'places';
+      if (!configLoc.googlePlaceId) return res.status(400).json({ error: 'No GBP resource name or Google Place ID configured for this location' });
+      if (!GOOGLE_MAPS_API_KEY) return res.status(500).json({ error: 'GOOGLE_MAPS_API_KEY not configured' });
+
+      const url = `https://places.googleapis.com/v1/places/${configLoc.googlePlaceId}`;
+      const placesRes = await fetch(url, {
+        headers: {
+          'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
+          'X-Goog-FieldMask': PLACES_FIELD_MASK,
+        },
+      });
+
+      if (!placesRes.ok) {
+        const errText = await placesRes.text();
+        logger.error(`[gbp-mgmt] Places API error for ${id}: ${placesRes.status} ${errText}`);
+        return res.status(502).json({ error: `Google Places API error: ${placesRes.status}`, details: errText });
+      }
+
+      incoming = mapPlacesData(await placesRes.json());
+    }
 
     // Get stored record
     const stored = await db('gbp_locations').where({ location_id: id }).first();
@@ -191,7 +259,7 @@ router.post('/locations/:id/sync', async (req, res, next) => {
         field_name: change.field,
         old_value: change.oldVal,
         new_value: change.newVal,
-        source: 'google',
+        source,
         status: 'pending',
       };
       const [inserted] = await db('gbp_updates').insert(record).returning('*');
@@ -222,6 +290,7 @@ router.post('/locations/:id/sync', async (req, res, next) => {
       changesDetected: changes.length,
       updates: updateRecords,
       googleData: incoming,
+      source,
     });
   } catch (err) {
     next(err);
@@ -632,7 +701,13 @@ router.get('/services/suggestions', async (req, res, next) => {
 
     // Use the GBP API to get service suggestions for a category
     // Fall back to a static list if no GBP API access
-    const anyConfiguredLoc = WAVES_LOCATIONS.find(l => gbpService._getClient(l.id));
+    let anyConfiguredLoc = null;
+    for (const loc of WAVES_LOCATIONS) {
+      if (await gbpService._getClient(loc.id)) {
+        anyConfiguredLoc = loc;
+        break;
+      }
+    }
     if (!anyConfiguredLoc) {
       // Return common pest control services as fallback
       return res.json({
