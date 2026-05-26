@@ -1443,15 +1443,46 @@ const StripeService = {
       const isCardFamily = pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach';
       const wasFinalized = pi.metadata?.surcharge_policy_version;
       if (isCardFamily && !wasFinalized) {
-        // Card payment without surcharge_policy_version = either Express Checkout
-        // (wallets, intentionally base-only in phase 1) or a legacy/unexpected path.
-        // Log a warning but don't block — the payment already succeeded at Stripe,
-        // and throwing here would orphan the charge without recording it.
-        logger.warn(
-          `[stripe] Card payment on PI ${paymentIntentId} confirmed without /finalize ` +
-          `(no surcharge_policy_version). Possibly Express Checkout or legacy flow. ` +
-          `Invoice ${invoice.invoice_number}.`,
-        );
+        // Card payment without surcharge_policy_version = bypassed /finalize.
+        // Don't block (payment already succeeded at Stripe), but check if it's
+        // a credit card that should have been surcharged.
+        let pmFunding = null;
+        try {
+          const pmId = typeof pi.payment_method === 'string' ? pi.payment_method : pi.payment_method?.id;
+          if (pmId) {
+            const pmObj = await stripe.paymentMethods.retrieve(pmId);
+            pmFunding = pmObj.card?.funding || null;
+          }
+        } catch { /* non-fatal — PM may be detached */ }
+
+        if (pmFunding === 'credit') {
+          logger.error(
+            `[stripe] SURCHARGE UNDER-COLLECTION: Credit card on PI ${paymentIntentId} ` +
+            `confirmed without /finalize. Invoice ${invoice.invoice_number} charged at base only.`,
+          );
+          try {
+            await db('customer_health_alerts').insert({
+              customer_id: invoice.customer_id,
+              alert_type: 'surcharge_under_collection',
+              severity: 'high',
+              title: `Surcharge under-collection — invoice ${invoice.invoice_number}`,
+              description: `Credit card payment confirmed without surcharge finalization. PI: ${paymentIntentId}. Charged base-only.`,
+              metadata: JSON.stringify({
+                stripe_payment_intent_id: paymentIntentId,
+                invoice_number: invoice.invoice_number,
+                card_funding: pmFunding,
+                expected_surcharge_bps: 300,
+              }),
+            });
+          } catch (alertErr) {
+            logger.error(`[stripe] Under-collection alert insert failed: ${alertErr.message}`);
+          }
+        } else {
+          logger.info(
+            `[stripe] Non-credit card (${pmFunding || 'unknown'}) on PI ${paymentIntentId} ` +
+            `confirmed without /finalize — no surcharge expected. Invoice ${invoice.invoice_number}.`,
+          );
+        }
       }
 
       const actualMethodType = pmdType || resolvedPaymentMethod;
@@ -1473,9 +1504,28 @@ const StripeService = {
         // Compare against the surcharge policy stored on the PI at charge time,
         // not a fresh recompute — the pay page may have intentionally charged
         // differently (no surcharge for debit, base-only for express checkout).
-        const expectedBase = Math.round(Number(pi.metadata?.base_amount || invoice.total) * 100);
-        const expectedSurcharge = Math.round(Number(pi.metadata?.card_surcharge || 0) * 100);
-        const expectedCents = expectedBase + expectedSurcharge;
+        const metaBase = Math.round(Number(pi.metadata?.base_amount || invoice.total) * 100);
+        const metaSurcharge = Math.round(Number(pi.metadata?.card_surcharge || 0) * 100);
+        // If metadata shows 0 surcharge but PM is credit card, re-derive expected
+        // surcharge — the PI may have bypassed /finalize.
+        let expectedSurcharge = metaSurcharge;
+        if (metaSurcharge === 0 && pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach') {
+          let pmFunding = pi.metadata?.card_funding || null;
+          if (!pmFunding) {
+            try {
+              const pmId = typeof pi.payment_method === 'string' ? pi.payment_method : pi.payment_method?.id;
+              if (pmId) {
+                const pmObj = await stripe.paymentMethods.retrieve(pmId);
+                pmFunding = pmObj.card?.funding || null;
+              }
+            } catch { /* non-fatal */ }
+          }
+          if (pmFunding === 'credit') {
+            const { computeSurchargeCents } = require('./stripe-pricing');
+            expectedSurcharge = computeSurchargeCents(metaBase);
+          }
+        }
+        const expectedCents = metaBase + expectedSurcharge;
         const actualCents = Number(pi.amount) || 0;
         if (actualCents + 1 < expectedCents) {  // 1-cent tolerance for rounding
           logger.error(
