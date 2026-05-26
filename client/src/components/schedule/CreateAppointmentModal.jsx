@@ -406,8 +406,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return discountPresets.filter((d) => (
       d.is_active
       && d.show_in_invoices
+      && discountAvailableForCustomer(d, selectedCustomer)
     ));
-  }, [discountPresets]);
+  }, [discountPresets, selectedCustomer]);
 
   // Notes & Confirm state
   const [customerNotes, setCustomerNotes] = useState('');

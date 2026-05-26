@@ -3419,7 +3419,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       .where({ id: svc.source_estimate_id })
       .first('id', 'token', 'monthly_total', 'annual_total', 'onetime_total', 'created_at', 'status');
     if (!est) return res.json({ linked: false });
-    const quotedTotal = Number(est.monthly_total || 0) + Number(est.onetime_total || 0);
+    const quotedTotal = Number(est.monthly_total || 0) + Number(est.annual_total || 0) + Number(est.onetime_total || 0);
     res.json({
       linked: true,
       estimateId: est.id,

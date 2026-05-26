@@ -437,7 +437,7 @@ export default function MobileAppointmentDetailSheet({
                 Quoted ${estimateSource.quotedTotal?.toFixed(2)}
               </span>
             </div>
-            {estimateSource.quotedTotal != null && price > 0 && Math.abs(estimateSource.quotedTotal - price) > 0.01 && (
+            {estimateSource.quotedTotal > 0 && price > 0 && Math.abs(estimateSource.quotedTotal - price) > 0.01 && (
               <div className="text-11 text-ink-secondary mt-1 px-1">
                 Current price ${price.toFixed(2)} ({price > estimateSource.quotedTotal ? '+' : ''}{((price - estimateSource.quotedTotal) / estimateSource.quotedTotal * 100).toFixed(0)}% vs quoted)
               </div>
