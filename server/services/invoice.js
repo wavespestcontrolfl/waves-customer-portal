@@ -102,6 +102,14 @@ function resolveStoredDiscountLineItem(item, row) {
 
 const WAVEGUARD_TIER_ORDER = ["Bronze", "Silver", "Gold", "Platinum"];
 
+function invoiceValidationError(message) {
+  const err = new Error(message);
+  err.status = 400;
+  err.statusCode = 400;
+  err.isOperational = true;
+  return err;
+}
+
 function assertDiscountEligibleForCustomer(discount, customer) {
   if (!discount) return;
   const requiredTier = discount.requires_waveguard_tier;
@@ -109,7 +117,7 @@ function assertDiscountEligibleForCustomer(discount, customer) {
   const customerTier = customer?.waveguard_tier;
   if (discount.is_waveguard_tier_discount) {
     if (customerTier !== requiredTier) {
-      throw new Error(
+      throw invoiceValidationError(
         "Selected WaveGuard tier discount is not available for this customer",
       );
     }
@@ -118,7 +126,7 @@ function assertDiscountEligibleForCustomer(discount, customer) {
   const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(requiredTier);
   const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customerTier);
   if (requiredIdx >= 0 && customerIdx < requiredIdx) {
-    throw new Error(
+    throw invoiceValidationError(
       "Selected discount is not available for this customer tier",
     );
   }

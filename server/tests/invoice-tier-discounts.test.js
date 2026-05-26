@@ -236,7 +236,11 @@ describe('invoice tier discounts', () => {
         { client_id: 'line-1', description: 'Pest Control', quantity: 1, unit_price: 100, amount: 100 },
         { _kind: 'discount', discount_id: 'silver-id', discount_for: 'line-1', description: 'WaveGuard Silver', quantity: 1, unit_price: -1, amount: -1 },
       ],
-    })).rejects.toThrow('WaveGuard tier discount');
+    })).rejects.toMatchObject({
+      message: expect.stringContaining('WaveGuard tier discount'),
+      statusCode: 400,
+      isOperational: true,
+    });
   });
 
 
