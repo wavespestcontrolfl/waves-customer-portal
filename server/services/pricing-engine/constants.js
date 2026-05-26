@@ -1111,6 +1111,33 @@ const SPECIALTY = {
     },
   },
   flea: {
+    offers: [
+      {
+        offerKey: 'flea_knockdown_single',
+        displayName: 'Flea Knockdown Visit',
+        billingCadence: 'one_time',
+        visitCount: 1,
+        warrantyType: 'none',
+        baseInitial: r(225),
+        floorInitial: r(185),
+        exteriorAddOnMode: 'initial_only',
+      },
+      {
+        offerKey: 'flea_elimination_two_visit',
+        displayName: 'Flea Elimination Package',
+        billingCadence: 'one_time',
+        visitCount: 2,
+        warrantyType: 'conditional_retreat',
+        baseInitial: r(225),
+        baseFollowUp: r(125),
+        floorInitial: r(185),
+        floorFollowUp: r(95),
+        packageFloor: r(280),
+        guaranteeWindowDaysAfterFollowUp: 30,
+        maxIncludedRetreats: 1,
+        exteriorAddOnMode: 'two_visit',
+      },
+    ],
     initial: { base: r(225), floor: r(185) },
     followUp: { base: r(125), floor: r(95) },
     footprintAdjustments: {

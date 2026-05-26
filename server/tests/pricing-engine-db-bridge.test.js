@@ -336,8 +336,9 @@ describe('pricing engine DB bridge', () => {
     expect(result.modifiers).toEqual({
       urgencyMultiplier: 1.30,
       recurringCustomerMultiplier: 0.80,
+      rushPremium: 150,
     });
-    expect(result.total).toBe(520);
+    expect(result.total).toBe(550);
     expect(result.recurringCustomerDiscountRate).toBe(0.20);
   });
 

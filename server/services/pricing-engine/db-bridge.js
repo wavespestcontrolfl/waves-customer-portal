@@ -1234,6 +1234,44 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(target.initial, 'floor', initial.floor ?? flea.initial_floor, money);
       setNumber(target.followUp, 'base', followUp.base ?? flea.followup_base ?? flea.followUp_base, money);
       setNumber(target.followUp, 'floor', followUp.floor ?? flea.followup_floor ?? flea.followUp_floor, money);
+      if (Array.isArray(flea.offers)) {
+        target.offers = flea.offers.map(offer => ({
+          ...offer,
+          offerKey: offer.offerKey || offer.offer_key,
+          displayName: offer.displayName || offer.display_name,
+          billingCadence: offer.billingCadence || offer.billing_cadence,
+          visitCount: Number(offer.visitCount ?? offer.visit_count ?? 1),
+          warrantyType: offer.warrantyType || offer.warranty_type,
+          ...(offer.baseInitial !== undefined || offer.base_initial !== undefined ? { baseInitial: money(offer.baseInitial ?? offer.base_initial) } : {}),
+          ...(offer.baseFollowUp !== undefined || offer.base_follow_up !== undefined ? { baseFollowUp: money(offer.baseFollowUp ?? offer.base_follow_up) } : {}),
+          ...(offer.floorInitial !== undefined || offer.floor_initial !== undefined ? { floorInitial: money(offer.floorInitial ?? offer.floor_initial) } : {}),
+          ...(offer.floorFollowUp !== undefined || offer.floor_follow_up !== undefined ? { floorFollowUp: money(offer.floorFollowUp ?? offer.floor_follow_up) } : {}),
+          ...(offer.packageFloor !== undefined || offer.package_floor !== undefined ? { packageFloor: money(offer.packageFloor ?? offer.package_floor) } : {}),
+          exteriorAddOnMode: offer.exteriorAddOnMode || offer.exterior_add_on_mode,
+        })).filter(offer => offer.offerKey);
+      } else if (Array.isArray(target.offers)) {
+        target.offers = target.offers.map(offer => {
+          if (offer.offerKey === 'flea_knockdown_single') {
+            return {
+              ...offer,
+              baseInitial: target.initial.base,
+              floorInitial: target.initial.floor,
+              packageFloor: target.initial.floor,
+            };
+          }
+          if (offer.offerKey === 'flea_elimination_two_visit') {
+            return {
+              ...offer,
+              baseInitial: target.initial.base,
+              floorInitial: target.initial.floor,
+              baseFollowUp: target.followUp.base,
+              floorFollowUp: target.followUp.floor,
+              packageFloor: target.initial.floor + target.followUp.floor,
+            };
+          }
+          return offer;
+        });
+      }
 
       if (flea.exterior && typeof flea.exterior === 'object') {
         setBoolean(target.exterior, 'enabled', flea.exterior.enabled);
