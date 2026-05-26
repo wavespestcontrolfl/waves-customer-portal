@@ -3040,9 +3040,9 @@ function priceRodentBait(property, options = {}) {
 // ============================================================
 // RODENT TRAPPING (One-Time)
 // ============================================================
-// Base price = setup visit + unlimited callbacks / trap checks during the
-// active trapping window. Final price adjusts for home size, lot size, rodent
-// pressure, and optional emergency surcharge.
+// Standard = setup + 2 callbacks/checks. Unlimited = callbacks for the same
+// active trapping job only. Trap-only monitoring is priced separately and is
+// not a warranty.
 //
 // Inputs:
 //   property: { footprint, lotSqFt, features }
@@ -3063,106 +3063,330 @@ function _bracketLookup(value, brackets, key) {
 
 function priceRodentTrapping(property, options = {}) {
   const cfg = RODENT.trapping;
-  const footprint = property.footprint || 0;
-  const lotSqFt = property.lotSqFt || 0;
-  const f = property.features || {};
+  const plan = options.plan === 'unlimited' || options.rodentTrappingPlan === 'unlimited'
+    ? 'unlimited'
+    : 'standard';
   const { emergency = false } = options;
+  const includedCallbacks = plan === 'standard' ? Number(cfg.includedFollowUps) || 2 : 'unlimited';
+  const unlimitedCallbacks = plan === 'unlimited';
+  const callbacksUsed = Math.max(0, Math.floor(Number(options.callbacksUsed) || 0));
+  const requestedExtraCallbacks = Math.max(0, Math.floor(Number(options.extraCallbackCount) || 0));
+  const extraCallbackAllowed = plan === 'standard' && callbacksUsed >= includedCallbacks;
+  const extraCallbackCount = extraCallbackAllowed ? requestedExtraCallbacks : 0;
+  const extraCallbackPrice = extraCallbackCount * cfg.additionalFollowUpRate;
+  const basePrice = unlimitedCallbacks ? cfg.unlimitedPrice : cfg.standardPrice;
+  const trappingBasePrice = options.upgradeToUnlimited
+    ? cfg.upgradeToUnlimitedPrice
+    : basePrice;
 
-  // Default pressure inference from property features.
-  let pressure = options.pressure;
-  if (!pressure) {
-    if (f.trees === 'heavy' && f.nearWater) pressure = 'heavy';
-    else if (f.trees === 'heavy' || f.nearWater) pressure = 'moderate';
-    else pressure = 'normal';
-  }
-
-  const homeBracket = _bracketLookup(footprint, cfg.homeSizeAdjustments, 'maxSqFt');
-  const lotBracket = _bracketLookup(lotSqFt, cfg.lotAdjustments, 'maxLotSqFt');
-  const homeAdj = homeBracket.adjustment;
-  const lotAdj = lotBracket.adjustment;
-  const pressureAdj = cfg.pressureAdjustments[pressure] ?? 0;
-
-  let raw = cfg.base + homeAdj + lotAdj + pressureAdj;
-
-  // Emergency surcharge: 20% of subtotal OR fixed minimum, whichever is higher.
   let emergencySurcharge = 0;
   if (emergency) {
-    const pctSurcharge = raw * (cfg.emergencyMultiplier - 1);
+    const pctSurcharge = trappingBasePrice * (cfg.emergencyMultiplier - 1);
     emergencySurcharge = Math.max(pctSurcharge, cfg.emergencyMinimumSurcharge);
-    raw += emergencySurcharge;
   }
 
-  const rounded = Math.round(raw / 5) * 5;
-  const ceilingHit = rounded >= cfg.ceilingBeforeCustom;
-  const customRecommended = !!(homeBracket.customRecommended || lotBracket.customRecommended || ceilingHit);
-  const price = Math.max(cfg.floor, Math.min(cfg.ceilingBeforeCustom, rounded));
-  const activeWindowDays = Number(cfg.activeWindowDays) || 14;
-  const unlimitedFollowUps = cfg.includedFollowUps === 'unlimited';
-  const includedDetail = unlimitedFollowUps
-    ? `Unlimited trap checks/callbacks for ${activeWindowDays} days`
-    : `Setup + ${cfg.includedFollowUps} follow-ups`;
-  const customQuoteReason = ceilingHit
-    ? `Rodent trapping reached the $${cfg.ceilingBeforeCustom} pricing ceiling`
-    : customRecommended
-      ? 'Large home or lot requires custom rodent trapping review'
-      : null;
+  const price = Math.round(trappingBasePrice + emergencySurcharge + extraCallbackPrice);
+  const name = options.upgradeToUnlimited
+    ? 'Rodent Trapping - Upgrade to Unlimited'
+    : plan === 'unlimited'
+      ? 'Rodent Trapping - Unlimited Callback'
+      : 'Rodent Trapping - Standard';
+  const warnings = [];
+  if (requestedExtraCallbacks > 0 && !extraCallbackAllowed) {
+    warnings.push('Extra callbacks can only be billed after the 2 included Standard callbacks/checks are used.');
+  }
+  if (plan === 'unlimited') {
+    warnings.push('Unlimited callbacks apply to the same active trapping job only, not lifetime coverage or new infestations after job closure.');
+  }
+  const detail = options.upgradeToUnlimited
+    ? 'Upgrade Standard Rodent Trapping to Unlimited Callback for the same active trapping job.'
+    : cfg.invoiceDescriptions[plan];
 
   return {
     service: 'rodent_trapping',
+    name,
     price,
-    base: cfg.base,
-    homeAdj,
-    lotAdj,
-    pressure,
-    pressureAdj,
+    finalPrice: price,
+    lineItems: [
+      {
+        service: 'rodent_trapping',
+        name,
+        price: trappingBasePrice,
+        discountEligible: false,
+        detail,
+      },
+      ...(emergencySurcharge > 0 ? [{
+        service: 'rodent_trapping_emergency_surcharge',
+        name: 'Emergency surcharge',
+        price: Math.round(emergencySurcharge),
+        discountEligible: false,
+        detail: '20% or $75 minimum, whichever is greater.',
+      }] : []),
+      ...(extraCallbackCount > 0 ? [{
+        service: 'rodent_trapping_extra_callback',
+        name: 'Rodent Trapping - Extra Callback',
+        count: extraCallbackCount,
+        perVisit: cfg.additionalFollowUpRate,
+        price: extraCallbackPrice,
+        discountEligible: false,
+        detail: `Additional callbacks after included visits are $${cfg.additionalFollowUpRate} each.`,
+      }] : []),
+    ],
+    base: trappingBasePrice,
+    trappingBasePrice,
+    rodentTrappingPlan: plan,
+    includedCallbacks,
+    callbacksUsed,
+    extraCallbackCount,
+    extraCallbackPrice,
+    extraCallbackAllowed,
+    unlimitedCallbacks,
     emergency,
     emergencySurcharge: Math.round(emergencySurcharge),
-    includedFollowUps: cfg.includedFollowUps,
-    activeWindowDays,
-    unlimitedCallbacks: unlimitedFollowUps,
-    customRecommended,
-    requiresCustomQuote: ceilingHit,
-    quoteRequired: ceilingHit,
-    customQuoteReason,
-    reason: ceilingHit ? customQuoteReason : null,
-    detail: `${includedDetail} | ${pressure} pressure${emergency ? ' | EMERGENCY' : ''}`,
+    emergencySurchargeApplied: emergencySurcharge > 0,
+    emergencySurchargeAmount: Math.round(emergencySurcharge),
+    includedFollowUps: includedCallbacks,
+    activeWindowDays: null,
+    customRecommended: false,
+    requiresCustomQuote: false,
+    quoteRequired: false,
+    customQuoteReason: null,
+    reason: null,
+    detail,
+    invoiceDescription: detail,
+    floorsApplied: [],
+    discounts: [],
+    warnings,
+    warrantyEligible: false,
+    pricingSource: 'rodent_trapping_revised_2026',
+    pricingBasis: {
+      standardPrice: cfg.standardPrice,
+      unlimitedPrice: cfg.unlimitedPrice,
+      upgradeToUnlimitedPrice: cfg.upgradeToUnlimitedPrice,
+      extraCallbackRate: cfg.additionalFollowUpRate,
+      emergencyMultiplier: cfg.emergencyMultiplier,
+      emergencyMinimumSurcharge: cfg.emergencyMinimumSurcharge,
+    },
   };
 }
 
 // ============================================================
 // RODENT TRAPPING — ADDITIONAL FOLLOW-UP VISITS
 // ============================================================
-// Base trapping price includes unlimited checks during the active trapping
-// window. This legacy function now returns an included $0 line for callers
-// that still pass explicit follow-up counts.
 function priceRodentTrappingFollowups(count = 1, options = {}) {
   const n = Math.max(0, Math.floor(count));
   if (n === 0) return null;
 
-  const withinActiveWindow = options.withinActiveWindow !== false;
-  const activeWindowDays = Number(RODENT.trapping.activeWindowDays) || 14;
-  if (withinActiveWindow) {
+  const cfg = RODENT.trapping;
+  const callbacksUsed = Math.max(0, Math.floor(Number(options.callbacksUsed) || 0));
+  const includedCallbacks = Number(cfg.includedFollowUps) || 2;
+  if (options.plan === 'unlimited' || options.unlimitedCallbacks) {
     return {
       service: 'rodent_trapping_followup',
       count: n,
       perVisit: 0,
       price: 0,
       included: true,
-      activeWindowDays,
-      detail: `${n} trap check${n === 1 ? '' : 's'} included during ${activeWindowDays}-day active trapping window`,
+      unlimitedCallbacks: true,
+      detail: `${n} trap check${n === 1 ? '' : 's'} included for the same active trapping job`,
     };
   }
+  const allowed = callbacksUsed >= includedCallbacks;
 
   return {
     service: 'rodent_trapping_followup',
     count: n,
-    perVisit: 0,
-    price: 0,
-    requiresCustomQuote: true,
-    quoteRequired: true,
-    customQuoteReason: 'Trap checks outside the active trapping window require custom review',
-    reason: 'Trap checks outside the active trapping window require custom review',
-    detail: `${n} out-of-window trap check${n === 1 ? '' : 's'} require custom review`,
+    perVisit: allowed ? cfg.additionalFollowUpRate : 0,
+    price: allowed ? n * cfg.additionalFollowUpRate : 0,
+    included: !allowed,
+    includedCallbacks,
+    callbacksUsed,
+    requiresCustomQuote: false,
+    quoteRequired: false,
+    customQuoteReason: null,
+    reason: allowed ? null : 'Extra callbacks can only be billed after the 2 included Standard callbacks/checks are used.',
+    detail: allowed
+      ? `${n} extra callback${n === 1 ? '' : 's'} at $${cfg.additionalFollowUpRate} each`
+      : `${n} callback${n === 1 ? '' : 's'} not billable until included callbacks/checks are used`,
+  };
+}
+
+function priceTrapOnlyRetainer(options = {}) {
+  const cfg = RODENT.trapOnlyRetainer;
+  const planKey = cfg.plans[options.plan] ? options.plan : 'standard';
+  const plan = cfg.plans[planKey];
+  const billing = options.billing === 'monthly' ? 'monthly' : 'annual';
+  const responseCallbacksUsed = Math.max(0, Math.floor(Number(options.responseCallbacksUsed) || 0));
+  const requestedExtraCallbacks = Math.max(0, Math.floor(Number(options.extraCallbackCount) || 0));
+  const extraCallbackCount = responseCallbacksUsed >= plan.responseCallbacksIncluded ? requestedExtraCallbacks : 0;
+  const extraCallbackPrice = extraCallbackCount * cfg.extraCallbackRate;
+  const annualPrepaid = billing === 'annual';
+  const attachedToCompletedTrappingJob = !!options.attachedToCompletedTrappingJob || !!options.activeTrappingClosedAt;
+  const waiveSetupFee = annualPrepaid || attachedToCompletedTrappingJob || !!options.waiveSetupFee;
+  const setupFee = waiveSetupFee ? 0 : cfg.setupFee;
+  const retainerPrice = annualPrepaid ? plan.annualPrice : plan.monthlyPrice;
+  const finalPrice = retainerPrice + setupFee + extraCallbackPrice;
+  const warnings = [cfg.warning];
+  if (requestedExtraCallbacks > 0 && extraCallbackCount === 0) {
+    warnings.push('Extra response callbacks can only be billed after included retainer response callbacks are used.');
+  }
+
+  return {
+    service: 'trap_only_retainer',
+    name: plan.label,
+    trapOnlyRetainerPlan: planKey,
+    trapOnlyRetainerBilling: billing,
+    trapOnlyRetainerAnnualPrice: plan.annualPrice,
+    trapOnlyRetainerMonthlyPrice: plan.monthlyPrice,
+    trapOnlyScheduledVisitsIncluded: plan.scheduledVisitsIncluded,
+    trapOnlyResponseCallbacksIncluded: plan.responseCallbacksIncluded,
+    trapOnlyResponseCallbacksUsed: responseCallbacksUsed,
+    trapOnlySetupFee: setupFee,
+    trapOnlyActivationDate: options.activationDate || null,
+    trapOnlyRenewalDate: options.renewalDate || null,
+    price: finalPrice,
+    subtotal: finalPrice,
+    finalPrice,
+    discounts: [],
+    floorsApplied: [],
+    warnings,
+    warrantyEligible: false,
+    rodentExclusionDeclined: true,
+    discountEligible: false,
+    excludedFromCoupons: true,
+    excludedFromWaveGuardDiscounts: true,
+    excludedFromBundleDiscounts: true,
+    lineItems: [
+      {
+        service: 'trap_only_retainer',
+        name: `${plan.label} - ${billing === 'annual' ? 'Annual prepaid' : 'Monthly, 12-month agreement'}`,
+        price: retainerPrice,
+        discountEligible: false,
+        detail: billing === 'annual'
+          ? `$${plan.annualPrice}/year. Includes ${plan.scheduledVisitsIncluded} scheduled checks and ${plan.responseCallbacksIncluded} response callbacks per year.`
+          : `$${plan.monthlyPrice}/month with 12-month agreement. Includes ${plan.scheduledVisitsIncluded} scheduled checks and ${plan.responseCallbacksIncluded} response callbacks per year.`,
+      },
+      ...(setupFee > 0 ? [{
+        service: 'trap_only_setup',
+        name: 'Trap-only setup / inspection',
+        price: setupFee,
+        discountEligible: false,
+      }] : []),
+      ...(extraCallbackCount > 0 ? [{
+        service: 'trap_only_extra_callback',
+        name: 'Trap-only extra response callback',
+        count: extraCallbackCount,
+        perVisit: cfg.extraCallbackRate,
+        price: extraCallbackPrice,
+        discountEligible: false,
+      }] : []),
+    ],
+    detail: 'Trap-only monitoring is not a rodent guarantee because exclusion was declined.',
+    pricingSource: 'trap_only_monitoring_retainer_2026',
+    pricingBasis: {
+      setupFee: cfg.setupFee,
+      extraCallbackRate: cfg.extraCallbackRate,
+      plan,
+    },
+  };
+}
+
+function priceRodentWireMesh(options = {}) {
+  const cfg = RODENT.wireMesh;
+  const substrateKey = cfg.substrates[options.meshSubstrate] ? options.meshSubstrate : 'wood_soft';
+  const substrate = cfg.substrates[substrateKey];
+  const meshLinearFeet = Math.max(0, Number(options.meshLinearFeet) || 0);
+  const measuredOrEstimated = options.measuredOrEstimated === 'measured' ? 'measured' : 'estimated';
+  const meshBase = meshLinearFeet * substrate.ratePerLinearFoot;
+  const basePrice = Math.max(meshBase, substrate.minimum);
+  const storyMult = options.storyMultiplier || options.storyMult || 1;
+  const roofMult = options.roofMultiplier || options.roofMult || 1;
+  const constructionMult = options.constructionMultiplier || options.constructionMult || 1;
+  const adjusted = Math.max(substrate.minimum, Math.round(basePrice * storyMult * roofMult * constructionMult));
+  const warnings = [];
+  const requiresFieldVerification = measuredOrEstimated === 'estimated' && (
+    meshLinearFeet > 40 ||
+    substrateKey === 'roofline_soffit_eave' ||
+    substrateKey === 'tile_steep_fragile_roofline'
+  );
+  if (requiresFieldVerification) warnings.push('Field verification required before final quote.');
+  if (substrate.customQuoteRecommended) warnings.push('Tile, steep, or fragile roofline mesh may require custom quote review.');
+
+  return {
+    service: 'rodent_wire_mesh',
+    name: 'Rodent Wire Mesh Exclusion',
+    meshLinearFeet,
+    meshSubstrate: substrateKey,
+    meshRatePerLinearFoot: substrate.ratePerLinearFoot,
+    meshMinimum: substrate.minimum,
+    meshMeasuredOrEstimated: measuredOrEstimated,
+    measuredOrEstimated,
+    meshPrice: adjusted,
+    price: adjusted,
+    subtotal: adjusted,
+    finalPrice: adjusted,
+    lineItems: [{
+      service: 'rodent_wire_mesh',
+      name: 'Wire mesh exclusion',
+      price: adjusted,
+      detail: `${meshLinearFeet} LF at $${substrate.ratePerLinearFoot}/LF (${substrate.label})`,
+    }],
+    discounts: [],
+    floorsApplied: adjusted === substrate.minimum ? [{ service: 'rodent_wire_mesh', floor: substrate.minimum }] : [],
+    warnings,
+    requiresFieldVerification,
+    customQuoteRecommended: !!substrate.customQuoteRecommended,
+    warrantyEligible: true,
+    pricingSource: 'rodent_wire_mesh_lf_2026',
+    pricingBasis: { meshBase, substrate, storyMult, roofMult, constructionMult },
+  };
+}
+
+function estimateRodentWireMeshLinearFeet(homeSqFt = 0) {
+  const roundUpToNearest5 = (value) => Math.ceil(value / 5) * 5;
+  const typicalMeshLF = roundUpToNearest5((Number(homeSqFt) || 0) / 100);
+  return {
+    typicalMeshLF,
+    lightMeshLF: Math.max(10, roundUpToNearest5(typicalMeshLF * 0.65)),
+    heavyMeshLF: roundUpToNearest5(typicalMeshLF * 1.40),
+  };
+}
+
+function priceRodentBirdBoxes(options = {}) {
+  const cfg = RODENT.birdBoxes;
+  const type = cfg[options.birdBoxType] ? options.birdBoxType : 'standard_bird_box';
+  const qty = Math.max(0, Math.floor(Number(options.birdBoxQuantity) || 0));
+  if (qty === 0) return null;
+  let price = 0;
+  if (type === 'standard_bird_box') {
+    price = cfg.standard_bird_box + Math.max(0, qty - 1) * cfg.additional_standard_same_visit;
+  } else {
+    price = cfg[type] * qty;
+  }
+  return {
+    service: 'rodent_bird_box',
+    name: 'Roof-entry cover / bird box',
+    birdBoxType: type,
+    birdBoxQuantity: qty,
+    birdBoxPrice: price,
+    price,
+    subtotal: price,
+    finalPrice: price,
+    lineItems: [{
+      service: 'rodent_bird_box',
+      name: 'Roof-entry cover / bird box',
+      count: qty,
+      price,
+      detail: type === 'standard_bird_box' && qty > 1
+        ? `$${cfg.standard_bird_box} first standard box + $${cfg.additional_standard_same_visit} each additional same visit`
+        : `${qty} ${type.replace(/_/g, ' ')} at $${cfg[type]} each`,
+    }],
+    discounts: [],
+    floorsApplied: price / qty <= 195 ? [{ service: 'rodent_bird_box', floor: 195 }] : [],
+    warnings: type === 'oversized_complex_custom' ? ['Complex roof-entry cover may require custom quote review.'] : [],
+    warrantyEligible: true,
+    pricingSource: 'rodent_bird_box_unit_2026',
+    pricingBasis: { rates: cfg },
   };
 }
 
@@ -5961,7 +6185,8 @@ module.exports = {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
-  priceRodentInspection,
+  priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
+  estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,

@@ -1775,6 +1775,11 @@ export default function EstimateToolViewV2({
     exclModerate: "0",
     exclAdvanced: "0",
     exclWaive: "NO",
+    rodentTrappingPlan: "standard",
+    rodentTrappingEmergency: false,
+    callbacksUsed: "0",
+    extraCallbackCount: "0",
+    upgradeToUnlimited: false,
     sanitationTier: "standard",
     sanitationArea: "",
     sanitationDebris: "0",
@@ -1831,6 +1836,19 @@ export default function EstimateToolViewV2({
     svcPreslab: false,
     svcFoam: false,
     svcRodentTrap: false,
+    svcTrapOnlyRetainer: false,
+    trapOnlyRetainerPlan: "standard",
+    trapOnlyRetainerBilling: "annual",
+    trapOnlyResponseCallbacksUsed: "0",
+    trapOnlyExtraCallbackCount: "0",
+    trapOnlyAttachedToCompletedTrappingJob: false,
+    svcRodentWireMesh: false,
+    meshLinearFeet: "",
+    meshSubstrate: "wood_soft",
+    meshMeasuredOrEstimated: "estimated",
+    svcRodentBirdBox: false,
+    birdBoxType: "standard_bird_box",
+    birdBoxQuantity: "1",
     svcRodentSanitation: false,
     svcFlea: false,
     svcFleaExterior: false,
@@ -2704,6 +2722,9 @@ export default function EstimateToolViewV2({
       if (form.svcPreslab) selectedServices.push("PRESLAB");
       if (form.svcFoam) selectedServices.push("FOAM");
       if (form.svcRodentTrap) selectedServices.push("RODENT_TRAP");
+      if (form.svcTrapOnlyRetainer) selectedServices.push("TRAP_ONLY_RETAINER");
+      if (form.svcRodentWireMesh) selectedServices.push("RODENT_WIRE_MESH");
+      if (form.svcRodentBirdBox) selectedServices.push("RODENT_BIRD_BOX");
       if (form.svcRodentSanitation) selectedServices.push("RODENT_SANITATION");
       if (form.svcFlea || form.svcFleaExterior) selectedServices.push("FLEA");
       if (form.svcWasp) selectedServices.push("STING");
@@ -2835,6 +2856,21 @@ export default function EstimateToolViewV2({
         exclModerate: parseInt(form.exclModerate, 10) || 0,
         exclAdvanced: parseInt(form.exclAdvanced, 10) || 0,
         exclWaiveInspection: form.exclWaive === "YES",
+        rodentTrappingPlan: form.rodentTrappingPlan || "standard",
+        rodentTrappingEmergency: !!form.rodentTrappingEmergency,
+        callbacksUsed: parseInt(form.callbacksUsed, 10) || 0,
+        extraCallbackCount: parseInt(form.extraCallbackCount, 10) || 0,
+        upgradeToUnlimited: !!form.upgradeToUnlimited,
+        trapOnlyRetainerPlan: form.trapOnlyRetainerPlan || "standard",
+        trapOnlyRetainerBilling: form.trapOnlyRetainerBilling || "annual",
+        trapOnlyResponseCallbacksUsed: parseInt(form.trapOnlyResponseCallbacksUsed, 10) || 0,
+        trapOnlyExtraCallbackCount: parseInt(form.trapOnlyExtraCallbackCount, 10) || 0,
+        trapOnlyAttachedToCompletedTrappingJob: !!form.trapOnlyAttachedToCompletedTrappingJob,
+        meshLinearFeet: parseInt(form.meshLinearFeet, 10) || 0,
+        meshSubstrate: form.meshSubstrate || "wood_soft",
+        meshMeasuredOrEstimated: form.meshMeasuredOrEstimated || "estimated",
+        birdBoxType: form.birdBoxType || "standard_bird_box",
+        birdBoxQuantity: parseInt(form.birdBoxQuantity, 10) || 0,
         sanitationTier: form.sanitationTier || "standard",
         sanitationArea: parseInt(form.sanitationArea, 10) || 0,
         sanitationDebris: parseInt(form.sanitationDebris, 10) || 0,
@@ -5207,6 +5243,122 @@ export default function EstimateToolViewV2({
               )}
               <SubGroupLabel className="mt-3">Rodent</SubGroupLabel>{" "}
               <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping" />{" "}
+              {form.svcRodentTrap && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Trapping Plan">
+                      <SelectV2
+                        k="rodentTrappingPlan"
+                        options={[
+                          { value: "standard", label: "Standard - $350 - includes 2 callbacks" },
+                          { value: "unlimited", label: "Unlimited Callback - $450" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Callbacks Used">
+                      <InputV2 k="callbacksUsed" type="number" min="0" />
+                    </FieldV2>
+                    <FieldV2 label="Extra Callbacks">
+                      <InputV2 k="extraCallbackCount" type="number" min="0" />
+                    </FieldV2>
+                    <div className="pt-7">
+                      <CheckboxV2 k="rodentTrappingEmergency" label="Emergency surcharge" />
+                    </div>
+                    <div className="col-span-2">
+                      <CheckboxV2 k="upgradeToUnlimited" label="Upgrade Standard to Unlimited (+$125)" />
+                    </div>
+                  </div>
+                </div>
+              )}
+              <CheckboxV2 k="svcTrapOnlyRetainer" label="Customer declined exclusion / trap-only monitoring" />
+              {form.svcTrapOnlyRetainer && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Retainer Plan">
+                      <SelectV2
+                        k="trapOnlyRetainerPlan"
+                        options={[
+                          { value: "standard", label: "Standard $495/yr or $49/mo" },
+                          { value: "plus", label: "Plus $695/yr or $69/mo" },
+                          { value: "monthly", label: "Monthly $995/yr or $99/mo" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Billing">
+                      <SelectV2
+                        k="trapOnlyRetainerBilling"
+                        options={[
+                          { value: "annual", label: "Annual prepaid" },
+                          { value: "monthly", label: "Monthly, 12-month agreement" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Response Callbacks Used">
+                      <InputV2 k="trapOnlyResponseCallbacksUsed" type="number" min="0" />
+                    </FieldV2>
+                    <FieldV2 label="Extra Response Callbacks">
+                      <InputV2 k="trapOnlyExtraCallbackCount" type="number" min="0" />
+                    </FieldV2>
+                    <div className="col-span-2">
+                      <CheckboxV2 k="trapOnlyAttachedToCompletedTrappingJob" label="Attached to completed trapping job (waive setup)" />
+                    </div>
+                  </div>
+                  <div className="text-12 text-zinc-600 mt-2">
+                    Trap-only monitoring is not a rodent guarantee because exclusion was declined.
+                  </div>
+                </div>
+              )}
+              <CheckboxV2 k="svcRodentWireMesh" label="Wire Mesh Exclusion" />
+              {form.svcRodentWireMesh && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-3 gap-3">
+                    <FieldV2 label="Linear Feet">
+                      <InputV2 k="meshLinearFeet" type="number" min="0" />
+                    </FieldV2>
+                    <FieldV2 label="Substrate">
+                      <SelectV2
+                        k="meshSubstrate"
+                        options={[
+                          { value: "wood_soft", label: "Wood / soft - $14/LF" },
+                          { value: "concrete_masonry", label: "Concrete / masonry - $20/LF" },
+                          { value: "roofline_soffit_eave", label: "Roofline / soffit / eave - $24/LF" },
+                          { value: "tile_steep_fragile_roofline", label: "Tile / steep / fragile - quote" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Measurement">
+                      <SelectV2
+                        k="meshMeasuredOrEstimated"
+                        options={[
+                          { value: "estimated", label: "Estimated" },
+                          { value: "measured", label: "Measured" },
+                        ]}
+                      />
+                    </FieldV2>
+                  </div>
+                </div>
+              )}
+              <CheckboxV2 k="svcRodentBirdBox" label="Bird Box / Roof-Entry Cover" />
+              {form.svcRodentBirdBox && (
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
+                  <div className="grid grid-cols-2 gap-3">
+                    <FieldV2 label="Type">
+                      <SelectV2
+                        k="birdBoxType"
+                        options={[
+                          { value: "small_bird_box", label: "Small - $195" },
+                          { value: "standard_bird_box", label: "Standard - $225" },
+                          { value: "large_bird_box", label: "Large - $295" },
+                          { value: "oversized_complex_custom", label: "Complex/custom - $395+" },
+                        ]}
+                      />
+                    </FieldV2>
+                    <FieldV2 label="Quantity">
+                      <InputV2 k="birdBoxQuantity" type="number" min="1" />
+                    </FieldV2>
+                  </div>
+                </div>
+              )}
               <CheckboxV2 k="svcRodentSanitation" label="Rodent Sanitation" />
               {form.svcRodentSanitation && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">

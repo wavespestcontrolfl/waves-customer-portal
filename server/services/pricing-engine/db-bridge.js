@@ -837,8 +837,12 @@ async function syncConstantsFromDB(dbInstance) {
     // Trapping (new structure)
     if (config.rodent_trapping) {
       const t = config.rodent_trapping;
+      if (t.standard_price != null) constants.RODENT.trapping.standardPrice = r(t.standard_price);
+      if (t.unlimited_price != null) constants.RODENT.trapping.unlimitedPrice = r(t.unlimited_price);
+      if (t.upgrade_to_unlimited_price != null) constants.RODENT.trapping.upgradeToUnlimitedPrice = r(t.upgrade_to_unlimited_price);
       if (t.base != null) constants.RODENT.trapping.base = r(t.base);
       if (t.floor != null) constants.RODENT.trapping.floor = r(t.floor);
+      if (t.unlimited_floor != null) constants.RODENT.trapping.unlimitedFloor = r(t.unlimited_floor);
       if (t.ceiling_before_custom != null) constants.RODENT.trapping.ceilingBeforeCustom = r(t.ceiling_before_custom);
       if (t.included_followups != null) {
         constants.RODENT.trapping.includedFollowUps =
@@ -870,6 +874,45 @@ async function syncConstantsFromDB(dbInstance) {
             constants.RODENT.trapping.pressureAdjustments[key] = val >= 0 ? r(val) : -r(Math.abs(val));
           }
         }
+      }
+    }
+
+    if (config.rodent_trap_only_retainer) {
+      const ret = config.rodent_trap_only_retainer;
+      if (ret.setup_fee != null) constants.RODENT.trapOnlyRetainer.setupFee = r(ret.setup_fee);
+      if (ret.extra_callback_rate != null) constants.RODENT.trapOnlyRetainer.extraCallbackRate = r(ret.extra_callback_rate);
+      if (ret.plans && typeof ret.plans === 'object') {
+        for (const [key, plan] of Object.entries(ret.plans)) {
+          if (!constants.RODENT.trapOnlyRetainer.plans[key] || !plan) continue;
+          if (plan.annual_price != null) constants.RODENT.trapOnlyRetainer.plans[key].annualPrice = r(plan.annual_price);
+          if (plan.monthly_price != null) constants.RODENT.trapOnlyRetainer.plans[key].monthlyPrice = r(plan.monthly_price);
+          if (plan.scheduled_visits_included != null) {
+            constants.RODENT.trapOnlyRetainer.plans[key].scheduledVisitsIncluded = Number(plan.scheduled_visits_included);
+          }
+          if (plan.response_callbacks_included != null) {
+            constants.RODENT.trapOnlyRetainer.plans[key].responseCallbacksIncluded = Number(plan.response_callbacks_included);
+          }
+        }
+      }
+    }
+
+    if (config.rodent_wire_mesh?.substrates) {
+      for (const [key, value] of Object.entries(config.rodent_wire_mesh.substrates)) {
+        if (!constants.RODENT.wireMesh.substrates[key] || !value) continue;
+        if (value.rate_per_linear_foot != null) {
+          constants.RODENT.wireMesh.substrates[key].ratePerLinearFoot = r(value.rate_per_linear_foot);
+        }
+        if (value.minimum != null) constants.RODENT.wireMesh.substrates[key].minimum = r(value.minimum);
+        if (typeof value.custom_quote_recommended === 'boolean') {
+          constants.RODENT.wireMesh.substrates[key].customQuoteRecommended = value.custom_quote_recommended;
+        }
+      }
+    }
+
+    if (config.rodent_bird_boxes) {
+      const bb = config.rodent_bird_boxes;
+      for (const key of Object.keys(constants.RODENT.birdBoxes)) {
+        if (bb[key] != null) constants.RODENT.birdBoxes[key] = r(bb[key]);
       }
     }
 

@@ -1777,7 +1777,40 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       services.foam.points = o.foamPoints;
     }
   }
-  if (sel.has('RODENT_TRAP')) services.rodentTrapping = {};
+  if (sel.has('RODENT_TRAP')) {
+    services.rodentTrapping = {
+      plan: o.rodentTrappingPlan || 'standard',
+      emergency: !!o.rodentTrappingEmergency,
+      callbacksUsed: o.callbacksUsed,
+      extraCallbackCount: o.extraCallbackCount,
+      upgradeToUnlimited: !!o.upgradeToUnlimited,
+    };
+  }
+  if (sel.has('RODENT_WIRE_MESH')) {
+    services.rodentWireMesh = {
+      meshLinearFeet: o.meshLinearFeet,
+      meshSubstrate: o.meshSubstrate,
+      measuredOrEstimated: o.meshMeasuredOrEstimated,
+    };
+  }
+  if (sel.has('RODENT_BIRD_BOX')) {
+    services.rodentBirdBoxes = {
+      birdBoxType: o.birdBoxType,
+      birdBoxQuantity: o.birdBoxQuantity,
+    };
+  }
+  if (sel.has('TRAP_ONLY_RETAINER')) {
+    services.trapOnlyRetainer = {
+      plan: o.trapOnlyRetainerPlan || 'standard',
+      billing: o.trapOnlyRetainerBilling || 'annual',
+      responseCallbacksUsed: o.trapOnlyResponseCallbacksUsed,
+      extraCallbackCount: o.trapOnlyExtraCallbackCount,
+      attachedToCompletedTrappingJob: !!o.trapOnlyAttachedToCompletedTrappingJob,
+      activeTrappingClosedAt: o.activeTrappingClosedAt,
+      activationDate: o.trapOnlyActivationDate,
+      renewalDate: o.trapOnlyRenewalDate,
+    };
+  }
   if (sel.has('WDO')) services.wdo = {};
   if (sel.has('FLEA')) {
     services.flea = {

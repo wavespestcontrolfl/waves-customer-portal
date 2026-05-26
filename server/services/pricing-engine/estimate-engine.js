@@ -10,7 +10,8 @@ const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub, pricePalmInjection,
   priceMosquito, priceTermiteBait, priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
-  priceRodentInspection, selectRodentBundle, applyRodentBundle,
+  priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
+  selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
@@ -701,8 +702,12 @@ function generateEstimate(input) {
   if (services.rodentTrapping && !useCommercialManualQuote(services.rodentTrapping, 'pest_control')) {
     const opts = typeof services.rodentTrapping === 'object' ? services.rodentTrapping : {};
     const result = priceRodentTrapping(property, {
+      plan: opts.plan || opts.rodentTrappingPlan,
       pressure: opts.pressure,
       emergency: !!opts.emergency,
+      callbacksUsed: opts.callbacksUsed,
+      extraCallbackCount: opts.extraCallbackCount,
+      upgradeToUnlimited: !!opts.upgradeToUnlimited,
     });
     lineItems.push(result);
   }
@@ -907,6 +912,27 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
 
+  if (services.rodentWireMesh && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control')) {
+    const opts = typeof services.rodentWireMesh === 'object' ? services.rodentWireMesh : {};
+    lineItems.push(priceRodentWireMesh({
+      meshLinearFeet: opts.meshLinearFeet,
+      meshSubstrate: opts.meshSubstrate,
+      measuredOrEstimated: opts.measuredOrEstimated || opts.meshMeasuredOrEstimated,
+      storyMult: opts.storyMult,
+      roofMult: opts.roofMult,
+      constructionMult: opts.constructionMult,
+    }));
+  }
+
+  if (services.rodentBirdBoxes && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control')) {
+    const opts = typeof services.rodentBirdBoxes === 'object' ? services.rodentBirdBoxes : {};
+    const result = priceRodentBirdBoxes({
+      birdBoxType: opts.birdBoxType,
+      birdBoxQuantity: opts.birdBoxQuantity,
+    });
+    if (result) lineItems.push(result);
+  }
+
   // Rodent sanitation (bleach + wipe; tier = light/standard/heavy)
   // Legacy 'medium' resolves to 'standard' inside priceSanitation.
   if (services.sanitation && !useCommercialManualQuote(services.sanitation, 'pest_control')) {
@@ -936,6 +962,11 @@ function generateEstimate(input) {
   // Standalone rodent inspection (paid diagnostic, creditable)
   if (services.rodentInspection && !useCommercialManualQuote(services.rodentInspection, 'pest_control')) {
     lineItems.push(priceRodentInspection());
+  }
+
+  if (services.trapOnlyRetainer && !useCommercialManualQuote(services.trapOnlyRetainer, 'pest_control')) {
+    const opts = typeof services.trapOnlyRetainer === 'object' ? services.trapOnlyRetainer : {};
+    lineItems.push(priceTrapOnlyRetainer(opts));
   }
 
   // Bait station setup fee — waived when any recurring plan is on the
