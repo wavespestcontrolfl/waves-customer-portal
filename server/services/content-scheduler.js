@@ -475,7 +475,7 @@ const ContentScheduler = {
           ? JSON.parse(social.custom_content)
           : social.custom_content;
 
-        await SocialMediaService.publishToAll({
+        const result = await SocialMediaService.publishToAll({
           title: social.title,
           description: social.description,
           link: social.source_url,
@@ -484,13 +484,18 @@ const ContentScheduler = {
           customContent,
         });
 
-        await db('social_media_posts').where('id', social.id).update({
-          publish_status: 'published',
-          status: 'published',
-          published_at: new Date(),
-        });
-        socialCount++;
-        logger.info(`[content-scheduler] Published social: "${social.title}"`);
+        if (result?.dryRun) {
+          await db('social_media_posts').where('id', social.id).update({ publish_status: 'pending' });
+          logger.info(`[content-scheduler] Dry-run social: "${social.title}" — kept pending`);
+        } else {
+          await db('social_media_posts').where('id', social.id).update({
+            publish_status: 'published',
+            status: 'published',
+            published_at: new Date(),
+          });
+          socialCount++;
+          logger.info(`[content-scheduler] Published social: "${social.title}"`);
+        }
       } catch (err) {
         errors++;
         await db('social_media_posts').where('id', social.id).update({ publish_status: 'failed' });
