@@ -14,8 +14,10 @@
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
+ *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *
- * In development, all gates are OPEN by default so you can test locally.
+ * In development, most gates are OPEN by default so you can test locally.
+ * Customer-facing auto-send gates still require explicit opt-in everywhere.
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -57,6 +59,11 @@ const gates = {
   // ring Adam and offer Press-1 to bridge directly to the customer. Off by
   // default in prod until verified; admin-click bridge is unaffected.
   leadAutoBridge: isProd ? process.env.GATE_LEAD_AUTO_BRIDGE === 'true' : true,
+
+  // Lead Estimate Auto-Send — sends generated lead-webhook draft estimates
+  // after a delay. Production default is OFF; the draft generation/review UI
+  // remains active without this gate.
+  leadEstimateAutoSend: process.env.GATE_LEAD_ESTIMATE_AUTO_SEND === 'true',
 
   // Email Template Automations — executes trigger-mapped template sends from
   // the email template automation catalog. Off by default in prod until each
