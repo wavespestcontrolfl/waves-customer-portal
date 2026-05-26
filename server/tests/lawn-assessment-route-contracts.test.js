@@ -58,6 +58,72 @@ describe('lawn assessment route contracts', () => {
     });
   });
 
+  test('customer snapshot contract strips internal fields from snapshot and cards', () => {
+    const snapshot = lawnHealthRouter._test.formatCustomerSnapshot({
+      id: 'snapshot-1',
+      assessment_id: 'assessment-1',
+      headline: 'Moderate issue being treated',
+      summary_customer: 'We saw moderate weed pressure in one area of the lawn.',
+      status: 'customer_visible',
+      generated_at: '2026-05-26T09:00:00.000Z',
+      findings: JSON.stringify([{
+        key: 'weed_pressure',
+        label: 'Weed pressure',
+        severity: 2,
+        confidence: 0.84,
+        customer_copy: 'We saw moderate weed pressure in one area of the lawn.',
+        internal_copy: 'Internal scoring detail',
+        evidence_refs: ['assessment:1'],
+      }]),
+      treatment_context: JSON.stringify({
+        completed_today: true,
+        service_type: 'WaveGuard',
+        products_applied_summary: 'Product A',
+      }),
+      weather_context: JSON.stringify({ customer_copy: 'Recent weather can influence recovery.' }),
+      expected_window: JSON.stringify({ min_days: 14, max_days: 21 }),
+      next_watch_items: JSON.stringify(['Monitor weed pressure']),
+      disclaimers: JSON.stringify(['Visible improvement depends on site conditions.']),
+    });
+
+    expect(snapshot).toMatchObject({
+      id: 'snapshot-1',
+      summary: 'We saw moderate weed pressure in one area of the lawn.',
+      findings: [{ key: 'weed_pressure', severity: 2 }],
+      treatment: { completedToday: true, serviceType: 'WaveGuard' },
+      expectedWindow: { minDays: 14, maxDays: 21 },
+    });
+    expect(snapshot.findings[0]).not.toHaveProperty('internal_copy');
+    expect(snapshot.findings[0]).not.toHaveProperty('confidence');
+    expect(snapshot.findings[0]).not.toHaveProperty('evidence_refs');
+
+    const card = lawnHealthRouter._test.formatCustomerRecommendation({
+      id: 'card-1',
+      type: 'tier_upgrade',
+      title: 'WaveGuard Gold may be a better fit',
+      priority: 'medium',
+      confidence: 0.82,
+      customer_copy: 'WaveGuard Gold may be a better fit.',
+      internal_reason: 'Internal reason',
+      trigger_signals: JSON.stringify([{ key: 'callback_risk' }]),
+      recommended_action: JSON.stringify({
+        action_type: 'upgrade_plan',
+        cta_label: 'Ask about Gold coverage',
+        plan: 'WaveGuard Gold',
+      }),
+    });
+
+    expect(card).toMatchObject({
+      id: 'card-1',
+      type: 'tier_upgrade',
+      title: 'WaveGuard Gold may be a better fit',
+      action: { type: 'upgrade_plan', label: 'Ask about Gold coverage' },
+    });
+    expect(card).not.toHaveProperty('internal_reason');
+    expect(card).not.toHaveProperty('trigger_signals');
+    expect(card).not.toHaveProperty('confidence');
+  });
+
   test('failed-quality photos stay auditable but are hidden from customer surfaces', () => {
     expect(adminLawnAssessmentRouter._test.customerVisibleForQualityCheck({ passed: false })).toBe(false);
     expect(adminLawnAssessmentRouter._test.customerVisibleForQualityCheck({ passed: true })).toBe(true);
