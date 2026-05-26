@@ -266,6 +266,36 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     draft = JSON.parse(repairedJson);
   }
 
+  // 4b. Assemble htmlBody from sections if missing (JSON repair may lose it)
+  if (!draft.htmlBody && draft.sections) {
+    const sectionOrder = [
+      'local_intro', 'fresh_this_week', 'just_starting', 'weekend_picks',
+      'family_or_low_key_pick', 'road_trip_pick', 'homeowner_minute', 'waves_cta',
+    ];
+    const sectionLabels = {
+      fresh_this_week: 'Fresh This Week',
+      just_starting: 'Just Starting',
+      weekend_picks: 'Weekend Picks',
+      family_or_low_key_pick: 'Family / Low-Key Pick',
+      road_trip_pick: 'Road Trip Pick',
+      homeowner_minute: 'Homeowner Minute',
+      waves_cta: '',
+    };
+    const parts = [];
+    for (const key of sectionOrder) {
+      const html = draft.sections[key];
+      if (!html) continue;
+      const label = sectionLabels[key];
+      if (label) parts.push(`<h2>${label}</h2>\n${html}`);
+      else parts.push(html);
+    }
+    draft.htmlBody = parts.join('\n\n');
+  }
+
+  if (!draft.textBody && draft.htmlBody) {
+    draft.textBody = draft.htmlBody.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  }
+
   // 5. Run voice validation
   const voiceCheck = validateVoice(
     { subject: draft.selectedSubject || draft.subjectVariants?.[0], htmlBody: draft.htmlBody },
