@@ -181,7 +181,7 @@ export default function SocialMediaPage() {
               {alert.message}
             </div>
             <div style={{ fontSize: 11, color: D.muted }}>
-              Since {new Date(alert.raised_at).toLocaleString()}
+              Since {new Date(alert.raised_at).toLocaleString('en-US', { timeZone: 'America/New_York' })}
             </div>
           </div>
           <button
