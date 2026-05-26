@@ -62,70 +62,34 @@ const ADAM_CELL = '+19415993489';
 router.post('/', async (req, res) => {
   try {
     const body = req.body;
+    const intake = buildLeadWebhookIntake(body);
+    const {
+      email,
+      rawPhone,
+      normalizedAddress,
+      address,
+      fullAddress,
+      pageUrl,
+      landingUrl,
+      utmSource,
+      utmMedium,
+      utmCampaign,
+      utmContent,
+      utmTerm,
+      formId,
+      formName,
+      gclid,
+      firstName,
+      lastName,
+      serviceInterest,
+      leadSource,
+    } = intake;
 
-    // Map raw form field names (garbled → clean)
-    const email = cleanEmail(body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '');
-    const rawPhone = body.phone || body['Got A Number We Can Call Or Text'] || findField(body, /number|phone|call|text/i) || '';
-    const rawAddress = body.address || body['And Whats Your Address'] || findField(body, /address/i) || '';
-    const normalizedAddress = normalizeLeadAddress({
-      raw: rawAddress,
-      line1: body.address_line1 || body.addressLine1,
-      city: body.city,
-      state: body.state,
-      zip: body.zip,
-      placeId: body.google_place_id || body.googlePlaceId,
-      components: body.address_components || body.addressComponents,
-    });
-    const address = normalizedAddress.line1 || rawAddress;
-    const fullAddress = normalizedAddress.fullAddress || rawAddress;
-
-    // Attribution can arrive in two shapes:
-    //   1. Flat top-level fields (legacy callers, GHL forms, etc.):
-    //        body.utm_source, body.gclid, body.landing_url, body.referrer
-    //   2. Nested under body.attribution (wavespestcontrol-astro- spoke forms,
-    //      shipped 2026-04-25 in wavespestcontrol-astro- PR #23):
-    //        body.attribution.utm.source, body.attribution.gclid,
-    //        body.attribution.landing_url, body.attribution.referrer,
-    //        body.attribution.domain
-    // Read flat first (preserves legacy behavior), fall back to nested. Without
-    // this fallback, every form submission from the spoke fleet collapses into
-    // lead_source='website' / detail='' because determineLeadSource() can't see
-    // the URL or UTM data.
-    const attr = (body.attribution && typeof body.attribution === 'object') ? body.attribution : {};
-    const attrUtm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
-    // Synthesized fallback from attribution.domain — when the spoke posts with
-    // no landing_url/page_url/referrer (e.g., direct apex visit), we still know
-    // the spoke domain. Synthesizing a base URL here lets determineLeadSource()
-    // match it via its domain table at L555+.
-    const synthesizedFromDomain = (!body.page_url && !body['Page Url'] && !body.referrer && !body.landing_url && !body['Landing Url'] && !attr.referrer && !attr.landing_url && attr.domain)
-      ? `https://www.${attr.domain}/`
-      : '';
-    const pageUrl = body.page_url || body['Page Url'] || body.referrer || attr.referrer || synthesizedFromDomain || '';
-    const landingUrl = body.landing_url || body['Landing Url'] || attr.landing_url || synthesizedFromDomain || '';
-    const utmSource = body.utm_source || body['Utm Source'] || attrUtm.source || '';
-    const utmMedium = body.utm_medium || body['Utm Medium'] || attrUtm.medium || '';
-    const utmCampaign = body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '';
-    const utmContent = body.utm_content || body['Utm Content'] || attrUtm.content || '';
-    const utmTerm = body.utm_term || body['Utm Term'] || attrUtm.term || '';
-    const formId = body.form_id || body['Form Id'] || '';
-    const formName = body.form_name || body['Form Name'] || body.source || '';
-    const gclid = body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '';
-
-    // Parse name
-    const normalizedName = normalizeLeadName(body);
-    const firstName = capitalizeName(normalizedName.first_name || 'Unknown');
-    const lastName = capitalizeName(normalizedName.last_name || '');
-    const serviceInterest = normalizeLeadServiceInterest(body);
-
-    // Clean phone
     const phone = cleanPhone(rawPhone);
     if (!phone || phone.length < 10) {
       return res.status(400).json({ error: 'Valid phone number required' });
     }
     const phoneFormatted = '+1' + phone.slice(-10);
-
-    // Determine lead source
-    const leadSource = determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent);
 
     // Look up matching lead_sources record for proper attribution
     let leadSourceId = null;
@@ -713,12 +677,111 @@ function normalizeLeadName(body = {}) {
   };
 }
 
+function getLeadWebhookAttribution(body = {}) {
+  const attr = (body.attribution && typeof body.attribution === 'object') ? body.attribution : {};
+  const attrUtm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
+  const domainFallback = firstNonEmpty(attr.domain, body.domain);
+
+  // Attribution can arrive in two shapes:
+  //   1. Flat top-level fields (legacy callers, GHL forms, etc.)
+  //   2. Nested under body.attribution (spoke sites and quote wizard)
+  // Flat values win so legacy callers keep their exact behavior.
+  const synthesizedFromDomain = (
+    !body.page_url &&
+    !body['Page Url'] &&
+    !body.referrer &&
+    !body.landing_url &&
+    !body['Landing Url'] &&
+    !attr.referrer &&
+    !attr.landing_url &&
+    domainFallback
+  ) ? `https://www.${domainFallback}/` : '';
+
+  return {
+    pageUrl: body.page_url || body['Page Url'] || body.referrer || attr.referrer || synthesizedFromDomain || '',
+    landingUrl: body.landing_url || body['Landing Url'] || attr.landing_url || synthesizedFromDomain || '',
+    utmSource: body.utm_source || body['Utm Source'] || attrUtm.source || '',
+    utmMedium: body.utm_medium || body['Utm Medium'] || attrUtm.medium || '',
+    utmCampaign: body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '',
+    utmContent: body.utm_content || body['Utm Content'] || attrUtm.content || '',
+    utmTerm: body.utm_term || body['Utm Term'] || attrUtm.term || '',
+    gclid: body.gclid || body['Gclid'] || body.GCLID || attr.gclid || '',
+  };
+}
+
+function buildLeadWebhookIntake(body = {}) {
+  // Map raw form field names (garbled -> clean)
+  const email = cleanEmail(body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '');
+  const rawPhone = body.phone || body['Got A Number We Can Call Or Text'] || findField(body, /number|phone|call|text/i) || '';
+  const rawAddress = body.address || body['And Whats Your Address'] || findField(body, /address/i) || '';
+  const normalizedAddress = normalizeLeadAddress({
+    raw: rawAddress,
+    line1: body.address_line1 || body.addressLine1,
+    city: body.city,
+    state: body.state,
+    zip: body.zip,
+    placeId: body.google_place_id || body.googlePlaceId,
+    components: body.address_components || body.addressComponents,
+  });
+  const address = normalizedAddress.line1 || rawAddress;
+  const fullAddress = normalizedAddress.fullAddress || rawAddress;
+  const attribution = getLeadWebhookAttribution(body);
+  const normalizedName = normalizeLeadName(body);
+  const firstName = capitalizeName(normalizedName.first_name || 'Unknown');
+  const lastName = capitalizeName(normalizedName.last_name || '');
+  const serviceInterest = normalizeLeadServiceInterest(body);
+  const leadSource = determineLeadSource(
+    attribution.pageUrl,
+    attribution.landingUrl,
+    attribution.utmSource,
+    attribution.utmMedium,
+    attribution.utmCampaign,
+    attribution.utmContent,
+  );
+
+  return {
+    email,
+    rawPhone,
+    rawAddress,
+    normalizedAddress,
+    address,
+    fullAddress,
+    ...attribution,
+    formId: body.form_id || body['Form Id'] || '',
+    formName: body.form_name || body['Form Name'] || body.source || '',
+    firstName,
+    lastName,
+    serviceInterest,
+    leadSource,
+  };
+}
+
 const SERVICE_INTEREST_LABELS = {
   pest: 'Pest Control',
+  general_pest: 'Pest Control',
   pest_control: 'Pest Control',
   pest_control_lawn_care: 'Pest Control + Lawn Care',
+  general_pest_lawn_care: 'Pest Control + Lawn Care',
   lawn: 'Lawn Care',
   lawn_care: 'Lawn Care',
+  mosquito_control: 'Mosquito Control',
+  mosquito_lawn_care: 'Mosquito Control + Lawn Care',
+  termite_treatment: 'Termite Treatment',
+  bed_bug_treatment: 'Bed Bug Treatment',
+  ant_control: 'Ant Control',
+  flea_tick_control: 'Flea & Tick Control',
+  spider_wasp_control: 'Spider & Wasp Control',
+  lawn_fertilization: 'Lawn Fertilization',
+  weed_control: 'Weed Control',
+  lawn_pest_control: 'Lawn Pest Control',
+  tree_shrub_care: 'Tree & Shrub Care',
+  palm_injections: 'Palm Tree Injections',
+  aeration_plugging: 'Lawn Aeration & Plugging',
+  not_sure_pest: 'Pest Control Consultation',
+  not_sure_lawn: 'Lawn Care Consultation',
+  not_sure_both: 'Pest Control + Lawn Care Consultation',
+  inspection: 'Inspection',
+  commercial_service: 'Commercial Service',
   both: 'Pest Control + Lawn Care',
   mosquito: 'Mosquito Control',
   termite: 'Termite',
@@ -768,6 +831,7 @@ function normalizeFrequencyKey(value) {
 function formatServiceInterestForFrequency(serviceLabel, frequency) {
   const label = serviceLabelFor(serviceLabel);
   if (!label) return '';
+  if (/\bconsultation\b/i.test(label)) return label;
   const frequencyKey = normalizeFrequencyKey(frequency);
   const frequencyLabel = FREQUENCY_LABELS[frequencyKey] ?? titleizeServiceValue(frequency);
   if (!frequencyLabel) return label;
@@ -803,7 +867,8 @@ function normalizeLeadServiceInterest(body = {}) {
   );
   if (explicit) return normalizeExplicitServiceInterest(explicit);
 
-  const interest = firstNonEmpty(body.interest, body.Interest);
+  const specificService = firstNonEmpty(body.specific_service, body.specificService);
+  const interest = firstNonEmpty(specificService, body.interest, body.Interest);
   const otherService = firstNonEmpty(body.otherService, body.other_service, body['Other Service']);
   if (!interest) {
     const legacyField = firstNonEmpty(findField(body, /service|help|pest|lawn/i));
@@ -937,6 +1002,8 @@ module.exports = router;
 module.exports._test = {
   scrubLeadAlertProviderError,
   markLeadAlertCallLogFailed,
+  buildLeadWebhookIntake,
+  getLeadWebhookAttribution,
   normalizeLeadServiceInterest,
   formatServiceInterestForFrequency,
   serviceInterestUpdateFromTriage,

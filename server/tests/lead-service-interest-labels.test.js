@@ -1,5 +1,6 @@
 const publicQuoteRouter = require('../routes/public-quote');
 const leadWebhookRouter = require('../routes/lead-webhook');
+const publicPropertyLookupRouter = require('../routes/public-property-lookup');
 
 describe('quote workflow service interest labels', () => {
   const {
@@ -11,11 +12,16 @@ describe('quote workflow service interest labels', () => {
   const {
     scrubLeadAlertProviderError,
     markLeadAlertCallLogFailed,
+    buildLeadWebhookIntake,
     normalizeLeadServiceInterest,
     serviceInterestUpdateFromTriage,
     shouldApplyTriageServiceInterest,
     shouldRunLeadAcquisition,
   } = leadWebhookRouter._test;
+
+  const {
+    normalizeServiceInterest: normalizeLookupServiceInterest,
+  } = publicPropertyLookupRouter._test;
 
   test('public quote recurring pest labels include selected cadence', () => {
     expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'quarterly' } }))
@@ -83,6 +89,99 @@ describe('quote workflow service interest labels', () => {
       .toBe('One-Time Lawn Care');
     expect(normalizeLeadServiceInterest({ interest: 'both', frequency: 'ongoing' }))
       .toBe('Recurring Pest Control + Recurring Lawn Care');
+  });
+
+  test('lead webhook formats specific service selections before storing service interest', () => {
+    expect(normalizeLeadServiceInterest({ specific_service: 'mosquito_control', frequency: 'ongoing' }))
+      .toBe('Recurring Mosquito Control');
+    expect(normalizeLeadServiceInterest({ specific_service: 'termite_treatment', frequency: 'one-time' }))
+      .toBe('One-Time Termite Treatment');
+    expect(normalizeLeadServiceInterest({ specific_service: 'lawn_fertilization', frequency: 'ongoing' }))
+      .toBe('Recurring Lawn Fertilization');
+    expect(normalizeLeadServiceInterest({ specific_service: 'not_sure_pest', frequency: 'ongoing' }))
+      .toBe('Pest Control Consultation');
+  });
+
+  test('lead webhook normalizes quote wizard payloads with nested attribution', () => {
+    const intake = buildLeadWebhookIntake({
+      firstName: 'jane',
+      lastName: 'smith',
+      email: ' Jane@Example.com ',
+      phone: '(941) 555-0199',
+      address: '123 Main St, Venice, FL 34285',
+      address_line1: '123 Main St',
+      city: 'Venice',
+      state: 'FL',
+      zip: '34285',
+      interest: 'both',
+      frequency: 'ongoing',
+      attribution: {
+        domain: 'venicelawncare.com',
+        utm: { source: 'google', medium: 'organic' },
+      },
+    });
+
+    expect(intake.email).toBe('jane@example.com');
+    expect(intake.rawPhone).toBe('(941) 555-0199');
+    expect(intake.firstName).toBe('Jane');
+    expect(intake.lastName).toBe('Smith');
+    expect(intake.fullAddress).toBe('123 Main St, Venice, FL 34285');
+    expect(intake.serviceInterest).toBe('Recurring Pest Control + Recurring Lawn Care');
+    expect(intake.landingUrl).toBe('https://www.venicelawncare.com/');
+    expect(intake.leadSource).toEqual(expect.objectContaining({
+      source: 'domain_website',
+      detail: expect.stringContaining('venicelawncare.com'),
+      area: 'Venice',
+    }));
+  });
+
+  test('lead webhook resolves top-level spoke domain when nested attribution is absent', () => {
+    const intake = buildLeadWebhookIntake({
+      name: 'Sam Spoke',
+      email: 'sam@example.com',
+      phone: '9415550198',
+      address: '456 Center Rd, Sarasota, FL 34240',
+      domain: 'sarasotafllawncare.com',
+      service_interest: 'Lawn Care',
+    });
+
+    expect(intake.landingUrl).toBe('https://www.sarasotafllawncare.com/');
+    expect(intake.leadSource).toEqual(expect.objectContaining({
+      source: 'domain_website',
+      detail: expect.stringContaining('sarasotafllawncare.com'),
+      area: 'Sarasota',
+    }));
+  });
+
+  test('lead webhook normalizes legacy labeled form fields', () => {
+    const intake = buildLeadWebhookIntake({
+      'Whats Your Best Email': 'legacy@example.com',
+      'Got A Number We Can Call Or Text': '941.555.0177',
+      'And Whats Your Address': '789 Legacy Ave, Bradenton, FL 34205',
+      'What Can We Help You With': 'Pest Control (One-Time)',
+      'Page Url': 'https://bradentonflpestcontrol.com/contact',
+      name: 'Legacy Lead',
+    });
+
+    expect(intake.email).toBe('legacy@example.com');
+    expect(intake.rawPhone).toBe('941.555.0177');
+    expect(intake.fullAddress).toBe('789 Legacy Ave, Bradenton, FL 34205');
+    expect(intake.serviceInterest).toBe('One-Time Pest Control');
+    expect(intake.leadSource).toEqual(expect.objectContaining({
+      source: 'domain_website',
+      area: 'Bradenton',
+    }));
+  });
+
+  test('public property lookup formats service intent from quote wizard frequency', () => {
+    expect(normalizeLookupServiceInterest({ interest: 'pest', frequency: 'one-time' }))
+      .toBe('One-Time Pest Control');
+    expect(normalizeLookupServiceInterest({ interest: 'both', frequency: 'ongoing' }))
+      .toBe('Recurring Pest Control + Recurring Lawn Care');
+    expect(normalizeLookupServiceInterest({ interest: 'lawn', frequency: 'not-sure' }))
+      .toBe('Lawn Care Consultation');
+    expect(normalizeLookupServiceInterest({ specific_service: 'mosquito_control', frequency: 'ongoing' }))
+      .toBe('Recurring Mosquito Control');
   });
 
   test('lead webhook normalizes legacy parenthetical one-time labels', () => {
