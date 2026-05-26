@@ -53,7 +53,7 @@ function makeDbLike(rows) {
 }
 
 describe('twilio voice customer phone lookup', () => {
-  const { customerPhoneLookupKey, findSingleCustomerByPhone } = voiceRouter._test;
+  const { customerPhoneLookupKey, findSingleCustomerByPhone, sanitizeVoiceProviderError } = voiceRouter._test;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -123,5 +123,13 @@ describe('twilio voice customer phone lookup', () => {
       sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?",
       bindings: ['442079460958'],
     }]);
+  });
+
+  test('scrubs phone numbers from lookup provider error text', () => {
+    const message = 'fetch failed for https://lookups.twilio.com/v2/PhoneNumbers/%2B19415551212?Fields=caller_name and +19415551212';
+
+    expect(sanitizeVoiceProviderError(message)).toBe(
+      'fetch failed for https://lookups.twilio.com/v2/PhoneNumbers/[phone]?Fields=caller_name and [phone]'
+    );
   });
 });

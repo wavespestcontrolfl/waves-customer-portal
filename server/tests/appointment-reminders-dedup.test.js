@@ -167,4 +167,13 @@ describe('appointment reminder registration deduplication', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(db.mock.calls.map(([table]) => table)).not.toContain('customers');
   });
+
+  test('scrubs phone numbers from Twilio Lookup diagnostic helpers', () => {
+    const { maskPhone, sanitizeLookupError } = AppointmentReminders._test;
+
+    expect(maskPhone('+19415551212')).toBe('***1212');
+    expect(sanitizeLookupError(
+      'GET https://lookups.twilio.com/v2/PhoneNumbers/%2B19415551212 failed for +19415551212'
+    )).toBe('GET https://lookups.twilio.com/v2/PhoneNumbers/[phone] failed for [phone]');
+  });
 });
