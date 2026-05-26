@@ -199,8 +199,18 @@ function leadEstimateAutoSendAuditRow(estimate = {}, options = {}) {
   };
 
   const claimedAt = summary.autoSend.claimedAt || summary.autoSend.claimed_at;
+  const attemptedAt = summary.autoSend.attemptedAt || summary.autoSend.attempted_at;
+  const blockedAt = summary.autoSend.blockedAt || summary.autoSend.blocked_at;
   const staleClaim = isStaleAutoSendClaim(summary.autoSend, now, config.staleClaimMinutes);
-  if (estimate.status === 'sending' && claimedAt && staleClaim && !base.sentAt && !base.scheduledAt) {
+  const matchesStaleRecoveryPredicates = estimate.status === 'sending'
+    && claimedAt
+    && staleClaim
+    && !attemptedAt
+    && !blockedAt
+    && !base.sentAt
+    && !base.scheduledAt
+    && summary.status === 'generated';
+  if (matchesStaleRecoveryPredicates) {
     const recovery = staleAutoSendRecoveryDecision(summary.autoSend, estimate, now);
     const recoveredEstimate = {
       ...estimate,
@@ -212,6 +222,7 @@ function leadEstimateAutoSendAuditRow(estimate = {}, options = {}) {
       : leadEstimateAutoSendEligibility(recoveredEstimate, { ...config, now });
     return {
       ...base,
+      phase: options.phase || null,
       action: recovery.includedSms
         ? 'stale_block_sms_replay'
         : recoveredEligibility.eligible
@@ -236,6 +247,7 @@ function leadEstimateAutoSendAuditRow(estimate = {}, options = {}) {
 
   return {
     ...base,
+    phase: options.phase || null,
     action,
     wouldSend: eligibility.eligible,
     eligibility,
@@ -273,22 +285,55 @@ async function candidateLeadEstimateAutoSends({
     .select('*');
 }
 
+async function staleLeadEstimateAutoSendClaimCandidates({
+  database = db,
+  limit = DEFAULT_LIMIT,
+} = {}) {
+  return database('estimates')
+    .where({ source: 'lead_webhook', status: 'sending' })
+    .whereNull('sent_at')
+    .whereNull('scheduled_at')
+    .whereRaw("estimate_data->'automation'->'draftEstimateAutomation'->>'status' = 'generated'")
+    .whereRaw(`(
+      estimate_data->'automation'->'autoSend'->>'claimedAt' IS NOT NULL
+      OR estimate_data->'automation'->'autoSend'->>'claimed_at' IS NOT NULL
+    )`)
+    .whereRaw("estimate_data->'automation'->'autoSend'->>'attemptedAt' IS NULL")
+    .whereRaw("estimate_data->'automation'->'autoSend'->>'attempted_at' IS NULL")
+    .whereRaw("estimate_data->'automation'->'autoSend'->>'blockedAt' IS NULL")
+    .whereRaw("estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL")
+    .orderBy('updated_at', 'asc')
+    .limit(limit)
+    .select('*');
+}
+
 async function previewLeadEstimateAutoSendAudit({
   database = db,
   now = new Date(),
   config = leadEstimateAutoSendConfigFromEnv(),
   limit = config.limit || DEFAULT_LIMIT,
 } = {}) {
-  const rows = await database('estimates')
-    .where({ source: 'lead_webhook' })
-    .whereNull('sent_at')
-    .whereNull('scheduled_at')
-    .whereIn('status', ['draft', 'sending'])
-    .orderBy('created_at', 'desc')
-    .limit(limit)
-    .select('*');
+  const [staleRows, candidateRows] = await Promise.all([
+    staleLeadEstimateAutoSendClaimCandidates({ database, limit }),
+    candidateLeadEstimateAutoSends({
+      database,
+      now,
+      delayMinutes: config.delayMinutes,
+      limit,
+    }),
+  ]);
 
-  const estimates = rows.map((estimate) => leadEstimateAutoSendAuditRow(estimate, { ...config, now }));
+  const staleEstimates = staleRows.map((estimate) => leadEstimateAutoSendAuditRow(estimate, {
+    ...config,
+    now,
+    phase: 'stale_claim_recovery',
+  }));
+  const candidateEstimates = candidateRows.map((estimate) => leadEstimateAutoSendAuditRow(estimate, {
+    ...config,
+    now,
+    phase: 'candidate_send',
+  }));
+  const estimates = [...staleEstimates, ...candidateEstimates];
   const counts = estimates.reduce((acc, row) => {
     acc.total += 1;
     acc.actions[row.action] = (acc.actions[row.action] || 0) + 1;
@@ -317,6 +362,10 @@ async function previewLeadEstimateAutoSendAudit({
       limit,
     },
     counts,
+    phases: {
+      staleClaimRecovery: staleEstimates.length,
+      candidateSend: candidateEstimates.length,
+    },
     estimates,
   };
 }
@@ -327,22 +376,7 @@ async function recoverStaleLeadEstimateAutoSendClaims({
   staleClaimMinutes = DEFAULT_STALE_CLAIM_MINUTES,
   limit = DEFAULT_LIMIT,
 } = {}) {
-  const possibleStaleClaims = await database('estimates')
-    .where({ source: 'lead_webhook', status: 'sending' })
-    .whereNull('sent_at')
-    .whereNull('scheduled_at')
-    .whereRaw("estimate_data->'automation'->'draftEstimateAutomation'->>'status' = 'generated'")
-    .whereRaw(`(
-      estimate_data->'automation'->'autoSend'->>'claimedAt' IS NOT NULL
-      OR estimate_data->'automation'->'autoSend'->>'claimed_at' IS NOT NULL
-    )`)
-    .whereRaw("estimate_data->'automation'->'autoSend'->>'attemptedAt' IS NULL")
-    .whereRaw("estimate_data->'automation'->'autoSend'->>'attempted_at' IS NULL")
-    .whereRaw("estimate_data->'automation'->'autoSend'->>'blockedAt' IS NULL")
-    .whereRaw("estimate_data->'automation'->'autoSend'->>'blocked_at' IS NULL")
-    .orderBy('updated_at', 'asc')
-    .limit(limit)
-    .select('*');
+  const possibleStaleClaims = await staleLeadEstimateAutoSendClaimCandidates({ database, limit });
 
   const result = { recovered: 0, blocked: 0 };
   for (const estimate of possibleStaleClaims) {

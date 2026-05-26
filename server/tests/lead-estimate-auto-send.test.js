@@ -293,6 +293,33 @@ describe('lead estimate auto-send policy', () => {
         wouldBlock: true,
       },
     });
+
+    expect(leadEstimateAutoSendAuditRow(generatedEstimate({
+      status: 'sending',
+      send_method: 'email',
+      estimate_data: {
+        automation: {
+          draftEstimateAutomation: {
+            status: 'generated',
+            generated: true,
+          },
+          autoSend: {
+            claimedAt: staleClaim,
+            attemptedAt: '2026-05-26T11:05:00.000Z',
+            sendMethod: 'email',
+          },
+        },
+      },
+    }), { now, staleClaimMinutes: 30 })).toMatchObject({
+      action: 'blocked',
+      wouldSend: false,
+      staleClaim: true,
+      eligibility: {
+        eligible: false,
+        reason: 'not_draft',
+      },
+      staleRecovery: null,
+    });
   });
 
   test('preserves automation data when adding auto-send metadata', () => {
