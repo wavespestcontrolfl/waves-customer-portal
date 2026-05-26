@@ -939,6 +939,9 @@ function initScheduledJobs() {
       if (result.blogCount > 0 || result.socialCount > 0) {
         logger.info(`Content scheduler: ${result.blogCount} blog(s), ${result.socialCount} social post(s) published`);
       }
+      if (result.socialSkipped) {
+        // social portion was skipped by feature flag — don't log noise
+      }
     } catch (err) {
       logger.error(`Content scheduler failed: ${err.message}`);
     }
@@ -962,6 +965,10 @@ function initScheduledJobs() {
   // EVERY 4 HOURS — Check RSS feed for new blog posts → auto-post to social
   // =========================================================================
   cron.schedule('0 */4 * * *', async () => {
+    const { SOCIAL_FLAGS } = require('./social-media');
+    if (!SOCIAL_FLAGS.automationEnabled || !SOCIAL_FLAGS.rssAutopublish) {
+      return; // silently skip — flags not enabled
+    }
     logger.info('Running: RSS social media check');
     try {
       const SocialMediaService = require('./social-media');

@@ -47,6 +47,16 @@ function dateColumnKey(value) {
 async function sharePublishedBlog(blog) {
   if (!blog.auto_share_social || blog.shared_to_social) return true;
 
+  const { SOCIAL_FLAGS, isPausedByAdmin } = require('./social-media');
+  if (!SOCIAL_FLAGS.automationEnabled) {
+    logger.info(`[content-scheduler] Social share skipped for blog ${blog.id} — automation disabled`);
+    return true;
+  }
+  if (await isPausedByAdmin()) {
+    logger.info(`[content-scheduler] Social share skipped for blog ${blog.id} — paused by admin`);
+    return false;
+  }
+
   try {
     const SocialMediaService = require('./social-media');
     const link = blog.astro_live_url || blog.url || `https://www.wavespestcontrol.com/${blog.slug}`;
@@ -57,6 +67,11 @@ async function sharePublishedBlog(blog) {
       guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
     });
+    if (result?.dryRun) {
+      logger.info(`[content-scheduler] Social share dry-run for blog ${blog.id} — not marking as shared`);
+      return true;
+    }
+
     const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
     const shared = result?.success || platforms.some((platform) => platform.success);
 
@@ -76,7 +91,7 @@ async function sharePublishedBlog(blog) {
     return true;
   } catch (err) {
     logger.warn(`[content-scheduler] Social share failed for blog ${blog.id}: ${err.message}`);
-    return false;
+    return true;
   }
 }
 
@@ -138,6 +153,17 @@ Return ONLY valid JSON with these keys:
 
 async function sharePublishedNewsletter(send) {
   if (send.shared_to_social) return true;
+
+  const { SOCIAL_FLAGS, isPausedByAdmin } = require('./social-media');
+  if (!SOCIAL_FLAGS.automationEnabled || !SOCIAL_FLAGS.newsletterAutoshare) {
+    logger.info(`[content-scheduler] Newsletter social share skipped for send ${send.id} — automation/newsletter flag disabled`);
+    return true;
+  }
+  if (await isPausedByAdmin()) {
+    logger.info(`[content-scheduler] Newsletter social share skipped for send ${send.id} — paused by admin`);
+    return false;
+  }
+
   if (!send.auto_share_social) {
     await db('newsletter_sends').where('id', send.id)
       .whereNot('social_share_status', 'skipped')
@@ -173,7 +199,7 @@ async function sharePublishedNewsletter(send) {
   if (!send.slug) {
     logger.warn(`[content-scheduler] Skipping social share; missing slug for newsletter send ${send.id}`);
     await db('newsletter_sends').where('id', send.id).update({ social_share_status: 'skipped' });
-    return false;
+    return true;
   }
 
   try {
@@ -205,6 +231,15 @@ async function sharePublishedNewsletter(send) {
       customContent,
     });
 
+    if (result?.dryRun) {
+      logger.info(`[content-scheduler] Newsletter social share dry-run for send ${send.id} �� not marking as shared`);
+      await db('newsletter_sends').where('id', send.id).update({
+        social_share_status: 'pending',
+        social_share_attempted_at: null,
+      });
+      return true;
+    }
+
     const platforms = Array.isArray(result?.platforms) ? result.platforms : [];
     const shared = result?.success || platforms.some((p) => p.success);
 
@@ -219,7 +254,7 @@ async function sharePublishedNewsletter(send) {
         social_share_error: (failures || 'all platforms failed').slice(0, 2000),
         social_share_result: JSON.stringify(platforms),
       });
-      return false;
+      return true;
     }
 
     await db('newsletter_sends').where('id', send.id).update({
@@ -235,7 +270,7 @@ async function sharePublishedNewsletter(send) {
       social_share_status: 'failed',
       social_share_error: String(err.message).slice(0, 2000),
     });
-    return false;
+    return true;
   }
 }
 
@@ -421,8 +456,16 @@ const ContentScheduler = {
     }
 
     // ── Process social posts ────────────────────────────────────
+    const { SOCIAL_FLAGS: flags, isPausedByAdmin: checkPause } = require('./social-media');
+    if (!flags.automationEnabled || !flags.scheduledPosts || await checkPause()) {
+      return { blogCount, socialCount, errors, socialSkipped: true };
+    }
+
     const pendingSocials = await db('social_media_posts')
-      .where('publish_status', 'pending')
+      .where(function() {
+        this.where('publish_status', 'pending')
+          .orWhere('publish_status', 'dry_run');
+      })
       .whereNotNull('scheduled_for')
       .where('scheduled_for', '<=', now);
 
@@ -435,7 +478,7 @@ const ContentScheduler = {
           ? JSON.parse(social.custom_content)
           : social.custom_content;
 
-        await SocialMediaService.publishToAll({
+        const result = await SocialMediaService.publishToAll({
           title: social.title,
           description: social.description,
           link: social.source_url,
@@ -444,13 +487,18 @@ const ContentScheduler = {
           customContent,
         });
 
-        await db('social_media_posts').where('id', social.id).update({
-          publish_status: 'published',
-          status: 'published',
-          published_at: new Date(),
-        });
-        socialCount++;
-        logger.info(`[content-scheduler] Published social: "${social.title}"`);
+        if (result?.dryRun) {
+          await db('social_media_posts').where('id', social.id).update({ publish_status: 'dry_run', status: 'dry_run' });
+          logger.info(`[content-scheduler] Dry-run social: "${social.title}" — marked dry_run`);
+        } else {
+          await db('social_media_posts').where('id', social.id).update({
+            publish_status: 'published',
+            status: 'published',
+            published_at: new Date(),
+          });
+          socialCount++;
+          logger.info(`[content-scheduler] Published social: "${social.title}"`);
+        }
       } catch (err) {
         errors++;
         await db('social_media_posts').where('id', social.id).update({ publish_status: 'failed' });

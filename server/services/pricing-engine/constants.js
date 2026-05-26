@@ -584,12 +584,16 @@ const RODENT = {
 
   // ── Trapping ──────────────────────────────────────────────
   trapping: {
-    base: r(395),                       // Includes active-window trap checks
+    standardPrice: r(350),
+    unlimitedPrice: r(450),
+    upgradeToUnlimitedPrice: r(125),
+    base: r(350),
     floor: r(350),
+    unlimitedFloor: r(450),
     ceilingBeforeCustom: r(795),
-    includedFollowUps: 'unlimited',
-    activeWindowDays: 14,
-    additionalFollowUpRate: 0,
+    includedFollowUps: 2,
+    activeWindowDays: null,
+    additionalFollowUpRate: r(125),
     homeSizeAdjustments: [
       { maxSqFt: 1200,     adjustment: -r(25) },
       { maxSqFt: 2500,     adjustment: 0 },
@@ -612,6 +616,56 @@ const RODENT = {
     },
     emergencyMultiplier: 1.20,           // OR fixed surcharge, whichever is greater
     emergencyMinimumSurcharge: r(75),
+    invoiceDescriptions: {
+      standard: 'Rodent Trapping - Standard: initial setup plus 2 callbacks/checks. Additional callbacks after included visits are $125 each.',
+      unlimited: 'Rodent Trapping - Unlimited Callback: callbacks for the same active trapping job only. Does not include exclusion, sanitation, or warranty.',
+    },
+  },
+
+  trapOnlyRetainer: {
+    setupFee: r(199),
+    extraCallbackRate: r(125),
+    warning: 'Customer declined exclusion. Trap-only monitoring does not include a rodent-free structural warranty. Service covers scheduled monitoring and included response callbacks only.',
+    plans: {
+      standard: {
+        label: 'Standard Trap-Only Retainer',
+        annualPrice: r(495),
+        monthlyPrice: r(49),
+        scheduledVisitsIncluded: 4,
+        responseCallbacksIncluded: 2,
+      },
+      plus: {
+        label: 'Plus Trap-Only Retainer',
+        annualPrice: r(695),
+        monthlyPrice: r(69),
+        scheduledVisitsIncluded: 6,
+        responseCallbacksIncluded: 3,
+      },
+      monthly: {
+        label: 'Monthly Trap-Only Retainer',
+        annualPrice: r(995),
+        monthlyPrice: r(99),
+        scheduledVisitsIncluded: 12,
+        responseCallbacksIncluded: 2,
+      },
+    },
+  },
+
+  wireMesh: {
+    substrates: {
+      wood_soft: { ratePerLinearFoot: r(14), minimum: r(195), label: 'Wood / soft substrate' },
+      concrete_masonry: { ratePerLinearFoot: r(20), minimum: r(250), label: 'Concrete / masonry' },
+      roofline_soffit_eave: { ratePerLinearFoot: r(24), minimum: r(275), label: 'Roofline / soffit / eave' },
+      tile_steep_fragile_roofline: { ratePerLinearFoot: r(24), minimum: r(395), label: 'Tile / steep / fragile roofline', customQuoteRecommended: true },
+    },
+  },
+
+  birdBoxes: {
+    small_bird_box: r(195),
+    standard_bird_box: r(225),
+    additional_standard_same_visit: r(175),
+    large_bird_box: r(295),
+    oversized_complex_custom: r(395),
   },
 
   // ── Sanitation (bleach + wipe; tier-based) ────────────────

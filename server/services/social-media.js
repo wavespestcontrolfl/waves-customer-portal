@@ -34,9 +34,204 @@ try {
   Anthropic = null;
 }
 
-const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID || '110336442031847';
-const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID || '17841465266249854';
-const LINKEDIN_COMPANY_ID = process.env.LINKEDIN_COMPANY_ID || '89173265';
+const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
+const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
+const LINKEDIN_COMPANY_ID = process.env.LINKEDIN_COMPANY_ID;
+
+// ── Feature Flags ──
+// Credentials make a platform *available*, not *active*.
+// Automation stays off until explicitly enabled.
+function socialFlag(key) {
+  return String(process.env[key] || '').toLowerCase() === 'true';
+}
+const SOCIAL_FLAGS = {
+  get automationEnabled() { return socialFlag('SOCIAL_AUTOMATION_ENABLED'); },
+  get rssAutopublish() { return socialFlag('SOCIAL_RSS_AUTOPUBLISH_ENABLED'); },
+  get scheduledPosts() { return socialFlag('SOCIAL_SCHEDULED_POSTS_ENABLED'); },
+  get newsletterAutoshare() { return socialFlag('SOCIAL_NEWSLETTER_AUTOSHARE_ENABLED'); },
+  get facebookEnabled() { return socialFlag('SOCIAL_FACEBOOK_ENABLED'); },
+  get instagramEnabled() { return socialFlag('SOCIAL_INSTAGRAM_ENABLED'); },
+  get gbpEnabled() { return socialFlag('SOCIAL_GBP_ENABLED'); },
+  get dryRun() { return socialFlag('SOCIAL_DRY_RUN'); },
+};
+
+async function isPausedByAdmin() {
+  try {
+    const row = await db('system_settings').where('key', 'social_automation_paused').first();
+    return row?.value === 'true' || row?.value === true;
+  } catch { return false; }
+}
+
+// ── Consecutive Failure Alerting ──
+const ALERT_THRESHOLD = 3;
+
+async function checkAndRaiseAlert() {
+  try {
+    const recentPosts = await db('social_media_posts')
+      .orderBy('created_at', 'desc')
+      .limit(ALERT_THRESHOLD)
+      .select('status');
+
+    const allFailed = recentPosts.length >= ALERT_THRESHOLD
+      && recentPosts.every(p => p.status === 'failed');
+
+    const alertKey = 'social_consecutive_failures_alert';
+    if (allFailed) {
+      const existing = await db('system_settings').where('key', alertKey).first();
+      if (!existing) {
+        await db('system_settings').insert({
+          key: alertKey,
+          value: JSON.stringify({
+            raised_at: new Date().toISOString(),
+            message: `Last ${ALERT_THRESHOLD} social posts all failed — check platform credentials`,
+          }),
+          updated_at: new Date(),
+        });
+      } else {
+        await db('system_settings').where('key', alertKey).update({
+          value: JSON.stringify({
+            raised_at: new Date().toISOString(),
+            message: `Last ${ALERT_THRESHOLD} social posts all failed — check platform credentials`,
+          }),
+          updated_at: new Date(),
+        });
+      }
+      logger.warn(`[social] ALERT: ${ALERT_THRESHOLD} consecutive failed posts`);
+    } else {
+      await db('system_settings').where('key', alertKey).del();
+    }
+  } catch (err) {
+    logger.error(`[social] Alert check failed: ${err.message}`);
+  }
+}
+
+const PLATFORM_FLAG_MAP = {
+  facebook: 'facebookEnabled',
+  instagram: 'instagramEnabled',
+  gbp: 'gbpEnabled',
+};
+
+const PLATFORM_ENV_REQS = {
+  facebook: ['FACEBOOK_ACCESS_TOKEN', 'FACEBOOK_PAGE_ID'],
+  instagram: ['FACEBOOK_ACCESS_TOKEN', 'INSTAGRAM_ACCOUNT_ID'],
+  gbp: [],
+};
+
+async function assertSocialPublishingReady(platform) {
+  if (await isPausedByAdmin()) {
+    return { ready: false, reason: 'Automation paused by admin' };
+  }
+  if (!SOCIAL_FLAGS.automationEnabled) {
+    return { ready: false, reason: 'SOCIAL_AUTOMATION_ENABLED is not true' };
+  }
+
+  const flagKey = PLATFORM_FLAG_MAP[platform];
+  if (flagKey && !SOCIAL_FLAGS[flagKey]) {
+    return { ready: false, reason: `${platform} is disabled (SOCIAL_${platform.toUpperCase()}_ENABLED)` };
+  }
+
+  const requiredEnvs = PLATFORM_ENV_REQS[platform] || [];
+  for (const envKey of requiredEnvs) {
+    if (!process.env[envKey]) {
+      return { ready: false, reason: `Missing required env var: ${envKey}` };
+    }
+  }
+
+  if (platform === 'instagram') {
+    const cdnDomain = process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+    const hasS3 = config.s3.accessKeyId && config.s3.secretAccessKey && config.s3.bucket;
+    if (!hasS3 && !cdnDomain) {
+      return { ready: false, reason: 'Instagram requires image hosting (S3 + CloudFront) — not configured' };
+    }
+  }
+
+  return { ready: true };
+}
+
+// ── Content Validation ──
+const PRICING_PATTERNS = /\$\d+(?:\.\d{2})?(?:\s*\/\s*(?:mo(?:nth)?|yr|year|visit|quarter))?/i;
+const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects)\b/i;
+const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
+
+const KNOWN_PHONES = new Set();
+try {
+  const twilioNumbers = require('../config/twilio-numbers');
+  const addPhone = (n) => {
+    if (n.number) KNOWN_PHONES.add(n.number.replace(/\D/g, ''));
+    if (n.formatted) KNOWN_PHONES.add(n.formatted.replace(/\D/g, ''));
+  };
+  if (twilioNumbers.locations) Object.values(twilioNumbers.locations).forEach(addPhone);
+  if (twilioNumbers.domainTracking) twilioNumbers.domainTracking.forEach(addPhone);
+  if (twilioNumbers.lawnDomainTracking) twilioNumbers.lawnDomainTracking.forEach(addPhone);
+} catch { /* twilio config not available */ }
+
+const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500 };
+
+function validateContent(text, platform) {
+  const issues = [];
+
+  if (PRICING_PATTERNS.test(text)) {
+    issues.push('Contains pricing claim — link to /pest-control-calculator/ instead');
+  }
+  if (SAFETY_OVERCLAIMS.test(text)) {
+    issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
+  }
+
+  const phones = text.match(PHONE_PATTERN) || [];
+  for (const phone of phones) {
+    const digits = phone.replace(/\D/g, '');
+    const normalized = digits.length === 11 && digits.startsWith('1') ? digits : `1${digits}`;
+    if (!KNOWN_PHONES.has(digits) && !KNOWN_PHONES.has(normalized)) {
+      issues.push(`Unknown phone number: ${phone} — may be hallucinated`);
+    }
+  }
+
+  const limit = PLATFORM_LENGTH_LIMITS[platform];
+  if (limit && text.length > limit) {
+    issues.push(`Content exceeds ${platform} limit (${text.length}/${limit} chars)`);
+  }
+
+  return issues.length > 0 ? { valid: false, issues } : { valid: true, issues: [] };
+}
+
+// ── URL Normalization ──
+function normalizeUrl(url) {
+  if (!url || !String(url).trim()) return null;
+  if (!url || !String(url).trim()) return null;
+  try {
+    const u = new URL(url);
+    u.protocol = 'https:';
+    u.search = '';  // strip UTM params
+    u.hash = '';
+    let path = u.pathname.replace(/\/+$/, '');
+    if (!path) path = '';
+    return `${u.origin}${path}`;
+  } catch {
+    return url.replace(/\/+$/, '');
+  }
+}
+
+// ── Advisory Lock for RSS Ingestion ──
+const RSS_LOCK_ID = 839201;  // arbitrary stable int for pg_advisory_lock
+
+// ── Retry with Exponential Backoff ──
+async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = err.message?.match(/\b(\d{3})\b/)?.[1];
+      const isTransient = !status || status >= 500 || /ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|network/i.test(err.message);
+      const isAuth = status === '401' || status === '403' || /expired|invalid.*token|not.*configured/i.test(err.message);
+
+      if (isAuth || !isTransient || attempt === maxAttempts) throw err;
+
+      const delay = Math.pow(4, attempt - 1) * 1000;  // 1s, 4s, 16s
+      logger.warn(`[social] ${label} attempt ${attempt}/${maxAttempts} failed: ${err.message} — retrying in ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
 
 // ── AI Content Generation ──
 async function generateContent(platform, { title, description, link, locationName }) {
@@ -111,26 +306,47 @@ async function generateImage(title) {
   }
 }
 
-// ── S3 Image Upload (for Instagram public URL requirement) ──
+// ── S3 Image Upload (for Instagram/GBP — requires public HTTPS URL) ──
+// Uses CloudFront OAC — no public-read ACL on S3.
 async function uploadImageToS3(base64Data, filename) {
   if (!config.s3.accessKeyId || !config.s3.bucket) return null;
+  const cdnDomain = process.env.SOCIAL_MEDIA_CDN_DOMAIN;
+
   try {
     const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-    const client = new S3Client({
+    const s3 = new S3Client({
       region: config.s3.region,
       credentials: { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey },
     });
-    const buffer = Buffer.from(base64Data, 'base64');
-    const key = `social-media/${filename}`;
-    await client.send(new PutObjectCommand({
+
+    let buffer = Buffer.from(base64Data, 'base64');
+    let contentType = 'image/jpeg';
+    let finalFilename = filename.replace(/\.\w+$/, '.jpg');
+
+    // Convert PNG/WebP → JPEG (Instagram requires JPEG)
+    try {
+      const sharp = require('sharp');
+      buffer = await sharp(buffer).jpeg({ quality: 85 }).toBuffer();
+    } catch {
+      // sharp not available — upload as-is
+      contentType = 'image/png';
+      finalFilename = filename;
+    }
+
+    const key = `social-media/${finalFilename}`;
+    await s3.send(new PutObjectCommand({
       Bucket: config.s3.bucket,
       Key: key,
       Body: buffer,
-      ContentType: 'image/png',
-      ACL: 'public-read',
+      ContentType: contentType,
     }));
-    const url = `https://${config.s3.bucket}.s3.${config.s3.region}.amazonaws.com/${key}`;
-    logger.info(`[social] Image uploaded to S3: ${url}`);
+
+    if (!cdnDomain) {
+      logger.error('[social] SOCIAL_MEDIA_CDN_DOMAIN not set — private S3 URLs are not publicly fetchable');
+      return null;
+    }
+    const url = `https://${cdnDomain}/${key}`;
+    logger.info(`[social] Image uploaded: ${url}`);
     return url;
   } catch (err) {
     logger.error(`[social] S3 upload failed: ${err.message}`);
@@ -311,36 +527,70 @@ const SocialMediaService = {
    * Check RSS feed for new posts and publish to all platforms.
    * Called by cron job or manually from admin.
    */
-  async checkAndPublish(feedUrl = 'https://www.wavespestcontrol.com/feed/') {
-    const items = await fetchRSSFeed(feedUrl);
-    if (!items.length) return { processed: 0, results: [] };
-
-    const results = [];
-
-    for (const item of items.slice(0, 5)) { // Process max 5 at a time
-      // Check if already posted
-      const existing = await db('social_media_posts')
-        .where({ source_url: item.link })
-        .orWhere({ source_guid: item.guid })
-        .first();
-
-      if (existing) continue; // Already processed
-
-      try {
-        const result = await this.publishToAll({
-          title: item.title,
-          description: item.description,
-          link: item.link,
-          guid: item.guid,
-          source: 'rss',
-        });
-        results.push({ item: item.title, ...result });
-      } catch (err) {
-        logger.error(`[social] Failed to process RSS item "${item.title}": ${err.message}`);
-        results.push({ item: item.title, error: err.message });
+  async checkAndPublish(feedUrl = 'https://www.wavespestcontrol.com/feed/', { manual = false } = {}) {
+    if (!manual) {
+      if (!SOCIAL_FLAGS.automationEnabled || !SOCIAL_FLAGS.rssAutopublish) {
+        logger.info('[social] RSS auto-publish skipped — automation or RSS flag disabled');
+        return { processed: 0, results: [], skipped: true };
+      }
+      if (await isPausedByAdmin()) {
+        logger.info('[social] RSS auto-publish skipped — paused by admin');
+        return { processed: 0, results: [], skipped: true };
       }
     }
 
+    const items = await fetchRSSFeed(feedUrl);
+    if (!items.length) return { processed: 0, results: [] };
+
+    // Advisory lock prevents overlapping cron runs / deploys from double-posting.
+    // Uses transaction-scoped lock so acquire+release use the same connection.
+    const results = [];
+    let lockAcquired = false;
+
+    await db.transaction(async (trx) => {
+      try {
+        const lockResult = await trx.raw(
+          'SELECT pg_try_advisory_xact_lock(?) as locked', [RSS_LOCK_ID]
+        );
+        lockAcquired = lockResult.rows[0]?.locked;
+      } catch (lockErr) { logger.warn(`[social] Advisory lock failed: ${lockErr.message} — skipping run`); }
+
+      if (!lockAcquired) {
+        logger.info('[social] RSS check skipped — another instance holds the lock');
+        return;
+      }
+
+      for (const item of items.slice(0, 5)) {
+        const normalizedUrl = normalizeUrl(item.link) || null;
+        const normalizedGuid = item.guid || normalizedUrl;
+
+        const existing = await trx('social_media_posts')
+          .where(function() {
+            this.where({ source_url: normalizedUrl })
+              .orWhere({ source_guid: normalizedGuid });
+          })
+          .whereNot('status', 'dry_run')
+          .first();
+
+        if (existing) continue;
+
+        try {
+          const result = await this.publishToAll({
+            title: item.title,
+            description: item.description,
+            link: normalizedUrl,
+            guid: normalizedGuid,
+            source: 'rss',
+          });
+          results.push({ item: item.title, ...result });
+        } catch (err) {
+          logger.error(`[social] Failed to process RSS item "${item.title}": ${err.message}`);
+          results.push({ item: item.title, error: err.message });
+        }
+      }
+    });
+
+    if (!lockAcquired) return { processed: 0, results: [], locked: true };
     return { processed: results.length, results };
   },
 
@@ -367,7 +617,7 @@ const SocialMediaService = {
         const img = await generateImage(title);
         if (img && img.base64) {
           // Upload to S3 to get a public URL (required by Instagram)
-          const filename = `post-${Date.now()}.png`;
+          const filename = `post-${Date.now()}.jpg`;
           const s3Url = await uploadImageToS3(img.base64, filename);
           if (s3Url) {
             generatedImageUrl = s3Url;
@@ -377,36 +627,64 @@ const SocialMediaService = {
     }
 
     // Generate content for each platform and post
+    const fbReady = !!process.env.FACEBOOK_ACCESS_TOKEN && !!FACEBOOK_PAGE_ID;
+    const igReady = fbReady && !!INSTAGRAM_ACCOUNT_ID && !!generatedImageUrl;
     const platforms = [
-      { key: 'facebook', enabled: !!process.env.FACEBOOK_ACCESS_TOKEN },
-      { key: 'instagram', enabled: !!process.env.FACEBOOK_ACCESS_TOKEN && !!generatedImageUrl },
-      { key: 'linkedin', enabled: !!process.env.LINKEDIN_ACCESS_TOKEN },
+      {
+        key: 'facebook',
+        enabled: SOCIAL_FLAGS.facebookEnabled && fbReady,
+        reason: !SOCIAL_FLAGS.facebookEnabled ? 'Disabled'
+          : !FACEBOOK_PAGE_ID ? 'FACEBOOK_PAGE_ID not set'
+          : 'FACEBOOK_ACCESS_TOKEN not set',
+      },
+      {
+        key: 'instagram',
+        enabled: SOCIAL_FLAGS.instagramEnabled && igReady,
+        reason: !SOCIAL_FLAGS.instagramEnabled ? 'Disabled'
+          : !process.env.FACEBOOK_ACCESS_TOKEN ? 'FACEBOOK_ACCESS_TOKEN not set'
+          : !INSTAGRAM_ACCOUNT_ID ? 'INSTAGRAM_ACCOUNT_ID not set'
+          : 'Image hosting not configured',
+      },
+      {
+        key: 'linkedin',
+        enabled: false,
+        reason: 'Disabled',
+      },
     ];
 
     for (const p of platforms) {
       if (!p.enabled) {
-        platformResults.push({ platform: p.key, skipped: 'Not configured' });
+        platformResults.push({ platform: p.key, skipped: p.reason });
         continue;
       }
 
       try {
         const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link });
 
+        const validation = validateContent(content, p.key);
+        if (!validation.valid) {
+          logger.warn(`[social] Content validation failed for ${p.key}: ${validation.issues.join('; ')}`);
+          platformResults.push({ platform: p.key, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues });
+          continue;
+        }
+
+        if (SOCIAL_FLAGS.dryRun) {
+          logger.info(`[social] DRY RUN — ${p.key}: ${content.substring(0, 120)}...`);
+          platformResults.push({ platform: p.key, success: false, dryRun: true, content });
+          continue;
+        }
+
         if (p.key === 'facebook') {
-          const r = await postToFacebook(content, link);
-          platformResults.push(r);
+          const r = await withRetry(() => postToFacebook(content, link), { label: 'facebook' });
+          platformResults.push({ ...r, content });
         } else if (p.key === 'instagram') {
-          // Instagram needs a publicly accessible image URL
           const imgUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
           if (imgUrl) {
-            const r = await postToInstagram(content, imgUrl);
-            platformResults.push(r);
+            const r = await withRetry(() => postToInstagram(content, imgUrl), { label: 'instagram' });
+            platformResults.push({ ...r, content });
           } else {
             platformResults.push({ platform: 'instagram', skipped: 'No public image URL' });
           }
-        } else if (p.key === 'linkedin') {
-          const r = await postToLinkedIn(content, link, title, description);
-          platformResults.push(r);
         }
       } catch (err) {
         logger.error(`[social] ${p.key} post failed: ${err.message}`);
@@ -415,38 +693,97 @@ const SocialMediaService = {
     }
 
     // Post to all 4 GBP locations
+    if (!SOCIAL_FLAGS.gbpEnabled) {
+      platformResults.push({ platform: 'gbp', skipped: 'Disabled' });
+    }
     // customContent.gbp may be a string (same copy for all locations) or an object keyed by location id
-    for (const loc of WAVES_LOCATIONS) {
+    for (const loc of (SOCIAL_FLAGS.gbpEnabled ? WAVES_LOCATIONS : [])) {
       try {
         const gbpCustom = customContent?.gbp;
         const gbpContent =
           (typeof gbpCustom === 'string' ? gbpCustom : gbpCustom?.[loc.id]) ||
           await generateContent('gbp', { title, description, link, locationName: loc.name });
+
+        const gbpValidation = validateContent(gbpContent, 'gbp');
+        if (!gbpValidation.valid) {
+          logger.warn(`[social] GBP content validation failed for ${loc.name}: ${gbpValidation.issues.join('; ')}`);
+          platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `Validation: ${gbpValidation.issues[0]}` });
+          continue;
+        }
+
+        if (SOCIAL_FLAGS.dryRun) {
+          logger.info(`[social] DRY RUN — gbp/${loc.name}: ${gbpContent.substring(0, 120)}...`);
+          platformResults.push({ platform: 'gbp', location: loc.id, success: false, dryRun: true, content: gbpContent });
+          continue;
+        }
+
         const r = await postToGBP(loc.id, gbpContent, link);
-        platformResults.push(r);
+        platformResults.push({ ...r, content: gbpContent });
       } catch (err) {
         platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: err.message });
       }
     }
 
     // Log to database
+    // Collect published content for audit trail
+    const publishedContent = {};
+    for (const r of platformResults) {
+      if (r.content) {
+        const key = r.location ? `${r.platform}_${r.location}` : r.platform;
+        publishedContent[key] = r.content;
+      }
+    }
+
+    const normalizedLink = normalizeUrl(link);
+    const postStatus = SOCIAL_FLAGS.dryRun ? 'dry_run'
+      : platformResults.some(r => r.success) ? 'published' : 'failed';
+
+    const postRow = {
+      title,
+      description: (description || '').substring(0, 1000),
+      source_url: normalizedLink,
+      source_guid: guid,
+      source_type: source || 'manual',
+      platforms_posted: JSON.stringify(platformResults),
+      image_url: typeof generatedImageUrl === 'string' ? generatedImageUrl : null,
+      status: postStatus,
+      ai_model: MODELS.FLAGSHIP,
+      published_content: Object.keys(publishedContent).length > 0
+        ? JSON.stringify(publishedContent) : null,
+    };
+    const updateCols = { platforms_posted: postRow.platforms_posted, status: postRow.status, published_content: postRow.published_content };
+
+    const autoSources = ['rss', 'blog_scheduled', 'newsletter'];
+    const isAutoSource = autoSources.includes(postRow.source_type);
+
     try {
-      await db('social_media_posts').insert({
-        title,
-        description: (description || '').substring(0, 1000),
-        source_url: link,
-        source_guid: guid,
-        source_type: source || 'manual',
-        platforms_posted: JSON.stringify(platformResults),
-        image_url: typeof generatedImageUrl === 'string' ? generatedImageUrl : null,
-        status: platformResults.some(r => r.success) ? 'published' : 'failed',
-      });
+      if (isAutoSource) {
+        const existingByUrl = normalizedLink
+          ? await db('social_media_posts').where('source_url', normalizedLink).whereIn('source_type', autoSources).first()
+          : null;
+        const existingByGuid = !existingByUrl && guid
+          ? await db('social_media_posts').where('source_guid', guid).whereIn('source_type', autoSources).first()
+          : null;
+        const existing = existingByUrl || existingByGuid;
+
+        if (existing) {
+          await db('social_media_posts').where('id', existing.id).update(updateCols);
+        } else {
+          await db('social_media_posts').insert(postRow);
+        }
+      } else {
+        await db('social_media_posts').insert(postRow);
+      }
     } catch (err) {
       logger.error(`[social] Failed to log post: ${err.message}`);
     }
 
+    // Recompute failure alert state on every publish (raise on failure, clear on success)
+    checkAndRaiseAlert().catch(() => {});
+
     return {
       success: platformResults.some(r => r.success),
+      dryRun: SOCIAL_FLAGS.dryRun,
       platforms: platformResults,
     };
   },
@@ -455,11 +792,35 @@ const SocialMediaService = {
    * Post to a single platform (from admin UI).
    */
   async postToSingle(platform, { title, description, link, content, imageUrl, locationId }) {
+    if (!SOCIAL_FLAGS.automationEnabled) {
+      return { platform, success: false, error: 'Automation is disabled' };
+    }
+    if (await isPausedByAdmin()) {
+      return { platform, success: false, error: 'Automation is paused' };
+    }
+    const flagMap = { facebook: 'facebookEnabled', instagram: 'instagramEnabled', gbp: 'gbpEnabled' };
+    const flagKey = flagMap[platform];
+    if (flagKey && !SOCIAL_FLAGS[flagKey]) {
+      return { platform, success: false, error: `${platform} is disabled` };
+    }
+    if (platform === 'linkedin') {
+      return { platform, success: false, error: 'LinkedIn is disabled' };
+    }
+
     const text = content || await generateContent(platform, { title, description, link, locationName: locationId });
+
+    const validation = validateContent(text, platform);
+    if (!validation.valid) {
+      return { platform, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues };
+    }
+
+    if (SOCIAL_FLAGS.dryRun) {
+      logger.info(`[social] DRY RUN — postToSingle/${platform}: ${text.substring(0, 120)}...`);
+      return { platform, success: false, dryRun: true, content: text };
+    }
 
     if (platform === 'facebook') return postToFacebook(text, link);
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
-    if (platform === 'linkedin') return postToLinkedIn(text, link, title, description);
     if (platform === 'gbp') return postToGBP(locationId || 'lakewood-ranch', text, link, imageUrl);
     throw new Error(`Unknown platform: ${platform}`);
   },
@@ -499,3 +860,8 @@ const SocialMediaService = {
 };
 
 module.exports = SocialMediaService;
+module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
+module.exports.isPausedByAdmin = isPausedByAdmin;
+module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
+module.exports.validateContent = validateContent;
+module.exports.normalizeUrl = normalizeUrl;
