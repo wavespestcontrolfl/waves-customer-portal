@@ -38,61 +38,6 @@ function adminFetch(path, options = {}) {
 const scoreColor = (v) => (v >= 75 ? D.green : v >= 50 ? D.amber : D.red);
 const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
 
-function formatPerformanceRate(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : "—";
-}
-
-function RecommendationPerformanceSummary({ performance }) {
-  if (!performance) return null;
-  const counts = performance.counts || {};
-  const shown = counts.recommendation_shown || counts.shown || 0;
-  const clicked = counts.recommendation_clicked || counts.clicked || 0;
-  const followUp = counts.follow_up_requested || 0;
-  const latest = performance.latestEventAt
-    ? new Date(performance.latestEventAt).toLocaleDateString()
-    : null;
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-        gap: 6,
-        marginTop: 8,
-      }}
-    >
-      {[
-        ["Shown", shown],
-        ["Clicked", clicked],
-        ["CTR", formatPerformanceRate(performance.clickThroughRate)],
-        ["Follow-up", followUp],
-      ].map(([label, value]) => (
-        <div
-          key={label}
-          style={{
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            padding: "7px 8px",
-            background: "#FAFAFA",
-          }}
-        >
-          <div style={{ fontSize: 10, color: D.muted, fontWeight: 800, textTransform: "uppercase" }}>
-            {label}
-          </div>
-          <div style={{ fontSize: 14, color: D.heading, fontWeight: 850, marginTop: 2 }}>
-            {value}
-          </div>
-        </div>
-      ))}
-      {latest && (
-        <div style={{ gridColumn: "1 / -1", fontSize: 11, color: D.muted }}>
-          Latest customer event: {latest}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // Resize phone photos before base64 upload — caps the long edge so a 4-8MB camera shot
 // becomes ~200-400KB. Opus 4.7 vision works on the smaller image without loss for turf
 // assessment, and the upload doesn't choke on slow LTE.
@@ -316,7 +261,6 @@ function SnapshotReviewPanel({
                 rows={3}
                 style={{ ...inputStyle, marginTop: 8, resize: "vertical", lineHeight: 1.5 }}
               />
-              <RecommendationPerformanceSummary performance={card.performance} />
               <button
                 type="button"
                 onClick={() => onRecommendationAction(card.id, { customer_copy: cardCopy[card.id] || "" })}
