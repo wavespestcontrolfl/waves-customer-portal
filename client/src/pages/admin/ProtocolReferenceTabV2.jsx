@@ -472,28 +472,35 @@ function ProtocolMixCard({
                         )}
                       </td>{" "}
                       <td className="px-3 py-3 text-right whitespace-nowrap">
-                        {" "}
-                        <div className="u-nums text-13 font-medium text-zinc-900">
-                          {fmtNumber(item.jobMix?.amount)}{" "}
-                          {item.jobMix?.amountUnit || ""}
-                        </div>{" "}
-                        <div className="text-11 text-ink-secondary">
-                          {fmtNumber(item.jobMix?.ratePer1000)}{" "}
-                          {item.jobMix?.rateUnit || ""}/1K
-                        </div>{" "}
+                        {item.jobMix ? (
+                          <>
+                            <div className="u-nums text-13 font-medium text-zinc-900">
+                              {fmtNumber(item.jobMix.amount)}{" "}
+                              {item.jobMix.amountUnit || ""}
+                            </div>
+                            <div className="text-11 text-ink-secondary">
+                              {fmtNumber(item.jobMix.ratePer1000)}{" "}
+                              {item.jobMix.rateUnit || ""}/1K
+                            </div>
+                          </>
+                        ) : (
+                          <div className="u-nums text-13 font-medium text-zinc-900">—</div>
+                        )}
                       </td>{" "}
                       <td className="px-3 py-3 text-right whitespace-nowrap">
-                        {" "}
-                        <div className="u-nums text-13 font-medium text-zinc-900">
-                          {fmtNumber(item.fullTankMix?.amount)}{" "}
-                          {item.fullTankMix?.amountUnit || ""}
-                        </div>{" "}
-                        <div className="text-11 text-ink-secondary">
-                          {fmtNumber(
-                            item.fullTankMix?.carrierGallons,
-                            " gal carrier",
-                          )}
-                        </div>{" "}
+                        {item.fullTankMix ? (
+                          <>
+                            <div className="u-nums text-13 font-medium text-zinc-900">
+                              {fmtNumber(item.fullTankMix.amount)}{" "}
+                              {item.fullTankMix.amountUnit || ""}
+                            </div>
+                            <div className="text-11 text-ink-secondary">
+                              {fmtNumber(item.fullTankMix.carrierGallons, " gal carrier")}
+                            </div>
+                          </>
+                        ) : (
+                          <div className="u-nums text-13 font-medium text-zinc-900">—</div>
+                        )}
                       </td>{" "}
                     </tr>
                   );
@@ -729,6 +736,7 @@ export default function ProtocolReferenceTabV2() {
             </button>
           );
         })}
+        <div className="w-px bg-zinc-200 self-stretch mx-1 flex-shrink-0" />
         {servicePrograms.map((program) => {
           const active = selectedTrack === program.key;
           return (
@@ -928,19 +936,20 @@ export default function ProtocolReferenceTabV2() {
                     {" "}
                     <tr className="border-b border-hairline border-zinc-200">
                       {[
-                        { k: "#", cls: "" },
+                        { k: "#", cls: "text-center" },
                         { k: "Month", cls: "" },
                         { k: "Primary Applications", cls: "min-w-[250px]" },
                         { k: "Secondary / Conditional", cls: "min-w-[200px]" },
-                        { k: "Mat$", cls: "" },
-                        { k: "Lab$", cls: "" },
+                        { k: "Mat$", cls: "text-right whitespace-nowrap" },
+                        { k: "Lab$", cls: "text-right whitespace-nowrap" },
                         { k: "Tiers", cls: "" },
                         { k: "Notes / SOP", cls: "min-w-[200px]" },
                       ].map((h) => (
                         <th
                           key={h.k}
                           className={cn(
-                            "px-2.5 py-2 text-11 font-medium u-label text-ink-tertiary text-left",
+                            "px-2.5 py-2 text-11 font-medium u-label text-ink-tertiary",
+                            h.cls?.includes("text-") ? "" : "text-left",
                             h.cls,
                           )}
                         >
@@ -1006,10 +1015,10 @@ export default function ProtocolReferenceTabV2() {
                             ))}
                             {!v.secondary && "\u2014"}
                           </td>{" "}
-                          <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top">
+                          <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {v.material_cost ? `$${v.material_cost}` : "\u2014"}
                           </td>{" "}
-                          <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top">
+                          <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {v.labor_cost ? `$${v.labor_cost}` : "\u2014"}
                           </td>{" "}
                           <td className="px-2.5 py-2 align-top">
