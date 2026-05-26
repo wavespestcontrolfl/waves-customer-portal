@@ -3485,18 +3485,34 @@ export default function EstimateToolViewV2({
     parseNonNegativeInteger(satelliteData?.estimatedTurfSf) ??
     null;
   const confirmedTurfSqFt = parseNonNegativeInteger(form.measuredTurfSf);
-  const effectiveTurfSqFt = confirmedTurfSqFt ?? aiTurfSqFt ?? 0;
-  const isDethatchingStAugustine = String(form.grassType || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "")
-    .includes("staugustine");
   const lotSqFtForTurf =
     parseNonNegativeInteger(form.lotSqFt) ??
     parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
     0;
+  const lotEstimateTurfSqFt = (() => {
+    if (lotSqFtForTurf <= 0) return null;
+    const pct = parseNonNegativeNumber(enrichedProfile?.imperviousSurfacePercent) ?? 20;
+    const open = Math.round(lotSqFtForTurf * (1 - Math.min(1, pct / 100)));
+    const bedPct = parseNonNegativeNumber(enrichedProfile?.estimatedBedAreaPercent);
+    const explicitBed = parseNonNegativeNumber(form.bedArea) ?? parseNonNegativeNumber(enrichedProfile?.estimatedBedAreaSf);
+    const beds = bedPct !== undefined
+      ? Math.round(open * (bedPct / 100))
+      : (explicitBed !== undefined ? explicitBed : Math.round(open * 0.15));
+    return Math.max(0, open - beds);
+  })();
+  const effectiveTurfSqFt =
+    confirmedTurfSqFt ?? (aiTurfSqFt > 0 ? aiTurfSqFt : null) ?? lotEstimateTurfSqFt ?? 0;
+  const turfDisplaySource =
+    confirmedTurfSqFt !== null ? "Confirmed" :
+    aiTurfSqFt > 0 ? "Using AI" :
+    lotEstimateTurfSqFt > 0 ? "Lot estimate" : "No estimate";
+  const isDethatchingStAugustine = String(form.grassType || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .includes("staugustine");
   const turfSliderMax = Math.max(
     20000,
-    Math.ceil(Math.max(lotSqFtForTurf, aiTurfSqFt || 0, confirmedTurfSqFt || 0, 5000) / 1000) * 1000,
+    Math.ceil(Math.max(lotSqFtForTurf, aiTurfSqFt || 0, confirmedTurfSqFt || 0, lotEstimateTurfSqFt || 0, 5000) / 1000) * 1000,
   );
   const plugAreaSqFt = parseNonNegativeInteger(form.plugArea);
   const fleaExteriorAreaSqFt = parseNonNegativeInteger(form.fleaExteriorAreaSqFt) ?? 0;
@@ -4225,7 +4241,7 @@ export default function EstimateToolViewV2({
                       Treatable Lawn Area
                     </div>
                     <Badge variant="neutral" className="text-10 u-nums">
-                      AI {formatSqFt(aiTurfSqFt)}
+                      {aiTurfSqFt > 0 ? `AI ${formatSqFt(aiTurfSqFt)}` : lotEstimateTurfSqFt > 0 ? `Lot est. ${formatSqFt(lotEstimateTurfSqFt)}` : "AI 0 sf"}
                     </Badge>
                   </div>
                   <div className="grid grid-cols-[1fr_auto] gap-2 items-end">
@@ -4236,7 +4252,7 @@ export default function EstimateToolViewV2({
                         step="250"
                         value={form.measuredTurfSf || ""}
                         onChange={(e) => set("measuredTurfSf", e.target.value)}
-                        placeholder={aiTurfSqFt ? String(aiTurfSqFt) : "Measured turf"}
+                        placeholder={effectiveTurfSqFt > 0 ? String(effectiveTurfSqFt) : "Measured turf"}
                         className={INPUT_CLS}
                       />
                     </FieldV2>
@@ -4264,7 +4280,7 @@ export default function EstimateToolViewV2({
                   <div className="mt-1 flex items-center justify-between text-11 text-ink-secondary">
                     <span>0 sf</span>
                     <span className="font-medium text-zinc-900 u-nums">
-                      {confirmedTurfSqFt !== null ? "Confirmed" : "Using AI"}:{" "}
+                      {turfDisplaySource}:{" "}
                       {formatSqFt(effectiveTurfSqFt)}
                     </span>
                     <span>{turfSliderMax.toLocaleString()} sf</span>
