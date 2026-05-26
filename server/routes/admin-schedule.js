@@ -818,12 +818,7 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
   const subtotal = (pricing.primaryNet || 0)
     + (Array.isArray(addonLines) ? addonLines : []).reduce((sum, line) => sum + (line.price || 0), 0);
   if (!(subtotal > 0)) {
-    return {
-      price: pricing.finalPrice != null ? pricing.finalPrice : null,
-      appointmentDiscountDollars: pricing.appointmentDiscount?.discountDollars != null
-        ? Number(pricing.appointmentDiscount.discountDollars)
-        : null,
-    };
+    return { price: null, appointmentDiscountDollars: null };
   }
   const appointmentDiscountDollars = calculateAppointmentDiscountDollars(pricing.appointmentDiscount, subtotal);
   return {
@@ -832,7 +827,7 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
   };
 }
 
-function calculateStoredVisitFinancials(parent, addonRows) {
+function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows) {
   const addons = Array.isArray(addonRows) ? addonRows : [];
   const addonNetTotal = addons.reduce((sum, addon) => {
     const n = Number(addon.estimated_price);
@@ -845,8 +840,12 @@ function calculateStoredVisitFinancials(parent, addonRows) {
     : null;
   if (primaryNet == null) {
     const parentEstimated = Number(parent?.estimated_price);
+    const fullAddonTotal = (Array.isArray(allParentAddonRows) ? allParentAddonRows : addons).reduce((sum, addon) => {
+      const n = Number(addon.estimated_price);
+      return Number.isFinite(n) && n > 0 ? sum + n : sum;
+    }, 0);
     primaryNet = Number.isFinite(parentEstimated) && parentEstimated > 0
-      ? Math.max(0, parentEstimated - addonNetTotal)
+      ? Math.max(0, parentEstimated - fullAddonTotal)
       : 0;
   }
   const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
@@ -860,9 +859,9 @@ function calculateStoredVisitFinancials(parent, addonRows) {
   };
 }
 
-function applyStoredVisitFinancials(target, cols, parent, addonRows) {
+function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAddonRows) {
   if (!target || !cols) return;
-  const financials = calculateStoredVisitFinancials(parent, addonRows);
+  const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows);
   if (cols.estimated_price && financials.price != null) target.estimated_price = financials.price;
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = financials.appointmentDiscountDollars;
 }
@@ -2474,7 +2473,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
               const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr);
-              applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons);
+              applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons);
               const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
               if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
             } catch { /* non-blocking */ }
@@ -3245,7 +3244,7 @@ router.put('/:id/status', async (req, res, next) => {
                     .where({ scheduled_service_id: parentId });
                 } catch { parentAddons = []; }
                 const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
-                applyStoredVisitFinancials(nextData, cols, parent, dueAddons);
+                applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons);
                 const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
                 // Mirror parent's add-on lines onto the auto-extended visit
                 // so a multi-service ongoing series keeps its full scope
@@ -4301,7 +4300,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -4350,7 +4349,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
