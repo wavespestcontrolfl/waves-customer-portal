@@ -1441,9 +1441,14 @@ const StripeService = {
       const isCardFamily = pmdType && pmdType !== 'us_bank_account' && pmdType !== 'ach';
       const wasFinalized = pi.metadata?.surcharge_policy_version;
       if (isCardFamily && !wasFinalized) {
-        // Allow Express Checkout (apple_pay, google_pay, link) at base — phase 1 design
+        // Stripe reports wallets (Apple Pay, Google Pay, Link) as type='card'
+        // with the wallet subtype under payment_method_details.card.wallet.type.
+        // Check both the top-level type AND the nested wallet field.
         const isExpressCheckout = ['apple_pay', 'google_pay', 'link'].includes(pmdType);
-        if (!isExpressCheckout) {
+        const chargeObj = typeof pi.latest_charge === 'object' ? pi.latest_charge : null;
+        const walletType = chargeObj?.payment_method_details?.card?.wallet?.type;
+        const isWalletPayment = !!walletType;
+        if (!isExpressCheckout && !isWalletPayment) {
           logger.error(`[stripe] Card payment on PI ${paymentIntentId} bypassed /finalize (no surcharge_policy_version). Rejecting.`);
           throw new Error('Payment was not properly finalized. Please try again.');
         }
