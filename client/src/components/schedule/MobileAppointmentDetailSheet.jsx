@@ -125,11 +125,22 @@ export default function MobileAppointmentDetailSheet({
   const [noteSavedAt, setNoteSavedAt] = useState(null);
   const [actionBusy, setActionBusy] = useState('');
   const [showCustomer, setShowCustomer] = useState(false);
+  const [estimateSource, setEstimateSource] = useState(null);
 
   useEffect(() => {
     setNote(service?.notes || '');
     setNoteSavedAt(null);
   }, [service?.id, service?.notes]);
+
+  useEffect(() => {
+    setEstimateSource(null);
+    if (!service?.sourceEstimateId) return;
+    let cancelled = false;
+    adminFetch(`/admin/schedule/${service.id}/estimate-source`)
+      .then(data => { if (!cancelled && data?.linked) setEstimateSource(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [service?.id, service?.sourceEstimateId]);
 
   if (!service) return null;
 
@@ -410,6 +421,29 @@ export default function MobileAppointmentDetailSheet({
             </span>
           </div>
         </section>
+
+        {/* Estimate provenance */}
+        {estimateSource && (
+          <section className="mt-4">
+            <div
+              className="flex items-center gap-2 px-3 py-2.5 rounded-sm"
+              style={{ background: '#F0F9FF', border: '1px solid #BAE6FD' }}
+            >
+              <span className="text-11 uppercase tracking-label font-medium" style={{ color: '#0369A1' }}>
+                From Estimate
+              </span>
+              <span className="flex-1" />
+              <span className="u-nums text-12 font-medium" style={{ color: '#0369A1' }}>
+                Quoted ${estimateSource.quotedTotal?.toFixed(2)}
+              </span>
+            </div>
+            {estimateSource.quotedTotal > 0 && price > 0 && Math.abs(estimateSource.quotedTotal - price) > 0.01 && (
+              <div className="text-11 text-ink-secondary mt-1 px-1">
+                Current price ${price.toFixed(2)} ({price > estimateSource.quotedTotal ? '+' : ''}{((price - estimateSource.quotedTotal) / estimateSource.quotedTotal * 100).toFixed(0)}% vs quoted)
+              </div>
+            )}
+          </section>
+        )}
 
         {/* Date and time */}
         <section className="mt-8">

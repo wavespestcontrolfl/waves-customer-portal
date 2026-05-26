@@ -214,8 +214,8 @@ describe('invoice tier discounts', () => {
     );
   });
 
-  test('manual tier discount is rejected when customer does not match the tier', async () => {
-    setupDb({
+  test('manual tier discount can be selected when customer does not match the tier', async () => {
+    const ctx = setupDb({
       customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },
       discounts: [{
         id: 'silver-id',
@@ -229,18 +229,18 @@ describe('invoice tier discounts', () => {
       }],
     });
 
-    await expect(InvoiceService.create({
+    const invoice = await InvoiceService.create({
       customerId: 'customer-1',
       title: 'Pest Control',
       lineItems: [
         { client_id: 'line-1', description: 'Pest Control', quantity: 1, unit_price: 100, amount: 100 },
         { _kind: 'discount', discount_id: 'silver-id', discount_for: 'line-1', description: 'WaveGuard Silver', quantity: 1, unit_price: -1, amount: -1 },
       ],
-    })).rejects.toMatchObject({
-      message: expect.stringContaining('WaveGuard tier discount'),
-      statusCode: 400,
-      isOperational: true,
     });
+
+    expect(invoice.discount_amount).toBe(10);
+    expect(invoice.total).toBe(90);
+    expect(ctx.getInsertedInvoice().discount_label).toBe('Line-item discounts');
   });
 
 

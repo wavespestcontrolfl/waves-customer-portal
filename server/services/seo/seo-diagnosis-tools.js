@@ -274,7 +274,6 @@ async function classifyQueryIntent({ queries = [] } = {}) {
     const msg = await anthropic.messages.create({
       model: MODELS.FAST,
       max_tokens: Math.min(2048, batch.length * 20),
-      temperature: 0.2,
       messages: [{ role: 'user', content: prompt }],
     });
     const text = msg.content[0]?.text || '';

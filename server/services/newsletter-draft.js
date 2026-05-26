@@ -237,7 +237,64 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude did not return JSON');
 
-  const draft = JSON.parse(jsonMatch[0]);
+  let rawJson = jsonMatch[0];
+  // Repair common Claude JSON issues
+  rawJson = rawJson.replace(/,\s*([\]}])/g, '$1');  // trailing commas
+  rawJson = rawJson.replace(/[\x00-\x1F\x7F]/g, (ch) => {  // unescaped control chars
+    if (ch === '\n' || ch === '\r' || ch === '\t') return ch;
+    return '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0');
+  });
+
+  let draft;
+  try {
+    draft = JSON.parse(rawJson);
+  } catch (firstErr) {
+    const logger = require('./logger');
+    logger.warn(`[newsletter-draft] JSON repair: first parse failed (${firstErr.message}), retrying with Claude`);
+    // Ask Claude to fix its own JSON
+    const repairResponse = await anthropic.messages.create({
+      model: MODELS.WORKHORSE,
+      max_tokens: 4000,
+      messages: [
+        { role: 'user', content: `The following JSON has syntax errors. Fix ONLY the JSON syntax (trailing commas, unescaped quotes, etc) and return ONLY the valid JSON. Do not change any content.\n\n${rawJson}` },
+      ],
+    });
+    const repairText = repairResponse.content?.[0]?.text || '';
+    const repairMatch = repairText.match(/\{[\s\S]*\}/);
+    if (!repairMatch) throw firstErr;
+    let repairedJson = repairMatch[0].replace(/,\s*([\]}])/g, '$1');
+    draft = JSON.parse(repairedJson);
+  }
+
+  // 4b. Assemble htmlBody from sections if missing (JSON repair may lose it)
+  if (!draft.htmlBody && draft.sections) {
+    const sectionOrder = [
+      'local_intro', 'fresh_this_week', 'just_starting', 'weekend_picks',
+      'family_or_low_key_pick', 'road_trip_pick', 'homeowner_minute', 'waves_cta',
+    ];
+    const sectionLabels = {
+      fresh_this_week: 'Fresh This Week',
+      just_starting: 'Just Starting',
+      weekend_picks: 'Weekend Picks',
+      family_or_low_key_pick: 'Family / Low-Key Pick',
+      road_trip_pick: 'Road Trip Pick',
+      homeowner_minute: 'Homeowner Minute',
+      waves_cta: '',
+    };
+    const parts = [];
+    for (const key of sectionOrder) {
+      const html = draft.sections[key];
+      if (!html) continue;
+      const label = sectionLabels[key];
+      if (label) parts.push(`<h2>${label}</h2>\n${html}`);
+      else parts.push(html);
+    }
+    draft.htmlBody = parts.join('\n\n');
+  }
+
+  if (!draft.textBody && draft.htmlBody) {
+    draft.textBody = draft.htmlBody.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  }
 
   // 5. Run voice validation
   const voiceCheck = validateVoice(

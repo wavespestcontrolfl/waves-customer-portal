@@ -374,8 +374,7 @@ Rules:
 
 Return ONLY the review body. No quotes, no preamble, no sign-off.`;
 
-    // Call Claude API — FAST tier is plenty for 256-token review body; high
-    // temperature keeps wording varied across customers.
+    // Call Claude API — FAST tier is plenty for 256-token review body.
     let reviewText = '';
     try {
       const Anthropic = require('@anthropic-ai/sdk');
@@ -384,7 +383,6 @@ Return ONLY the review body. No quotes, no preamble, no sign-off.`;
       const message = await anthropic.messages.create({
         model: MODELS.FAST,
         max_tokens: 256,
-        temperature: 0.95,
         messages: [{ role: 'user', content: prompt }],
       });
 

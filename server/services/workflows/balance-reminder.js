@@ -424,7 +424,7 @@ class BalanceReminder {
       // Get oldest unpaid invoice for title and service date
       const oldestInvoice = await db("invoices")
         .where({ customer_id: customer.id })
-        .whereIn("status", ["sent", "overdue", "unpaid"])
+        .whereIn("status", ["sent", "viewed", "overdue", "unpaid"])
         .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
         .first();
       if (!oldestInvoice?.id || !oldestInvoice?.token) {

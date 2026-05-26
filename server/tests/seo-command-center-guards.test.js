@@ -128,6 +128,91 @@ describe('SEO Command Center guards', () => {
     ]);
   });
 
+  test('site audit recognizes H1 text wrapped in nested hero spans', async () => {
+    delete process.env.GOOGLE_API_KEY;
+
+    const audit = await SiteAuditor.auditPage(
+      'https://www.wavespestcontrol.com/ant-control-bradenton-fl/',
+      `
+        <title>Ant Control in Bradenton, FL</title>
+        <meta name="description" content="Ant control in Bradenton">
+        <h1 class="mobile-critical-heading">
+          <span>Ant Control in</span>
+          <span class="block">Bradenton, FL</span>
+        </h1>
+        <h2><span>How Bradenton Ant Treatment Works</span></h2>
+        <p>${'Local ant control details. '.repeat(80)}</p>
+      `,
+      200,
+      42,
+      null,
+      null,
+      'service_page',
+      'https://www.wavespestcontrol.com/',
+    );
+
+    const issues = JSON.parse(audit.issues);
+    expect(audit.h1_text).toBe('Ant Control in Bradenton, FL');
+    expect(issues).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'missing_h1' }),
+    ]));
+  });
+
+  test('site audit recognizes FAQPage in JSON-LD arrays and graphs', async () => {
+    delete process.env.GOOGLE_API_KEY;
+
+    const audit = await SiteAuditor.auditPage(
+      'https://www.wavespestcontrol.com/lawn-care/core-aeration-in-venice-fl/',
+      `
+        <title>Core Aeration in Venice, FL</title>
+        <meta name="description" content="Core aeration for Venice lawns">
+        <h1>Core Aeration in Venice, FL</h1>
+        <h2>Frequently Asked Questions</h2>
+        <p>${'Core aeration details. '.repeat(80)}</p>
+        <script type="application/ld+json">
+          [
+            {
+              "@context": "https://schema.org",
+              "@type": "BlogPosting",
+              "headline": "Core Aeration in Venice, FL"
+            },
+            {
+              "@context": "https://schema.org",
+              "@type": "FAQPage",
+              "mainEntity": []
+            },
+            {
+              "@context": "https://schema.org",
+              "@graph": [
+                { "@type": ["LocalBusiness", "Organization"], "name": "Waves Pest Control" },
+                { "@type": "Service", "name": "Core Aeration" }
+              ]
+            }
+          ]
+        </script>
+      `,
+      200,
+      42,
+      null,
+      null,
+      'service_page',
+      'https://www.wavespestcontrol.com/',
+    );
+
+    const issues = JSON.parse(audit.issues);
+    expect(JSON.parse(audit.schema_types_found)).toEqual(expect.arrayContaining([
+      'BlogPosting',
+      'FAQPage',
+      'LocalBusiness',
+      'Organization',
+      'Service',
+    ]));
+    expect(audit.has_faq_schema).toBe(true);
+    expect(issues).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'missing_faqpage' }),
+    ]));
+  });
+
   test('site audit PageSpeed fetch uses a timeout signal', async () => {
     process.env.GOOGLE_API_KEY = 'test-key';
     process.env.SEO_PAGESPEED_TIMEOUT_MS = '1234';
