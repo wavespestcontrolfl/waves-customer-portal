@@ -59,6 +59,14 @@ function timeoutSignal(ms) {
     : undefined;
 }
 
+function extractHeadingTexts(html, level) {
+  const tag = `h${level}`;
+  const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'gi');
+  return [...String(html || '').matchAll(re)]
+    .map((match) => match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
 class SiteAuditor {
   async discoverUrlsFromSitemaps(siteUrl) {
     const roots = [
@@ -396,9 +404,9 @@ class SiteAuditor {
     if (!metaDesc) issues.push({ category: 'meta', type: 'missing_description', severity: 'warning', recommendation: 'Add a meta description' });
 
     // Headings
-    const h1s = html.match(/<h1[^>]*>([^<]+)<\/h1>/gi) || [];
-    const h1Text = h1s[0]?.replace(/<[^>]+>/g, '').trim() || '';
-    const h2s = html.match(/<h2[^>]*>([^<]+)<\/h2>/gi) || [];
+    const h1s = extractHeadingTexts(html, 1);
+    const h1Text = h1s[0] || '';
+    const h2s = extractHeadingTexts(html, 2);
 
     if (h1s.length === 0) issues.push({ category: 'meta', type: 'missing_h1', severity: 'critical', recommendation: 'Add an H1 heading' });
     else if (h1s.length > 1) issues.push({ category: 'meta', type: 'multiple_h1', severity: 'warning', recommendation: `${h1s.length} H1 tags found, use only 1` });
@@ -608,6 +616,6 @@ class SiteAuditor {
 }
 
 const siteAuditor = new SiteAuditor();
-siteAuditor._internals = { pageSpeedTimeoutMs, timeoutSignal };
+siteAuditor._internals = { extractHeadingTexts, pageSpeedTimeoutMs, timeoutSignal };
 
 module.exports = siteAuditor;

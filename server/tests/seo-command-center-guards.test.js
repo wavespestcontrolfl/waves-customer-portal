@@ -128,6 +128,36 @@ describe('SEO Command Center guards', () => {
     ]);
   });
 
+  test('site audit recognizes H1 text wrapped in nested hero spans', async () => {
+    delete process.env.GOOGLE_API_KEY;
+
+    const audit = await SiteAuditor.auditPage(
+      'https://www.wavespestcontrol.com/ant-control-bradenton-fl/',
+      `
+        <title>Ant Control in Bradenton, FL</title>
+        <meta name="description" content="Ant control in Bradenton">
+        <h1 class="mobile-critical-heading">
+          <span>Ant Control in</span>
+          <span class="block">Bradenton, FL</span>
+        </h1>
+        <h2><span>How Bradenton Ant Treatment Works</span></h2>
+        <p>${'Local ant control details. '.repeat(80)}</p>
+      `,
+      200,
+      42,
+      null,
+      null,
+      'service_page',
+      'https://www.wavespestcontrol.com/',
+    );
+
+    const issues = JSON.parse(audit.issues);
+    expect(audit.h1_text).toBe('Ant Control in Bradenton, FL');
+    expect(issues).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'missing_h1' }),
+    ]));
+  });
+
   test('site audit PageSpeed fetch uses a timeout signal', async () => {
     process.env.GOOGLE_API_KEY = 'test-key';
     process.env.SEO_PAGESPEED_TIMEOUT_MS = '1234';
