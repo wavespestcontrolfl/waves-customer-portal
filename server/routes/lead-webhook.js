@@ -22,6 +22,7 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const {
   automationNote,
+  buildAutomatedLeadDraftEstimate,
   evaluateLeadEstimateAutomationReadiness,
 } = require('../services/lead-estimate-automation');
 
@@ -464,6 +465,7 @@ router.post('/', async (req, res) => {
     // Create estimate/quote record so it appears in Pipeline → Quotes tab
     let createdEstimateId = null;
     let createdEstimateServiceInterest = serviceInterest || null;
+    let automatedDraftEstimate = null;
     try {
       await withAutomatedEstimatePhoneLock(phoneFormatted, async (trx) => {
         const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phoneFormatted, { database: trx });
@@ -471,26 +473,40 @@ router.post('/', async (req, res) => {
         if (duplicateBlock) {
           logger.info(`[lead-webhook] Estimate creation blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${customer.id}`);
         } else {
+          automatedDraftEstimate = buildAutomatedLeadDraftEstimate({
+            intake,
+            customer,
+            body,
+            readiness: estimateAutomationReadiness,
+          });
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');
+          const estimateData = automatedDraftEstimate?.estimateData || {
+            automation: {
+              leadEstimateAutomation: estimateAutomationReadiness,
+            },
+          };
+          const draftAutomation = automatedDraftEstimate?.automation;
+          const draftAutomationNote = draftAutomation
+            ? ` Draft automation: ${draftAutomation.status}${draftAutomation.unsupportedReason ? ` (${draftAutomation.unsupportedReason})` : ''}.`
+            : '';
           const [estimateRow] = await trx('estimates').insert({
             customer_id: customer.id,
             customer_name: `${firstName} ${lastName}`,
             customer_phone: phoneFormatted,
             customer_email: email || null,
             address: fullAddress || '',
+            monthly_total: automatedDraftEstimate?.monthly || null,
+            annual_total: automatedDraftEstimate?.annual || null,
+            onetime_total: automatedDraftEstimate?.oneTimeTotal || null,
             status: 'draft',
             source: 'lead_webhook',
             service_interest: serviceInterest || null,
             lead_source: leadSource.source,
             lead_source_detail: leadSource.detail,
             token: estimateToken,
-            estimate_data: JSON.stringify({
-              automation: {
-                leadEstimateAutomation: estimateAutomationReadiness,
-              },
-            }),
-            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(estimateAutomationReadiness)}`,
+            estimate_data: JSON.stringify(estimateData),
+            notes: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. ${automationNote(estimateAutomationReadiness)}${draftAutomationNote}`,
           }).returning(['id', 'service_interest']);
           createdEstimateId = estimateRow?.id || null;
           createdEstimateServiceInterest = estimateRow?.service_interest || createdEstimateServiceInterest;
@@ -516,6 +532,7 @@ router.post('/', async (req, res) => {
           service_interest: serviceInterest || null,
           automation: {
             leadEstimateAutomation: estimateAutomationReadiness,
+            draftEstimateAutomation: automatedDraftEstimate?.automation || null,
           },
           attribution: {
             leadSource,
