@@ -67,6 +67,23 @@ function extractHeadingTexts(html, level) {
     .filter(Boolean);
 }
 
+function collectSchemaTypes(schema, out = new Set()) {
+  if (Array.isArray(schema)) {
+    schema.forEach((item) => collectSchemaTypes(item, out));
+    return out;
+  }
+  if (!schema || typeof schema !== 'object') return out;
+
+  const type = schema['@type'];
+  if (Array.isArray(type)) type.forEach((item) => item && out.add(String(item)));
+  else if (type) out.add(String(type));
+
+  if (Array.isArray(schema['@graph'])) {
+    schema['@graph'].forEach((item) => collectSchemaTypes(item, out));
+  }
+  return out;
+}
+
 class SiteAuditor {
   async discoverUrlsFromSitemaps(siteUrl) {
     const roots = [
@@ -430,8 +447,7 @@ class SiteAuditor {
     for (const block of schemaBlocks) {
       try {
         const json = JSON.parse(block.replace(/<[^>]+>/g, ''));
-        const types = Array.isArray(json['@type']) ? json['@type'] : [json['@type']];
-        schemaTypes.push(...types.filter(Boolean));
+        schemaTypes.push(...collectSchemaTypes(json));
       } catch { schemaValid = false; }
     }
 
@@ -616,6 +632,6 @@ class SiteAuditor {
 }
 
 const siteAuditor = new SiteAuditor();
-siteAuditor._internals = { extractHeadingTexts, pageSpeedTimeoutMs, timeoutSignal };
+siteAuditor._internals = { collectSchemaTypes, extractHeadingTexts, pageSpeedTimeoutMs, timeoutSignal };
 
 module.exports = siteAuditor;
