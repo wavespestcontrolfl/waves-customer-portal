@@ -43,6 +43,10 @@ const {
   buildPricingBundle,
   bookingServiceFor,
 } = require('./estimate-public');
+const {
+  leadEstimateAutoSendConfigFromEnv,
+  previewLeadEstimateAutoSendAudit,
+} = require('../services/lead-estimate-auto-send');
 
 const ESTIMATE_LIST_LIMIT = 500;
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
@@ -584,6 +588,32 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
 
 // Export for cron usage
 router.sendEstimateNow = sendEstimateNow;
+
+// GET /api/admin/estimates/lead-auto-send/preview — read-only dry-run audit.
+router.get('/lead-auto-send/preview', async (req, res, next) => {
+  try {
+    const config = leadEstimateAutoSendConfigFromEnv({
+      ...process.env,
+      LEAD_ESTIMATE_AUTO_SEND_DELAY_MINUTES:
+        req.query.delayMinutes || req.query.delay_minutes || process.env.LEAD_ESTIMATE_AUTO_SEND_DELAY_MINUTES,
+      LEAD_ESTIMATE_AUTO_SEND_LIMIT:
+        req.query.limit || process.env.LEAD_ESTIMATE_AUTO_SEND_LIMIT,
+      LEAD_ESTIMATE_AUTO_SEND_STALE_CLAIM_MINUTES:
+        req.query.staleClaimMinutes || req.query.stale_claim_minutes || process.env.LEAD_ESTIMATE_AUTO_SEND_STALE_CLAIM_MINUTES,
+      LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS:
+        req.query.allowedReviewReasons || req.query.allowed_review_reasons || process.env.LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS,
+      LEAD_ESTIMATE_AUTO_SEND_METHOD:
+        req.query.sendMethod || req.query.send_method || process.env.LEAD_ESTIMATE_AUTO_SEND_METHOD,
+    });
+    const audit = await previewLeadEstimateAutoSendAudit({
+      config,
+      limit: config.limit,
+    });
+    res.json({ success: true, dryRun: true, ...audit });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/admin/estimates — list
 router.get('/', async (req, res, next) => {

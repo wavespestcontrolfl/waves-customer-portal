@@ -2,6 +2,7 @@ const {
   DEFAULT_ALLOWED_REVIEW_REASONS,
   DEFAULT_STALE_CLAIM_MINUTES,
   isStaleAutoSendClaim,
+  leadEstimateAutoSendAuditRow,
   leadEstimateAutoSendConfigFromEnv,
   leadEstimateAutoSendEligibility,
   mergeAutoSendMetadata,
@@ -190,6 +191,106 @@ describe('lead estimate auto-send policy', () => {
         blockedAt: '2026-05-26T12:00:00.000Z',
         blockedReason: 'stale_claim_sms_idempotency_unknown',
         result: 'blocked',
+      },
+    });
+  });
+
+  test('builds read-only audit rows for would-send, waiting, and blocked estimates', () => {
+    const now = new Date('2026-05-26T12:00:00.000Z');
+
+    expect(leadEstimateAutoSendAuditRow(generatedEstimate(), {
+      now,
+      delayMinutes: 5,
+      allowedReviewReasons: ['property_measurements_defaulted'],
+    })).toMatchObject({
+      id: 'estimate-1',
+      action: 'would_send',
+      wouldSend: true,
+      eligibility: { eligible: true, reason: null },
+      contact: { hasPhone: true, hasEmail: true },
+      automation: {
+        status: 'generated',
+        generated: true,
+        review: ['property_measurements_defaulted'],
+      },
+    });
+
+    expect(leadEstimateAutoSendAuditRow(generatedEstimate({
+      created_at: new Date(now.getTime() - 2 * 60 * 1000).toISOString(),
+    }), { now, delayMinutes: 5 })).toMatchObject({
+      action: 'waiting',
+      wouldSend: false,
+      eligibility: { eligible: false, reason: 'delay_not_elapsed' },
+    });
+
+    expect(leadEstimateAutoSendAuditRow(generatedEstimate({
+      customer_phone: null,
+      customer_email: null,
+    }), { now })).toMatchObject({
+      action: 'blocked',
+      wouldSend: false,
+      eligibility: { eligible: false, reason: 'missing_delivery_contact' },
+      contact: { hasPhone: false, hasEmail: false },
+    });
+  });
+
+  test('audit rows distinguish stale email recovery from stale SMS replay block', () => {
+    const now = new Date('2026-05-26T12:00:00.000Z');
+    const staleClaim = '2026-05-26T11:00:00.000Z';
+
+    expect(leadEstimateAutoSendAuditRow(generatedEstimate({
+      status: 'sending',
+      send_method: 'email',
+      estimate_data: {
+        automation: {
+          draftEstimateAutomation: {
+            status: 'generated',
+            generated: true,
+          },
+          autoSend: {
+            claimedAt: staleClaim,
+            sendMethod: 'email',
+          },
+        },
+      },
+    }), { now, staleClaimMinutes: 30 })).toMatchObject({
+      action: 'stale_recover_then_send',
+      wouldSend: true,
+      staleClaim: true,
+      staleRecovery: {
+        includedSms: false,
+        wouldRecover: true,
+        wouldBlock: false,
+      },
+    });
+
+    expect(leadEstimateAutoSendAuditRow(generatedEstimate({
+      status: 'sending',
+      send_method: 'both',
+      estimate_data: {
+        automation: {
+          draftEstimateAutomation: {
+            status: 'generated',
+            generated: true,
+          },
+          autoSend: {
+            claimedAt: staleClaim,
+            sendMethod: 'both',
+          },
+        },
+      },
+    }), { now, staleClaimMinutes: 30 })).toMatchObject({
+      action: 'stale_block_sms_replay',
+      wouldSend: false,
+      staleClaim: true,
+      eligibility: {
+        eligible: false,
+        reason: 'stale_claim_sms_idempotency_unknown',
+      },
+      staleRecovery: {
+        includedSms: true,
+        wouldRecover: false,
+        wouldBlock: true,
       },
     });
   });
