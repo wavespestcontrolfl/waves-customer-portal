@@ -234,6 +234,44 @@ async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
 }
 
 // ── AI Content Generation ──
+
+const BRAND_PREAMBLE = `You are writing social media content for Waves Pest Control, a family-owned pest control and lawn care company in Southwest Florida (Manatee, Sarasota, and Charlotte counties). 12 years in SWFL.
+
+Voice: Knowledgeable neighbor, not corporate. You're talking to a homeowner over the fence. Casual, specific, occasionally funny. Never salesy or generic.
+
+Content angles to draw from when relevant:
+- What we're seeing this week (seasonal/weather-driven)
+- Pest CSI (make pest signs fascinating)
+- Lawn ER (diagnosis, not cosmetics)
+- Florida newcomer mistakes
+- "Don't touch that" (urgency without fearmongering)
+- Lanai life (highly local, relatable)
+
+Rules:
+- Never include pricing ($39/mo, $99 setup, etc.)
+- Never make safety guarantees ("100% effective", "completely safe", "risk-free")
+- Never use: "Your trusted pest control provider", "Contact us today for all your pest control needs", "We are pleased to announce", "Dear valued customer"
+- Be specific: "Southern chinch bugs feed at the blade base" beats "chinch bugs damage lawns"
+- Reference SWFL naturally: Florida humidity, gulf coast weather, lanais, St. Augustine grass, local neighborhoods`;
+
+const HOOK_BANK = [
+  "Here's what we're seeing in {location} after the rain…",
+  "That brown patch might not be drought.",
+  "Don't scrape this off your foundation.",
+  "New to Florida? This one surprises people.",
+  "If your lanai has ants right now, check this first.",
+  "Before you spray, look here.",
+  "The bug you see is usually not the whole problem.",
+  "Your lawn is not being dramatic. It's trying to tell you something.",
+  "A pest tech would notice this in 10 seconds.",
+  "This is why DIY sprays don't always solve the problem.",
+];
+
+function getHookSample() {
+  const shuffled = HOOK_BANK.sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, 3).join('\n  ');
+}
+
 async function generateContent(platform, { title, description, link, locationName }) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('ANTHROPIC_API_KEY not configured');
@@ -243,40 +281,98 @@ async function generateContent(platform, { title, description, link, locationNam
   const safeTitle = String(title || '').replace(/[\r\n]+/g, ' ').slice(0, 300);
   const safeDesc = String(description || '').replace(/[\r\n]+/g, ' ').slice(0, 1000);
   const safeLocation = String(locationName || '').replace(/[\r\n]+/g, ' ').slice(0, 100);
+  const hooks = getHookSample();
 
   const prompts = {
-    facebook: `Write an engaging Facebook post for Waves Pest Control based on this blog article.
-Keep it conversational, use 1-2 relevant emojis, include a call to action.
-150-250 characters. Do NOT include the URL — it will be added separately.
+    facebook: `${BRAND_PREAMBLE}
 
-Title: ${safeTitle}
-Description: ${safeDesc}`,
+Write a Facebook post based on this blog article.
 
-    instagram: `Write an Instagram caption for Waves Pest Control based on this blog article.
-Keep it engaging, use 3-5 relevant hashtags at the end (#wavespestcontrol #pestcontrol #swfl etc).
-150-300 characters before hashtags. Do NOT include any URL.
+Format:
+- Hook line first (question, surprising fact, or "here's what we're seeing")
+- 2-3 sentences of real value — the reader should learn something without clicking
+- End with a soft CTA ("Full breakdown on the blog" or "Here's what to check first")
+- 1-2 emojis max, only where natural — never emoji-stuffed
+- 200-400 characters total
+- Do NOT include the URL — it will be attached as a link preview
 
-Title: ${safeTitle}
-Description: ${safeDesc}`,
+Hook inspiration (vary your approach):
+  ${hooks}
 
-    linkedin: `Write a professional LinkedIn post for Waves Pest Control company page based on this blog article.
+GOOD example:
+"That brown patch spreading across your St. Augustine? It's probably not drought — it's chinch bugs feeding at the blade base. 🐛 By the time you notice, they've had a 2-week head start. Here's how to tell the difference and what actually works."
+
+BAD example (do NOT write like this):
+"🏠🐜 Pest problems? Waves Pest Control is here to help! Check out our latest blog for tips on keeping your home pest-free! 💪✨ #pestcontrol"
+
+Article title: ${safeTitle}
+Article summary: ${safeDesc}`,
+
+    instagram: `${BRAND_PREAMBLE}
+
+Write an Instagram caption based on this blog article.
+
+Format:
+- Strong opening line that works as a standalone hook (this shows before "...more")
+- 2-3 sentences of genuinely useful content
+- End with a conversation starter ("What's your lawn doing this week?" or "Tag someone whose lanai has this problem")
+- 200-400 characters before hashtags
+- Do NOT include any URL
+
+After the caption, add a blank line then 3-5 hashtags:
+- Always include: #wavespestcontrol
+- 1-2 local: #swfl #sarasotafl #bradentonfl #lakewoodranch #manateecounty #floridahomeowner
+- 1-2 niche (match the topic): #chinchbugs #staugustinegrass #floridapests #lawncare #termites #pestcontrol #floridagardening
+- Never more than 5 hashtags total
+
+Hook inspiration (vary your approach):
+  ${hooks}
+
+GOOD example:
+"Florida lawns can look thirsty when they're actually under attack. Chinch bugs hide low in St. Augustine and the damage shows up as crispy patches. Check the blade base before blaming your sprinkler.
+
+What's your lawn doing this week? 👇
+
+#wavespestcontrol #sarasotafl #chinchbugs #staugustinegrass #floridahomeowner"
+
+Article title: ${safeTitle}
+Article summary: ${safeDesc}`,
+
+    linkedin: `${BRAND_PREAMBLE}
+
+Write a professional LinkedIn post based on this blog article.
 Professional but approachable tone. 100-200 characters. Do NOT include the URL.
 
-Title: ${safeTitle}
-Description: ${safeDesc}`,
+Article title: ${safeTitle}
+Article summary: ${safeDesc}`,
 
-    gbp: `Write a Google Business Profile post for Waves Pest Control ${safeLocation} based on this blog article.
-Local, helpful tone for SWFL homeowners. 100-200 characters. Do NOT include any URL.
+    gbp: `${BRAND_PREAMBLE}
 
-Title: ${safeTitle}
-Description: ${safeDesc}`,
+Write a Google Business Profile post for Waves Pest Control ${safeLocation}.
+
+This post appears on Google Search and Maps for local customers.
+
+Format:
+- Mention ${safeLocation || 'the local area'} naturally in the first sentence
+- Lead with a useful seasonal or practical tip
+- Sound like a local expert sharing advice, not an ad
+- End with a clear next step ("Schedule an inspection" or "See the full guide")
+- 150-250 characters total — tight and scannable
+- Do NOT include any URL or phone number — a button will be attached
+- Do NOT use hashtags
+
+GOOD example:
+"Seeing crispy St. Augustine in Lakewood Ranch? It may not be drought. Chinch bugs feed near the blade base and spread fast in hot spots. Schedule a lawn inspection before the patch grows."
+
+Article title: ${safeTitle}
+Article summary: ${safeDesc}`,
   };
 
   const prompt = prompts[platform] || prompts.facebook;
 
   const response = await client.messages.create({
     model: MODELS.FLAGSHIP,
-    max_tokens: 300,
+    max_tokens: 500,
     messages: [{ role: 'user', content: prompt }],
   });
 
