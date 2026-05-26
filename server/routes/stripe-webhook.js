@@ -625,6 +625,51 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   // ReviewService.create is idempotent by service_record_id.
   await scheduleReviewAfterPaidInvoice(piId);
 
+  // ── Surcharge enforcement: detect credit card payments that bypassed /finalize ──
+  //
+  // If a credit card PI succeeded without surcharge_policy_version in metadata,
+  // the customer bypassed the /finalize flow. The charge already landed — we
+  // can't block it — but we create a health alert for manual follow-up.
+  const piMeta = paymentIntent.metadata || {};
+  if (!piMeta.surcharge_policy_version && paymentIntent.payment_method) {
+    try {
+      const pmId = typeof paymentIntent.payment_method === 'string'
+        ? paymentIntent.payment_method
+        : paymentIntent.payment_method?.id;
+      if (pmId) {
+        const stripe = getStripe();
+        if (stripe) {
+          const pmObj = await stripe.paymentMethods.retrieve(pmId);
+          const funding = pmObj.card?.funding || null;
+          const isWallet = !!pmObj.card?.wallet;
+          if (funding === 'credit' && !isWallet) {
+            const alertInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
+            logger.error(
+              `[stripe-webhook] SURCHARGE UNDER-COLLECTION: Credit card PI ${paymentIntent.id} ` +
+              `succeeded without surcharge finalization. Invoice ${alertInvoice?.invoice_number || 'unknown'}.`,
+            );
+            await db('customer_health_alerts').insert({
+              customer_id: alertInvoice?.customer_id,
+              alert_type: 'surcharge_under_collection_webhook',
+              severity: 'high',
+              title: `Surcharge under-collection (webhook) — invoice ${alertInvoice?.invoice_number || 'unknown'}`,
+              description: `Credit card payment confirmed via webhook without surcharge finalization. PI: ${paymentIntent.id}. Charged base-only. Requires manual follow-up.`,
+              metadata: JSON.stringify({
+                stripe_payment_intent_id: paymentIntent.id,
+                card_funding: funding,
+                invoice_number: alertInvoice?.invoice_number,
+              }),
+            }).catch(alertErr => {
+              logger.error(`[stripe-webhook] Under-collection alert failed: ${alertErr.message}`);
+            });
+          }
+        }
+      }
+    } catch (pmErr) {
+      logger.warn(`[stripe-webhook] Could not check PM for surcharge enforcement: ${pmErr.message}`);
+    }
+  }
+
   // ── Auto-send payment receipt (SMS + email) ───────────────
   //
   // Single source of truth for "payment succeeded → notify the customer."
