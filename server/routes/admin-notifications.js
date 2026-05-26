@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const NotificationService = require('../services/notification-service');
 const PushService = require('../services/push-notifications');
 const { computeDashboardAlerts, toNotifications } = require('../services/dashboard-alerts');
@@ -97,6 +97,18 @@ function isLiveDuplicate(persisted, liveKeys) {
   return liveKeys.has(`${payload.alertId}:${payload.alertCount}`);
 }
 
+function parseMetadata(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return {}; }
+  }
+  return typeof value === 'object' ? value : {};
+}
+
+function notificationIssueLimit(value) {
+  return Math.min(Math.max(parseInt(value, 10) || 50, 1), 200);
+}
+
 // GET /api/admin/notifications — list with pagination.
 // Live dashboard alerts are merged in front of the persisted feed on
 // page 1 only; subsequent pages serve persisted notifications without
@@ -114,6 +126,40 @@ router.get('/', async (req, res, next) => {
       : { live: [], liveKeys: new Set() };
     const dedupedPersisted = persisted.filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
     res.json({ notifications: [...liveCtx.live, ...dedupedPersisted], page, limit });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/notifications/issues — recent internal/admin delivery issues.
+router.get('/issues', requireAdmin, async (req, res, next) => {
+  try {
+    const limit = notificationIssueLimit(req.query.limit);
+    if (db.schema?.hasTable && !(await db.schema.hasTable('audit_log'))) {
+      return res.json({ issues: [] });
+    }
+
+    const rows = await db('audit_log')
+      .where({ action: 'notification.internal_admin_alert.delivery_issue' })
+      .orderBy('created_at', 'desc')
+      .limit(limit)
+      .select('id', 'metadata', 'created_at');
+
+    const issues = rows.map((row) => {
+      const metadata = parseMetadata(row.metadata);
+      return {
+        id: row.id,
+        created_at: row.created_at,
+        outcome: metadata.outcome || null,
+        message_type: metadata.message_type || null,
+        to_masked: metadata.to_masked || null,
+        body_length: metadata.body_length ?? null,
+        title: metadata.title || null,
+        link: metadata.link || null,
+        reason: metadata.reason || null,
+        stats: metadata.stats || null,
+      };
+    });
+
+    res.json({ issues });
   } catch (err) { next(err); }
 });
 
