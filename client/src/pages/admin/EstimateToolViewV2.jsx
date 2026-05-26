@@ -3493,8 +3493,11 @@ export default function EstimateToolViewV2({
     if (lotSqFtForTurf <= 0) return null;
     const pct = parseNonNegativeNumber(enrichedProfile?.imperviousSurfacePercent) ?? 20;
     const open = Math.round(lotSqFtForTurf * (1 - Math.min(1, pct / 100)));
-    const bedPct = parseNonNegativeNumber(enrichedProfile?.estimatedBedAreaPercent) ?? 15;
-    const beds = Math.round(open * (bedPct / 100));
+    const bedPct = parseNonNegativeNumber(enrichedProfile?.estimatedBedAreaPercent);
+    const explicitBed = parseNonNegativeNumber(form.bedArea) ?? parseNonNegativeNumber(enrichedProfile?.estimatedBedAreaSf);
+    const beds = bedPct !== undefined
+      ? Math.round(open * (bedPct / 100))
+      : (explicitBed !== undefined ? explicitBed : Math.round(open * 0.15));
     return Math.max(0, open - beds);
   })();
   const effectiveTurfSqFt =
