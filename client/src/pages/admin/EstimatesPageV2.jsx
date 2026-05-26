@@ -61,7 +61,10 @@ import {
   Archive,
   Link as LinkIcon,
   RotateCw,
+  CalendarPlus,
 } from "lucide-react";
+
+import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -1373,6 +1376,7 @@ function EstimatePipelineViewV2() {
   const [auditTarget, setAuditTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
+  const [scheduleEstimate, setScheduleEstimate] = useState(null);
 
   const refreshEstimates = useCallback(() => {
     // When the "Archived" filter is picked, ask the API for archived-only;
@@ -1644,6 +1648,25 @@ function EstimatePipelineViewV2() {
           estimate={auditTarget.estimate || auditTarget}
           initialFocus={auditTarget.focus || "all"}
           onClose={() => setAuditTarget(null)}
+        />
+      )}
+
+      {scheduleEstimate && (
+        <CreateAppointmentModal
+          open
+          onClose={() => setScheduleEstimate(null)}
+          onChange={() => {
+            setScheduleEstimate(null);
+            refreshEstimates();
+          }}
+          defaultCustomer={{
+            id: scheduleEstimate.customerId,
+            first_name: (scheduleEstimate.customerName || '').split(' ')[0] || '',
+            last_name: (scheduleEstimate.customerName || '').split(' ').slice(1).join(' ') || '',
+            phone: scheduleEstimate.customerPhone || '',
+            email: scheduleEstimate.customerEmail || '',
+          }}
+          defaultEstimateId={scheduleEstimate.id}
         />
       )}
 
@@ -2060,20 +2083,31 @@ function EstimatePipelineViewV2() {
                         )}
 
                         {e.status === "accepted" && !e.archivedAt && (
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            className="w-full sm:w-auto rounded-full whitespace-nowrap"
-                            onClick={() => sendBookingLink(e)}
-                            disabled={!e.customerPhone}
-                            title={
-                              e.customerPhone
-                                ? "Text the customer a link to self-schedule"
-                                : "No phone on file"
-                            }
-                          >
-                            Send Booking
-                          </Button>
+                          <>
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                              onClick={() => setScheduleEstimate(e)}
+                            >
+                              <CalendarPlus size={14} strokeWidth={1.75} className="mr-1" />
+                              Schedule
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="w-full sm:w-auto rounded-full whitespace-nowrap"
+                              onClick={() => sendBookingLink(e)}
+                              disabled={!e.customerPhone}
+                              title={
+                                e.customerPhone
+                                  ? "Text the customer a link to self-schedule"
+                                  : "No phone on file"
+                              }
+                            >
+                              Send Booking
+                            </Button>
+                          </>
                         )}
 
                         {e.archivedAt && (

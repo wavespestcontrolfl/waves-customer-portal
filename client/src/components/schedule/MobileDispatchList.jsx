@@ -10,12 +10,14 @@
 // ET-anchored: "today," week anchoring, and section headers all compute
 // against America/New_York — the business is in SW Florida. No UTC.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookOpen, Leaf, MapPin, ShieldCheck } from 'lucide-react';
 import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
 import { serviceColor } from '../../lib/service-colors';
 import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib/timezone';
+import InlineTechPicker from './InlineTechPicker';
+import QuickActionMenu from './QuickActionMenu';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -121,7 +123,7 @@ function headerLabel(dateStr) {
   });
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -137,6 +139,27 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   const techInitial = service.technicianName
     ? service.technicianName.trim().charAt(0).toUpperCase()
     : '';
+
+  const [showTechPicker, setShowTechPicker] = useState(false);
+  const [showQuickMenu, setShowQuickMenu] = useState(false);
+  const techBtnRef = useRef(null);
+  const longPressTimer = useRef(null);
+  const longPressTriggered = useRef(false);
+
+  const handlePointerDown = useCallback(() => {
+    longPressTriggered.current = false;
+    if (!onQuickAction) return;
+    longPressTimer.current = setTimeout(() => {
+      longPressTriggered.current = true;
+      setShowQuickMenu(true);
+    }, 500);
+  }, [onQuickAction]);
+  const handlePointerUp = useCallback(() => {
+    clearTimeout(longPressTimer.current);
+  }, []);
+  const handlePointerCancel = useCallback(() => {
+    clearTimeout(longPressTimer.current);
+  }, []);
 
   const showTreatmentPlan = isLawnService(service) && Boolean(onTreatmentPlan);
   const showProtocol = Boolean(onProtocol);
@@ -165,7 +188,11 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
       <div className="flex-1 min-w-0" style={{ padding: '12px 14px' }}>
         <button
           type="button"
-          onClick={() => onEdit?.(service)}
+          onClick={() => { if (!longPressTriggered.current) onEdit?.(service); }}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onContextMenu={(e) => e.preventDefault()}
           className="block w-full text-left bg-white active:bg-zinc-50 u-focus-ring"
         >
           <span className="flex items-baseline gap-2 flex-wrap">
@@ -217,16 +244,28 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         {hasActions && (
           <div className="flex items-stretch gap-2 flex-wrap" style={{ marginTop: 10 }}>
             {techInitial && (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); onEdit?.(service); }}
-                className={primaryBtnClass}
-                style={{ fontSize: 13 }}
-                title={service.technicianName}
-                aria-label={`Technician: ${service.technicianName}`}
-              >
-                {techInitial}
-              </button>
+              <div className="relative" ref={techBtnRef}>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setShowTechPicker(!showTechPicker); }}
+                  className={primaryBtnClass}
+                  style={{ fontSize: 13 }}
+                  title={`${service.technicianName} — tap to reassign`}
+                  aria-label={`Technician: ${service.technicianName}`}
+                >
+                  {techInitial}
+                </button>
+                {showTechPicker && (
+                  <InlineTechPicker
+                    serviceId={service.id}
+                    currentTechId={service.technicianId}
+                    technicians={technicians || []}
+                    onAssigned={() => { onRefresh?.(); }}
+                    onClose={() => setShowTechPicker(false)}
+                    anchorRect={techBtnRef.current?.getBoundingClientRect()}
+                  />
+                )}
+              </div>
             )}
             {showTreatmentPlan && (
               <button
@@ -288,11 +327,21 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           </div>
         )}
       </div>
+      {showQuickMenu && onQuickAction && (
+        <QuickActionMenu
+          service={service}
+          isMobile
+          onReschedule={(svc) => onQuickAction('reschedule', svc)}
+          onCancel={(svc) => onQuickAction('cancel', svc)}
+          onMarkPrepaid={(svc) => onQuickAction('markPrepaid', svc)}
+          onClose={() => setShowQuickMenu(false)}
+        />
+      )}
     </div>
   );
 }
 
-function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit }) {
+function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const today = isETToday(dateStr);
   return (
@@ -331,6 +380,9 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatm
             onProtocol={onProtocol}
             onTreatmentPlan={onTreatmentPlan}
             onViewAudit={onViewAudit}
+            technicians={technicians}
+            onQuickAction={onQuickAction}
+            onRefresh={onRefresh}
           />
         ))
       )}
@@ -338,7 +390,7 @@ function DaySegment({ dateStr, services, onEdit, onEnRoute, onProtocol, onTreatm
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit }) {
+export default function MobileDispatchList({ mode, date, services, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, technicians, onQuickAction, onRefresh }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -374,6 +426,9 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
           onProtocol={onProtocol}
           onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
+          technicians={technicians}
+          onQuickAction={onQuickAction}
+          onRefresh={onRefresh}
         />
       </div>
     );
@@ -405,6 +460,9 @@ export default function MobileDispatchList({ mode, date, services, onEdit, onEnR
           onProtocol={onProtocol}
           onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
+          technicians={technicians}
+          onQuickAction={onQuickAction}
+          onRefresh={onRefresh}
         />
       ))}
     </div>

@@ -65,6 +65,7 @@ import TreatmentPlanPanel from "../../components/schedule/TreatmentPlanPanel";
 import MarkPrepaidModal from "../../components/schedule/MarkPrepaidModal";
 import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBannerV2";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
+import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
@@ -1940,6 +1941,19 @@ export default function DispatchPageV2({
             setViewMode("day");
           }}
           onViewCustomer={openCustomerSidebar}
+        />
+      )}
+      {viewMode === "list" && (
+        <ScheduleListView
+          technicians={data?.technicians || []}
+          onEdit={(svc) => {
+            if (isMobile) {
+              setDetailService(svc);
+            } else {
+              setEditingService(svc);
+            }
+          }}
+          onRefresh={() => fetchSchedule(date)}
         />
       )}
 

@@ -67,10 +67,9 @@ const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time T
 
 
 // Per-line cadence options. Each service line picks its own cadence so a
-// customer can get e.g. quarterly pest + monthly lawn from a single new-
-// appointment form. Same-cadence lines ride one parent appointment as
-// add-ons; different-cadence lines fan out into separate parent series at
-// submit time.
+// customer can get e.g. bimonthly pest + monthly lawn from a single new-
+// appointment form. The initial save is one appointment; future generated
+// visits include whichever add-on service lines are due on that date.
 const CADENCE_OPTIONS = [
   { value: 'one_time', label: 'One-time' },
   { value: 'monthly', label: 'Monthly' },
@@ -114,6 +113,16 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
+
+function discountAvailableForCustomer(discount, customer) {
+  const requiredTier = discount?.requires_waveguard_tier || '';
+  if (!requiredTier) return !discount?.is_waveguard_tier_discount;
+  const customerTier = customer?.tier || customer?.waveguard_tier || '';
+  if (discount?.is_waveguard_tier_discount) return customerTier === requiredTier;
+  const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(requiredTier);
+  const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customerTier);
+  return requiredIdx < 0 || customerIdx >= requiredIdx;
+}
 
 function normalizeHourTime(value, fallback = '09:00') {
   const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
@@ -253,7 +262,7 @@ export function pickAutoScheduleEstimate({
   return { estimate, key };
 }
 
-export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, onClose, onCreated }) {
+export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
 
@@ -395,6 +404,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // recurring cadence group on this appointment, matching the prior
   // single-form-level count semantics.
   const [recurringCount, setRecurringCount] = useState('');
+  const [collectPrepay, setCollectPrepay] = useState(false);
+  const [prepayMethod, setPrepayMethod] = useState('cash');
+  const [prepayNote, setPrepayNote] = useState('');
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
@@ -536,6 +548,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     applyScheduleEstimate(auto.estimate.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
+
+  const defaultEstimateAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!defaultEstimateId || defaultEstimateAppliedRef.current) return;
+    if (scheduleEstimatesLoading || !scheduleEstimates.length) return;
+    const match = scheduleEstimates.find(e => String(e.id) === String(defaultEstimateId));
+    if (!match) return;
+    defaultEstimateAppliedRef.current = true;
+    applyScheduleEstimate(match.id);
+  }, [defaultEstimateId, scheduleEstimates, scheduleEstimatesLoading]);
+
   const formatDiscountLabel = (d) => {
     if (!d) return '';
     if (d.discount_type === 'free_service') return 'Free';
@@ -789,6 +812,52 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }
     return Array.from(groups.values());
   };
+  const cadenceRankDays = (svc) => {
+    const cadence = svc?.cadence || 'one_time';
+    if (cadence === 'one_time') return Number.POSITIVE_INFINITY;
+    if (cadence === 'custom') return Math.max(1, parseInt(svc.intervalDays) || 30);
+    if (cadence === 'weekly') return 7;
+    if (cadence === 'biweekly') return 14;
+    const months = {
+      monthly: 30,
+      monthly_nth_weekday: 30,
+      bimonthly: 60,
+      quarterly: 90,
+      triannual: 120,
+      semiannual: 180,
+      biannual: 180,
+      annual: 365,
+      yearly: 365,
+    };
+    return months[cadence] || 91;
+  };
+  const serviceCadenceConfig = (s) => {
+    const cadence = s?.cadence || 'one_time';
+    const wd = Number.isFinite(parseInt(s?.weekday)) ? parseInt(s.weekday) : 3;
+    return {
+      recurringPattern: cadence,
+      recurringIntervalDays: cadence === 'custom' ? parseInt(s.intervalDays) || 30 : null,
+      recurringNth: cadence === 'monthly_nth_weekday' ? parseInt(s.nth) || 3 : null,
+      recurringWeekday: cadence === 'monthly_nth_weekday' ? wd : null,
+    };
+  };
+  const groupServicesForAppointmentSubmit = (rows) => {
+    const sorted = [...rows].sort((a, b) => {
+      const rank = cadenceRankDays(a) - cadenceRankDays(b);
+      if (rank !== 0) return rank;
+      return rows.indexOf(a) - rows.indexOf(b);
+    });
+    const primary = sorted[0] || rows[0];
+    if (!primary) return [];
+    const cfg = serviceCadenceConfig(primary);
+    return [{
+      cadence: primary.cadence || 'one_time',
+      intervalDays: cfg.recurringIntervalDays,
+      nth: cfg.recurringNth,
+      weekday: cfg.recurringWeekday,
+      lines: [primary, ...sorted.filter((s) => s !== primary)],
+    }];
+  };
 
   // Tracks cadence-group keys already POSTed during this modal session.
   // If the loop fails partway (e.g. quarterly succeeded, monthly errored),
@@ -800,7 +869,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // shown matches what gets saved. Renders below the Visits input.
   const recurringPreview = useMemo(() => {
     if (!apptDate) return [];
-    const groups = groupServicesByCadence(services);
+    const groups = groupServicesForAppointmentSubmit(services);
     const recurring = groups.filter((g) => g.cadence !== 'one_time');
     if (recurring.length === 0) return [];
     const parsedCount = Number.parseInt(recurringCount, 10);
@@ -855,7 +924,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const handleSubmit = async () => {
     if (!selectedCustomer || services.length === 0) return;
     setSaving(true);
-    const groups = groupServicesByCadence(services);
+    const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
     let firstError = null;
     for (const group of groups) {
@@ -885,6 +954,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             discountType: s.lineDiscount?.discount_type || null,
             discountAmount: s.lineDiscount?.amount != null ? Number(s.lineDiscount.amount) : null,
             discountDollars: lineDiscountAmount(s) || null,
+            ...serviceCadenceConfig(s),
+            skipWeekends: s.cadence && s.cadence !== 'one_time' ? !!skipWeekends : undefined,
+            weekendShift: s.cadence && s.cadence !== 'one_time' && skipWeekends ? weekendShift : undefined,
           };
         });
         const isRecurring = group.cadence !== 'one_time';
@@ -953,6 +1025,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             : undefined,
           createInvoice: true,
           sendConfirmation: sendSms,
+          prepaid: collectPrepay && isRecurring ? {
+            totalAmount: groupSubtotal * (hasFiniteRecurringCount ? parsedRecurringCount : 4),
+            method: prepayMethod,
+            note: prepayNote || undefined,
+          } : undefined,
         };
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
@@ -981,6 +1058,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setTimeout(() => {
       createdGroupKeysRef.current = new Set();
       onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
+      onChange?.({ id: results[0]?.id, scheduledDate: apptDate });
     }, 1200);
   };
 
@@ -1671,6 +1749,55 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           )}
         </div>
+
+        {/* Prepaid collection toggle */}
+        {hasRecurringServices && (() => {
+          const parsedCount = Number.parseInt(recurringCount, 10);
+          const finiteCount = Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : 0;
+          if (!finiteCount) return null;
+          const perVisit = services.reduce((sum, s) => sum + Number(s.price || 0), 0);
+          const total = perVisit * finiteCount;
+          return (
+            <div style={{ ...sectionStyle, background: collectPrepay ? '#F0FDF4' : undefined, border: collectPrepay ? '1px solid #BBF7D0' : undefined, borderRadius: 8, padding: collectPrepay ? 14 : undefined }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input type="checkbox" checked={collectPrepay} onChange={(e) => setCollectPrepay(e.target.checked)} />
+                <span style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Collect prepayment</span>
+              </label>
+              {collectPrepay && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 13, color: '#52525B', marginBottom: 8 }}>
+                    {finiteCount} visits &times; ${perVisit.toFixed(2)} = <strong>${total.toFixed(2)}</strong>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                    {['cash', 'check', 'card', 'other'].map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setPrepayMethod(m)}
+                        style={{
+                          padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                          border: prepayMethod === m ? '1.5px solid #166534' : '1px solid #D4D4D8',
+                          background: prepayMethod === m ? '#DCFCE7' : '#fff',
+                          color: prepayMethod === m ? '#166534' : '#52525B',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {m.charAt(0).toUpperCase() + m.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Note (optional)"
+                    value={prepayNote}
+                    onChange={(e) => setPrepayNote(e.target.value)}
+                    style={{ width: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid #D4D4D8', fontSize: 13 }}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Section 3: Date */}
         <div style={sectionStyle}>
