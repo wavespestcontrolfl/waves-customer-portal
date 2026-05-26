@@ -227,4 +227,15 @@ describe('getServiceLabel', () => {
       { services: [{ key: 'pest_control', label: 'Pest Control', isRecurring: true }] },
     )).toBe('Quarterly Pest Control');
   });
+
+  it('uses the estimate service in one-time choice labels', () => {
+    expect(getServiceLabel(
+      { key: 'seasonal9', label: 'Seasonal', serviceCategory: 'mosquito' },
+      { showOneTimeOption: true },
+      {
+        anchorOneTimePrice: 275,
+        services: [{ key: 'mosquito', label: 'Mosquito Control', isRecurring: true }],
+      },
+    )).toBe('Seasonal Mosquito Control or One-Time Mosquito Control');
+  });
 });

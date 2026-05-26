@@ -1193,7 +1193,10 @@ describe('public estimate one-time breakdown', () => {
       estimate_data: {
         result: {
           results: {
-            mq: [{ n: 'Seasonal Mosquito Program (9 visits)', v: 9, pv: 110, recommended: true }],
+            mq: [
+              { n: 'Seasonal Mosquito Program (9 visits)', v: 9, pv: 110, recommended: true },
+              { n: 'Monthly Mosquito Program (12 visits)', v: 12, pv: 95 },
+            ],
             mqMeta: { pr: 1.2, ri: 0, treatableSqFt: 8250 },
           },
           recurring: {
@@ -1203,14 +1206,24 @@ describe('public estimate one-time breakdown', () => {
               { service: 'mosquito', name: 'Mosquito (Seasonal Mosquito Program)', mo: 82.5, perTreatment: 110, visitsPerYear: 9 },
             ],
           },
-          oneTime: { total: 0, items: [], specItems: [] },
+          oneTime: {
+            total: 275,
+            items: [{
+              service: 'one_time_mosquito',
+              name: 'One-Time Mosquito Treatment',
+              price: 275,
+              detail: 'Rain re-spray guarantee',
+            }],
+            specItems: [],
+          },
           specItems: [],
         },
       },
       monthly_total: 82.5,
       annual_total: 990,
-      onetime_total: 0,
+      onetime_total: 275,
       waveguard_tier: 'Bronze',
+      show_one_time_option: true,
     });
 
     expect(payload.services).toHaveLength(1);
@@ -1223,6 +1236,29 @@ describe('public estimate one-time breakdown', () => {
         headline: 'Hey {first}, choose your mosquito control option.',
       }),
     }));
+    expect(payload.services[0].frequencies.map((frequency) => frequency.key)).toEqual(['seasonal9', 'monthly12']);
+    expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
+      label: 'Seasonal',
+      monthly: 82.5,
+      perTreatment: 110,
+      visitsPerYear: 9,
+      serviceCategory: 'mosquito',
+    }));
+    expect(payload.services[0].frequencies[1]).toEqual(expect.objectContaining({
+      label: 'Monthly',
+      monthly: 95,
+      perTreatment: 95,
+      visitsPerYear: 12,
+      serviceCategory: 'mosquito',
+    }));
+    expect(payload.anchorOneTimePrice).toBe(275);
+    expect(payload.oneTimeBreakdown.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        service: 'one_time_mosquito',
+        label: 'One-Time Mosquito Treatment',
+        amount: 275,
+      }),
+    ]));
     expect(payload.renderFlags).toEqual(expect.objectContaining({
       showWaveGuardSetupFee: false,
       showPestRecurringAddOns: false,
@@ -1511,6 +1547,69 @@ describe('public estimate one-time breakdown', () => {
       amount: 99,
       waivedWithPrepay: true,
     }));
+  });
+
+  test('public pricing bundle exposes waived WaveGuard setup for termite bait stations', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-termite-bait-prepay-test',
+      estimate_data: {
+        result: {
+          recurring: {
+            waveGuardTier: 'Bronze',
+            monthlyTotal: 45,
+            annualAfterDiscount: 540,
+            services: [{
+              service: 'termite_bait',
+              name: 'Termite Bait Stations',
+              mo: 45,
+              perTreatment: 135,
+              visitsPerYear: 4,
+            }],
+          },
+          oneTime: {
+            total: 655,
+            membershipFee: 99,
+            items: [
+              { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 },
+              { service: 'termite_bait_installation', name: 'Advance Installation', price: 556, detail: '20 stations · 196 linear ft perimeter' },
+            ],
+          },
+          specItems: [],
+          results: {
+            tmBait: { perim: 196, sta: 20 },
+          },
+        },
+      },
+      monthly_total: 45,
+      annual_total: 540,
+      onetime_total: 655,
+      waveguard_tier: 'Bronze',
+    });
+
+    expect(payload.annualPrepayEligible).toBe(true);
+    expect(payload.setupFee).toEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+      amount: 99,
+      waivedWithPrepay: true,
+    }));
+    expect(payload.firstVisitFees).toContainEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+      amount: 99,
+      waivedWithPrepay: true,
+    }));
+    expect(payload.services[0]).toEqual(expect.objectContaining({
+      key: 'termite_bait',
+      setupFee: expect.objectContaining({
+        service: 'waveguard_setup',
+        amount: 99,
+        waivedWithPrepay: true,
+      }),
+    }));
+    expect(payload.renderFlags.showWaveGuardSetupFee).toBe(true);
+    expect(payload.oneTimeBreakdown.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ service: 'termite_bait_installation', amount: 556 }),
+      expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
+    ]));
   });
 
   test('classifies fallback-saved native roach initial by service key', async () => {
@@ -3664,7 +3763,12 @@ describe('public estimate one-time breakdown', () => {
           ],
         },
         oneTime: {
-          items: [{ service: 'termite_bait_installation', name: 'Termite bait installation', price: 420 }],
+          total: 519,
+          membershipFee: 99,
+          items: [
+            { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99 },
+            { service: 'termite_bait_installation', name: 'Termite bait installation', price: 420 },
+          ],
           specItems: [],
         },
         specItems: [],
@@ -3679,6 +3783,13 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Termite perimeter');
     expect(html).toContain('185 linear ft');
     expect(html).toContain('Pick your first termite protection visit');
+    expect(html).toContain('Choose how you want to pay');
+    expect(html).toContain('WaveGuard Membership Setup');
+    expect(html).toContain('<s>$99</s> $0');
+    expect(html).toContain('Setup waived');
+    expect(html).toContain('One-time items (billed separately)');
+    expect(html).toContain('Termite bait installation');
+    expect(html).toContain('One-time total</strong></td><td style="text-align:right"><strong>$420</strong>');
     expect(html).toContain('What your termite protection plan includes');
     expect(html).toContain('Ready to start termite protection?');
     expect(html).toContain('How does the bait work?');
