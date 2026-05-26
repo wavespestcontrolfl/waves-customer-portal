@@ -201,7 +201,6 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
             ref={fileInputRef}
             type="file"
             accept="image/*"
-            capture="environment"
             onChange={handleFileSelected}
             style={{ display: 'none' }}
           />

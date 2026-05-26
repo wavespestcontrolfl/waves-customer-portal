@@ -61,13 +61,19 @@ const CHIP_ACTIONS = [
   "Applied perimeter band",
   "Interior — baseboards/kitchen/baths",
   "Cobweb sweep",
-  "Granular in beds",
+  "Granular applied in beds",
   "Spot-treated weeds",
   "Checked bait stations",
-  "Pre-emergent applied",
   "Barrier treatment",
   "Larvicide applied",
   "De-webbed eaves",
+  "Used non-repellent solutions",
+  "Used repellent solutions with a surfactant",
+  "Dusted wall voids",
+  "Applied gel bait",
+  "Crack and crevice treatment",
+  "Flushed with aerosol",
+  "Treated entry points (doors/windows/pipes)",
 ];
 const CHIP_OBSERVATIONS = [
   "Pest activity noted",
@@ -79,6 +85,14 @@ const CHIP_OBSERVATIONS = [
   "Weeds spreading",
   "Property access issue",
   "Customer concern discussed",
+  "Debris in gutters",
+  "Ant trails observed",
+  "Roach activity (live/dead)",
+  "Spider webs/egg sacs",
+  "Wasp/bee nests found",
+  "Moisture/conducive conditions",
+  "Entry points identified",
+  "Conducive vegetation against structure",
 ];
 const CHIP_RECOMMENDATIONS = [
   "Callback recommended",
@@ -4414,7 +4428,6 @@ function LawnAssessmentCompletionBlock({ service, disabled, onConfirmed }) {
             ref={fileRef}
             type="file"
             accept="image/*"
-            capture="environment"
             multiple
             onChange={addPhotos}
             style={{ display: "none" }}
@@ -6934,7 +6947,6 @@ export function CompletionPanel({
                   ref={photoInputRef}
                   type="file"
                   accept="image/*"
-                  capture="environment"
                   multiple
                   onChange={handlePhotoSelect}
                   style={{ display: "none" }}
@@ -8571,7 +8583,6 @@ export function CompletionPanel({
                 ref={photoInputRef}
                 type="file"
                 accept="image/*"
-                capture="environment"
                 multiple
                 onChange={handlePhotoSelect}
                 style={{ display: "none" }}
